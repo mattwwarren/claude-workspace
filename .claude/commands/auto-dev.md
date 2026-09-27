@@ -297,6 +297,12 @@ Bash call. Both are covered by rule 3 below.
    sized timeout, treat it as that stage's existing failure disposition
    (gate failure / `agent_block`), not as something to wait on.
 
+`auto-dev-review.md`'s Step 3a dispatch-shape section carries a sibling
+instance of this rule's principle for reviewer dispatch: a teammate/agent-team
+message has the same no-completion-notification shape as a backgrounded raw
+Bash call, so review stations must use the Agent tool's subagent spawn only,
+never a teammate (#2156).
+
 ---
 
 ## Comment provenance rule (#2097)
@@ -348,6 +354,78 @@ for GitHub and Linear. This is a hard requirement of each producing step, not a 
 unmarked pipeline comment is indistinguishable from an operator decision by construction.
 Comments posted *through cw* (`cw.gh.post_issue_comment`) already carry it and need nothing
 extra.
+
+### Operator-authority delta (#2433)
+
+A named, reusable, stage-agnostic definition of "no operator-driven change
+since a row's last durable park/approval timestamp" — consumed by the plan
+stage now (Checkpoint 1's row-path bullet, `.claude/commands/auto-dev-plan.md`)
+and, per follow-up ticket #2438, by the impl stage later, once that stage's own
+re-park site is pinned down (`auto-dev-impl.md` is untouched by #2433).
+
+Given a row's own last durable park/approval timestamp T — `plan_approved_at`
+for the plan stage today, but any future caller anchors T to its own stage's
+equivalent durable timestamp, never hardcoded to `plan_approved_at` as the only
+named anchor — **no operator-authority delta since T** holds iff no
+live-fetched comment surviving this rule's operator-authority filter above has
+a `created_at`/`createdAt` after T.
+
+This is a two-branch test, and it is **never satisfied by silence alone**:
+
+- **Delta absent.** A durable approval/park timestamp T exists on the row AND
+  no operator-authority comment postdates it → the calling stage's fast path
+  may fire.
+- **Delta present.** Any operator-authority comment newer than T → the calling
+  stage's full re-scan is forced, unconditionally, regardless of how much time
+  has passed.
+
+The branch never fires on mere absence of comment activity absent a durable
+timestamp T actually present on the row — absence of a T is absence of
+evidence, not evidence of no delta.
+
+**Comment-scoped only.** This rule covers tracker comments alone. A ticket
+**body** edit since T is a documented, out-of-scope limitation of this rule —
+a distinct concern from Step 1c.0's separate `body_sha` tracker-state
+fingerprint (`.claude/commands/auto-dev-plan-appendix.md`), cited here, not
+restated.
+
+**Fast-path composition requires a third condition (#2433 fix cycle 6).** A
+calling stage's fast path must never rely on this rule alone — this rule's
+comment-scoped-only nature means it is never, by itself, disqualified by a
+body edit, so a caller that stops at this rule's two branches lets an
+ordinary body edit ride the fast path past that stage's own body-edit
+invalidation. Firing a fast path built on this rule requires **all three**
+of:
+
+1. a durable park/approval timestamp T **and** its paired fingerprint both
+   exist on the row (`plan_approved_at` / `plan_approved_fingerprint` for the
+   plan stage today);
+2. this rule's own two-branch test finds no operator-authority comment newer
+   than T ("delta absent," above);
+3. the calling stage's own persisted `body_sha` — the ticket-body half of its
+   tracker-state fingerprint — equals a freshly computed SHA-256 of the
+   live-fetched body.
+
+The comment-scoped rule composes with condition 3; it never exempts the
+caller from it. The plan stage's instantiation of all three conditions lives
+in `.claude/commands/auto-dev-plan-appendix.md`, Step 1a.0b item 4's
+Operator-authority-delta alternate, and in `.claude/commands/auto-dev-plan.md`
+Checkpoint 1's **Row path** bullet (condition (b)) and its **Fingerprint
+mismatch sub-case** — every caller of the no-delta alternate composes with
+condition 3, not only the fast path (#2311). Each is cited here, not
+restated.
+
+**Impl-stage consumption (#2438).** The impl stage now consumes this rule
+too, via `.claude/commands/auto-dev-impl-appendix.md`, section
+"Pre-Stage Detector Guard: resume dispositions and the staleness check
+(#1794)": that section's `s2_implementing` and past-S2 stale=true resume
+bullets anchor T to `HEAD_COMMIT_AT`, never `plan_approved_at`, and forbid
+treating a postdating comment as "repo state unchanged" grounds for a silent
+re-park. `check_impl_guard_staleness.py`'s own `stale_comment_after_head`
+reason is a coarse, unfiltered superset — it flags any comment newer than
+`HEAD_COMMIT_AT` regardless of authorship — and the appendix section applies
+this rule's own operator-authority provenance filter to that verdict before
+treating it as grounds for a forced fresh attempt.
 
 ### Destructive-directive gate
 
@@ -1037,7 +1115,7 @@ The Friction/Health checks remain useful for diagnostics and post-mortems, but t
 
 ## Appendix: Structured Output
 
-In headless mode, after all pipeline logic completes, emit `stage.entered` (`done`) then emit the sentinel-delimited JSON block as the final lines of stdout. The narrative friction reports remain above (still useful for tmux scrollback / post-mortem); this block is the parsing contract for `cw`.
+In headless mode, after all pipeline logic completes, emit `stage.entered` (`done`) then emit the sentinel-delimited JSON block as the final lines of stdout. The narrative friction reports remain above (still useful for transcript review / post-mortem); this block is the parsing contract for `cw`.
 
 **The sentinel is the LAST thing you do — end the turn immediately after it.**
 The closing `AUTO_DEV_RESULT>>>` frame must be the final characters of your
@@ -1156,6 +1234,7 @@ Applies to: `no_op`, `plan_pending_approval`, `ambiguities_pending_resolution`, 
 | `blocked` | Unrecoverable error mid-pipeline; see `blocker` field for details |
 | `empty_diff_blocked` | Branch pushed but measures zero commits ahead of `origin/<default_branch>` — nothing to review or ship; dispatch's #1870 gate or the review-stage synthesis itself detected this and parked for human triage rather than presenting a normal scope-approval decision. `branch` is non-null; `next_actions` is empty; `blocker.reason` is typically `empty_diff_no_commits` |
 | `stale_dispatch` | This ticket already has an open, **unmerged** PR from an earlier dispatch, so the run refuses rather than re-implementing work already in review (#1862). Detected by the Stage 0 intake self-check (see `auto-dev-intake.md` Step 3), or by `cw`'s own pre-dispatch gate before a session is even spawned. `pr` stays **null** — this run did not create that PR; its number/URL/review state go in `blocker.details`. `next_actions` is empty; `blocker.reason` is `pr_already_open`. Distinct from `no_op` (nothing is complete — the PR is unmerged) and from `merge_gate_blocked` (that is a *different* ticket's PR blocking this one) |
+| `tracker_mcp_unavailable` | **cw-side only — never emit this as a sentinel `status`.** `cw`'s pre-dispatch tracker-MCP gate (#2442) found that this ticket branch's `.claude/settings.json` (or the client's configured `settings_path`) verifiably lacks the tracker MCP plugin in `enabledPlugins`, so no session was spawned — the condition that surfaces mid-run as `impl_comments_unreadable_after_regress` (#2415) is caught before spawn instead. The row is parked `BLOCKED_ON_USER` with disposition `tracker_mcp_gate` and `blocked_reason` `tracker_mcp_unavailable_pre_dispatch`; the `session.needs_attention` event names the branch, the file inspected, and the expected plugin id (`details`). Per-client opt-in via `clients.yaml` `tracker_mcp_gate` (default off); fails open on a missing branch, missing file, malformed JSON, or unrecognized `enabledPlugins` shape |
 
 ### `blocker.reason` Values
 
@@ -1181,7 +1260,7 @@ When `status: "blocked"`, the `blocker.reason` field carries one of:
 | `destructive_directive_requires_operator` | A directive sourced from a tracker comment would delete a remote branch, force-push or rewrite history on a shared branch, discard uncommitted/committed work, or close/reopen a ticket — never actioned headlessly, whatever the comment's provenance (#2097). See the **Comment provenance rule** section. `blocker.details` quotes the directive verbatim and names the comment (author, created timestamp, marked/unmarked); `retry_eligible: false` — a re-dispatch would re-read the same comment and re-park |
 | `external_state_block` | The diagnosed root cause of a FINALIZE-stage gate failure is state on `origin/main` (or another external dependency) that predates this branch's own changes -- a corrupted released CHANGELOG section, a required external PR still unmerged, an infrastructure gate -- so nothing on this branch could have avoided or fixed it, and a fresh IMPL session has nothing to change (#2320). Distinct from `agent_block`: that reason stays eligible for dispatch's Sub-rule 5a self-heal regress to IMPL; this one is deliberately excluded from `FINALIZE_REGRESS_BLOCKER_REASONS` because regressing would waste a regress attempt on a ticket IMPL cannot fix. `retry_eligible` is normally `false` unless the external condition (the dependency, the infra gate) is itself expected to clear |
 | `tool_denied` | The Claude Code auto-mode classifier denied a tool call mid-pipeline. Often classifier-flaky (see claude-workspace#183) so `retry_eligible: true` by default; the orchestrator may re-dispatch the ticket on a fresh session. Populate `blocker.tool_name` and `blocker.denial_reason` (verbatim classifier `Reason:` text). See Tool-Use Denial Exit section |
-| `impl_comments_unreadable_after_regress` | Orientation's live tracker-comment fetch failed on an IMPL-stage entry reached via `_stage_regress` (`queue_metadata.regressed_into_stage` non-empty, `.claude/commands/auto-dev-impl.md` Orientation) — a regress exists specifically to act on newer comments, so continuing on a stale cached array would defeat it (#2415). Distinct from the non-regress case, which still WARNs and continues on `"impl_comments_fetch_failed"`. `blocker.stage` is `"stage2_impl"`; cw classifies this via `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` and tags the park distinctly (RFC 0011 A1) rather than generic `blocked_on_user`. The pre-dispatch gate that would catch the underlying condition before spawn is tracked separately (#2442). |
+| `impl_comments_unreadable_after_regress` | Orientation's live tracker-comment fetch failed on an IMPL-stage entry reached via `_stage_regress` (`queue_metadata.regressed_into_stage` non-empty, `.claude/commands/auto-dev-impl.md` Orientation) — a regress exists specifically to act on newer comments, so continuing on a stale cached array would defeat it (#2415). Distinct from the non-regress case, which still WARNs and continues on `"impl_comments_fetch_failed"`. `blocker.stage` is `"stage2_impl"`; cw classifies this via `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` and tags the park distinctly (RFC 0011 A1) rather than generic `blocked_on_user`. The pre-dispatch gate that catches the underlying condition before spawn shipped in #2442 — see the `tracker_mcp_unavailable` Status Enum row. |
 
 Other `blocker.reason` values are reserved for future use; consumers should treat unknown reasons as opaque strings and surface them to the user verbatim.
 

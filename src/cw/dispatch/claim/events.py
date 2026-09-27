@@ -11,7 +11,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cw.dev_queue import STALE_DISPATCH_GATE_DISPOSITION
+from cw.dev_queue import (
+    STALE_DISPATCH_GATE_DISPOSITION,
+    TRACKER_MCP_GATE_DISPOSITION,
+)
 from cw.events import record_event
 from cw.models import DispatchSkipReason, OrchestratorEventType
 
@@ -146,6 +149,69 @@ def _emit_stale_dispatch_attention_event(
             "breadcrumbs": "",
             "crashed": False,
             "lane": lane,
+        },
+        correlation_id=task.ticket_id,
+    )
+
+
+def _emit_tracker_mcp_gate_blocked_event(client_name: str, ticket_id: str) -> None:
+    """Emit a dispatch.tick event when the tracker-MCP gate parks a task (#2442).
+
+    Sibling of :func:`_emit_stale_dispatch_blocked_event`: per-task, outside
+    the per-client-tick precedence chain.
+    """
+    record_event(
+        OrchestratorEventType.DISPATCH_TICK,
+        {
+            "client": client_name,
+            "claimed": 0,
+            "skip_reason": DispatchSkipReason.TRACKER_MCP_GATE_BLOCKED,
+            "ticket_id": ticket_id,
+        },
+    )
+
+
+def _emit_tracker_mcp_gate_attention_event(
+    task: TicketTask,
+    client_name: str,
+    lane: str,
+    *,
+    branch: str,
+    file_inspected: str,
+    expected_plugin: str,
+) -> None:
+    """Emit SESSION_NEEDS_ATTENTION for a pre-dispatch tracker-MCP gate park (#2442).
+
+    Mirrors :func:`_emit_stale_dispatch_attention_event`'s canonical 9-field
+    payload (``paused_status`` is the gate-suffixed
+    :data:`~cw.dev_queue.TRACKER_MCP_GATE_DISPOSITION`; ``breadcrumbs`` is
+    hardcoded empty because no session ran), plus four additive fields on the
+    ``attempt_ceiling`` precedent in :func:`_emit_attempt_cap_attention_event`:
+    ``branch``, ``file_inspected``, and ``expected_plugin`` name exactly what
+    the operator must fix, and ``details`` composes them into one
+    human-readable string. This detail is transient and event-only by design
+    -- ``TicketTask.advisory_note`` is cleared by the very
+    ``transition_task_status`` call that performs the park.
+    """
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": task.session_id or "",
+            "session_name": "",
+            "client": client_name,
+            "ticket_id": task.ticket_id,
+            "claude_session_id": None,
+            "paused_status": TRACKER_MCP_GATE_DISPOSITION,
+            "breadcrumbs": "",
+            "crashed": False,
+            "lane": lane,
+            "branch": branch,
+            "file_inspected": file_inspected,
+            "expected_plugin": expected_plugin,
+            "details": (
+                f"branch={branch}; file_inspected={file_inspected};"
+                f" expected_plugin={expected_plugin}"
+            ),
         },
         correlation_id=task.ticket_id,
     )

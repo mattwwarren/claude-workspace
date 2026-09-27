@@ -27,6 +27,7 @@ working unchanged.
 from __future__ import annotations
 
 from cw.dev_queue.approval import (
+    BODY_DRIFT_WARNING_KEY,
     _approve_ticket_locked,
     approve_scope_drift_ticket,
     approve_ticket,
@@ -60,6 +61,7 @@ from cw.dev_queue.lifecycle import (
     _PLAN_SOUNDNESS_MARKER,
     _PLAN_SPEC_MARKER,
     _PRE_DISPATCH_STALE_PR_REASON,
+    _PRE_DISPATCH_TRACKER_MCP_REASON,
     AWAITING_OPERATOR_DISPOSITION,
     BRANCH_STALENESS_GATE_DISPOSITION,
     EMPTY_DIFF_GATE_DISPOSITION,
@@ -71,6 +73,8 @@ from cw.dev_queue.lifecycle import (
     SIGNOFF_GATE_DISPOSITION,
     STALE_DISPATCH_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
+    TRACKER_MCP_GATE_DISPOSITION,
+    UNCONCLUDED_FINALIZE_REGRESS_MERGE_GATE_DISPOSITION,
     _advance_task_pointer,
     _derive_disposition,
     _extract_pr_url,
@@ -110,6 +114,7 @@ from cw.exceptions import LaneNotFoundError
 
 __all__ = [
     "AWAITING_OPERATOR_DISPOSITION",
+    "BODY_DRIFT_WARNING_KEY",
     "BRANCH_STALENESS_GATE_DISPOSITION",
     "DEFAULT_PRUNE_OLDER_THAN_DAYS",
     "DRAIN_DISPOSITIONS",
@@ -122,9 +127,12 @@ __all__ = [
     "SIGNOFF_GATE_DISPOSITION",
     "STALE_DISPATCH_DISPOSITION",
     "STALE_DISPATCH_GATE_DISPOSITION",
+    "TRACKER_MCP_GATE_DISPOSITION",
+    "UNCONCLUDED_FINALIZE_REGRESS_MERGE_GATE_DISPOSITION",
     "_PLAN_SOUNDNESS_MARKER",
     "_PLAN_SPEC_MARKER",
     "_PRE_DISPATCH_STALE_PR_REASON",
+    "_PRE_DISPATCH_TRACKER_MCP_REASON",
     "LaneNotFoundError",
     "_advance_task_pointer",
     "_apply_requeue_stage",

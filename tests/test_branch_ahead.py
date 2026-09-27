@@ -15,15 +15,16 @@ worktree git state cannot be read.
 
 from __future__ import annotations
 
+import subprocess
 from typing import TYPE_CHECKING
+
+import pytest
 
 from tests.conftest import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
-
-    import pytest
 
 _BRANCH = "dev/1870"
 _FILE = "work.txt"
@@ -205,3 +206,94 @@ class TestCurrentHeadSha:
         monkeypatch.setattr(ba_mod, "_run_git", blank)
 
         assert ba_mod.current_head_sha(repo) is None
+
+
+def _seed_conflicting_merge(make_git_repo: Callable[..., Path], name: str) -> Path:
+    """Leave *name* mid-merge: ``git merge origin/main`` stopped on a conflict.
+
+    ``main`` and ``dev/1870`` each rewrite the same line of ``_FILE``, so the
+    merge cannot auto-resolve and git leaves ``MERGE_HEAD`` behind -- the state
+    a FINALIZE pre-push refresh leaves when it hands a conflict back to IMPL.
+    """
+    repo = _seed_repo(make_git_repo, name)
+    _write_commit(repo, _FILE, "branch side\n", "branch work")
+    git_in(repo, "checkout", "main")
+    _write_commit(repo, _FILE, "main side\n", "main work")
+    git_in(repo, "fetch", "origin", "main")
+    git_in(repo, "checkout", _BRANCH)
+    with pytest.raises(subprocess.CalledProcessError):
+        git_in(repo, "merge", "origin/main")
+    return repo
+
+
+class TestMergeInProgress:
+    """#2421: whether a merge is still mid-flight (``MERGE_HEAD`` resolves).
+
+    Same three-valued, fail-open-never-raise contract as its two siblings:
+    ``True``/``False`` are measurements and ``None`` is "unmeasurable". The
+    *consumer* (``dispatch.impl_gates``) decides that ``None`` fails closed.
+    """
+
+    def test_no_merge_in_progress_measures_false(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        from cw.branch_ahead import merge_in_progress
+
+        repo = _seed_repo(make_git_repo, "mip-clean")
+
+        assert merge_in_progress(repo) is False
+
+    def test_conflicting_merge_measures_true(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """The #2421 incident shape: a conflicted merge, resolved and staged
+        but never committed, still leaves ``MERGE_HEAD`` set."""
+        from cw.branch_ahead import merge_in_progress
+
+        repo = _seed_conflicting_merge(make_git_repo, "mip-conflict")
+        (repo / _FILE).write_text("resolved\n", encoding="utf-8")
+        git_in(repo, "add", _FILE)
+
+        assert merge_in_progress(repo) is True
+
+    def test_committed_merge_measures_false(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """Committing the resolution concludes the merge and clears MERGE_HEAD."""
+        from cw.branch_ahead import merge_in_progress
+
+        repo = _seed_conflicting_merge(make_git_repo, "mip-committed")
+        (repo / _FILE).write_text("resolved\n", encoding="utf-8")
+        git_in(repo, "add", _FILE)
+        git_in(repo, "commit", "--no-edit")
+
+        assert merge_in_progress(repo) is False
+
+    def test_missing_worktree_is_unmeasurable(self, tmp_path: Path) -> None:
+        """None and a non-existent path resolve to None, never to False."""
+        from cw.branch_ahead import merge_in_progress
+
+        assert merge_in_progress(None) is None
+        assert merge_in_progress(tmp_path / "nope") is None
+
+    def test_non_repository_is_unmeasurable(self, tmp_path: Path) -> None:
+        """A fatal git probe failure is not a measured clean merge state."""
+        from cw.branch_ahead import merge_in_progress
+
+        assert merge_in_progress(tmp_path) is None
+
+    def test_git_failure_is_unmeasurable(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A missing git binary (OSError) is swallowed into None, never raised."""
+        from cw import branch_ahead as ba_mod
+
+        repo = _seed_repo(make_git_repo, "mip-oserror")
+
+        def boom(*args: str, cwd: object, check: bool = True) -> None:
+            msg = "git not found"
+            raise OSError(msg)
+
+        monkeypatch.setattr(ba_mod, "_run_git", boom)
+
+        assert ba_mod.merge_in_progress(repo) is None

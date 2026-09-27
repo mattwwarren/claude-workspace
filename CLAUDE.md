@@ -72,7 +72,7 @@ uv run python .claude/scripts/check_changelog_frozen.py          # 7. Freeze rel
 uv run pre-commit run --all-files                                # 8. Hooks
 uv run --extra mcp pytest tests/ -m 'not integration' \
   --cov=cw --cov-report=xml --cov-fail-under=88                  # 9. Unit + total cov ≥88%
-uv run pytest tests/ -m integration                              # 10. tmux integration
+uv run pytest tests/ -m integration                              # 10. Integration
 uv run diff-cover coverage.xml --compare-branch=origin/main \
   --fail-under=90                                                # 11. Patch coverage ≥90%
 ```

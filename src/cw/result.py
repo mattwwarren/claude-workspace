@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import getpass
+import hashlib
 import json
 import logging
 import sys
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -14,13 +17,18 @@ from pydantic import ValidationError
 
 from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.config import load_state, save_state, sessions_lock
+from cw.events import record_event
 from cw.exceptions import (
     AmbiguousSessionIdentifierError,
     EmitSessionNotFoundError,
     EmitValidationError,
     PlanDraftBindingError,
 )
-from cw.models import PLAN_DRAFT_FINGERPRINT_KEY, LastResultSource
+from cw.models import (
+    PLAN_DRAFT_FINGERPRINT_KEY,
+    LastResultSource,
+    OrchestratorEventType,
+)
 from cw.plan_fingerprint import (
     PLAN_DRAFT_RELATIVE_PATH,
     FingerprintBinding,
@@ -347,6 +355,70 @@ def emit_result_on(
     )
 
 
+def _record_result_emitted_audit(
+    session: Session,
+    payload_for_digest: dict[str, Any],
+    *,
+    source: LastResultSource,
+    status: str,
+) -> None:
+    """Append the #2439 audit-only ``session.result_emitted`` event.
+
+    Audit-only by construction (R2): never read by any routing, reconcile,
+    salvage, or attention consumer, and carries no completion/task-routing
+    effect of its own -- it exists purely so an operator can answer "who
+    wrote this session's result, and when" without reconstructing it from
+    logs. ``payload_digest`` is a sha256 hex of the normalized sentinel
+    actually written to ``session.last_result`` (``payload_for_digest``),
+    not the raw incoming payload.
+    """
+    # Function-local import breaks the cw.cli <-> cw.result circular dependency;
+    # inline import is the sanctioned mechanism (PLC0415), not a workaround.
+    from cw.reconcile._shared import ticket_id_for_session
+
+    ticket_id = ticket_id_for_session(session.name)
+    payload_digest = hashlib.sha256(
+        json.dumps(payload_for_digest, sort_keys=True).encode()
+    ).hexdigest()
+    audit_payload = {
+        "session_id": session.id,
+        "ticket_id": ticket_id,
+        "client": session.client,
+        "lane": session.lane,
+        "stage": session.stage.value if session.stage else None,
+        "last_result_source": source.value,
+        "status": status,
+        "payload_digest": payload_digest,
+        "actor": getpass.getuser(),
+        "recorded_at": datetime.now(UTC).isoformat(),
+    }
+    record_event(
+        OrchestratorEventType.SESSION_RESULT_EMITTED,
+        audit_payload,
+        correlation_id=ticket_id,
+    )
+
+
+def emit_result_on_audited(
+    session: Session, payload: dict[str, Any], *, source: LastResultSource
+) -> EmitOutcome:
+    """Apply the pure emit mutation and audit an accepted result.
+
+    This remains an in-memory operation; the caller owns persistence. It is
+    the audit-aware seam for reconcile paths that already hold a loaded
+    ``Session`` and therefore cannot use :func:`emit_result_locked`.
+    """
+    outcome = emit_result_on(session, payload, source=source)
+    if outcome.result is not None:
+        _record_result_emitted_audit(
+            session,
+            outcome.result.model_dump(mode="json"),
+            source=source,
+            status=outcome.result.status,
+        )
+    return outcome
+
+
 def emit_result_locked(
     payload: dict[str, Any], session_id: str, *, source: LastResultSource
 ) -> EmitOutcome:
@@ -363,8 +435,12 @@ def emit_result_locked(
     only when the write was accepted (a refusal mutated nothing, so persisting
     it is wasted work). External behavior/signature/exceptions are unchanged.
 
-    Emits no event and performs no task routing -- write-only, matching the
-    original cw result emit CLI contract byte-for-byte (RFC 0012 D-A1).
+    Records an audit-only ``session.result_emitted`` event (#2439) on every
+    accepted write, before the state save -- never consumed by any routing,
+    reconcile, salvage, or attention path (R2). The function still performs
+    NO task routing of its own: the Stop hook remains the sole
+    completion-event source, matching the original cw result emit CLI
+    contract byte-for-byte (RFC 0012 D-A1).
 
     Refusing to overwrite an already-terminal last_result (RFC 0012 S2,
     #1456) is a normal, non-raising return -- EmitOutcome(refused=True,
@@ -393,8 +469,17 @@ def emit_result_locked(
         msg = f"Session {session_id!r} not found"
         raise EmitSessionNotFoundError(msg, session_id=session_id)
 
-    outcome = emit_result_on(session, payload, source=source)
-    if not outcome.refused:
+    # Why: event-first ordering is deliberate (mirrors
+    # revoke_plan_approval's documented accepted-risk case exactly, see
+    # tests/test_dev_queue.py's test_revoke_plan_approval_save_failure_
+    # raises_with_event_recorded) -- if save_state below later fails, a
+    # phantom audit record is preferable to an unaudited mutation
+    # reaching disk with no trail.
+    outcome = emit_result_on_audited(session, payload, source=source)
+    # outcome.result is non-None exactly when the write was accepted (see
+    # EmitOutcome's docstring) -- narrowing on this, rather than on
+    # `not outcome.refused`, lets mypy see through to the accepted branch.
+    if outcome.result is not None:
         save_state(state)
     return outcome
 
@@ -505,10 +590,12 @@ def result_emit(path: str, session_id: str | None, plan_draft: Path | None) -> N
 
     Write-only: resolves the target session (``--session-id`` wins, else the
     ``session_id`` from ``<cwd>/.claude/cw-context.json``), validates the
-    payload, and writes ``session.last_result`` under the sessions lock. Emits
-    NO event and changes NO session status -- the Stop hook remains the sole
-    completion-event source. Validation strictly precedes any state write, so
-    a bad payload leaves state untouched.
+    payload, and writes ``session.last_result`` under the sessions lock. Also
+    records an audit-only ``session.result_emitted`` event (#2439) -- never
+    consumed by any routing/reconcile/salvage/attention path (R2). Changes NO
+    session status -- the Stop hook remains the sole completion-event source.
+    Validation strictly precedes any state write, so a bad payload leaves
+    state untouched.
 
     A session that already carries a terminal result short-circuits to the
     'already recorded' outcome before the payload is bound or validated: a

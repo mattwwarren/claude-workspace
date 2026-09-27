@@ -8,7 +8,7 @@ import logging
 import threading
 import time
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 from click.testing import CliRunner
@@ -1742,9 +1742,9 @@ class TestAddTicketDedupe:
 
 
 def _setup_client_with_lanes(
-    tmp_config_dir: Path, tmp_path: Path, lanes: list[str]
+    tmp_config_dir: Path, tmp_path: Path, client_name: str, lanes: list[str]
 ) -> None:
-    """Write clients.yaml with named lanes for 'genhealth'."""
+    """Write clients.yaml with named lanes for a client."""
     config_dir = tmp_config_dir / ".config" / "cw"
     config_dir.mkdir(parents=True, exist_ok=True)
     ws = tmp_path / "ws"
@@ -1753,7 +1753,7 @@ def _setup_client_with_lanes(
         f"      - name: {ln}\n        max_parallel: 1\n" for ln in lanes
     )
     (config_dir / "clients.yaml").write_text(
-        f"clients:\n  genhealth:\n    workspace_path: {ws}\n    lanes:\n{lane_yaml}"
+        f"clients:\n  {client_name}:\n    workspace_path: {ws}\n    lanes:\n{lane_yaml}"
     )
 
 
@@ -1778,7 +1778,9 @@ class TestAddTicketLaneValidation:
         """add_ticket raises LaneNotFoundError for an undeclared lane."""
         from cw.exceptions import LaneNotFoundError
 
-        _setup_client_with_lanes(tmp_config_dir, patched_queue, ["default"])
+        _setup_client_with_lanes(
+            tmp_config_dir, patched_queue, "genhealth", ["default"]
+        )
         task = TicketTask(ticket_id="GEN-10", client="genhealth", lane="fast")
         with pytest.raises(LaneNotFoundError, match="Lane 'fast' is not declared"):
             add_ticket(task)
@@ -1787,7 +1789,9 @@ class TestAddTicketLaneValidation:
         self, patched_queue: Path, tmp_config_dir: Path
     ) -> None:
         """add_ticket accepts a task whose lane is declared for the client."""
-        _setup_client_with_lanes(tmp_config_dir, patched_queue, ["default", "fast"])
+        _setup_client_with_lanes(
+            tmp_config_dir, patched_queue, "genhealth", ["default", "fast"]
+        )
         task = TicketTask(ticket_id="GEN-11", client="genhealth", lane="fast")
         result = add_ticket(task)
         assert result is True
@@ -3973,7 +3977,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pr_state"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v8_pr_state_preserved_idempotently(self) -> None:
         """Existing pr_state survives a second migration pass (idempotent)."""
@@ -4017,7 +4021,7 @@ class TestMigrateDevQueue:
         """migrate_dev_queue bumps schema_version to current regardless of input."""
         raw: dict[str, object] = {"schema_version": 1, "tasks": []}
         migrated = migrate_dev_queue(raw)
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v9_signoff_preserved_idempotently(self) -> None:
         """Existing signoff value survives a second migration pass."""
@@ -4052,7 +4056,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalation_parked_at"] is None
         assert migrated["tasks"][0]["escalation_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v10_escalation_fields_preserved_idempotently(self) -> None:
         """Existing escalation timestamps survive a second migration pass."""
@@ -4095,7 +4099,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["false_park_recovery_count"] == 0
         assert migrated["tasks"][0]["false_park_recovery_next_eligible_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v11_false_park_recovery_backoff_preserved_idempotently(self) -> None:
         """Existing false-park-recovery backoff state survives a second
@@ -4137,7 +4141,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["gate_recipe_failed_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v12_gate_recipe_failed_at_preserved_idempotently(self) -> None:
         """Existing gate_recipe_failed_at timestamp survives a second
@@ -4175,7 +4179,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalate_merge_block_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v14_escalate_merge_block_fired_at_preserved_idempotently(self) -> None:
         """Existing escalate_merge_block_fired_at survives a second migration."""
@@ -4212,7 +4216,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["request_reviewer_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v16_request_reviewer_fired_at_preserved_idempotently(self) -> None:
         """Existing request_reviewer_fired_at survives a second migration."""
@@ -4249,7 +4253,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["auto_fix_ci_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v17_auto_fix_ci_fired_at_preserved_idempotently(self) -> None:
         """Existing auto_fix_ci_fired_at survives a second migration."""
@@ -4286,7 +4290,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["address_review_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v18_address_review_fired_at_preserved_idempotently(self) -> None:
         """Existing address_review_fired_at survives a second migration."""
@@ -4323,7 +4327,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["last_blocked_result"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v19_last_blocked_result_preserved_idempotently(self) -> None:
         """Existing last_blocked_result survives a second migration."""
@@ -4364,7 +4368,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["cross_repo_override"] is False
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v20_cross_repo_override_preserved_idempotently(self) -> None:
         """Existing cross_repo_override survives a second migration."""
@@ -4402,7 +4406,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["stage_high_water"] == "impl"
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_migrate_dev_queue_fills_stage_high_water_default_when_stage_also_missing(
         self,
@@ -4424,7 +4428,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["stage"] == DEFAULT_STAGE.value == "plan"
         assert migrated["tasks"][0]["stage_high_water"] == DEFAULT_STAGE.value == "plan"
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v21_stage_high_water_preserved_idempotently(self) -> None:
         """Existing stage_high_water survives a second migration pass unchanged,
@@ -4464,7 +4468,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["blocked_reason"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_migrate_dev_queue_fills_hold_finalize_default(self) -> None:
         """migrate_dev_queue fills hold_finalize=None on tasks missing the key
@@ -4482,7 +4486,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["hold_finalize"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v23_hold_finalize_preserved_idempotently(self) -> None:
         """An existing hold_finalize value survives a second migration pass."""
@@ -4520,7 +4524,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["attention_digest_buffered_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v24_attention_digest_buffered_at_preserved_idempotently(
         self,
@@ -4562,7 +4566,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["salvage_no_sentinel_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v25_salvage_no_sentinel_at_preserved_idempotently(self) -> None:
         """An existing salvage_no_sentinel_at value survives a second
@@ -4601,7 +4605,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["regressed_into_stage"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v27_regressed_into_stage_preserved_idempotently(self) -> None:
         """An already-stamped regressed_into_stage survives a second migration
@@ -4640,7 +4644,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["finalize_regress_branch_head"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v28_finalize_regress_branch_head_preserved_idempotently(self) -> None:
         """An already-stamped finalize_regress_branch_head survives a second
@@ -4661,6 +4665,48 @@ class TestMigrateDevQueue:
         twice = migrate_dev_queue(once)
         assert twice["tasks"][0]["finalize_regress_branch_head"] == "deadbeef"
 
+    def test_migrate_dev_queue_fills_finalize_regress_merge_conflict_detected_default(
+        self,
+    ) -> None:
+        """migrate_dev_queue fills finalize_regress_merge_conflict_detected=False
+        on tasks missing the key (v43, GitHub #2421)."""
+        raw: dict[str, object] = {
+            "schema_version": 42,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-2421",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["finalize_regress_merge_conflict_detected"] is False
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
+
+    def test_v43_finalize_regress_merge_conflict_detected_preserved_idempotently(
+        self,
+    ) -> None:
+        """An already-raised finalize_regress_merge_conflict_detected survives a
+        second migration pass -- the filler is additive, never a reset (#2421)."""
+        raw: dict[str, object] = {
+            "schema_version": 43,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-2421B",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "finalize_regress_branch_head": "deadbeef",
+                    "finalize_regress_merge_conflict_detected": True,
+                }
+            ],
+        }
+        once = migrate_dev_queue(raw)
+        twice = migrate_dev_queue(once)
+        assert twice["tasks"][0]["finalize_regress_merge_conflict_detected"] is True
+
     def test_migrate_dev_queue_fills_pending_operator_comment_default(self) -> None:
         """migrate_dev_queue fills pending_operator_comment=False on tasks
         missing the key (v29, GitHub #1730)."""
@@ -4677,7 +4723,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pending_operator_comment"] is False
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v29_pending_operator_comment_preserved_idempotently(self) -> None:
         """An already-raised pending_operator_comment survives a second
@@ -4736,7 +4782,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["finding_dispositions"] == {}
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v31_finding_dispositions_preserved_idempotently(self) -> None:
         """An already-populated ledger survives a second migration pass — the
@@ -4781,7 +4827,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["ever_spawned"] is True
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v33_ever_spawned_preserved_idempotently(self) -> None:
         """An explicit ever_spawned=False survives a second migration pass --
@@ -4817,7 +4863,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pending_fix_dispatch"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_migrate_dev_queue_fills_fix_dispatch_session_id_default(self) -> None:
         """migrate_dev_queue fills fix_dispatch_session_id=None (v34, #2017)."""
@@ -4893,7 +4939,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["stale_gate_detected_at"] is None
         assert migrated["tasks"][0]["blocked_on_pr"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v31_migration_fills_both_v30_and_v31_fields_in_one_pass(self) -> None:
         """A single pre-v30 row gains BOTH #1713's and #1838's fields.
@@ -4918,7 +4964,7 @@ class TestMigrateDevQueue:
         assert migrated["tasks"][0]["stale_gate_detected_at"] is None
         assert migrated["tasks"][0]["blocked_on_pr"] is None
         assert migrated["tasks"][0]["finding_dispositions"] == {}
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_v32_migration_fills_both_v31_and_v32_fields_in_one_pass(self) -> None:
         """A single pre-v31 row gains BOTH #1838's and #1750's fields.
@@ -4944,14 +4990,14 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["finding_dispositions"] == {}
         assert migrated["tasks"][0]["unproductive_attempts"] == 0
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_migrate_dev_queue_fills_watched_prs_default(self) -> None:
         """migrate_dev_queue fills watched_prs=[] on a store missing the key (v15)."""
         raw: dict[str, object] = {"schema_version": 14, "tasks": []}
         migrated = migrate_dev_queue(raw)
         assert migrated["watched_prs"] == []
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_migrate_dev_queue_preserves_existing_watched_prs(self) -> None:
         """An existing watched_prs list survives migration untouched (idempotent)."""
@@ -5503,10 +5549,12 @@ class TestMoveTicket:
     def test_move_ticket_pending_success(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """PENDING ticket moves to target lane; returns old from_lane."""
+        """PENDING ticket moves to target lane; returns dict describing the move."""
         from cw.dev_queue import move_ticket
 
-        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        _setup_client_with_lanes(
+            tmp_config_dir, tmp_path, "genhealth", ["default", "fast"]
+        )
         task = TicketTask(
             ticket_id="GEN-200",
             client="genhealth",
@@ -5515,9 +5563,14 @@ class TestMoveTicket:
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
 
-        from_lane = move_ticket("GEN-200", "genhealth", "fast")
+        result = move_ticket("GEN-200", "genhealth", to_lane="fast")
 
-        assert from_lane == "default"
+        assert result == {
+            "from_lane": "default",
+            "to_lane": "fast",
+            "from_priority": None,
+            "to_priority": None,
+        }
         store = load_dev_queue()
         moved = next(t for t in store.tasks if t.ticket_id == "GEN-200")
         assert moved.lane == "fast"
@@ -5529,7 +5582,9 @@ class TestMoveTicket:
         from cw.dev_queue import move_ticket
         from cw.exceptions import LaneMoveError
 
-        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        _setup_client_with_lanes(
+            tmp_config_dir, tmp_path, "genhealth", ["default", "fast"]
+        )
         task = TicketTask(
             ticket_id="GEN-201",
             client="genhealth",
@@ -5548,7 +5603,9 @@ class TestMoveTicket:
         from cw.dev_queue import move_ticket
         from cw.exceptions import LaneMoveError
 
-        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        _setup_client_with_lanes(
+            tmp_config_dir, tmp_path, "genhealth", ["default", "fast"]
+        )
         task = TicketTask(
             ticket_id="GEN-202",
             client="genhealth",
@@ -5567,7 +5624,9 @@ class TestMoveTicket:
         from cw.dev_queue import move_ticket
         from cw.exceptions import LaneMoveError
 
-        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        _setup_client_with_lanes(
+            tmp_config_dir, tmp_path, "genhealth", ["default", "fast"]
+        )
         task = TicketTask(
             ticket_id="GEN-204",
             client="genhealth",
@@ -5586,7 +5645,7 @@ class TestMoveTicket:
         from cw.dev_queue import move_ticket
         from cw.exceptions import LaneNotFoundError
 
-        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default"])
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, "genhealth", ["default"])
         task = TicketTask(
             ticket_id="GEN-203",
             client="genhealth",
@@ -5604,11 +5663,292 @@ class TestMoveTicket:
         """Non-existent ticket raises CwError."""
         from cw.dev_queue import move_ticket
 
-        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        _setup_client_with_lanes(
+            tmp_config_dir, tmp_path, "genhealth", ["default", "fast"]
+        )
         save_dev_queue(DevQueueStore(tasks=[]))
 
         with pytest.raises(CwError, match="No dev-queue task found"):
             move_ticket("GEN-MISSING", "genhealth", "fast")
+
+    def test_move_ticket_priority_only_success(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Priority-only move (no to_lane) edits priority; lane is untouched."""
+        from cw.dev_queue import move_ticket
+
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, "genhealth", ["default"])
+        task = TicketTask(
+            ticket_id="T1",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+            priority=0,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = move_ticket("T1", "genhealth", priority=5)
+
+        assert result == {
+            "from_lane": None,
+            "to_lane": None,
+            "from_priority": 0,
+            "to_priority": 5,
+        }
+        store = load_dev_queue()
+        moved = next(t for t in store.tasks if t.ticket_id == "T1")
+        assert moved.priority == 5
+        assert moved.lane == DEFAULT_LANE
+
+    def test_move_ticket_lane_and_priority_together(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """to_lane and priority given together mutate atomically, one save."""
+        from cw.dev_queue import move_ticket
+
+        _setup_client_with_lanes(
+            tmp_config_dir, tmp_path, "genhealth", ["default", "fast"]
+        )
+        task = TicketTask(
+            ticket_id="T1",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+            lane="default",
+            priority=0,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = move_ticket("T1", "genhealth", to_lane="fast", priority=5)
+
+        assert result == {
+            "from_lane": "default",
+            "to_lane": "fast",
+            "from_priority": 0,
+            "to_priority": 5,
+        }
+        store = load_dev_queue()
+        moved = next(t for t in store.tasks if t.ticket_id == "T1")
+        assert moved.lane == "fast"
+        assert moved.priority == 5
+
+    def test_move_ticket_priority_only_running_raises_lane_move_error(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """RUNNING ticket rejects a priority-only move too, not just lane moves."""
+        from cw.dev_queue import move_ticket
+        from cw.exceptions import LaneMoveError
+
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, "genhealth", ["default"])
+        task = TicketTask(
+            ticket_id="T1",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            priority=0,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(LaneMoveError):
+            move_ticket("T1", "genhealth", priority=5)
+
+    def test_move_ticket_priority_negative_allowed(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """No bounds are enforced on priority -- a negative value succeeds."""
+        from cw.dev_queue import move_ticket
+
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, "genhealth", ["default"])
+        task = TicketTask(
+            ticket_id="T1",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+            priority=0,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = move_ticket("T1", "genhealth", priority=-3)
+
+        assert result["to_priority"] == -3
+        store = load_dev_queue()
+        moved = next(t for t in store.tasks if t.ticket_id == "T1")
+        assert moved.priority == -3
+
+
+# ---------------------------------------------------------------------------
+# TestCLIDevQueueMove — cw dev-queue move
+# ---------------------------------------------------------------------------
+
+
+class TestCLIDevQueueMove:
+    """CLI-level coverage for `cw dev-queue move` (#2312)."""
+
+    def _seed_task(
+        self,
+        tmp_dev_queue: Path,
+        *,
+        status: QueueItemStatus = QueueItemStatus.PENDING,
+        priority: int = 0,
+        lane: str = "default",
+    ) -> None:
+        """Seed T1 for the CLI move tests."""
+        _setup_client_with_lanes(
+            tmp_dev_queue, tmp_dev_queue, "client", ["default", "fast"]
+        )
+        task = TicketTask(
+            ticket_id="T1",
+            client="client",
+            status=status,
+            lane=lane,
+            priority=priority,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+    def _capture_events(self, monkeypatch: pytest.MonkeyPatch) -> list[CapturedEvent]:
+        events: list[CapturedEvent] = []
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.crud.record_event",
+            lambda etype, payload=None, **kw: events.append(
+                (etype, payload or {}, kw.get("correlation_id"))
+            ),
+        )
+        return events
+
+    def test_move_cli_to_lane_only(
+        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_task(tmp_dev_queue)
+        events = self._capture_events(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "move", "T1", "-c", "client", "--to", "fast"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Moved T1 (client): default -> fast" in result.output
+        moved = [e for e in events if e[0] == OrchestratorEventType.TICKET_MOVED]
+        assert len(moved) == 1
+        reprioritized = [
+            e for e in events if e[0] == OrchestratorEventType.TICKET_REPRIORITIZED
+        ]
+        assert reprioritized == []
+
+    def test_move_cli_priority_only(
+        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_task(tmp_dev_queue)
+        events = self._capture_events(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "move", "T1", "-c", "client", "--priority", "5"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Reprioritized T1 (client): 0 -> 5" in result.output
+        reprioritized = [
+            e for e in events if e[0] == OrchestratorEventType.TICKET_REPRIORITIZED
+        ]
+        assert len(reprioritized) == 1
+        moved = [e for e in events if e[0] == OrchestratorEventType.TICKET_MOVED]
+        assert moved == []
+
+    def test_move_cli_both_flags(
+        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_task(tmp_dev_queue)
+        events = self._capture_events(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "move",
+                "T1",
+                "-c",
+                "client",
+                "--to",
+                "fast",
+                "--priority",
+                "5",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Moved T1 (client): default -> fast" in result.output
+        assert "Reprioritized T1 (client): 0 -> 5" in result.output
+        moved = [e for e in events if e[0] == OrchestratorEventType.TICKET_MOVED]
+        reprioritized = [
+            e for e in events if e[0] == OrchestratorEventType.TICKET_REPRIORITIZED
+        ]
+        assert len(moved) == 1
+        assert len(reprioritized) == 1
+
+    def test_move_cli_neither_flag_errors(
+        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_task(tmp_dev_queue)
+        events = self._capture_events(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "move", "T1", "-c", "client"])
+        assert result.exit_code != 0
+        assert "Must pass --to and/or --priority" in result.output
+        assert events == []
+        store = load_dev_queue()
+        unchanged = next(t for t in store.tasks if t.ticket_id == "T1")
+        assert unchanged.lane == "default"
+        assert unchanged.priority == 0
+
+    def test_move_cli_priority_on_running_task_errors(
+        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_task(tmp_dev_queue, status=QueueItemStatus.RUNNING)
+        events = self._capture_events(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "move", "T1", "-c", "client", "--priority", "5"]
+        )
+        assert result.exit_code != 0
+        assert "running" in result.output.lower()
+        assert events == []
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            QueueItemStatus.COMPLETED,
+            QueueItemStatus.FAILED,
+            QueueItemStatus.CANCELLED,
+        ],
+    )
+    def test_move_cli_priority_on_terminal_task_errors(
+        self,
+        tmp_dev_queue: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        status: QueueItemStatus,
+    ) -> None:
+        self._seed_task(tmp_dev_queue, status=status)
+        events = self._capture_events(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "move", "T1", "-c", "client", "--priority", "5"]
+        )
+        assert result.exit_code != 0
+        assert status.value in result.output
+        assert "Only PENDING" in result.output
+        assert events == []
+        store = load_dev_queue()
+        unchanged = next(t for t in store.tasks if t.ticket_id == "T1")
+        assert unchanged.status == status
+        assert unchanged.priority == 0
+
+    def test_move_cli_short_flag_p(
+        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_task(tmp_dev_queue)
+        events = self._capture_events(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "move", "T1", "-c", "client", "-p", "5"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Reprioritized T1 (client): 0 -> 5" in result.output
+        reprioritized = [
+            e for e in events if e[0] == OrchestratorEventType.TICKET_REPRIORITIZED
+        ]
+        assert len(reprioritized) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -5798,6 +6138,38 @@ def _seed_plan_worktree(
     if draft is not None:
         (cw_dir / "plan-draft.md").write_text(draft, encoding="utf-8")
     return cw_dir
+
+
+# #2311 -- ticket-body drift detection at approve time. The draft's
+# `plan-stage-last-evaluated` marker persists the body_sha the plan stage
+# evaluated; the live body either still hashes to it or was edited since.
+_EVALUATED_TICKET_BODY = "Original ticket body.\n"
+_EDITED_TICKET_BODY = "Original ticket body.\n\nNew binding requirement.\n"
+_EVALUATED_BODY_SHA = hashlib.sha256(_EVALUATED_TICKET_BODY.encode("utf-8")).hexdigest()
+_EDITED_BODY_SHA = hashlib.sha256(_EDITED_TICKET_BODY.encode("utf-8")).hexdigest()
+# Bookkeeping lines are stripped by the Plan-draft fingerprint rule, so this
+# draft's fingerprint is _RECONCILED_DRAFT_FINGERPRINT.
+_BODY_EVALUATED_DRAFT = (
+    "<!-- plan-stage-scan-round: 1 -->\n"
+    "<!-- plan-stage-last-evaluated: operator_comment=none|body_sha="
+    + _EVALUATED_BODY_SHA
+    + " -->\n"
+    + _RECONCILED_DRAFT_BODY
+)
+
+
+def _stub_fetch_issue_body(
+    monkeypatch: pytest.MonkeyPatch, body: str | None
+) -> list[tuple[str, object]]:
+    """Stub approval's ``fetch_issue_body`` binding; return its call log."""
+    calls: list[tuple[str, object]] = []
+
+    def _fake(ticket_id: str, timeout: int, *, cwd: Path | None = None) -> str | None:
+        calls.append((ticket_id, cwd))
+        return body
+
+    monkeypatch.setattr("cw.dev_queue.approval.fetch_issue_body", _fake)
+    return calls
 
 
 # ---------------------------------------------------------------------------
@@ -6791,6 +7163,385 @@ class TestApproveTicket:
         assert t.plan_approved_at is None
         assert (cw_dir / "plan.md").read_text(encoding="utf-8") == plan_body()
 
+    # -- Ticket-body drift warning (#2311) -----------------------------------
+
+    def _arm_plan_pending(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        session_id: str,
+        *,
+        draft: str | None = _BODY_EVALUATED_DRAFT,
+        plan: str | None = None,
+    ) -> TicketTask:
+        """Park a PLAN row at plan_pending_approval, seeding its worktree via
+        ``_seed_plan_worktree`` when *draft* or *plan* is given. With no
+        ``plan``, the plan-of-record is unreviewed and approve re-queues at
+        PLAN (#968); with ``plan=plan_body()`` it advances directly."""
+        from cw.config import save_state
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id=session_id)
+        if draft is not None or plan is not None:
+            _seed_plan_worktree(
+                task, tmp_path / f"wt-{session_id}", plan=plan, draft=draft
+            )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id=session_id,
+                        last_result={
+                            "status": "plan_pending_approval",
+                            "plan_draft_fingerprint": _RECONCILED_DRAFT_FINGERPRINT,
+                        },
+                    )
+                ]
+            )
+        )
+        return task
+
+    def test_approve_plan_requeue_returns_body_drift_warning_on_mismatch(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Edit-then-approve: the live body no longer hashes to the persisted
+        body_sha, so approve names the safe requeue sequence -- advisory only,
+        the approval still lands."""
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift1")
+        calls = _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        warning = result[BODY_DRIFT_WARNING_KEY]
+        assert isinstance(warning, str)
+        assert "cw dev-queue requeue GEN-500 --client genhealth --stage plan" in warning
+        assert _EVALUATED_BODY_SHA[:12] in warning
+        assert _EDITED_BODY_SHA[:12] in warning
+        assert result["plan_requeued"] is True
+        assert result["plan_approved_fingerprint"] == _RECONCILED_DRAFT_FINGERPRINT
+        assert calls == [("GEN-500", tmp_path / "ws")]
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.plan_approved_at is not None
+        assert t.plan_approved_fingerprint == _RECONCILED_DRAFT_FINGERPRINT
+
+    def test_approve_plan_requeue_no_warning_when_body_unchanged(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift2")
+        calls = _stub_fetch_issue_body(monkeypatch, _EVALUATED_TICKET_BODY)
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result[BODY_DRIFT_WARNING_KEY] is None
+        assert len(calls) == 1
+
+    def test_approve_plan_requeue_no_warning_when_no_persisted_marker(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No persisted body_sha: nothing to compare, so the gh fetch cost is
+        never paid."""
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+
+        self._arm_plan_pending(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "sess-drift3",
+            draft=_RECONCILED_DRAFT_BODY,
+        )
+        calls = _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result[BODY_DRIFT_WARNING_KEY] is None
+        assert calls == []
+
+    def test_approve_no_warning_on_non_github_tracker(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The check is GitHub-only and fails open on a Linear-tracked client."""
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift4")
+        _write_project_config_yaml(
+            tmp_path / "ws", "tracking:\n  primary:\n    system: linear\n"
+        )
+        calls = _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result[BODY_DRIFT_WARNING_KEY] is None
+        assert calls == []
+
+    def test_approve_no_warning_when_worktree_unresolvable(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+
+        self._arm_plan_pending(
+            tmp_config_dir, tmp_path, monkeypatch, "sess-drift5", draft=None
+        )
+        calls = _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result[BODY_DRIFT_WARNING_KEY] is None
+        assert calls == []
+
+    def test_approve_no_warning_when_body_fetch_fails(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed gh fetch fails open: no warning, approval unaffected."""
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift6")
+        calls = _stub_fetch_issue_body(monkeypatch, None)
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result[BODY_DRIFT_WARNING_KEY] is None
+        assert result["plan_requeued"] is True
+        assert len(calls) == 1
+
+    def test_approve_direct_advance_also_checks_body_drift(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The gate is the PLAN stage, not the re-queue branch: a direct
+        plan->impl advance warns too. The persisted body_sha is read before
+        promotion moves the draft onto .cw/plan.md."""
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+
+        self._arm_plan_pending(
+            tmp_config_dir, tmp_path, monkeypatch, "sess-drift7", plan=plan_body()
+        )
+        _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["to_stage"] == "impl"
+        assert result["plan_promoted"] is True
+        warning = result[BODY_DRIFT_WARNING_KEY]
+        assert isinstance(warning, str)
+        assert "cw dev-queue requeue GEN-500 --client genhealth --stage plan" in warning
+
+    def test_approve_body_drift_warning_key_always_present_on_non_plan_paths(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """REVIEW advance and the signoff-clearing early return both report
+        None and never fetch the body."""
+        from cw.config import save_state
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        calls = _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-drift8")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess-drift8",
+                        last_result={"status": "review_pending_approval"},
+                    )
+                ]
+            )
+        )
+        review_result = approve_ticket("GEN-500", "genhealth")
+        assert review_result["to_stage"] == "finalize"
+        assert review_result[BODY_DRIFT_WARNING_KEY] is None
+
+        signoff_task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id=None,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        save_dev_queue(DevQueueStore(tasks=[signoff_task]))
+        signoff_result = approve_ticket("GEN-500", "genhealth")
+        assert signoff_result["to_stage"] == "finalize"
+        assert signoff_result[BODY_DRIFT_WARNING_KEY] is None
+        assert calls == []
+
+    def test_approve_gate_recipe_caller_skips_body_drift_check(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the operator's ``cw dev-queue approve`` runs the check: the
+        automatic gate-recipe caller never pays a gh fetch under the lock,
+        and the audit event's actor would be false for it."""
+        from cw.dev_queue import (
+            BODY_DRIFT_WARNING_KEY,
+            _approve_ticket_locked,
+            dev_queue_lock,
+        )
+
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift9")
+        calls = _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        with dev_queue_lock():
+            result = _approve_ticket_locked("GEN-500", "genhealth")
+
+        assert result[BODY_DRIFT_WARNING_KEY] is None
+        assert calls == []
+
+    def test_approve_locked_emits_plan_approval_body_drift_warned_event(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """R1: the warning leaves a durable audit event carrying both hashes
+        and the fingerprint this approval stamped; matching or absent
+        body_sha emits nothing."""
+        from cw.dev_queue import approve_ticket
+
+        events = capture_events(
+            "cw.dev_queue.approval",
+            OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED,
+        )
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift10")
+        _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        approve_ticket("GEN-500", "genhealth")
+
+        assert len(events) == 1
+        _etype, payload, correlation_id = events[0]
+        assert payload == {
+            "ticket_id": "GEN-500",
+            "client": "genhealth",
+            "persisted_body_sha": _EVALUATED_BODY_SHA,
+            "live_body_sha": _EDITED_BODY_SHA,
+            "plan_approved_fingerprint": _RECONCILED_DRAFT_FINGERPRINT,
+            "actor": "cw dev-queue approve",
+        }
+        assert correlation_id == "GEN-500"
+
+        events.clear()
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift11")
+        _stub_fetch_issue_body(monkeypatch, _EVALUATED_TICKET_BODY)
+        approve_ticket("GEN-500", "genhealth")
+        self._arm_plan_pending(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "sess-drift12",
+            draft=_RECONCILED_DRAFT_BODY,
+        )
+        approve_ticket("GEN-500", "genhealth")
+        assert events == []
+
+    def test_body_drift_event_shares_the_promotion_event_actor(self) -> None:
+        """Both approve-path audit events name one actor constant."""
+        import inspect
+
+        from cw.dev_queue.plan_promotion import (
+            DEV_QUEUE_APPROVE_ACTOR,
+            promote_plan_draft,
+        )
+
+        assert DEV_QUEUE_APPROVE_ACTOR == "cw dev-queue approve"
+        actor_default = inspect.signature(promote_plan_draft).parameters["actor"]
+        assert actor_default.default is DEV_QUEUE_APPROVE_ACTOR
+
+    @pytest.mark.parametrize("event_error", [OSError, RuntimeError])
+    def test_approve_body_drift_event_failure_aborts_with_nothing_persisted(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        event_error: type[Exception],
+    ) -> None:
+        """Event-first ordering: a failed append aborts before persistence,
+        leaving the row parked and the draft unpromoted."""
+        from cw.dev_queue import approval as approval_module
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+
+        task = self._arm_plan_pending(
+            tmp_config_dir, tmp_path, monkeypatch, "sess-drift13", plan=plan_body()
+        )
+        _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+        assert task.worktree_path is not None
+        cw_dir = task.worktree_path / ".cw"
+        before = load_dev_queue().model_dump()
+        real_record_event = approval_module.record_event
+
+        def _record(
+            etype: OrchestratorEventType,
+            payload: dict[str, object] | None = None,
+            *,
+            correlation_id: str | None = None,
+        ) -> None:
+            if etype == OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED:
+                msg = "events log unwritable"
+                raise event_error(msg)
+            real_record_event(etype, payload, correlation_id=correlation_id)
+
+        monkeypatch.setattr("cw.dev_queue.approval.record_event", _record)
+
+        with (
+            caplog.at_level(logging.ERROR, logger="cw.dev_queue.approval"),
+            pytest.raises(ApproveGateError, match="Nothing was recorded") as excinfo,
+        ):
+            approve_ticket("GEN-500", "genhealth")
+
+        assert isinstance(excinfo.value.__cause__, event_error)
+        assert "plan.approval_body_drift_warned" in caplog.text
+        assert any(record.exc_info for record in caplog.records)
+        assert load_dev_queue().model_dump() == before
+        assert (cw_dir / "plan.md").read_text(encoding="utf-8") == plan_body()
+        assert (cw_dir / "plan-draft.md").read_text(
+            encoding="utf-8"
+        ) == _BODY_EVALUATED_DRAFT
+
+    def test_approve_body_drift_save_failure_after_event_leaves_phantom_record(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A save failure after the event leaves the accepted phantom audit
+        record while the approval remains unpersisted."""
+        from cw.dev_queue import approve_ticket
+        from cw.events import read_events
+
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift14")
+        _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        def _raise_save(*_args: object, **_kwargs: object) -> None:
+            msg = "queue file unwritable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.dev_queue.approval.save_dev_queue", _raise_save)
+
+        with pytest.raises(OSError, match="queue file unwritable"):
+            approve_ticket("GEN-500", "genhealth")
+
+        audit = read_events(
+            event_types=[OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED]
+        )
+        assert len(audit) == 1
+        assert audit[0].correlation_id == "GEN-500"
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.plan_approved_at is None
+        assert t.plan_approved_fingerprint is None
+
 
 # ---------------------------------------------------------------------------
 # TestApproveScopeDrift — approve_scope_drift_ticket (#2337)
@@ -7040,7 +7791,7 @@ class TestApproveScopeDrift:
         """A failed restore is durable and operator-visible, not silently masked."""
         from cw.config import dev_queue_file
         from cw.dev_queue import approve_scope_drift_ticket
-        from cw.dev_queue.approval import save_dev_queue as real_save_dev_queue
+        from cw.dev_queue.storage import save_dev_queue as real_save_dev_queue
         from cw.models import OrchestratorEventType
 
         self._seed(tmp_config_dir, tmp_path, monkeypatch)
@@ -8149,6 +8900,140 @@ class TestApproveTicketLockedForceHold:
         assert payload["disposition"] == "advanced"
         assert correlation_id == "GEN-500"
 
+    def test_approve_locked_operator_bypasses_force_hold_after_stage_complete(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Per-ticket hold_finalize='manual' parked by a plain stage_complete
+        completion (last_result.status='stage_complete', disposition=
+        finalize_gate_held) -- not review_pending_approval -- still releases
+        via operator-initiated approve (#2410's primary repro). hold_finalize
+        is left untouched: it is a standing per-ticket policy, not a one-shot
+        latch (see docs/headless-contract.md's "Releasing the hold")."""
+        from cw.config import save_state
+        from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION, approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess-fh-sc-1",
+            disposition=FINALIZE_GATE_HELD_DISPOSITION,
+        )
+        task.hold_finalize = "manual"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess-fh-sc-1",
+                        last_result={"status": "stage_complete"},
+                    )
+                ]
+            )
+        )
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["finalize_held"] is False
+        assert result["awaiting_signoff"] is False
+        assert result["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.FINALIZE
+        assert t.status == QueueItemStatus.PENDING
+        assert t.hold_finalize == "manual"
+
+    def test_approve_locked_releases_lane_finalize_gate_after_stage_complete(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Lane-level finalize_gate='manual' (no per-ticket hold_finalize),
+        parked by the real routing path (apply_staged_decision) via a plain
+        stage_complete, also releases via operator-initiated approve (#2410,
+        mattGenhealth's comment). There is no per-row flag to clear here, so
+        hold_finalize stays None."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.dispatch import apply_staged_decision
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-fh-lane-1",
+        )
+        assert task.hold_finalize is None
+        clients = {
+            "genhealth": ClientConfig(
+                name="genhealth",
+                workspace_path=tmp_path,
+                lanes=[LaneConfig(name=DEFAULT_LANE, finalize_gate="manual")],
+            )
+        }
+        apply_staged_decision(task, "stage_complete", None, clients)
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "finalize_gate_held"
+        assert task.hold_finalize is None
+
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess-fh-lane-1",
+                        last_result={"status": "stage_complete"},
+                    )
+                ]
+            )
+        )
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["finalize_held"] is False
+        assert result["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.FINALIZE
+        assert t.status == QueueItemStatus.PENDING
+        assert t.hold_finalize is None
+
+    def test_approve_locked_automatic_caller_stays_held_after_stage_complete(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Regression guard (#2410): the widened disposition check only
+        widens what an operator-initiated call may do. An automatic caller
+        (resolved_task pinned, no operator_initiated) still holds after a
+        plain stage_complete park with disposition=finalize_gate_held -- the
+        actual protection is the pre-existing `not operator_initiated and
+        _should_force_hold_finalize(...)` guard inside
+        _approve_ticket_locked's branch chain, unaffected by the
+        disposition-tuple widening in _not_at_approval_gate."""
+        from cw.config import load_state, save_state
+        from cw.dev_queue import (
+            FINALIZE_GATE_HELD_DISPOSITION,
+            _approve_ticket_locked,
+            dev_queue_lock,
+        )
+
+        task = self._arm_force_held_review_row(tmp_config_dir, tmp_path, "sess-fh-7")
+        task.disposition = FINALIZE_GATE_HELD_DISPOSITION
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        state = load_state()
+        session = state.find_by_name_or_id("sess-fh-7")
+        assert session is not None
+        session.last_result = {"status": "stage_complete"}
+        save_state(state)
+
+        with dev_queue_lock():
+            result = _approve_ticket_locked("GEN-500", "genhealth", resolved_task=task)
+
+        assert result["finalize_held"] is True
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.REVIEW
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
 
 # ---------------------------------------------------------------------------
 # TestRequeueTicket — requeue_ticket() mutation function
@@ -8641,6 +9526,76 @@ class TestRequeueTicket:
         assert t.status == QueueItemStatus.PENDING
         assert t.stage == Stage.IMPL
         assert t.regress_attempts == 1
+
+    @pytest.mark.parametrize("measured", [True, False, None])
+    def test_requeue_manual_regress_from_finalize_stamps_merge_conflict_detected(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        measured: bool | None,
+    ) -> None:
+        """#2421: the manual ``--regress`` path carries no blocker at all, so it
+        measures MERGE_HEAD itself and stamps the same flag Rule 5a does."""
+        from cw.dev_queue import requeue as requeue_mod
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_worktree = tmp_path / "wt"
+        seen: list[Path | None] = []
+
+        def _probe(path: Path | None) -> bool | None:
+            seen.append(path)
+            return measured
+
+        monkeypatch.setattr(
+            requeue_mod, "resolve_task_worktree", lambda _t, _c: stub_worktree
+        )
+        monkeypatch.setattr(requeue_mod, "merge_in_progress", _probe)
+        task = _make_blocked_task(stage=Stage.FINALIZE, session_id="sess-mcd-1")
+        task.stage_base_ref = "sha-original"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket(
+            "GEN-500", "genhealth", stage_override="impl", allow_regress=True
+        )
+
+        assert result["regressed"] is True
+        assert seen == [stub_worktree]
+        t = load_dev_queue().tasks[0]
+        assert t.stage == Stage.IMPL
+        assert t.finalize_regress_branch_head == "sha-original"
+        assert t.finalize_regress_merge_conflict_detected is (measured is True)
+
+    def test_requeue_manual_regress_from_review_skips_merge_measurement(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only a FINALIZE-origin regress stamps the flag, so no other origin
+        pays for the git probe."""
+        from cw.dev_queue import requeue as requeue_mod
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+
+        def _must_not_probe(_path: Path | None) -> bool | None:
+            msg = "merge_in_progress probed on a non-FINALIZE regress"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(requeue_mod, "merge_in_progress", _must_not_probe)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-mcd-2")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket(
+            "GEN-500", "genhealth", stage_override="impl", allow_regress=True
+        )
+
+        assert result["regressed"] is True
+        assert load_dev_queue().tasks[0].finalize_regress_merge_conflict_detected is (
+            False
+        )
 
     def test_requeue_from_awaiting_signoff_without_regress_flag_stage_target_forward_ok(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -12497,6 +13452,49 @@ class TestStaleDispatchDispositions:
         assert task.unproductive_attempts == 0
 
 
+class TestTrackerMcpGateDisposition:
+    """The #2442 pre-dispatch tracker-MCP gate's literals and set membership."""
+
+    def test_gate_disposition_value(self) -> None:
+        from cw.dev_queue import TRACKER_MCP_GATE_DISPOSITION
+
+        assert TRACKER_MCP_GATE_DISPOSITION == "tracker_mcp_gate"
+
+    def test_pre_dispatch_reason_value(self) -> None:
+        from cw.dev_queue import _PRE_DISPATCH_TRACKER_MCP_REASON
+
+        assert (
+            _PRE_DISPATCH_TRACKER_MCP_REASON == "tracker_mcp_unavailable_pre_dispatch"
+        )
+
+    def test_gate_disposition_is_not_a_hold_disposition(self) -> None:
+        """Clears by fixing the branch's settings file or re-dispatching, not
+        by a blanket "proceed anyway" -- same rule as stale_dispatch_gate."""
+        from cw.dev_queue import HOLD_DISPOSITIONS, TRACKER_MCP_GATE_DISPOSITION
+
+        assert TRACKER_MCP_GATE_DISPOSITION not in HOLD_DISPOSITIONS
+
+    def test_gate_disposition_is_never_a_status_member(self) -> None:
+        from typing import get_args
+
+        from cw.auto_dev_result import Status
+        from cw.dev_queue import TRACKER_MCP_GATE_DISPOSITION
+
+        assert TRACKER_MCP_GATE_DISPOSITION not in get_args(Status)
+
+    def test_gate_disposition_is_not_breadcrumb_eligible(self) -> None:
+        from cw.dev_queue import TRACKER_MCP_GATE_DISPOSITION
+        from cw.dispatch import BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+
+        assert TRACKER_MCP_GATE_DISPOSITION not in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+
+    def test_pre_dispatch_reason_is_a_known_blocker_reason(self) -> None:
+        from cw.auto_dev_result import KNOWN_BLOCKER_REASONS
+        from cw.dev_queue import _PRE_DISPATCH_TRACKER_MCP_REASON
+
+        assert _PRE_DISPATCH_TRACKER_MCP_REASON in KNOWN_BLOCKER_REASONS
+
+
 # ---------------------------------------------------------------------------
 # TestHoldAwareDisposition
 # ---------------------------------------------------------------------------
@@ -12850,6 +13848,24 @@ class TestStageRegress:
         review_task.stage_base_ref = "cafef00d"
         _stage_regress(review_task, Stage.PLAN)
         assert review_task.finalize_regress_branch_head is None
+
+    def test_stamps_merge_conflict_detected_only_from_finalize_origin(self) -> None:
+        """#2421: the caller-measured flag rides alongside the branch-head
+        oracle -- stamped only on a FINALIZE-origin regress, defaulted False
+        when the caller passes nothing."""
+        from cw.dev_queue import _stage_regress
+
+        finalize_task = _make_stage_task(stage=Stage.FINALIZE)
+        _stage_regress(finalize_task, Stage.IMPL, merge_conflict_detected=True)
+        assert finalize_task.finalize_regress_merge_conflict_detected is True
+
+        default_task = _make_stage_task(stage=Stage.FINALIZE)
+        _stage_regress(default_task, Stage.IMPL)
+        assert default_task.finalize_regress_merge_conflict_detected is False
+
+        review_task = _make_stage_task(stage=Stage.REVIEW)
+        _stage_regress(review_task, Stage.IMPL, merge_conflict_detected=True)
+        assert review_task.finalize_regress_merge_conflict_detected is False
 
     def test_clears_session_id(self) -> None:
         from cw.dev_queue import _stage_regress
@@ -13251,7 +14267,7 @@ class TestUnproductiveAttempts:
         assert task.unproductive_attempts == 0
 
     def test_schema_version_bumped_to_32(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 42
+        assert DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_migrate_fills_unproductive_attempts_default(self) -> None:
         """migrate_dev_queue fills unproductive_attempts=0 on legacy rows (v32)."""
@@ -13554,7 +14570,7 @@ class TestPlanApprovedAtStamp:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["plan_approved_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_migrate_preserves_plan_approved_at_idempotently(self) -> None:
         """A recorded approval survives a second migration pass."""
@@ -13664,7 +14680,7 @@ class TestAdvisoryNoteMigration:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["advisory_note"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_migrate_preserves_advisory_note_idempotently(self) -> None:
         """A recorded advisory_note survives a second migration pass."""
@@ -13689,7 +14705,7 @@ class TestAdvisoryNoteMigration:
         """A v36 store on disk without the key loads as v37 with None."""
         from cw.config import dev_queue_file
 
-        v36_data = {
+        v36_data: dict[str, Any] = {
             "schema_version": 36,
             "tasks": [
                 {
@@ -13706,7 +14722,7 @@ class TestAdvisoryNoteMigration:
 
         store = load_dev_queue()
 
-        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 43
         assert store.tasks[0].advisory_note is None
 
 
@@ -13737,7 +14753,7 @@ class TestUsageLimitActMigration:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["usage_limit_act"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_migrate_preserves_usage_limit_act_idempotently(self) -> None:
         """An intent already on the row survives a second migration pass."""
@@ -13779,7 +14795,7 @@ class TestUsageLimitActMigration:
 
         store = load_dev_queue()
 
-        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 43
         assert store.tasks[0].usage_limit_act is None
 
     def test_v39_row_with_codex_orphan_link_migrates_to_v41(
@@ -13790,7 +14806,7 @@ class TestUsageLimitActMigration:
         link exactly as written."""
         from cw.config import dev_queue_file
 
-        v39_data = {
+        v39_data: dict[str, Any] = {
             "schema_version": 39,
             "tasks": [
                 {
@@ -13808,7 +14824,7 @@ class TestUsageLimitActMigration:
 
         migrated = migrate_dev_queue(json.loads(json.dumps(v39_data)))
         task_raw = migrated["tasks"][0]
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
         assert task_raw["usage_limit_act"] is None
         assert task_raw["codex_orphan_session_id"] == "sess-orphan"
         assert task_raw["codex_orphan_rescan_next_eligible_at"] == (
@@ -13819,7 +14835,7 @@ class TestUsageLimitActMigration:
         dev_queue_file().write_text(json.dumps(v39_data))
         store = load_dev_queue()
         task = store.tasks[0]
-        assert store.schema_version == 42
+        assert store.schema_version == 43
         assert task.usage_limit_act is None
         assert task.codex_orphan_session_id == "sess-orphan"
         assert task.codex_orphan_rescan_next_eligible_at == datetime(
@@ -13869,7 +14885,7 @@ class TestCodexOrphanLinkMigration:
         task_raw = migrated["tasks"][0]
         assert task_raw["codex_orphan_session_id"] is None
         assert task_raw["codex_orphan_rescan_next_eligible_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_migrate_preserves_a_recorded_link_idempotently(self) -> None:
         raw: dict[str, object] = {
@@ -13914,7 +14930,7 @@ class TestCodexOrphanLinkMigration:
 
         store = load_dev_queue()
 
-        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 43
         assert store.tasks[0].codex_orphan_session_id is None
         assert store.tasks[0].codex_orphan_rescan_next_eligible_at is None
 
@@ -14067,7 +15083,7 @@ class TestPlanApprovedFingerprintStamp:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["plan_approved_fingerprint"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 42
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_migrate_preserves_plan_approved_fingerprint_idempotently(self) -> None:
         """A recorded fingerprint survives a second migration pass."""
@@ -14258,7 +15274,7 @@ class TestPlanApprovedFingerprintStamp:
         from cw.dev_queue import approve_ticket
         from cw.models import CwState, LastResultSource
         from cw.result import emit_result_on
-        from tests.test_auto_dev_result import _plan_pending_payload
+        from tests.conftest import _plan_pending_payload
 
         fingerprint = "f" * 64
         stub_fetch_plan(

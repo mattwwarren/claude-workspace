@@ -107,7 +107,7 @@ def _table_minimums() -> dict[str, tuple[int, str]]:
         match["script"]: (int(match["version"]), match["doc"])
         for match in _TABLE_ROW.finditer(_resolver_table_section())
     }
-    assert len(rows) == 5, f"expected 5 table rows, parsed {sorted(rows)}"
+    assert len(rows) == 6, f"expected 6 table rows, parsed {sorted(rows)}"
     return rows
 
 
@@ -495,7 +495,7 @@ def test_every_marker_fence_anchors_the_parse_to_the_script_header() -> None:
                 f"{doc}: the marker must be extracted from a full `# "
                 f"cw-script-version: N` comment line, anchored at both ends"
             )
-    assert fences == 6, f"expected 6 marker fences across the docs, found {fences}"
+    assert fences == 7, f"expected 7 marker fences across the docs, found {fences}"
 
 
 def test_canonical_rule_anchors_the_marker_to_the_script_header() -> None:
@@ -539,7 +539,7 @@ def test_every_marker_regex_in_the_impl_doc_is_the_bounded_one() -> None:
 
 
 def test_resolver_table_lists_every_guard_script_with_minimum_version() -> None:
-    """One shared table in auto-dev-impl.md covers all five guard scripts."""
+    """One shared table in auto-dev-impl.md covers all six guard scripts."""
     section = _resolver_table_section()
     for script in (
         "check_not_main_checkout.py",
@@ -547,6 +547,7 @@ def test_resolver_table_lists_every_guard_script_with_minimum_version() -> None:
         "check_impl_guard_staleness.py",
         "classify_merge_conflict.py",
         "check_must_fix_override.py",
+        "check_merge_gate_overlap.py",
     ):
         assert script in section
     assert "cw-script-version" in section
@@ -689,13 +690,42 @@ def _gate2_fence() -> str:
     return _site_fence(_GATE2_SCRIPT)
 
 
-# The three sites whose resolver anchors to ``$GUARD_ROOT`` and is therefore
-# exercisable by the shared ``run_guard_fence`` runner. Step 2.5 gate 2 derives
-# its anchor from ``git worktree list`` instead, so it runs through
+_IMPL_GUARD_SCRIPT = "check_impl_guard_staleness.py"
+
+# check_impl_guard_staleness.py's minimum moved past the shared v1 fixtures
+# when it gained the operator-authority comment filter (#2438 MUST_FIX A), so
+# its fence is driven with markers at its own table minimum; the shared v1
+# marker becomes a stale ("previous_minimum") case here, same precedent as
+# gate 2's split above.
+_IMPL_GUARD_MARKER_CURRENT = (
+    f"# cw-script-version: {_table_minimums()[_IMPL_GUARD_SCRIPT][0]}\n"
+)
+_IMPL_GUARD_MARKER_GOOD_CASES: tuple[tuple[str, str], ...] = (
+    ("marker_first_line", _IMPL_GUARD_MARKER_CURRENT),
+    (
+        "marker_third_line",
+        '#!/usr/bin/env python3\n"""Guard script."""\n' + _IMPL_GUARD_MARKER_CURRENT,
+    ),
+)
+_IMPL_GUARD_MARKER_BAD_CASES: tuple[tuple[str, str], ...] = (
+    *GUARD_MARKER_BAD_CASES,
+    ("previous_minimum", GUARD_MARKER_CURRENT),
+)
+
+
+# The sites whose resolver anchors to ``$GUARD_ROOT``, is exercisable by the
+# shared ``run_guard_fence`` runner, AND still shares the table's v1 minimum —
+# so the shared ``GUARD_MARKER_CURRENT``/``GUARD_MARKER_GOOD_CASES`` fixtures
+# plant a marker that is genuinely current for all three. Step 2.5 gate 2
+# derives its anchor from ``git worktree list`` instead, so it runs through
 # ``_run_gate2_fence`` below — same matrix, real worktrees (#2141 round 4).
+# ``check_impl_guard_staleness.py`` moved to minimum 2 (#2438) — it still uses
+# the simple ``$GUARD_ROOT`` resolver, but the shared v1 fixture is now a stale
+# case *for it specifically*, so it is exercised by its own dedicated
+# ``_IMPL_GUARD_...`` matrix below instead (same shape as gate 2's split, minus
+# gate 2's extra session-worktree machinery — this script needs none of it).
 _GUARD_SCRIPTS = [
     "check_not_main_checkout.py",
-    "check_impl_guard_staleness.py",
     "classify_merge_conflict.py",
 ]
 
@@ -796,6 +826,69 @@ def test_every_site_fence_prefers_the_repo_local_copy(
         global_copy=GUARD_MARKER_CURRENT,
     )
     assert stale_local.returncode != 0, f"{script}: stale repo-local copy was rescued"
+    assert _INVOKED not in stale_local.stdout
+    assert "STALE:" in stale_local.stdout
+
+
+@pytest.mark.parametrize("location", _LOCATIONS)
+@pytest.mark.parametrize(("label", "script_body"), _IMPL_GUARD_MARKER_BAD_CASES)
+def test_impl_guard_fence_hard_stops_without_invoking(
+    tmp_path: Path, location: str, label: str, script_body: str
+) -> None:
+    """check_impl_guard_staleness.py's own matrix at its table minimum (2).
+
+    Same executable proof as ``test_every_site_fence_hard_stops_without_invoking``
+    above, but at this script's own minimum (#2438) rather than the shared v1 —
+    ``previous_minimum`` (the old table value) must now hard-stop too.
+    """
+    result = _run_site_fence(
+        tmp_path, _IMPL_GUARD_SCRIPT, **_placement(location, script_body)
+    )
+    assert result.returncode != 0, f"{location}/{label}: fell through with exit 0"
+    assert _INVOKED not in result.stdout, f"{location}/{label}: reached anyway"
+    assert "STALE:" in result.stdout
+
+
+@pytest.mark.parametrize("location", _LOCATIONS)
+@pytest.mark.parametrize(("label", "script_body"), _IMPL_GUARD_MARKER_GOOD_CASES)
+def test_impl_guard_fence_reaches_the_script_on_a_current_marker(
+    tmp_path: Path, location: str, label: str, script_body: str
+) -> None:
+    """Companion happy path at check_impl_guard_staleness.py's own minimum."""
+    result = _run_site_fence(
+        tmp_path, _IMPL_GUARD_SCRIPT, **_placement(location, script_body)
+    )
+    assert result.returncode == 0, f"{location}/{label}: {result.stderr}"
+    assert _INVOKED in result.stdout
+    assert (
+        guard_candidate_path(tmp_path, location, _IMPL_GUARD_SCRIPT) in result.stdout
+    ), f"{location}/{label}: resolved a different copy: {result.stdout!r}"
+    assert "STALE:" not in result.stdout
+
+
+def test_impl_guard_fence_prefers_the_repo_local_copy(tmp_path: Path) -> None:
+    """Repo-local precedence at check_impl_guard_staleness.py's own minimum."""
+    current_local = _run_site_fence(
+        tmp_path / "a",
+        _IMPL_GUARD_SCRIPT,
+        repo_local=_IMPL_GUARD_MARKER_CURRENT,
+        global_copy=GUARD_MARKER_STALE,
+    )
+    assert current_local.returncode == 0, current_local.stderr
+    assert _INVOKED in current_local.stdout
+    assert (
+        guard_candidate_path(tmp_path / "a", "repo_local", _IMPL_GUARD_SCRIPT)
+        in current_local.stdout
+    ), "the global copy won over the repo-local one"
+    assert "STALE:" not in current_local.stdout
+
+    stale_local = _run_site_fence(
+        tmp_path / "b",
+        _IMPL_GUARD_SCRIPT,
+        repo_local=GUARD_MARKER_STALE,
+        global_copy=_IMPL_GUARD_MARKER_CURRENT,
+    )
+    assert stale_local.returncode != 0, "stale repo-local copy was rescued"
     assert _INVOKED not in stale_local.stdout
     assert "STALE:" in stale_local.stdout
 

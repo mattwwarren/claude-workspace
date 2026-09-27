@@ -4847,8 +4847,9 @@ class TestSignalStop:
 class TestHarvestLastResultThroughDoor:
     """Direct tests for _harvest_last_result_through_door (RFC 0012 A1, #1457).
 
-    Covers the best-effort exception-swallow path: a door-side validation or
-    session-not-found failure must never propagate out of the Stop hook.
+    Covers the best-effort exception-swallow path: a door-side validation,
+    session-not-found, or audit-inbox failure must never propagate out of the
+    Stop hook.
     """
 
     def test_swallows_emit_validation_error(
@@ -4898,6 +4899,29 @@ class TestHarvestLastResultThroughDoor:
             _harvest_last_result_through_door("ghost-session", sentinel)
 
         assert any("rejected by door" in r.getMessage() for r in caplog.records)
+
+    def test_swallows_audit_append_oserror(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.auto_dev_result import AutoDevResult
+        from cw.cli.stop_hook import _harvest_last_result_through_door
+
+        sentinel = AutoDevResult.model_validate(_valid_payload())
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            message = "inbox unavailable"
+            raise OSError(message)
+
+        monkeypatch.setattr("cw.cli.stop_hook.emit_result_locked", _raise)
+
+        with caplog.at_level("WARNING"):
+            _harvest_last_result_through_door("sess-audit-error", sentinel)
+
+        assert any("audit append failed" in r.getMessage() for r in caplog.records)
 
 
 class TestSentinelPresentInTranscript:
@@ -10342,6 +10366,39 @@ class TestDevQueueApproveCli:
         assert result.exit_code == 0, result.output
         assert "awaiting operator signoff" in result.output
 
+    def test_approve_cli_prints_body_drift_warning_to_stderr(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2311: an advisory body-drift warning goes to stderr; the approval
+        message itself stays on stdout and the command still exits 0."""
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY
+
+        self._seed_review_pending(tmp_config_dir, tmp_path, signoff=False)
+        warning = "Warning: the body of ticket ACME-1 changed (test)."
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.approve.approve_ticket",
+            lambda *_a, **_kw: {
+                "from_stage": "plan",
+                "to_stage": "plan",
+                "ticket_id": "ACME-1",
+                "client": "acme",
+                "awaiting_signoff": False,
+                "plan_requeued": True,
+                "finalize_held": False,
+                "plan_approved_fingerprint": None,
+                "plan_promoted": False,
+                BODY_DRIFT_WARNING_KEY: warning,
+            },
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "approve", "ACME-1", "--client", "acme"]
+        )
+        assert result.exit_code == 0, result.output
+        assert warning in result.stderr
+        assert warning not in result.stdout
+        assert "re-queued at plan stage" in result.stdout
+
     def _seed_plan_pending(
         self,
         tmp_config_dir: Path,
@@ -11582,6 +11639,8 @@ class TestDevQueueWaitSentinelAware:
         surface_ref: str = "abcd1234",
         started_at: datetime | None = None,
         reap_proposed_at: datetime | None = None,
+        last_result: dict[str, object] | None = None,
+        last_result_source: LastResultSource | None = None,
     ) -> Session:
         """Build an ACTIVE Session pointing at *worktree*."""
         return _make_daemon_session(
@@ -11594,6 +11653,8 @@ class TestDevQueueWaitSentinelAware:
             claude_session_id=claude_session_id,
             started_at=started_at or datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
             reap_proposed_at=reap_proposed_at,
+            last_result=last_result,
+            last_result_source=last_result_source,
         )
 
     def test_terminal_shipped_csid_set(
@@ -11617,8 +11678,14 @@ class TestDevQueueWaitSentinelAware:
         _write_stop_hook_transcript(fake_home, worktree, csid, self._SHIPPED_SENTINEL)
         self._seed_running_task("GEN-535", session_id)
 
+        from cw.auto_dev_result import parse_stdout
+
         session = self._make_running_session(
-            session_id, worktree, claude_session_id=csid
+            session_id,
+            worktree,
+            claude_session_id=csid,
+            last_result=parse_stdout(self._SHIPPED_SENTINEL).model_dump(mode="json"),
+            last_result_source=LastResultSource.STOP_HOOK_HARVEST,
         )
         state = CwState(sessions=[session])
         from cw.config import save_state as _save_state
@@ -11671,8 +11738,14 @@ class TestDevQueueWaitSentinelAware:
         _write_stop_hook_transcript(fake_home, worktree, csid, sentinel_text)
         self._seed_running_task("GEN-899", session_id)
 
+        from cw.auto_dev_result import parse_stdout
+
         session = self._make_running_session(
-            session_id, worktree, claude_session_id=csid
+            session_id,
+            worktree,
+            claude_session_id=csid,
+            last_result=parse_stdout(sentinel_text).model_dump(mode="json"),
+            last_result_source=LastResultSource.STOP_HOOK_HARVEST,
         )
         from cw.config import save_state as _save_state
 
@@ -11780,8 +11853,21 @@ class TestDevQueueWaitSentinelAware:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        """TERMINAL: csid=None on Session → resolved via surface_ref glob."""
+        """TERMINAL detection via ``session.last_result`` is independent of
+        transcript presence and csid resolution.
+
+        Step 2a runs before Step 3 (csid resolution), so a populated
+        ``session.last_result`` short-circuits the terminal decision without
+        needing a resolvable ``claude_session_id`` or an existing transcript
+        at all -- ``claude_session_id`` stays ``None`` and no transcript file
+        is written. ``_csid_from_transcript``'s glob-resolution mechanism
+        this test previously exercised keeps direct, independent unit
+        coverage at ``tests/test_reconcile_shared_sentinels.py``'s
+        ``test_csid_from_transcript_via_helper``.
+        """
         import json as _json
+
+        from cw.auto_dev_result import parse_stdout
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -11791,18 +11877,6 @@ class TestDevQueueWaitSentinelAware:
         worktree.mkdir(parents=True)
 
         session_id = "sess535b"
-        surface_ref = "abcd5350"  # 8-char hex
-        # csid starts with surface_ref (as per _csid_from_transcript glob)
-        csid = f"{surface_ref}-longer-uuid-suffix"
-
-        # Transcript written AFTER session.started_at so the mtime guard passes.
-        transcript = _write_stop_hook_transcript(
-            fake_home, worktree, csid, self._SHIPPED_SENTINEL
-        )
-        # Ensure mtime is fresh (after started_at = epoch).
-        import os
-
-        os.utime(transcript, None)
 
         self._seed_running_task("GEN-535B", session_id)
 
@@ -11810,9 +11884,10 @@ class TestDevQueueWaitSentinelAware:
         session = self._make_running_session(
             session_id,
             worktree,
-            claude_session_id=None,  # not yet set — will resolve via glob
-            surface_ref=surface_ref,
+            claude_session_id=None,
             started_at=started,
+            last_result=parse_stdout(self._SHIPPED_SENTINEL).model_dump(mode="json"),
+            last_result_source=LastResultSource.STOP_HOOK_HARVEST,
         )
         state = CwState(sessions=[session])
         from cw.config import save_state as _save_state
@@ -11820,7 +11895,16 @@ class TestDevQueueWaitSentinelAware:
         _save_state(state)
 
         monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
-        monkeypatch.setattr("cw.cli.dev_queue.wait.time.monotonic", lambda: 0.0)
+        # Advancing (not frozen) clock: Step 2a short-circuits on the very
+        # first iteration post-fix regardless of clock shape, but pre-fix
+        # there is no transcript/csid for the old branch to find a sentinel
+        # in, so a frozen clock would spin forever instead of hitting the
+        # deadline -- this bounded clock keeps a pre-fix run fast (exit 124)
+        # rather than hanging.
+        clock = iter([0.0, 1000.0])
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(clock, 1000.0)
+        )
 
         runner = CliRunner()
         result = runner.invoke(
@@ -11873,7 +11957,14 @@ class TestDevQueueWaitSentinelAware:
         def _fake_sentinel(
             cwd: str, claude_session_id: str | None, **_kwargs: object
         ) -> object:
-            """Return None on first call, AutoDevResult on second."""
+            """Return None on first call, AutoDevResult on second.
+
+            The second call also mutates session.last_result -- Step 2a
+            (the fix for #2397) reads that at the TOP of every poll, so this
+            mutation only becomes visible starting at the loop's THIRD
+            iteration, not the second. The transcript-parsed return value
+            here now only feeds the heartbeat/BlockedResult-guard path.
+            """
             from cw.auto_dev_result import parse_stdout
 
             call_count[0] += 1
@@ -11881,7 +11972,8 @@ class TestDevQueueWaitSentinelAware:
                 # Write a fresh-mtime transcript (no sentinel) to prevent ATTENTION.
                 transcript.write_text(json.dumps({"type": "user"}) + "\n")
                 return None
-            # Second poll: inject the shipped sentinel.
+            # Second poll: inject the shipped sentinel into the transcript
+            # AND stamp session.last_result (visible starting next poll).
             transcript.write_text(
                 json.dumps(
                     {
@@ -11895,6 +11987,19 @@ class TestDevQueueWaitSentinelAware:
                 )
                 + "\n"
             )
+            from cw.config import load_state as _load_state
+            from cw.config import save_state as _save_state_inner
+
+            fresh_state = _load_state()
+            for fresh_session in fresh_state.sessions:
+                if fresh_session.id == session_id:
+                    fresh_session.last_result = parse_stdout(
+                        self._SHIPPED_SENTINEL
+                    ).model_dump(mode="json")
+                    fresh_session.last_result_source = (
+                        LastResultSource.STOP_HOOK_HARVEST
+                    )
+            _save_state_inner(fresh_state)
             return parse_stdout(self._SHIPPED_SENTINEL)
 
         monkeypatch.setattr(
@@ -11963,7 +12068,14 @@ class TestDevQueueWaitSentinelAware:
         def _fake_sentinel(
             cwd: str, claude_session_id: str | None, **kwargs: object
         ) -> object:
-            """Record identity of the warned_blocks kwarg across calls."""
+            """Record identity of the warned_blocks kwarg across calls.
+
+            The second call also mutates session.last_result -- Step 2a
+            reads that at the TOP of every poll, so it only becomes visible
+            starting at the loop's THIRD iteration, keeping call_count[0]
+            at exactly 2 (see test_heartbeat_then_terminal for the same
+            shape).
+            """
             from cw.auto_dev_result import parse_stdout
 
             seen_warned_blocks.append(kwargs.get("warned_blocks"))
@@ -11984,6 +12096,19 @@ class TestDevQueueWaitSentinelAware:
                 )
                 + "\n"
             )
+            from cw.config import load_state as _load_state
+            from cw.config import save_state as _save_state_inner
+
+            fresh_state = _load_state()
+            for fresh_session in fresh_state.sessions:
+                if fresh_session.id == session_id:
+                    fresh_session.last_result = parse_stdout(
+                        self._SHIPPED_SENTINEL
+                    ).model_dump(mode="json")
+                    fresh_session.last_result_source = (
+                        LastResultSource.STOP_HOOK_HARVEST
+                    )
+            _save_state_inner(fresh_state)
             return parse_stdout(self._SHIPPED_SENTINEL)
 
         monkeypatch.setattr(
@@ -12434,8 +12559,14 @@ class TestDevQueueWaitSentinelAware:
         _write_stop_hook_transcript(fake_home, worktree, csid, self._SHIPPED_SENTINEL)
         self._seed_running_task("GEN-535F", session_id)
 
+        from cw.auto_dev_result import parse_stdout
+
         session = self._make_running_session(
-            session_id, worktree, claude_session_id=csid
+            session_id,
+            worktree,
+            claude_session_id=csid,
+            last_result=parse_stdout(self._SHIPPED_SENTINEL).model_dump(mode="json"),
+            last_result_source=LastResultSource.STOP_HOOK_HARVEST,
         )
         from cw.config import save_state as _save_state
 
@@ -12722,6 +12853,289 @@ class TestDevQueueWaitSentinelAware:
             main, ["dev-queue", "wait", "GEN-535I", "--client", "genhealth"]
         )
         assert result.exit_code == _WAIT_EXIT_TIMEOUT
+
+    def test_requeue_stale_transcript_sentinel_not_reported_terminal(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Regression for #2397: a stale transcript sentinel from a PRIOR
+        run must not be reported terminal once ``session.last_result`` has
+        been reset by requeue (``_reset_for_same_stage_requeue`` clears only
+        ``TicketTask`` fields, leaving a fresh ``Session`` with
+        ``last_result=None`` -- but the old transcript file, and any
+        terminal-shaped sentinel written into it, can still be sitting in
+        the worktree). The wait must keep polling to the hard ceiling
+        instead of trusting that leftover transcript sentinel.
+        """
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-2397"
+        worktree.mkdir(parents=True)
+
+        session_id = "sess2397a"
+        csid = "uuid-2397a-csid"
+        # Stale sentinel left in the transcript from the PRIOR run.
+        _write_stop_hook_transcript(fake_home, worktree, csid, self._SHIPPED_SENTINEL)
+        self._seed_running_task("GEN-2397A", session_id)
+
+        # Freshly-requeued session: last_result=None, exactly as after
+        # _reset_for_same_stage_requeue's post-requeue reclaim.
+        session = self._make_running_session(
+            session_id, worktree, claude_session_id=csid
+        )
+        state = CwState(sessions=[session])
+        from cw.config import save_state as _save_state
+
+        _save_state(state)
+
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
+        # First monotonic() sets the deadline; the next poll's deadline check
+        # is already past it, so a non-terminal first pass exits 124.
+        clock = iter([0.0, 1000.0, 2000.0])
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.monotonic", lambda: next(clock))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", "GEN-2397A", "--client", "genhealth"],
+        )
+        assert result.exit_code == 124, result.output
+        assert "SHIPPED" not in result.output
+
+    def test_last_result_terminal_reported_with_source_stop_hook_harvest(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """``session.last_result`` (Step 2a) is terminal-reported, sourced
+        from ``STOP_HOOK_HARVEST`` -- no transcript needs to exist.
+        """
+        import json as _json
+
+        from cw.auto_dev_result import parse_stdout
+
+        worktree = tmp_path / "wt" / "auto-dev-2397b1"
+        worktree.mkdir(parents=True)
+
+        session_id = "sess2397b1"
+        self._seed_running_task("GEN-2397B1", session_id)
+
+        last_result = parse_stdout(self._SHIPPED_SENTINEL).model_dump(mode="json")
+        session = self._make_running_session(
+            session_id,
+            worktree,
+            last_result=last_result,
+            last_result_source=LastResultSource.STOP_HOOK_HARVEST,
+        )
+        from cw.config import save_state as _save_state
+
+        _save_state(CwState(sessions=[session]))
+
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
+        # Advancing (not frozen) clock: Step 2a short-circuits on the very
+        # first iteration post-fix regardless of clock shape, but pre-fix
+        # there is no transcript/csid for the old branch to find a sentinel
+        # in, so a frozen clock would spin forever instead of hitting the
+        # deadline -- this bounded clock keeps a pre-fix run fast (exit 124)
+        # rather than hanging.
+        clock = iter([0.0, 1000.0])
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(clock, 1000.0)
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", "GEN-2397B1", "--client", "genhealth", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = _json.loads(result.output.strip())
+        assert payload["state"] == "terminal"
+        assert payload["sentinel_status"] == "shipped"
+        assert payload["last_result_source"] == LastResultSource.STOP_HOOK_HARVEST.value
+
+    def test_last_result_terminal_reported_with_source_emit_cli(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Same as the ``STOP_HOOK_HARVEST`` case, sourced from ``EMIT_CLI``."""
+        import json as _json
+
+        from cw.auto_dev_result import parse_stdout
+
+        worktree = tmp_path / "wt" / "auto-dev-2397b2"
+        worktree.mkdir(parents=True)
+
+        session_id = "sess2397b2"
+        self._seed_running_task("GEN-2397B2", session_id)
+
+        last_result = parse_stdout(self._SHIPPED_SENTINEL).model_dump(mode="json")
+        session = self._make_running_session(
+            session_id,
+            worktree,
+            last_result=last_result,
+            last_result_source=LastResultSource.EMIT_CLI,
+        )
+        from cw.config import save_state as _save_state
+
+        _save_state(CwState(sessions=[session]))
+
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
+        # See test_last_result_terminal_reported_with_source_stop_hook_harvest
+        # for why this uses an advancing clock rather than a frozen one.
+        clock = iter([0.0, 1000.0])
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(clock, 1000.0)
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", "GEN-2397B2", "--client", "genhealth", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = _json.loads(result.output.strip())
+        assert payload["state"] == "terminal"
+        assert payload["sentinel_status"] == "shipped"
+        assert payload["last_result_source"] == LastResultSource.EMIT_CLI.value
+
+    def test_intermediate_stage_complete_before_last_result_keeps_polling(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A ``stage_complete`` payload in ``session.last_result`` is not
+        terminal -- ``INTERMEDIATE_ADVANCE_STATUSES`` excludes it from Step
+        2a exactly as it does from the (demoted) transcript path, since
+        ``last_result`` can legitimately hold a mid-pipeline stage hand-off.
+        """
+        from cw.auto_dev_result import parse_stdout
+
+        worktree = tmp_path / "wt" / "auto-dev-2397c"
+        worktree.mkdir(parents=True)
+
+        session_id = "sess2397c"
+        self._seed_running_task("GEN-2397C", session_id)
+
+        sentinel_text = (
+            self._SHIPPED_SENTINEL.replace(
+                '"status": "shipped"', '"status": "stage_complete"'
+            )
+            .replace(
+                '"stage_reached": "stage5_post_create"',
+                '"stage_reached": "stage2_impl"',
+            )
+            .replace(
+                '"pr": {"number": 535, '
+                '"url": "https://github.com/foo/bar/pull/535", '
+                '"auto_merge": true, "base": "main"}',
+                '"pr": null',
+            )
+        )
+        last_result = parse_stdout(sentinel_text).model_dump(mode="json")
+        session = self._make_running_session(
+            session_id,
+            worktree,
+            last_result=last_result,
+            last_result_source=LastResultSource.STOP_HOOK_HARVEST,
+        )
+        from cw.config import save_state as _save_state
+
+        _save_state(CwState(sessions=[session]))
+
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
+        clock = iter([0.0, 1000.0, 2000.0])
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.monotonic", lambda: next(clock))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", "GEN-2397C", "--client", "genhealth"],
+        )
+        assert result.exit_code == 124, result.output
+        assert "FAILED" not in result.output
+
+    def test_stale_attention_not_suppressed_by_leftover_terminal_transcript_sentinel(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A leftover terminal-shaped transcript sentinel must not suppress
+        ATTENTION (regression for the ``_check_stale_attention`` guard fix).
+
+        Mirrors ``test_attention_stale_not_in_roster``, but the mocked
+        ``_parse_sentinel_from_transcript`` returns a terminal-shaped
+        ``AutoDevResult`` (a leftover sentinel from a prior run sitting in a
+        stale, dead worktree) instead of ``None`` -- exactly #2397's scenario
+        once the transcript-terminal branch is removed. Only a
+        ``BlockedResult`` sentinel is allowed to suppress ATTENTION (the
+        partial-write guard); a terminal-shaped ``AutoDevResult`` must not.
+        """
+        import json as _json
+
+        from cw.auto_dev_result import parse_stdout
+        from cw.cli import _WAIT_EXIT_ATTENTION
+
+        worktree = tmp_path / "wt" / "auto-dev-2397d"
+        worktree.mkdir(parents=True)
+
+        session_id = "sess2397d"
+        surface_ref = "deadbeef"  # 8-char hex
+        csid = "uuid-2397d"
+
+        self._seed_running_task("GEN-2397D", session_id)
+
+        started = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        session = self._make_running_session(
+            session_id,
+            worktree,
+            claude_session_id=csid,
+            surface_ref=surface_ref,
+            started_at=started,
+        )
+        state = CwState(sessions=[session])
+        from cw.config import save_state as _save_state
+
+        _save_state(state)
+
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.wait._parse_sentinel_from_transcript",
+            lambda *_a, **_kw: parse_stdout(self._SHIPPED_SENTINEL),
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.wait._transcript_age_seconds",
+            lambda *_a, **_kw: 99999.0,  # very stale
+        )
+
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        fake_daemon = FakeNativeDaemonClient()
+        # Don't add surface_ref to roster → not in roster.
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.wait.get_native_daemon_client", lambda: fake_daemon
+        )
+
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.monotonic", lambda: 0.0)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", "GEN-2397D", "--client", "genhealth", "--json"],
+        )
+        assert result.exit_code == _WAIT_EXIT_ATTENTION, result.output
+        payload = _json.loads(result.output.strip())
+        assert payload["state"] == "attention"
+        assert payload["sentinel_status"] is None
 
 
 # ---------------------------------------------------------------------------

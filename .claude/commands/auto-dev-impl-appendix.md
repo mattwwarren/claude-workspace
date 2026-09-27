@@ -76,12 +76,12 @@ Reached from `### Pre-Stage Detector Guard` in the core doc, and only when
 `detect_current_stage()` reported `s2_implementing` or a stage past S2 — i.e.
 this ticket already carries branch work. A fresh dispatch never reaches here.
 
-**Staleness/regress check (#1794) — run before applying either bullet below, whenever the detector reports a stage past S2.** The "past S2, do not re-implement" premise — that HEAD's `Auto-Dev-Stage: impl-complete` trailer means nothing is left to do — holds only if nothing has asked for more work since HEAD was written. Compute:
+**Staleness/regress check (#1794) — run before applying any bullet below, on every arrival at this section, whether the detector reports `s2_implementing` or a stage past S2 (#2438 widens this from the past-S2-only gate this sentence used to read).** The "past S2, do not re-implement" premise — that HEAD's `Auto-Dev-Stage: impl-complete` trailer means nothing is left to do — holds only if nothing has asked for more work since HEAD was written, and an `s2_implementing` resume carries the identical risk: a merge-conflict BLOCK during IMPL never reaches the completion trailer, so an operator's resolution comment posted after the regress would otherwise never be checked for. Compute:
 
 ```bash
 HEAD_COMMIT_AT=$(git log -1 --format=%cI HEAD)
 REGRESSED_INTO_STAGE=$(jq -r '.queue_metadata.regressed_into_stage // empty' .claude/cw-context.json 2>/dev/null)
-MIN_VERSION=1  # per the script version table in auto-dev-impl.md
+MIN_VERSION=2  # per the script version table in auto-dev-impl.md
 GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
   "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
@@ -115,17 +115,21 @@ fi
 Resolution follows "Guard-script path resolution and staleness marker (#2141)" in the core doc. Two dispositions attach to it, and neither is the script's own verdict:
 
 - **Absent from both locations** (no repo-local copy, no global install): log `"check_impl_guard_staleness: script absent, skipped"` in `friction_highlights` and treat as `stale: false` — the unchanged fail-open short-circuit. A missing file coincidentally exits 2 as well, but it is not an unparseable timestamp and must not be filed as one.
-- **Candidate found but its marker is missing or below minimum:** do NOT run it and do NOT fail open — EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Pre-Stage Detector Guard: HEADLESS BLOCK — check_impl_guard_staleness.py at <resolved-path> — missing/stale cw-script-version marker (need >= 1)"`, and STOP.
+- **Candidate found but its marker is missing or below minimum:** do NOT run it and do NOT fail open — EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Pre-Stage Detector Guard: HEADLESS BLOCK — check_impl_guard_staleness.py at <resolved-path> — missing/stale cw-script-version marker (need >= 2)"`, and STOP.
 
 **This file-staleness check is a distinct, earlier gate from the script's own `stale` output field.** The marker answers "is this copy of the script current?"; the verdict's `stale: true/false` answers "have the impl comments moved past HEAD?". A stale *script* can produce a confidently wrong *verdict*, which is exactly why the marker gate runs first and blocks rather than feeding the verdict downstream. Do not conflate the two.
 
 `REGRESSED_INTO_STAGE` reads `.claude/cw-context.json` → `queue_metadata.regressed_into_stage` (written by `spawn_create_impl` from `TicketTask.regressed_into_stage`, `src/cw/spawn.py`). A non-empty value means THIS impl-stage entry was reached via `_stage_regress` — the operator's `cw dev-queue requeue <T> --regress --stage impl`, or the FINALIZE self-heal regress — an explicit external assertion that the stage is NOT actually complete. It is a **per-arrival** signal (cleared by dispatch the moment this session was spawned, `src/cw/dispatch/claim.py`), deliberately distinct from `TicketTask.regress_attempts` (a cumulative, never-reset-on-advance counter bounding the FINALIZE self-heal cap, which would otherwise misfire on every later IMPL entry after a single regress anywhere in the ticket's history, #1794). A missing/unreadable `queue_metadata` reads as empty, not an error. **Known limitation:** the marker is consumed and cleared at spawn time, so a session that dies before acting on it loses the regress signal; the comment-staleness check above is the backstop, but a bare `--regress` with no accompanying comment would not be caught. #1801 evaluated making the marker survive a no-sentinel death and rejected it (would fragment the shared `_stage_regress` seam and reintroduce the same gap at Orientation's early `blocked` exit) — an accepted, documented limitation, not an oversight.
 
+**Regress-into-IMPL carrying an unconcluded merge (#2421).** When `REGRESSED_INTO_STAGE` is `impl` and `git rev-parse --verify -q MERGE_HEAD` resolves on arrival, FINALIZE's pre-push refresh left a merge mid-flight and regressed here so it could be finished. Whichever resume bullet below applies, pass that fact to the Stage 2 agent explicitly: its first job is to resolve that merge, `git commit` it (staging alone leaves `MERGE_HEAD` set and the branch head unchanged), re-run the gates, and push — per the core doc's **Pre-completion merge guard (#2421)** bullet. Never re-declare completion on top of it.
+
 On script exit 2 (`--head-commit-at` unparseable — fail open): treat as `stale: false`, proceed as the unchanged behavior below, and log `"impl_guard_staleness_check_failed"` in `friction_highlights`. A malformed or unreadable `--comments-file` does NOT trigger exit 2 (#1794 follow-up): the script still exits 0 with a computed verdict and `comments_load_failed: true`, because `REGRESSED_INTO_STAGE` is an independent queue-state-derived signal that must not be discarded over a transient comments-fetch hiccup. If the verdict's `comments_load_failed` is `true`, log `"impl_guard_comments_load_failed"` in `friction_highlights` alongside the verdict's `reasons`.
 
-- If `stage == "s2_implementing"`: the branch exists but the `Auto-Dev-Stage: impl-complete` trailer is absent. **Resume from current branch HEAD; do not reset.** Log the resumed-from SHA for audit, skip the worktree-create + branch-init steps in the core doc, and have the new impl agent continue on top of existing commits.
+- If `stage == "s2_implementing"`: the branch exists but the `Auto-Dev-Stage: impl-complete` trailer is absent.
+  - **If the verdict's `stale` is `false`:** **Resume from current branch HEAD; do not reset.** Log the resumed-from SHA for audit, skip the worktree-create + branch-init steps in the core doc, and have the new impl agent continue on top of existing commits.
+  - **If the verdict's `stale` is `true`:** do NOT treat this as "repo state unchanged — outcome deterministic" and silently re-park on the same disposition. **Resume from current branch HEAD; do not reset** (same discipline as the stale=false sub-case above). Log the verdict's `reasons` (`regressed_to_impl` and/or `stale_comment_after_head`) in `friction_highlights`. `stale_comment_after_head` is a coarse, unfiltered superset — it fires on any comment newer than `HEAD_COMMIT_AT` regardless of authorship — so before acting on it, apply the *Operator-authority delta* rule's own comment-provenance filter (`auto-dev.md`, `## Comment provenance rule (#2097)`) to the live-fetched comments, and pass only the surviving **operator-authority comment(s)** (verbatim, chronological, especially any postdating `HEAD_COMMIT_AT`) to the Stage 2 agent as new, binding instructions to read and act on before re-declaring completion. An agent-authored comment postdating `HEAD_COMMIT_AT` alone does not license a fresh attempt. This is the *Operator-authority delta* rule (`auto-dev.md`, #2433) applied to the impl stage: T is `HEAD_COMMIT_AT`, not `plan_approved_at`, and a comment postdating it is a delta the resuming agent must act on, never silence to re-park on. The agent still must append a fresh `Auto-Dev-Stage: impl-complete` trailer to its new final commit per the S2 Completion Marker in the core doc — the old trailer's commit is not this run's answer.
 - If `stage` is past S2 (`s3_*`, `s4_*`, `s5_*`, `merged`) **AND the verdict's `stale` is `false`**: advance to that stage's entry point; do not re-implement. The unchanged fast path — a completed impl with no new operator activity and no regress.
-- If `stage` is past S2 **AND the verdict's `stale` is `true`**: the trailer's premise ("impl is done, nothing to do") is stale — do NOT advance to the next stage's entry point and do NOT treat the ticket as complete. **Resume from current branch HEAD; do not reset** (same discipline as the `s2_implementing` bullet). Log the verdict's `reasons` (`regressed_to_impl` and/or `stale_comment_after_head`) in `friction_highlights`, and pass the live-fetched comments (verbatim, chronological, especially any postdating `HEAD_COMMIT_AT`) to the Stage 2 agent as new, binding instructions to read and act on before re-declaring completion. The agent still must append a fresh `Auto-Dev-Stage: impl-complete` trailer to its new final commit per the S2 Completion Marker in the core doc — the old trailer's commit is not this run's answer.
+- If `stage` is past S2 **AND the verdict's `stale` is `true`**: the trailer's premise ("impl is done, nothing to do") is stale — do NOT advance to the next stage's entry point and do NOT treat the ticket as complete, and do NOT treat this as "repo state unchanged — outcome deterministic" and silently re-park on the same disposition — the *Operator-authority delta* rule (`auto-dev.md`, #2433) applies here too, anchored to `HEAD_COMMIT_AT` rather than `plan_approved_at`. **Resume from current branch HEAD; do not reset** (same discipline as the `s2_implementing` bullet). Log the verdict's `reasons` (`regressed_to_impl` and/or `stale_comment_after_head`) in `friction_highlights`. `stale_comment_after_head` is a coarse, unfiltered superset — it fires on any comment newer than `HEAD_COMMIT_AT` regardless of authorship — so before acting on it, apply the *Operator-authority delta* rule's own comment-provenance filter (`auto-dev.md`, `## Comment provenance rule (#2097)`) to the live-fetched comments, and pass only the surviving **operator-authority comment(s)** (verbatim, chronological, especially any postdating `HEAD_COMMIT_AT`) to the Stage 2 agent as new, binding instructions to read and act on before re-declaring completion. An agent-authored comment postdating `HEAD_COMMIT_AT` alone does not license a fresh attempt. The agent still must append a fresh `Auto-Dev-Stage: impl-complete` trailer to its new final commit per the S2 Completion Marker in the core doc — the old trailer's commit is not this run's answer.
 
 ---
 
@@ -242,6 +246,41 @@ stage-pointer walk, resume, or requeue can advance `task.stage` past IMPL
 without gate 1 re-running against the final branch state — which is exactly how
 an empty branch once reached a human approval prompt. Nothing changes in the
 core doc's gate; it stays the first and cheapest catch.
+
+---
+
+## Regress-into-IMPL merge conclusion: the dispatch backstop (#2421)
+
+Dispatch independently re-verifies the core doc's **Pre-completion merge guard
+(#2421)** at the IMPL→REVIEW checkpoint with its own git measurement
+(`dispatch/impl_gates.py::_should_gate_for_unconcluded_finalize_regress_merge`),
+because the session-level self-check is a prose-and-inline-bash contract an
+agent could still omit under pressure — the #1870 precedent's own reasoning
+(caught, but with less context than the session had).
+
+This check cannot live in Step 2.5's Orchestrator Completion Gate. That gate
+only ever sees a detached checkout of the already-pushed `origin/<branch-name>`
+ref and explicitly cannot reach the impl isolation worktree, so uncommitted
+local state like `MERGE_HEAD` is invisible to it. The dispatch gate is a
+separate, later re-verification against the ticket's persistent worktree, not a
+duplicate of the same measurement.
+
+If `TicketTask.finalize_regress_branch_head` is set and either `MERGE_HEAD` is
+still present in the ticket's worktree (unconditionally), or the branch head
+has not moved since the regress **and** the regress was actually merge-caused
+(`finalize_regress_merge_conflict_detected`, measured with `merge_in_progress`
+at regress time by both `_stage_regress` call sites), the row parks
+`BLOCKED_ON_USER`/`unconcluded_finalize_regress_merge` instead of advancing to
+REVIEW. The unmeasurable cases (unresolvable worktree, unreadable git state)
+park too. A finalize regress for a non-merge cause (e.g. a diff-cover
+`agent_block`) with an unchanged head is deliberately NOT gated here — it is
+left to existing routing (the #1717 `_consume_finalize_regress_repeat`
+signal-only detector at REVIEW re-entry). Recovery: conclude and push the merge
+in the ticket's worktree, then `cw dev-queue requeue`.
+
+**Known limitation:** runs only at the single-hop `_route_stage_success` site,
+not the multi-hop stage-pointer walk (mirrors #1801's accepted-limitation
+style).
 
 ---
 

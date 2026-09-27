@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     from cw.models.tasks import TicketTask
 
 _GH_PR_STATE_MERGED = "MERGED"
+_GH_PR_STATE_CLOSED = "CLOSED"
+_GH_PR_STATE_OPEN = "OPEN"
 _PR_EXISTS_TIMEOUT = 10
 _PLAN_MARKER = "<!-- plan-spec-reviewed"
 # Provenance marker appended to every tracker comment this module posts
@@ -551,6 +553,43 @@ def fetch_issue_comments(
     except (ValueError, AttributeError):
         return None
     return comments
+
+
+def fetch_issue_body(
+    ticket_id: str, timeout: int, *, cwd: Path | None = None
+) -> str | None:
+    """Return the issue's raw body text, or None on any fetch/parse error.
+
+    Shaped after :func:`fetch_issue_comments` (same *cwd* contract: multi-client
+    callers MUST pass it). The string is returned exactly as ``gh issue view
+    --json body`` reports it, because the plan stage's ``body_sha`` is a
+    SHA-256 over that raw string; ``cw dev-queue approve``'s advisory
+    ticket-body drift check (#2311) recomputes it from this value and fails
+    open on None.
+    """
+    try:
+        result = _sp.run(
+            ["gh", "issue", "view", ticket_id, "--json", "body"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            cwd=cwd,
+        )
+    except FileNotFoundError:
+        return None
+    except (OSError, _sp.TimeoutExpired):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    try:
+        data: dict[str, Any] = json.loads(result.stdout)
+        body = data.get("body")
+    except (ValueError, AttributeError):
+        return None
+    return body if isinstance(body, str) else None
 
 
 def _comment_has_marker(comment: dict[str, Any]) -> bool:

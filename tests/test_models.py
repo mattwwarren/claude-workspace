@@ -320,6 +320,28 @@ class TestClientConfig:
         )
         assert c.quality_gate_commands == ""
 
+    def test_merge_gate_ignore_paths_defaults_to_empty_list(self) -> None:
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.merge_gate_ignore_paths == []
+
+    def test_merge_gate_ignore_paths_accepts_list(self) -> None:
+        c = ClientConfig(
+            name="test",
+            workspace_path=Path("/dev/null"),
+            merge_gate_ignore_paths=["mypy-baseline.txt", "uv.lock"],
+        )
+        assert c.merge_gate_ignore_paths == ["mypy-baseline.txt", "uv.lock"]
+
+    def test_merge_gate_ignore_paths_round_trip(self) -> None:
+        original = ClientConfig(
+            name="test",
+            workspace_path=Path("/dev/null"),
+            merge_gate_ignore_paths=["mypy-baseline.txt"],
+        )
+        data = original.model_dump(mode="json")
+        restored = ClientConfig.model_validate(data)
+        assert restored.merge_gate_ignore_paths == ["mypy-baseline.txt"]
+
     def test_occupancy_gate_enabled_defaults_to_inherit(self) -> None:
         c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
         assert c.occupancy_gate_enabled is None
@@ -335,6 +357,47 @@ class TestClientConfig:
             occupancy_gate_enabled=False,
         )
         assert c.occupancy_gate_enabled is False
+
+    def test_tracker_mcp_gate_defaults_to_none(self) -> None:
+        """#2442: omitted from clients.yaml -> the gate never runs."""
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.tracker_mcp_gate is None
+
+    def test_tracker_mcp_gate_config_defaults(self) -> None:
+        from cw.models.client import TrackerMcpGateConfig
+
+        gate = TrackerMcpGateConfig(plugin_id="linear@acme")
+        assert gate.enabled is False
+        assert gate.settings_path == ".claude/settings.json"
+
+    def test_tracker_mcp_gate_config_requires_plugin_id(self) -> None:
+        from cw.models.client import TrackerMcpGateConfig
+
+        with pytest.raises(ValidationError):
+            TrackerMcpGateConfig.model_validate({"enabled": True})
+
+    def test_tracker_mcp_gate_config_rejects_unknown_key(self) -> None:
+        from cw.models.client import TrackerMcpGateConfig
+
+        with pytest.raises(ValidationError):
+            TrackerMcpGateConfig.model_validate(
+                {"plugin_id": "linear@acme", "bogus": 1}
+            )
+
+    def test_tracker_mcp_gate_round_trip(self) -> None:
+        original = ClientConfig.model_validate(
+            {
+                "name": "test",
+                "workspace_path": "/dev/null",
+                "tracker_mcp_gate": {"enabled": True, "plugin_id": "linear@acme"},
+            }
+        )
+        data = original.model_dump(mode="json")
+        restored = ClientConfig.model_validate(data)
+        assert restored.tracker_mcp_gate is not None
+        assert restored.tracker_mcp_gate.enabled is True
+        assert restored.tracker_mcp_gate.plugin_id == "linear@acme"
+        assert restored.tracker_mcp_gate.settings_path == ".claude/settings.json"
 
     def test_unknown_key_raises(self) -> None:
         """extra='forbid' rejects an unrecognized top-level key (#1200)."""
@@ -1160,7 +1223,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 42
+        assert DEV_QUEUE_SCHEMA_VERSION == 43
 
     def test_ticket_task_old_row_without_codex_orphan_fields_defaults_none(
         self,
@@ -1895,6 +1958,19 @@ class TestConciergeAndEscalationModelSurface:
 
         assert (
             OrchestratorEventType.CONCIERGE_RECOVERED
+            not in _DEFAULT_OPERATOR_EVENT_TYPES
+        )
+
+    def test_orchestrator_event_type_includes_session_result_emitted(self) -> None:
+        assert OrchestratorEventType.SESSION_RESULT_EMITTED == "session.result_emitted"
+
+    def test_session_result_emitted_not_in_default_forward_set(self) -> None:
+        """SESSION_RESULT_EMITTED is audit-trail only — deliberately NOT
+        forwarded to the operator channel by default (#2439)."""
+        from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
+
+        assert (
+            OrchestratorEventType.SESSION_RESULT_EMITTED
             not in _DEFAULT_OPERATOR_EVENT_TYPES
         )
 

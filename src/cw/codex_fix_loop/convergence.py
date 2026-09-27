@@ -14,11 +14,10 @@ release-critical exception with evidence substantiated against the working
 tree. Everything else is diverted into the verdict's debt ledger — recorded,
 never silently dropped — and emits a ``REVIEW_TREADMILL_DETECTED`` event.
 
-Lives beside :mod:`cw.codex_fix_loop` rather than inside it: that module is
-already at the repo's module-size ceiling, and the two functions whose
-correctness is coupled to the new fingerprint-based survivor key
-(:func:`_track_open_findings`, :func:`_survivors_only_verdict`) belong with the
-gate that defines it.
+The two functions whose correctness is coupled to the new fingerprint-based
+survivor key (:func:`_track_open_findings`, :func:`_survivors_only_verdict`)
+live here with the gate that defines it, rather than in the loop driver
+(:mod:`cw.codex_fix_loop._driver`).
 """
 
 from __future__ import annotations

@@ -49,7 +49,7 @@ Severity = Literal["MUST_FIX", "SHOULD_FIX", "DEBT", "NIT", "PRINCIPLE"]
 # ``cw.review_adjudication``.
 #
 # "unresolved" (#2352) is stamped exclusively by
-# ``cw.codex_fix_loop_convergence._survivors_only_verdict`` for a MUST_FIX
+# ``cw.codex_fix_loop.convergence._survivors_only_verdict`` for a MUST_FIX
 # finding still open when the fix loop exits on cycle-cap or budget
 # exhaustion. It is deliberately distinct from "deferred" — which means
 # non-blocking, an operator/adjudication-issued decision — because the
@@ -439,7 +439,7 @@ class AcceptedFinding(BaseModel):
     contract is unchanged: optimistic default in, adapter overwrites it later.
 
     ``"unresolved"`` (#2352) is likewise never stamped here — only
-    :func:`cw.codex_fix_loop_convergence._survivors_only_verdict` produces it,
+    :func:`cw.codex_fix_loop.convergence._survivors_only_verdict` produces it,
     for a fix-loop cap-exit survivor.
 
     ``disposition_detail`` is the free-text "why" paired with the closed

@@ -3618,11 +3618,11 @@ class TestCwContextWorkspacePath:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (10 after the
-        queue_metadata.must_fix_override addition)."""
+        """cw-context.json schema_version is current (11 after the
+        merge_gate_ignore_paths addition)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 10
+        assert CW_CONTEXT_SCHEMA_VERSION == 11
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -3637,7 +3637,80 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 10
+        assert context["schema_version"] == 11
+
+
+class TestCwContextMergeGateIgnorePaths:
+    """_write_hook_context stamps the #2431 merge_gate_ignore_paths key.
+
+    auto-dev-finalize.md Step 4a's headless fence reads it with ``jq`` — the
+    fence has no other route to the client's ClientConfig field.
+    """
+
+    def test_write_hook_context_writes_merge_gate_ignore_paths_default_empty_list(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.spawn import _write_hook_context
+
+        worktree = tmp_path / "wt-mg-default"
+        worktree.mkdir()
+        _write_hook_context(
+            worktree,
+            session_id="s1",
+            session_name="acme/impl",
+            client="acme",
+            purpose="impl",
+            ticket_id=None,
+            origin=SessionOrigin.USER,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["merge_gate_ignore_paths"] == []
+
+    def test_write_hook_context_writes_merge_gate_ignore_paths_when_provided(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.spawn import _write_hook_context
+
+        worktree = tmp_path / "wt-mg-set"
+        worktree.mkdir()
+        _write_hook_context(
+            worktree,
+            session_id="s1",
+            session_name="acme/impl",
+            client="acme",
+            purpose="impl",
+            ticket_id=None,
+            origin=SessionOrigin.DAEMON,
+            merge_gate_ignore_paths=["mypy-baseline.txt", "uv.lock"],
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["merge_gate_ignore_paths"] == ["mypy-baseline.txt", "uv.lock"]
+
+    def test_spawn_create_impl_forwards_client_merge_gate_ignore_paths(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path, name="mg-client").model_copy(
+            update={"merge_gate_ignore_paths": ["mypy-baseline.txt"]}
+        )
+        worktree = make_git_repo("wt-2431-mg")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-2431 --headless",
+            label="auto-dev/GEN-2431",
+            native_daemon=FakeNativeDaemonClient(),
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["merge_gate_ignore_paths"] == ["mypy-baseline.txt"]
 
 
 class TestCwContextLaneStamp:

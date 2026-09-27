@@ -1,33 +1,30 @@
-"""Tests for cw.executor.CodexExecutor — prompt-driven codex review backend.
+"""Tests for cw.executor.CodexExecutor — detached ``cw codex run`` launcher.
 
-RFC 0005 F1, rewired for the per-reviewer-role loop (#1236). The executor's job
-is pre-flight, delegate Step 3 to ``codex_review.run_review``, persist, post the
-consolidated verdict, emit SESSION_COMPLETED, and handle failures. Per-role
-disposition and consolidation are covered in test_codex_review.py; here we test
-the executor orchestration end-to-end (real FakeCodexRunner + real diff) plus the
-delegation/exception seams.
+RFC 0005 F1 / RFC 0014 A2 (#2388). ``spawn()`` runs its synchronous pre-flight
+(``_codex_preflight``: cw-context.json, stage check, binary check, session-id
+stamp), then launches ``cw codex run`` fire-and-forget through the shared
+``_spawn_fire_and_forget`` skeleton and records a ``codex``-tagged
+``LocalLivenessHandle``. The review itself runs in that subprocess; its
+end-to-end outcomes are covered against ``cw.codex_driver`` in
+test_codex_driver.py, and the review unit of work in test_codex_background.py.
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
-import threading
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
 
-from cw import codex_background
 from cw.auto_dev_result import AutoDevResult
-from cw.codex_background import join_outstanding_codex_threads
 from cw.codex_review import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
-    CODEX_MUST_FIX_FINDINGS,
     CODEX_REVIEW_UNPARSEABLE,
 )
-from cw.codex_runner import FakeCodexRunner
 from cw.config import load_state
 from cw.dev_queue import add_ticket, load_dev_queue
 from cw.executor import (
@@ -40,15 +37,20 @@ from cw.executor import (
     codex_capability_diagnosis,
     resolve_executor,
 )
-from cw.local_runner import UNEXPECTED_ERROR, make_blocked
+from cw.executor.core import FakeFireAndForgetRunner
+from cw.executor_diagnostics import (
+    ExecutorFailure,
+    diagnostics_bundle_dir,
+    render_bundle_path,
+)
+from cw.local_runner import LIVENESS_UNAVAILABLE, UNEXPECTED_ERROR, make_blocked
 from cw.models import (
     CODEX_BACKEND,
     ClientConfig,
     CompletionReason,
-    LaneConfig,
     LastResultSource,
+    LocalLivenessHandle,
     QueueItemStatus,
-    ReasoningEffort,
     SessionStatus,
     Stage,
     StageExecutorConfig,
@@ -57,41 +59,44 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from tests._codex_review_helpers import _mk_codex_proc
-from tests.conftest import (
-    _seed_completed_session,
-    add_bare_origin,
-    find_completed_session,
-    git_in,
-)
+from tests.conftest import _seed_completed_session, find_completed_session
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
-    from cw.codex_runner import CodexRunner
+    from cw.executor.core import FireAndForgetRunner
     from cw.native_daemon import NativeDaemonClient
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_WHICH = "cw.executor.codex.shutil.which"
+_CODEX_PATH = "/usr/bin/codex"
 
-def _sync_codex_executor(
-    config: StageExecutorConfig,
-    runner: CodexRunner | None = None,
+
+def _codex_executor(
+    config: StageExecutorConfig | None = None,
     *,
+    runner: FireAndForgetRunner | None = None,
     native_daemon: NativeDaemonClient | None = None,
 ) -> CodexExecutor:
-    """A CodexExecutor whose background seam runs inline (#1727).
-
-    Since spawn() hands Step 3/4/4b/5 to a daemon thread, every assertion in
-    this file about persisted state / emitted events / posted comments would
-    otherwise race the worker. Injecting ``background=lambda fn: fn()`` keeps
-    these tests deterministic and keeps them asserting the same observable
-    outcomes they asserted when spawn() was synchronous end-to-end. The
-    threading seam itself is covered in tests/test_codex_background.py.
-    """
+    """A CodexExecutor launching through a fake fire-and-forget runner."""
     return CodexExecutor(
-        config=config,
-        runner=runner,
-        background=lambda fn: fn(),
+        config=config or StageExecutorConfig(backend=CODEX_BACKEND),
+        runner=runner or FakeFireAndForgetRunner(),
         native_daemon=native_daemon,
     )
+
+
+def _kill_procs(runner: FakeFireAndForgetRunner) -> None:
+    for proc in runner.procs:
+        proc.kill()
+        proc.wait()
+
+
+@pytest.fixture
+def fake_runner() -> Iterator[FakeFireAndForgetRunner]:
+    runner = FakeFireAndForgetRunner()
+    yield runner
+    _kill_procs(runner)
 
 
 def _persisted_result() -> AutoDevResult:
@@ -104,84 +109,47 @@ def _persisted_result() -> AutoDevResult:
     return AutoDevResult.model_validate(result_raw)
 
 
-def _worktree_with_change(
-    make_git_repo: Callable[[str], Path], name: str, *, filename: str, content: str
-) -> Path:
-    """Return a repo on a feature branch with *content* committed to *filename*."""
-    repo = make_git_repo(name)
-    git_in(repo, "checkout", "-b", "feature")
-    (repo / filename).write_text(content, encoding="utf-8")
-    git_in(repo, "add", filename)
-    git_in(repo, "commit", "-m", f"add {filename}")
-    # #2354: fix-loop commits push, and the review-exit guard compares HEAD
-    # with origin/<branch>, so the feature branch needs a real origin.
-    add_bare_origin(repo)
-    return repo
+def _review_task(ticket_id: str) -> TicketTask:
+    return TicketTask(ticket_id=ticket_id, client="test", stage=Stage.REVIEW)
 
 
-def _reviewer_doc(
-    *,
-    role: str = "Code Quality Reviewer",
-    findings: list[dict[str, object]] | None = None,
-) -> str:
-    return json.dumps(
-        {
-            "reviewer_role": role,
-            "status": "ok",
-            "detail": "reviewed; no issues found.",
-            "findings": findings or [],
-        }
+def _client(worktree: Path) -> ClientConfig:
+    return ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+
+
+def _seed_running_row(task: TicketTask) -> None:
+    # Same created_at as `task`: the stamp re-finds the spawning task's own
+    # row by that identity (#2219), as the claimed row is in real dispatch.
+    add_ticket(
+        TicketTask(
+            ticket_id=task.ticket_id,
+            client=task.client,
+            stage=task.stage,
+            status=QueueItemStatus.RUNNING,
+            created_at=task.created_at,
+        )
     )
 
 
-def _must_fix_finding(*, file: str, line: int, evidence: str) -> dict[str, object]:
-    return {
-        "severity": "MUST_FIX",
-        "file": file,
-        "line_start": line,
-        "line_end": line,
-        "summary": "Bug here",
-        "consequence": "It breaks",
-        "suggested_fix": "Fix it",
-        "evidence": evidence,
-        "confidence": "HIGH",
-    }
-
-
-def _should_fix_finding(*, file: str, line: int, evidence: str) -> dict[str, object]:
-    return {
-        "severity": "SHOULD_FIX",
-        "file": file,
-        "line_start": line,
-        "line_end": line,
-        "summary": "Nit here",
-        "consequence": "Minor",
-        "suggested_fix": "Polish it",
-        "evidence": evidence,
-        "confidence": "HIGH",
-    }
-
-
 # ---------------------------------------------------------------------------
-# Pre-flight (unchanged)
+# Pre-flight (synchronous blocked completions)
 # ---------------------------------------------------------------------------
 
 
 def test_codex_executor_wrong_stage_blocked(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
+    fake_runner: FakeFireAndForgetRunner,
 ) -> None:
-    """spawn() on a non-REVIEW stage → blocked/codex_review_only."""
+    """spawn() on a non-REVIEW stage → blocked/codex_review_only, no launch."""
     worktree = make_git_repo("wt-codex-wrong-stage")
-    runner = FakeCodexRunner(returncode=0)
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = _sync_codex_executor(config, runner)
+    executor = _codex_executor(runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.PLAN)
 
     executor.spawn(stage=Stage.PLAN, task=task, worktree=worktree, client=client)
 
-    assert len(runner.calls) == 0
+    assert fake_runner.calls == []
     result = _persisted_result()
     assert result.status == "blocked"
     assert result.stage_reached == "stage3_review"
@@ -193,25 +161,32 @@ def test_codex_executor_wrong_stage_blocked(
 def test_codex_executor_codex_not_found(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
+    fake_runner: FakeFireAndForgetRunner,
 ) -> None:
-    """shutil.which('codex') is None → blocked/codex_not_found."""
+    """shutil.which('codex') is None → blocked/codex_not_found, no launch."""
     worktree = make_git_repo("wt-codex-missing")
-    runner = FakeCodexRunner(returncode=0)
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = _sync_codex_executor(config, runner)
+    executor = _codex_executor(runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
-    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
 
-    with patch("cw.executor.codex.shutil.which", return_value=None):
-        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+    with patch(_WHICH, return_value=None):
+        executor.spawn(
+            stage=Stage.REVIEW,
+            task=_review_task("T-1"),
+            worktree=worktree,
+            client=client,
+        )
 
-    assert len(runner.calls) == 0
+    assert fake_runner.calls == []
     result = _persisted_result()
     assert result.status == "blocked"
     assert result.stage_reached == "stage3_review"
     assert result.blocker is not None
     assert result.blocker.reason == CODEX_NOT_FOUND
     assert result.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
+    session = find_completed_session(load_state())
+    assert session.completed_reason == CompletionReason.NORMAL
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
+    assert session.local_liveness is None
 
 
 def test_spawn_writes_cw_context_json_on_preflight_failure(
@@ -220,21 +195,19 @@ def test_spawn_writes_cw_context_json_on_preflight_failure(
 ) -> None:
     """#2280: cw-context.json lands even on the CODEX_NOT_FOUND pre-flight path.
 
-    ``CodexExecutor.spawn()`` never routed through ``_write_hook_context`` at
-    all before this ticket (both of that function's other call sites are
-    Claude-session spawns) — no ``prior_attempts_summary`` was ever collected
-    for a codex-review retry. No Stop hook is installed on this path:
-    CodexExecutor never involves a Claude session to signal-stop.
+    No Stop hook is installed on this path: CodexExecutor never involves a
+    Claude session to signal-stop.
     """
     worktree = make_git_repo("wt-codex-context-preflight")
-    runner = FakeCodexRunner(returncode=0)
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = _sync_codex_executor(config, runner)
-    client = ClientConfig(name="test", workspace_path=worktree)
-    task = TicketTask(ticket_id="T-ctx-pre", client="test", stage=Stage.REVIEW)
+    executor = _codex_executor()
 
-    with patch("cw.executor.codex.shutil.which", return_value=None):
-        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+    with patch(_WHICH, return_value=None):
+        executor.spawn(
+            stage=Stage.REVIEW,
+            task=_review_task("T-ctx-pre"),
+            worktree=worktree,
+            client=ClientConfig(name="test", workspace_path=worktree),
+        )
 
     context_path = worktree / ".claude" / "cw-context.json"
     assert context_path.exists()
@@ -243,27 +216,36 @@ def test_spawn_writes_cw_context_json_on_preflight_failure(
     assert not (worktree / ".claude" / "settings.local.json").exists()
 
 
-def test_spawn_writes_cw_context_json_on_review_pass(
+def test_spawn_writes_cw_context_json_before_launch(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
+    fake_runner: FakeFireAndForgetRunner,
 ) -> None:
-    """#2280: cw-context.json also lands ahead of a real (inline) review pass."""
-    worktree = make_git_repo("wt-codex-context-review")
-    runner = FakeCodexRunner(returncode=0, output_file_content=_reviewer_doc())
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = _sync_codex_executor(config, runner)
-    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
-    task = TicketTask(ticket_id="T-ctx-run", client="test", stage=Stage.REVIEW)
+    """#2280: cw-context.json is on disk by the time ``cw codex run`` launches."""
+    worktree = make_git_repo("wt-codex-context-launch")
+    seen: dict[str, object] = {}
+    original_launch = fake_runner.launch
 
+    def _launch(
+        worktree_arg: Path, argv: list[str], env: dict[str, str]
+    ) -> subprocess.Popen[bytes]:
+        seen["context_exists"] = (worktree / ".claude" / "cw-context.json").exists()
+        return original_launch(worktree_arg, argv, env)
+
+    executor = _codex_executor(runner=fake_runner)
     with (
-        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
-        patch("cw.codex_background._post_review_comment"),
+        patch(_WHICH, return_value=_CODEX_PATH),
+        patch.object(fake_runner, "launch", _launch),
     ):
-        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+        executor.spawn(
+            stage=Stage.REVIEW,
+            task=_review_task("T-ctx-run"),
+            worktree=worktree,
+            client=_client(worktree),
+        )
 
-    context_path = worktree / ".claude" / "cw-context.json"
-    assert context_path.exists()
-    context = json.loads(context_path.read_text())
+    assert seen["context_exists"] is True
+    context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
     assert context["ticket_id"] == "T-ctx-run"
     assert not (worktree / ".claude" / "settings.local.json").exists()
 
@@ -273,12 +255,7 @@ def test_spawn_second_attempt_prior_attempts_summary_reflects_first_codex_park(
     tmp_path: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """#2280: prior_attempts_summary picks up a codex-origin park on retry.
-
-    Before this ticket, a retry after a codex-review park carried an empty
-    ``prior_attempts_summary`` regardless of ``task.attempts``, because
-    ``CodexExecutor.spawn()`` never wrote ``cw-context.json`` at all.
-    """
+    """#2280: prior_attempts_summary picks up a codex-origin park on retry."""
     worktree = make_git_repo("wt-codex-retry")
     _seed_completed_session(
         tmp_path,
@@ -296,16 +273,15 @@ def test_spawn_second_attempt_prior_attempts_summary_reflects_first_codex_park(
             },
         },
     )
-    runner = FakeCodexRunner(returncode=0)
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = _sync_codex_executor(config, runner)
-    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    executor = _codex_executor()
     task = TicketTask(
         ticket_id="T-retry", client="test", stage=Stage.REVIEW, attempts=1
     )
 
-    with patch("cw.executor.codex.shutil.which", return_value=None):
-        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+    with patch(_WHICH, return_value=None):
+        executor.spawn(
+            stage=Stage.REVIEW, task=task, worktree=worktree, client=_client(worktree)
+        )
 
     context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
     summary = context["world_state_snapshot"]["prior_attempts_summary"]
@@ -314,338 +290,347 @@ def test_spawn_second_attempt_prior_attempts_summary_reflects_first_codex_park(
 
 
 # ---------------------------------------------------------------------------
-# End-to-end wiring (real FakeCodexRunner + real diff)
+# Fire-and-forget launch of `cw codex run`
 # ---------------------------------------------------------------------------
 
 
-def test_codex_executor_clean_stage_complete(
+def test_codex_executor_launch_records_liveness_and_returns_active(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    fake_runner: FakeFireAndForgetRunner,
+) -> None:
+    """Pre-flight passes → session ACTIVE with a codex LocalLivenessHandle."""
+    worktree = make_git_repo("wt-codex-launch-active")
+    executor = _codex_executor(runner=fake_runner)
+
+    with patch(_WHICH, return_value=_CODEX_PATH):
+        sid = executor.spawn(
+            stage=Stage.REVIEW,
+            task=_review_task("T-100"),
+            worktree=worktree,
+            client=_client(worktree),
+        )
+
+    session = next(s for s in load_state().sessions if s.id == sid)
+    assert session.status == SessionStatus.ACTIVE
+    assert isinstance(session.local_liveness, LocalLivenessHandle)
+    assert session.local_liveness.pid == fake_runner.procs[0].pid
+    assert session.local_liveness.start_time_ns > 0
+    assert session.local_liveness.backend == "codex"
+    assert session.last_result is None
+    assert len(fake_runner.calls) == 1
+    assert fake_runner.calls[0]["cwd"] == worktree
+
+
+def test_spawn_returns_before_launched_job_completes(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    fake_runner: FakeFireAndForgetRunner,
+) -> None:
+    """spawn() does not wait on the review (#1727, #2388).
+
+    FakeFireAndForgetRunner launches a real ``sleep 60``; spawn() returning
+    while it is still alive proves the launch is fire-and-forget. No thread
+    and no in-process registry is involved any more.
+    """
+    worktree = make_git_repo("wt-codex-async")
+    executor = _codex_executor(runner=fake_runner)
+
+    with patch(_WHICH, return_value=_CODEX_PATH):
+        sid = executor.spawn(
+            stage=Stage.REVIEW,
+            task=_review_task("T-async"),
+            worktree=worktree,
+            client=_client(worktree),
+        )
+
+    assert fake_runner.procs[0].poll() is None
+    session = next(s for s in load_state().sessions if s.id == sid)
+    assert session.status is SessionStatus.ACTIVE
+    assert session.last_result is None
+
+
+def test_codex_executor_spawn_argv_invokes_cw_codex_run(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    fake_runner: FakeFireAndForgetRunner,
+) -> None:
+    """The launched argv is ``python -m cw codex run`` for this ticket/session."""
+    # Two worktrees: a second spawn into the first's worktree would (rightly)
+    # trip _write_hook_context's live-session conflict guard.
+    worktree = make_git_repo("wt-codex-argv")
+    worktree_budget = make_git_repo("wt-codex-argv-budget")
+    executor = _codex_executor(runner=fake_runner)
+    task = _review_task("T-argv")
+
+    with patch(_WHICH, return_value=_CODEX_PATH):
+        sid = executor.spawn(
+            stage=Stage.REVIEW, task=task, worktree=worktree, client=_client(worktree)
+        )
+        sid_budget = executor.spawn(
+            stage=Stage.REVIEW,
+            task=task,
+            worktree=worktree_budget,
+            client=_client(worktree_budget),
+            wall_clock_budget_seconds=120,
+        )
+
+    expected = [
+        sys.executable,
+        "-m",
+        "cw",
+        "codex",
+        "run",
+        "T-argv",
+        "--stage",
+        "review",
+        "--session-id",
+    ]
+    assert fake_runner.calls[0]["argv"] == [*expected, sid]
+    assert fake_runner.calls[1]["argv"] == [
+        *expected,
+        sid_budget,
+        "--wall-clock-budget-seconds",
+        "120",
+    ]
+
+
+def test_codex_executor_env_is_full_os_environ(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    fake_runner: FakeFireAndForgetRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The job inherits the full environment — unlike aider/opencode's allowlist.
+
+    The child is another ``cw`` process: it must resolve the same
+    XDG-derived config/state dirs as the parent.
+    """
+    monkeypatch.setenv("CW_TEST_CODEX_ENV_SENTINEL", "inherited")
+    worktree = make_git_repo("wt-codex-env")
+    executor = _codex_executor(runner=fake_runner)
+
+    with patch(_WHICH, return_value=_CODEX_PATH):
+        executor.spawn(
+            stage=Stage.REVIEW,
+            task=_review_task("T-env"),
+            worktree=worktree,
+            client=_client(worktree),
+        )
+
+    env = fake_runner.calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["CW_TEST_CODEX_ENV_SENTINEL"] == "inherited"
+
+
+def test_spawn_stamps_session_id_before_launch(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    fake_runner: FakeFireAndForgetRunner,
+) -> None:
+    """R1: the RUNNING row carries session_id by the time the job launches.
+
+    ``cw codex run`` re-finds its task by (ticket_id, session_id), and a crash
+    between spawn() returning and dispatch's own post-spawn stamp would
+    otherwise leave a live codex job with no queue row pointing at it.
+    """
+    worktree = make_git_repo("wt-codex-stamp")
+    task = _review_task("T-stamp")
+    _seed_running_row(task)
+    seen: dict[str, object] = {}
+    original_launch = fake_runner.launch
+
+    def _launch(
+        worktree_arg: Path, argv: list[str], env: dict[str, str]
+    ) -> subprocess.Popen[bytes]:
+        seen["stamped_at_launch"] = load_dev_queue().tasks[0].session_id
+        return original_launch(worktree_arg, argv, env)
+
+    executor = _codex_executor(runner=fake_runner)
+    with (
+        patch(_WHICH, return_value=_CODEX_PATH),
+        patch.object(fake_runner, "launch", _launch),
+    ):
+        sid = executor.spawn(
+            stage=Stage.REVIEW, task=task, worktree=worktree, client=_client(worktree)
+        )
+
+    assert seen["stamped_at_launch"] == sid
+    assert len(fake_runner.calls) == 1
+
+
+def test_codex_executor_liveness_unavailable_marks_session_completed(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    fake_runner: FakeFireAndForgetRunner,
+) -> None:
+    """Start-time unreadable → orphan killed, COMPLETED, codex runtime_error bundle."""
+    worktree = make_git_repo("wt-codex-liveness")
+    executor = _codex_executor(runner=fake_runner)
+
+    with (
+        patch(_WHICH, return_value=_CODEX_PATH),
+        patch("cw.executor.core.read_process_start_time_ns", return_value=None),
+    ):
+        sid = executor.spawn(
+            stage=Stage.REVIEW,
+            task=_review_task("T-liveness"),
+            worktree=worktree,
+            client=_client(worktree),
+        )
+
+    assert fake_runner.procs[0].poll() is not None
+    session = find_completed_session(load_state())
+    assert session.id == sid
+    assert session.local_liveness is None
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.blocker is not None
+    assert result.blocker.reason == LIVENESS_UNAVAILABLE
+    assert result.stage_reached == "stage3_review"
+    [path] = list(diagnostics_bundle_dir(sid).glob("codex-runtime_error-*.json"))
+    failure = ExecutorFailure.model_validate_json(path.read_text())
+    assert failure.executor_name == "codex"
+    # No prompt text in the argv, so nothing is redacted.
+    assert "--session-id" in failure.argv_sanitized
+
+
+def test_codex_executor_launch_exception_marks_session_completed(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    fake_runner: FakeFireAndForgetRunner,
+) -> None:
+    """launch() raises OSError → COMPLETED/CRASHED + UNEXPECTED_ERROR, re-raised."""
+    worktree = make_git_repo("wt-codex-launch-exc")
+    executor = _codex_executor(runner=fake_runner)
+
+    with (
+        patch(_WHICH, return_value=_CODEX_PATH),
+        patch.object(fake_runner, "launch", side_effect=OSError("exec boom")),
+        pytest.raises(OSError, match="exec boom"),
+    ):
+        executor.spawn(
+            stage=Stage.REVIEW,
+            task=_review_task("T-exc"),
+            worktree=worktree,
+            client=_client(worktree),
+        )
+
+    session = find_completed_session(load_state())
+    assert session.status == SessionStatus.COMPLETED
+    assert session.completed_reason == CompletionReason.CRASHED
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == UNEXPECTED_ERROR
+    assert result.stage_reached == "stage3_review"
+    assert result.blocker.details == (
+        "unexpected error during codex launch "
+        f"[diagnostics: {render_bundle_path(session.id)}]"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Exception seams on the synchronous pre-flight path
+# ---------------------------------------------------------------------------
+
+
+def test_preflight_failure_persist_error_completes_session_and_reraises(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """Every role returns a clean document → stage_complete, verdict posted."""
-    worktree = _worktree_with_change(
-        make_git_repo, "wt-codex-clean", filename="new.py", content="def broken():\n"
-    )
-    runner = FakeCodexRunner(returncode=0, output_file_content=_reviewer_doc())
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = _sync_codex_executor(config, runner)
-    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
-    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+    """A failing blocked-result write is guarded, then re-raised.
+
+    Dispatch is still on this call stack, so re-raising is correct: its own
+    handler reverts the claimed task. The session is still driven out of
+    ACTIVE first by the shared skeleton's crash completion.
+    """
+    worktree = make_git_repo("wt-codex-preflight-boom")
+    executor = _codex_executor()
+    task = TicketTask(ticket_id="T-pf", client="test", stage=Stage.PLAN)
+
+    calls: list[dict[str, object]] = []
+
+    def _door(sid: str, payload: dict[str, object], **kwargs: object) -> None:
+        calls.append({"sid": sid, "payload": payload, **kwargs})
+        if len(calls) == 1:
+            msg = "door boom"
+            raise OSError(msg)
 
     with (
-        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
-        patch("cw.codex_background._post_review_comment") as post_mock,
+        patch("cw.executor.core._complete_session_via_door", _door),
+        pytest.raises(OSError, match="door boom"),
     ):
-        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+        # Stage.PLAN trips the CODEX_REVIEW_ONLY pre-flight guard.
+        executor.spawn(
+            stage=Stage.PLAN, task=task, worktree=worktree, client=_client(worktree)
+        )
 
-    assert len(runner.calls) >= 1
-    # Every selected role is fed its prompt over stdin.
-    assert all(call["stdin"] for call in runner.calls)
-    post_mock.assert_called_once()
-    assert post_mock.call_args.args[0] == "T-1"
-    assert "Non-blocking" in post_mock.call_args.args[1]
-    # #1705: default lane has no codex_fix_loop_enabled override, so it
-    # resolves to the global default (False) — the posted comment must state
-    # this history as its own state ("single-pass"/"disabled"), never as
-    # flaked/degraded.
-    assert "disabled" in post_mock.call_args.args[1].lower()
-    result = _persisted_result()
-    assert result.status == "stage_complete"
-    assert result.stage_reached == "stage3_review"
-    assert result.health.recommendation == "PROCEED"
-    assert result.health.any_incomplete_risk is False
-    assert result.review.must_fix_initial == 0
-    assert result.review.should_fix == 0
-    assert result.review.deferred == 0
-    assert result.review.fix_cycles_used == 0
-    # Every selected role invoked codex exec and returned a clean document, so
-    # agents_run tracks the per-role loop's call count exactly (#1194 wiring
-    # ported onto the per-role path, #1236 Blocker Resolution).
-    # -1 for the filesystem-capability probe call (#1709): this test starts on
-    # a cold per-test cache, so the first _prepare_review_pass spends one extra
-    # runner.run() on the probe before any role runs.
-    assert result.review.agents_run == len(runner.calls) - 1
-    # Round-trips through the strict validator.
-    AutoDevResult.model_validate(result.model_dump(mode="json"))
+    # Second call is the guarded blocked-result write from the except branch.
+    assert len(calls) == 2
+    assert calls[1]["guard_already_completed"] is True
+    recovery = AutoDevResult.model_validate(calls[1]["payload"])
+    assert recovery.status == "blocked"
+    assert recovery.blocker is not None
+    assert recovery.blocker.reason == UNEXPECTED_ERROR
 
+
+def test_spawn_write_hook_context_failure_completes_session_and_reraises(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    fake_runner: FakeFireAndForgetRunner,
+) -> None:
+    """#2280: a `_write_hook_context` raise must not leak the session ACTIVE.
+
+    The session is persisted ACTIVE before the pre-flight runs; the shared
+    skeleton's ``try:`` now covers the pre-flight (#2388), so the raise lands
+    in its crash completion rather than propagating with the session ACTIVE.
+    """
+    worktree = make_git_repo("wt-codex-hook-context-boom")
+    executor = _codex_executor(runner=fake_runner)
+
+    with (
+        patch(
+            "cw.executor.codex._write_hook_context", side_effect=OSError("hook boom")
+        ),
+        pytest.raises(OSError, match="hook boom"),
+    ):
+        executor.spawn(
+            stage=Stage.REVIEW,
+            task=_review_task("T-hc"),
+            worktree=worktree,
+            client=_client(worktree),
+        )
+
+    assert fake_runner.calls == []
     state = load_state()
+    assert not any(s.status == SessionStatus.ACTIVE for s in state.sessions)
     session = find_completed_session(state)
     assert session.status == SessionStatus.COMPLETED
+    # #2280 round 2: the full terminal record, not just status.
+    assert session.completed_at is not None
+    assert session.completed_reason == CompletionReason.CRASHED
     assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
-
-
-def test_codex_executor_must_fix_blocked(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """A persistent MUST_FIX finding → fix loop runs to cap → blocked (#1392).
-
-    ``FakeCodexRunner`` returns the same MUST_FIX doc for every call and never
-    edits the worktree, so each fix invocation is a no-op the re-review still
-    finds blocking — the loop caps at ``_MAX_FIX_CYCLES`` and parks with the
-    finding recorded in BOTH ``must_fix_initial`` (cycle-0 snapshot) and
-    ``deferred`` (the cross-cycle survivor set).
-
-    A lane-scoped ``codex_fix_loop_enabled=True`` (#1553) is required here:
-    the resolved default is False, which would park at cycle 0 instead of
-    running the loop to cap — that default-off path is covered by
-    ``TestFixLoopDisabledGate`` in ``test_codex_fix_loop.py``.
-    """
-    worktree = _worktree_with_change(
-        make_git_repo, "wt-codex-mf", filename="new.py", content="def broken():\n"
-    )
-    doc = _reviewer_doc(
-        findings=[_must_fix_finding(file="new.py", line=1, evidence="def broken():")]
-    )
-    runner = FakeCodexRunner(returncode=0, output_file_content=doc)
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = _sync_codex_executor(config, runner)
-    client = ClientConfig(
-        name="test",
-        workspace_path=worktree,
-        default_branch="main",
-        lanes=[LaneConfig(name="mf-lane", codex_fix_loop_enabled=True)],
-    )
-    task = TicketTask(
-        ticket_id="T-1", client="test", stage=Stage.REVIEW, lane="mf-lane"
-    )
-
-    with (
-        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
-        patch("cw.codex_background._post_review_comment") as post_mock,
-    ):
-        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
-
-    result = _persisted_result()
+    result = AutoDevResult.model_validate(session.last_result)
     assert result.status == "blocked"
     assert result.blocker is not None
-    assert result.blocker.reason == CODEX_MUST_FIX_FINDINGS
-    # Every role echoes the identical finding; dedup collapses them to one, and
-    # the survivor is counted in both must_fix_initial and deferred at cap.
-    assert result.review.must_fix_initial == 1
-    assert result.review.should_fix == 0
-    assert result.review.deferred == 1
-    assert result.review.fix_cycles_used == 5
-    assert result.health.fix_loop_escalated is True
-    # The survivor verdict is still posted as a blocking comment.
-    post_mock.assert_called_once()
-    assert "BLOCKING" in post_mock.call_args.args[1]
-    # #1705: FakeCodexRunner here never edits the worktree, so 0 of the 1
-    # originally-found finding was ever actually resolved across all 5 capped
-    # cycles — the posted comment must say so honestly, not silently omit it.
-    assert "0 of 1" in post_mock.call_args.args[1]
-
-
-def test_codex_executor_clean_stage_complete_fix_loop_enabled_states_available(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """#1705: a clean review with the fix loop enabled for the lane states
-    "available but not needed" — distinct from the disabled-lane wording in
-    ``test_codex_executor_clean_stage_complete`` — proving fix_loop_enabled
-    threads correctly all the way from ``_resolve_codex_fix_loop_enabled``
-    through to the posted GitHub comment, not just through the renderer's own
-    unit tests."""
-    worktree = _worktree_with_change(
-        make_git_repo,
-        "wt-codex-clean-loop-enabled",
-        filename="new.py",
-        content="def broken():\n",
+    assert result.blocker.reason == UNEXPECTED_ERROR
+    assert result.blocker.details == (
+        "unexpected error during codex launch "
+        f"[diagnostics: {render_bundle_path(session.id)}]"
     )
-    runner = FakeCodexRunner(returncode=0, output_file_content=_reviewer_doc())
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = _sync_codex_executor(config, runner)
-    client = ClientConfig(
-        name="test",
-        workspace_path=worktree,
-        default_branch="main",
-        lanes=[LaneConfig(name="mf-lane", codex_fix_loop_enabled=True)],
-    )
-    task = TicketTask(
-        ticket_id="T-1", client="test", stage=Stage.REVIEW, lane="mf-lane"
-    )
-
-    with (
-        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
-        patch("cw.codex_background._post_review_comment") as post_mock,
-    ):
-        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
-
-    post_mock.assert_called_once()
-    enabled_body = post_mock.call_args.args[1]
-    assert "available" in enabled_body.lower()
-    result = _persisted_result()
-    assert result.status == "stage_complete"
-
-
-def test_codex_executor_all_roles_fail_blocked(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """Unparseable output from every role → blocked, no verdict to render.
-
-    #2280: no documents means no ``ReviewVerdict`` to render, but the park is
-    no longer silent — ``result.blocker.details`` (the per-role summary) is
-    now persisted to the worktree and posted as the ticket comment.
-    """
-    worktree = _worktree_with_change(
-        make_git_repo, "wt-codex-fail", filename="new.py", content="def broken():\n"
-    )
-    runner = FakeCodexRunner(returncode=0, output_file_content="not json{{")
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = _sync_codex_executor(config, runner)
-    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
-    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
-
-    with (
-        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
-        patch("cw.codex_background._post_review_comment") as post_mock,
-    ):
-        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
-
-    result = _persisted_result()
-    assert result.status == "blocked"
-    assert result.blocker is not None
-    assert result.blocker.reason == CODEX_REVIEW_UNPARSEABLE
-    post_mock.assert_called_once()
-    assert post_mock.call_args.args[0] == "T-1"
-    assert post_mock.call_args.args[1] == result.blocker.details
-    artifact = post_mock.call_args.kwargs["artifact_path"]
-    assert artifact == worktree / ".claude" / "review-verdict-unparseable.md"
-    assert artifact.exists()
 
 
 # ---------------------------------------------------------------------------
-# Delegation / exception seams
+# Wiring / resolution
 # ---------------------------------------------------------------------------
 
 
-def test_codex_executor_stage_sentinel_schema(tmp_path: Path) -> None:
+def test_codex_executor_stage_sentinel_schema() -> None:
     """stage_sentinel_schema returns the AutoDevResult JSON schema."""
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = _sync_codex_executor(config)
-
-    schema = executor.stage_sentinel_schema(Stage.REVIEW)
+    schema = _codex_executor().stage_sentinel_schema(Stage.REVIEW)
 
     assert schema == AutoDevResult.model_json_schema()
-
-
-def test_codex_executor_should_fix_only_stays_complete(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """A SHOULD_FIX-only finding (no MUST_FIX) → stays stage_complete.
-
-    Retargeted from main's #1203 single-shot-path test onto the per-role
-    architecture (#1236 Blocker Resolution): the old path fed the executor a
-    raw ``{must_fix_initial, should_fix, deferred}`` payload directly; the new
-    path always derives those counts from validated per-role findings, so
-    "should_fix only" here means one accepted SHOULD_FIX finding and zero
-    MUST_FIX findings.
-    """
-    worktree = _worktree_with_change(
-        make_git_repo,
-        "wt-codex-should-fix-only",
-        filename="new.py",
-        content="def broken():\n",
-    )
-    doc = _reviewer_doc(
-        findings=[_should_fix_finding(file="new.py", line=1, evidence="def broken():")]
-    )
-    runner = FakeCodexRunner(returncode=0, output_file_content=doc)
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = _sync_codex_executor(config, runner)
-    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
-    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
-
-    with patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"):
-        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
-
-    result = _persisted_result()
-    assert result.status == "stage_complete"
-    assert result.review.must_fix_initial == 0
-    assert result.review.should_fix == 1
-    assert result.review.deferred == 0
-    # -1 for the filesystem-capability probe call (#1709) — see
-    # test_codex_executor_clean_stage_complete for the same adjustment.
-    assert result.review.agents_run == len(runner.calls) - 1
-
-
-def test_spawn_delegates_to_fix_loop_not_bare_run_review(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """#1392: CodexExecutor.spawn on REVIEW calls run_review_with_fix_loop."""
-    worktree = make_git_repo("wt-codex-wiring")
-    runner = FakeCodexRunner(returncode=0)
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = _sync_codex_executor(config, runner)
-    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
-    task = TicketTask(ticket_id="T-wire", client="test", stage=Stage.REVIEW)
-
-    blocked = make_blocked(
-        ticket_id="T-wire",
-        worktree=worktree,
-        reason=CODEX_REVIEW_UNPARSEABLE,
-        stage_reached="stage3_review",
-    )
-    with (
-        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
-        patch(
-            "cw.codex_background.run_review_with_fix_loop", return_value=(blocked, None)
-        ) as fix_loop_mock,
-    ):
-        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
-
-    fix_loop_mock.assert_called_once()
-    # No FakeCodexRunner call happened — the executor delegated the whole review
-    # pass to the (patched) fix loop rather than driving codex itself.
-    assert len(runner.calls) == 0
-    result = _persisted_result()
-    assert result.blocker is not None
-    assert result.blocker.reason == CODEX_REVIEW_UNPARSEABLE
-    # #1553: client has no lanes, so effective_lanes synthesizes the default
-    # lane with codex_fix_loop_enabled=None; the resolver falls through to
-    # OrchestratorConfig()'s default (default_codex_fix_loop_enabled=False),
-    # giving fix_loop_enabled=False here.
-    assert fix_loop_mock.call_args.kwargs["fix_loop_enabled"] is False
-
-
-def test_spawn_threads_codex_fix_loop_enabled_true_from_lane(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """#1553: LaneConfig.codex_fix_loop_enabled=True threads fix_loop_enabled=True."""
-    worktree = make_git_repo("wt-codex-wiring-enabled")
-    runner = FakeCodexRunner(returncode=0)
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = _sync_codex_executor(config, runner)
-    client = ClientConfig(
-        name="test",
-        workspace_path=worktree,
-        default_branch="main",
-        lanes=[LaneConfig(name="mf-lane", codex_fix_loop_enabled=True)],
-    )
-    task = TicketTask(
-        ticket_id="T-wire-2", client="test", stage=Stage.REVIEW, lane="mf-lane"
-    )
-
-    blocked = make_blocked(
-        ticket_id="T-wire-2",
-        worktree=worktree,
-        reason=CODEX_REVIEW_UNPARSEABLE,
-        stage_reached="stage3_review",
-    )
-    with (
-        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
-        patch(
-            "cw.codex_background.run_review_with_fix_loop", return_value=(blocked, None)
-        ) as fix_loop_mock,
-    ):
-        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
-
-    fix_loop_mock.assert_called_once()
-    assert fix_loop_mock.call_args.kwargs["fix_loop_enabled"] is True
 
 
 def test_resolve_executor_returns_codex_executor(
@@ -671,16 +656,10 @@ def test_codex_executor_threads_native_daemon_into_write_hook_context(
     tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
 ) -> None:
     """CodexExecutor.native_daemon (#2077) reaches _write_hook_context's
-    `daemon` kwarg exactly like ClaudeNativeExecutor's -- before this field
-    existed, every codex-backed REVIEW spawn called _write_hook_context with
-    no daemon, so its DAEMON-conflict branch could never tell a genuinely
-    live prior session apart from a stale one for a codex lane."""
+    `daemon` kwarg exactly like ClaudeNativeExecutor's."""
     worktree = make_git_repo("wt-codex-native-daemon")
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
     daemon = FakeNativeDaemonClient()
-    executor = _sync_codex_executor(config, native_daemon=daemon)
-    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
-    task = TicketTask(ticket_id="T-nd", client="test", stage=Stage.REVIEW)
+    executor = _codex_executor(native_daemon=daemon)
 
     calls: list[dict[str, object]] = []
 
@@ -688,9 +667,43 @@ def test_codex_executor_threads_native_daemon_into_write_hook_context(
         calls.append(kwargs)
 
     with patch("cw.executor.codex._write_hook_context", _capture):
-        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+        executor.spawn(
+            stage=Stage.REVIEW,
+            task=_review_task("T-nd"),
+            worktree=worktree,
+            client=_client(worktree),
+        )
 
     assert calls[0]["daemon"] is daemon
+
+
+def test_codex_executor_threads_merge_gate_ignore_paths_into_write_hook_context(
+    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+) -> None:
+    """#2431: the codex spawn path stamps the client's ignore list too."""
+    worktree = make_git_repo("wt-codex-mg-ignore")
+    executor = _codex_executor()
+    client = ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        default_branch="main",
+        merge_gate_ignore_paths=["mypy-baseline.txt"],
+    )
+
+    calls: list[dict[str, object]] = []
+
+    def _capture(*_args: object, **kwargs: object) -> None:
+        calls.append(kwargs)
+
+    with patch("cw.executor.codex._write_hook_context", _capture):
+        executor.spawn(
+            stage=Stage.REVIEW,
+            task=_review_task("T-mg"),
+            worktree=worktree,
+            client=client,
+        )
+
+    assert calls[0]["merge_gate_ignore_paths"] == ["mypy-baseline.txt"]
 
 
 def test_resolve_executor_threads_native_daemon_into_codex_executor(
@@ -714,293 +727,21 @@ def test_resolve_executor_threads_native_daemon_into_codex_executor(
     assert executor._native_daemon is daemon
 
 
-def test_codex_executor_exception_handler_marks_session_completed(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """Exception in Step 3 → session COMPLETED and the claimed task reverted.
+def test_stage_executor_protocol_comment_does_not_call_codex_an_exception() -> None:
+    """RFC 0014 A2: CodexExecutor now satisfies the liveness invariant.
 
-    #1727: Step 3 now runs on a background thread with no caller left to catch
-    for it, so the exception is swallowed rather than re-raised — and the
-    revert-to-PENDING that dispatch's own ``except`` handler used to perform
-    moves into the worker. spawn() itself returns the sid normally.
+    The StageExecutor Protocol comment must no longer carve codex out as an
+    accepted exception to it.
     """
-    worktree = make_git_repo("wt-codex-exc-handler")
-    runner = FakeCodexRunner(returncode=0)
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = _sync_codex_executor(config, runner)
-    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
-    task = TicketTask(ticket_id="T-exc", client="test", stage=Stage.REVIEW)
-    # Same created_at as `task`: the stamp re-finds the spawning task's own
-    # row by that identity (#2219), as the claimed row is in real dispatch.
-    add_ticket(
-        TicketTask(
-            ticket_id="T-exc",
-            client="test",
-            stage=Stage.REVIEW,
-            status=QueueItemStatus.RUNNING,
-            created_at=task.created_at,
-        )
+    core_text = (_REPO_ROOT / "src" / "cw" / "executor" / "core.py").read_text(
+        encoding="utf-8"
     )
-
-    with (
-        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
-        patch(
-            "cw.codex_background.run_review_with_fix_loop",
-            side_effect=RuntimeError("git boom"),
-        ),
-    ):
-        sid = executor.spawn(
-            stage=Stage.REVIEW, task=task, worktree=worktree, client=client
-        )
-
-    state = load_state()
-    session = find_completed_session(state)
-    assert session.id == sid
-    assert session.status == SessionStatus.COMPLETED
-    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
-    result = AutoDevResult.model_validate(session.last_result)
-    assert result.status == "blocked"
-    assert result.blocker is not None
-    assert result.blocker.reason == UNEXPECTED_ERROR
-    assert result.stage_reached == "stage3_review"
-    assert result.blocker.stage == "stage3_review"
-    # R1: session_id was stamped before backgrounding, then cleared by the
-    # revert — the task is available for a later tick, not orphaned RUNNING.
-    stored = load_dev_queue().tasks[0]
-    assert stored.status is QueueItemStatus.PENDING
-    assert stored.session_id is None
-    assert stored.spawn_error_count == 1
+    assert "accepted, documented exception" not in core_text
 
 
-def test_preflight_failure_persist_error_completes_session_and_reraises(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """The synchronous pre-flight branch keeps its own guard-and-re-raise.
-
-    Unlike the backgrounded path, dispatch is still on this call stack here,
-    so re-raising is correct: dispatch's own handler reverts the claimed task.
-    The session must still be driven out of ACTIVE first.
-    """
-    worktree = make_git_repo("wt-codex-preflight-boom")
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = _sync_codex_executor(config, FakeCodexRunner(returncode=0))
-    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
-    task = TicketTask(ticket_id="T-pf", client="test", stage=Stage.PLAN)
-
-    calls: list[dict[str, object]] = []
-
-    def _door(**kwargs: object) -> None:
-        calls.append(kwargs)
-        if len(calls) == 1:
-            msg = "door boom"
-            raise OSError(msg)
-
-    # Two lookup sites: CodexExecutor.spawn's own binding, and the recovery
-    # write in cw.codex_background, which imports the name from the package.
-    with (
-        patch("cw.executor.codex._complete_session_via_door", _door),
-        patch("cw.executor._complete_session_via_door", _door),
-        pytest.raises(OSError, match="door boom"),
-    ):
-        # Stage.PLAN trips the CODEX_REVIEW_ONLY pre-flight guard, so this
-        # never reaches the background path at all.
-        executor.spawn(stage=Stage.PLAN, task=task, worktree=worktree, client=client)
-
-    # Second call is the guarded blocked-result write from the except branch.
-    assert len(calls) == 2
-    assert calls[1]["guard_already_completed"] is True
-    recovery = AutoDevResult.model_validate(calls[1]["payload"])
-    assert recovery.status == "blocked"
-    assert recovery.blocker is not None
-    assert recovery.blocker.reason == UNEXPECTED_ERROR
-
-
-def test_spawn_write_hook_context_failure_completes_session_and_reraises(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """#2280: a `_write_hook_context` raise must not leak the session ACTIVE.
-
-    The session is persisted ACTIVE (Step 1) before `_write_hook_context`
-    runs -- a raise there previously propagated straight out of spawn() with
-    nothing driving the session out of ACTIVE, the same leaked-ACTIVE class
-    that held a client-ceiling slot for ~2h (#2285's addendum). Still
-    synchronous here (pre-backgrounding), so re-raising is correct -- dispatch
-    is still on this stack and its own handler reverts the claimed task.
-    """
-    worktree = make_git_repo("wt-codex-hook-context-boom")
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = _sync_codex_executor(config, FakeCodexRunner(returncode=0))
-    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
-    task = TicketTask(ticket_id="T-hc", client="test", stage=Stage.REVIEW)
-
-    with (
-        patch(
-            "cw.executor.codex._write_hook_context", side_effect=OSError("hook boom")
-        ),
-        pytest.raises(OSError, match="hook boom"),
-    ):
-        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
-
-    state = load_state()
-    assert not any(s.status == SessionStatus.ACTIVE for s in state.sessions)
-    session = find_completed_session(state)
-    assert session.status == SessionStatus.COMPLETED
-    # #2280 round 2: the full terminal record, not just status -- an
-    # unexpected-error completion is a crash, not a normal one.
-    assert session.completed_at is not None
-    assert session.completed_reason == CompletionReason.CRASHED
-    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
-    result = AutoDevResult.model_validate(session.last_result)
-    assert result.status == "blocked"
-    assert result.blocker is not None
-    assert result.blocker.reason == UNEXPECTED_ERROR
-
-
-def test_spawn_stamps_session_id_before_backgrounding(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """R1: the RUNNING row carries session_id by the time the worker starts.
-
-    Without this, a crash between spawn() returning and dispatch's own
-    post-spawn stamp would leave a live codex session with no queue row
-    pointing at it — the failure-observability hole #1727 must not open.
-    """
-    worktree = make_git_repo("wt-codex-stamp")
-    runner = FakeCodexRunner(returncode=0)
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
-    task = TicketTask(ticket_id="T-stamp", client="test", stage=Stage.REVIEW)
-    # Same created_at as `task`: the stamp re-finds the spawning task's own
-    # row by that identity (#2219), as the claimed row is in real dispatch.
-    add_ticket(
-        TicketTask(
-            ticket_id="T-stamp",
-            client="test",
-            stage=Stage.REVIEW,
-            status=QueueItemStatus.RUNNING,
-            created_at=task.created_at,
-        )
-    )
-
-    seen: dict[str, object] = {}
-
-    def _capture_background(fn: Callable[[], None]) -> None:
-        seen["stamped_at_handoff"] = load_dev_queue().tasks[0].session_id
-        del fn  # deliberately never run: proves spawn() returns without it
-
-    executor = CodexExecutor(
-        config=config, runner=runner, background=_capture_background
-    )
-    with patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"):
-        sid = executor.spawn(
-            stage=Stage.REVIEW, task=task, worktree=worktree, client=client
-        )
-
-    assert seen["stamped_at_handoff"] == sid
-    # spawn() returned without the review having run at all.
-    assert len(runner.calls) == 0
-
-
-def test_spawn_returns_before_background_work_completes(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """The ticket's core claim: spawn() does not wait on the review (#1727).
-
-    Uses the real ``_default_background`` daemon thread and blocks the review
-    on an Event that is only released after spawn() has already returned.
-    """
-    worktree = make_git_repo("wt-codex-async")
-    runner = FakeCodexRunner(returncode=0)
-    config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = CodexExecutor(config=config, runner=runner)
-    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
-    task = TicketTask(ticket_id="T-async", client="test", stage=Stage.REVIEW)
-
-    entered = threading.Event()
-    release = threading.Event()
-    blocked = make_blocked(
-        ticket_id="T-async",
-        worktree=worktree,
-        reason=CODEX_REVIEW_UNPARSEABLE,
-        stage_reached="stage3_review",
-    )
-
-    def _blocking_review(**_kwargs: object) -> tuple[AutoDevResult, None]:
-        entered.set()
-        release.wait(timeout=10.0)
-        return blocked, None
-
-    try:
-        with (
-            patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
-            patch("cw.codex_background.run_review_with_fix_loop", _blocking_review),
-        ):
-            executor.spawn(
-                stage=Stage.REVIEW, task=task, worktree=worktree, client=client
-            )
-
-            # spawn() already returned while the review is still blocked.
-            assert entered.wait(timeout=5.0)
-            assert load_state().sessions[0].status is SessionStatus.ACTIVE
-            # R7(b): the in-flight thread is visible to the shutdown drain.
-            with codex_background._outstanding_lock:
-                assert len(codex_background._outstanding) == 1
-
-            release.set()
-            assert join_outstanding_codex_threads(timeout_seconds=5.0) == 0
-
-        assert load_state().sessions[0].status is SessionStatus.COMPLETED
-        with codex_background._outstanding_lock:
-            assert codex_background._outstanding == []
-    finally:
-        release.set()
-        join_outstanding_codex_threads(timeout_seconds=5.0)
-
-
-def test_spawn_threads_session_id_and_reasoning_effort_into_run_review(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """CodexExecutor.spawn passes the real cw session id (its own sid, not a
-    fresh uuid) into run_review so diagnostics land under the right dir, and
-    forwards the stage config's reasoning_effort rather than a default."""
-    worktree = make_git_repo("wt-codex-sid-thread")
-    runner = FakeCodexRunner(returncode=0)
-    config = StageExecutorConfig(
-        backend=CODEX_BACKEND, reasoning_effort=ReasoningEffort.MAX
-    )
-    executor = _sync_codex_executor(config, runner)
-    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
-    task = TicketTask(ticket_id="T-sid", client="test", stage=Stage.REVIEW)
-
-    captured: dict[str, object] = {}
-
-    def _spy_run_review(**kwargs: object) -> tuple[AutoDevResult, None]:
-        captured["session_id"] = kwargs["session_id"]
-        captured["reasoning_effort"] = kwargs["reasoning_effort"]
-        blocked = make_blocked(
-            ticket_id="T-sid",
-            worktree=worktree,
-            reason=CODEX_REVIEW_UNPARSEABLE,
-            stage_reached="stage3_review",
-        )
-        return blocked, None
-
-    with (
-        patch("cw.executor.codex.shutil.which", return_value="/usr/bin/codex"),
-        patch("cw.codex_background.run_review_with_fix_loop", _spy_run_review),
-    ):
-        sid = executor.spawn(
-            stage=Stage.REVIEW, task=task, worktree=worktree, client=client
-        )
-
-    assert captured["session_id"] == sid
-    assert captured["reasoning_effort"] == "max"
+# ---------------------------------------------------------------------------
+# make_blocked (shared with LocalExecutor)
+# ---------------------------------------------------------------------------
 
 
 def test_make_blocked_backward_compat(tmp_path: Path) -> None:

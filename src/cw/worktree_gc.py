@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from cw.dev_queue import load_dev_queue
+from cw.gh import _GH_PR_STATE_CLOSED, _GH_PR_STATE_MERGED, _GH_PR_STATE_OPEN
 from cw.models import QueueItemStatus
 from cw.worktree import live_session_worktree_paths
 
@@ -37,11 +38,6 @@ _CW_SCRATCH_PREFIX = ".claude/"
 # gh CLI subcommand args
 _GH_PR_LIST_STATE_ALL = "all"
 _GH_PR_LIST_LIMIT = "1"
-
-# gh PR state values returned in JSON output
-_GH_PR_STATE_MERGED = "MERGED"
-_GH_PR_STATE_CLOSED = "CLOSED"
-_GH_PR_STATE_OPEN = "OPEN"
 
 # Why -D not -d: squash-merged branches are never ancestors of main, so -d
 # (safe delete) always refuses them. We verify PR state and check for unsaved

@@ -40,6 +40,7 @@ from cw.reconcile._shared import (
     resolve_session_for_task,
     session_daemon_liveness,
 )
+from cw.result import reconstruct_staged_sentinel
 
 from ._group import (
     _WAIT_EXIT_ATTENTION,
@@ -171,6 +172,8 @@ def _handle_sentinel_terminal(
     ticket_id: str,
     resolved: str,
     output_json: bool,
+    *,
+    last_result_source: str | None,
 ) -> None:
     """Emit sentinel-terminal output and raise the mapped ``Exit`` for *sentinel*."""
     exit_code = _WAIT_STATUS_EXIT.get(sentinel.status, _WAIT_EXIT_FAILED)
@@ -186,6 +189,7 @@ def _handle_sentinel_terminal(
                     "state": "terminal",
                     "sentinel_status": sentinel.status,
                     "pr_url": pr_url,
+                    "last_result_source": last_result_source,
                 }
             )
         )
@@ -276,7 +280,7 @@ def _check_stale_attention(
     # ATTENTION. Checked before the roster query (both are cheap local reads)
     # so a polling wait loop does not shell out to the daemon every 5s on a
     # session that is plainly still working.
-    if not is_stale or sentinel is not None:
+    if not is_stale or isinstance(sentinel, BlockedResult):
         return
     # #1762: one shared definition of "is this session's surface still live",
     # rather than a second hand-rolled surface_ref/roster comparison.
@@ -391,10 +395,15 @@ def dev_queue_wait(
 ) -> None:
     """Block until a dev-queue ticket reaches terminal status.
 
-    Sentinel-aware: detects AUTO_DEV_RESULT sentinels in the transcript
-    directly rather than relying solely on task-status polling.  This
-    eliminates false-timeout (exit 124) for long-running healthy workers
-    whose reconcile cycle hasn't fired yet.
+    Sentinel-aware: the terminal decision is sourced from ``session.last_result``
+    (RFC 0012 harvest authority, checked first every poll) rather than relying
+    solely on task-status polling. A transcript-parsed AUTO_DEV_RESULT sentinel
+    is demoted to a heartbeat/``BlockedResult``-guard signal only -- it is no
+    longer trusted for the terminal exit, since a stale sentinel from a
+    requeued session's prior run can still be sitting in the transcript
+    (#2397). Together this eliminates both false-timeout (exit 124) for
+    long-running healthy workers whose reconcile cycle hasn't fired yet, and
+    false-terminal reporting of a leftover sentinel from before a requeue.
 
     A ``stage_complete`` sentinel is a successful intermediate hand-off, not
     a terminal outcome — the wait keeps polling while dispatch advances the
@@ -489,6 +498,35 @@ def dev_queue_wait(
             time.sleep(_WAIT_SENTINEL_POLL_INTERVAL)
             continue
 
+        # --- Step 2a: last_result-first terminal check (RFC 0012 harvest authority) ---
+        # session.last_result is the one-door published result -- a fresh Session
+        # (e.g. after requeue's _reset_for_same_stage_requeue, #2397) is a new
+        # object with last_result=None, so this check is structurally immune to a
+        # stale transcript-parsed sentinel surviving from a requeued session's
+        # prior run. Checked BEFORE any transcript parse (Step 3/4 below).
+        # INTERMEDIATE_ADVANCE_STATUSES (stage_complete) is excluded here exactly
+        # as it is from the transcript path below: session.last_result can
+        # legitimately hold a stage_complete payload mid-pipeline (a completed
+        # stage hand-off, not a ticket-terminal outcome), and dispatch advances
+        # the ticket to its next stage rather than this wait exiting on it.
+        last_result_sentinel = reconstruct_staged_sentinel(session.last_result)
+        if (
+            isinstance(last_result_sentinel, AutoDevResult)
+            and last_result_sentinel.status not in INTERMEDIATE_ADVANCE_STATUSES
+        ):
+            _handle_sentinel_terminal(
+                last_result_sentinel,
+                task,
+                ticket_id,
+                resolved,
+                output_json,
+                last_result_source=(
+                    session.last_result_source.value
+                    if session.last_result_source
+                    else None
+                ),
+            )
+
         # --- Step 3: resolve claude session id ---
         csid = session.claude_session_id or _csid_from_transcript(session)
 
@@ -499,23 +537,17 @@ def dev_queue_wait(
                 str(session.worktree_path), csid, warned_blocks=warned_blocks
             )
 
-        # BlockedResult means framing present but payload unusable — treat as
-        # not-yet-terminal (could be a partial write); keep polling.
-        # INTERMEDIATE_ADVANCE_STATUSES (stage_complete) is a successful
-        # stage hand-off, not a ticket-terminal outcome: dispatch advances the
-        # ticket to its next stage, so keep polling instead of exiting FAILED
-        # (previously stage_complete fell through .get()'s FAILED default).
-        if (
-            isinstance(sentinel, AutoDevResult)
-            and sentinel.status not in INTERMEDIATE_ADVANCE_STATUSES
-        ):
-            # TERMINAL: emit and raise the mapped exit code.
-            _handle_sentinel_terminal(sentinel, task, ticket_id, resolved, output_json)
+        # Why: session.last_result (Step 2a) is now the sole terminal-decision
+        # source (RFC 0012 harvest authority) -- a transcript-parsed terminal-
+        # shaped sentinel is no longer trusted for the terminal exit, since a
+        # stale sentinel from a requeued session's PRIOR run can still be sitting
+        # in the transcript (#2397). `sentinel` survives past this point only to
+        # feed _check_stale_attention's BlockedResult partial-write guard below.
 
         # --- Step 5: HEARTBEAT / ATTENTION ---
         # ATTENTION: stale AND worker not native OR not in daemon roster.
         # Must guard with _is_native_surface_ref to avoid false-attention on
-        # non-daemon surface refs (e.g. tmux window names).
+        # non-daemon surface refs (anything not an 8-char hex daemon short id).
         # BlockedResult → keep polling (partial write guard), so exclude from ATTENTION.
         _check_stale_attention(
             task, session, sentinel, ticket_id, resolved, output_json

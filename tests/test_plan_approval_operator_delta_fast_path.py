@@ -1,0 +1,288 @@
+"""Guard tests for the operator-authority-delta fast path (#2433).
+
+These are pure-markdown assertions over the plan-stage instructions and
+headless contract. Shared readers are imported from the established test
+helpers rather than duplicated here.
+"""
+
+from tests.conftest import _REPO_ROOT, _appendix, _checkpoint1_section, _cmd, _norm
+from tests.test_agent_comment_provenance import RULE_ANCHOR, _rule_section
+from tests.test_auto_dev_preflight_resolutions import _after
+
+NEW_SUBSECTION_ANCHOR = "### Operator-authority delta (#2433)"
+DESTRUCTIVE_GATE_ANCHOR = "### Destructive-directive gate"
+PROVENANCE_ANCHOR = "### Provenance — what carries operator authority"
+# The auto-dev.md rule every caller of the no-delta alternate must compose
+# with (#2433 fix cycle 6, generalized to every caller by #2311).
+COMPOSITION_RULE_NAME = "Fast-path composition requires a third condition"
+AUTO_DEV_DOC_PATH = "`.claude/commands/auto-dev.md`"
+
+
+def _headless_contract() -> str:
+    return (_REPO_ROOT / "docs" / "headless-contract.md").read_text(encoding="utf-8")
+
+
+def _reason_field_row() -> str:
+    return _norm(_after(_headless_contract(), "### 10.3 Payload Schema", span=2600))
+
+
+def test_operator_authority_delta_subsection_exists_in_provenance_rule() -> None:
+    section = _rule_section()
+    assert RULE_ANCHOR in section
+    assert section.index(PROVENANCE_ANCHOR) < section.index(NEW_SUBSECTION_ANCHOR)
+    assert section.index(NEW_SUBSECTION_ANCHOR) < section.index(DESTRUCTIVE_GATE_ANCHOR)
+
+
+def test_operator_authority_delta_defined_generically_not_plan_stage_only() -> None:
+    window = _norm(_after(_rule_section(), NEW_SUBSECTION_ANCHOR, span=900))
+    assert "`plan_approved_at` for the plan stage today" in window
+    assert (
+        "any future caller anchors T to its own stage's equivalent durable timestamp"
+        in window
+    )
+    assert "never hardcoded to `plan_approved_at` as the only named anchor" in window
+
+
+def test_operator_authority_delta_documents_comment_only_scope() -> None:
+    window = _norm(_after(_rule_section(), NEW_SUBSECTION_ANCHOR, span=1800))
+    assert "**Comment-scoped only.**" in window
+    assert "body** edit since T is a documented, out-of-scope limitation" in window
+    assert "`body_sha` tracker-state fingerprint" in window
+
+
+def test_checkpoint1_row_path_gains_operator_authority_alternate() -> None:
+    section = _norm(_checkpoint1_section())
+    assert "either (a)" in section
+    assert "no operator-authority delta since `plan_approved_at`" in section
+    assert "latter branch does not require fingerprint equality" in section
+
+
+def test_checkpoint1_existing_equality_language_still_present() -> None:
+    assert "equal to `draft_fp`" in _checkpoint1_section()
+
+
+def test_checkpoint1_no_delta_alternate_still_requires_fingerprint() -> None:
+    """A timestamp without the paired durable fingerprint is not approval."""
+    section = _norm(_checkpoint1_section())
+    row_path = _after(section, "**Row path:**", span=1500)
+    assert (
+        "non-null `queue_metadata.plan_approved_at` **AND** non-null "
+        "`queue_metadata.plan_approved_fingerprint`"
+    ) in row_path
+    assert (
+        "tolerates a non-equal fingerprint but still requires both durable approval "
+        "fields"
+    ) in row_path
+
+
+def test_step1a0b_fast_path_gains_operator_authority_branch() -> None:
+    window = _norm(_after(_appendix("plan"), "Fingerprint fast-path check", span=2600))
+    assert "Operator-authority-delta alternate" in window
+    assert "Operator-authority delta" in window
+    assert "independently of fingerprint equality" in window
+
+
+def test_step1a0b_new_reason_value_distinct_from_existing() -> None:
+    appendix = _appendix("plan")
+    assert '\\"reason\\":\\"approved_fingerprint_match\\"' in appendix
+    assert '\\"reason\\":\\"operator_approval_no_delta\\"' in appendix
+
+
+def test_headless_contract_reason_enum_documents_new_value() -> None:
+    window = _reason_field_row()
+    assert "`operator_approval_no_delta`" in window
+    assert "Open enum — consumers MUST tolerate unknown future values" in window
+
+
+def test_new_branch_never_emits_resolution_consumed_keys() -> None:
+    window = _norm(
+        _after(_appendix("plan"), "Operator-authority-delta alternate", span=1400)
+    )
+    marker = "never emits `resolution_consumed` or `resolution_evidence`"
+    assert marker in window
+    assert window.count("`resolution_consumed`") == 1
+    assert window.count("`resolution_evidence`") == 1
+
+
+def test_scope_note_on_evidence_source_unchanged() -> None:
+    window = _norm(
+        _after(_appendix("plan"), "**Scope note on evidence source.**", span=700)
+    )
+    assert (
+        "existing fingerprint-equality evidence check is scoped to the row-path only"
+        in window
+    )
+    assert "comment-path-token-approved draft is unaffected" in window
+
+
+def test_step1a0b_distinguishes_resolutions_changes_from_ordinary_body_edits() -> None:
+    window = _norm(
+        _after(
+            _appendix("plan"),
+            "Because step 3 (delta/revision) runs strictly before step 4",
+            span=1100,
+        )
+    )
+    assert "body edit that changes the resolutions source" in window
+    assert (
+        "ordinary ticket body edit that does not change the resolutions source does not"
+    ) in window
+    assert "that rule is comment-scoped only" in window
+
+
+def test_operator_authority_delta_requires_no_delta_not_mere_silence() -> None:
+    window = _norm(_after(_rule_section(), NEW_SUBSECTION_ANCHOR, span=1600))
+    assert "never satisfied by silence alone" in window
+    assert (
+        "A durable approval/park timestamp T exists on the row AND no "
+        "operator-authority comment postdates it" in window
+    )
+    assert "Any operator-authority comment newer than T" in window
+    assert "unconditionally, regardless of how much time has passed" in window
+    assert "absence of a T is absence of evidence, not evidence of no delta" in window
+
+
+def test_checkpoint1_revocation_marker_gates_both_row_path_subconditions() -> None:
+    window = _norm(
+        _after(
+            _checkpoint1_section(),
+            "Before accepting either row-path sub-condition",
+            span=900,
+        )
+    )
+    assert (
+        "entire row-path evidence pair and both sub-conditions as revoked and absent"
+        in window
+    )
+    assert "a later `plan_approved_at` is a fresh approval" in window
+
+
+def test_step1a0b_fast_path_requires_body_sha_match_third_condition() -> None:
+    """#2433 fix cycle 6: an ordinary body edit must NOT ride the fast path.
+
+    The operator-authority-delta alternate previously fired off two
+    conditions (durable approval + no newer operator-authority comment)
+    without checking the persisted `body_sha`, letting a body edit that left
+    the resolutions source untouched skip Step 1c.0's body-edit invalidation
+    entirely. Approval present, no newer operator comment, `body_sha` changed
+    -> full Step 1c.0 / Step 1c path, fast path not taken.
+    """
+    window = _norm(
+        _after(_appendix("plan"), "Operator-authority-delta alternate", span=2600)
+    )
+    assert "ALL three conditions hold" in window
+    assert "plan_approved_fingerprint` both exist on the row" in window
+    assert "no operator-authority comment newer than `plan_approved_at`" in window
+    assert "equals a freshly computed SHA-256 of the live-fetched issue body" in window
+    assert (
+        "A `body_sha` mismatch disqualifies this branch exactly as a newer "
+        "operator-authority comment does" in window
+    )
+    assert "invents no new branch for it" in window
+
+
+def test_step1a0b_body_sha_condition_never_exempted_by_comment_scoped_rule() -> None:
+    window = _norm(
+        _after(_appendix("plan"), "Operator-authority-delta alternate", span=2600)
+    )
+    assert "stays comment-scoped only" in window
+    assert "never, by itself, disqualified by a body edit" in window
+    assert "never exempts the fast path from the body-edit check" in window
+
+
+def test_auto_dev_operator_authority_delta_rule_documents_fast_path_composition() -> (
+    None
+):
+    window = _norm(_after(_rule_section(), NEW_SUBSECTION_ANCHOR, span=3000))
+    assert "requires a third condition" in window
+    assert "all three" in window.lower()
+    assert "never, by itself, disqualified by a" in window or "never exempts" in window
+    assert (
+        "Step 1a.0b item 4's" in window
+        or "Operator-authority-delta alternate" in window
+    )
+
+
+def test_headless_contract_reason_value_mentions_body_sha_condition() -> None:
+    window = _reason_field_row()
+    assert "`operator_approval_no_delta`" in window
+    assert "matching persisted `body_sha`" in window
+    assert "all three required" in window
+
+
+def test_fingerprint_mismatch_subcase_checks_operator_authority_delta_first() -> None:
+    window = _norm(
+        _after(
+            _checkpoint1_section(),
+            "**Fingerprint mismatch sub-case (#2102).**",
+            span=1800,
+        )
+    )
+    assert "First evaluate the *Operator-authority delta* alternate" in window
+    assert "If that no-delta condition does not hold" in window
+    assert "quote both fingerprints" in window
+    assert (
+        "A resumed draft classified **Small** follows the ordinary AUTO-SKIP path"
+        in window
+    )
+    assert "**always** EXIT `plan_pending_approval`" not in window
+
+
+def test_checkpoint1_row_path_alternate_requires_body_sha_match_too() -> None:
+    """#2311: Checkpoint 1's row-path condition (b) is the same no-delta
+    alternate Step 1a.0b composes with the `body_sha` gate, so it must cite
+    that composition rule too -- otherwise an ordinary body edit rides the
+    row path past Step 1c.0's body-edit invalidation (fix cycle 6's
+    asymmetry)."""
+    window = _norm(
+        _after(
+            _norm(_checkpoint1_section()),
+            "latter branch does not require fingerprint equality",
+            span=900,
+        )
+    )
+    assert COMPOSITION_RULE_NAME in window
+    assert AUTO_DEV_DOC_PATH in window
+    assert "`body_sha`" in window
+    assert "no marker fails closed" in window
+
+
+def test_checkpoint1_mismatch_subcase_alternate_requires_body_sha_match_too() -> None:
+    """#2311: the mismatch sub-case evaluates the same alternate first, so a
+    `body_sha` mismatch (or no persisted marker) must disqualify it there as
+    well -- without regressing the fingerprint-quoting fallback."""
+    window = _norm(
+        _after(
+            _checkpoint1_section(),
+            "**Fingerprint mismatch sub-case (#2102).**",
+            span=1800,
+        )
+    )
+    assert COMPOSITION_RULE_NAME in window
+    assert AUTO_DEV_DOC_PATH in window
+    assert "`body_sha`" in window
+    assert (
+        "disqualifies the alternate exactly as a newer operator-authority "
+        "comment does" in window
+    )
+    assert "quote both fingerprints" in window
+
+
+def test_auto_dev_rule_generalizes_composition_to_every_caller_not_only_fast_path() -> (
+    None
+):
+    """#2311: the composition rule's pointer sentence names every plan-stage
+    instantiation -- Checkpoint 1's row-path bullet and mismatch sub-case as
+    well as Step 1a.0b -- so no caller is left citing only two conditions."""
+    window = _norm(
+        _after(
+            _norm(_cmd("auto-dev.md")),
+            "The plan stage's instantiation of all three conditions lives in",
+            span=700,
+        )
+    )
+    assert "Step 1a.0b item 4's Operator-authority-delta alternate" in window
+    assert "`.claude/commands/auto-dev-plan.md`" in window
+    assert "Checkpoint 1" in window
+    assert "**Row path** bullet" in window
+    assert "**Fingerprint mismatch sub-case**" in window

@@ -34,7 +34,7 @@ from cw.dev_queue import (
     save_dev_queue,
 )
 from cw.events import record_event
-from cw.gh import _GH_PR_STATE_MERGED, fetch_pr_view
+from cw.gh import _GH_PR_STATE_CLOSED, _GH_PR_STATE_MERGED, fetch_pr_view
 from cw.models import OrchestratorEventType, PrState, WatchedPr
 
 if TYPE_CHECKING:
@@ -89,7 +89,9 @@ _ROW1_MERGE_BLOCKING_STATES: frozenset[str] = frozenset({"DIRTY", "BEHIND"})
 # from outside the set — not on merely leaving a blocking status into
 # UNKNOWN/DRAFT (operator resolution, #929 premise round 2026-07-05).
 _MERGEABLE_STATES: frozenset[str] = frozenset({"CLEAN", "UNSTABLE", "HAS_HOOKS"})
-_TERMINAL_PR_STATES: frozenset[str] = frozenset({_GH_PR_STATE_MERGED, "CLOSED"})
+_TERMINAL_PR_STATES: frozenset[str] = frozenset(
+    {_GH_PR_STATE_MERGED, _GH_PR_STATE_CLOSED}
+)
 
 _PR_URL_RE = re.compile(r"github\.com/([^/]+/[^/]+)/pull/(\d+)")
 # GitHub #1198 — parse an ``owner/repo`` slug out of a git remote URL, covering

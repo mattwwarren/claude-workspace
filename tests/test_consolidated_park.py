@@ -93,6 +93,15 @@ def test_consolidated_park_posts_one_comment_with_ordered_sections() -> None:
     assert findings < approval < draft
 
 
+def test_consolidated_park_names_malformed_verified_note_by_name() -> None:
+    """The park comment's closed enumeration names both malformed notes (#2432)."""
+    block = _park_block()
+    start = block.index("Post ONE comment under the `## Pending Verification Scan`")
+    sentence = block[start : block.index("### Advisory plan-review findings", start)]
+    assert "the malformed-recommendation note" in sentence
+    assert "the malformed-verified note" in sentence
+
+
 def test_consolidated_park_approval_section_is_large_scope_only() -> None:
     """The approval sub-section appears only when Step 1d classified Large."""
     block = _park_block()
@@ -229,7 +238,7 @@ def test_checkpoint1_accepts_row_side_plan_approval_evidence() -> None:
     """The Large-scope carve-out names the queue_metadata record as evidence."""
     section = _checkpoint1_section()
     window = _after(
-        section, "the AUTO-SKIP additionally requires approval evidence", span=2700
+        section, "the AUTO-SKIP additionally requires approval evidence", span=3700
     )
     assert "`queue_metadata.plan_approved_at`" in window
     assert "`.claude/cw-context.json`" in window

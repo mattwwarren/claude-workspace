@@ -409,18 +409,25 @@ def cancel_task_for_session(session_id: str) -> bool:
     return False
 
 
-def move_ticket(ticket_id: str, client_name: str, to_lane: str) -> str:
-    """Move a pending ticket to a different lane.
+def move_ticket(
+    ticket_id: str,
+    client_name: str,
+    to_lane: str | None = None,
+    priority: int | None = None,
+) -> dict[str, str | int | None]:
+    """Move a pending ticket to a different lane and/or edit its priority.
 
-    Returns the previous lane name (from_lane) for event emission by the caller.
+    Returns a dict with from_lane/to_lane/from_priority/to_priority for event
+    emission by the caller (a key is None when that field was not touched).
 
     Raises:
         CwError: if no matching task is found for (ticket_id, client_name).
-        LaneNotFoundError: if to_lane is not declared for the client.
-        LaneMoveError: if the task status is RUNNING, BLOCKED_ON_USER, or
-            AWAITING_OPERATOR_SIGNOFF.
+        LaneNotFoundError: if to_lane is given and not declared for the client.
+        LaneMoveError: if to_lane and/or priority is given and the task status
+            is RUNNING, BLOCKED_ON_USER, or AWAITING_OPERATOR_SIGNOFF.
 
-    Note: record_event is NOT called here — the CLI layer fires TICKET_MOVED.
+    Note: record_event is NOT called here — the CLI layer fires TICKET_MOVED
+    and/or TICKET_REPRIORITIZED.
     """
     with _lock():
         store = load_dev_queue()
@@ -439,27 +446,52 @@ def move_ticket(ticket_id: str, client_name: str, to_lane: str) -> str:
             )
             raise CwError(msg)
 
-        client = get_client(client_name)
-        declared_lane_names = [ln.name for ln in client.effective_lanes]
-        if to_lane not in declared_lane_names:
-            msg = (
-                f"Lane '{to_lane}' is not declared for client '{client_name}'."
-                f" Declared lanes: {', '.join(declared_lane_names)}."
-                f" Run: cw lane add {client_name} {to_lane}"
-            )
-            raise LaneNotFoundError(msg)
+        if to_lane is not None:
+            client = get_client(client_name)
+            declared_lane_names = [ln.name for ln in client.effective_lanes]
+            if to_lane not in declared_lane_names:
+                msg = (
+                    f"Lane '{to_lane}' is not declared for client '{client_name}'."
+                    f" Declared lanes: {', '.join(declared_lane_names)}."
+                    f" Run: cw lane add {client_name} {to_lane}"
+                )
+                raise LaneNotFoundError(msg)
 
-        if task.status in _UNMOVABLE_STATUSES:
+        if priority is not None and task.status != QueueItemStatus.PENDING:
             msg = (
-                f"Cannot move ticket '{ticket_id}': task is {task.status.value}."
-                " Only PENDING tasks can be moved between lanes."
+                f"Cannot reprioritize ticket '{ticket_id}':"
+                f" task is {task.status.value}."
+                " Only PENDING tasks can be reprioritized."
             )
             raise LaneMoveError(msg)
 
-        from_lane = task.lane
-        task.lane = to_lane
+        if to_lane is not None and task.status in _UNMOVABLE_STATUSES:
+            msg = (
+                f"Cannot move ticket '{ticket_id}':"
+                f" task is {task.status.value}."
+                " Only PENDING tasks can be moved."
+            )
+            raise LaneMoveError(msg)
+
+        from_lane = to_lane_result = None
+        if to_lane is not None:
+            from_lane = task.lane
+            task.lane = to_lane
+            to_lane_result = to_lane
+
+        from_priority = to_priority_result = None
+        if priority is not None:
+            from_priority = task.priority
+            task.priority = priority
+            to_priority_result = priority
+
         save_dev_queue(store)
-    return from_lane
+    return {
+        "from_lane": from_lane,
+        "to_lane": to_lane_result,
+        "from_priority": from_priority,
+        "to_priority": to_priority_result,
+    }
 
 
 def _select_clear_candidates(

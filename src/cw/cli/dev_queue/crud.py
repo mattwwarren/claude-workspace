@@ -171,28 +171,62 @@ def dev_queue_add(
         click.echo(f"Enqueued {ticket_id} -> {resolved} (priority={priority})")
 
 
-@dev_queue.command(name="move", help="Move a ticket to a different lane.")
+@dev_queue.command(
+    name="move", help="Move a ticket to a different lane and/or edit its priority."
+)
 @click.argument("ticket_id")
 @click.option("--client", "-c", required=True, help="Client name.")
-@click.option("--to", "to_lane", required=True, help="Target lane name.")
+@click.option("--to", "to_lane", default=None, help="Target lane name.")
+@click.option(
+    "--priority",
+    "-p",
+    "priority",
+    type=int,
+    default=None,
+    help="New priority (higher=sooner). Edits a queued row's priority in place.",
+)
 @handle_errors
-def dev_queue_move(ticket_id: str, client: str, to_lane: str) -> None:
-    """Move TICKET_ID to a different lane within CLIENT.
+def dev_queue_move(
+    ticket_id: str, client: str, to_lane: str | None, priority: int | None
+) -> None:
+    """Move TICKET_ID to a different lane and/or reprioritize it within CLIENT.
 
-    Only PENDING tickets can be moved; RUNNING and BLOCKED_ON_USER tasks
-    must be resolved before lane reassignment.
+    At least one of --to or --priority must be given. Only PENDING tickets
+    can be moved or reprioritized; RUNNING and BLOCKED_ON_USER tasks must
+    be resolved before lane reassignment or priority editing.
     """
-    from_lane = move_ticket(ticket_id, client, to_lane)
-    record_event(
-        OrchestratorEventType.TICKET_MOVED,
-        {
-            "ticket_id": ticket_id,
-            "client": client,
-            "from_lane": from_lane,
-            "to_lane": to_lane,
-        },
-    )
-    click.echo(f"Moved {ticket_id} ({client}): {from_lane} -> {to_lane}")
+    if to_lane is None and priority is None:
+        msg = "Must pass --to and/or --priority."
+        raise click.UsageError(msg)
+    result = move_ticket(ticket_id, client, to_lane=to_lane, priority=priority)
+    if result["to_lane"] is not None:
+        record_event(
+            OrchestratorEventType.TICKET_MOVED,
+            {
+                "ticket_id": ticket_id,
+                "client": client,
+                "from_lane": result["from_lane"],
+                "to_lane": result["to_lane"],
+            },
+        )
+        click.echo(
+            f"Moved {ticket_id} ({client}):"
+            f" {result['from_lane']} -> {result['to_lane']}"
+        )
+    if result["to_priority"] is not None:
+        record_event(
+            OrchestratorEventType.TICKET_REPRIORITIZED,
+            {
+                "ticket_id": ticket_id,
+                "client": client,
+                "from_priority": result["from_priority"],
+                "to_priority": result["to_priority"],
+            },
+        )
+        click.echo(
+            f"Reprioritized {ticket_id} ({client}):"
+            f" {result['from_priority']} -> {result['to_priority']}"
+        )
 
 
 @dev_queue.command(name="requeue")

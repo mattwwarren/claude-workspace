@@ -249,8 +249,14 @@ class OrchestratorEventType(StrEnum):
     FOCUS_SET = "focus.set"
     FOCUS_CLEARED = "focus.cleared"
     TICKET_MOVED = "ticket.moved"
+    # #2312 -- distinct from TICKET_MOVED: fires when `cw dev-queue move
+    # --priority` edits a queued row's priority in place.
+    TICKET_REPRIORITIZED = "ticket.reprioritized"
     TICKET_APPROVED = "ticket.approved"
     PLAN_APPROVAL_REVOKED = "plan.approval_revoked"
+    # #2311 -- advisory audit trail: `cw dev-queue approve` found the ticket
+    # body changed since the plan stage last evaluated it. Never blocks.
+    PLAN_APPROVAL_BODY_DRIFT_WARNED = "plan.approval_body_drift_warned"
     PLAN_DRAFT_PROMOTED = "plan.draft_promoted"
     # Companion correction when a ticket approval event was written but the
     # queue mutation did not remain durable (#2337).
@@ -565,6 +571,18 @@ class OrchestratorEventType(StrEnum):
     # record, not an operator page -- Step 3c already surfaces each downgrade
     # in friction_highlights.
     REVIEW_FIXED_DISPOSITION_DOWNGRADED = "review.fixed_disposition_downgraded"
+    # GitHub #2439 -- audit-only record of every accepted `emit_result_locked`
+    # write (session_id, ticket_id, client, lane, stage, last_result_source,
+    # status, payload_digest, actor, recorded_at). Emitted from inside the
+    # door itself, before `save_state`, on every accepted write regardless of
+    # backend (`cw result emit`, the Stop-hook harvest, an executor-direct
+    # write). Carries no routing/consumption semantics whatsoever -- it must
+    # never be read by any reconcile/dispatch/attention consumer, and is
+    # deliberately NOT added to _DEFAULT_OPERATOR_EVENT_TYPES, matching the
+    # SCOPE_ROUTING_DECISION / WORKTREE_FAST_FORWARDED convention above: this
+    # is an audit trail, not an operator alert, and fires on effectively every
+    # accepted emit -- far higher volume than any currently-forwarded member.
+    SESSION_RESULT_EMITTED = "session.result_emitted"
 
 
 class StageIdentifier(StrEnum):
@@ -632,6 +650,10 @@ class DispatchSkipReason(StrEnum):
     by a live session or daemon worker -- caught either before the row is
     claimed (the pre-claim occupancy screen) or by a genuinely-live
     ``HookContextConflictError`` release during spawn.
+    TRACKER_MCP_GATE_BLOCKED (#2442) is likewise per-task and outside the
+    precedence chain: emitted when the pre-dispatch tracker-MCP gate parks a
+    PLAN/IMPL-stage task whose branch's settings file verifiably lacks the
+    client's configured tracker MCP plugin.
     HOST_CAPACITY_GATED ranks just above CAP_FULL (#1444): a fleet-wide
     ``OrchestratorConfig.host_session_budget`` ceiling on concurrently-running
     DAEMON sessions across the whole host, folded into the per-client
@@ -651,6 +673,7 @@ class DispatchSkipReason(StrEnum):
     ATTEMPT_CAP_BLOCKED = "attempt_cap_blocked"
     STALE_PR_BLOCKED = "stale_pr_blocked"
     WORKTREE_OCCUPIED = "worktree_occupied"
+    TRACKER_MCP_GATE_BLOCKED = "tracker_mcp_gate_blocked"
     SPAWN_ERROR = "spawn_error"
     LANE_CIRCUIT_PAUSED = "lane_circuit_paused"
     SPAWN_ERROR_BACKOFF = "spawn_error_backoff"

@@ -146,14 +146,6 @@ jobs:
           steps.guard.outputs.match == 'true' &&
           steps.tag.outputs.exists == 'false'
 
-      # No `runner.os` conditional (unlike release.yml's verify job and
-      # ci.yml): this job has no OS matrix, it is ubuntu-latest only.
-      - name: Install tmux
-        if: >
-          steps.guard.outputs.match == 'true' &&
-          steps.tag.outputs.exists == 'false'
-        run: sudo apt-get update && sudo apt-get install -y tmux
-
       - name: Install dependencies
         if: >
           steps.guard.outputs.match == 'true' &&

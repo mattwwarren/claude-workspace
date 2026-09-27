@@ -1,13 +1,13 @@
 """``cw codex run`` subprocess entry point (RFC 0014 S1, ADR-0018).
 
 Owns the process-boundary driver that ``CodexExecutor.spawn()`` hands the
-codex review off to as a detached subprocess, in place of the in-process
-daemon thread ``cw.codex_background`` runs today (D-2: both paths remain
-live until B2 retires the thread path). This module is invoked ONLY as a
-subprocess via ``cw codex run`` (``cw.cli.codex``) — never imported by
-``cw.executor`` (D-1): the whole point of the process boundary is that a
-crash here cannot take the dispatch loop down with it, which an in-process
-import would silently reintroduce.
+codex review off to as a detached subprocess (RFC 0014 A2, #2388), in place
+of the in-process daemon thread ``cw.codex_background`` used to run (D-2: the
+thread plumbing stays in place, unused on this path, until B2 retires it).
+This module is invoked ONLY as a subprocess via ``cw codex run``
+(``cw.cli.codex``) — never imported by ``cw.executor`` (D-1): the whole point
+of the process boundary is that a crash here cannot take the dispatch loop
+down with it, which an in-process import would silently reintroduce.
 """
 
 from __future__ import annotations

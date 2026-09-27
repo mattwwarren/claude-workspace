@@ -172,9 +172,10 @@ def apply_adjudication(
     ``review.deferred`` is recomputed; ``must_fix_initial``, ``should_fix``,
     ``fix_cycles_used``, ``agents_run`` and ``had_real_commit`` are preserved
     verbatim. Those are the frozen cycle-0 baseline (``auto-dev-review.md``
-    Checkpoint 3a step 4 freezes them, and ``codex_fix_loop._finalize_review``
-    keeps the same split) — recomputing them from a disposition-stamped list
-    would silently corrupt them.
+    Checkpoint 3a step 4 freezes them, and
+    ``cw.codex_fix_loop.park._finalize_review`` keeps the same split) —
+    recomputing them from a disposition-stamped list would silently corrupt
+    them.
 
     Never raises on a per-item mismatch (only pydantic's own ``ValidationError``
     on structurally malformed input can): an unmatched entry is logged and

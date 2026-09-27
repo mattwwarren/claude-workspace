@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 from cw._git import capture_head_sha
 from cw.atomic import atomic_write_text
 from cw.codex_fix_loop import run_review_with_fix_loop
-from cw.codex_fix_loop_push import push_and_verify_head, remote_branch_tip
+from cw.codex_fix_loop.push import push_and_verify_head, remote_branch_tip
 from cw.codex_review import (
     CODEX_UNPUSHED_AT_EXIT,
     make_codex_blocked,
@@ -122,11 +122,12 @@ def _stamp_session_id_on_running_task(
 ) -> None:
     """Stamp *session_id* onto the matching RUNNING dev-queue row (#1727 R1).
 
-    Called by ``CodexExecutor.spawn()`` immediately before it hands the review
-    off, so the queue row already points at the live session by the time this
-    module's thread starts. Dispatch stamps session_id too, but only *after*
-    spawn() returns — a crash in that window would otherwise leave a running
-    codex session with no row attributing it.
+    Called by ``CodexExecutor``'s pre-flight immediately before it launches the
+    detached ``cw codex run`` job (RFC 0014 A2, #2388), so the queue row already
+    points at the live session by the time that job re-finds its task by
+    ``(ticket_id, session_id)``. Dispatch stamps session_id too, but only
+    *after* spawn() returns — a crash in that window would otherwise leave a
+    running codex session with no row attributing it.
 
     Keyword-only because ``client_name``/``ticket_id``/``session_id`` are all
     plain ``str`` with no type-system distinction between them — mirrors

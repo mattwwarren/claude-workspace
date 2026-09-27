@@ -50,6 +50,7 @@ from cw.auto_dev_result.schema._validators import (
     _has_usable_premise_text,
     _has_usable_question,
     _is_blank,
+    _is_no_impact_premise,
     _is_resolved_premise,
     _reject_empty_string_items,
 )
@@ -139,6 +140,7 @@ __all__ = [
     "_has_usable_premise_text",
     "_has_usable_question",
     "_is_blank",
+    "_is_no_impact_premise",
     "_is_resolved_premise",
     "_reject_empty_string_items",
     "is_known_blocker_reason",

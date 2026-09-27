@@ -647,8 +647,10 @@ CLI commands emit thin audit events; payloads carry the obvious fields:
 | `lane.resumed` | `cw lane resume` (also resets the circuit-breaker counter) | `{client, lane, source: "operator"}` |
 | `ticket.enqueued` | `cw dev-queue add` | `{ticket_id, client, priority}` (see top of file) |
 | `ticket.moved` | `cw dev-queue move` | `{ticket_id, client, from_lane, to_lane}` |
+| `ticket.reprioritized` | `cw dev-queue move --priority` | `{ticket_id, client, from_priority, to_priority}` |
 | `ticket.approved` | `cw dev-queue approve` | `{ticket_id, client, from_stage, to_stage}`; scope-drift approvals also carry `{old_status, new_status, scope_drift_approved_extra_files, scope_drift_approved_head, approved_at, actor}` |
 | `plan.approval_revoked` | `cw dev-queue revoke-plan-approval` | `{ticket_id, client, previous_fingerprint, revoked_at, initiating_service, resolutions_source, reason}` |
+| `plan.approval_body_drift_warned` | `cw dev-queue approve` (advisory-only; never blocks or mutates the approval) | `{ticket_id, client, persisted_body_sha, live_body_sha, plan_approved_fingerprint, actor}` |
 | `ticket.approval_failed` | scope-drift approval compensation | `{ticket_id, client, approval_event, approval_payload, error, rolled_back, recovery_required}` |
 | `ticket.requeued` | `cw dev-queue requeue`, `cw dev-queue drain --held` (RFC 0011 A4, #1161), and dispatch's automatic FINALIZE→IMPL regress path (#770) | `{ticket_id, client, from_stage, to_stage, reason, regressed}` |
 | `ticket.unblocked` | `cw dev-queue unblock` | `{ticket_id, client}` |
@@ -1108,6 +1110,48 @@ coordination stream, and the body lives in the session's own
 Until #2255 lands, the common outcome for a session that is genuinely live
 and mid-task is queued-but-not-delivered; see ADR-0017.
 
+### `session.result_emitted`
+
+**Emitter:** `emit_result_locked` (`cw.result`) and the audit-aware reconcile
+result-mutation seams
+**Payload:**
+```json
+{
+  "session_id": "<str>",
+  "ticket_id": "<str|null>",
+  "client": "<str>",
+  "lane": "<str|null>",
+  "stage": "<str|null>",
+  "last_result_source": "<str>",
+  "status": "<str>",
+  "payload_digest": "<64-char hex sha256>",
+  "actor": "<str>",
+  "recorded_at": "<ISO8601>"
+}
+```
+**Semantics:** Fires on every accepted result write, regardless of backend
+(`cw result emit`, the Stop-hook harvest, an executor-direct write, or a
+reconcile harvest) -- GitHub #2439. Does not fire on a first-writer-wins
+refusal (RFC 0012 S2): a refused write mutates nothing, so there is nothing to
+audit.
+`payload_digest` is a sha256 hex digest of the normalized sentinel actually
+written to `session.last_result` (`result_obj.model_dump(mode="json")`), not
+the raw incoming payload. `actor` is the local OS username, audit-only --
+never compared for authorization, same convention as `session.message_sent`'s
+`author` field above. `correlation_id` is the ticket id derived from the
+session name (`cw.reconcile._shared.ticket_id_for_session`), or `None` when
+the session name carries none.
+
+**Audit-only by construction (R2):** this event carries no
+routing/consumption semantics whatsoever. No reconcile, dispatch, or
+attention-monitor consumer reads it, and it must never be added to a
+routing/completion consumer's `event_types` filter -- `tests/test_result.py`
+enforces this with a grep sweep over `src/cw/reconcile/` and
+`src/cw/dispatch/`. It exists purely so an operator can answer "who wrote
+this session's result, and when" from the event stream rather than
+reconstructing it from logs. Cross-reference ADR-0003's Amendment (#2439)
+and `docs/headless-contract.md` §11.6.
+
 ### `session.salvage_skipped` — historical (ADR-0014)
 
 **Emitter:** none since the process-kill-timeout removal (was the stalled
@@ -1270,8 +1314,9 @@ only ones emitted today). `correlation_id` is the `ticket_id`.
 ```
 
 **Known legacy gap — the `ticket.*` CLI family:** The operator-command events
-`ticket.enqueued`, `ticket.moved`, `ticket.approved`, `ticket.requeued`, and
-`ticket.unblocked` are emitted from the CLI layer with `correlation_id=None`
+`ticket.enqueued`, `ticket.moved`, `ticket.reprioritized`, `ticket.approved`,
+`ticket.requeued`, and `ticket.unblocked` are emitted from the CLI layer with
+`correlation_id=None`
 (the `ticket_id` lives only in their payloads). The three `task.*` producers
 above deliberately set `correlation_id=ticket_id`; the older `ticket.*` family
 was **not** retrofitted in this change to avoid touching unrelated emit sites.
@@ -2134,7 +2179,7 @@ finding's disappearance needs explaining.
 
 ### `review.treadmill_detected`
 
-**Emitter:** `_emit_treadmill_diagnostic` (`cw.codex_fix_loop_convergence`),
+**Emitter:** `_emit_treadmill_diagnostic` (`cw.codex_fix_loop.convergence`),
 reached from `_track_open_findings` on every in-loop fix cycle.
 **Payload:**
 ```json
@@ -2171,7 +2216,7 @@ debt itself is already surfaced on the posted review comment.
 
 ### `review.fix_loop_divergence_detected`
 
-**Emitter:** `emit_divergence_event` (`cw.codex_fix_loop_divergence`),
+**Emitter:** `emit_divergence_event` (`cw.codex_fix_loop.divergence`),
 reached from `run_review_with_fix_loop` (`cw.codex_fix_loop`) at most once per
 run, immediately before the loop parks with `blocker.reason =
 "fix_loop_diverging"`.

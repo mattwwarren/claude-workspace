@@ -21,6 +21,28 @@ DEFAULT_AUTO_PURPOSES: list[SessionPurpose] = [
 ]
 
 
+class TrackerMcpGateConfig(BaseModel):
+    """Per-client opt-in for the #2442 pre-dispatch tracker-MCP gate.
+
+    Before a PLAN/IMPL-stage PENDING ticket is claimed, dispatch reads
+    ``settings_path`` from the ticket's own branch (``git show``, no checkout)
+    and parks the ticket when that file's ``enabledPlugins`` verifiably lacks
+    ``plugin_id`` -- a worker spawned there could not reach the tracker MCP.
+
+    ``plugin_id`` is the exact ``enabledPlugins`` key the tracker's MCP plugin
+    registers under (e.g. ``"linear@acme-marketplace"``); matching is exact,
+    with no ``@``-suffix stripping and no case folding. Anything ambiguous --
+    no branch yet, no settings file, malformed JSON, an unrecognized
+    ``enabledPlugins`` shape -- fails open (the spawn proceeds).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    plugin_id: str
+    settings_path: str = ".claude/settings.json"
+
+
 class ClientConfig(BaseModel):
     """Configuration for a client workspace.
 
@@ -75,6 +97,16 @@ class ClientConfig(BaseModel):
     #   3. CLAUDE.md "## Quality Gates" section — #1744, feeds codex-review
     #      lint grounding.
     quality_gate_commands: str | None = None
+    # Per-client ignore list for Step 4a's merge-gate overlap check (#2431).
+    # Repo-relative, root-anchored, exact-match paths (no globs) excluded from
+    # the branch/PR file intersection before it escalates to a `git
+    # merge-tree` probe -- e.g. a checked-in mypy-baseline.txt or lock file
+    # that nearly every PR touches. It does not excuse a genuine textual
+    # conflict in a listed path; the gate simply never looks at that path.
+    # Delivered to headless workers via `.claude/cw-context.json` (schema v11,
+    # see cw.spawn.CW_CONTEXT_SCHEMA_VERSION), never read from clients.yaml
+    # inside an agent's own bash.
+    merge_gate_ignore_paths: list[str] = Field(default_factory=list)
     # RFC 0011 S1 D-S2b — override for the GitHub login used in counterparty
     # (self|external) and self-identity resolution (see
     # cw.operator_identity.resolve_operator_login). Opaque string — no
@@ -99,6 +131,12 @@ class ClientConfig(BaseModel):
     # setting readable so clients.yaml written during the staged rollout
     # remains loadable after the policy becomes the default implementation.
     sentinel_mismatch_veto_enabled: bool = False
+    # Per-client opt-in for the #2442 pre-dispatch tracker-MCP gate. None (the
+    # default) means the gate never runs for this client -- it never even
+    # reads the branch's settings file. There is deliberately no fleet-wide
+    # OrchestratorConfig companion toggle: per-client opt-in IS the rollout
+    # control. See TrackerMcpGateConfig above.
+    tracker_mcp_gate: TrackerMcpGateConfig | None = None
     auto_background_threshold: int | None = None
     notifications: bool = False
     lanes: list[LaneConfig] = Field(default_factory=list)

@@ -170,6 +170,18 @@ def _appendix(stage: str) -> str:
     )
 
 
+def _norm(text: str) -> str:
+    """Collapse *text* to single-spaced words (#2438).
+
+    Doc-guard tests slice a markdown section and then need to assert a
+    phrase regardless of the exact whitespace/line-wrapping around it.
+    Hoisted out of ``test_plan_approval_operator_delta_fast_path.py`` and
+    ``test_impl_operator_authority_delta.py``, which carried byte-identical
+    private copies (#2438 MUST_FIX B) — import this instead of adding a third.
+    """
+    return " ".join(text.split())
+
+
 def _step4c2_section() -> str:
     """Return ``auto-dev-finalize.md``'s Step 4c.2 agent-prompt region.
 
@@ -354,6 +366,7 @@ def run_guard_fence(
     fence: str,
     script: str,
     *,
+    create_base_commit: bool = False,
     repo_local: str | None = None,
     global_copy: str | None = None,
     worktree_path_override: str | None = None,
@@ -402,6 +415,25 @@ def run_guard_fence(
         check=True,
         env=_clean_git_env(),
     )
+    if create_base_commit:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.name=Codex Fixture",
+                "-c",
+                "user.email=codex-fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fixture base",
+            ],
+            capture_output=True,
+            check=True,
+            env=_clean_git_env(),
+        )
     if repo_local is not None:
         scripts = repo / ".claude" / "scripts"
         scripts.mkdir(parents=True, exist_ok=True)
@@ -1620,8 +1652,8 @@ def _hide_optional_binaries(
     bug for any runner that opts in without one.
 
     ``@pytest.mark.integration``-marked tests are exempt entirely: those
-    tests intentionally shell out to real external tools (tmux, cmux,
-    ``claude --bg``), so this fixture no-ops for them.
+    tests intentionally shell out to real external tools (``claude --bg``,
+    ``codex``, ``opencode``), so this fixture no-ops for them.
     """
     if request.node.get_closest_marker("integration") is not None:
         return
@@ -2054,6 +2086,30 @@ def make_git_repo_with_origin(
         git_in(repo, "checkout", "-b", branch)
         commit_tracked_file(repo, "feature.py")
         return repo, add_bare_origin(repo)
+
+    return _make
+
+
+@pytest.fixture
+def make_worktree_with_change(
+    make_git_repo: Callable[..., Path],
+) -> Callable[..., Path]:
+    """Factory: a repo on ``feature`` with *content* committed to *filename*.
+
+    The branch is pushed to a bare origin: the codex fix loop's per-cycle push
+    and the review-exit guard compare HEAD with ``origin/<branch>`` (#2354).
+    Hoisted (#2388) from two private ``_worktree_with_change`` copies in
+    ``test_codex_executor.py`` and ``test_codex_driver.py``.
+    """
+
+    def _make(name: str, *, filename: str, content: str) -> Path:
+        repo = make_git_repo(name)
+        git_in(repo, "checkout", "-b", "feature")
+        (repo / filename).write_text(content, encoding="utf-8")
+        git_in(repo, "add", filename)
+        git_in(repo, "commit", "-m", f"add {filename}")
+        add_bare_origin(repo)
+        return repo
 
     return _make
 

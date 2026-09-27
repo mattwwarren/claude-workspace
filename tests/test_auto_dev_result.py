@@ -3018,7 +3018,7 @@ class TestCase1325ResolvedPremisesDowngrade:
         assert isinstance(result1, AutoDevResult)
         assert isinstance(result2, AutoDevResult)
         matching = [
-            rec for rec in caplog.records if "resolved premises item" in rec.message
+            rec for rec in caplog.records if "resolved (see #1325)" in rec.message
         ]
         assert len(matching) == 1
 
@@ -3027,6 +3027,194 @@ class TestCase1325ResolvedPremisesDowngrade:
 
         assert _warn is not None
         assert _premises_resolution is not None
+
+
+# ---------------------------------------------------------------------------
+# Issue #2432 — impact-exempt premise items (`impact: "none"` paired with a
+# non-empty `impact_reason`) are dropped at the parse boundary by the same
+# three-outcome coercion as #1325's resolved items, independent of `verified`.
+# ---------------------------------------------------------------------------
+
+
+_IMPACT_REASON_ABSENT = object()
+
+
+class TestCase2432NoImpactPremisesDowngrade:
+    """Impact-exempt premises downgrade status to stage_complete (#2432)."""
+
+    def test_all_no_impact_premises_downgrade_to_stage_complete(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [
+            _premise_item(claim="one", impact="none", impact_reason="orthogonal"),
+            _premise_item(claim="two", impact="none", impact_reason="unrelated"),
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "stage_complete"
+        assert result.premises == []
+        assert len(result.friction_highlights) == 2
+
+    def test_mixed_no_impact_and_open_keeps_pending_with_only_open(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [
+            _premise_item(claim="exempt", impact="none", impact_reason="orthogonal"),
+            _premise_item(claim="still open", impact="code-affecting"),
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+        assert result.premises[0]["claim"] == "still open"
+        assert len(result.friction_highlights) == 1
+
+    def test_no_impact_case_insensitive_and_whitespace_tolerant(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [_premise_item(impact="  NoNe \n", impact_reason="orthogonal")]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "stage_complete"
+        assert result.premises == []
+
+    def test_code_affecting_value_not_treated_as_no_impact(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [
+            _premise_item(impact="CODE-AFFECTING", impact_reason="orthogonal")
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+
+    def test_non_string_impact_value_not_treated_as_no_impact(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [_premise_item(impact=False, impact_reason="orthogonal")]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+
+    def test_blank_impact_string_not_treated_as_no_impact(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [_premise_item(impact="   ", impact_reason="orthogonal")]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+
+    @pytest.mark.parametrize("reason", [_IMPACT_REASON_ABSENT, None, "", "   \t"])
+    def test_impact_none_without_impact_reason_not_treated_as_no_impact(
+        self, reason: object
+    ) -> None:
+        item = _premise_item(claim="bare none", impact="none")
+        if reason is not _IMPACT_REASON_ABSENT:
+            item["impact_reason"] = reason
+        p = _premises_pending_payload()
+        p["premises"] = [item]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+        assert result.premises[0]["claim"] == "bare none"
+        assert result.friction_highlights == []
+
+    def test_verified_no_with_impact_none_still_downgrades(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [
+            _premise_item(verified=False, impact="none", impact_reason="orthogonal")
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "stage_complete"
+        assert result.premises == []
+
+    def test_verified_no_with_impact_none_but_no_reason_stays_pending(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [_premise_item(verified=False, impact="none")]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+
+    def test_no_impact_and_resolved_mixed_in_same_batch_both_downgrade(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [
+            _premise_item(claim="resolved", verified=True, resolution="Res 1"),
+            _premise_item(claim="exempt", impact="none", impact_reason="orthogonal"),
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "stage_complete"
+        assert result.premises == []
+        assert result.friction_highlights == [
+            "premise resolved (issue #1325): resolved — resolution: Res 1",
+            "premise no-impact (issue #2432): exempt — impact_reason: orthogonal",
+        ]
+
+    def test_friction_highlights_cite_claim_for_no_impact_reason(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [
+            _premise_item(
+                claim="the claim text",
+                impact="none",
+                impact_reason="another ticket's status; no code path reads it",
+            )
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.friction_highlights == [
+            "premise no-impact (issue #2432): the claim text — impact_reason: "
+            "another ticket's status; no code path reads it"
+        ]
+        assert "impact: none" not in result.friction_highlights[0]
+
+    def test_next_actions_user_verify_premises_dropped_for_no_impact_too(
+        self,
+    ) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [_premise_item(impact="none", impact_reason="orthogonal")]
+        p["next_actions"] = ["user_verify_premises", "some_other_action"]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "stage_complete"
+        assert result.next_actions == ["some_other_action"]
+
+    def test_model_validate_direct_leaves_status_and_premises_unchanged_for_impact(
+        self,
+    ) -> None:
+        """The coercion is parse-boundary-only (mirrors the #1325 test)."""
+        p = _premises_pending_payload()
+        p["premises"] = [_premise_item(impact="none", impact_reason="orthogonal")]
+        result = AutoDevResult.model_validate(p)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+
+    def test_empty_premises_array_producer_glitch_still_placeholder(self) -> None:
+        """Regression guard: the #962/#430 glitch-placeholder park is untouched."""
+        p = _premises_pending_payload()
+        p["premises"] = [{}]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert result.premises[0]["claim"] == _PREMISE_GLITCH_PLACEHOLDER_CLAIM
+
+    def test_warning_logged_once_via_warned_blocks_dedup_for_impact(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [_premise_item(impact="none", impact_reason="orthogonal")]
+        text = _wrap_sentinel(p)
+        warned_blocks: set[str] = set()
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            result1 = parse_stdout(text, warned_blocks=warned_blocks)
+            result2 = parse_stdout(text, warned_blocks=warned_blocks)
+        assert isinstance(result1, AutoDevResult)
+        assert isinstance(result2, AutoDevResult)
+        expected = (
+            "premises: dropped 1 item(s) — 0 resolved (see #1325), "
+            "1 impact-exempt (see #2432)"
+        )
+        matching = [rec for rec in caplog.records if rec.getMessage() == expected]
+        assert len(matching) == 1
 
 
 # ---------------------------------------------------------------------------

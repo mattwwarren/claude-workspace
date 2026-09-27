@@ -1,8 +1,13 @@
 """Boot-time pass over codex sessions orphaned by a crash (GitHub #1727).
 
-Since ``CodexExecutor.spawn()`` hands its review to a background thread, an
-ordinary process exit can land mid-review. ``run_dispatch_loop``'s shutdown
-path covers the exits we control by bounded-joining those threads
+Since RFC 0014 A2 (#2388), ``CodexExecutor.spawn()`` launches the review as a
+detached ``cw codex run`` job carrying a ``Session.local_liveness`` handle; such
+a session survives a serve restart and is skipped here (reconcile/local's codex
+harvest branch owns it). What follows describes the pre-migration sessions this
+pass still covers until B2 retires it: those whose review ran on a background
+thread inside serve, where an ordinary process exit can land mid-review.
+``run_dispatch_loop``'s shutdown path covers the exits we control by
+bounded-joining those threads
 (``cw.codex_background.join_outstanding_codex_threads``). A crash or ``SIGKILL``
 is the case a join cannot reach at all: the process that owned the thread is
 already gone, so there is nothing left to join and nothing recorded a failure.
@@ -227,7 +232,7 @@ def _worktree_porcelain_clean_except_verdict(worktree: Path) -> bool | None:
     ``REVIEW_VERDICT_COMMENT_RELATIVE_PATH``, is pending), ``False`` dirty,
     ``None`` when git could not answer — kept distinct from ``False`` so the
     park reason says ``git_error`` rather than misreporting dirt. Parse shape
-    mirrors ``codex_fix_loop._porcelain_changed_paths``, except a rename
+    mirrors ``cw.codex_fix_loop.commit._porcelain_changed_paths``, except a rename
     contributes BOTH sides: ``git mv tracked.md .claude/review-verdict.md``
     touches a tracked file, which must never read as clean.
     """
@@ -726,6 +731,12 @@ def reap_orphaned_codex_sessions_at_boot() -> int:
             session.status not in _LIVE_STATUSES
             or session.origin is not SessionOrigin.DAEMON
             or not _is_headless(session)
+            # RFC 0014 A2 (#2388): a session carrying a liveness handle is a
+            # detached ``cw codex run`` job that outlives serve. It is not an
+            # orphan — reconcile/local's codex harvest branch (A1) owns it,
+            # and only once its PID is dead. This sweep is left with the
+            # pre-migration, handle-less sessions until B2 retires it.
+            or session.local_liveness is not None
         ):
             continue
         ticket_id = ticket_id_for_session(session.name)

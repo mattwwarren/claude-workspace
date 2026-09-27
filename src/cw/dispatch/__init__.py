@@ -14,6 +14,9 @@ unchanged.
 ``routing`` -- five at the time, six since #1870) and ``branch_freshness``
 (ticket-branch staleness against ``origin/<default_branch>``).
 
+#2421 added ``impl_gates``, the IMPL-scoped sibling to ``review_gates`` (the
+unconcluded FINALIZE-regress merge gate), re-exported the same way.
+
 #1728 finished the job: ``routing`` is itself a package now, with four
 concern submodules -- ``scope_tier`` (effective scope-tier resolution and
 carried-context persistence), ``stage_walk`` (``stage_reached`` classification
@@ -72,6 +75,11 @@ from cw.dispatch.gating import (
     _resolve_availability_once,
     _resolve_freshness,
     _resolve_ssh_key_once,
+)
+from cw.dispatch.impl_gates import (
+    _UNCONCLUDED_MERGE_REASON,
+    _park_unconcluded_finalize_regress_merge_gate,
+    _should_gate_for_unconcluded_finalize_regress_merge,
 )
 from cw.dispatch.lanes import (
     _LANE_PAUSE_SOURCE_CIRCUIT_BREAKER,
@@ -198,6 +206,7 @@ __all__ = [
     "_SPAWN_ERROR_BACKOFF_INITIAL_SECONDS",
     "_SSH_KEY_WARN_SENTINEL",
     "_STAGE_REACHED_TO_STAGE",
+    "_UNCONCLUDED_MERGE_REASON",
     "_UNKNOWN_CLIENT_REASON",
     "DispatchTickResult",
     "_ClientDispatchResult",
@@ -236,6 +245,7 @@ __all__ = [
     "_park_running_task_blocked_on_user",
     "_park_scope_hint_gate",
     "_park_signoff_gate",
+    "_park_unconcluded_finalize_regress_merge_gate",
     "_pending_in_lane",
     "_persist_carried_context",
     "_reconcile_usage_limited",
@@ -271,6 +281,7 @@ __all__ = [
     "_should_gate_for_review_staleness",
     "_should_gate_for_scope_hint",
     "_should_gate_for_signoff",
+    "_should_gate_for_unconcluded_finalize_regress_merge",
     "_spawn_claimed_task",
     "_stage_advance_unchecked",
     "_stale_pending_clients",

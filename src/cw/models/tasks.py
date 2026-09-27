@@ -203,7 +203,11 @@ from cw.review_finding_dispositions import FindingDisposition
 #      park, bound to the verdict's reviewed_sha and finding fingerprints.
 #      ``| None`` with a ``None`` default, so no migration filler is needed
 #      (same as v13/v38/v40).
-DEV_QUEUE_SCHEMA_VERSION = 42
+# v43: added TicketTask.finalize_regress_merge_conflict_detected (GitHub
+#      #2421) — whether MERGE_HEAD was present in the ticket's worktree when a
+#      FINALIZE-origin regress fired. Backfilled to False on every pre-v43
+#      row: no regress under the older schema measured it.
+DEV_QUEUE_SCHEMA_VERSION = 43
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -506,6 +510,16 @@ class TicketTask(BaseModel):
     # stamped at the same _stage_regress seam under independent preconditions
     # (see the shared-seam comment there).
     finalize_regress_branch_head: str | None = None
+    # v43 companion to finalize_regress_branch_head (#2421): whether MERGE_HEAD
+    # was actually present in the ticket's worktree at the moment this
+    # FINALIZE-origin (or manual-operator) regress fired, per a live
+    # merge_in_progress() measurement -- NOT derived from blocker_reason
+    # (FINALIZE_REGRESS_BLOCKER_REASONS has a single member covering both
+    # merge and non-merge causes, and _apply_requeue_stage's manual regress
+    # path carries no blocker at all). Stamped by _stage_regress's two call
+    # sites; cleared alongside finalize_regress_branch_head by
+    # _consume_finalize_regress_repeat. Read by dispatch/impl_gates.py.
+    finalize_regress_merge_conflict_detected: bool = False
     # Per-arrival marker: raised to True by _stage_regress alongside
     # regressed_into_stage above (same stamp point, same unconditional style),
     # signalling that this re-entry followed a backward move and may therefore

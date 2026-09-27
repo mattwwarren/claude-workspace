@@ -106,7 +106,7 @@ uv run mypy --strict src/                                        # 3. Type check
 uv run pre-commit run --all-files                                # 4. Hooks
 uv run --extra mcp pytest tests/ -m 'not integration' \\
   --cov=cw --cov-report=xml --cov-fail-under=88  # 5. Unit + total cov >=88%
-uv run pytest tests/ -m integration                # 6. tmux integration
+uv run pytest tests/ -m integration                # 6. Integration
 uv run diff-cover coverage.xml --compare-branch=origin/main \\
   --fail-under=90  # 7. Patch coverage >=90%
 ```

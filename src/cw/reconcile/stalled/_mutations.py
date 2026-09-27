@@ -22,6 +22,7 @@ from cw.dev_queue import (
 )
 from cw.models import (
     CompletionReason,
+    LastResultSource,
     QueueItemStatus,
     SessionStatus,
 )
@@ -29,7 +30,7 @@ from cw.reconcile._shared import (
     _PAUSED_STATUS_KEY,
     _SENTINEL_ADVANCE_REFUSED_KEY,
     _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
-    _apply_sentinel_to_task,
+    _apply_sentinel_to_task_audited,
     _foreign_result_target_queue_status,
     _resolve_routed_sentinel,
 )
@@ -107,10 +108,16 @@ def _apply_stalled_routed_mutations(
         session = session_by_id[candidate.session_id]
         routed = True
         task_already_terminal = False
-        if candidate.ticket_id:
-            outcome = _apply_sentinel_to_task(
-                candidate.ticket_id, session, routed_sentinel
-            )
+        routed_payload = routed_sentinel.model_dump(mode="json")
+        audited = _apply_sentinel_to_task_audited(
+            candidate.ticket_id,
+            session,
+            routed_sentinel,
+            source=LastResultSource.SALVAGE_TRANSCRIPT,
+            audit_existing_result=True,
+        )
+        outcome = audited.route
+        if outcome is not None:
             routed = outcome.routed
             task_already_terminal = outcome.task_already_terminal
         if not routed and not task_already_terminal:
@@ -145,7 +152,8 @@ def _apply_stalled_routed_mutations(
         session.status = SessionStatus.COMPLETED
         session.completed_at = now
         session.completed_reason = CompletionReason.NORMAL
-        session.last_result = routed_sentinel.model_dump(mode="json")
+        session.last_result = routed_payload
+        session.last_result_source = LastResultSource.SALVAGE_TRANSCRIPT
         if candidate.salvage_csid is not None:
             session.claude_session_id = candidate.salvage_csid
         accepted.append(candidate)

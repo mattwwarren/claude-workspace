@@ -229,11 +229,12 @@ number and this table's minimum in the same commit.
 |---|---|---|
 | `check_not_main_checkout.py` | 1 | `auto-dev-impl.md` Pre-mutation guard |
 | `check_plan_scope_conformance.py` | 2 | `auto-dev-impl.md` Step 2.5 gate 2 |
-| `check_impl_guard_staleness.py` | 1 | `auto-dev-impl-appendix.md` Pre-Stage Detector Guard |
+| `check_impl_guard_staleness.py` | 2 | `auto-dev-impl-appendix.md` Pre-Stage Detector Guard |
 | `classify_merge_conflict.py` | 1 | `auto-dev-finalize.md` Step 4c.5 |
+| `check_merge_gate_overlap.py` | 1 | `auto-dev-finalize.md` Step 4a |
 | `check_must_fix_override.py` | 1 | `auto-dev-finalize.md` MUST_FIX Override Verification |
 
-`auto-dev-finalize.md`'s Step 4c.5 and MUST_FIX Override Verification sites reference this subsection by name
+`auto-dev-finalize.md`'s Step 4a, Step 4c.5 and MUST_FIX Override Verification sites reference this subsection by name
 rather than duplicating the table; the shell snippet itself is repeated
 literally at each call site, because shell state does not persist between
 `Bash` tool calls (same convention as `prep-pr.md`'s `prep_pr_state.py`
@@ -248,7 +249,8 @@ Before starting S2 work, run `detect_current_stage()` (see [Resume Detection](#r
 - **Any other verdict** (`s2_implementing`, or a stage past S2: `s3_*`, `s4_*`,
   `s5_*`, `merged`) means this ticket already carries branch work, which is rare
   — the resume dispositions, and the staleness/regress check (#1794) that MUST
-  run before them whenever the detector reports a stage past S2, live in
+  run before them on every arrival here, whether the detector reports
+  `s2_implementing` or a stage past S2 (#2438), live in
   `.claude/commands/auto-dev-impl-appendix.md`, section
   "Pre-Stage Detector Guard: resume dispositions and the staleness check (#1794)".
   Read it now; do not decide from this summary whether to advance, resume, or
@@ -271,7 +273,7 @@ Stage 2 agent spawn:
   git fetch origin main
   git merge origin/main
   ```
-  A merge conflict here is a BLOCK in friction — the worktree starts from a conflicted state and cannot proceed.
+  A merge conflict here is a BLOCK in friction — the worktree starts from a conflicted state and cannot proceed. Exception: on a regress into IMPL (`REGRESSED_INTO_STAGE` is `impl`, see the appendix's Pre-Stage Detector Guard) that arrives with `MERGE_HEAD` already set — an unconcluded merge left by FINALIZE's pre-push refresh — resolving that merge is the point of the session, not a reason to block: conclude it per the **Pre-completion merge guard (#2421)** bullet below.
 - **Record the fork point** immediately after merging main — the exact commit the feature branch diverged from, used for all deterministic diffs downstream:
   ```bash
   FORK_POINT=$(git merge-base origin/main HEAD)
@@ -342,6 +344,7 @@ Stage 2 agent spawn:
   git push -u origin HEAD:refs/heads/<branch-name>
   ```
   Do NOT use the short form `git push -u origin <branch-name>`: when the local branch is `agent-<hash>` it either fails or pushes the wrong ref. After pushing, verify with `git rev-parse origin/<branch-name>` and confirm it matches `git rev-parse HEAD`. Subsequent stages (fix loop, PR creation) depend on the branch being on origin rather than locked inside an isolation worktree new subagents cannot reach.
+- **Pre-completion merge guard (#2421):** Before declaring `stage_complete` (and before the push instruction above, if resolving requires a new commit), check whether a merge is still mid-flight in this worktree: `git rev-parse --verify -q MERGE_HEAD`. If it resolves (exit 0), this is the signature of a FINALIZE pre-push-refresh conflict regressed here for resolution — it is not optional background cleanup. Resolve it, `git commit` the resolved merge (staging alone is insufficient — `git add` without a commit leaves `MERGE_HEAD` set and the branch head unchanged), run the full gate suite again, and push, exactly per the Incremental commits and push instructions above, before reporting `stage_complete`. If, after a genuine attempt, the merge still cannot be concluded, EXIT `blocked` with `blocker.reason: "merge_in_progress"` (an open-enum addition per headless-contract.md §4.2, mirroring `merge_conflict_post_push`'s single-producer, doc-only convention — no Python constant needed) and `blocker.details` naming what remains unresolved. Do NOT report `stage_complete` with `MERGE_HEAD` still set. Dispatch re-verifies this at the IMPL→REVIEW checkpoint (see `auto-dev-impl-appendix.md`, "Regress-into-IMPL merge conclusion: the dispatch backstop (#2421)"), but it catches an omission with less context than you have now.
 - Instruction to include the final pushed commit SHA, the local branch name (from `git branch --show-current`), and the push confirmation (`origin/<branch-name>` SHA) in the friction report
 - The friction protocol block
 - The following health check block verbatim:

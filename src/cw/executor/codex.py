@@ -1,4 +1,4 @@
-"""CodexExecutor — prompt-driven ``codex exec`` REVIEW backend (#1236, #1727)."""
+"""CodexExecutor — detached ``cw codex run`` REVIEW backend (#1236, RFC 0014 A2)."""
 
 from __future__ import annotations
 
@@ -6,37 +6,32 @@ import shutil
 from typing import TYPE_CHECKING, Any
 
 from cw.auto_dev_result import AutoDevResult
-from cw.codex_background import (
-    _complete_session_as_unexpected_error,
-    _default_background,
-    _run_codex_review_and_complete,
-    _stamp_session_id_on_running_task,
+from cw.codex_background import _stamp_session_id_on_running_task
+from cw.codex_review import make_codex_blocked
+from cw.codex_runner import (
+    RealCodexJobRunner,
+    build_codex_run_argv,
+    build_codex_run_env,
 )
-from cw.codex_review import (
-    make_codex_blocked,
+from cw.executor.core import (
+    CODEX_NOT_FOUND,
+    FireAndForgetRunner,
+    _PreflightOK,
+    _spawn_fire_and_forget,
 )
-from cw.codex_runner import CodexRunner, RealCodexRunner
-from cw.config import load_state, save_state, sessions_lock
-from cw.events import record_event as _record_orchestrator_event
-from cw.executor.core import CODEX_NOT_FOUND, _complete_session_via_door
-from cw.models import (
-    ClientConfig,
-    OrchestratorEventType,
-    Session,
-    SessionOrigin,
-    SessionPurpose,
-    Stage,
-    StageExecutorConfig,
-    TicketTask,
-)
+from cw.models import SessionOrigin, SessionPurpose, Stage
 from cw.native_daemon import get_native_daemon_client
-from cw.reconcile import AUTO_DEV_LABEL_PREFIX
 from cw.spawn import _write_hook_context
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
+    from cw.models import (
+        ClientConfig,
+        Session,
+        StageExecutorConfig,
+        TicketTask,
+    )
     from cw.native_daemon import NativeDaemonClient
 
 # Session-level CodexExecutor pre-flight blocker reason code (RFC 0005 F1);
@@ -45,36 +40,102 @@ if TYPE_CHECKING:
 CODEX_REVIEW_ONLY = "codex_review_only"
 
 
+def _codex_preflight(
+    *,
+    task: TicketTask,
+    worktree: Path,
+    client: ClientConfig,
+    stage: Stage,
+    sess: Session,
+    wall_clock_budget_seconds: int | None,
+    daemon: NativeDaemonClient,
+) -> AutoDevResult | _PreflightOK:
+    """Run CodexExecutor pre-flight; resolve the ``cw codex run`` launch.
+
+    #2280: CodexExecutor never reaches either of ``_write_hook_context``'s
+    other two call sites (both are Claude-session spawns), so without this call
+    a codex-review attempt never gets a cw-context.json -- and with it, never
+    gets a ``prior_attempts_summary`` on retry. ``write_stop_hook=False``:
+    there is no Claude turn loop here to signal-stop. Called first so even a
+    CODEX_REVIEW_ONLY/CODEX_NOT_FOUND park is covered.
+
+    On success, stamps the session id onto the still-RUNNING dev-queue row
+    *before* the launch (#1727 R1): ``cw codex run`` re-finds its task by
+    ``(ticket_id, session_id)``, and dispatch's own stamp lands only after
+    spawn() returns. Deliberately narrower than dispatch's post-spawn stamp --
+    session_id only, not the error-counter reset or stage_base_ref -- so
+    backoff semantics keep a single owner.
+    """
+    _write_hook_context(
+        worktree,
+        session_id=sess.id,
+        session_name=sess.name,
+        client=client.name,
+        purpose=SessionPurpose.IMPL.value,
+        ticket_id=task.ticket_id,
+        origin=SessionOrigin.DAEMON,
+        task=task,
+        wall_clock_budget_seconds=wall_clock_budget_seconds,
+        default_branch=client.default_branch,
+        workspace_path=client.workspace_path,
+        lane=task.lane,
+        merge_gate_ignore_paths=client.merge_gate_ignore_paths,
+        write_stop_hook=False,
+        daemon=daemon,
+    )
+    if stage != Stage.REVIEW:
+        return make_codex_blocked(
+            ticket_id=task.ticket_id, worktree=worktree, reason=CODEX_REVIEW_ONLY
+        )
+    if shutil.which("codex") is None:
+        return make_codex_blocked(
+            ticket_id=task.ticket_id, worktree=worktree, reason=CODEX_NOT_FOUND
+        )
+    _stamp_session_id_on_running_task(
+        client_name=client.name,
+        ticket_id=task.ticket_id,
+        session_id=sess.id,
+        created_at=task.created_at,
+    )
+    return _PreflightOK(
+        argv=build_codex_run_argv(
+            ticket_id=task.ticket_id,
+            session_id=sess.id,
+            wall_clock_budget_seconds=wall_clock_budget_seconds,
+        ),
+        env=build_codex_run_env(),
+    )
+
+
 class CodexExecutor:
-    """StageExecutor backed by prompt-driven ``codex exec`` reviewers (#1236).
+    """StageExecutor backed by a detached ``cw codex run`` subprocess (#2388).
 
-    REVIEW-only: spawn() returns make_codex_blocked(reason=CODEX_REVIEW_ONLY) if
-    called on any stage other than REVIEW. Step 3 delegates to
-    ``codex_review.run_review``, which runs a per-reviewer-role loop of generic
-    ``codex exec`` calls (each fed a materialized prompt over stdin), validates
-    every reviewer's structured output through the ``review_findings`` library,
-    and synthesizes a typed AutoDevResult from the consolidated verdict. The
-    consolidated verdict is posted as a GitHub issue comment on a clean run.
+    REVIEW-only: pre-flight blocks with ``CODEX_REVIEW_ONLY`` on any other
+    stage, and with ``CODEX_NOT_FOUND`` when the codex binary is absent.
 
-    spawn() is NOT synchronous (#1727). Pre-flight (Steps 1-2) runs on the
-    caller's thread; once it passes, the review is handed to a
-    ``cw.codex_background`` daemon thread and spawn() returns the session id
-    immediately. Blocking here would freeze the shared ``dispatch_tick`` stack
-    for the whole review, stalling every other client and lane — see the
-    StageExecutor Protocol invariant in ``cw.executor.core``.
+    spawn() is non-blocking on the launch path: after synchronous pre-flight
+    checks, it launches ``cw codex run`` via ``RealCodexJobRunner.launch``
+    (Popen in its own session, no wait), records a ``Session.local_liveness``
+    handle (PID + start-time, ``backend="codex"``), leaves the session ACTIVE,
+    and returns the sid immediately. The subprocess runs the per-reviewer-role
+    ``codex exec`` loop and fix loop (the ``cw codex run`` driver), posts the
+    consolidated verdict, and completes the session itself through the door
+    (``emit_result_locked``, source=EXECUTOR_DIRECT — RFC 0012 A2, #1458) —
+    the sole normal completion path, which survives a serve restart. If the
+    process dies without completing, reconcile/local's codex branch (A1,
+    #2387) applies its audited clean-requeue-or-park gate.
 
-    Like LocalExecutor, it bypasses stdout-sentinel parsing: the
-    SESSION_COMPLETED event carries no result payload, so dispatch consumes the
-    last_result written via the door (``emit_result_locked``,
-    source=EXECUTOR_DIRECT — RFC 0012 A2, #1458) as-is.
+    Pre-flight failures stay synchronous: they persist a blocked result via
+    the door, mark the session COMPLETED, and emit SESSION_COMPLETED before
+    returning — the launch never happens. The shared skeleton lives in
+    ``cw.executor.core._spawn_fire_and_forget`` (#2369).
     """
 
     def __init__(
         self,
         *,
         config: StageExecutorConfig,
-        runner: CodexRunner | None = None,
-        background: Callable[[Callable[[], None]], None] | None = None,
+        runner: FireAndForgetRunner | None = None,
         native_daemon: NativeDaemonClient | None = None,
     ) -> None:
         self._config = config
@@ -82,11 +143,9 @@ class CodexExecutor:
         # _write_hook_context so its DAEMON-conflict branch can corroborate a
         # prior session's liveness against the caller's own daemon client.
         self._native_daemon = native_daemon
-        self._runner: CodexRunner = runner if runner is not None else RealCodexRunner()
-        # Testability seam for the threading handoff: tests inject
-        # ``lambda fn: fn()`` to run the review inline and keep their
-        # assertions deterministic.
-        self._background = background if background is not None else _default_background
+        self._runner: FireAndForgetRunner = (
+            runner if runner is not None else RealCodexJobRunner()
+        )
 
     def spawn(
         self,
@@ -100,128 +159,34 @@ class CodexExecutor:
     ) -> str:
         # parent is intentionally unused; codex has no parent-session concept.
         del parent
-        # Step 1: Create Session with all required fields.
-        sess = Session(
-            name=f"{client.name}/{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}",
-            client=client.name,
-            purpose=SessionPurpose.IMPL,
-            origin=SessionOrigin.DAEMON,
-            workspace_path=client.workspace_path,
-            worktree_path=worktree,
-            stage=stage,
-            lane=task.lane,
-        )
-        sid = sess.id
-        with sessions_lock():
-            state = load_state()
-            state.sessions.append(sess)
-            save_state(state)
-
-        # #2280: CodexExecutor never reaches either of _write_hook_context's
-        # other two call sites (both are Claude-session spawns), so a
-        # codex-review attempt never got a cw-context.json — and with it,
-        # never got a prior_attempts_summary on retry. write_stop_hook=False:
-        # there is no Claude turn loop here to signal-stop. Called ahead of
-        # the pre-flight branch below so even a CODEX_REVIEW_ONLY/
-        # CODEX_NOT_FOUND park is covered.
         daemon = self._native_daemon or get_native_daemon_client()
-        try:
-            _write_hook_context(
-                worktree,
-                session_id=sid,
-                session_name=sess.name,
-                client=client.name,
-                purpose=SessionPurpose.IMPL.value,
-                ticket_id=task.ticket_id,
-                origin=SessionOrigin.DAEMON,
-                task=task,
-                wall_clock_budget_seconds=wall_clock_budget_seconds,
-                default_branch=client.default_branch,
-                workspace_path=client.workspace_path,
-                lane=task.lane,
-                write_stop_hook=False,
-                daemon=daemon,
-            )
-        except Exception:
-            # #2280: sess is already persisted ACTIVE above -- a raise here
-            # would otherwise leak it permanently ACTIVE (the same class of
-            # leak that held a client-ceiling slot for ~2h, #2285). Mirrors
-            # the pre-flight-result-write branch below: dispatch is still on
-            # this stack, so re-raising lets its own handler revert the
-            # claimed task to PENDING.
-            _complete_session_as_unexpected_error(sid, task, worktree)
-            raise
 
-        # Step 2: Pre-flight checks (first match assigns result).
-        result: AutoDevResult | None = None
-        if stage != Stage.REVIEW:
-            result = make_codex_blocked(
+        def _blocked(*, reason: str, details: str) -> AutoDevResult:
+            return make_codex_blocked(
                 ticket_id=task.ticket_id,
                 worktree=worktree,
-                reason=CODEX_REVIEW_ONLY,
-            )
-        elif shutil.which("codex") is None:
-            result = make_codex_blocked(
-                ticket_id=task.ticket_id,
-                worktree=worktree,
-                reason=CODEX_NOT_FOUND,
+                reason=reason,
+                details=details,
             )
 
-        if result is not None:
-            # Pre-flight failed: nothing to review, so persist + emit inline.
-            # This branch is cheap and has no subprocess in it, so keeping it
-            # on the caller's thread costs dispatch nothing.
-            try:
-                with sessions_lock():
-                    _complete_session_via_door(
-                        sid=sid, payload=result.model_dump(mode="json")
-                    )
-                _record_orchestrator_event(
-                    OrchestratorEventType.SESSION_COMPLETED,
-                    {
-                        "session_id": sid,
-                        "ticket_id": task.ticket_id,
-                        "session_name": sess.name,
-                    },
-                )
-            except Exception:
-                # Never leave the session ACTIVE on an unexpected error. The
-                # re-raise is correct *here* (unlike on the background path):
-                # dispatch is still on this stack and its own handler reverts
-                # the claimed task to PENDING.
-                _complete_session_as_unexpected_error(sid, task, worktree)
-                raise
-            return sid
-
-        # Pre-flight passed. Stamp session_id onto the still-RUNNING dev-queue
-        # row *before* backgrounding (#1727 R1): dispatch stamps it too, but
-        # only after spawn() returns, so a crash in that window would otherwise
-        # leave a live codex session with no queue row pointing at it and no
-        # way to attribute the failure. Deliberately narrower than dispatch's
-        # own post-spawn stamp — session_id only, not the error-counter reset
-        # or stage_base_ref — so backoff semantics keep a single owner.
-        _stamp_session_id_on_running_task(
-            client_name=client.name,
-            ticket_id=task.ticket_id,
-            session_id=sid,
-            created_at=task.created_at,
-        )
-
-        # Steps 3/4/4b/5 run off the dispatch_tick call stack (#1727).
-        self._background(
-            lambda: _run_codex_review_and_complete(
-                runner=self._runner,
+        return _spawn_fire_and_forget(
+            task=task,
+            worktree=worktree,
+            client=client,
+            stage=stage,
+            executor_name="codex",
+            preflight_fn=lambda sess: _codex_preflight(
                 task=task,
                 worktree=worktree,
                 client=client,
+                stage=stage,
+                sess=sess,
                 wall_clock_budget_seconds=wall_clock_budget_seconds,
-                sid=sid,
-                sess_name=sess.name,
-                config_model=self._config.model,
-                config_reasoning_effort=self._config.reasoning_effort,
-            )
+                daemon=daemon,
+            ),
+            blocked_ctor=_blocked,
+            runner=self._runner,
         )
-        return sid
 
     def stage_sentinel_schema(self, _stage: Stage) -> dict[str, Any]:
         return AutoDevResult.model_json_schema()
