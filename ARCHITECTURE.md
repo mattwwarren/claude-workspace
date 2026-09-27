@@ -185,7 +185,10 @@ write-only: "it emits no events and routes no tasks (the #536 separation —
 the Stop hook remains the sole completion-event source, `_apply_sentinel_to_task`
 stays with its callers)." A new mechanism that both writes `last_result` and
 emits a completion event would duplicate that separation and is out of scope
-for any future backend integration.
+for any future backend integration. One narrow exception: `emit_result_locked`
+records an audit-only `session.result_emitted` event on every accepted write
+(ADR-0003 Amendment, #2439) — it carries no task-routing effect and is never
+consumed by any routing path, so it does not reopen this invariant.
 
 See `docs/rfcs/0012-unified-result-publishing.md` for the full design, and
 `docs/headless-contract.md` for the `AUTO_DEV_RESULT` sentinel schema and
@@ -244,7 +247,8 @@ cites one of these.
    Source: `src/cw/dispatch/claim.py`
 5. Sentinel/emit contract: the Stop hook is the sole completion-event
    source; the result-publishing door emits no events and routes no
-   tasks. — Source: `docs/headless-contract.md`
+   tasks (save for one narrow, audit-only exception with no task-routing
+   effect — ADR-0003 Amendment, #2439). — Source: `docs/headless-contract.md`
 6. Module-size / package-split convention: modules stay under ~1000 lines;
    exceeding it means splitting into a package with an `__init__.py` that
    re-exports the public surface — except that a cohesive module serving a
@@ -310,7 +314,9 @@ principle, grounded in the same source document.
 5. A new completion-event source competing with the Stop hook — any code
    path that both writes a result and emits its own completion event
    instead of routing through the existing Stop-hook /
-   `_apply_sentinel_to_task` seam. — Source: `docs/headless-contract.md`
+   `_apply_sentinel_to_task` seam — a narrow audit-only event with no
+   completion or task-routing effect (ADR-0003 Amendment, #2439) is not
+   this anti-pattern. — Source: `docs/headless-contract.md`
 6. A source module silently growing past ~1000 lines with no package
    split — accreting unrelated concerns into one file instead of
    extracting helpers or splitting into a package with a re-exporting

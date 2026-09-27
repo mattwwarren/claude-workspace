@@ -186,6 +186,26 @@ precedence then takes that recorded result and skips the transcript re-parse.
   else: no event, no status transition. The Stop hook remains the sole
   completion-event source.
 
+## Amendment (#2439)
+
+`emit_result_locked` (the RFC 0012 door) now records an audit-only
+`session.result_emitted` event on every accepted write, before `save_state`.
+The payload carries the actor, a timestamp, the write's source
+(`LastResultSource`), the ticket/session/client/lane/stage identity, the
+recorded status, and a payload digest -- never the sentinel payload itself.
+
+- **This is not a completion event.** It does not gate, precede, or
+  substitute for any status transition, and it carries no
+  routing/consumption semantics -- no reconcile, dispatch, or
+  attention-monitor consumer reads it (see `docs/events.md`'s
+  `session.result_emitted` section and `docs/headless-contract.md` §11.6).
+- **The Stop hook remains the sole completion-event source.** Invariant 4
+  and the Amendment (#2382) above are unchanged: the hook is still the only
+  mechanism that emits a completion event or routes a task. This audit
+  record is a narrow, deliberately out-of-band exception -- observability on
+  the door's own write, not a second completion signal competing with the
+  hook.
+
 ## Alternatives considered
 
 - **Continue parsing the wrapper buffer for daemon sessions.** Rejected.
@@ -210,4 +230,4 @@ precedence then takes that recorded result and skips the transcript re-parse.
 
 ## Referenced by
 
-- #147, #151, #165, #176, #184, #225, #2226, #2382, ADR-0002
+- #147, #151, #165, #176, #184, #225, #2226, #2382, #2439, ADR-0002
