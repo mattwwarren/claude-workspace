@@ -79,6 +79,13 @@ since_tag = "v1.51.0"
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = ["-m", "not integration"]
+# Why: a full-suite run left ~220K files under pytest's default basetemp on
+# the shared 1M-inode /tmp tmpfs; three runs exhausted it on 2026-09-27,
+# taking down every headless worker on the host (#2474).
+tmp_path_retention_policy = "failed"
+# Why: keep at most one run's temp tree instead of accumulating every past
+# run's basetemp on the shared tmpfs (#2474).
+tmp_path_retention_count = 1
 markers = [
     "integration: end-to-end tests that shell out to external tools (claude --bg, codex, opencode)",
     "binary_on_path(*names): exempt from the optional-binary absence guard (#1753) for the given binary name(s), e.g. @pytest.mark.binary_on_path('codex')",
