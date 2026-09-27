@@ -27,6 +27,7 @@ working unchanged.
 from __future__ import annotations
 
 from cw.dev_queue.approval import (
+    BODY_DRIFT_WARNING_KEY,
     _approve_ticket_locked,
     approve_scope_drift_ticket,
     approve_ticket,
@@ -110,6 +111,7 @@ from cw.exceptions import LaneNotFoundError
 
 __all__ = [
     "AWAITING_OPERATOR_DISPOSITION",
+    "BODY_DRIFT_WARNING_KEY",
     "BRANCH_STALENESS_GATE_DISPOSITION",
     "DEFAULT_PRUNE_OLDER_THAN_DAYS",
     "DRAIN_DISPOSITIONS",

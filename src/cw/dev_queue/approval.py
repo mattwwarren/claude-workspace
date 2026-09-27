@@ -19,6 +19,7 @@ Layering: imports ``crud`` (``_find_ticket`` / ``_APPROVABLE_STATUSES``) and
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -36,12 +37,13 @@ from cw.dev_queue.lifecycle import (
     _clear_signoff_gate,
     _plan_is_reviewed,
     _reset_for_same_stage_requeue,
+    _tracker_allows_github_fetch,
 )
 from cw.dev_queue.plan_promotion import promote_plan_draft
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
-from cw.gh import branch_head_sha_on_origin
+from cw.gh import FETCH_COMMENTS_TIMEOUT, branch_head_sha_on_origin, fetch_issue_body
 from cw.models import (
     PLAN_APPROVED_FINGERPRINT_KEY,
     PLAN_DRAFT_FINGERPRINT_KEY,
@@ -52,8 +54,12 @@ from cw.models import (
     QueueItemStatus,
     Stage,
 )
-from cw.plan_fingerprint import is_plan_draft_fingerprint
-from cw.worktree import _git_dir
+from cw.plan_fingerprint import (
+    PLAN_DRAFT_RELATIVE_PATH,
+    extract_persisted_body_sha,
+    is_plan_draft_fingerprint,
+)
+from cw.worktree import _git_dir, resolve_task_worktree
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, DevQueueStore, Session, TicketTask
@@ -61,6 +67,19 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 _SCOPE_DRIFT_RECOVERY_MARKER = "scope-drift-approval-recovery.jsonl"
+
+BODY_DRIFT_WARNING_KEY = "body_drift_warning"
+"""Advisory :func:`approve_ticket` result key (#2311).
+
+A ready-to-print warning when the ticket body changed since the plan stage
+last evaluated it (the ``body_sha`` persisted in ``.cw/plan-draft.md``'s
+``plan-stage-last-evaluated`` marker no longer matches the live body), else
+None. Not a persisted ``TicketTask`` field, so it lives here rather than in
+``cw.models.tasks`` beside ``PLAN_APPROVED_FINGERPRINT_KEY``.
+"""
+# Mirrors ``promote_plan_draft``'s literal invoking-command ``actor``.
+_BODY_DRIFT_ACTOR = "cw dev-queue approve"
+_BODY_SHA_DISPLAY_LEN = 12
 
 
 def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool | None]:
@@ -90,7 +109,13 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool | N
     non-PLAN path and whenever the sentinel carried no fingerprint), and
     plan_promoted (#2342; True iff *this* call's direct plan->impl advance
     promoted ``.cw/plan-draft.md`` to ``.cw/plan.md`` -- always present, False
-    on every other path and when there was no draft to promote).
+    on every other path and when there was no draft to promote), and
+    body_drift_warning (#2311, ``BODY_DRIFT_WARNING_KEY``; a ready-to-print
+    warning when a PLAN-stage approval finds the GitHub ticket body changed
+    since the plan stage last evaluated it -- advisory only: it never blocks
+    and never mutates the row, and on a mismatch the
+    ``PLAN_APPROVAL_BODY_DRIFT_WARNED`` audit event is recorded -- None on
+    every other path and whenever there is nothing to compare).
 
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
@@ -371,6 +396,110 @@ def _promote_plan_draft_on_direct_advance(
     )
 
 
+def _read_persisted_body_sha(task: TicketTask, client_cfg: ClientConfig) -> str | None:
+    """Return the ``body_sha`` the plan stage last persisted for *task* (#2311).
+
+    Read from the worktree's ``.cw/plan-draft.md`` BEFORE the approve branch
+    chain runs, because the direct plan->impl advance promotes (and deletes)
+    that draft. Every miss -- no resolvable worktree, no draft, a read or
+    decode failure, no ``plan-stage-last-evaluated`` marker -- is None, which
+    skips the drift check entirely (fail-open, matching
+    ``lifecycle._local_plan_body``'s read idiom).
+    """
+    wt_path = resolve_task_worktree(task, client_cfg)
+    if wt_path is None:
+        return None
+    try:
+        draft_text = (wt_path / PLAN_DRAFT_RELATIVE_PATH).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return extract_persisted_body_sha(draft_text)
+
+
+def _body_drift_message(
+    task: TicketTask, persisted_body_sha: str, live_body_sha: str
+) -> str:
+    """Build the operator-facing :data:`BODY_DRIFT_WARNING_KEY` text (#2311).
+
+    The approval has already been recorded when this prints, and ``requeue``
+    refuses the now-PENDING row, so the requeue command is named as the safe
+    order for the next body edit rather than as an undo.
+    """
+    consequence = (
+        "the re-dispatched plan stage re-evaluates the edited body and may"
+        " re-park at plan_pending_approval"
+        if task.stage == Stage.PLAN
+        else "the approved plan, drafted against the old body, advances to"
+        f" {task.stage.value} as-is"
+    )
+    requeue = (
+        f"cw dev-queue requeue {task.ticket_id} --client {task.client} --stage plan"
+    )
+    return (
+        f"Warning: the body of ticket {task.ticket_id} changed after the plan"
+        " stage last evaluated it (persisted body_sha"
+        f" {persisted_body_sha[:_BODY_SHA_DISPLAY_LEN]}, live body_sha"
+        f" {live_body_sha[:_BODY_SHA_DISPLAY_LEN]}). The approval was recorded,"
+        f" but {consequence}. Safe order for a body edit: edit the body, run"
+        f" `{requeue}` while the ticket is still parked, then approve."
+    )
+
+
+def _detect_body_drift_warning(
+    task: TicketTask,
+    client_cfg: ClientConfig,
+    persisted_body_sha: str | None,
+) -> str | None:
+    """Warn when the live ticket body no longer matches the evaluated one (#2311).
+
+    Advisory only: never raises, never blocks, never mutates the row. Skipped
+    (None) when nothing was persisted to compare, when the client's tracker is
+    positively non-GitHub (``_tracker_allows_github_fetch``'s fail-open
+    polarity -- ``fetch_issue_body`` is ``gh``-only), and when the fetch
+    fails. On a mismatch, records ``PLAN_APPROVAL_BODY_DRIFT_WARNED`` where the
+    mismatch is discovered, under the caller's dev-queue lock and after its
+    ``save_dev_queue`` -- so ``task.plan_approved_fingerprint`` is the value
+    this approval stamped. A recording failure (``OSError``) is logged, not
+    propagated.
+    """
+    if persisted_body_sha is None or not _tracker_allows_github_fetch(client_cfg):
+        return None
+    body = fetch_issue_body(
+        task.ticket_id, FETCH_COMMENTS_TIMEOUT, cwd=_git_dir(client_cfg)
+    )
+    if body is None:
+        return None
+    live_body_sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    if live_body_sha == persisted_body_sha:
+        return None
+    try:
+        record_event(
+            OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED,
+            {
+                "ticket_id": task.ticket_id,
+                "client": task.client,
+                "persisted_body_sha": persisted_body_sha,
+                "live_body_sha": live_body_sha,
+                "plan_approved_fingerprint": task.plan_approved_fingerprint,
+                "actor": _BODY_DRIFT_ACTOR,
+            },
+            correlation_id=task.ticket_id,
+        )
+    except OSError:
+        # Mirrors promote_plan_draft's best-effort PLAN_DRAFT_PROMOTED emit:
+        # the event is advisory, so an unwritable events inbox never fails
+        # an approval that has already been saved.
+        _log.warning(
+            "approve: could not record %s for %s/%s; the body-drift warning"
+            " is still returned",
+            OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED.value,
+            task.client,
+            task.ticket_id,
+            exc_info=True,
+        )
+    return _body_drift_message(task, persisted_body_sha, live_body_sha)
+
+
 def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
     """True iff neither release condition for the approval gate is met.
 
@@ -525,6 +654,13 @@ def _approve_ticket_locked(
     as ``plan_promoted``. A promotion I/O failure raises before any mutation
     or ``save_dev_queue``, so the row stays parked and nothing is recorded.
 
+    ``body_drift_warning`` (#2311) is computed only for an operator-initiated
+    PLAN-stage approval: the persisted ``body_sha`` is read before the branch
+    chain (promotion deletes the draft), compared with the live GitHub body
+    after ``save_dev_queue``, and a mismatch records
+    ``PLAN_APPROVAL_BODY_DRIFT_WARNED``. Advisory only -- never raises, never
+    blocks, never mutates the row; automatic callers always get None.
+
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
             last_result is absent, last_result status is not an approval gate,
@@ -578,6 +714,8 @@ def _approve_ticket_locked(
             # Likewise: clearing a signoff gate never approves a plan draft,
             # so there is never a draft for this call to have promoted.
             PLAN_PROMOTED_KEY: False,
+            # No plan approval, so no ticket-body drift to warn about.
+            BODY_DRIFT_WARNING_KEY: None,
         }
 
     state = load_state()
@@ -603,6 +741,14 @@ def _approve_ticket_locked(
         raise ApproveGateError(msg)
 
     from_stage = task.stage.value
+    # #2311: read before the branch chain -- the direct advance below
+    # promotes (and deletes) the draft carrying the persisted body_sha. Only
+    # the operator's `cw dev-queue approve` runs the check.
+    persisted_body_sha = (
+        _read_persisted_body_sha(task, client_cfg)
+        if operator_initiated and task.stage == Stage.PLAN
+        else None
+    )
     awaiting_signoff = False
     plan_requeued = False
     finalize_held = False
@@ -679,6 +825,12 @@ def _approve_ticket_locked(
         "finalize_held": finalize_held,
         PLAN_APPROVED_FINGERPRINT_KEY: stamped_fingerprint,
         PLAN_PROMOTED_KEY: plan_promoted,
+        # #2311: evaluated here, after save_dev_queue, so the advisory event
+        # never describes an approval that did not persist (same ordering
+        # rationale as the scope-routing event above).
+        BODY_DRIFT_WARNING_KEY: _detect_body_drift_warning(
+            task, client_cfg, persisted_body_sha
+        ),
     }
 
 
