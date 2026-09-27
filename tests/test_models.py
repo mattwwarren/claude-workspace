@@ -2305,6 +2305,7 @@ class TestPackageExportCompleteness:
             "PLAN_PROMOTED_KEY",
             "SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY",
             "SCOPE_DRIFT_APPROVED_HEAD_KEY",
+            "STAGED_EMIT_RESULT_KEY",
             "PendingFixDispatch",
             "PrState",
             "QueueItemStatus",

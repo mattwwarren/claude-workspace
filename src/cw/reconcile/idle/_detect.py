@@ -26,6 +26,7 @@ from cw.reconcile._shared import (
     ReapCandidate,
     _has_terminal_sentinel,
     _parse_any_sentinel_from_transcript,
+    holds_staged_emit_result,
     ticket_id_for_session,
 )
 from cw.result import reconstruct_staged_sentinel
@@ -34,20 +35,6 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from cw.models import CwState, OrchestratorConfig, Session, TicketTask
-
-
-def _holds_staged_emit_result(session: Session) -> bool:
-    """True when *session* carries a terminal result its worker emitted (#2458).
-
-    ``cw result emit`` writes ``last_result`` directly -- independently of
-    whether ``signal_stop`` ever ran -- so for this source a populated
-    ``last_result`` is NOT evidence the Stop hook already routed it. Every
-    other source (``stop_hook_harvest`` and the reconcile writers) is written
-    by a routing authority, so those stay excluded exactly as before.
-    """
-    return session.last_result_source is LastResultSource.EMIT_CLI and (
-        _has_terminal_sentinel(session)
-    )
 
 
 def _staged_emit_result_refused(session: Session) -> bool:
@@ -93,6 +80,7 @@ def _staged_emit_candidate(
         proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
         ticket_id=ticket_id,
         routed_sentinel=staged,
+        result_source=LastResultSource.EMIT_CLI,
         # May legitimately be None: this producer reads session state, not a
         # transcript, so there is no csid to derive. _resolve_routed_sentinel
         # tolerates it.
@@ -119,16 +107,16 @@ def _detect_idle_candidate_for_session(
     sentinel is never dispositioned here regardless of elapsed time.
 
     Two producers share that delay. A staged ``cw result emit`` result
-    (:func:`_holds_staged_emit_result`) is routed off ``last_result`` itself
-    (#2458). Otherwise the guard ``last_result is None`` means signal_stop
-    never ran -- prevents double-routing -- and the transcript is re-parsed.
-    Constructive, not a reap. See GitHub #578, #2458.
+    (:func:`~cw.reconcile._shared.holds_staged_emit_result`) is routed off
+    ``last_result`` itself (#2458). Otherwise the guard ``last_result is
+    None`` means signal_stop never ran -- prevents double-routing -- and the
+    transcript is re-parsed. Constructive, not a reap. See GitHub #578, #2458.
     """
     elapsed = (now - session.started_at).total_seconds()
     if elapsed < config.sentinel_unrouted_check_seconds:
         return None
     lane = task.lane if task else DEFAULT_LANE
-    if _holds_staged_emit_result(session):
+    if holds_staged_emit_result(session):
         return _staged_emit_candidate(
             session, ticket_id=ticket_id, lane=lane, elapsed=elapsed
         )
@@ -173,7 +161,7 @@ def _detect_idle_candidates(
             continue
         if session.status not in _LIVE_STATUSES:
             continue
-        if _has_terminal_sentinel(session) and not _holds_staged_emit_result(session):
+        if _has_terminal_sentinel(session) and not holds_staged_emit_result(session):
             continue
         if session.surface_ref is None or session.surface_ref not in native_live:
             continue

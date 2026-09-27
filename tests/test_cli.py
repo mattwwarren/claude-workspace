@@ -51,6 +51,7 @@ from cw.exceptions import CwError, SprintApplyError
 from cw.models import (
     PARK_COMMENT_MARKER_KEY,
     PARK_ON_ABANDONED_EXIT_KEY,
+    STAGED_EMIT_RESULT_KEY,
     ClientConfig,
     CwState,
     LastResultSource,
@@ -4861,8 +4862,6 @@ class TestSignalStop:
     # even mid-background-task, and an unroutable one pages.
     # ------------------------------------------------------------------
 
-    _EMIT_HOOK_TIME = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
-
     def _stage_emit_cli_result(
         self, session_id: str, payload: dict[str, object]
     ) -> None:
@@ -4894,19 +4893,6 @@ class TestSignalStop:
             )
         )
 
-    def _fire_emit_stop(
-        self, worktree: Path, claude_session_id: str, **extra: object
-    ) -> None:
-        body: dict[str, object] = {
-            "session_id": claude_session_id,
-            "cwd": str(worktree),
-            "hook_event_name": "Stop",
-        }
-        body.update(extra)
-        with freeze_time(self._EMIT_HOOK_TIME):
-            result = CliRunner().invoke(main, ["signal-stop"], input=json.dumps(body))
-        assert result.exit_code == 0, result.output
-
     @staticmethod
     def _attention_statuses(consumer: str) -> list[object]:
         events = read_events(
@@ -4933,6 +4919,13 @@ class TestSignalStop:
         advance). ``Path.home`` points at an empty fake home: no transcript
         exists unless the case writes one, so any routing observed below can
         only have come from the staged ``last_result``.
+
+        The written context also carries ``staged_emit_result: True`` (#2458)
+        -- ``_stage_emit_cli_result`` writes ``last_result`` directly rather
+        than through ``cw result emit``, so it must also replicate that
+        command's cw-context.json stamp, or the Stop hook's lock-free peek
+        (which reads the stamp, never ``session.last_result``) would never
+        see this fixture's staged result as staged.
         """
         from cw.native_daemon import FakeNativeDaemonClient
 
@@ -4945,7 +4938,11 @@ class TestSignalStop:
         _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
         self._stage_emit_cli_result(session.id, payload)
         self._seed_running_row(session.id, stage=stage, attempts=attempts)
-        self._write_headless_context(worktree, session_id=session.id)
+        self._write_headless_context(
+            worktree,
+            session_id=session.id,
+            extra={STAGED_EMIT_RESULT_KEY: True},
+        )
         fake_home = tmp_path / f"fake-home-2458-{name}"
         fake_home.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -4990,7 +4987,7 @@ class TestSignalStop:
             stage=Stage.PLAN,
         )
 
-        self._fire_emit_stop(worktree, "sfref-2458-plan-advance-uuid")
+        self._invoke_stop(worktree, session_id="sfref-2458-plan-advance-uuid")
 
         assert self._reload_task().stage == Stage.IMPL
         updated = next(s for s in load_state().sessions if s.id == session.id)
@@ -5001,6 +4998,43 @@ class TestSignalStop:
         )
         assert [e.payload["session_id"] for e in events] == [session.id]
         assert daemon.stop_calls == ["sfref-2458-plan-advance"]
+
+    def test_signal_stop_emit_cli_shipped_completes_finalize_row(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2458 test 1b: a staged terminal ``shipped`` result completes the row.
+
+        Every other emit_cli case here is non-terminal (``stage_complete``) or
+        a park/refusal; the ticket's own incidents (a ``shipped`` FINALIZE
+        session stuck 35 minutes, comment 1) and comment 2's acceptance bar
+        both name a plain terminal completion explicitly, and this is the
+        first test to route one through the Stop hook.
+        """
+        from cw.models import QueueItemStatus
+
+        worktree, session, daemon = self._emit_case(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "shipped",
+            payload={**_valid_payload(), "ticket_id": self.SEED_TICKET_ID},
+            stage=Stage.FINALIZE,
+        )
+
+        self._invoke_stop(worktree, session_id="sfref-2458-shipped-uuid")
+
+        assert self._reload_task().status == QueueItemStatus.COMPLETED
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+        events = read_events(
+            consumer="t2458-shipped",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert [e.payload["session_id"] for e in events] == [session.id]
+        assert daemon.stop_calls == ["sfref-2458-shipped"]
 
     def test_signal_stop_emit_cli_premises_pending_verification_parks_plan_parked(
         self,
@@ -5026,7 +5060,7 @@ class TestSignalStop:
             stage=Stage.PLAN,
         )
 
-        self._fire_emit_stop(worktree, "sfref-2458-premises-uuid")
+        self._invoke_stop(worktree, session_id="sfref-2458-premises-uuid")
 
         assert self._reload_task().status == QueueItemStatus.BLOCKED_ON_USER
         assert self._attention_statuses("t2458-premises") == ["plan_parked"]
@@ -5069,7 +5103,7 @@ class TestSignalStop:
             filename=f"{claude_session_id}.jsonl",
         )
 
-        self._fire_emit_stop(worktree, claude_session_id)
+        self._invoke_stop(worktree, session_id=claude_session_id)
 
         assert self._reload_task().status == QueueItemStatus.BLOCKED_ON_USER
         updated = next(s for s in load_state().sessions if s.id == session.id)
@@ -5088,6 +5122,10 @@ class TestSignalStop:
         The genuine mid-subagent-wait case the ``background_tasks`` guard was
         always for: no ``cw result emit`` has run, so the lock-free peek finds
         nothing and the hook mutates nothing but the spawn-stamp snapshot.
+
+        Also #2458: the peek must answer from the cheap per-worktree
+        cw-context.json flag alone -- never by loading the fleet-wide
+        sessions.json -- so this is also the regression guard on that cost.
         """
         from cw.models import QueueItemStatus
 
@@ -5104,13 +5142,36 @@ class TestSignalStop:
         target.last_result = None
         target.last_result_source = None
         save_state(state)
+        # _emit_case stamps staged_emit_result unconditionally (payload={} was
+        # still "staged" at that point); clear it back to match the
+        # last_result wipe above, so the peek's flag agrees with session
+        # state for this "nothing staged" fixture.
+        context_path = worktree / ".claude" / "cw-context.json"
+        context = json.loads(context_path.read_text())
+        context[STAGED_EMIT_RESULT_KEY] = False
+        context_path.write_text(json.dumps(context))
         pre_snapshot = target.model_dump()
 
-        self._fire_emit_stop(
+        load_state_call_count = 0
+        real_load_state = load_state
+
+        def _counting_load_state() -> CwState:
+            nonlocal load_state_call_count
+            load_state_call_count += 1
+            return real_load_state()
+
+        monkeypatch.setattr("cw.cli.stop_hook.load_state", _counting_load_state)
+
+        self._invoke_stop(
             worktree,
-            "sfref-2458-nothing-staged-uuid",
+            session_id="sfref-2458-nothing-staged-uuid",
             background_tasks=[{"id": "task-1", "description": "Plan subagent running"}],
         )
+
+        # #2458: nothing staged -> the lock-free peek must resolve from the
+        # cw-context.json flag alone; it must never fall through to a
+        # fleet-wide sessions.json load to answer "is anything staged".
+        assert load_state_call_count == 0
 
         post = next(s for s in load_state().sessions if s.id == session.id)
         assert post.model_dump() == pre_snapshot
@@ -5142,9 +5203,9 @@ class TestSignalStop:
             stage=Stage.PLAN,
         )
 
-        self._fire_emit_stop(
+        self._invoke_stop(
             worktree,
-            "sfref-2458-bg-routed-uuid",
+            session_id="sfref-2458-bg-routed-uuid",
             background_tasks=[
                 {"id": "bg-1", "description": "trailing finalize subagent"}
             ],
@@ -5196,9 +5257,9 @@ class TestSignalStop:
             attempts=_VALIDATION_FAILED_MAX_ATTEMPTS,
         )
 
-        self._fire_emit_stop(
+        self._invoke_stop(
             worktree,
-            "sfref-2458-catchall-uuid",
+            session_id="sfref-2458-catchall-uuid",
             background_tasks=[{"id": "bg-1", "description": "still running"}],
         )
 
@@ -5240,7 +5301,7 @@ class TestSignalStop:
         )
 
         with caplog.at_level("WARNING", logger="cw.cli.stop_hook"):
-            self._fire_emit_stop(worktree, claude_session_id)
+            self._invoke_stop(worktree, session_id=claude_session_id)
 
         messages = [
             r.getMessage()
@@ -5286,7 +5347,7 @@ class TestSignalStop:
             stage=Stage.REVIEW,
         )
 
-        self._fire_emit_stop(worktree, "sfref-2458-mismatch-uuid")
+        self._invoke_stop(worktree, session_id="sfref-2458-mismatch-uuid")
 
         mismatches = read_events(
             consumer="t2458-mismatch",

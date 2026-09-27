@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 
 from cw.models import (
     CompletionReason,
-    LastResultSource,
     SessionStatus,
 )
 from cw.reconcile._shared import (
@@ -93,7 +92,12 @@ def _apply_idle_routed_mutations(
             candidate.ticket_id,
             session,
             routed_sentinel,
-            source=LastResultSource.SALVAGE_TRANSCRIPT,
+            # #2458: the candidate's own result_source, not a hardcoded
+            # SALVAGE_TRANSCRIPT literal -- this call now serves two
+            # differently-sourced producers (the transcript-salvage one, and
+            # the staged-emit one below), and hardcoding one source here
+            # misattributed the other's audit event.
+            source=candidate.result_source,
             audit_existing_result=(
                 reconstruct_staged_sentinel(session.last_result) == routed_sentinel
             ),

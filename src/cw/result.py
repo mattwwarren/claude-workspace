@@ -26,6 +26,7 @@ from cw.exceptions import (
 )
 from cw.models import (
     PLAN_DRAFT_FINGERPRINT_KEY,
+    STAGED_EMIT_RESULT_KEY,
     LastResultSource,
     OrchestratorEventType,
 )
@@ -566,6 +567,34 @@ def _fail_no_mutation(message: str | None) -> click.exceptions.Exit:
     return click.exceptions.Exit(1)
 
 
+def _stamp_staged_emit_result(session_id: str) -> None:
+    """Best-effort: flag this worktree's cw-context.json after a successful emit.
+
+    #2458: the Stop hook's lock-free peek
+    (``cw.cli.stop_hook._peek_staged_emit_result``)
+    reads this flag instead of ``load_state()`` to answer "does this session
+    hold a staged emit_cli result" without a fleet-wide sessions.json load on
+    every Stop-hook fire with pending ``background_tasks``.
+
+    Only stamps when the invoking cwd's own cw-context.json already names
+    *session_id* as its session -- an operator running ``cw result emit
+    --session-id`` from an unrelated directory must not stamp a foreign
+    worktree's context. Silent no-op on any mismatch, missing file, or write
+    failure: purely an optimization for the peek, never load-bearing -- a
+    peek that misses the flag just defers as it did before #2458, which a
+    later Stop or the idle sweep recovers from.
+    """
+    # Function-local import breaks the cw.cli <-> cw.result circular dependency;
+    # inline import is the sanctioned mechanism (PLC0415), not a workaround.
+    from cw.cli._hook_io import _read_cw_context, _write_cw_context_locked
+
+    cwd = str(Path.cwd())
+    context = _read_cw_context(cwd)
+    if context is None or context.get("session_id") != session_id:
+        return
+    _write_cw_context_locked(cwd, lambda ctx: {**ctx, STAGED_EMIT_RESULT_KEY: True})
+
+
 @result.command(name="emit")
 @click.argument("path")
 @click.option(
@@ -664,6 +693,7 @@ def result_emit(path: str, session_id: str | None, plan_draft: Path | None) -> N
         _echo_refusal(outcome.session_id, outcome.existing_source)
         return
 
+    _stamp_staged_emit_result(outcome.session_id)
     _echo_binding_note(binding)
     logger.info(
         "cw result emit: session=%s prior_status=%s new_status=%s",

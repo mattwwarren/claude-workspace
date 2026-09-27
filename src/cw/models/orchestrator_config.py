@@ -143,6 +143,16 @@ AGENT_SPAWN_STAMP_KEY = "agent_spawn_stamp"
 AGENT_SPAWN_UNRESOLVED_COUNT_KEY = "unresolved_count"
 AGENT_SPAWN_LAST_STAMPED_AT_KEY = "last_stamped_at"
 
+# Set True in cw-context.json by a successful ``cw result emit`` (#2458).
+# The Stop hook's lock-free peek (``cw.cli.stop_hook._peek_staged_emit_result``)
+# reads this flag instead of ``load_state()`` -- the peek's whole reason to
+# exist is a near-zero-cost check on every Stop-hook fire with pending
+# background_tasks, which a fleet-wide sessions.json load defeats. Lives here
+# for the same reason AGENT_SPAWN_STAMP_KEY does: ``cw.result`` (writer) and
+# ``cw.cli.stop_hook`` (reader) cannot import each other directly, so both
+# import the literal from this shared, dependency-free module.
+STAGED_EMIT_RESULT_KEY = "staged_emit_result"
+
 # Tool names the ``cw background-tool-guard-pre`` hook (#2303) is both wired to
 # and branches on: ``cw.spawn._build_hook_settings`` writes them as PreToolUse
 # matchers, and ``cw.cli._background_tool_policy`` compares the payload's

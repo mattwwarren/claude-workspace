@@ -36,6 +36,7 @@ from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
     AGENT_SPAWN_STAMP_KEY,
     AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
+    STAGED_EMIT_RESULT_KEY,
     CompletionReason,
     LastResultSource,
     OrchestratorEventType,
@@ -50,6 +51,7 @@ from cw.reconcile import (
     _has_terminal_sentinel,
     _route_stopped_without_sentinel,
     find_running_task_for_session,
+    holds_staged_emit_result,
     park_gate_open,
 )
 from cw.result import emit_result_locked, reconstruct_staged_sentinel
@@ -706,7 +708,7 @@ def signal_stop() -> None:
         # untouched exactly as before. Backstops if no further Stop ever
         # fires: the idle sweep routes a staged emit_cli result; the phantom
         # sweep handles a daemon that has exited.
-        if not _peek_staged_emit_result(cw_session_id, context):
+        if not _peek_staged_emit_result(context):
             return
     elif not _agent_spawn_stamp_is_clear(context):
         # #1947: this Stop has background_tasks empty/absent -- clear any
@@ -737,7 +739,7 @@ def signal_stop() -> None:
     session, claude_session_id, resolution = locked
 
     if resolution.rescued is None:
-        _handle_unrouted_stop(session, context, resolution)
+        _handle_unrouted_stop(session, context, resolution, bg_count)
         return
 
     if bg_count:
@@ -767,25 +769,21 @@ def signal_stop() -> None:
         get_native_daemon_client().stop(session.surface_ref)
 
 
-def _peek_staged_emit_result(cw_session_id: str, context: dict[str, object]) -> bool:
+def _peek_staged_emit_result(context: dict[str, object]) -> bool:
     """Lock-free peek: does this session hold a staged emit_cli result? (#2458)
 
-    Advisory only -- read without ``sessions_lock``, like
-    ``find_running_task_for_session``'s precondition read. A stale answer
-    cannot corrupt anything: True just means the caller takes the lock and
-    re-makes every decision from a freshly loaded session; False means it
-    defers exactly as it did before #2458, which a later Stop or the idle
-    sweep recovers from.
+    Reads the ``staged_emit_result`` flag ``cw result emit`` stamps into this
+    worktree's own ``cw-context.json`` (#2458) -- never ``load_state()``,
+    whose fleet-wide ``sessions.json`` this peek exists specifically to avoid
+    loading on every Stop-hook fire with pending ``background_tasks``. A
+    stale answer cannot corrupt anything: True just means the caller takes
+    the lock and re-makes every decision from a freshly loaded session; False
+    means it defers exactly as it did before #2458, which a later Stop or the
+    idle sweep recovers from.
     """
     if not context.get("headless"):
         return False
-    session = next((s for s in load_state().sessions if s.id == cw_session_id), None)
-    return (
-        session is not None
-        and session.origin is SessionOrigin.DAEMON
-        and session.last_result_source is LastResultSource.EMIT_CLI
-        and _has_terminal_sentinel(session)
-    )
+    return bool(context.get(STAGED_EMIT_RESULT_KEY))
 
 
 class _LockedStop(NamedTuple):
@@ -907,6 +905,7 @@ def _handle_unrouted_stop(
     session: Session,
     context: dict[str, object],
     resolution: _HeadlessResolution,
+    bg_count: int,
 ) -> None:
     """Act on a ``rescued=None`` bail once ``sessions_lock`` has released.
 
@@ -915,6 +914,12 @@ def _handle_unrouted_stop(
     daemon stop. Runs identically whether or not ``background_tasks`` was
     pending (#2458): a leaked worker is leaked whatever it is still waiting
     on, and an unroutable staged result deserves a page either way.
+
+    *bg_count* is the hook payload's ``background_tasks`` length at this
+    Stop -- carried through only to log alongside the #1273 daemon stop
+    (#2458), so a post-incident read can tell "stopped a leaked worker" from
+    "stopped a worker with N background tasks still in flight" instead of
+    inferring it from the surrounding Stop-hook fires.
     """
     if _sentinel_unroutable(session, resolution):
         # Defense in depth for a third, rarer failure mode: the hook DID run
@@ -934,6 +939,13 @@ def _handle_unrouted_stop(
         and session.origin is SessionOrigin.DAEMON
         and session.surface_ref is not None
     ):
+        logger.info(
+            "landed_terminal daemon stop: session=%s surface_ref=%s "
+            "pending_background_tasks=%d",
+            session.id,
+            session.surface_ref,
+            bg_count,
+        )
         get_native_daemon_client().stop(session.surface_ref)
 
 
@@ -951,8 +963,7 @@ def _sentinel_unroutable(session: Session, resolution: _HeadlessResolution) -> b
         not resolution.landed_terminal
         and not resolution.parked_abandoned
         and not resolution.stage_mismatch_refused
-        and session.last_result_source is LastResultSource.EMIT_CLI
-        and _has_terminal_sentinel(session)
+        and holds_staged_emit_result(session)
     )
 
 

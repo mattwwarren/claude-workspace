@@ -31,7 +31,6 @@ from cw.exceptions import CwError, RequeueStateError
 from cw.models import (
     ClientConfig,
     CompletionReason,
-    LastResultSource,
     OrchestratorEventType,
     QueueItemStatus,
     SessionOrigin,
@@ -40,7 +39,7 @@ from cw.models import (
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.reconcile import (
     _apply_sentinel_to_task,
-    _has_terminal_sentinel,
+    holds_staged_emit_result,
     ticket_id_for_session,
 )
 from cw.result import reconstruct_staged_sentinel
@@ -96,9 +95,7 @@ def _route_staged_emit_result(sess: Session) -> bool:
     Called under ``sessions_lock``, the same ``sessions_lock`` ->
     ``dev_queue_lock`` nesting ``signal_stop`` already uses.
     """
-    if sess.last_result_source is not LastResultSource.EMIT_CLI:
-        return False
-    if not _has_terminal_sentinel(sess):
+    if not holds_staged_emit_result(sess):
         return False
     staged = reconstruct_staged_sentinel(sess.last_result)
     if staged is None:

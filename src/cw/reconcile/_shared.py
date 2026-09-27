@@ -475,6 +475,15 @@ class ReapCandidate:
     # reclassified INTERMEDIATE_ADVANCE_STATUSES case is a third producer,
     # onto ROUTE_EMITTED_SENTINEL rather than a new field. See #2426.
     routed_sentinel: AutoDevResult | BlockedResult | None = None
+    # Which authority produced ``routed_sentinel``, threaded into the
+    # ``_apply_sentinel_to_task_audited`` call's ``source`` kwarg instead of a
+    # hardcoded literal (#2458). Defaults to the transcript-reparse producer
+    # (the common case across every ReapCandidate site); the idle sweep's
+    # staged-``cw result emit`` producer (``_staged_emit_candidate``) is the
+    # one override, so an emit_cli-originated result routed via that backstop
+    # is audited with its true source instead of misattributed to
+    # SALVAGE_TRANSCRIPT.
+    result_source: LastResultSource = LastResultSource.SALVAGE_TRANSCRIPT
     usage_limit_detected: bool = False
     elapsed_seconds: float = 0.0
     reap_reason: ReapReason | None = None
@@ -2595,6 +2604,28 @@ def _stamp_session_id_mismatch_advisories(
             changed = True
         if changed:
             save_dev_queue(store)
+
+
+def holds_staged_emit_result(session: Session) -> bool:
+    """True when *session* carries a staged, still-routable ``cw result emit`` result.
+
+    The shared base predicate for "an emit_cli result is staged and not yet
+    routed" -- EMIT_CLI source plus a terminal-shaped sentinel. Hoisted here
+    (#2458) after three independent reviewers found this exact pair
+    re-derived four times across three files (``cw.cli.stop_hook``'s
+    ``_peek_staged_emit_result`` and ``_sentinel_unroutable``,
+    ``cw.reconcile.idle._detect``'s ``_holds_staged_emit_result``, and
+    ``cw.cli.spawn``'s ``_route_staged_emit_result``): this predicate is the
+    load-bearing gate for the exact defect class #2458 exists to fix, so a
+    future change to what counts as "staged and routable" now has one site to
+    update instead of four. Each caller ANDs its own extra context-specific
+    condition (DAEMON origin, no route refusal yet, etc.) on top of this base
+    pair.
+    """
+    return (
+        session.last_result_source is LastResultSource.EMIT_CLI
+        and _has_terminal_sentinel(session)
+    )
 
 
 def _has_terminal_sentinel(session: Session) -> bool:

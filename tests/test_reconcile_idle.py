@@ -299,6 +299,53 @@ def test_detect_idle_candidates_routes_live_emit_cli_stage_complete(
     assert idle_daemon.stop_calls == ["fake-short-id"]
 
 
+def test_detect_idle_candidates_routes_live_emit_cli_shipped(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    no_transcript_parse: None,
+    idle_daemon: FakeNativeDaemonClient,
+) -> None:
+    """The backstop routes a staged terminal ``shipped`` result to COMPLETED.
+
+    The idle-sweep twin of the Stop hook's
+    ``test_signal_stop_emit_cli_shipped_completes_finalize_row``: every other
+    emit_cli case in this module is non-terminal (``stage_complete``) or a
+    park/refusal -- this is the plain terminal completion the ticket's own
+    incidents (a ``shipped`` FINALIZE session stuck 35 minutes) needed.
+    """
+    _write_staged_client()
+    _seed_row(QueueItemStatus.RUNNING, Stage.FINALIZE)
+    payload = _shipped_salvage_payload()
+    state = _emit_cli_state(tmp_path, payload)
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=_NOW_PAST_CHECK,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.proposed_action is ProposedAction.ROUTE_EMITTED_SENTINEL
+    assert candidate.ticket_id == _EMIT_TICKET
+    assert isinstance(candidate.routed_sentinel, AutoDevResult)
+    assert candidate.routed_sentinel.status == "shipped"
+    # #2458: the candidate's own source, not a hardcoded SALVAGE_TRANSCRIPT.
+    assert candidate.result_source is LastResultSource.EMIT_CLI
+
+    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+
+    assert _reload_row().status == QueueItemStatus.COMPLETED
+    session = state.sessions[0]
+    assert session.status is SessionStatus.COMPLETED
+    # The worker's own emitted result is audited, never overwritten.
+    assert session.last_result == payload
+    assert session.last_result_source is LastResultSource.EMIT_CLI
+    assert idle_daemon.stop_calls == ["fake-short-id"]
+
+
 def test_detect_idle_candidates_emit_cli_respects_the_unrouted_check_delay(
     tmp_config_dir: Path, tmp_path: Path, no_transcript_parse: None
 ) -> None:
