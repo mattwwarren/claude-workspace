@@ -514,7 +514,11 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
 3. **Capture the conflicted set:**
 
    ```bash
-   git diff --name-only --diff-filter=U > /tmp/conflicted-files-$CW_SESSION
+   # In the session worktree's own (excluded) .cw/, never the host's shared
+   # /tmp tmpfs (#2470).
+   mkdir -p "$(git rev-parse --show-toplevel)/.cw"
+   git diff --name-only --diff-filter=U \
+     > "$(git rev-parse --show-toplevel)/.cw/conflicted-files-$CW_SESSION"
    ```
 
 4. **Classify and resolve — one attempt, no loops:**
@@ -542,7 +546,7 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
        exit 3
      else
        RESOLVE_OUTPUT=$(uv run python "$RESOLVED" resolve \
-         --conflicted-files /tmp/conflicted-files-$CW_SESSION --json)
+         --conflicted-files "$(git rev-parse --show-toplevel)/.cw/conflicted-files-$CW_SESSION" --json)
        RESOLVE_EXIT=$?
      fi
    fi

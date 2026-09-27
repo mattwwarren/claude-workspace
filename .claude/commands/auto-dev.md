@@ -930,14 +930,14 @@ git worktree add --detach "$TMPWT" origin/<branch-name> || { echo "IMPL_FAILED: 
 git -C "$TMPWT" diff --stat "$FORK_POINT" | grep " changed" || { echo "IMPL_FAILED: empty diff"; exit 1; }
 
 # 2. File set matches the implementation plan's file list
-git -C "$TMPWT" diff --name-only "$FORK_POINT" | sort > /tmp/touched_files-$$
-echo "<files from plan>" | sort > /tmp/planned_files-$$
-comm -23 /tmp/touched_files-$$ /tmp/planned_files-$$ | wc -l
+git -C "$TMPWT" diff --name-only "$FORK_POINT" | sort > "$TMPDIR/touched_files-$$"
+echo "<files from plan>" | sort > "$TMPDIR/planned_files-$$"
+comm -23 "$TMPDIR/touched_files-$$" "$TMPDIR/planned_files-$$" | wc -l
 # (output must be 0 — no unexpected file touches)
 
 # 3. If the plan lists a test command, run it.
 export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$CW_SESSION"
-cd "$TMPWT" && timeout 600 <test_command> --tb=short > /tmp/test.log-$$ 2>&1
+cd "$TMPWT" && timeout 600 <test_command> --tb=short > "$TMPDIR/test.log-$$" 2>&1
 # Foreground, sized timeout — never accept a background continuation for
 # this call: a timeout here is IMPL_FAILED, not something to resume later
 # (Worker Execution Discipline).
