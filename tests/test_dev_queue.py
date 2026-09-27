@@ -5503,7 +5503,7 @@ class TestMoveTicket:
     def test_move_ticket_pending_success(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """PENDING ticket moves to target lane; returns old from_lane."""
+        """PENDING ticket moves to target lane; returns dict describing the move."""
         from cw.dev_queue import move_ticket
 
         _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
@@ -5515,9 +5515,14 @@ class TestMoveTicket:
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
 
-        from_lane = move_ticket("GEN-200", "genhealth", "fast")
+        result = move_ticket("GEN-200", "genhealth", to_lane="fast")
 
-        assert from_lane == "default"
+        assert result == {
+            "from_lane": "default",
+            "to_lane": "fast",
+            "from_priority": None,
+            "to_priority": None,
+        }
         store = load_dev_queue()
         moved = next(t for t in store.tasks if t.ticket_id == "GEN-200")
         assert moved.lane == "fast"
@@ -5609,6 +5614,260 @@ class TestMoveTicket:
 
         with pytest.raises(CwError, match="No dev-queue task found"):
             move_ticket("GEN-MISSING", "genhealth", "fast")
+
+    def test_move_ticket_priority_only_success(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Priority-only move (no to_lane) edits priority; lane is untouched."""
+        from cw.dev_queue import move_ticket
+
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default"])
+        task = TicketTask(
+            ticket_id="T1",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+            priority=0,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = move_ticket("T1", "genhealth", priority=5)
+
+        assert result == {
+            "from_lane": None,
+            "to_lane": None,
+            "from_priority": 0,
+            "to_priority": 5,
+        }
+        store = load_dev_queue()
+        moved = next(t for t in store.tasks if t.ticket_id == "T1")
+        assert moved.priority == 5
+        assert moved.lane == DEFAULT_LANE
+
+    def test_move_ticket_lane_and_priority_together(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """to_lane and priority given together mutate atomically, one save."""
+        from cw.dev_queue import move_ticket
+
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        task = TicketTask(
+            ticket_id="T1",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+            lane="default",
+            priority=0,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = move_ticket("T1", "genhealth", to_lane="fast", priority=5)
+
+        assert result == {
+            "from_lane": "default",
+            "to_lane": "fast",
+            "from_priority": 0,
+            "to_priority": 5,
+        }
+        store = load_dev_queue()
+        moved = next(t for t in store.tasks if t.ticket_id == "T1")
+        assert moved.lane == "fast"
+        assert moved.priority == 5
+
+    def test_move_ticket_priority_only_running_raises_lane_move_error(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """RUNNING ticket rejects a priority-only move too, not just lane moves."""
+        from cw.dev_queue import move_ticket
+        from cw.exceptions import LaneMoveError
+
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default"])
+        task = TicketTask(
+            ticket_id="T1",
+            client="genhealth",
+            status=QueueItemStatus.RUNNING,
+            priority=0,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(LaneMoveError):
+            move_ticket("T1", "genhealth", priority=5)
+
+    def test_move_ticket_priority_negative_allowed(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """No bounds are enforced on priority -- a negative value succeeds."""
+        from cw.dev_queue import move_ticket
+
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default"])
+        task = TicketTask(
+            ticket_id="T1",
+            client="genhealth",
+            status=QueueItemStatus.PENDING,
+            priority=0,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = move_ticket("T1", "genhealth", priority=-3)
+
+        assert result["to_priority"] == -3
+        store = load_dev_queue()
+        moved = next(t for t in store.tasks if t.ticket_id == "T1")
+        assert moved.priority == -3
+
+
+# ---------------------------------------------------------------------------
+# TestCLIDevQueueMove — cw dev-queue move
+# ---------------------------------------------------------------------------
+
+
+class TestCLIDevQueueMove:
+    """CLI-level coverage for `cw dev-queue move` (#2312)."""
+
+    def _seed_task(
+        self,
+        tmp_dev_queue: Path,
+        *,
+        status: QueueItemStatus = QueueItemStatus.PENDING,
+        priority: int = 0,
+        lane: str = "default",
+    ) -> None:
+        """Declare 'default'+'fast' lanes for client 'client' and seed T1."""
+        ws = tmp_dev_queue / "ws"
+        clients_file().write_text(
+            f"clients:\n  client:\n    workspace_path: {ws}\n"
+            "    lanes:\n"
+            "      - name: default\n        max_parallel: 1\n"
+            "      - name: fast\n        max_parallel: 1\n"
+        )
+        task = TicketTask(
+            ticket_id="T1",
+            client="client",
+            status=status,
+            lane=lane,
+            priority=priority,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+    def _capture_events(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> list[CapturedEvent]:
+        events: list[CapturedEvent] = []
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.crud.record_event",
+            lambda etype, payload=None, **kw: events.append(
+                (etype, payload or {}, kw.get("correlation_id"))
+            ),
+        )
+        return events
+
+    def test_move_cli_to_lane_only(
+        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_task(tmp_dev_queue)
+        events = self._capture_events(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "move", "T1", "-c", "client", "--to", "fast"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Moved T1 (client): default -> fast" in result.output
+        moved = [e for e in events if e[0] == OrchestratorEventType.TICKET_MOVED]
+        assert len(moved) == 1
+        reprioritized = [
+            e for e in events if e[0] == OrchestratorEventType.TICKET_REPRIORITIZED
+        ]
+        assert reprioritized == []
+
+    def test_move_cli_priority_only(
+        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_task(tmp_dev_queue)
+        events = self._capture_events(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "move", "T1", "-c", "client", "--priority", "5"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Reprioritized T1 (client): 0 -> 5" in result.output
+        reprioritized = [
+            e for e in events if e[0] == OrchestratorEventType.TICKET_REPRIORITIZED
+        ]
+        assert len(reprioritized) == 1
+        moved = [e for e in events if e[0] == OrchestratorEventType.TICKET_MOVED]
+        assert moved == []
+
+    def test_move_cli_both_flags(
+        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_task(tmp_dev_queue)
+        events = self._capture_events(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "move",
+                "T1",
+                "-c",
+                "client",
+                "--to",
+                "fast",
+                "--priority",
+                "5",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Moved T1 (client): default -> fast" in result.output
+        assert "Reprioritized T1 (client): 0 -> 5" in result.output
+        moved = [e for e in events if e[0] == OrchestratorEventType.TICKET_MOVED]
+        reprioritized = [
+            e for e in events if e[0] == OrchestratorEventType.TICKET_REPRIORITIZED
+        ]
+        assert len(moved) == 1
+        assert len(reprioritized) == 1
+
+    def test_move_cli_neither_flag_errors(
+        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_task(tmp_dev_queue)
+        events = self._capture_events(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "move", "T1", "-c", "client"])
+        assert result.exit_code != 0
+        assert "Must pass --to and/or --priority" in result.output
+        assert events == []
+        store = load_dev_queue()
+        unchanged = next(t for t in store.tasks if t.ticket_id == "T1")
+        assert unchanged.lane == "default"
+        assert unchanged.priority == 0
+
+    def test_move_cli_priority_on_running_task_errors(
+        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_task(tmp_dev_queue, status=QueueItemStatus.RUNNING)
+        events = self._capture_events(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "move", "T1", "-c", "client", "--priority", "5"]
+        )
+        assert result.exit_code != 0
+        assert "running" in result.output.lower()
+        assert events == []
+
+    def test_move_cli_short_flag_p(
+        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_task(tmp_dev_queue)
+        events = self._capture_events(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "move", "T1", "-c", "client", "-p", "5"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Reprioritized T1 (client): 0 -> 5" in result.output
+        reprioritized = [
+            e for e in events if e[0] == OrchestratorEventType.TICKET_REPRIORITIZED
+        ]
+        assert len(reprioritized) == 1
 
 
 # ---------------------------------------------------------------------------
