@@ -547,6 +547,12 @@ printf '%s' "$SENTINEL_JSON" | cw result emit -
 
 ---
 
+## Stage event rule (#2429)
+
+A `cw event record stage.*` rejection that names a payload field (`Unknown stage '…'` / `Unknown prev_stage '…'`, per the closed stage enum in `docs/headless-contract.md` §10.2) is a bug in the calling fence — fix the payload and re-run; any other failure of the event call is ignored as today.
+
+---
+
 ## Guard Matrix
 
 Two independent axes control approval automation.
@@ -1123,7 +1129,7 @@ and the queue task unrouted (#578 — observed four times in the 1.1 waves).
 ```bash
 cw event record stage.entered \
   --correlation-id "$TICKET" \
-  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"done\",\"prev_stage\":\"s5_ci_waiting\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
+  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"done\",\"prev_stage\":\"s5_ci_waiting\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
 ```
 
 **Emit through cw, then frame (#2382).** Record the payload with `cw result emit -` per the *Sentinel emit rule* above — from the cw session worktree root, fixing every `field.path: message` error it reports and re-running until it exits 0 — and only then frame the recorded JSON. Recording is not framing (#1890): the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame, wrapping the same JSON, MUST be the final characters of this same message — not a description of what you are about to do next.

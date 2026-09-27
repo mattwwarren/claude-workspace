@@ -34,7 +34,7 @@ The durable revocation is the approval source of truth: Checkpoint 1 MUST honor 
      ```bash
      cw event record stage.entered \
        --correlation-id "$TICKET" \
-       --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_skipped\",\"prev_stage\":\"s1_plan_generated\",\"reason\":\"approved_fingerprint_match\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
+       --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_skipped\",\"prev_stage\":\"s1_plan_generated\",\"reason\":\"approved_fingerprint_match\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
      ```
      — in place of, not in addition to, `s1_ambiguity_scan_complete`.
    - **Operator-authority-delta alternate eligibility guard — this branch fires ONLY when ALL three conditions hold (#2433 fix cycle 6):**
@@ -47,7 +47,7 @@ The durable revocation is the approval source of truth: Checkpoint 1 MUST honor 
      ```bash
      cw event record stage.entered \
        --correlation-id "$TICKET" \
-       --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_skipped\",\"prev_stage\":\"s1_plan_generated\",\"reason\":\"operator_approval_no_delta\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
+       --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_skipped\",\"prev_stage\":\"s1_plan_generated\",\"reason\":\"operator_approval_no_delta\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
       ```
      — in place of, not in addition to, `s1_ambiguity_scan_complete`. Any operator-authority comment newer than `plan_approved_at` disqualifies this branch and falls through to Step 1c.0 / Step 1c as today.
 

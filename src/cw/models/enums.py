@@ -585,6 +585,40 @@ class OrchestratorEventType(StrEnum):
     SESSION_RESULT_EMITTED = "session.result_emitted"
 
 
+class StageIdentifier(StrEnum):
+    """Closed headless-contract §10.2 stage vocabulary (GitHub #2429).
+
+    The legal values of ``payload.stage`` and ``payload.prev_stage`` on
+    ``stage.entered`` / ``stage.errored`` events. ``cw event record`` rejects
+    anything else at record time, and ``cw orchestrate status`` renders an
+    out-of-set ``stage`` as no ``last_stage`` at all.
+
+    Distinct from ``Stage`` above (the RFC 0005 dispatch-lane pipeline stage):
+    an unrelated concept with a different producer (the ``/auto-dev`` skill,
+    not ``cw dispatch``).
+    """
+
+    S0_INTAKE = "s0_intake"
+    S1_PLAN_GENERATED = "s1_plan_generated"
+    S1_AMBIGUITY_SCAN_COMPLETE = "s1_ambiguity_scan_complete"
+    S1_AMBIGUITY_SCAN_SKIPPED = "s1_ambiguity_scan_skipped"
+    S1_PLAN_REVIEWED = "s1_plan_reviewed"
+    S2_IMPL_STARTED = "s2_impl_started"
+    S2_IMPL_COMPLETE = "s2_impl_complete"
+    S3_REVIEW_STARTED = "s3_review_started"
+    S3_REVIEW_COMPLETE = "s3_review_complete"
+    S4_PR_CREATED = "s4_pr_created"
+    S5_CI_WAITING = "s5_ci_waiting"
+    DONE = "done"
+
+
+# Membership set for the closed §10.2 vocabulary. ``payload.stage`` lives in
+# the open ``OrchestratorEvent.payload`` dict, so there is no model field to
+# type as ``StageIdentifier``; both the CLI producer gate and the orchestrate
+# consumer filter test membership against this one constant.
+STAGE_IDENTIFIERS: frozenset[str] = frozenset(s.value for s in StageIdentifier)
+
+
 class DispatchSkipReason(StrEnum):
     """First-match skip_reason values emitted in dispatch.tick events.
 

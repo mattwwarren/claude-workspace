@@ -155,7 +155,7 @@ rules below are tracker-aware.
    TICKET=$(jq -r '.ticket_id' "$CW_CTX")
    cw event record stage.entered \
      --correlation-id "$TICKET" \
-     --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s0_intake\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
+     --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s0_intake\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
    ```
    `$CW_SESSION` and `$TICKET` are used by every subsequent stage event emission. Source is `cw-context.json` (written by `cw` dispatch before spawning): the `CW_SESSION_ID` env var does not propagate through `claude --bg` (RFC 0001 §Row 10 gap).
 

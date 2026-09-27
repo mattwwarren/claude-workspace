@@ -56,6 +56,7 @@ from cw.models import (
     SessionStatus,
     TicketTask,
 )
+from cw.models.enums import STAGE_IDENTIFIERS
 from cw.pr_hydrate import _parse_pr_url
 from cw.reconcile._shared import _transcript_age_seconds
 
@@ -557,6 +558,11 @@ def _derive_last_stage_by_session(
     earlier ones. STAGE_ERRORED events are deliberately ignored — they
     remain visible in recent_events but do not redefine the "current
     stage" of a session.
+
+    A ``stage`` outside ``STAGE_IDENTIFIERS`` is skipped too (#2429): the
+    same closed §10.2 set ``cw event record`` enforces, applied here so a
+    producer that bypasses the CLI and calls ``record_event`` directly still
+    degrades to no ``last_stage`` instead of leaking a raw string.
     """
     result: dict[str, str] = {}
     for ev in events:
@@ -564,7 +570,11 @@ def _derive_last_stage_by_session(
             continue
         session_id = ev.payload.get("session_id")
         stage = ev.payload.get("stage")
-        if isinstance(session_id, str) and isinstance(stage, str):
+        if (
+            isinstance(session_id, str)
+            and isinstance(stage, str)
+            and stage in STAGE_IDENTIFIERS
+        ):
             result[session_id] = stage
     return result
 

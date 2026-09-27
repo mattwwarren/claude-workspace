@@ -100,7 +100,7 @@ Spawn a **Plan** agent (`subagent_type: "Plan", model: "sonnet"`) and wait for i
    ```bash
    cw event record stage.entered \
      --correlation-id "$TICKET" \
-     --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_plan_generated\",\"prev_stage\":\"s0_intake\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
+     --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_plan_generated\",\"prev_stage\":\"s0_intake\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
    ```
 
 ### Step 1c: Ambiguity Verification
@@ -212,7 +212,7 @@ A line whose content is anything other than the exact grammar above (trailing te
    > ```bash
    > cw event record stage.errored \
    >   --correlation-id "$TICKET" \
-   >   --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_complete\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"error_kind\":\"deferred_stub_unresolved\"}" || true
+   >   --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_complete\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"error_kind\":\"deferred_stub_unresolved\"}"
    > ```
    >
    > **Cap check (second).** Reachable only when the stub check passed AND the impending Step 4c outcome is one of the three EXIT bullets — i.e. `parked` non-empty OR `unverified` non-empty. AUTO-CONTINUE never reaches this check, since nothing is being parked or blocked for the round cap to bound.
@@ -224,7 +224,7 @@ A line whose content is anything other than the exact grammar above (trailing te
    > ```bash
    > cw event record stage.errored \
    >   --correlation-id "$TICKET" \
-   >   --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_complete\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"error_kind\":\"ambiguity_scan_unconverged\"}" || true
+   >   --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_complete\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"error_kind\":\"ambiguity_scan_unconverged\"}"
    > ```
 
    **Step 4c — Exit/continue decision.** Keys on `parked` and `unverified` ONLY — `deferred` never gates (#1651) — not the raw block presence: an all-adopt ambiguity scan (`parked` empty) or a premises scan fully absorbed by `self_verified` + `deferred` (`unverified` empty) is functionally `NO_AMBIGUITIES`/`no premises pending` even though the raw scans returned items:
@@ -234,7 +234,7 @@ A line whose content is anything other than the exact grammar above (trailing te
    ```bash
    cw event record stage.entered \
      --correlation-id "$TICKET" \
-     --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_complete\",\"prev_stage\":\"s1_plan_generated\",\"adopted_count\":<N>,\"malformed_recommendation_count\":<M>,\"malformed_verified_count\":<V>,\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
+     --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_complete\",\"prev_stage\":\"s1_plan_generated\",\"adopted_count\":<N>,\"malformed_recommendation_count\":<M>,\"malformed_verified_count\":<V>,\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
    ```
    `<N>` is a literal placeholder — substitute the computed `len(adopted)` integer directly into the payload string before running the command. It is not a shell variable: nothing exports an `ADOPTED_COUNT` env var, so a literal `$ADOPTED_COUNT` token would expand to empty and produce invalid JSON. `<M>` is likewise a literal placeholder for the `malformed_recommendation_count` from Step 4a; on this AUTO-CONTINUE emission it is always `0` (malformed items are a subset of the empty `parked`), and the non-zero case surfaces via the `## Pending Verification Scan` comment note below. `<V>` is likewise a literal placeholder for `malformed_verified_count`. Unlike `malformed_recommendation_count`, this field is NOT guaranteed always-`0` on the AUTO-CONTINUE path (#2432): its malformed-`Verified`-only component is always `0` here, because a malformed-`Verified` item is fail-closed to `NO` and always lands in `unverified`, which would block AUTO-CONTINUE outright — but its malformed/missing-`Impact:` component can still be non-zero even on an otherwise-clean AUTO-CONTINUE round, since such an item can carry a well-formed `Verified: YES`/`DEFER` and settle into `self_verified`/`deferred` without ever touching `unverified`. The `## Pending Verification Scan` comment note below only fires when `unverified` is non-empty, so a purely Impact-driven non-zero `<V>` on an AUTO-CONTINUE round surfaces only via `friction_highlights` (#2432), not via that comment note.
    - `parked` non-empty AND `unverified` empty → EXIT `ambiguities_pending_resolution` **through the consolidated park above**. Persist the draft per the draft-persistence rule above (write the plan's current text to `.cw/plan-draft.md`) before posting. Post only the `parked` items (renumbered) under the `## Pending Verification Scan` header (one numbered question per item, with the plan's current interpretation and the alternatives) and include only the `parked` items in the result payload under `ambiguities` — never the raw N-item list. The branch is NOT created. If this round settled ≥1 item via Step 1c.0 step 5, include `resolution_consumed: true` and `resolution_evidence`; otherwise omit both keys.
@@ -404,7 +404,7 @@ Re-spawn the **Plan** agent (`subagent_type: "Plan", model: "sonnet"`) (#2211) w
 ```bash
 cw event record stage.errored \
   --correlation-id "$TICKET" \
-  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_plan_reviewed\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"error_kind\":\"plan_revision_failed\"}" || true
+  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_plan_reviewed\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"error_kind\":\"plan_revision_failed\"}"
 ```
 
 **Friction & health check note:** if either reviewer's friction is **BLOCK** (couldn't access the repo, plan malformed), treat as `agent_block` per the existing escalation path — do NOT treat agent failure as a clean review.
@@ -422,7 +422,7 @@ Recompute the tier alone (via the Step 1d.3 boundary — `≤10 files AND ≤500
 ```bash
 cw event record stage.errored \
   --correlation-id "$TICKET" \
-  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_plan_reviewed\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"error_kind\":\"scope_tier_stale\"}" || true
+  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_plan_reviewed\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"error_kind\":\"scope_tier_stale\"}"
 ```
 
 **Independent of the approval fingerprint (#2102, no rule change).** This gate and Checkpoint 1's fingerprint-equality check are two separate sensors on the same underlying risk, and neither subsumes the other: a Small→Large tier flip fires here even when the fingerprint matched, and a fingerprint mismatch re-parks at Checkpoint 1 even when the tier is unchanged. There is deliberately no additional "a tier change always re-asks for approval" rule — a tier change is very likely to correlate with a content change, which the fingerprint already detects, and a stale-tier stamp is caught here regardless.
@@ -460,7 +460,7 @@ If Step 1c surfaced ambiguities AND the user resolved them (interactive path), O
 ```bash
 cw event record stage.entered \
   --correlation-id "$TICKET" \
-  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_plan_reviewed\",\"prev_stage\":\"s1_ambiguity_scan_complete\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
+  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_plan_reviewed\",\"prev_stage\":\"s1_ambiguity_scan_complete\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
 ```
 
 ---
