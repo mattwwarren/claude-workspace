@@ -132,4 +132,8 @@ def merge_in_progress(worktree_path: Path | None) -> bool | None:
         )
     except OSError:
         return None
-    return result.returncode == 0
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None

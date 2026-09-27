@@ -276,6 +276,12 @@ class TestMergeInProgress:
         assert merge_in_progress(None) is None
         assert merge_in_progress(tmp_path / "nope") is None
 
+    def test_non_repository_is_unmeasurable(self, tmp_path: Path) -> None:
+        """A fatal git probe failure is not a measured clean merge state."""
+        from cw.branch_ahead import merge_in_progress
+
+        assert merge_in_progress(tmp_path) is None
+
     def test_git_failure_is_unmeasurable(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
