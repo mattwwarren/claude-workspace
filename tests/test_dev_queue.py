@@ -7444,20 +7444,43 @@ class TestApproveTicket:
         approve_ticket("GEN-500", "genhealth")
         assert events == []
 
-    def test_approve_body_drift_event_failure_is_logged_not_raised(
+    def test_body_drift_event_shares_the_promotion_event_actor(self) -> None:
+        """Both approve-path audit events name one actor constant."""
+        import inspect
+
+        from cw.dev_queue.plan_promotion import (
+            DEV_QUEUE_APPROVE_ACTOR,
+            promote_plan_draft,
+        )
+
+        assert DEV_QUEUE_APPROVE_ACTOR == "cw dev-queue approve"
+        actor_default = inspect.signature(promote_plan_draft).parameters["actor"]
+        assert actor_default.default is DEV_QUEUE_APPROVE_ACTOR
+
+    @pytest.mark.parametrize("event_error", [OSError, RuntimeError])
+    def test_approve_body_drift_event_failure_aborts_with_nothing_persisted(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
+        event_error: type[Exception],
     ) -> None:
-        """The event is advisory: a recording failure is logged and the
-        warning is still returned -- the approval never fails over it."""
-        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+        """Event-first ordering: the body-drift audit is recorded before any
+        mutation, so a failed append -- whatever it raises -- is logged and
+        aborts the approval with nothing persisted: the row stays parked and
+        the approved draft is never promoted over ``.cw/plan.md``."""
         from cw.dev_queue import approval as approval_module
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
 
-        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift13")
+        task = self._arm_plan_pending(
+            tmp_config_dir, tmp_path, monkeypatch, "sess-drift13", plan=plan_body()
+        )
         _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+        assert task.worktree_path is not None
+        cw_dir = task.worktree_path / ".cw"
+        before = load_dev_queue().model_dump()
         real_record_event = approval_module.record_event
 
         def _record(
@@ -7468,19 +7491,62 @@ class TestApproveTicket:
         ) -> None:
             if etype == OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED:
                 msg = "events log unwritable"
-                raise OSError(msg)
+                raise event_error(msg)
             real_record_event(etype, payload, correlation_id=correlation_id)
 
         monkeypatch.setattr("cw.dev_queue.approval.record_event", _record)
 
-        with caplog.at_level(logging.WARNING, logger="cw.dev_queue.approval"):
-            result = approve_ticket("GEN-500", "genhealth")
+        with (
+            caplog.at_level(logging.ERROR, logger="cw.dev_queue.approval"),
+            pytest.raises(ApproveGateError, match="Nothing was recorded") as excinfo,
+        ):
+            approve_ticket("GEN-500", "genhealth")
 
-        assert isinstance(result[BODY_DRIFT_WARNING_KEY], str)
+        assert isinstance(excinfo.value.__cause__, event_error)
         assert "plan.approval_body_drift_warned" in caplog.text
-        store = load_dev_queue()
-        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
-        assert t.plan_approved_fingerprint == _RECONCILED_DRAFT_FINGERPRINT
+        assert any(record.exc_info for record in caplog.records)
+        assert load_dev_queue().model_dump() == before
+        assert (cw_dir / "plan.md").read_text(encoding="utf-8") == plan_body()
+        assert (cw_dir / "plan-draft.md").read_text(
+            encoding="utf-8"
+        ) == _BODY_EVALUATED_DRAFT
+
+    def test_approve_body_drift_save_failure_after_event_leaves_phantom_record(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Documented accepted risk, mirroring ``revoke_plan_approval``
+        (#2394): the body-drift audit is recorded before ``save_dev_queue``,
+        so a save failure after a successful append leaves a phantom audit
+        record -- the event stands while the approval never persisted. The
+        record is truthful that a drifted approval was attempted, and a
+        re-run of ``approve`` re-evaluates from the still-parked row."""
+        from cw.dev_queue import approve_ticket
+        from cw.events import read_events
+
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift14")
+        _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        def _raise_save(*_args: object, **_kwargs: object) -> None:
+            msg = "queue file unwritable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.dev_queue.approval.save_dev_queue", _raise_save)
+
+        with pytest.raises(OSError, match="queue file unwritable"):
+            approve_ticket("GEN-500", "genhealth")
+
+        audit = read_events(
+            event_types=[OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED]
+        )
+        assert len(audit) == 1
+        assert audit[0].correlation_id == "GEN-500"
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.plan_approved_at is None
+        assert t.plan_approved_fingerprint is None
 
 
 # ---------------------------------------------------------------------------
