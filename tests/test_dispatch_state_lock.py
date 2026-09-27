@@ -512,7 +512,14 @@ class TestHostTmpProbeCacheSidecar:
             "acme", HostTmpProbeCache(datetime.now(UTC), exhausted=True, latched=True)
         )
 
-        assert load_host_tmp_probe_cache() == {}
+        # The process-local fallback keeps the just-set latch visible even
+        # when the sidecar write fails, preventing repeated attention events.
+        assert load_host_tmp_probe_cache()["acme"].latched is True
+
+        save_host_tmp_probe_cache(
+            "acme", HostTmpProbeCache(datetime.now(UTC), exhausted=False, latched=False)
+        )
+        assert load_host_tmp_probe_cache()["acme"].latched is False
 
 
 class TestOpenPrProbeEntriesBatch:

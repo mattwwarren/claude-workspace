@@ -125,6 +125,8 @@ class TestInodeFloor:
         [
             # Small mount: the absolute floor dominates (5% would be 10K).
             (200_000, 50_000),
+            # Preserve a non-integral fractional floor by rounding upward.
+            (3, 2),
             # R1 example 1: 1M-inode tmpfs refuses below 50K free.
             (1_000_000, 50_000),
             # R1 example 2: 50M-inode ext4 mount refuses below 2.5M free.
@@ -134,7 +136,9 @@ class TestInodeFloor:
     def test_effective_min_free_inodes(self, total: int, expected_floor: int) -> None:
         assert (
             effective_min_free_inodes(
-                total, min_free_inodes=50_000, min_free_inode_fraction=0.05
+                total,
+                min_free_inodes=0 if total == 3 else 50_000,
+                min_free_inode_fraction=0.5 if total == 3 else 0.05,
             )
             == expected_floor
         )

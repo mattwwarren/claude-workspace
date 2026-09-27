@@ -139,6 +139,13 @@ class HostTmpProbeCache(NamedTuple):
     # subsequent probe is healthy (edge-triggered reset).
 
 
+# A failed sidecar write must not erase an edge-triggered latch in the current
+# process: the next probe would otherwise re-emit SESSION_NEEDS_ATTENTION.
+# Include the state-file path because tests, and callers embedding cw, can
+# redirect state between independent stores in one process.
+_HOST_TMP_PROBE_FALLBACK: dict[tuple[str, str], HostTmpProbeCache] = {}
+
+
 def _executor_blocked_key(client: str, ticket_id: str) -> str:
     """Composite sidecar key for one (client, ticket) marker.
 
@@ -871,34 +878,43 @@ def load_host_tmp_probe_cache() -> dict[str, HostTmpProbeCache]:
     Returns ``{}`` when the file is absent, unreadable, malformed, or missing
     the ``"host_tmp_probe"`` key. Individual malformed entries are dropped.
     """
-    path = DISPATCH_STATE_FILE
-    if not path.exists():
-        return {}
-    try:
-        raw = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError, ValueError, TypeError):
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    entries = raw.get("host_tmp_probe")
-    if not isinstance(entries, dict):
-        return {}
     cache: dict[str, HostTmpProbeCache] = {}
-    for client_name, entry in entries.items():
-        parsed = _parse_host_tmp_probe_entry(entry)
-        if parsed is not None:
-            cache[client_name] = parsed
+    path = DISPATCH_STATE_FILE
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError, ValueError, TypeError):
+            raw = None
+        if isinstance(raw, dict):
+            entries = raw.get("host_tmp_probe")
+            if isinstance(entries, dict):
+                for client_name, entry in entries.items():
+                    parsed = _parse_host_tmp_probe_entry(entry)
+                    if parsed is not None:
+                        cache[client_name] = parsed
+    state_path = str(DISPATCH_STATE_FILE)
+    cache.update(
+        {
+            client_name: entry
+            for (fallback_path, client_name), entry in _HOST_TMP_PROBE_FALLBACK.items()
+            if fallback_path == state_path
+        }
+    )
     return cache
 
 
-def save_host_tmp_probe_cache(client_name: str, cache: HostTmpProbeCache) -> None:
+def save_host_tmp_probe_cache(client_name: str, cache: HostTmpProbeCache) -> bool:
     """Persist one client's worker-tmp inode latch (#2470).
 
     Read-merge-writes the shared sidecar (other keys preserved, #1157) and
     merges into the existing ``"host_tmp_probe"`` dict so other clients keep
     their own entries. Silently swallows write errors, same posture as
-    :func:`save_main_drift_latches`: a failed persist costs at most one extra
-    attention re-fire (on a set) or one suppressed re-arm (on a reset).
+    :func:`save_main_drift_latches`. When persistence fails, retain a
+    process-local per-client fallback so a set cannot re-fire attention on
+    every tick; a later healthy probe replaces that fallback with an
+    unlatched entry.
+
+    Returns whether the sidecar write succeeded.
     """
     try:
         refuse_real_state_write(DISPATCH_STATE_FILE)
@@ -916,8 +932,13 @@ def save_host_tmp_probe_cache(client_name: str, cache: HostTmpProbeCache) -> Non
             payload["host_tmp_probe"] = entries
             atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
     except OSError:
+        _HOST_TMP_PROBE_FALLBACK[(str(DISPATCH_STATE_FILE), client_name)] = cache
         logger.warning(
             "dispatch_state: failed to persist host_tmp_probe (client=%s)",
             client_name,
             exc_info=True,
         )
+        return False
+    else:
+        _HOST_TMP_PROBE_FALLBACK.pop((str(DISPATCH_STATE_FILE), client_name), None)
+        return True

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from math import ceil
 from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
@@ -87,7 +88,7 @@ def effective_min_free_inodes(
     50M-inode mount refuses below 2.5M free). Shared by the dispatch-time
     gate and the ``cw doctor`` worker-tmp check so the two never disagree.
     """
-    return int(max(min_free_inodes, min_free_inode_fraction * total_inodes))
+    return ceil(max(min_free_inodes, min_free_inode_fraction * total_inodes))
 
 
 def inodes_exhausted(
