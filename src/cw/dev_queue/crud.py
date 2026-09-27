@@ -457,13 +457,19 @@ def move_ticket(
                 )
                 raise LaneNotFoundError(msg)
 
-        if (
-            to_lane is not None or priority is not None
-        ) and task.status in _UNMOVABLE_STATUSES:
+        if priority is not None and task.status != QueueItemStatus.PENDING:
             msg = (
-                f"Cannot move or reprioritize ticket '{ticket_id}':"
+                f"Cannot reprioritize ticket '{ticket_id}':"
                 f" task is {task.status.value}."
-                " Only PENDING tasks can be moved or reprioritized."
+                " Only PENDING tasks can be reprioritized."
+            )
+            raise LaneMoveError(msg)
+
+        if to_lane is not None and task.status in _UNMOVABLE_STATUSES:
+            msg = (
+                f"Cannot move ticket '{ticket_id}':"
+                f" task is {task.status.value}."
+                " Only PENDING tasks can be moved."
             )
             raise LaneMoveError(msg)
 

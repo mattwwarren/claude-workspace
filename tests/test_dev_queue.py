@@ -1742,9 +1742,9 @@ class TestAddTicketDedupe:
 
 
 def _setup_client_with_lanes(
-    tmp_config_dir: Path, tmp_path: Path, lanes: list[str]
+    tmp_config_dir: Path, tmp_path: Path, client_name: str, lanes: list[str]
 ) -> None:
-    """Write clients.yaml with named lanes for 'genhealth'."""
+    """Write clients.yaml with named lanes for a client."""
     config_dir = tmp_config_dir / ".config" / "cw"
     config_dir.mkdir(parents=True, exist_ok=True)
     ws = tmp_path / "ws"
@@ -1753,7 +1753,7 @@ def _setup_client_with_lanes(
         f"      - name: {ln}\n        max_parallel: 1\n" for ln in lanes
     )
     (config_dir / "clients.yaml").write_text(
-        f"clients:\n  genhealth:\n    workspace_path: {ws}\n    lanes:\n{lane_yaml}"
+        f"clients:\n  {client_name}:\n    workspace_path: {ws}\n    lanes:\n{lane_yaml}"
     )
 
 
@@ -1778,7 +1778,9 @@ class TestAddTicketLaneValidation:
         """add_ticket raises LaneNotFoundError for an undeclared lane."""
         from cw.exceptions import LaneNotFoundError
 
-        _setup_client_with_lanes(tmp_config_dir, patched_queue, ["default"])
+        _setup_client_with_lanes(
+            tmp_config_dir, patched_queue, "genhealth", ["default"]
+        )
         task = TicketTask(ticket_id="GEN-10", client="genhealth", lane="fast")
         with pytest.raises(LaneNotFoundError, match="Lane 'fast' is not declared"):
             add_ticket(task)
@@ -1787,7 +1789,9 @@ class TestAddTicketLaneValidation:
         self, patched_queue: Path, tmp_config_dir: Path
     ) -> None:
         """add_ticket accepts a task whose lane is declared for the client."""
-        _setup_client_with_lanes(tmp_config_dir, patched_queue, ["default", "fast"])
+        _setup_client_with_lanes(
+            tmp_config_dir, patched_queue, "genhealth", ["default", "fast"]
+        )
         task = TicketTask(ticket_id="GEN-11", client="genhealth", lane="fast")
         result = add_ticket(task)
         assert result is True
@@ -5506,7 +5510,9 @@ class TestMoveTicket:
         """PENDING ticket moves to target lane; returns dict describing the move."""
         from cw.dev_queue import move_ticket
 
-        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        _setup_client_with_lanes(
+            tmp_config_dir, tmp_path, "genhealth", ["default", "fast"]
+        )
         task = TicketTask(
             ticket_id="GEN-200",
             client="genhealth",
@@ -5534,7 +5540,9 @@ class TestMoveTicket:
         from cw.dev_queue import move_ticket
         from cw.exceptions import LaneMoveError
 
-        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        _setup_client_with_lanes(
+            tmp_config_dir, tmp_path, "genhealth", ["default", "fast"]
+        )
         task = TicketTask(
             ticket_id="GEN-201",
             client="genhealth",
@@ -5553,7 +5561,9 @@ class TestMoveTicket:
         from cw.dev_queue import move_ticket
         from cw.exceptions import LaneMoveError
 
-        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        _setup_client_with_lanes(
+            tmp_config_dir, tmp_path, "genhealth", ["default", "fast"]
+        )
         task = TicketTask(
             ticket_id="GEN-202",
             client="genhealth",
@@ -5572,7 +5582,9 @@ class TestMoveTicket:
         from cw.dev_queue import move_ticket
         from cw.exceptions import LaneMoveError
 
-        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        _setup_client_with_lanes(
+            tmp_config_dir, tmp_path, "genhealth", ["default", "fast"]
+        )
         task = TicketTask(
             ticket_id="GEN-204",
             client="genhealth",
@@ -5591,7 +5603,7 @@ class TestMoveTicket:
         from cw.dev_queue import move_ticket
         from cw.exceptions import LaneNotFoundError
 
-        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default"])
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, "genhealth", ["default"])
         task = TicketTask(
             ticket_id="GEN-203",
             client="genhealth",
@@ -5609,7 +5621,9 @@ class TestMoveTicket:
         """Non-existent ticket raises CwError."""
         from cw.dev_queue import move_ticket
 
-        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        _setup_client_with_lanes(
+            tmp_config_dir, tmp_path, "genhealth", ["default", "fast"]
+        )
         save_dev_queue(DevQueueStore(tasks=[]))
 
         with pytest.raises(CwError, match="No dev-queue task found"):
@@ -5621,7 +5635,7 @@ class TestMoveTicket:
         """Priority-only move (no to_lane) edits priority; lane is untouched."""
         from cw.dev_queue import move_ticket
 
-        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default"])
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, "genhealth", ["default"])
         task = TicketTask(
             ticket_id="T1",
             client="genhealth",
@@ -5649,7 +5663,9 @@ class TestMoveTicket:
         """to_lane and priority given together mutate atomically, one save."""
         from cw.dev_queue import move_ticket
 
-        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default", "fast"])
+        _setup_client_with_lanes(
+            tmp_config_dir, tmp_path, "genhealth", ["default", "fast"]
+        )
         task = TicketTask(
             ticket_id="T1",
             client="genhealth",
@@ -5679,7 +5695,7 @@ class TestMoveTicket:
         from cw.dev_queue import move_ticket
         from cw.exceptions import LaneMoveError
 
-        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default"])
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, "genhealth", ["default"])
         task = TicketTask(
             ticket_id="T1",
             client="genhealth",
@@ -5697,7 +5713,7 @@ class TestMoveTicket:
         """No bounds are enforced on priority -- a negative value succeeds."""
         from cw.dev_queue import move_ticket
 
-        _setup_client_with_lanes(tmp_config_dir, tmp_path, ["default"])
+        _setup_client_with_lanes(tmp_config_dir, tmp_path, "genhealth", ["default"])
         task = TicketTask(
             ticket_id="T1",
             client="genhealth",
@@ -5730,13 +5746,9 @@ class TestCLIDevQueueMove:
         priority: int = 0,
         lane: str = "default",
     ) -> None:
-        """Declare 'default'+'fast' lanes for client 'client' and seed T1."""
-        ws = tmp_dev_queue / "ws"
-        clients_file().write_text(
-            f"clients:\n  client:\n    workspace_path: {ws}\n"
-            "    lanes:\n"
-            "      - name: default\n        max_parallel: 1\n"
-            "      - name: fast\n        max_parallel: 1\n"
+        """Seed T1 for the CLI move tests."""
+        _setup_client_with_lanes(
+            tmp_dev_queue, tmp_dev_queue, "client", ["default", "fast"]
         )
         task = TicketTask(
             ticket_id="T1",
@@ -5850,6 +5862,35 @@ class TestCLIDevQueueMove:
         assert result.exit_code != 0
         assert "running" in result.output.lower()
         assert events == []
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            QueueItemStatus.COMPLETED,
+            QueueItemStatus.FAILED,
+            QueueItemStatus.CANCELLED,
+        ],
+    )
+    def test_move_cli_priority_on_terminal_task_errors(
+        self,
+        tmp_dev_queue: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        status: QueueItemStatus,
+    ) -> None:
+        self._seed_task(tmp_dev_queue, status=status)
+        events = self._capture_events(monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "move", "T1", "-c", "client", "--priority", "5"]
+        )
+        assert result.exit_code != 0
+        assert status.value in result.output
+        assert "Only PENDING" in result.output
+        assert events == []
+        store = load_dev_queue()
+        unchanged = next(t for t in store.tasks if t.ticket_id == "T1")
+        assert unchanged.status == status
+        assert unchanged.priority == 0
 
     def test_move_cli_short_flag_p(
         self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
