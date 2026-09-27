@@ -96,6 +96,46 @@ def test_findings_round_initialization_is_recoverable() -> None:
     assert "restore" in startup.lower()
 
 
+def test_new_round_promotes_verified_staging_after_archiving_old_round() -> None:
+    """Round archival and marker promotion must be explicitly ordered."""
+    content = _cmd("auto-dev-review.md")
+    startup = content[content.index("### Step 3a"):content.index("**Small scope:")]
+    archive_dir = ".cw/review-findings-archive/<ticket>-<round-id>/review-findings/"
+    archive_marker = (
+        ".cw/review-findings-archive/<ticket>-<round-id>/review-findings-round.json"
+    )
+    staging_dir = (
+        ".cw/review-findings-staging/<ticket>-<round-id>/review-findings/"
+    )
+    staging_marker = (
+        ".cw/review-findings-staging/<ticket>-<round-id>/review-findings-round.json"
+    )
+    assert archive_dir in startup
+    assert archive_marker in startup
+    assert staging_dir in startup
+    assert staging_marker in startup
+    assert startup.index("First archive the old active directory") < startup.index(
+        "only after both renames succeed"
+    )
+    assert startup.index("only after both renames succeed") < startup.index(
+        "atomically rename the verified staging findings directory"
+    )
+    assert "final commit point" in startup
+
+
+def test_roster_is_persisted_before_spawn_and_after_return() -> None:
+    """The complete pending roster and each return state use atomic writes."""
+    content = _cmd("auto-dev-review.md")
+    section = content[content.index("### Step 3a"):content.index("**Sandbox warning**")]
+    assert 'every role marked `status: "pending"`' in section
+    assert "before the first Agent spawn" in section
+    assert ".cw/review-findings-round.json.tmp" in section
+    assert "immediately before each subsequent spawn" in section
+    assert 'status: "completed"' in section
+    assert "failure record" in section
+    assert "atomically" in section
+
+
 def test_each_reviewer_write_happens_before_next_dispatch() -> None:
     """The SPAWNED_ROLES paragraph must state the per-reviewer findings write
     happens immediately after that reviewer returns, before the next is
