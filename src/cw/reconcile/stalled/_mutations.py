@@ -9,6 +9,7 @@ remain. These helpers write session state in place (the caller owns the
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING
 
 from cw.dev_queue import (
@@ -109,12 +110,24 @@ def _apply_stalled_routed_mutations(
         session = session_by_id[candidate.session_id]
         routed = True
         task_already_terminal = False
+        routed_payload = routed_sentinel.model_dump(mode="json")
+
         if candidate.ticket_id:
             outcome = _apply_sentinel_to_task(
-                candidate.ticket_id, session, routed_sentinel
+                candidate.ticket_id,
+                session,
+                routed_sentinel,
+                before_persist=partial(
+                    _record_result_emitted_audit,
+                    session,
+                    routed_payload,
+                    source=LastResultSource.SALVAGE_TRANSCRIPT,
+                    status=routed_sentinel.status,
+                ),
             )
             routed = outcome.routed
             task_already_terminal = outcome.task_already_terminal
+        audit_recorded = bool(candidate.ticket_id and routed)
         if not routed and not task_already_terminal:
             # #1149-shape stage-mismatch refusal: leave the task untouched and
             # merge (never clobber) the refusal flag into the pre-existing
@@ -144,17 +157,18 @@ def _apply_stalled_routed_mutations(
         # return ``refused=True`` -- that door is never open here, so both
         # arms complete the session directly and share this one block
         # (#2426 fix-cycle-2, folding fix-cycle-1's duplicate).
-        routed_payload = routed_sentinel.model_dump(mode="json")
-        _record_result_emitted_audit(
-            session,
-            routed_payload,
-            source=LastResultSource.SALVAGE_TRANSCRIPT,
-            status=routed_sentinel.status,
-        )
+        if not audit_recorded:
+            _record_result_emitted_audit(
+                session,
+                routed_payload,
+                source=LastResultSource.SALVAGE_TRANSCRIPT,
+                status=routed_sentinel.status,
+            )
         session.status = SessionStatus.COMPLETED
         session.completed_at = now
         session.completed_reason = CompletionReason.NORMAL
         session.last_result = routed_payload
+        session.last_result_source = LastResultSource.SALVAGE_TRANSCRIPT
         if candidate.salvage_csid is not None:
             session.claude_session_id = candidate.salvage_csid
         accepted.append(candidate)

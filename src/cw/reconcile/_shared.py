@@ -92,7 +92,7 @@ from cw.worktree import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from cw.dispatch import _StagePosition
@@ -1662,6 +1662,8 @@ def _apply_sentinel_to_task(
     ticket_id: str,
     session: Session,
     sentinel: AutoDevResult | BlockedResult,
+    *,
+    before_persist: Callable[[], None] | None = None,
 ) -> SentinelRouteOutcome:
     """Update the matching dev-queue task based on the sentinel result.
 
@@ -1688,6 +1690,11 @@ def _apply_sentinel_to_task(
     and the LOCAL-DAEMON git-harvest reaper ``cw.reconcile.local``, #2140) --
     each completing the now-leaked session on this sub-cause instead of
     orphaning it.
+
+    ``before_persist`` is an optional reconcile-only write-ahead hook. When a
+    route is accepted, it runs after the in-memory queue mutation but before
+    ``save_dev_queue``; a failure therefore cannot leave the persisted queue
+    ahead of the caller's session mutation.
     """
     cw_session_id = session.id
     with dev_queue_lock():
@@ -1739,9 +1746,12 @@ def _apply_sentinel_to_task(
                     },
                     correlation_id=ticket_id,
                 )
+            routed = not lookup.matched_excluded
+            if routed and before_persist is not None:
+                before_persist()
             return SentinelRouteOutcome(
                 rescued=False,
-                routed=not lookup.matched_excluded,
+                routed=routed,
                 landed_terminal=False,
                 task_already_terminal=already_terminal,
             )
@@ -1796,6 +1806,8 @@ def _apply_sentinel_to_task(
             # carries no success signal and must not write (#918).
             mutated = False
 
+        if routed and before_persist is not None:
+            before_persist()
         if mutated:
             save_dev_queue(store)
         return SentinelRouteOutcome(

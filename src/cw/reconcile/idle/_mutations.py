@@ -7,6 +7,7 @@ caller in ``core``. See GitHub #105, #121, #552, #578, #1031, ADR-0006.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING
 
 from cw.models import (
@@ -86,12 +87,24 @@ def _apply_idle_routed_mutations(
         session = session_by_id[candidate.session_id]
         routed = True
         task_already_terminal = False
+        routed_payload = routed_sentinel.model_dump(mode="json")
+
         if candidate.ticket_id:
             outcome = _apply_sentinel_to_task(
-                candidate.ticket_id, session, routed_sentinel
+                candidate.ticket_id,
+                session,
+                routed_sentinel,
+                before_persist=partial(
+                    _record_result_emitted_audit,
+                    session,
+                    routed_payload,
+                    source=LastResultSource.SALVAGE_TRANSCRIPT,
+                    status=routed_sentinel.status,
+                ),
             )
             routed = outcome.routed
             task_already_terminal = outcome.task_already_terminal
+        audit_recorded = bool(candidate.ticket_id and routed)
         if not routed and not task_already_terminal:
             # #1149: a stage-mismatch refusal (earlier-stage replay / unresolvable
             # position) leaves the task untouched. Stamp a paused_status-only
@@ -126,17 +139,18 @@ def _apply_idle_routed_mutations(
             accepted.append(candidate)
             state_mutated = True
             continue
-        routed_payload = routed_sentinel.model_dump(mode="json")
-        _record_result_emitted_audit(
-            session,
-            routed_payload,
-            source=LastResultSource.SALVAGE_TRANSCRIPT,
-            status=routed_sentinel.status,
-        )
+        if not audit_recorded:
+            _record_result_emitted_audit(
+                session,
+                routed_payload,
+                source=LastResultSource.SALVAGE_TRANSCRIPT,
+                status=routed_sentinel.status,
+            )
         session.status = SessionStatus.COMPLETED
         session.completed_at = now
         session.completed_reason = CompletionReason.NORMAL
         session.last_result = routed_payload
+        session.last_result_source = LastResultSource.SALVAGE_TRANSCRIPT
         # #1762: guarded for the same reason as phantom's copy -- the shared
         # guard no longer proves salvage_csid is non-None, and blanking the id
         # the transcript lookups key off would be a silent regression.

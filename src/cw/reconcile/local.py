@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 
 from cw.codex_background import _resolve_codex_fix_loop_enabled
@@ -74,7 +75,11 @@ from cw.reconcile.codex_boot import (
     _worktree_porcelain_clean_except_verdict,
 )
 from cw.reconcile.tasks import _resolve_task_policy
-from cw.result import emit_result_on_audited
+from cw.result import (
+    _record_result_emitted_audit,
+    emit_result_on,
+    emit_result_on_audited,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -571,10 +576,24 @@ def _act_on_local_harvest_candidates(
         # terminal/advanced state when revert_completed_silent_tasks runs.
         routed = True
         task_already_terminal = False
+        sentinel_payload = sentinel.model_dump(mode="json")
+
         if candidate.ticket_id:
-            outcome = _apply_sentinel_to_task(candidate.ticket_id, session, sentinel)
+            outcome = _apply_sentinel_to_task(
+                candidate.ticket_id,
+                session,
+                sentinel,
+                before_persist=partial(
+                    _record_result_emitted_audit,
+                    session,
+                    sentinel_payload,
+                    source=LastResultSource.GIT_SYNTHESIS,
+                    status=sentinel.status,
+                ),
+            )
             routed = outcome.routed
             task_already_terminal = outcome.task_already_terminal
+        audit_recorded = bool(candidate.ticket_id and routed)
         if not routed and not task_already_terminal:
             continue
         # RFC 0012 A3 (#1459): route the git-synthesized completion through the
@@ -586,10 +605,16 @@ def _act_on_local_harvest_candidates(
         # by _apply_sentinel_to_task above (pre-existing ordering, unchanged);
         # a refusal does not roll that back (Adopted Assumption 2). The door's
         # own warning logs existing_source/attempted_source, so no log here.
-        emit_outcome = emit_result_on_audited(
-            session,
-            sentinel.model_dump(mode="json"),
-            source=LastResultSource.GIT_SYNTHESIS,
+        emit_outcome = (
+            emit_result_on(
+                session, sentinel_payload, source=LastResultSource.GIT_SYNTHESIS
+            )
+            if audit_recorded
+            else emit_result_on_audited(
+                session,
+                sentinel_payload,
+                source=LastResultSource.GIT_SYNTHESIS,
+            )
         )
         if emit_outcome.refused:
             continue
