@@ -2136,7 +2136,7 @@ finding's disappearance needs explaining.
 
 ### `review.treadmill_detected`
 
-**Emitter:** `_emit_treadmill_diagnostic` (`cw.codex_fix_loop_convergence`),
+**Emitter:** `_emit_treadmill_diagnostic` (`cw.codex_fix_loop.convergence`),
 reached from `_track_open_findings` on every in-loop fix cycle.
 **Payload:**
 ```json
@@ -2173,7 +2173,7 @@ debt itself is already surfaced on the posted review comment.
 
 ### `review.fix_loop_divergence_detected`
 
-**Emitter:** `emit_divergence_event` (`cw.codex_fix_loop_divergence`),
+**Emitter:** `emit_divergence_event` (`cw.codex_fix_loop.divergence`),
 reached from `run_review_with_fix_loop` (`cw.codex_fix_loop`) at most once per
 run, immediately before the loop parks with `blocker.reason =
 "fix_loop_diverging"`.

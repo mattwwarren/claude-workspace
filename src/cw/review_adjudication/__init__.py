@@ -20,11 +20,12 @@ only its serialization becomes mechanical.
 
 **Why this is a Claude-native-only seam, and why it must not be unified with
 the Codex path (#1805 R2 — the durable principle lives here rather than in a
-new ADR).** :func:`cw.codex_fix_loop._survivors_only_verdict` also stamps
-``disposition`` and recomputes ``blocking``, but its ``"unresolved"`` (#2352;
-formerly the same ``"deferred"`` literal this package uses) means the
-opposite of this package's ``"deferred"``: there it means "the fix loop capped
-out, this MUST_FIX is still genuinely unresolved" (so ``blocking`` must stay
+new ADR).** :func:`cw.codex_fix_loop.convergence._survivors_only_verdict`
+also stamps ``disposition`` and recomputes ``blocking``, but its
+``"unresolved"`` (#2352; formerly the same ``"deferred"`` literal this package
+uses) means the opposite of this package's ``"deferred"``: there it means "the
+fix loop capped out, this MUST_FIX is still genuinely unresolved" (so
+``blocking`` must stay
 ``True`` for an unresolved survivor, which is exactly why that function
 computes ``blocking`` from the open-finding set rather than from
 dispositions). Here ``"deferred"`` means "the coordinating session

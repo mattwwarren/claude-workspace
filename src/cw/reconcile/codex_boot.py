@@ -227,7 +227,7 @@ def _worktree_porcelain_clean_except_verdict(worktree: Path) -> bool | None:
     ``REVIEW_VERDICT_COMMENT_RELATIVE_PATH``, is pending), ``False`` dirty,
     ``None`` when git could not answer — kept distinct from ``False`` so the
     park reason says ``git_error`` rather than misreporting dirt. Parse shape
-    mirrors ``codex_fix_loop._porcelain_changed_paths``, except a rename
+    mirrors ``cw.codex_fix_loop.commit._porcelain_changed_paths``, except a rename
     contributes BOTH sides: ``git mv tracked.md .claude/review-verdict.md``
     touches a tracked file, which must never read as clean.
     """

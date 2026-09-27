@@ -41,13 +41,13 @@ adjudication outcome, or a new bucket.
 - `cw.codex_review._verdict.synthesize_codex_review_result` applies
   suppression between consolidation and the disposition table, so every exit
   branch sees the suppressed state. Both its call sites (`core.run_review`,
-  `codex_fix_loop._rereview`) reach the blocking check through it; suppressing
-  at only one would let the same void be honored on one path and ignored on
-  the other.
-- `cw.codex_fix_loop._track_open_findings` treats only `disposition == "fixed"`
-  as still open. Severity alone cannot exclude a voided finding — it keeps its
-  MUST_FIX severity — so a severity-only filter hands the fix agent a decision
-  the operator already made.
+  `cw.codex_fix_loop._driver._rereview`) reach the blocking check through it;
+  suppressing at only one would let the same void be honored on one path and
+  ignored on the other.
+- `cw.codex_fix_loop.convergence._track_open_findings` treats only
+  `disposition == "fixed"` as still open. Severity alone cannot exclude a
+  voided finding — it keeps its MUST_FIX severity — so a severity-only filter
+  hands the fix agent a decision the operator already made.
 - `.claude/commands/auto-dev-review.md` Checkpoint 3a consults the record at
   step 3.5 and presents a suppressed finding informationally only. It is never
   a bucket-sort candidate: re-sorting it would append a second, conflicting

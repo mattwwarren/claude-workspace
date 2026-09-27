@@ -102,7 +102,8 @@ def _format_degraded_document_highlights(
     One ``f"{role}: {status} — {detail}"`` line per non-``"ok"`` document,
     plus a trailing bare diagnostics-pointer entry (#2094) so an operator's
     next click lands on the per-role documents :func:`_persist_codex_role_document`
-    just wrote. Mirrors ``codex_fix_loop._with_snapshot_pointer``'s
+    just wrote. Mirrors
+    ``cw.codex_fix_loop.snapshot._with_snapshot_pointer``'s
     list-append-one-pointer-item shape combined with
     :func:`_format_failures_detail`'s ``append_diagnostics_pointer`` call.
 

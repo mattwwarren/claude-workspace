@@ -311,8 +311,9 @@ def _persist_codex_role_document(
 ) -> None:
     """Persist *doc* (the full parsed reviewer document) on every success.
 
-    Modeled directly on ``codex_fix_loop._persist_cycle_snapshot``'s shape
-    (atomic write, never-raise, same bundle dir): fires for every status
+    Modeled directly on
+    ``cw.codex_fix_loop.snapshot._persist_cycle_snapshot``'s shape (atomic
+    write, never-raise, same bundle dir): fires for every status
     (``ok``/``degraded``/``failed``), not just degraded ones, so a
     degraded/failed reviewer's stated rationale (#2094) survives
     ``run_codex_roles``'s unconditional scratch-dir cleanup instead of being

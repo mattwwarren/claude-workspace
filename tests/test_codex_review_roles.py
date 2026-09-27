@@ -735,7 +735,8 @@ class TestRunCodexRolePersistsDiagnostics:
     ) -> None:
         # #2094: _persist_codex_role_document never-raises -- an OSError
         # during the write is logged and swallowed, mirroring
-        # codex_fix_loop._persist_cycle_snapshot's own never-raise contract
+        # cw.codex_fix_loop.snapshot._persist_cycle_snapshot's own never-raise
+        # contract
         # (see test_cycle0_snapshot_write_failure_does_not_block_loop in
         # tests/test_codex_fix_loop.py).
         def _boom(*_a: object, **_k: object) -> None:
