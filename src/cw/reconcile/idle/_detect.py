@@ -6,28 +6,101 @@ dispositions are gone -- transcript quietness never dispositions a session.
 What remains is the unrouted-sentinel check (#578): a session whose
 transcript already carries an emitted sentinel that ``signal_stop`` never
 routed is routed forward, which is positive evidence of completion, not a
-timeout. Every function here is read-only: zero writes to state, queue, or
-event bus. See GitHub #105, #121, #552, #578, ADR-0006.
+timeout. Since #2458 the same check also covers a live session holding a
+staged ``cw result emit`` result the Stop hook never routed. Every function
+here is read-only: zero writes to state, queue, or event bus. See GitHub
+#105, #121, #552, #578, #2458, ADR-0006.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cw.models import DEFAULT_LANE, SessionOrigin
+from cw.models import DEFAULT_LANE, LastResultSource, SessionOrigin
 from cw.reconcile._shared import (
     _LIVE_STATUSES,
+    _PAUSED_STATUS_KEY,
+    _SENTINEL_ADVANCE_REFUSED_KEY,
+    _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     ProposedAction,
     ReapCandidate,
     _has_terminal_sentinel,
     _parse_any_sentinel_from_transcript,
     ticket_id_for_session,
 )
+from cw.result import reconstruct_staged_sentinel
 
 if TYPE_CHECKING:
     from datetime import datetime
 
     from cw.models import CwState, OrchestratorConfig, Session, TicketTask
+
+
+def _holds_staged_emit_result(session: Session) -> bool:
+    """True when *session* carries a terminal result its worker emitted (#2458).
+
+    ``cw result emit`` writes ``last_result`` directly -- independently of
+    whether ``signal_stop`` ever ran -- so for this source a populated
+    ``last_result`` is NOT evidence the Stop hook already routed it. Every
+    other source (``stop_hook_harvest`` and the reconcile writers) is written
+    by a routing authority, so those stay excluded exactly as before.
+    """
+    return session.last_result_source is LastResultSource.EMIT_CLI and (
+        _has_terminal_sentinel(session)
+    )
+
+
+def _staged_emit_result_refused(session: Session) -> bool:
+    """Whether a prior tick already refused this staged result (#1149).
+
+    The phantom sweep's ``already_refused`` check
+    (``phantom._detect._detect_phantom_candidates``), applied to the idle
+    sweep's staged-result producer: ``_apply_idle_routed_mutations`` merges
+    the refusal flag INTO a staged ``last_result``, which therefore stays
+    terminal-shaped and would otherwise be reconstructed and re-refused on
+    every tick, forever.
+    """
+    last_result = session.last_result
+    return isinstance(last_result, dict) and (
+        last_result.get(_PAUSED_STATUS_KEY) == _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+        or last_result.get(_SENTINEL_ADVANCE_REFUSED_KEY) is True
+    )
+
+
+def _staged_emit_candidate(
+    session: Session,
+    *,
+    ticket_id: str | None,
+    lane: str,
+    elapsed: float,
+) -> ReapCandidate | None:
+    """Route a live session's staged ``cw result emit`` result forward (#2458).
+
+    The idle sweep's port of the phantom sweep's dead-session staged-result
+    producer: the Stop hook is otherwise the only authority that can route an
+    emit_cli result, and a worker whose async-completion wakeup is dropped
+    upstream (#1889) never fires another Stop. Returns ``None`` when the
+    result was already refused or reconstructs into neither arm of the
+    ``AutoDevResult``/``BlockedResult`` union -- there is nothing to route.
+    """
+    if _staged_emit_result_refused(session):
+        return None
+    staged = reconstruct_staged_sentinel(session.last_result)
+    if staged is None:
+        return None
+    return ReapCandidate(
+        session_id=session.id,
+        proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+        ticket_id=ticket_id,
+        routed_sentinel=staged,
+        # May legitimately be None: this producer reads session state, not a
+        # transcript, so there is no csid to derive. _resolve_routed_sentinel
+        # tolerates it.
+        salvage_csid=session.claude_session_id,
+        elapsed_seconds=elapsed,
+        lane=lane,
+        client=session.client,
+    )
 
 
 def _detect_idle_candidate_for_session(
@@ -42,14 +115,24 @@ def _detect_idle_candidate_for_session(
 
     An emitted sentinel is positive evidence the worker completed; the
     ``sentinel_unrouted_check_seconds`` threshold (300 s) is only a re-check
-    delay before parsing the transcript, not a disposition timer -- a session
-    with no sentinel is never dispositioned here regardless of elapsed time.
-    Guard: ``last_result is None`` means signal_stop never ran — prevents
-    double-routing. Constructive, not a reap. See GitHub #578.
+    delay before routing, not a disposition timer -- a session with no
+    sentinel is never dispositioned here regardless of elapsed time.
+
+    Two producers share that delay. A staged ``cw result emit`` result
+    (:func:`_holds_staged_emit_result`) is routed off ``last_result`` itself
+    (#2458). Otherwise the guard ``last_result is None`` means signal_stop
+    never ran -- prevents double-routing -- and the transcript is re-parsed.
+    Constructive, not a reap. See GitHub #578, #2458.
     """
     elapsed = (now - session.started_at).total_seconds()
-    unrouted_check = config.sentinel_unrouted_check_seconds
-    if session.last_result is not None or elapsed < unrouted_check:
+    if elapsed < config.sentinel_unrouted_check_seconds:
+        return None
+    lane = task.lane if task else DEFAULT_LANE
+    if _holds_staged_emit_result(session):
+        return _staged_emit_candidate(
+            session, ticket_id=ticket_id, lane=lane, elapsed=elapsed
+        )
+    if session.last_result is not None:
         return None
     routed = _parse_any_sentinel_from_transcript(session)
     if routed is None:
@@ -62,7 +145,7 @@ def _detect_idle_candidate_for_session(
         routed_sentinel=_routed_result,
         salvage_csid=_csid,
         elapsed_seconds=elapsed,
-        lane=task.lane if task else DEFAULT_LANE,
+        lane=lane,
         client=session.client,
     )
 
@@ -78,8 +161,11 @@ def _detect_idle_candidates(
     """Pure classification phase for live DAEMON sessions with unrouted sentinels.
 
     Returns a list of ReapCandidate objects (ROUTE_EMITTED_SENTINEL only).
+    A session holding a terminal ``last_result`` is skipped unless that
+    result is a staged ``cw result emit`` one (#2458) -- the sweep is the
+    backstop authority for those when the Stop hook never routes them.
     Makes zero writes to state, queue, or event bus. See GitHub #552, #578,
-    ADR-0006.
+    #2458, ADR-0006.
     """
     candidates: list[ReapCandidate] = []
     for session in state.sessions:
@@ -87,7 +173,7 @@ def _detect_idle_candidates(
             continue
         if session.status not in _LIVE_STATUSES:
             continue
-        if _has_terminal_sentinel(session):
+        if _has_terminal_sentinel(session) and not _holds_staged_emit_result(session):
             continue
         if session.surface_ref is None or session.surface_ref not in native_live:
             continue

@@ -16,10 +16,12 @@ from cw.models import (
 )
 from cw.reconcile._shared import (
     _PAUSED_STATUS_KEY,
+    _SENTINEL_ADVANCE_REFUSED_KEY,
     _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     _apply_sentinel_to_task_audited,
     _resolve_routed_sentinel,
 )
+from cw.result import reconstruct_staged_sentinel
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -42,14 +44,14 @@ def _apply_idle_routed_mutations(
     shared ``_resolve_routed_sentinel`` guard (GitHub #1762), then mark the
     session COMPLETED/NORMAL -- but only when the route was accepted.
 
-    Not a byte-for-byte mirror, despite the older wording here: unlike phantom's
-    post-#1762 ``reconstruct_staged_sentinel`` producer, every candidate
-    ``_detect_idle_candidate_for_session`` builds carries a paired non-``None``
-    ``salvage_csid`` (both halves come out of the same
-    ``_parse_any_sentinel_from_transcript`` tuple). The csid half of the old
-    duplicated guard was therefore inert here; it is dropped rather than
-    preserved, because only phantom's genuinely ``None``-tolerant case ever
-    depended on it.
+    Since #2458 the detect phase has two producers, like phantom's: the
+    transcript re-parse (whose candidates carry a paired non-``None``
+    ``salvage_csid``) and the staged ``cw result emit`` producer, which reads
+    ``session.last_result`` and passes ``session.claude_session_id`` straight
+    back -- possibly ``None``, which the shared ``_resolve_routed_sentinel``
+    guard tolerates. A staged candidate is audited rather than re-emitted
+    through the door (``audit_existing_result``), and its stage-mismatch
+    refusal is merged into ``last_result`` rather than overwriting it.
 
     GitHub #1031 (extends #1019's phantom-path guard): when
     ``_apply_sentinel_to_task`` reports ``routed=False`` (a stage-mismatch
@@ -82,11 +84,21 @@ def _apply_idle_routed_mutations(
         session = session_by_id[candidate.session_id]
         routed = True
         task_already_terminal = False
+        # #2458: the staged-emit producer reconstructs routed_sentinel FROM
+        # session.last_result, so a fresh door emit would refuse it as an
+        # overwrite of itself (first-writer-wins) -- audit the already-staged
+        # result instead. Ported verbatim from phantom's #1762 comparison; see
+        # _apply_phantom_routed_mutations for why sentinels, not raw dicts, are
+        # compared. A transcript-derived candidate has last_result None here,
+        # so the comparison is False and that path is unchanged.
         audited = _apply_sentinel_to_task_audited(
             candidate.ticket_id,
             session,
             routed_sentinel,
             source=LastResultSource.SALVAGE_TRANSCRIPT,
+            audit_existing_result=(
+                reconstruct_staged_sentinel(session.last_result) == routed_sentinel
+            ),
         )
         if audited.emit is not None and audited.emit.refused:
             # #2140: the door refused a genuine overwrite attempt -- a foreign
@@ -105,9 +117,19 @@ def _apply_idle_routed_mutations(
             # gate (_detect_idle_candidate_for_session) stops re-proposing this same
             # doomed candidate forever. No "status" key -> _has_terminal_sentinel
             # stays False.
-            session.last_result = {
-                _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
-            }
+            #
+            # #2458: a staged emit_cli candidate reaches here with the worker's
+            # own result in last_result -- overwriting it would destroy the
+            # authoritative record. Merge the refusal flag in instead
+            # (phantom's merge-aware stamp), which _staged_emit_result_refused
+            # reads on the next tick to stop re-offering it.
+            existing = session.last_result
+            if isinstance(existing, dict):
+                session.last_result = {**existing, _SENTINEL_ADVANCE_REFUSED_KEY: True}
+            else:
+                session.last_result = {
+                    _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+                }
             state_mutated = True
             continue
         if not routed and task_already_terminal:

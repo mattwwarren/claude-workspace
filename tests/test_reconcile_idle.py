@@ -409,6 +409,53 @@ def test_detect_idle_candidates_skips_emit_cli_already_refused(
     assert candidates == []
 
 
+def test_emit_cli_stage_mismatch_refusal_keeps_staged_result_and_stops_reoffering(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    no_transcript_parse: None,
+    idle_daemon: FakeNativeDaemonClient,
+) -> None:
+    """A #1031 refusal merges its flag into the staged result, never over it.
+
+    The worker's own emitted result stays the authoritative record; the
+    merged ``sentinel_advance_refused`` flag stops the next tick re-offering
+    the same doomed candidate.
+    """
+    _write_staged_client()
+    # A stage2_impl report against a row that already advanced to REVIEW.
+    _seed_row(QueueItemStatus.RUNNING, Stage.REVIEW)
+    before = _reload_row().model_dump()
+    payload = _impl_stage_complete()
+    state = _emit_cli_state(tmp_path, payload)
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=_NOW_PAST_CHECK,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+    assert len(candidates) == 1
+    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+
+    assert _reload_row().model_dump() == before
+    session = state.sessions[0]
+    assert session.status is SessionStatus.ACTIVE
+    assert session.last_result == {**payload, "sentinel_advance_refused": True}
+    assert session.last_result_source is LastResultSource.EMIT_CLI
+    assert idle_daemon.stop_calls == []
+    assert (
+        _detect_idle_candidates(
+            state,
+            now=_NOW_PAST_CHECK,
+            native_live={"fake-short-id"},
+            config=OrchestratorConfig(),
+            task_by_ticket={},
+        )
+        == []
+    )
+
+
 def test_detect_idle_candidates_skips_unreconstructable_emit_cli_result(
     tmp_config_dir: Path, tmp_path: Path, no_transcript_parse: None
 ) -> None:
