@@ -289,7 +289,15 @@ def reconstruct_staged_sentinel(
         )
     try:
         return _validate_harvest_payload(sanitized)
-    except EmitValidationError:
+    except EmitValidationError as exc:
+        # #2458: every caller falls back on None (the Stop hook to the
+        # transcript, the reconcile sweeps to their next producer), so this is
+        # the only place the *reason* a staged result could not be routed is
+        # still known.
+        logger.warning(
+            "reconstruct_staged_sentinel: validation failed: %s",
+            "; ".join(exc.errors),
+        )
         return None
 
 
