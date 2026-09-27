@@ -24,6 +24,7 @@ from cw.auto_dev_result import (
     EXTERNAL_STATE_BLOCKER_REASON,
     FINALIZE_REGRESS_BLOCKER_REASONS,
     FREEFORM_BLOCKER_REASON_PREFIX,
+    IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
     KNOWN_BLOCKER_REASONS,
     OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
     PAUSED_FOR_USER_INPUT_STATUSES,
@@ -3772,6 +3773,21 @@ class TestPlanDraftFingerprintField:
         current = AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
         assert f"**`schema_version: {current}`**" in _cmd("auto-dev.md")
 
+    def test_headless_contract_states_one_directional_reason_conformance(
+        self,
+    ) -> None:
+        """#2415: registering a reason in KNOWN_BLOCKER_REASONS does not require
+        a matching row in auto-dev.md's table -- only the reverse direction is
+        enforced by test_agent_comment_provenance.py's
+        test_every_documented_reason_is_registered. The doc previously claimed
+        a bidirectional lockstep that does not exist."""
+        from tests.conftest import _REPO_ROOT
+
+        doc = (_REPO_ROOT / "docs" / "headless-contract.md").read_text(encoding="utf-8")
+        assert "test_every_documented_reason_is_registered" in doc
+        assert "enforces only one direction" in doc
+        assert "a doc-conformance test keeps in lockstep" not in doc
+
 
 # ---------------------------------------------------------------------------
 # Issue #430 — Case 4: scope_exceeded / forbidden_area emitted at/after
@@ -4564,7 +4580,12 @@ class TestOperatorUnavailableBlockerReasons:
     def test_operator_unavailable_reasons_frozenset_members(self) -> None:
         assert (
             frozenset(
-                {"push_auth_failed", "operator_unavailable", "dependency_unmerged"}
+                {
+                    "push_auth_failed",
+                    "operator_unavailable",
+                    "dependency_unmerged",
+                    IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
+                }
             )
             == OPERATOR_UNAVAILABLE_BLOCKER_REASONS
         )
@@ -4580,6 +4601,13 @@ class TestOperatorUnavailableBlockerReasons:
 
     def test_dependency_unmerged_is_known_blocker_reason(self) -> None:
         assert is_known_blocker_reason("dependency_unmerged")
+
+    def test_impl_comments_unreadable_after_regress_is_known_blocker_reason(
+        self,
+    ) -> None:
+        assert is_known_blocker_reason(
+            IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
+        )
 
     def test_finalize_regress_blocker_reasons_unchanged(self) -> None:
         assert frozenset({"agent_block"}) == FINALIZE_REGRESS_BLOCKER_REASONS
@@ -4602,6 +4630,22 @@ class TestOperatorUnavailableBlockerReasons:
         assert isinstance(result, AutoDevResult)
         assert result.blocker is not None
         assert result.blocker.reason == "dependency_unmerged"
+        assert result.schema_version == p["schema_version"]
+
+    def test_blocked_impl_comments_unreadable_after_regress_round_trips_without_bump(
+        self,
+    ) -> None:
+        """A blocked+impl_comments_unreadable_after_regress blocker round-trips
+        without a schema bump (#2415)."""
+        p = _blocked_payload()
+        p["blocker"]["reason"] = IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.blocker is not None
+        assert (
+            result.blocker.reason
+            == IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
+        )
         assert result.schema_version == p["schema_version"]
 
 

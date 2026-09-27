@@ -16,9 +16,11 @@ import pytest
 
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.models import (
+    CompletionReason,
     CwState,
     QueueItemStatus,
     SessionStatus,
+    Stage,
     TicketTask,
 )
 from cw.reconcile import _deps
@@ -30,6 +32,8 @@ from cw.reconcile.stalled import (
 from tests._reconcile_helpers import (
     _mk_headless_daemon_session,
     _shipped_salvage_payload,
+    _stage_complete_payload,
+    _write_staged_clients_yaml,
 )
 
 _STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -204,3 +208,175 @@ def test_foreign_result_with_no_evidence_is_charged(
 
     task = load_dev_queue().tasks[0]
     assert task.unproductive_attempts == 1
+
+
+def test_stage_complete_foreign_result_classified_as_route_emitted_sentinel(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """#2426: a live worker's stage_complete foreign result is NOT completed outright.
+
+    ``stage_complete`` is an INTERMEDIATE_ADVANCE_STATUSES member -- it must
+    be reclassified to ROUTE_EMITTED_SENTINEL so the owning task's stage
+    advances instead of landing terminal-COMPLETED.
+    """
+    state = _foreign_result_session(tmp_path, _stage_complete_payload())
+
+    candidates = _detect_stalled_candidates(state, task_by_ticket={})
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.proposed_action is ProposedAction.ROUTE_EMITTED_SENTINEL
+    assert candidate.routed_sentinel is not None
+    assert candidate.routed_sentinel.status == "stage_complete"
+
+
+def test_stage_complete_foreign_result_advances_task_stage_not_completed(
+    tmp_config_dir: Path, tmp_path: Path, stop_recorder: _StopRecorder
+) -> None:
+    """#2426: the incident case -- a live IMPL worker's mid-pipeline result must
+    advance IMPL -> REVIEW (leaving the task PENDING for a fresh REVIEW
+    dispatch), not land it terminal-COMPLETED at IMPL.
+    """
+    state = _foreign_result_session(tmp_path, _stage_complete_payload())
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    store = load_dev_queue()
+    store.tasks.append(
+        TicketTask(
+            ticket_id="salv-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="salv-1",
+            stage=Stage.IMPL,
+        )
+    )
+    save_dev_queue(store)
+    candidates = _detect_stalled_candidates(state, task_by_ticket={})
+
+    _act_on_stalled_candidates(state, candidates, now=_NOW)
+
+    task = load_dev_queue().tasks[0]
+    assert task.stage == Stage.REVIEW
+    assert task.status != QueueItemStatus.COMPLETED
+    assert task.status == QueueItemStatus.PENDING
+    session = state.sessions[0]
+    assert session.status is SessionStatus.COMPLETED
+    assert session.completed_reason == CompletionReason.NORMAL
+    assert stop_recorder.stopped == ["fake-short-id"]
+
+
+def test_stage_complete_at_last_pipeline_stage_still_completes_task(
+    tmp_config_dir: Path, tmp_path: Path, stop_recorder: _StopRecorder
+) -> None:
+    """#2426: a stage_complete claim at the pipeline's last stage still completes.
+
+    ``_apply_sentinel_to_task`` -> ``apply_staged_decision`` ->
+    ``_route_stage_success`` completes the task when the task is already at
+    the pipeline's last stage, regardless of which sweep invoked it -- this
+    pins that the reclassification does not regress the terminal-shipped
+    guarantee for a last-stage stage_complete claim.
+    """
+    payload = _stage_complete_payload()
+    payload["stage_reached"] = "stage5_post_create"
+    state = _foreign_result_session(tmp_path, payload)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    store = load_dev_queue()
+    store.tasks.append(
+        TicketTask(
+            ticket_id="salv-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="salv-1",
+            stage=Stage.FINALIZE,
+        )
+    )
+    save_dev_queue(store)
+    candidates = _detect_stalled_candidates(state, task_by_ticket={})
+
+    _act_on_stalled_candidates(state, candidates, now=_NOW)
+
+    task = load_dev_queue().tasks[0]
+    assert task.status == QueueItemStatus.COMPLETED
+    assert task.stage == Stage.FINALIZE
+
+
+def test_stage_mismatch_refusal_is_not_reoffered(
+    tmp_config_dir: Path, tmp_path: Path, stop_recorder: _StopRecorder
+) -> None:
+    """#2426: a stale/earlier-stage stage_complete claim is refused, not completed.
+
+    The task is already past the sentinel's claimed stage (REVIEW vs. the
+    default payload's stage2_impl/IMPL) -- an earlier-stage stage-advance
+    claim, which the shared staged-advance guard refuses. The session must
+    stay live (not torn down) and the refusal must latch so the doomed
+    candidate is never re-offered.
+    """
+    state = _foreign_result_session(tmp_path, _stage_complete_payload())
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    store = load_dev_queue()
+    store.tasks.append(
+        TicketTask(
+            ticket_id="salv-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="salv-1",
+            stage=Stage.REVIEW,
+        )
+    )
+    save_dev_queue(store)
+    candidates = _detect_stalled_candidates(state, task_by_ticket={})
+
+    _act_on_stalled_candidates(state, candidates, now=_NOW)
+
+    session = state.sessions[0]
+    assert session.status is SessionStatus.ACTIVE
+    assert isinstance(session.last_result, dict)
+    assert "status" in session.last_result
+    assert stop_recorder.stopped == []
+    task = load_dev_queue().tasks[0]
+    assert task.stage == Stage.REVIEW
+    assert task.status == QueueItemStatus.RUNNING
+
+    candidates_again = _detect_stalled_candidates(state, task_by_ticket={})
+    assert candidates_again == []
+
+
+def test_task_already_terminal_race_completes_session_not_leaked(
+    tmp_config_dir: Path, tmp_path: Path, stop_recorder: _StopRecorder
+) -> None:
+    """#2426 fix-cycle-1: a #2140-shape race must not leak the session.
+
+    A concurrent authority already landed the ticket's dev-queue task
+    genuinely terminal (COMPLETED) before this tick's ``_apply_sentinel_to_
+    task`` lookup ran, so it reports ``routed=False, task_already_terminal=
+    True``. The dead ``emit_result_on`` call previously on this arm always
+    refused here -- stalled's own precondition guarantees ``session.
+    last_result`` already carries a terminal sentinel (that is exactly what
+    made this a candidate), so ``has_terminal_result`` always short-circuited
+    it to ``refused=True`` -- leaving the session ACTIVE and the daemon
+    surface running forever. The session must instead be completed directly,
+    same as the ordinary ``routed=True`` success arm.
+    """
+    state = _foreign_result_session(tmp_path, _stage_complete_payload())
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    store = load_dev_queue()
+    store.tasks.append(
+        TicketTask(
+            ticket_id="salv-1",
+            client="client-a",
+            status=QueueItemStatus.COMPLETED,
+            session_id="salv-1",
+            stage=Stage.IMPL,
+        )
+    )
+    save_dev_queue(store)
+    candidates = _detect_stalled_candidates(state, task_by_ticket={})
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action is ProposedAction.ROUTE_EMITTED_SENTINEL
+
+    _act_on_stalled_candidates(state, candidates, now=_NOW)
+
+    session = state.sessions[0]
+    assert session.status is SessionStatus.COMPLETED
+    assert session.completed_at == _NOW
+    assert session.completed_reason == CompletionReason.NORMAL
+    assert stop_recorder.stopped == ["fake-short-id"]

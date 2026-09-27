@@ -79,6 +79,34 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "_apply_sentinel_to_task, carries 'status'"
         ),
     },
+    "reconcile/stalled/_mutations.py": {
+        (
+            "session.last_result = {\n"
+            "**existing,\n"
+            "_SENTINEL_ADVANCE_REFUSED_KEY: True,\n"
+            "}"
+        ): (
+            "stalled/_mutations.py (_apply_stalled_routed_mutations) — park "
+            "marker, stage-mismatch-refused (merge branch: preserves the "
+            "pre-existing terminal sentinel dict already in last_result); "
+            "no 'status' key added"
+        ),
+        (
+            "session.last_result = {\n"
+            "_PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON\n"
+            "}"
+        ): (
+            "stalled/_mutations.py (_apply_stalled_routed_mutations) — park "
+            "marker, stage-mismatch-refused (fresh branch: existing "
+            "last_result was not a dict); no 'status' key"
+        ),
+        'session.last_result = routed_sentinel.model_dump(mode="json")': (
+            "stalled/_mutations.py (_apply_stalled_routed_mutations) — "
+            "routed-sentinel advance (ordinary success arm, and the #2140-"
+            "shape task_already_terminal race arm); a real terminal "
+            "sentinel routed via _apply_sentinel_to_task, carries 'status'"
+        ),
+    },
     "dev_queue/requeue.py": {
         "session.last_result = None": (
             "requeue.py:322 — deliberate erasure ahead of a requeue; resets "

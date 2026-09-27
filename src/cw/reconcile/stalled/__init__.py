@@ -5,7 +5,12 @@ wall-clock-budget enforcement (revert, retry-cap park, finalize-blocked park,
 liveness veto) is gone -- elapsed time never dispositions a session. What
 remains is COMPLETE_FOREIGN_RESULT: completing a live session whose
 ``last_result`` already carries a terminal sentinel recorded by another
-authority. See GitHub #185, #552, #1470, ADR-0006.
+authority. Since #2426, a foreign result whose status is an
+``INTERMEDIATE_ADVANCE_STATUSES`` member (today ``stage_complete``) is
+reclassified as ROUTE_EMITTED_SENTINEL and routed through the same
+stage-aware authority ``phantom.py`` already uses, so a still-live worker's
+mid-pipeline result advances the stage instead of landing the ticket
+terminal-COMPLETED. See GitHub #185, #552, #1470, #2426, ADR-0006.
 
 - ``_detect`` — the pure detect-phase classifier (zero writes).
 - ``_mutations`` — act-phase session-state and dev-queue mutations.

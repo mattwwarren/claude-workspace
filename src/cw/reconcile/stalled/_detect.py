@@ -2,20 +2,29 @@
 
 Evidence-only since the process-kill-timeout removal: the wall-clock budget,
 retry-cap, finalize-blocked, and liveness-veto dispositions are gone --
-elapsed time never dispositions a session. The only candidate this sweep
-still produces is COMPLETE_FOREIGN_RESULT, which acts on a terminal result
-some other authority already recorded on the session (e.g. an out-of-band
-``cw result emit``). Every function here is read-only: zero writes to state,
-queue, or event bus. See GitHub #185, #552, #1470, ADR-0006.
+elapsed time never dispositions a session. This sweep produces
+COMPLETE_FOREIGN_RESULT for a terminal foreign result and, since #2426,
+ROUTE_EMITTED_SENTINEL for an ``INTERMEDIATE_ADVANCE_STATUSES`` foreign result
+(``stage_complete``) -- a still-live worker's out-of-band ``cw result emit``
+must advance the pipeline's stage, not land the ticket terminal-COMPLETED at
+whatever stage it happened to be at (#2382 made this possible: the emit CLI is
+write-only and never flips ``session.status``, so a genuinely still-running
+worker can hold a terminal-shaped result while ``session.status`` stays
+ACTIVE/IDLE). Every function here is read-only: zero writes to state, queue,
+or event bus. See GitHub #185, #552, #1470, #2382, #2426, ADR-0006.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cw.auto_dev_result import INTERMEDIATE_ADVANCE_STATUSES, AutoDevResult
 from cw.models import DEFAULT_LANE, SessionOrigin
 from cw.reconcile._shared import (
     _LIVE_STATUSES,
+    _PAUSED_STATUS_KEY,
+    _SENTINEL_ADVANCE_REFUSED_KEY,
+    _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     ProposedAction,
     ReapCandidate,
     _has_terminal_sentinel,
@@ -28,13 +37,32 @@ if TYPE_CHECKING:
     from cw.models import CwState, Session, TicketTask
 
 
+def _is_already_refused(session: Session) -> bool:
+    """True when a prior tick already refused this session's foreign sentinel.
+
+    Mirrors ``phantom._detect``'s ``already_refused`` latch (#1149): a
+    ``ROUTE_EMITTED_SENTINEL`` refusal merges ``_SENTINEL_ADVANCE_REFUSED_KEY``
+    into ``session.last_result`` (stalled's precondition is that
+    ``last_result`` is always already the emitted terminal dict, so the
+    single-key ``_PAUSED_STATUS_KEY``-only stamp never applies here -- the
+    check still reads for it for parity with the shared vocabulary). Without
+    this latch a stale/earlier-stage ``stage_complete`` claim would be
+    re-offered as a candidate forever.
+    """
+    existing = session.last_result
+    return isinstance(existing, dict) and (
+        existing.get(_PAUSED_STATUS_KEY) == _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+        or existing.get(_SENTINEL_ADVANCE_REFUSED_KEY) is True
+    )
+
+
 def _append_foreign_result_candidate(
     candidates: list[ReapCandidate],
     session: Session,
     task: TicketTask | None,
     ticket_id: str | None,
 ) -> bool:
-    """Append a COMPLETE_FOREIGN_RESULT candidate; return whether the guard fired.
+    """Append a foreign-result candidate; return whether the guard fired.
 
     A live session whose ``last_result`` already carries a terminal sentinel
     from another authority (e.g. an out-of-band ``cw result emit``, which by
@@ -43,21 +71,49 @@ def _append_foreign_result_candidate(
     with no disposition candidate) rather than being re-offered every tick --
     it is not this sweep's scope to disposition an unroutable foreign write,
     only to stop re-parsing the transcript for one. See GitHub #1470.
+
+    #2426: a validated result whose status is an intermediate stage-advance
+    claim (``INTERMEDIATE_ADVANCE_STATUSES``, today exactly ``stage_complete``)
+    is reclassified as ``ROUTE_EMITTED_SENTINEL`` instead of
+    ``COMPLETE_FOREIGN_RESULT`` -- it must advance the owning task's stage
+    through the same stage-aware authority ``phantom._detect`` already uses
+    (``_apply_sentinel_to_task`` / ``apply_staged_decision``), not land the
+    ticket terminal-COMPLETED at its current stage. A session already latched
+    ``already_refused`` by a prior tick's stage-mismatch refusal is never
+    re-offered.
     """
     if not _has_terminal_sentinel(session):
         return False
+    if _is_already_refused(session):
+        return True
     validated_foreign = _validate_existing_result_for_routing(session.last_result)
     if validated_foreign is not None:
-        candidates.append(
-            ReapCandidate(
-                session_id=session.id,
-                proposed_action=ProposedAction.COMPLETE_FOREIGN_RESULT,
-                ticket_id=ticket_id,
-                routed_sentinel=validated_foreign,
-                lane=task.lane if task else DEFAULT_LANE,
-                client=session.client,
+        lane = task.lane if task else DEFAULT_LANE
+        if (
+            isinstance(validated_foreign, AutoDevResult)
+            and validated_foreign.status in INTERMEDIATE_ADVANCE_STATUSES
+        ):
+            candidates.append(
+                ReapCandidate(
+                    session_id=session.id,
+                    proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+                    ticket_id=ticket_id,
+                    routed_sentinel=validated_foreign,
+                    lane=lane,
+                    client=session.client,
+                )
             )
-        )
+        else:
+            candidates.append(
+                ReapCandidate(
+                    session_id=session.id,
+                    proposed_action=ProposedAction.COMPLETE_FOREIGN_RESULT,
+                    ticket_id=ticket_id,
+                    routed_sentinel=validated_foreign,
+                    lane=lane,
+                    client=session.client,
+                )
+            )
     return True
 
 
@@ -68,11 +124,12 @@ def _detect_stalled_candidates(
 ) -> list[ReapCandidate]:
     """Pure classification phase for headless DAEMON sessions.
 
-    Returns a list of ReapCandidate objects (COMPLETE_FOREIGN_RESULT only).
-    Makes zero writes to state, queue, or event bus. Elapsed wall-clock time
-    is deliberately never consulted -- a session is only dispositioned here on
-    the positive evidence of an already-recorded terminal result.
-    See GitHub #552, #1470, ADR-0006.
+    Returns a list of ReapCandidate objects (COMPLETE_FOREIGN_RESULT or, since
+    #2426, ROUTE_EMITTED_SENTINEL for an INTERMEDIATE_ADVANCE_STATUSES foreign
+    result). Makes zero writes to state, queue, or event bus. Elapsed
+    wall-clock time is deliberately never consulted -- a session is only
+    dispositioned here on the positive evidence of an already-recorded
+    terminal result. See GitHub #552, #1470, #2426, ADR-0006.
     """
     candidates: list[ReapCandidate] = []
     for session in state.sessions:
