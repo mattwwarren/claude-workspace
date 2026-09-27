@@ -11621,8 +11621,14 @@ class TestDevQueueWaitSentinelAware:
         _write_stop_hook_transcript(fake_home, worktree, csid, self._SHIPPED_SENTINEL)
         self._seed_running_task("GEN-535", session_id)
 
+        from cw.auto_dev_result import parse_stdout
+
         session = self._make_running_session(
-            session_id, worktree, claude_session_id=csid
+            session_id,
+            worktree,
+            claude_session_id=csid,
+            last_result=parse_stdout(self._SHIPPED_SENTINEL).model_dump(mode="json"),
+            last_result_source=LastResultSource.STOP_HOOK_HARVEST,
         )
         state = CwState(sessions=[session])
         from cw.config import save_state as _save_state
@@ -11675,8 +11681,14 @@ class TestDevQueueWaitSentinelAware:
         _write_stop_hook_transcript(fake_home, worktree, csid, sentinel_text)
         self._seed_running_task("GEN-899", session_id)
 
+        from cw.auto_dev_result import parse_stdout
+
         session = self._make_running_session(
-            session_id, worktree, claude_session_id=csid
+            session_id,
+            worktree,
+            claude_session_id=csid,
+            last_result=parse_stdout(sentinel_text).model_dump(mode="json"),
+            last_result_source=LastResultSource.STOP_HOOK_HARVEST,
         )
         from cw.config import save_state as _save_state
 
@@ -11784,8 +11796,21 @@ class TestDevQueueWaitSentinelAware:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        """TERMINAL: csid=None on Session → resolved via surface_ref glob."""
+        """TERMINAL detection via ``session.last_result`` is independent of
+        transcript presence and csid resolution.
+
+        Step 2a runs before Step 3 (csid resolution), so a populated
+        ``session.last_result`` short-circuits the terminal decision without
+        needing a resolvable ``claude_session_id`` or an existing transcript
+        at all -- ``claude_session_id`` stays ``None`` and no transcript file
+        is written. ``_csid_from_transcript``'s glob-resolution mechanism
+        this test previously exercised keeps direct, independent unit
+        coverage at ``tests/test_reconcile_shared_sentinels.py``'s
+        ``test_csid_from_transcript_via_helper``.
+        """
         import json as _json
+
+        from cw.auto_dev_result import parse_stdout
 
         fake_home = tmp_path / "fake-home"
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
@@ -11795,18 +11820,6 @@ class TestDevQueueWaitSentinelAware:
         worktree.mkdir(parents=True)
 
         session_id = "sess535b"
-        surface_ref = "abcd5350"  # 8-char hex
-        # csid starts with surface_ref (as per _csid_from_transcript glob)
-        csid = f"{surface_ref}-longer-uuid-suffix"
-
-        # Transcript written AFTER session.started_at so the mtime guard passes.
-        transcript = _write_stop_hook_transcript(
-            fake_home, worktree, csid, self._SHIPPED_SENTINEL
-        )
-        # Ensure mtime is fresh (after started_at = epoch).
-        import os
-
-        os.utime(transcript, None)
 
         self._seed_running_task("GEN-535B", session_id)
 
@@ -11814,9 +11827,10 @@ class TestDevQueueWaitSentinelAware:
         session = self._make_running_session(
             session_id,
             worktree,
-            claude_session_id=None,  # not yet set — will resolve via glob
-            surface_ref=surface_ref,
+            claude_session_id=None,
             started_at=started,
+            last_result=parse_stdout(self._SHIPPED_SENTINEL).model_dump(mode="json"),
+            last_result_source=LastResultSource.STOP_HOOK_HARVEST,
         )
         state = CwState(sessions=[session])
         from cw.config import save_state as _save_state
@@ -11877,7 +11891,14 @@ class TestDevQueueWaitSentinelAware:
         def _fake_sentinel(
             cwd: str, claude_session_id: str | None, **_kwargs: object
         ) -> object:
-            """Return None on first call, AutoDevResult on second."""
+            """Return None on first call, AutoDevResult on second.
+
+            The second call also mutates session.last_result -- Step 2a
+            (the fix for #2397) reads that at the TOP of every poll, so this
+            mutation only becomes visible starting at the loop's THIRD
+            iteration, not the second. The transcript-parsed return value
+            here now only feeds the heartbeat/BlockedResult-guard path.
+            """
             from cw.auto_dev_result import parse_stdout
 
             call_count[0] += 1
@@ -11885,7 +11906,8 @@ class TestDevQueueWaitSentinelAware:
                 # Write a fresh-mtime transcript (no sentinel) to prevent ATTENTION.
                 transcript.write_text(json.dumps({"type": "user"}) + "\n")
                 return None
-            # Second poll: inject the shipped sentinel.
+            # Second poll: inject the shipped sentinel into the transcript
+            # AND stamp session.last_result (visible starting next poll).
             transcript.write_text(
                 json.dumps(
                     {
@@ -11899,6 +11921,19 @@ class TestDevQueueWaitSentinelAware:
                 )
                 + "\n"
             )
+            from cw.config import load_state as _load_state
+            from cw.config import save_state as _save_state_inner
+
+            fresh_state = _load_state()
+            for fresh_session in fresh_state.sessions:
+                if fresh_session.id == session_id:
+                    fresh_session.last_result = parse_stdout(
+                        self._SHIPPED_SENTINEL
+                    ).model_dump(mode="json")
+                    fresh_session.last_result_source = (
+                        LastResultSource.STOP_HOOK_HARVEST
+                    )
+            _save_state_inner(fresh_state)
             return parse_stdout(self._SHIPPED_SENTINEL)
 
         monkeypatch.setattr(
@@ -11967,7 +12002,14 @@ class TestDevQueueWaitSentinelAware:
         def _fake_sentinel(
             cwd: str, claude_session_id: str | None, **kwargs: object
         ) -> object:
-            """Record identity of the warned_blocks kwarg across calls."""
+            """Record identity of the warned_blocks kwarg across calls.
+
+            The second call also mutates session.last_result -- Step 2a
+            reads that at the TOP of every poll, so it only becomes visible
+            starting at the loop's THIRD iteration, keeping call_count[0]
+            at exactly 2 (see test_heartbeat_then_terminal for the same
+            shape).
+            """
             from cw.auto_dev_result import parse_stdout
 
             seen_warned_blocks.append(kwargs.get("warned_blocks"))
@@ -11988,6 +12030,19 @@ class TestDevQueueWaitSentinelAware:
                 )
                 + "\n"
             )
+            from cw.config import load_state as _load_state
+            from cw.config import save_state as _save_state_inner
+
+            fresh_state = _load_state()
+            for fresh_session in fresh_state.sessions:
+                if fresh_session.id == session_id:
+                    fresh_session.last_result = parse_stdout(
+                        self._SHIPPED_SENTINEL
+                    ).model_dump(mode="json")
+                    fresh_session.last_result_source = (
+                        LastResultSource.STOP_HOOK_HARVEST
+                    )
+            _save_state_inner(fresh_state)
             return parse_stdout(self._SHIPPED_SENTINEL)
 
         monkeypatch.setattr(
@@ -12438,8 +12493,14 @@ class TestDevQueueWaitSentinelAware:
         _write_stop_hook_transcript(fake_home, worktree, csid, self._SHIPPED_SENTINEL)
         self._seed_running_task("GEN-535F", session_id)
 
+        from cw.auto_dev_result import parse_stdout
+
         session = self._make_running_session(
-            session_id, worktree, claude_session_id=csid
+            session_id,
+            worktree,
+            claude_session_id=csid,
+            last_result=parse_stdout(self._SHIPPED_SENTINEL).model_dump(mode="json"),
+            last_result_source=LastResultSource.STOP_HOOK_HARVEST,
         )
         from cw.config import save_state as _save_state
 
