@@ -11838,7 +11838,16 @@ class TestDevQueueWaitSentinelAware:
         _save_state(state)
 
         monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
-        monkeypatch.setattr("cw.cli.dev_queue.wait.time.monotonic", lambda: 0.0)
+        # Advancing (not frozen) clock: Step 2a short-circuits on the very
+        # first iteration post-fix regardless of clock shape, but pre-fix
+        # there is no transcript/csid for the old branch to find a sentinel
+        # in, so a frozen clock would spin forever instead of hitting the
+        # deadline -- this bounded clock keeps a pre-fix run fast (exit 124)
+        # rather than hanging.
+        clock = iter([0.0, 1000.0])
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(clock, 1000.0)
+        )
 
         runner = CliRunner()
         result = runner.invoke(
