@@ -13,6 +13,7 @@ from cw.plan_fingerprint import (
     PLAN_DRAFT_FINGERPRINT_KEY,
     bind_claimed_fingerprint,
     compute_plan_draft_fingerprint,
+    extract_persisted_body_sha,
     is_plan_draft_fingerprint,
     sanitize_persisted_fingerprint,
 )
@@ -110,6 +111,29 @@ class TestComputePlanDraftFingerprint:
         bookkeeping and must change the digest."""
         malformed = "<!-- plan-stage-settled: A1: ADOPTED (operator note) -->\n"
         assert compute_plan_draft_fingerprint(_ROUND + malformed + _BODY) != _BODY_SHA
+
+
+class TestExtractPersistedBodySha:
+    """#2311: the ``body_sha`` half of the ``plan-stage-last-evaluated``
+    marker, read from the leading bookkeeping block only."""
+
+    def test_extract_persisted_body_sha_returns_value_when_present(self) -> None:
+        text = _ROUND + _LAST_EVALUATED + _SETTLED_A + _BODY
+        assert extract_persisted_body_sha(text) == "a" * 64
+
+    def test_extract_persisted_body_sha_returns_none_when_absent(self) -> None:
+        assert extract_persisted_body_sha(_BODY) is None
+        assert extract_persisted_body_sha(_ROUND + _SETTLED_A + _BODY) is None
+
+    def test_extract_persisted_body_sha_ignores_body_sha_like_string_in_plan_content(
+        self,
+    ) -> None:
+        """Mirrors test_bookkeeping_is_a_leading_block_only: a marker that is
+        not in the leading block (no round-counter line ahead of it, or plan
+        content before it) is plan content, never the persisted value."""
+        assert extract_persisted_body_sha(_LAST_EVALUATED + _BODY) is None
+        assert extract_persisted_body_sha(_ROUND + "body\n" + _LAST_EVALUATED) is None
+        assert extract_persisted_body_sha(_BODY + _ROUND + _LAST_EVALUATED) is None
 
 
 class TestBindClaimedFingerprint:

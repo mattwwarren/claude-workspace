@@ -37,7 +37,7 @@ PLAN_DRAFT_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 _ROUND_LINE = re.compile(r"<!-- plan-stage-scan-round: [0-9]+ -->\n?")
 _LAST_EVALUATED_LINE = re.compile(
     r"<!-- plan-stage-last-evaluated: "
-    r"operator_comment=[^|\n]+\|body_sha=[0-9a-f]{64} -->\n?"
+    r"operator_comment=[^|\n]+\|body_sha=(?P<body_sha>[0-9a-f]{64}) -->\n?"
 )
 _SETTLED_LINE = re.compile(
     r"<!-- plan-stage-settled: "
@@ -94,6 +94,27 @@ def compute_plan_draft_fingerprint(text: str) -> str:
             offset = trailing_match.end()
     stripped = text[offset:]
     return hashlib.sha256(stripped.encode("utf-8")).hexdigest()
+
+
+def extract_persisted_body_sha(draft_text: str) -> str | None:
+    """Return the ``body_sha`` persisted in *draft_text*'s bookkeeping, or None.
+
+    Reads the ``plan-stage-last-evaluated`` line of the *Plan-draft fingerprint
+    rule*'s leading bookkeeping-line grammar (auto-dev-plan.md, "Leading
+    bookkeeping-line grammar and order"): that line is only bookkeeping as the
+    second line, immediately after the round-counter line. A matching comment
+    anywhere else -- no round-counter line ahead of it, or plan content before
+    it -- is plan content and yields None, exactly as
+    :func:`compute_plan_draft_fingerprint` treats it as hash material. Used by
+    ``cw dev-queue approve``'s advisory ticket-body drift check (#2311).
+    """
+    round_match = _ROUND_LINE.match(draft_text)
+    if round_match is None:
+        return None
+    last_evaluated_match = _LAST_EVALUATED_LINE.match(draft_text, round_match.end())
+    if last_evaluated_match is None:
+        return None
+    return last_evaluated_match.group("body_sha")
 
 
 @dataclass(frozen=True)
