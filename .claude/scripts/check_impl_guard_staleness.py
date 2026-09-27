@@ -5,7 +5,7 @@
 Usage (from `/auto-dev-impl`'s Pre-Stage Detector Guard):
     python .claude/scripts/check_impl_guard_staleness.py \\
         --head-commit-at "$(git log -1 --format=%cI HEAD)" \\
-        --comments-file /tmp/impl-comments-$CW_SESSION.json \\
+        --comments-file "$GUARD_ROOT/.cw/impl-comments.json" \\
         --regressed-into-stage "$REGRESSED_INTO_STAGE"
 
 Context: the Pre-Stage Detector Guard used to treat an `Auto-Dev-Stage:
