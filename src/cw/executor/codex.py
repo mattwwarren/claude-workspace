@@ -139,6 +139,7 @@ class CodexExecutor:
                 default_branch=client.default_branch,
                 workspace_path=client.workspace_path,
                 lane=task.lane,
+                merge_gate_ignore_paths=client.merge_gate_ignore_paths,
                 write_stop_hook=False,
                 daemon=daemon,
             )

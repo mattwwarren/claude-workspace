@@ -1109,6 +1109,48 @@ coordination stream, and the body lives in the session's own
 Until #2255 lands, the common outcome for a session that is genuinely live
 and mid-task is queued-but-not-delivered; see ADR-0017.
 
+### `session.result_emitted`
+
+**Emitter:** `emit_result_locked` (`cw.result`) and the audit-aware reconcile
+result-mutation seams
+**Payload:**
+```json
+{
+  "session_id": "<str>",
+  "ticket_id": "<str|null>",
+  "client": "<str>",
+  "lane": "<str|null>",
+  "stage": "<str|null>",
+  "last_result_source": "<str>",
+  "status": "<str>",
+  "payload_digest": "<64-char hex sha256>",
+  "actor": "<str>",
+  "recorded_at": "<ISO8601>"
+}
+```
+**Semantics:** Fires on every accepted result write, regardless of backend
+(`cw result emit`, the Stop-hook harvest, an executor-direct write, or a
+reconcile harvest) -- GitHub #2439. Does not fire on a first-writer-wins
+refusal (RFC 0012 S2): a refused write mutates nothing, so there is nothing to
+audit.
+`payload_digest` is a sha256 hex digest of the normalized sentinel actually
+written to `session.last_result` (`result_obj.model_dump(mode="json")`), not
+the raw incoming payload. `actor` is the local OS username, audit-only --
+never compared for authorization, same convention as `session.message_sent`'s
+`author` field above. `correlation_id` is the ticket id derived from the
+session name (`cw.reconcile._shared.ticket_id_for_session`), or `None` when
+the session name carries none.
+
+**Audit-only by construction (R2):** this event carries no
+routing/consumption semantics whatsoever. No reconcile, dispatch, or
+attention-monitor consumer reads it, and it must never be added to a
+routing/completion consumer's `event_types` filter -- `tests/test_result.py`
+enforces this with a grep sweep over `src/cw/reconcile/` and
+`src/cw/dispatch/`. It exists purely so an operator can answer "who wrote
+this session's result, and when" from the event stream rather than
+reconstructing it from logs. Cross-reference ADR-0003's Amendment (#2439)
+and `docs/headless-contract.md` §11.6.
+
 ### `session.salvage_skipped` — historical (ADR-0014)
 
 **Emitter:** none since the process-kill-timeout removal (was the stalled

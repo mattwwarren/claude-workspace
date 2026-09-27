@@ -17,10 +17,9 @@ from cw.models import (
 from cw.reconcile._shared import (
     _PAUSED_STATUS_KEY,
     _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
-    _apply_sentinel_to_task,
+    _apply_sentinel_to_task_audited,
     _resolve_routed_sentinel,
 )
-from cw.result import emit_result_on
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -83,10 +82,20 @@ def _apply_idle_routed_mutations(
         session = session_by_id[candidate.session_id]
         routed = True
         task_already_terminal = False
-        if candidate.ticket_id:
-            outcome = _apply_sentinel_to_task(
-                candidate.ticket_id, session, routed_sentinel
-            )
+        audited = _apply_sentinel_to_task_audited(
+            candidate.ticket_id,
+            session,
+            routed_sentinel,
+            source=LastResultSource.SALVAGE_TRANSCRIPT,
+        )
+        if audited.emit is not None and audited.emit.refused:
+            # #2140: the door refused a genuine overwrite attempt -- a foreign
+            # authority's already-recorded terminal result must survive
+            # byte-identical (first-writer-wins), so this candidate is
+            # abandoned rather than completed.
+            continue
+        outcome = audited.route
+        if outcome is not None:
             routed = outcome.routed
             task_already_terminal = outcome.task_already_terminal
         if not routed and not task_already_terminal:
@@ -102,20 +111,8 @@ def _apply_idle_routed_mutations(
             state_mutated = True
             continue
         if not routed and task_already_terminal:
-            # #2140: another authority already landed this ticket's task
-            # genuinely terminal before this call's own lookup ran. Route the
-            # completion through the door instead of the raw assignment below
-            # (that block is reached only when routed is True) so a foreign
-            # authority's already-door-written result is never clobbered.
-            emit_outcome = emit_result_on(
-                session,
-                routed_sentinel.model_dump(mode="json"),
-                source=LastResultSource.SALVAGE_TRANSCRIPT,
-            )
-            if emit_outcome.refused:
-                # emit_result_on() leaves `session` byte-identical on refusal --
-                # nothing new for this tick to persist.
-                continue
+            # #2140: the shared audited seam already accepted and recorded the
+            # result after discovering the raced terminal queue row.
             session.status = SessionStatus.COMPLETED
             session.completed_at = now
             session.completed_reason = CompletionReason.NORMAL
@@ -126,7 +123,6 @@ def _apply_idle_routed_mutations(
         session.status = SessionStatus.COMPLETED
         session.completed_at = now
         session.completed_reason = CompletionReason.NORMAL
-        session.last_result = routed_sentinel.model_dump(mode="json")
         # #1762: guarded for the same reason as phantom's copy -- the shared
         # guard no longer proves salvage_csid is non-None, and blanking the id
         # the transcript lookups key off would be a silent regression.

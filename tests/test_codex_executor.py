@@ -693,6 +693,31 @@ def test_codex_executor_threads_native_daemon_into_write_hook_context(
     assert calls[0]["daemon"] is daemon
 
 
+def test_codex_executor_threads_merge_gate_ignore_paths_into_write_hook_context(
+    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+) -> None:
+    """#2431: the codex spawn path stamps the client's ignore list too."""
+    worktree = make_git_repo("wt-codex-mg-ignore")
+    executor = _sync_codex_executor(StageExecutorConfig(backend=CODEX_BACKEND))
+    client = ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        default_branch="main",
+        merge_gate_ignore_paths=["mypy-baseline.txt"],
+    )
+    task = TicketTask(ticket_id="T-mg", client="test", stage=Stage.REVIEW)
+
+    calls: list[dict[str, object]] = []
+
+    def _capture(*_args: object, **kwargs: object) -> None:
+        calls.append(kwargs)
+
+    with patch("cw.executor.codex._write_hook_context", _capture):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    assert calls[0]["merge_gate_ignore_paths"] == ["mypy-baseline.txt"]
+
+
 def test_resolve_executor_threads_native_daemon_into_codex_executor(
     tmp_config_dir: Path, tmp_path: Path
 ) -> None:

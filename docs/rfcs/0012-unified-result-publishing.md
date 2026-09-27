@@ -92,6 +92,9 @@ the worker's contract, provenance is cw's write metadata; this avoids a
 sentinel schema_version bump. The door stays write-only: it emits no events
 and routes no tasks (the #536 separation — the Stop hook remains the sole
 completion-event source, `_apply_sentinel_to_task` stays with its callers).
+(A later, narrow exception — an audit-only `session.result_emitted` event
+with no task-routing effect — is documented in ADR-0003's Amendment, #2439,
+rather than revising this decision record.)
 
 ### Epic II — Writer migration, retirement, enforcement
 
@@ -167,7 +170,9 @@ explicitly blessed as display/forensic surfaces that never write state.
 - **Acceptance:**
   - `emit_result()` is importable and unit-tested; the Click command is a thin wrapper over it.
   - CLI exit codes and stderr output for valid/invalid payloads and missing-session cases are unchanged (existing CLI tests pass unmodified).
-  - The door emits no events and performs no task routing.
+  - The door emits no events and performs no task routing. (A later, narrow
+    exception — an audit-only `session.result_emitted` event with no
+    task-routing effect — is documented in ADR-0003's Amendment, #2439.)
 
 ### S2 — Provenance field and centralized first-writer-wins arbitration in the door
 

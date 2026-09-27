@@ -899,3 +899,29 @@ Three surfaces re-parse or re-display transcript/sentinel data for the operator 
 - **`cw dev-queue wait`** (`src/cw/cli/dev_queue/wait.py`) — blessed by a zero-hit scan: `tests/test_result_door_guard.py::TestReadOnlySurfacesNeverWrite` asserts no `last_result` assignment exists in this file. It re-parses transcripts for display only.
 - **`queue_peek`** (`src/cw/queue_peek.py`) — same zero-hit scan coverage; re-parses transcripts for display only, never writes `Session.last_result`.
 - **`.claude/skills/cw-followup/scripts/parse_sentinel.py`** — outside `src/cw/`, so the enforcement test structurally cannot cover it. Its blessing is doc-prose only, stated here: it parses a completed session's sentinel for the `/cw-followup` skill's disposition logic and never writes back to `Session.last_result`.
+
+### 11.6 Audit Trail for Every Accepted Emit (#2439)
+
+`emit_result_locked` (`cw.result`) records an audit-only `session.result_emitted`
+event on every accepted write from inside the door itself. The direct
+reconcile mutation paths use the audit-aware `emit_result_on_audited` seam (or
+the same audit helper immediately before their legacy terminal-sentinel
+assignment), so accepted writes from `cw.reconcile.local`'s git-facts
+synthesis, transcript salvage, phantom/idle routing, and stalled routing are
+covered too. The event fires regardless of which backend's harvest authority
+wrote the result (§11.1's table), before the caller persists the write, and is
+skipped entirely on a first-writer-wins refusal (§11.2) since a refusal mutates
+nothing.
+
+Payload: `session_id`, `ticket_id` (derived from the session name), `client`,
+`lane`, `stage`, `last_result_source`, `status`, `payload_digest` (a sha256
+hex digest of the normalized sentinel written, not the raw payload), `actor`
+(local OS username), `recorded_at` (ISO8601). See `docs/events.md`'s
+`session.result_emitted` section for the full payload shape and semantics.
+
+This is audit-only by construction: it carries no routing or task-completion
+effect, is never read by any reconcile/dispatch/attention consumer, and does
+not alter the invariant in §11.1/§11.2 above -- the door remains write-only
+with respect to session state and task routing. See ADR-0003's Amendment
+(#2439) for how this narrow exception composes with "the Stop hook is the
+sole completion-event source."

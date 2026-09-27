@@ -568,6 +568,18 @@ class OrchestratorEventType(StrEnum):
     # record, not an operator page -- Step 3c already surfaces each downgrade
     # in friction_highlights.
     REVIEW_FIXED_DISPOSITION_DOWNGRADED = "review.fixed_disposition_downgraded"
+    # GitHub #2439 -- audit-only record of every accepted `emit_result_locked`
+    # write (session_id, ticket_id, client, lane, stage, last_result_source,
+    # status, payload_digest, actor, recorded_at). Emitted from inside the
+    # door itself, before `save_state`, on every accepted write regardless of
+    # backend (`cw result emit`, the Stop-hook harvest, an executor-direct
+    # write). Carries no routing/consumption semantics whatsoever -- it must
+    # never be read by any reconcile/dispatch/attention consumer, and is
+    # deliberately NOT added to _DEFAULT_OPERATOR_EVENT_TYPES, matching the
+    # SCOPE_ROUTING_DECISION / WORKTREE_FAST_FORWARDED convention above: this
+    # is an audit trail, not an operator alert, and fires on effectively every
+    # accepted emit -- far higher volume than any currently-forwarded member.
+    SESSION_RESULT_EMITTED = "session.result_emitted"
 
 
 class DispatchSkipReason(StrEnum):

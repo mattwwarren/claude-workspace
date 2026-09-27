@@ -106,7 +106,13 @@ _log = logging.getLogger(__name__)
 #     record, as a JSON object or null. FINALIZE's check_must_fix_override.py
 #     compares it against the worktree's live review verdict; it rides here
 #     because the row's blocked_reason is cleared by the requeue to FINALIZE.)
-CW_CONTEXT_SCHEMA_VERSION = 10
+# v11: added `merge_gate_ignore_paths` (#2431 — the client's
+#     ClientConfig.merge_gate_ignore_paths, as a string list, [] when unset.
+#     Read by auto-dev-finalize.md Step 4a's headless bash fence via
+#     `jq -r '.merge_gate_ignore_paths // [] | .[]'` and passed to
+#     check_merge_gate_overlap.py as repeated `--ignore-path` arguments — the
+#     fence has no other route to a ClientConfig field from inside agent bash.)
+CW_CONTEXT_SCHEMA_VERSION = 11
 
 
 def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:
@@ -484,6 +490,7 @@ def _write_hook_context(
     default_branch: str = "main",
     workspace_path: Path | None = None,
     lane: str | None = None,
+    merge_gate_ignore_paths: list[str] | None = None,
     write_stop_hook: bool = True,
     daemon: NativeDaemonClient | None = None,
 ) -> None:
@@ -617,6 +624,7 @@ def _write_hook_context(
         # the guard's per-lane config override (LaneConfig.busy_wait_guard_*)
         # resolvable at all. Null for USER-origin sessions, which have no lane.
         "lane": lane,
+        "merge_gate_ignore_paths": merge_gate_ignore_paths or [],
         "purpose": purpose,
         "ticket_id": ticket_id,
         "headless": headless,
@@ -805,6 +813,7 @@ def spawn_create_impl(
         default_branch=client.default_branch,
         workspace_path=client.workspace_path,
         lane=lane,
+        merge_gate_ignore_paths=client.merge_gate_ignore_paths,
         daemon=daemon,
     )
 

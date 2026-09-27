@@ -80,7 +80,8 @@ from cw.native_daemon import _is_native_surface_ref
 from cw.reconcile import _deps
 from cw.result import (
     EmitOutcome,
-    emit_result_on,
+    _record_result_emitted_audit,
+    emit_result_on_audited,
     has_terminal_result,
     reconstruct_staged_sentinel,
 )
@@ -92,7 +93,7 @@ from cw.worktree import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from cw.dispatch import _StagePosition
@@ -1491,6 +1492,13 @@ class _TaskLookupResult(NamedTuple):
     terminal_excluded_client: str | None
 
 
+class AuditedSentinelRouteOutcome(NamedTuple):
+    """Result of routing a sentinel through the audited write-ahead seam."""
+
+    route: SentinelRouteOutcome | None
+    emit: EmitOutcome | None
+
+
 def _lookup_matching_task(
     store: DevQueueStore, ticket_id: str, cw_session_id: str
 ) -> _TaskLookupResult:
@@ -1662,6 +1670,8 @@ def _apply_sentinel_to_task(
     ticket_id: str,
     session: Session,
     sentinel: AutoDevResult | BlockedResult,
+    *,
+    before_persist: Callable[[], bool | None] | None = None,
 ) -> SentinelRouteOutcome:
     """Update the matching dev-queue task based on the sentinel result.
 
@@ -1688,6 +1698,12 @@ def _apply_sentinel_to_task(
     and the LOCAL-DAEMON git-harvest reaper ``cw.reconcile.local``, #2140) --
     each completing the now-leaked session on this sub-cause instead of
     orphaning it.
+
+    ``before_persist`` is an optional reconcile-only write-ahead hook. When a
+    route is accepted, it runs after the in-memory queue mutation but before
+    ``save_dev_queue``; a failure therefore cannot leave the persisted queue
+    ahead of the caller's session mutation. Returning ``False`` abandons the
+    in-memory queue mutation without persisting it.
     """
     cw_session_id = session.id
     with dev_queue_lock():
@@ -1739,9 +1755,12 @@ def _apply_sentinel_to_task(
                     },
                     correlation_id=ticket_id,
                 )
+            routed = not lookup.matched_excluded
+            if routed and before_persist is not None and before_persist() is False:
+                routed = False
             return SentinelRouteOutcome(
                 rescued=False,
-                routed=not lookup.matched_excluded,
+                routed=routed,
                 landed_terminal=False,
                 task_already_terminal=already_terminal,
             )
@@ -1796,11 +1815,76 @@ def _apply_sentinel_to_task(
             # carries no success signal and must not write (#918).
             mutated = False
 
+        if routed and before_persist is not None and before_persist() is False:
+            routed = False
+            mutated = False
         if mutated:
             save_dev_queue(store)
         return SentinelRouteOutcome(
             rescued=rescued, routed=routed, landed_terminal=landed_terminal
         )
+
+
+def _apply_sentinel_to_task_audited(
+    ticket_id: str | None,
+    session: Session,
+    sentinel: AutoDevResult | BlockedResult,
+    *,
+    source: LastResultSource,
+    audit_existing_result: bool = False,
+) -> AuditedSentinelRouteOutcome:
+    """Apply a reconcile sentinel with one audited write-ahead operation.
+
+    For a fresh sentinel, first-writer arbitration and the audit event happen
+    before the queue is persisted. Existing-result callers (the stalled sweep)
+    only record the already-present sentinel and leave its session mutation to
+    their caller. Keeping both forms here prevents the idle, phantom, stalled,
+    and local reconcile paths from drifting apart on ordering or refusal.
+    """
+    payload = sentinel.model_dump(mode="json")
+    emit_outcome: EmitOutcome | None = None
+
+    def before_persist() -> bool:
+        nonlocal emit_outcome
+        if audit_existing_result:
+            _record_result_emitted_audit(
+                session, payload, source=source, status=sentinel.status
+            )
+            return True
+        emit_outcome = emit_result_on_audited(session, payload, source=source)
+        return not emit_outcome.refused
+
+    if ticket_id is None:
+        if audit_existing_result:
+            _record_result_emitted_audit(
+                session, payload, source=source, status=sentinel.status
+            )
+        else:
+            emit_outcome = emit_result_on_audited(session, payload, source=source)
+        return AuditedSentinelRouteOutcome(None, emit_outcome)
+
+    route = _apply_sentinel_to_task(
+        ticket_id,
+        session,
+        sentinel,
+        before_persist=before_persist,
+    )
+    if emit_outcome is not None and emit_outcome.refused:
+        # The queue was deliberately not persisted by before_persist(). Make
+        # the refusal shape explicit to callers that otherwise complete on a
+        # task-already-terminal route.
+        route = route._replace(routed=False, task_already_terminal=True)
+    elif audit_existing_result and route.task_already_terminal:
+        # No callback runs on the lookup-miss/raced-terminal branch, but the
+        # existing session sentinel is still a successful completion audit.
+        _record_result_emitted_audit(
+            session, payload, source=source, status=sentinel.status
+        )
+    elif not audit_existing_result and route.task_already_terminal:
+        # There is no queue mutation to persist in this branch, so finish the
+        # accepted emit directly after the lookup result is known.
+        emit_outcome = emit_result_on_audited(session, payload, source=source)
+    return AuditedSentinelRouteOutcome(route, emit_outcome)
 
 
 def _requeue_blocked_result_under_cap(
@@ -2164,7 +2248,7 @@ def _apply_salvaged_completion(
     Returns the ``EmitOutcome`` (``refused=True`` when the door declined). All
     four callers (phantom/idle/stalled/concierge) check ``.refused``.
     """
-    outcome = emit_result_on(
+    outcome = emit_result_on_audited(
         session,
         result.model_dump(mode="json"),
         source=LastResultSource.SALVAGE_TRANSCRIPT,

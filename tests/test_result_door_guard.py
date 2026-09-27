@@ -46,11 +46,6 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "stage-mismatch-refused; no 'status' key so has_terminal_result() "
             "stays False"
         ),
-        'session.last_result = routed_sentinel.model_dump(mode="json")': (
-            "idle/_mutations.py (_apply_idle_routed_mutations) — routed-"
-            "sentinel advance; a real terminal sentinel routed via "
-            "_apply_sentinel_to_task, carries 'status'"
-        ),
     },
     "reconcile/phantom/_mutations.py": {
         (
@@ -73,10 +68,11 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "marker, stage-mismatch-refused (fresh branch: no pre-existing "
             "dict to merge into); no 'status' key"
         ),
-        'session.last_result = routed_sentinel.model_dump(mode="json")': (
+        "session.last_result = routed_payload": (
             "phantom/_mutations.py (_apply_phantom_routed_mutations) — "
-            "routed-sentinel advance; a real terminal sentinel routed via "
-            "_apply_sentinel_to_task, carries 'status'"
+            "routed-sentinel advance; audit is appended immediately before "
+            "this legacy assignment, and the real terminal sentinel routed "
+            "via _apply_sentinel_to_task carries 'status'"
         ),
     },
     "reconcile/stalled/_mutations.py": {
@@ -100,11 +96,11 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "marker, stage-mismatch-refused (fresh branch: existing "
             "last_result was not a dict); no 'status' key"
         ),
-        'session.last_result = routed_sentinel.model_dump(mode="json")': (
+        "session.last_result = routed_payload": (
             "stalled/_mutations.py (_apply_stalled_routed_mutations) — "
-            "routed-sentinel advance (ordinary success arm, and the #2140-"
-            "shape task_already_terminal race arm); a real terminal "
-            "sentinel routed via _apply_sentinel_to_task, carries 'status'"
+            "routed-sentinel advance; audit is appended immediately before "
+            "this legacy assignment, and the real terminal sentinel routed "
+            "via _apply_sentinel_to_task carries 'status'"
         ),
     },
     "dev_queue/requeue.py": {

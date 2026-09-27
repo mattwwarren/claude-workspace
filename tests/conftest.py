@@ -366,6 +366,7 @@ def run_guard_fence(
     fence: str,
     script: str,
     *,
+    create_base_commit: bool = False,
     repo_local: str | None = None,
     global_copy: str | None = None,
     worktree_path_override: str | None = None,
@@ -414,6 +415,25 @@ def run_guard_fence(
         check=True,
         env=_clean_git_env(),
     )
+    if create_base_commit:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.name=Codex Fixture",
+                "-c",
+                "user.email=codex-fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fixture base",
+            ],
+            capture_output=True,
+            check=True,
+            env=_clean_git_env(),
+        )
     if repo_local is not None:
         scripts = repo / ".claude" / "scripts"
         scripts.mkdir(parents=True, exist_ok=True)

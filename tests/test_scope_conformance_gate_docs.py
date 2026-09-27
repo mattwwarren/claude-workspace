@@ -107,7 +107,7 @@ def _table_minimums() -> dict[str, tuple[int, str]]:
         match["script"]: (int(match["version"]), match["doc"])
         for match in _TABLE_ROW.finditer(_resolver_table_section())
     }
-    assert len(rows) == 5, f"expected 5 table rows, parsed {sorted(rows)}"
+    assert len(rows) == 6, f"expected 6 table rows, parsed {sorted(rows)}"
     return rows
 
 
@@ -495,7 +495,7 @@ def test_every_marker_fence_anchors_the_parse_to_the_script_header() -> None:
                 f"{doc}: the marker must be extracted from a full `# "
                 f"cw-script-version: N` comment line, anchored at both ends"
             )
-    assert fences == 6, f"expected 6 marker fences across the docs, found {fences}"
+    assert fences == 7, f"expected 7 marker fences across the docs, found {fences}"
 
 
 def test_canonical_rule_anchors_the_marker_to_the_script_header() -> None:
@@ -539,7 +539,7 @@ def test_every_marker_regex_in_the_impl_doc_is_the_bounded_one() -> None:
 
 
 def test_resolver_table_lists_every_guard_script_with_minimum_version() -> None:
-    """One shared table in auto-dev-impl.md covers all five guard scripts."""
+    """One shared table in auto-dev-impl.md covers all six guard scripts."""
     section = _resolver_table_section()
     for script in (
         "check_not_main_checkout.py",
@@ -547,6 +547,7 @@ def test_resolver_table_lists_every_guard_script_with_minimum_version() -> None:
         "check_impl_guard_staleness.py",
         "classify_merge_conflict.py",
         "check_must_fix_override.py",
+        "check_merge_gate_overlap.py",
     ):
         assert script in section
     assert "cw-script-version" in section
