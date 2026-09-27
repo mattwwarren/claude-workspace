@@ -5,17 +5,13 @@ headless contract. Shared readers are imported from the established test
 helpers rather than duplicated here.
 """
 
-from tests.conftest import _REPO_ROOT, _appendix, _checkpoint1_section
+from tests.conftest import _REPO_ROOT, _appendix, _checkpoint1_section, _norm
 from tests.test_agent_comment_provenance import RULE_ANCHOR, _rule_section
 from tests.test_auto_dev_preflight_resolutions import _after
 
 NEW_SUBSECTION_ANCHOR = "### Operator-authority delta (#2433)"
 DESTRUCTIVE_GATE_ANCHOR = "### Destructive-directive gate"
 PROVENANCE_ANCHOR = "### Provenance — what carries operator authority"
-
-
-def _norm(text: str) -> str:
-    return " ".join(text.split())
 
 
 def _headless_contract() -> str:

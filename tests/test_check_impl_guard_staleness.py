@@ -12,8 +12,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from tests.conftest import GUARD_MARKER_CURRENT
-
 SCRIPT = (
     Path(__file__).resolve().parents[1]
     / ".claude"
@@ -274,6 +272,72 @@ def test_newest_comment_at_is_null_when_no_timestamps(tmp_path: Path) -> None:
 
 
 def test_check_impl_guard_staleness_declares_cw_script_version_header() -> None:
-    """Line 2 (index 1) carries the marker the #2141 resolvers grep for."""
+    """Line 2 (index 1) carries the marker the #2141 resolvers grep for.
+
+    Version 2 (#2438 MUST_FIX A): the operator-authority comment filter is a
+    real behaviour change, so this pins the bumped minimum directly rather
+    than the shared ``GUARD_MARKER_CURRENT`` fixture (v1), which is now a
+    stale case for this script specifically.
+    """
     lines = SCRIPT.read_text(encoding="utf-8").splitlines()
-    assert lines[1] == GUARD_MARKER_CURRENT.rstrip("\n")
+    assert lines[1] == "# cw-script-version: 2"
+
+
+def test_agent_authored_comment_after_head_is_not_stale(tmp_path: Path) -> None:
+    """Operator-authority filter (#2438 MUST_FIX A): a comment carrying the
+    pipeline's own `<!-- cw-agent-authored -->` marker must not trip
+    stale_comment_after_head, even though it postdates HEAD."""
+    comments = tmp_path / "comments.json"
+    comments.write_text(
+        json.dumps(
+            [
+                {
+                    "createdAt": "2026-08-11T03:28:16Z",
+                    "body": "Routine status update.\n\n<!-- cw-agent-authored -->",
+                }
+            ]
+        )
+    )
+    code, verdict = _run(
+        "--head-commit-at",
+        "2026-08-10T22:53:27-04:00",
+        "--comments-file",
+        str(comments),
+    )
+    assert code == 0
+    assert verdict["stale"] is False
+    assert verdict["reasons"] == []
+    assert verdict["newest_comment_at"] is None
+
+
+def test_operator_comment_after_head_is_stale_and_agent_comment_does_not_mask_it(
+    tmp_path: Path,
+) -> None:
+    """An operator-authority comment still trips stale_comment_after_head; a
+    later-timestamped agent-authored comment in the same file must not be
+    picked as `newest_comment_at` instead of it."""
+    comments = tmp_path / "comments.json"
+    comments.write_text(
+        json.dumps(
+            [
+                {
+                    "createdAt": "2026-08-11T03:00:00Z",
+                    "body": "Resolved the merge conflict, please retry.",
+                },
+                {
+                    "createdAt": "2026-08-11T05:00:00Z",
+                    "body": "Automated status.\n\n<!-- cw-agent-authored -->",
+                },
+            ]
+        )
+    )
+    code, verdict = _run(
+        "--head-commit-at",
+        "2026-08-10T22:53:27-04:00",
+        "--comments-file",
+        str(comments),
+    )
+    assert code == 0
+    assert verdict["stale"] is True
+    assert verdict["reasons"] == ["stale_comment_after_head"]
+    assert verdict["newest_comment_at"] == "2026-08-11T03:00:00Z"
