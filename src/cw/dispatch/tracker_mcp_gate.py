@@ -164,7 +164,7 @@ def _plugin_enabled(enabled_plugins_raw: object, plugin_id: str) -> bool | None:
             return None
         if plugin_id not in enabled_plugins_raw:
             return False
-        return enabled_plugins_raw[plugin_id]
+        return bool(enabled_plugins_raw[plugin_id])
     if isinstance(enabled_plugins_raw, list):
         if not all(isinstance(plugin, str) for plugin in enabled_plugins_raw):
             return None
