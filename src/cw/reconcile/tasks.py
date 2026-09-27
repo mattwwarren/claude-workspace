@@ -23,6 +23,7 @@ from cw.dev_queue import (
 )
 from cw.events import advance_cursor, read_events, record_event
 from cw.gh import (
+    _GH_PR_STATE_CLOSED,
     _GH_PR_STATE_MERGED,
     TIMED_OUT_MERGED_LOOKBACK_DAYS,
     resolve_merged_via_pr_state,
@@ -875,9 +876,11 @@ def _is_variant_b_gate_task(task: TicketTask) -> bool:
 
     The two producers reach their blocking PR's state by different routes.
     prior_pipeline_pr_open's PR belongs to a DIFFERENT ticket, whose own
-    store row carries it as a pr_url for the task scan in
-    _merged_pr_numbers_by_client to poll. stale_dispatch's PR is this
-    ticket's OWN earlier dispatch, found by a live `gh pr list --head` query
+    store row carries it as a pr_url for the task scan in the merged/closed
+    cross-reference (_merged_pr_numbers_by_client /
+    _closed_pr_numbers_by_client, GitHub #1920) to poll. stale_dispatch's PR
+    is this ticket's OWN earlier dispatch, found by a live `gh pr list --head`
+    query
     that writes no pr_url anywhere -- so #1927 gives it an independent
     source instead: cw.reconcile.stale_dispatch_watch registers it as a
     client-tagged WatchedPr, which hydrates on the same serve tick and folds
@@ -910,8 +913,10 @@ def _index_variant_a_candidates(
     }
 
 
-def _merged_pr_numbers_by_client(store: DevQueueStore) -> dict[str, set[int]]:
-    """client -> set of PR numbers this store has observed MERGED (via pr_state).
+def _pr_numbers_by_client_in_state(
+    store: DevQueueStore, pr_state_value: str
+) -> dict[str, set[int]]:
+    """client -> set of PR numbers this store has observed in *pr_state_value*.
 
     Two independent sources, unioned per client:
 
@@ -929,9 +934,9 @@ def _merged_pr_numbers_by_client(store: DevQueueStore) -> dict[str, set[int]]:
     operator-review producers) carries no client context and is therefore
     excluded rather than attributed to a guessed client (#1269).
     """
-    merged: dict[str, set[int]] = {}
+    by_client: dict[str, set[int]] = {}
     for t in store.tasks:
-        if t.pr_state is None or t.pr_state.state != _GH_PR_STATE_MERGED:
+        if t.pr_state is None or t.pr_state.state != pr_state_value:
             continue
         if not t.pr_url:
             continue
@@ -939,14 +944,32 @@ def _merged_pr_numbers_by_client(store: DevQueueStore) -> dict[str, set[int]]:
         if parsed is None:
             continue
         _, pr_number = parsed
-        merged.setdefault(t.client, set()).add(pr_number)
+        by_client.setdefault(t.client, set()).add(pr_number)
     for w in store.watched_prs:
         if w.client is None:
             continue
-        if w.pr_state is None or w.pr_state.state != _GH_PR_STATE_MERGED:
+        if w.pr_state is None or w.pr_state.state != pr_state_value:
             continue
-        merged.setdefault(w.client, set()).add(w.pr_number)
-    return merged
+        by_client.setdefault(w.client, set()).add(w.pr_number)
+    return by_client
+
+
+def _merged_pr_numbers_by_client(store: DevQueueStore) -> dict[str, set[int]]:
+    """client -> set of PR numbers this store has observed MERGED (via pr_state).
+
+    See ``_pr_numbers_by_client_in_state`` for the two-source contract.
+    """
+    return _pr_numbers_by_client_in_state(store, _GH_PR_STATE_MERGED)
+
+
+def _closed_pr_numbers_by_client(store: DevQueueStore) -> dict[str, set[int]]:
+    """client -> set of PR numbers this store has observed CLOSED unmerged
+    (via pr_state). GitHub #1920: a Variant B park's blocking PR that is
+    CLOSED without merging must release the park identically to a MERGED
+    one -- see ``_pr_numbers_by_client_in_state`` for the shared two-source
+    contract.
+    """
+    return _pr_numbers_by_client_in_state(store, _GH_PR_STATE_CLOSED)
 
 
 def _release_variant_a(task: TicketTask, policy: ReapPolicy) -> None:
@@ -996,7 +1019,11 @@ def release_stale_gated_tasks() -> list[str]:
       within the same client -- plus, since #1927, against every
       client-tagged ``WatchedPr``, which is what makes the stale_dispatch
       producer reachable at all (its self-PR lives on no task row; see
-      ``cw.reconcile.stale_dispatch_watch``).
+      ``cw.reconcile.stale_dispatch_watch``). Since GitHub #1920, the
+      blocking PR's state matches on either MERGED or CLOSED-unmerged --
+      both leave the specific condition Variant B parks on (the OTHER PR
+      still being OPEN) equally false, so both release identically to
+      PENDING.
 
     Per ``park_terminal_sibling_tasks``'s exact precedent (ADR-0006):
     ``SESSION_REAP_PROPOSED`` fires on EVERY detection regardless of
@@ -1008,9 +1035,9 @@ def release_stale_gated_tasks() -> list[str]:
     latch-clear then clears ``stale_gate_detected_at`` in the same call.
 
     Residual blind spot (binding operator resolution, not closed here):
-    Variant B is cross-reference-only -- a blocking PR that merged and then
-    left the queue entirely (its task row removed/never tracked) has no
-    ``pr_state`` for this scan to match against, so that row stays parked
+    Variant B is cross-reference-only -- a blocking PR that merged or closed
+    and then left the queue entirely (its task row removed/never tracked) has
+    no ``pr_state`` for this scan to match against, so that row stays parked
     until an operator intervenes. No ``gh pr view`` fallback is attempted.
 
     Does NOT require ``sessions_lock`` -- operates on the dev queue and the
@@ -1073,10 +1100,13 @@ def release_stale_gated_tasks() -> list[str]:
         # Variant B: dev-queue-wide cross-reference scan (no event stream
         # names these rows directly -- see docstring).
         merged_by_client = _merged_pr_numbers_by_client(store)
+        closed_by_client = _closed_pr_numbers_by_client(store)
         for task in store.tasks:
             if not _is_variant_b_gate_task(task):
                 continue
-            if task.blocked_on_pr not in merged_by_client.get(task.client, set()):
+            if task.blocked_on_pr not in merged_by_client.get(
+                task.client, set()
+            ) and task.blocked_on_pr not in closed_by_client.get(task.client, set()):
                 continue
             orig_session_id = task.session_id
             policy = _resolve_task_policy(
