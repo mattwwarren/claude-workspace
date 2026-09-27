@@ -240,6 +240,7 @@ def _run_marker_fence(
         tmp_path,
         _gate_fence() + '\necho "${MERGE_GATE_OUTPUT-}"\n',
         _SCRIPT,
+        create_base_commit=True,
         placeholders={"fork_point_sha": "HEAD", "branch-prefix": "dev"},
         **placement,
     )
