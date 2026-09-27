@@ -20,7 +20,10 @@ from cw.reconcile._shared import (
     _apply_sentinel_to_task,
     _resolve_routed_sentinel,
 )
-from cw.result import emit_result_on
+from cw.result import (
+    _record_result_emitted_audit,
+    emit_result_on_audited,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -107,7 +110,7 @@ def _apply_idle_routed_mutations(
             # completion through the door instead of the raw assignment below
             # (that block is reached only when routed is True) so a foreign
             # authority's already-door-written result is never clobbered.
-            emit_outcome = emit_result_on(
+            emit_outcome = emit_result_on_audited(
                 session,
                 routed_sentinel.model_dump(mode="json"),
                 source=LastResultSource.SALVAGE_TRANSCRIPT,
@@ -123,10 +126,17 @@ def _apply_idle_routed_mutations(
             accepted.append(candidate)
             state_mutated = True
             continue
+        routed_payload = routed_sentinel.model_dump(mode="json")
+        _record_result_emitted_audit(
+            session,
+            routed_payload,
+            source=LastResultSource.SALVAGE_TRANSCRIPT,
+            status=routed_sentinel.status,
+        )
         session.status = SessionStatus.COMPLETED
         session.completed_at = now
         session.completed_reason = CompletionReason.NORMAL
-        session.last_result = routed_sentinel.model_dump(mode="json")
+        session.last_result = routed_payload
         # #1762: guarded for the same reason as phantom's copy -- the shared
         # guard no longer proves salvage_csid is non-None, and blanking the id
         # the transcript lookups key off would be a silent regression.

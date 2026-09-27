@@ -22,6 +22,7 @@ from cw.dev_queue import (
 )
 from cw.models import (
     CompletionReason,
+    LastResultSource,
     QueueItemStatus,
     SessionStatus,
 )
@@ -33,6 +34,7 @@ from cw.reconcile._shared import (
     _foreign_result_target_queue_status,
     _resolve_routed_sentinel,
 )
+from cw.result import _record_result_emitted_audit
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -142,10 +144,17 @@ def _apply_stalled_routed_mutations(
         # return ``refused=True`` -- that door is never open here, so both
         # arms complete the session directly and share this one block
         # (#2426 fix-cycle-2, folding fix-cycle-1's duplicate).
+        routed_payload = routed_sentinel.model_dump(mode="json")
+        _record_result_emitted_audit(
+            session,
+            routed_payload,
+            source=LastResultSource.SALVAGE_TRANSCRIPT,
+            status=routed_sentinel.status,
+        )
         session.status = SessionStatus.COMPLETED
         session.completed_at = now
         session.completed_reason = CompletionReason.NORMAL
-        session.last_result = routed_sentinel.model_dump(mode="json")
+        session.last_result = routed_payload
         if candidate.salvage_csid is not None:
             session.claude_session_id = candidate.salvage_csid
         accepted.append(candidate)

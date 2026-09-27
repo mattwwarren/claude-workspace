@@ -80,7 +80,7 @@ from cw.native_daemon import _is_native_surface_ref
 from cw.reconcile import _deps
 from cw.result import (
     EmitOutcome,
-    emit_result_on,
+    emit_result_on_audited,
     has_terminal_result,
     reconstruct_staged_sentinel,
 )
@@ -2164,7 +2164,7 @@ def _apply_salvaged_completion(
     Returns the ``EmitOutcome`` (``refused=True`` when the door declined). All
     four callers (phantom/idle/stalled/concierge) check ``.refused``.
     """
-    outcome = emit_result_on(
+    outcome = emit_result_on_audited(
         session,
         result.model_dump(mode="json"),
         source=LastResultSource.SALVAGE_TRANSCRIPT,

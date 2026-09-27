@@ -4847,8 +4847,9 @@ class TestSignalStop:
 class TestHarvestLastResultThroughDoor:
     """Direct tests for _harvest_last_result_through_door (RFC 0012 A1, #1457).
 
-    Covers the best-effort exception-swallow path: a door-side validation or
-    session-not-found failure must never propagate out of the Stop hook.
+    Covers the best-effort exception-swallow path: a door-side validation,
+    session-not-found, or audit-inbox failure must never propagate out of the
+    Stop hook.
     """
 
     def test_swallows_emit_validation_error(
@@ -4898,6 +4899,29 @@ class TestHarvestLastResultThroughDoor:
             _harvest_last_result_through_door("ghost-session", sentinel)
 
         assert any("rejected by door" in r.getMessage() for r in caplog.records)
+
+    def test_swallows_audit_append_oserror(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.auto_dev_result import AutoDevResult
+        from cw.cli.stop_hook import _harvest_last_result_through_door
+
+        sentinel = AutoDevResult.model_validate(_valid_payload())
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            message = "inbox unavailable"
+            raise OSError(message)
+
+        monkeypatch.setattr("cw.cli.stop_hook.emit_result_locked", _raise)
+
+        with caplog.at_level("WARNING"):
+            _harvest_last_result_through_door("sess-audit-error", sentinel)
+
+        assert any("audit append failed" in r.getMessage() for r in caplog.records)
 
 
 class TestSentinelPresentInTranscript:

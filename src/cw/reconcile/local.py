@@ -74,7 +74,7 @@ from cw.reconcile.codex_boot import (
     _worktree_porcelain_clean_except_verdict,
 )
 from cw.reconcile.tasks import _resolve_task_policy
-from cw.result import emit_result_on
+from cw.result import emit_result_on_audited
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -586,7 +586,7 @@ def _act_on_local_harvest_candidates(
         # by _apply_sentinel_to_task above (pre-existing ordering, unchanged);
         # a refusal does not roll that back (Adopted Assumption 2). The door's
         # own warning logs existing_source/attempted_source, so no log here.
-        emit_outcome = emit_result_on(
+        emit_outcome = emit_result_on_audited(
             session,
             sentinel.model_dump(mode="json"),
             source=LastResultSource.GIT_SYNTHESIS,

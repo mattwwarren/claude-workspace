@@ -39,7 +39,10 @@ from cw.reconcile._shared import (
     _queue_status_for_salvaged,
     _resolve_routed_sentinel,
 )
-from cw.result import emit_result_on
+from cw.result import (
+    _record_result_emitted_audit,
+    emit_result_on_audited,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -282,7 +285,7 @@ def _apply_phantom_routed_mutations(
             # authority's already-door-written result is never clobbered. The
             # merge-aware refusal-stamp logic below stays skipped entirely for
             # this case.
-            emit_outcome = emit_result_on(
+            emit_outcome = emit_result_on_audited(
                 session,
                 routed_sentinel.model_dump(mode="json"),
                 source=LastResultSource.SALVAGE_TRANSCRIPT,
@@ -332,11 +335,18 @@ def _apply_phantom_routed_mutations(
                     _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
                 }
             continue
+        routed_payload = routed_sentinel.model_dump(mode="json")
+        _record_result_emitted_audit(
+            session,
+            routed_payload,
+            source=LastResultSource.SALVAGE_TRANSCRIPT,
+            status=routed_sentinel.status,
+        )
         session.status = SessionStatus.COMPLETED
         session.completed_at = now
         session.completed_reason = CompletionReason.NORMAL
         session.reap_reason = ReapReason.PHANTOM_SURFACE
-        session.last_result = routed_sentinel.model_dump(mode="json")
+        session.last_result = routed_payload
         # #1762: only overwrite when the candidate actually carries a csid. The
         # staged-last_result producer passes session.claude_session_id straight
         # back (a no-op), but a future None-csid producer must not blank the id

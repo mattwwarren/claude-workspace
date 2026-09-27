@@ -897,13 +897,15 @@ Three surfaces re-parse or re-display transcript/sentinel data for the operator 
 ### 11.6 Audit Trail for Every Accepted Emit (#2439)
 
 `emit_result_locked` (`cw.result`) records an audit-only `session.result_emitted`
-event on every accepted write, from inside the door itself -- not from
-`emit_result_on`'s two direct-caller sites (`cw.reconcile.local`'s git-facts
-synthesis, `cw.reconcile._shared`'s salvage-transcript path), which remain
-uncovered by this audit trail. The event fires regardless of which backend's
-harvest authority wrote the result (§11.1's table), before `save_state`
-persists the write, and is skipped entirely on a first-writer-wins refusal
-(§11.2) since a refusal mutates nothing.
+event on every accepted write from inside the door itself. The direct
+reconcile mutation paths use the audit-aware `emit_result_on_audited` seam (or
+the same audit helper immediately before their legacy terminal-sentinel
+assignment), so accepted writes from `cw.reconcile.local`'s git-facts
+synthesis, transcript salvage, phantom/idle routing, and stalled routing are
+covered too. The event fires regardless of which backend's harvest authority
+wrote the result (§11.1's table), before the caller persists the write, and is
+skipped entirely on a first-writer-wins refusal (§11.2) since a refusal mutates
+nothing.
 
 Payload: `session_id`, `ticket_id` (derived from the session name), `client`,
 `lane`, `stage`, `last_result_source`, `status`, `payload_digest` (a sha256

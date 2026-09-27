@@ -399,6 +399,26 @@ def _record_result_emitted_audit(
     )
 
 
+def emit_result_on_audited(
+    session: Session, payload: dict[str, Any], *, source: LastResultSource
+) -> EmitOutcome:
+    """Apply the pure emit mutation and audit an accepted result.
+
+    This remains an in-memory operation; the caller owns persistence. It is
+    the audit-aware seam for reconcile paths that already hold a loaded
+    ``Session`` and therefore cannot use :func:`emit_result_locked`.
+    """
+    outcome = emit_result_on(session, payload, source=source)
+    if outcome.result is not None:
+        _record_result_emitted_audit(
+            session,
+            outcome.result.model_dump(mode="json"),
+            source=source,
+            status=outcome.result.status,
+        )
+    return outcome
+
+
 def emit_result_locked(
     payload: dict[str, Any], session_id: str, *, source: LastResultSource
 ) -> EmitOutcome:
@@ -449,23 +469,17 @@ def emit_result_locked(
         msg = f"Session {session_id!r} not found"
         raise EmitSessionNotFoundError(msg, session_id=session_id)
 
-    outcome = emit_result_on(session, payload, source=source)
+    # Why: event-first ordering is deliberate (mirrors
+    # revoke_plan_approval's documented accepted-risk case exactly, see
+    # tests/test_dev_queue.py's test_revoke_plan_approval_save_failure_
+    # raises_with_event_recorded) -- if save_state below later fails, a
+    # phantom audit record is preferable to an unaudited mutation
+    # reaching disk with no trail.
+    outcome = emit_result_on_audited(session, payload, source=source)
     # outcome.result is non-None exactly when the write was accepted (see
     # EmitOutcome's docstring) -- narrowing on this, rather than on
     # `not outcome.refused`, lets mypy see through to the accepted branch.
     if outcome.result is not None:
-        # Why: event-first ordering is deliberate (mirrors
-        # revoke_plan_approval's documented accepted-risk case exactly, see
-        # tests/test_dev_queue.py's test_revoke_plan_approval_save_failure_
-        # raises_with_event_recorded) -- if save_state below later fails, a
-        # phantom audit record is preferable to an unaudited mutation
-        # reaching disk with no trail.
-        _record_result_emitted_audit(
-            session,
-            outcome.result.model_dump(mode="json"),
-            source=source,
-            status=outcome.result.status,
-        )
         save_state(state)
     return outcome
 

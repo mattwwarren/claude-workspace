@@ -1111,7 +1111,8 @@ and mid-task is queued-but-not-delivered; see ADR-0017.
 
 ### `session.result_emitted`
 
-**Emitter:** `emit_result_locked` (`cw.result`)
+**Emitter:** `emit_result_locked` (`cw.result`) and the audit-aware reconcile
+result-mutation seams
 **Payload:**
 ```json
 {
@@ -1127,10 +1128,11 @@ and mid-task is queued-but-not-delivered; see ADR-0017.
   "recorded_at": "<ISO8601>"
 }
 ```
-**Semantics:** Fires on every accepted `emit_result_locked` write, regardless
-of backend (`cw result emit`, the Stop-hook harvest, an executor-direct
-write) -- GitHub #2439. Does not fire on a first-writer-wins refusal (RFC
-0012 S2): a refused write mutates nothing, so there is nothing to audit.
+**Semantics:** Fires on every accepted result write, regardless of backend
+(`cw result emit`, the Stop-hook harvest, an executor-direct write, or a
+reconcile harvest) -- GitHub #2439. Does not fire on a first-writer-wins
+refusal (RFC 0012 S2): a refused write mutates nothing, so there is nothing to
+audit.
 `payload_digest` is a sha256 hex digest of the normalized sentinel actually
 written to `session.last_result` (`result_obj.model_dump(mode="json")`), not
 the raw incoming payload. `actor` is the local OS username, audit-only --
