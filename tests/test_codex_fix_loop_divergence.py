@@ -1,4 +1,4 @@
-"""Tests for cw.codex_fix_loop_divergence — the fix-loop divergence guard (#2394).
+"""Tests for cw.codex_fix_loop.divergence —the fix-loop divergence guard (#2394).
 
 The #1837 admission gate always admits a MUST_FIX anchored in the latest delta,
 so a fix loop that keeps inventing new code to address its own findings never
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cw.codex_fix_loop_divergence import (
+from cw.codex_fix_loop.divergence import (
     _DIVERGENCE_MIN_LINES,
     _DIVERGENCE_PRE_LOOP_FRACTION,
     _DIVERGENCE_STALL_CYCLES,
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from cw.codex_fix_loop_convergence import _OpenFindingKey
+    from cw.codex_fix_loop.convergence import _OpenFindingKey
 
 _KEY_A: _OpenFindingKey = ("a.py", "first finding")
 _KEY_B: _OpenFindingKey = ("b.py", "second finding")

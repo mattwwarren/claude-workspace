@@ -10,18 +10,18 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw import codex_fix_loop
 from cw.codex_fix_loop import (
-    _ESCALATE_AT_CYCLE,
     _FIX_CYCLE_FLOOR_SECONDS,
     _MAX_FIX_CYCLES,
     _build_fix_codex_argv,
     _build_fix_prompt,
     _commit_fix_cycle,
-    _verdict_snapshot_filename,
+    _driver,
     run_review_with_fix_loop,
 )
-from cw.codex_fix_loop_convergence import _open_finding_key, _track_open_findings
+from cw.codex_fix_loop.convergence import _open_finding_key, _track_open_findings
+from cw.codex_fix_loop.park import _ESCALATE_AT_CYCLE
+from cw.codex_fix_loop.snapshot import _verdict_snapshot_filename
 from cw.codex_review import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     _MIN_ROLE_TIMEOUT_SECONDS,
@@ -356,10 +356,10 @@ class TestFixCycleFloor:
         worktree = _worktree(make_git_repo, "wt-floor")
         result0, verdict = _blocking_stub(worktree)
         monkeypatch.setattr(
-            "cw.codex_fix_loop.run_review", lambda **_k: (result0, verdict)
+            "cw.codex_fix_loop._driver.run_review", lambda **_k: (result0, verdict)
         )
         # deadline = 0 + 1000; remaining at loop = 1000 - 950 = 50 < 60.
-        monkeypatch.setattr("cw.codex_fix_loop.time.monotonic", _Clock([0.0, 950.0]))
+        monkeypatch.setattr("cw.codex_fix_loop._driver.time.monotonic", _Clock([0.0, 950.0]))
         runner = _SequencedRunner([])
         out, out_verdict = _run_loop(
             runner, worktree, budget=1000, session_id="s-floor"
@@ -383,11 +383,11 @@ class TestFixCycleFloor:
         worktree = _worktree(make_git_repo, "wt-floor-none")
         result0, verdict = _blocking_stub(worktree)
         monkeypatch.setattr(
-            "cw.codex_fix_loop.run_review", lambda **_k: (result0, verdict)
+            "cw.codex_fix_loop._driver.run_review", lambda **_k: (result0, verdict)
         )
         clean_result, clean_verdict = _stage_complete(worktree)
         monkeypatch.setattr(
-            "cw.codex_fix_loop._rereview",
+            "cw.codex_fix_loop._driver._rereview",
             lambda **_k: (clean_result, clean_verdict, _stub_prepared()),
         )
         runner = _SequencedRunner([CodexRunResult(returncode=0, stdout="", stderr="")])
@@ -417,8 +417,8 @@ class TestFixCycleFloor:
             seen["rereview"] = kwargs["reasoning_effort"]
             return clean_result, clean_verdict, _stub_prepared()
 
-        monkeypatch.setattr("cw.codex_fix_loop.run_review", _review)
-        monkeypatch.setattr("cw.codex_fix_loop._rereview", _rereview)
+        monkeypatch.setattr("cw.codex_fix_loop._driver.run_review", _review)
+        monkeypatch.setattr("cw.codex_fix_loop._driver._rereview", _rereview)
         runner = _SequencedRunner([CodexRunResult(returncode=0, stdout="", stderr="")])
         _run_loop(runner, worktree, session_id="s-effort", reasoning_effort="max")
 
@@ -436,15 +436,15 @@ class TestFixCycleFloor:
         worktree = _worktree(make_git_repo, "wt-floor-eq")
         result0, verdict = _blocking_stub(worktree)
         monkeypatch.setattr(
-            "cw.codex_fix_loop.run_review", lambda **_k: (result0, verdict)
+            "cw.codex_fix_loop._driver.run_review", lambda **_k: (result0, verdict)
         )
         clean_result, clean_verdict = _stage_complete(worktree)
         monkeypatch.setattr(
-            "cw.codex_fix_loop._rereview",
+            "cw.codex_fix_loop._driver._rereview",
             lambda **_k: (clean_result, clean_verdict, _stub_prepared()),
         )
         # deadline 1000; remaining = 1000 - 940 = 60 == floor → not floored.
-        monkeypatch.setattr("cw.codex_fix_loop.time.monotonic", _Clock([0.0, 940.0]))
+        monkeypatch.setattr("cw.codex_fix_loop._driver.time.monotonic", _Clock([0.0, 940.0]))
         runner = _SequencedRunner([CodexRunResult(returncode=0, stdout="", stderr="")])
         out, _ = _run_loop(runner, worktree, budget=1000, session_id="s-floor-eq")
 
@@ -603,7 +603,7 @@ class TestFixInvocation:
 
         worktree = _worktree(make_git_repo, "wt-fix-noop")
         runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC])  # no-op fix, then clean
-        with caplog.at_level(logging.WARNING, logger="cw.codex_fix_loop"):
+        with caplog.at_level(logging.WARNING, logger="cw.codex_fix_loop.commit"):
             out, _ = _run_loop(runner, worktree, session_id="s-fix-noop")
 
         log = subprocess.check_output(
@@ -623,7 +623,7 @@ class TestFixInvocation:
         def _boom(*_a: object, **_k: object) -> str | None:
             raise subprocess.CalledProcessError(1, ["git", "commit"], stderr="nope")
 
-        monkeypatch.setattr("cw.codex_fix_loop._commit_fix_cycle", _boom)
+        monkeypatch.setattr("cw.codex_fix_loop.commit._commit_fix_cycle", _boom)
         runner = _FixLoopRunner([_MF_DOC], fix_behaviors=[_editor()])
         out, _ = _run_loop(runner, worktree, session_id="s-fix-commit-exc")
 
@@ -660,7 +660,7 @@ class TestFixInvocation:
         _write(worktree / "fix.py", "patched = 1\n")
         git_in(worktree, "add", "fix.py")
 
-        with caplog.at_level(logging.WARNING, logger="cw.codex_fix_loop"):
+        with caplog.at_level(logging.WARNING, logger="cw.codex_fix_loop.commit"):
             sha = _commit_fix_cycle(worktree, cycle=1, findings=[_make_finding()])
 
         assert sha is not None
@@ -1178,7 +1178,7 @@ class TestFixLoopCapAndEscalation:
             msg = "disk full"
             raise OSError(msg)
 
-        monkeypatch.setattr("cw.codex_fix_loop.write_review_verdict", _boom)
+        monkeypatch.setattr("cw.codex_fix_loop.snapshot.write_review_verdict", _boom)
         runner = _FixLoopRunner([_MF_DOC])
 
         import logging
@@ -1216,7 +1216,7 @@ class TestFixLoopCapAndEscalation:
             raise OSError(msg)
 
         monkeypatch.setattr(
-            "cw.codex_fix_loop.write_review_verdict", _fail_after_cycle0
+            "cw.codex_fix_loop.snapshot.write_review_verdict", _fail_after_cycle0
         )
         runner = _FixLoopRunner([_MF_DOC])
 
@@ -2248,21 +2248,21 @@ class TestRereviewForwardsFindingDispositions:
         seen_tasks: list[TicketTask] = []
         seen_ledgers: list[object] = []
 
-        real_prepare = codex_fix_loop._prepare_review_pass
+        real_prepare = _driver._prepare_review_pass
 
         def _spy_prepare(*args: object, **kwargs: object) -> object:
             seen_tasks.append(args[0])  # type: ignore[arg-type]
             return real_prepare(*args, **kwargs)  # type: ignore[arg-type]
 
-        real_synth = codex_fix_loop.synthesize_codex_review_result
+        real_synth = _driver.synthesize_codex_review_result
 
         def _spy_synth(**kwargs: object) -> object:
             seen_ledgers.append(kwargs.get("finding_dispositions"))
             return real_synth(**kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(codex_fix_loop, "_prepare_review_pass", _spy_prepare)
+        monkeypatch.setattr(_driver, "_prepare_review_pass", _spy_prepare)
         monkeypatch.setattr(
-            codex_fix_loop, "synthesize_codex_review_result", _spy_synth
+            _driver, "synthesize_codex_review_result", _spy_synth
         )
         monkeypatch.setattr(
             "cw.codex_review._context.core.fetch_issue_comments", lambda *_a, **_kw: []
@@ -2274,7 +2274,7 @@ class TestRereviewForwardsFindingDispositions:
         base = subprocess.check_output(
             ["git", "-C", str(worktree), "rev-parse", "HEAD~1"], text=True
         ).strip()
-        result, verdict, prepared = codex_fix_loop._rereview(
+        result, verdict, prepared = _driver._rereview(
             runner=_FixLoopRunner([_MF_DOC]),
             task=task,
             worktree=worktree,
@@ -2337,7 +2337,7 @@ class TestRereviewForwardsFindingDispositions:
         base = subprocess.check_output(
             ["git", "-C", str(worktree), "rev-parse", "HEAD~1"], text=True
         ).strip()
-        _, verdict, prepared = codex_fix_loop._rereview(
+        _, verdict, prepared = _driver._rereview(
             runner=_FixLoopRunner([_MF_DOC]),
             task=_make_ticket_task(
                 ticket_id="T-2210", client="test", stage=Stage.REVIEW
@@ -2384,7 +2384,7 @@ class TestClaimTierGateReachesBothSynthesisHops:
             codex_review_core.synthesize_codex_review_result
         )
         real_loop_synth: Callable[..., object] = (
-            codex_fix_loop.synthesize_codex_review_result
+            _driver.synthesize_codex_review_result
         )
 
         def _spy_core(**kwargs: object) -> object:
@@ -2398,7 +2398,7 @@ class TestClaimTierGateReachesBothSynthesisHops:
         monkeypatch.setattr(
             codex_review_core, "synthesize_codex_review_result", _spy_core
         )
-        monkeypatch.setattr(codex_fix_loop, "synthesize_codex_review_result", _spy_loop)
+        monkeypatch.setattr(_driver, "synthesize_codex_review_result", _spy_loop)
 
         _run_loop(
             _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()]),
@@ -2437,9 +2437,9 @@ class TestDispositionDriftCheckGateReachesAllSynthesisHops:
             codex_review_core.synthesize_codex_review_result
         )
         real_loop_synth: Callable[..., object] = (
-            codex_fix_loop.synthesize_codex_review_result
+            _driver.synthesize_codex_review_result
         )
-        real_rereview: Callable[..., object] = codex_fix_loop._rereview
+        real_rereview: Callable[..., object] = _driver._rereview
 
         def _spy_core(**kwargs: object) -> object:
             seen.append(kwargs.get("disposition_drift_check_enabled"))
@@ -2456,8 +2456,8 @@ class TestDispositionDriftCheckGateReachesAllSynthesisHops:
         monkeypatch.setattr(
             codex_review_core, "synthesize_codex_review_result", _spy_core
         )
-        monkeypatch.setattr(codex_fix_loop, "synthesize_codex_review_result", _spy_loop)
-        monkeypatch.setattr(codex_fix_loop, "_rereview", _spy_rereview)
+        monkeypatch.setattr(_driver, "synthesize_codex_review_result", _spy_loop)
+        monkeypatch.setattr(_driver, "_rereview", _spy_rereview)
 
         _run_loop(
             _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()]),
