@@ -35,6 +35,7 @@ from cw.models import (
     SessionStatus,
     Stage,
 )
+from cw.models.enums import StageIdentifier
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import fix_dispatch, reconcile
 from tests._reconcile_helpers import _make_pending_fix_dispatch
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
 
 _TICKET = "2017"
 _CLIENT = "acme"
+_FIX_LOOP_PHASE = "fix_loop"
 
 
 def _pending(**overrides: Any) -> PendingFixDispatch:
@@ -290,8 +292,8 @@ def test_act_on_pending_fix_dispatches_clears_and_escalates_on_hard_failure(
     assert errored[0].correlation_id == _TICKET
     assert errored[0].payload["session_id"] == "review-sess"
     assert errored[0].payload["ticket_id"] == _TICKET
-    assert errored[0].payload["stage"] == "s3_review_started"
-    assert errored[0].payload["phase"] == "fix_loop"
+    assert errored[0].payload["stage"] == StageIdentifier.S3_REVIEW_STARTED.value
+    assert errored[0].payload["phase"] == _FIX_LOOP_PHASE
     assert errored[0].payload["cycle"] == 1
     assert errored[0].payload["error_kind"] == "fix_dispatch_failed"
     assert errored[0].payload["started_at"]
@@ -342,8 +344,8 @@ def test_act_on_pending_fix_dispatches_drops_stale_handoff_when_row_reverted_to_
     assert errored[0].correlation_id == _TICKET
     assert errored[0].payload["session_id"] == "review-sess"
     assert errored[0].payload["ticket_id"] == _TICKET
-    assert errored[0].payload["stage"] == "s3_review_started"
-    assert errored[0].payload["phase"] == "fix_loop"
+    assert errored[0].payload["stage"] == StageIdentifier.S3_REVIEW_STARTED.value
+    assert errored[0].payload["phase"] == _FIX_LOOP_PHASE
     assert errored[0].payload["cycle"] == 1
     assert errored[0].payload["error_kind"] == "fix_dispatch_stale_row"
 
@@ -376,8 +378,8 @@ def test_act_on_pending_fix_dispatches_stale_handoff_carries_the_handoffs_own_cy
     assert acted == []
     errored = read_events(event_types=[OrchestratorEventType.STAGE_ERRORED])
     assert len(errored) == 1
-    assert errored[0].payload["stage"] == "s3_review_started"
-    assert errored[0].payload["phase"] == "fix_loop"
+    assert errored[0].payload["stage"] == StageIdentifier.S3_REVIEW_STARTED.value
+    assert errored[0].payload["phase"] == _FIX_LOOP_PHASE
     assert errored[0].payload["cycle"] == 3
 
 
