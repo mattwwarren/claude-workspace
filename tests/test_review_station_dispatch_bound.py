@@ -83,14 +83,17 @@ def test_review_stations_allowed_tools_excludes_sendmessage() -> None:
     assert "SendMessage" not in _frontmatter()
 
 
-def test_findings_cleanup_runs_before_first_reviewer_spawn() -> None:
-    """The `.cw/review-findings/` clear-and-recreate must happen at the top
-    of Step 3a, before any reviewer is spawned — not batched at Checkpoint 3a
-    after every reviewer has already returned."""
+def test_findings_round_initialization_is_recoverable() -> None:
+    """A new round must archive prior findings, while a resume retains them."""
     content = _cmd("auto-dev-review.md")
-    rm_index = content.index("rm -f .cw/review-findings/*.json")
-    checkpoint_index = content.index("### Checkpoint 3a")
-    assert rm_index < checkpoint_index
+    startup = content[content.index("### Step 3a"):content.index("**Small scope:")]
+    assert "review-findings-round.json" in startup
+    assert "status: \"in_progress\"" in startup
+    assert "resume" in startup.lower()
+    assert "retain the active directory" in startup
+    assert "review-findings-archive" in startup
+    assert "Never use `rm`" in startup
+    assert "restore" in startup.lower()
 
 
 def test_each_reviewer_write_happens_before_next_dispatch() -> None:
