@@ -150,6 +150,20 @@ def test_fake_runner_records_none_stdin_by_default(tmp_path: Path) -> None:
     assert runner.calls[0]["stdin"] is None
 
 
+def test_fake_runner_records_env(tmp_path: Path) -> None:
+    """FakeCodexRunner records the env mapping passed per call."""
+    runner = FakeCodexRunner(returncode=0)
+    runner.run(tmp_path, ["codex", "exec"], 60, env={"TMPDIR": "/scratch/tmp"})
+    assert runner.calls[0]["env"] == {"TMPDIR": "/scratch/tmp"}
+
+
+def test_fake_runner_records_none_env_by_default(tmp_path: Path) -> None:
+    """FakeCodexRunner records env=None when the kwarg is omitted."""
+    runner = FakeCodexRunner(returncode=0)
+    runner.run(tmp_path, ["codex", "exec"], 60)
+    assert runner.calls[0]["env"] is None
+
+
 # ---------------------------------------------------------------------------
 # RealCodexRunner — subprocess handling
 # ---------------------------------------------------------------------------
@@ -223,3 +237,31 @@ def test_real_runner_no_stdin_is_backward_compatible(tmp_path: Path) -> None:
     result = runner.run(tmp_path, ["cat"], None)
     assert result.returncode == 0
     assert result.stdout == ""
+
+
+def test_real_runner_passes_env_to_process(tmp_path: Path) -> None:
+    """RealCodexRunner.run() hands *env* to the child as its whole environment."""
+    runner = RealCodexRunner()
+    result = runner.run(
+        tmp_path,
+        [sys.executable, "-c", "import os; print(os.environ.get('CW_PROBE_VAR'))"],
+        None,
+        env={**os.environ, "CW_PROBE_VAR": "from-env-kwarg"},
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == "from-env-kwarg"
+
+
+def test_real_runner_no_env_inherits_parent_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RealCodexRunner.run() with no env kwarg inherits the parent's os.environ."""
+    monkeypatch.setenv("CW_PROBE_VAR", "from-parent")
+    runner = RealCodexRunner()
+    result = runner.run(
+        tmp_path,
+        [sys.executable, "-c", "import os; print(os.environ.get('CW_PROBE_VAR'))"],
+        None,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == "from-parent"

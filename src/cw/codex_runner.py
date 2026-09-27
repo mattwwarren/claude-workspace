@@ -145,12 +145,16 @@ class CodexRunner(Protocol):
         timeout_seconds: int | None,
         *,
         stdin: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> CodexRunResult:
         """Spawn the codex process and return its outcome.
 
         *stdin*, when set, is written to the process's standard input (used to
         feed a materialized reviewer prompt to ``codex exec``); when ``None``,
         the process gets ``/dev/null`` on stdin (the pre-#1236 behavior).
+
+        *env*, when set, is the child's complete environment (not an overlay);
+        when ``None``, the child inherits the parent's ``os.environ``.
         """
         ...
 
@@ -165,6 +169,7 @@ class RealCodexRunner:
         timeout_seconds: int | None,
         *,
         stdin: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> CodexRunResult:
         try:
             proc = subprocess.Popen(
@@ -174,6 +179,7 @@ class RealCodexRunner:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                env=env,
             )
         except FileNotFoundError:
             return CodexRunResult(
@@ -229,6 +235,7 @@ class FakeCodexRunner:
         timeout_seconds: int | None,
         *,
         stdin: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> CodexRunResult:
         self.calls.append(
             {
@@ -236,6 +243,7 @@ class FakeCodexRunner:
                 "cwd": worktree,
                 "timeout": timeout_seconds,
                 "stdin": stdin,
+                "env": env,
             }
         )
         if self.simulate_timeout:
