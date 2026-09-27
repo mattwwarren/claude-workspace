@@ -59,6 +59,7 @@ from cw.auto_dev_result import (
     STALE_DISPATCH_BLOCKER_REASON,
     is_known_blocker_reason,
 )
+from cw.branch_ahead import merge_in_progress
 from cw.codex_review import (
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
     CODEX_REVIEW_UNPARSEABLE,
@@ -71,6 +72,10 @@ from cw.dev_queue import (
     _hold_aware_disposition,
     _stage_regress,
     transition_task_status,
+)
+from cw.dispatch.impl_gates import (
+    _park_unconcluded_finalize_regress_merge_gate,
+    _should_gate_for_unconcluded_finalize_regress_merge,
 )
 from cw.dispatch.productivity import extract_claim_evidence, is_unproductive
 from cw.dispatch.regress_repeat import (
@@ -131,6 +136,7 @@ from cw.models import (
 )
 from cw.reconcile.fix_dispatch import FIX_LOOP_PENDING_DISPATCH
 from cw.unavailability import FAMILY_PROVIDER_OVERLOAD
+from cw.worktree import resolve_task_worktree
 
 if TYPE_CHECKING:
     from cw.models import (
@@ -694,6 +700,11 @@ def _route_stage_success(
     in turn wins outright over signoff when both of those are armed -- see
     ``_route_scope_gated_approval``.
 
+    One IMPL-scoped gate runs ahead of those six: the #2421 unconcluded
+    FINALIZE-regress merge gate (``dispatch/impl_gates.py``), which refuses an
+    IMPL->REVIEW advance while a FINALIZE-regress round trip's merge is still
+    unconcluded. It is stage-exclusive with the REVIEW rungs.
+
     Why REVIEW-scoped: STAGE_SUCCESS_STATUSES fires at every pipeline stage as
     the ordinary staged-advance signal (each of HARDEN/PLAN/IMPL/REVIEW's
     "stage_complete", plus terminal "shipped"); gating every one of those
@@ -717,7 +728,14 @@ def _route_stage_success(
     # _route_scope_gated_approval's identical placement). No hop has run yet
     # in this function, so task.stage_base_ref is still the live value.
     is_repeat = _consume_finalize_regress_repeat(task, task.stage_base_ref)
-    if task.stage == Stage.REVIEW and _should_gate_for_empty_diff(task, clients):
+    if task.stage == Stage.IMPL and _should_gate_for_unconcluded_finalize_regress_merge(
+        task, clients
+    ):
+        # Stage-exclusive with every REVIEW rung below, so its position only
+        # matters for readability: a FINALIZE-regress round trip must not
+        # leave IMPL with its merge unconcluded (#2421).
+        _park_unconcluded_finalize_regress_merge_gate(task)
+    elif task.stage == Stage.REVIEW and _should_gate_for_empty_diff(task, clients):
         # Why first: every gate below reasons about a branch that has content --
         # whether it is current, whether it was reviewed, whether it is big
         # enough to need approval. A branch with zero commits ahead of
@@ -794,7 +812,10 @@ def _route_stage_failure(
     earlier-stage report (GitHub #1676 follow-up, _is_earlier_stage_report):
     "agent_block" reported at, say, stage1_plan never actually failed at
     FINALIZE, so self-healing off it would mask the sentinel's real, earlier
-    failure behind a fresh, doomed-to-repeat IMPL dispatch.
+    failure behind a fresh, doomed-to-repeat IMPL dispatch. 5a measures
+    ``merge_in_progress`` in the ticket's worktree before regressing and hands
+    the result to ``_stage_regress`` (#2421), since ``blocker_reason`` cannot
+    tell a merge-conflict cause from any other ``agent_block``.
     """
     if status == "blocked" and blocker_reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED:
         # #1714: dedicated override -- see
@@ -822,7 +843,14 @@ def _route_stage_failure(
             task.regress_attempts + 1,
             FINALIZE_REGRESS_CAP,
         )
-        _stage_regress(task, Stage.IMPL)
+        # #2421: measured here, not derived from blocker_reason --
+        # "agent_block" covers merge and non-merge causes alike.
+        worktree_path = resolve_task_worktree(task, clients.get(task.client))
+        _stage_regress(
+            task,
+            Stage.IMPL,
+            merge_conflict_detected=merge_in_progress(worktree_path) is True,
+        )
         record_event(
             OrchestratorEventType.TICKET_REQUEUED,
             {
