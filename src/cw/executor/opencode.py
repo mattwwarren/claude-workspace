@@ -152,8 +152,8 @@ class OpencodeExecutor:
             client=client,
             stage=stage,
             executor_name="opencode",
-            preflight_fn=lambda sid: _opencode_preflight(
-                self._config, task, worktree, client, stage, sid
+            preflight_fn=lambda sess: _opencode_preflight(
+                self._config, task, worktree, client, stage, sess.id
             ),
             blocked_ctor=_blocked,
             runner=self._runner,

@@ -46,6 +46,7 @@ from cw.models import (
     LaneConfig,
     LastResultSource,
     OrchestratorEventType,
+    Session,
     SessionOrigin,
     SessionStatus,
     Stage,
@@ -691,7 +692,7 @@ def _faf_spawn(
         client=ClientConfig(name="test", workspace_path=worktree),
         stage=Stage.IMPL,
         executor_name=executor_name,
-        preflight_fn=lambda _sid: preflight,
+        preflight_fn=lambda _sess: preflight,
         blocked_ctor=_faf_blocked_ctor(worktree),
         runner=runner,
     )
@@ -725,7 +726,7 @@ def test_fake_fire_and_forget_runner_records_call_and_returns_live_proc(
         _kill_procs(runner)
 
 
-@pytest.mark.parametrize("executor_name", ["aider", "opencode"])
+@pytest.mark.parametrize("executor_name", ["aider", "opencode", "codex"])
 def test_spawn_fire_and_forget_happy_path_stores_backend(
     executor_name: LocalLivenessBackend,
     tmp_config_dir: Path,
@@ -789,7 +790,7 @@ def test_spawn_fire_and_forget_preflight_blocked_completes_session(
     )
 
 
-@pytest.mark.parametrize("executor_name", ["aider", "opencode"])
+@pytest.mark.parametrize("executor_name", ["aider", "opencode", "codex"])
 def test_spawn_fire_and_forget_liveness_unavailable(
     executor_name: LocalLivenessBackend,
     tmp_config_dir: Path,
@@ -868,6 +869,92 @@ def test_spawn_fire_and_forget_unexpected_error_reraises_and_completes(
     )
     failure = ExecutorFailure.model_validate_json(path.read_text())
     assert failure.executor_name == "opencode"
+
+
+def test_spawn_fire_and_forget_passes_created_session_to_preflight_fn(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """preflight_fn receives the persisted Session itself, not just its id.
+
+    CodexExecutor's pre-flight needs ``sess.name`` for ``_write_hook_context``
+    (#2388), which a bare sid cannot supply.
+    """
+    worktree = make_git_repo("wt-faf-preflight-session")
+    seen: list[Session] = []
+    blocked = make_blocked(
+        ticket_id=_FAF_TICKET, worktree=worktree, reason="preflight_nope"
+    )
+
+    def _preflight(sess: Session) -> AutoDevResult:
+        seen.append(sess)
+        return blocked
+
+    sid = _spawn_fire_and_forget(
+        task=TicketTask(ticket_id=_FAF_TICKET, client="test", stage=Stage.IMPL),
+        worktree=worktree,
+        client=ClientConfig(name="test", workspace_path=worktree),
+        stage=Stage.IMPL,
+        executor_name="codex",
+        preflight_fn=_preflight,
+        blocked_ctor=_faf_blocked_ctor(worktree),
+        runner=FakeFireAndForgetRunner(),
+    )
+
+    [sess] = seen
+    assert sess.id == sid
+    assert sess.name == f"test/{AUTO_DEV_LABEL_PREFIX}{_FAF_TICKET}"
+
+
+def test_spawn_fire_and_forget_preflight_fn_raises_reraises_and_completes(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """preflight_fn raises → re-raised; session COMPLETED/CRASHED; bundle persisted.
+
+    The pre-flight call runs inside the skeleton's ``try:`` (#2388), so a
+    pre-flight exception (e.g. CodexExecutor's ``_write_hook_context``) never
+    leaks the already-persisted session ACTIVE.
+    """
+    worktree = make_git_repo("wt-faf-preflight-raises")
+    runner = FakeFireAndForgetRunner()
+
+    def _boom(_sess: Session) -> AutoDevResult | _PreflightOK:
+        msg = "preflight boom"
+        raise OSError(msg)
+
+    with (
+        patch("cw.executor.core._record_orchestrator_event") as record_mock,
+        pytest.raises(OSError, match="preflight boom"),
+    ):
+        _spawn_fire_and_forget(
+            task=TicketTask(ticket_id=_FAF_TICKET, client="test", stage=Stage.IMPL),
+            worktree=worktree,
+            client=ClientConfig(name="test", workspace_path=worktree),
+            stage=Stage.IMPL,
+            executor_name="codex",
+            preflight_fn=_boom,
+            blocked_ctor=_faf_blocked_ctor(worktree),
+            runner=runner,
+        )
+
+    assert runner.calls == []
+    record_mock.assert_not_called()
+    session = find_completed_session(load_state())
+    assert session.status == SessionStatus.COMPLETED
+    assert session.completed_reason == CompletionReason.CRASHED
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.blocker is not None
+    assert result.blocker.reason == UNEXPECTED_ERROR
+    assert result.blocker.details == (
+        "unexpected error during codex launch "
+        f"[diagnostics: {render_bundle_path(session.id)}]"
+    )
+    [path] = list(diagnostics_bundle_dir(session.id).glob("codex-runtime_error-*.json"))
+    failure = ExecutorFailure.model_validate_json(path.read_text())
+    assert failure.executor_name == "codex"
+    assert failure.argv_sanitized == []
 
 
 @pytest.mark.parametrize("executor_name", ["aider", "opencode"])

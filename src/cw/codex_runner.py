@@ -1,16 +1,102 @@
 """RFC 0005 F1 — codex subprocess runner for CodexExecutor.
 
-Parallel to local_runner.py's AiderRunner seam. CodexExecutor delegates the
-``codex exec review`` invocation to a CodexRunner so tests can drive every
+Parallel to local_runner.py's AiderRunner seam. The codex review delegates each
+per-role ``codex exec`` invocation to a CodexRunner so tests can drive every
 disposition (exit code, timeout, stderr) without spawning a real subprocess.
+
+A second, distinct seam lives here too (RFC 0014 A2, #2388): the job launcher
+``RealCodexJobRunner`` plus ``build_codex_run_argv``/``build_codex_run_env``,
+which ``CodexExecutor.spawn()`` uses to start the whole review as a detached
+``cw codex run`` subprocess. That subprocess then drives the per-role
+``CodexRunner`` calls itself. This module must never import ``cw.codex_driver``:
+``cw.executor`` imports it, and ``cw.executor`` must never reach the driver
+(D-1, the process boundary).
 """
 
 from __future__ import annotations
 
 import dataclasses
+import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+from cw.executor_launch import _launch_logged_subprocess
+
+# Per-run output of the detached ``cw codex run`` job. Private: harvest never
+# parses it — reconcile/local's codex branch (A1) decides from git and audit
+# facts, not from a log.
+_CODEX_DRIVER_LOG_RELATIVE_PATH: Path = Path(".cw", "codex_driver.log")
+
+# Mirrors ``cw.codex_driver.STAGE_REVIEW``; not imported, to keep this module
+# (imported by ``cw.executor.codex``) from ever reaching ``cw.codex_driver``.
+_CODEX_RUN_STAGE_REVIEW = "review"
+
+
+def build_codex_run_argv(
+    *,
+    ticket_id: str,
+    session_id: str,
+    wall_clock_budget_seconds: int | None,
+) -> list[str]:
+    """Return the argv that runs the codex review stage as ``cw codex run``.
+
+    ``sys.executable -m cw`` rather than resolving a ``cw`` binary on PATH
+    (contrast ``cw.watchdog._resolve_cw_executable_path``, which serves a
+    systemd/launchd unit written ahead of time with no inherited PATH): the
+    parent here IS a running ``cw`` process, so its own interpreter already
+    has the package importable.
+    """
+    argv = [
+        sys.executable,
+        "-m",
+        "cw",
+        "codex",
+        "run",
+        ticket_id,
+        "--stage",
+        _CODEX_RUN_STAGE_REVIEW,
+        "--session-id",
+        session_id,
+    ]
+    if wall_clock_budget_seconds is not None:
+        argv.extend(["--wall-clock-budget-seconds", str(wall_clock_budget_seconds)])
+    return argv
+
+
+def build_codex_run_env() -> dict[str, str]:
+    """Return the full parent environment for the ``cw codex run`` job.
+
+    Deliberately NOT aider/opencode's narrow allowlist. The subprocess is
+    another ``cw`` process: it must resolve the same ``CONFIG_DIR``/
+    ``STATE_DIR`` (``cw.config`` derives them from ``XDG_CONFIG_HOME``/
+    ``XDG_DATA_HOME`` at import time) as the parent ``cw dev-queue serve``.
+    The in-process review's ``codex exec`` calls already inherited the full
+    serve environment unfiltered; narrowing it here would silently change what
+    ``codex exec`` can see.
+    """
+    return dict(os.environ)
+
+
+class RealCodexJobRunner:
+    """Launches the detached ``cw codex run`` job (RFC 0014 A2, #2388).
+
+    Satisfies ``cw.executor.core.FireAndForgetRunner`` structurally; not
+    imported, so this module stays free of the executor package. Output goes
+    to ``.cw/codex_driver.log`` in the worktree, and the child gets its own
+    session (``start_new_session=True``) so it outlives a serve restart.
+    """
+
+    def launch(
+        self,
+        worktree: Path,
+        argv: list[str],
+        env: dict[str, str],
+    ) -> subprocess.Popen[bytes]:
+        return _launch_logged_subprocess(
+            worktree, argv, env, _CODEX_DRIVER_LOG_RELATIVE_PATH
+        )
 
 
 @dataclasses.dataclass
