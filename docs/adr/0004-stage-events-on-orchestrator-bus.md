@@ -60,6 +60,14 @@ For every event recorded with type `STAGE_ENTERED` or `STAGE_ERRORED`:
   failure) that do NOT end the run. A run-ending failure still emits the
   canonical `<<<AUTO_DEV_RESULT` sentinel with `status: blocked` per §3 —
   stage events do not replace the sentinel.
+- Since #2429, an unknown `stage` or `prev_stage` on `stage.entered` /
+  `stage.errored` is rejected at `cw event record` time (non-zero exit,
+  nothing recorded) rather than silently accepted and only degrading at
+  consumer render time. `/auto-dev` stage docs therefore no longer append
+  `|| true` to these calls. A producer that calls `record_event` directly
+  bypasses that check; invariant 1's `last_stage = None` degradation, which
+  `_derive_last_stage_by_session` now enforces by filtering against the same
+  closed set, still covers it.
 
 ## Consequences
 

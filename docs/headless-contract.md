@@ -832,9 +832,11 @@ cw event record stage.entered \
   --payload '{"session_id":"$CW_SESSION_ID","ticket_id":"173","stage":"s2_impl_started","prev_stage":"s1_plan_reviewed","started_at":"2026-05-23T13:01:42Z"}'
 ```
 
+The §10.2 enum is enforced, not just documented (#2429): `cw event record` rejects a `stage.entered` / `stage.errored` payload whose `stage` is missing or outside §10.2, or whose `prev_stage` is present and outside §10.2, exiting non-zero with `Unknown stage '<value>'. Valid stages: …` (or `Unknown prev_stage '<value>'. …`) and recording nothing. `error_kind` stays open (§10.3) and is not checked.
+
 ### 10.5 Consumer Behavior
 
-cw surfaces `last_stage` per running session in `cw orchestrate status` (text output). The value is derived at render time by filtering recorded events to `STAGE_ENTERED` and mapping `payload.session_id → payload.stage` (latest event wins). `STAGE_ERRORED` events are visible in `cw event tail` and `recent_events` but do NOT redefine `last_stage`. Sessions with no stage events omit the `last_stage=…` token in the text output.
+cw surfaces `last_stage` per running session in `cw orchestrate status` (text output). The value is derived at render time by filtering recorded events to `STAGE_ENTERED` and mapping `payload.session_id → payload.stage` (latest event wins; a `stage` outside §10.2, possible only from a producer that bypasses `cw event record`, is skipped). `STAGE_ERRORED` events are visible in `cw event tail` and `recent_events` but do NOT redefine `last_stage`. Sessions with no stage events omit the `last_stage=…` token in the text output.
 
 ### 10.6 Cross-Repo Status
 
