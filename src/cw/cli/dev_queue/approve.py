@@ -13,6 +13,7 @@ import click
 from cw.cli._base import handle_errors
 from cw.config import get_client, load_orchestrator_config
 from cw.dev_queue import (
+    BODY_DRIFT_WARNING_KEY,
     approve_must_fix_override_ticket,
     approve_scope_drift_ticket,
     approve_ticket,
@@ -301,6 +302,11 @@ def dev_queue_approve(
     Approving a changed draft posts a fresh marker; re-approving the same
     draft does not.
 
+    A PLAN-stage approve warns on stderr when the GitHub ticket body changed
+    after the plan stage last evaluated it. The warning is advisory and never
+    blocks. The safe order for a body edit is: edit the body, run `requeue
+    --stage plan` while the ticket is parked, then approve.
+
     --scope-drift approves operator-directed scope growth that the IMPL-stage
     scope-conformance gate (check_plan_scope_conformance.py) would otherwise
     block as plan_scope_drift — typically files a review-round direction asked
@@ -339,6 +345,11 @@ def dev_queue_approve(
         _approve_scope_drift(ticket_id, resolved, scope_drift)
         return
     result = approve_ticket(ticket_id, resolved)
+    # #2311: advisory only -- the approval already landed. approve_ticket
+    # recorded the audit event itself; the CLI just surfaces the warning.
+    body_drift_warning = result[BODY_DRIFT_WARNING_KEY]
+    if body_drift_warning:
+        click.echo(body_drift_warning, err=True)
     record_event(
         OrchestratorEventType.TICKET_APPROVED,
         {

@@ -555,6 +555,43 @@ def fetch_issue_comments(
     return comments
 
 
+def fetch_issue_body(
+    ticket_id: str, timeout: int, *, cwd: Path | None = None
+) -> str | None:
+    """Return the issue's raw body text, or None on any fetch/parse error.
+
+    Shaped after :func:`fetch_issue_comments` (same *cwd* contract: multi-client
+    callers MUST pass it). The string is returned exactly as ``gh issue view
+    --json body`` reports it, because the plan stage's ``body_sha`` is a
+    SHA-256 over that raw string; ``cw dev-queue approve``'s advisory
+    ticket-body drift check (#2311) recomputes it from this value and fails
+    open on None.
+    """
+    try:
+        result = _sp.run(
+            ["gh", "issue", "view", ticket_id, "--json", "body"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            cwd=cwd,
+        )
+    except FileNotFoundError:
+        return None
+    except (OSError, _sp.TimeoutExpired):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    try:
+        data: dict[str, Any] = json.loads(result.stdout)
+        body = data.get("body")
+    except (ValueError, AttributeError):
+        return None
+    return body if isinstance(body, str) else None
+
+
 def _comment_has_marker(comment: dict[str, Any]) -> bool:
     """Return True if *comment*'s body contains the plan-review marker."""
     body = comment.get("body", "")

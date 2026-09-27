@@ -6140,6 +6140,38 @@ def _seed_plan_worktree(
     return cw_dir
 
 
+# #2311 -- ticket-body drift detection at approve time. The draft's
+# `plan-stage-last-evaluated` marker persists the body_sha the plan stage
+# evaluated; the live body either still hashes to it or was edited since.
+_EVALUATED_TICKET_BODY = "Original ticket body.\n"
+_EDITED_TICKET_BODY = "Original ticket body.\n\nNew binding requirement.\n"
+_EVALUATED_BODY_SHA = hashlib.sha256(_EVALUATED_TICKET_BODY.encode("utf-8")).hexdigest()
+_EDITED_BODY_SHA = hashlib.sha256(_EDITED_TICKET_BODY.encode("utf-8")).hexdigest()
+# Bookkeeping lines are stripped by the Plan-draft fingerprint rule, so this
+# draft's fingerprint is _RECONCILED_DRAFT_FINGERPRINT.
+_BODY_EVALUATED_DRAFT = (
+    "<!-- plan-stage-scan-round: 1 -->\n"
+    "<!-- plan-stage-last-evaluated: operator_comment=none|body_sha="
+    + _EVALUATED_BODY_SHA
+    + " -->\n"
+    + _RECONCILED_DRAFT_BODY
+)
+
+
+def _stub_fetch_issue_body(
+    monkeypatch: pytest.MonkeyPatch, body: str | None
+) -> list[tuple[str, object]]:
+    """Stub approval's ``fetch_issue_body`` binding; return its call log."""
+    calls: list[tuple[str, object]] = []
+
+    def _fake(ticket_id: str, timeout: int, *, cwd: Path | None = None) -> str | None:
+        calls.append((ticket_id, cwd))
+        return body
+
+    monkeypatch.setattr("cw.dev_queue.approval.fetch_issue_body", _fake)
+    return calls
+
+
 # ---------------------------------------------------------------------------
 # TestApproveTicket — approve_ticket() mutation function
 # ---------------------------------------------------------------------------
@@ -7130,6 +7162,385 @@ class TestApproveTicket:
         assert t.session_id == "sess-promote4"
         assert t.plan_approved_at is None
         assert (cw_dir / "plan.md").read_text(encoding="utf-8") == plan_body()
+
+    # -- Ticket-body drift warning (#2311) -----------------------------------
+
+    def _arm_plan_pending(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        session_id: str,
+        *,
+        draft: str | None = _BODY_EVALUATED_DRAFT,
+        plan: str | None = None,
+    ) -> TicketTask:
+        """Park a PLAN row at plan_pending_approval, seeding its worktree via
+        ``_seed_plan_worktree`` when *draft* or *plan* is given. With no
+        ``plan``, the plan-of-record is unreviewed and approve re-queues at
+        PLAN (#968); with ``plan=plan_body()`` it advances directly."""
+        from cw.config import save_state
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id=session_id)
+        if draft is not None or plan is not None:
+            _seed_plan_worktree(
+                task, tmp_path / f"wt-{session_id}", plan=plan, draft=draft
+            )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id=session_id,
+                        last_result={
+                            "status": "plan_pending_approval",
+                            "plan_draft_fingerprint": _RECONCILED_DRAFT_FINGERPRINT,
+                        },
+                    )
+                ]
+            )
+        )
+        return task
+
+    def test_approve_plan_requeue_returns_body_drift_warning_on_mismatch(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Edit-then-approve: the live body no longer hashes to the persisted
+        body_sha, so approve names the safe requeue sequence -- advisory only,
+        the approval still lands."""
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift1")
+        calls = _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        warning = result[BODY_DRIFT_WARNING_KEY]
+        assert isinstance(warning, str)
+        assert "cw dev-queue requeue GEN-500 --client genhealth --stage plan" in warning
+        assert _EVALUATED_BODY_SHA[:12] in warning
+        assert _EDITED_BODY_SHA[:12] in warning
+        assert result["plan_requeued"] is True
+        assert result["plan_approved_fingerprint"] == _RECONCILED_DRAFT_FINGERPRINT
+        assert calls == [("GEN-500", tmp_path / "ws")]
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.plan_approved_at is not None
+        assert t.plan_approved_fingerprint == _RECONCILED_DRAFT_FINGERPRINT
+
+    def test_approve_plan_requeue_no_warning_when_body_unchanged(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift2")
+        calls = _stub_fetch_issue_body(monkeypatch, _EVALUATED_TICKET_BODY)
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result[BODY_DRIFT_WARNING_KEY] is None
+        assert len(calls) == 1
+
+    def test_approve_plan_requeue_no_warning_when_no_persisted_marker(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No persisted body_sha: nothing to compare, so the gh fetch cost is
+        never paid."""
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+
+        self._arm_plan_pending(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "sess-drift3",
+            draft=_RECONCILED_DRAFT_BODY,
+        )
+        calls = _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result[BODY_DRIFT_WARNING_KEY] is None
+        assert calls == []
+
+    def test_approve_no_warning_on_non_github_tracker(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The check is GitHub-only and fails open on a Linear-tracked client."""
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift4")
+        _write_project_config_yaml(
+            tmp_path / "ws", "tracking:\n  primary:\n    system: linear\n"
+        )
+        calls = _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result[BODY_DRIFT_WARNING_KEY] is None
+        assert calls == []
+
+    def test_approve_no_warning_when_worktree_unresolvable(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+
+        self._arm_plan_pending(
+            tmp_config_dir, tmp_path, monkeypatch, "sess-drift5", draft=None
+        )
+        calls = _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result[BODY_DRIFT_WARNING_KEY] is None
+        assert calls == []
+
+    def test_approve_no_warning_when_body_fetch_fails(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed gh fetch fails open: no warning, approval unaffected."""
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift6")
+        calls = _stub_fetch_issue_body(monkeypatch, None)
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result[BODY_DRIFT_WARNING_KEY] is None
+        assert result["plan_requeued"] is True
+        assert len(calls) == 1
+
+    def test_approve_direct_advance_also_checks_body_drift(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The gate is the PLAN stage, not the re-queue branch: a direct
+        plan->impl advance warns too. The persisted body_sha is read before
+        promotion moves the draft onto .cw/plan.md."""
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+
+        self._arm_plan_pending(
+            tmp_config_dir, tmp_path, monkeypatch, "sess-drift7", plan=plan_body()
+        )
+        _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["to_stage"] == "impl"
+        assert result["plan_promoted"] is True
+        warning = result[BODY_DRIFT_WARNING_KEY]
+        assert isinstance(warning, str)
+        assert "cw dev-queue requeue GEN-500 --client genhealth --stage plan" in warning
+
+    def test_approve_body_drift_warning_key_always_present_on_non_plan_paths(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """REVIEW advance and the signoff-clearing early return both report
+        None and never fetch the body."""
+        from cw.config import save_state
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        calls = _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-drift8")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess-drift8",
+                        last_result={"status": "review_pending_approval"},
+                    )
+                ]
+            )
+        )
+        review_result = approve_ticket("GEN-500", "genhealth")
+        assert review_result["to_stage"] == "finalize"
+        assert review_result[BODY_DRIFT_WARNING_KEY] is None
+
+        signoff_task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id=None,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        save_dev_queue(DevQueueStore(tasks=[signoff_task]))
+        signoff_result = approve_ticket("GEN-500", "genhealth")
+        assert signoff_result["to_stage"] == "finalize"
+        assert signoff_result[BODY_DRIFT_WARNING_KEY] is None
+        assert calls == []
+
+    def test_approve_gate_recipe_caller_skips_body_drift_check(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the operator's ``cw dev-queue approve`` runs the check: the
+        automatic gate-recipe caller never pays a gh fetch under the lock,
+        and the audit event's actor would be false for it."""
+        from cw.dev_queue import (
+            BODY_DRIFT_WARNING_KEY,
+            _approve_ticket_locked,
+            dev_queue_lock,
+        )
+
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift9")
+        calls = _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        with dev_queue_lock():
+            result = _approve_ticket_locked("GEN-500", "genhealth")
+
+        assert result[BODY_DRIFT_WARNING_KEY] is None
+        assert calls == []
+
+    def test_approve_locked_emits_plan_approval_body_drift_warned_event(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """R1: the warning leaves a durable audit event carrying both hashes
+        and the fingerprint this approval stamped; matching or absent
+        body_sha emits nothing."""
+        from cw.dev_queue import approve_ticket
+
+        events = capture_events(
+            "cw.dev_queue.approval",
+            OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED,
+        )
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift10")
+        _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        approve_ticket("GEN-500", "genhealth")
+
+        assert len(events) == 1
+        _etype, payload, correlation_id = events[0]
+        assert payload == {
+            "ticket_id": "GEN-500",
+            "client": "genhealth",
+            "persisted_body_sha": _EVALUATED_BODY_SHA,
+            "live_body_sha": _EDITED_BODY_SHA,
+            "plan_approved_fingerprint": _RECONCILED_DRAFT_FINGERPRINT,
+            "actor": "cw dev-queue approve",
+        }
+        assert correlation_id == "GEN-500"
+
+        events.clear()
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift11")
+        _stub_fetch_issue_body(monkeypatch, _EVALUATED_TICKET_BODY)
+        approve_ticket("GEN-500", "genhealth")
+        self._arm_plan_pending(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "sess-drift12",
+            draft=_RECONCILED_DRAFT_BODY,
+        )
+        approve_ticket("GEN-500", "genhealth")
+        assert events == []
+
+    def test_body_drift_event_shares_the_promotion_event_actor(self) -> None:
+        """Both approve-path audit events name one actor constant."""
+        import inspect
+
+        from cw.dev_queue.plan_promotion import (
+            DEV_QUEUE_APPROVE_ACTOR,
+            promote_plan_draft,
+        )
+
+        assert DEV_QUEUE_APPROVE_ACTOR == "cw dev-queue approve"
+        actor_default = inspect.signature(promote_plan_draft).parameters["actor"]
+        assert actor_default.default is DEV_QUEUE_APPROVE_ACTOR
+
+    @pytest.mark.parametrize("event_error", [OSError, RuntimeError])
+    def test_approve_body_drift_event_failure_aborts_with_nothing_persisted(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        event_error: type[Exception],
+    ) -> None:
+        """Event-first ordering: a failed append aborts before persistence,
+        leaving the row parked and the draft unpromoted."""
+        from cw.dev_queue import approval as approval_module
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+
+        task = self._arm_plan_pending(
+            tmp_config_dir, tmp_path, monkeypatch, "sess-drift13", plan=plan_body()
+        )
+        _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+        assert task.worktree_path is not None
+        cw_dir = task.worktree_path / ".cw"
+        before = load_dev_queue().model_dump()
+        real_record_event = approval_module.record_event
+
+        def _record(
+            etype: OrchestratorEventType,
+            payload: dict[str, object] | None = None,
+            *,
+            correlation_id: str | None = None,
+        ) -> None:
+            if etype == OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED:
+                msg = "events log unwritable"
+                raise event_error(msg)
+            real_record_event(etype, payload, correlation_id=correlation_id)
+
+        monkeypatch.setattr("cw.dev_queue.approval.record_event", _record)
+
+        with (
+            caplog.at_level(logging.ERROR, logger="cw.dev_queue.approval"),
+            pytest.raises(ApproveGateError, match="Nothing was recorded") as excinfo,
+        ):
+            approve_ticket("GEN-500", "genhealth")
+
+        assert isinstance(excinfo.value.__cause__, event_error)
+        assert "plan.approval_body_drift_warned" in caplog.text
+        assert any(record.exc_info for record in caplog.records)
+        assert load_dev_queue().model_dump() == before
+        assert (cw_dir / "plan.md").read_text(encoding="utf-8") == plan_body()
+        assert (cw_dir / "plan-draft.md").read_text(
+            encoding="utf-8"
+        ) == _BODY_EVALUATED_DRAFT
+
+    def test_approve_body_drift_save_failure_after_event_leaves_phantom_record(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A save failure after the event leaves the accepted phantom audit
+        record while the approval remains unpersisted."""
+        from cw.dev_queue import approve_ticket
+        from cw.events import read_events
+
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-drift14")
+        _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY)
+
+        def _raise_save(*_args: object, **_kwargs: object) -> None:
+            msg = "queue file unwritable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.dev_queue.approval.save_dev_queue", _raise_save)
+
+        with pytest.raises(OSError, match="queue file unwritable"):
+            approve_ticket("GEN-500", "genhealth")
+
+        audit = read_events(
+            event_types=[OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED]
+        )
+        assert len(audit) == 1
+        assert audit[0].correlation_id == "GEN-500"
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.plan_approved_at is None
+        assert t.plan_approved_fingerprint is None
 
 
 # ---------------------------------------------------------------------------

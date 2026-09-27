@@ -254,6 +254,9 @@ class OrchestratorEventType(StrEnum):
     TICKET_REPRIORITIZED = "ticket.reprioritized"
     TICKET_APPROVED = "ticket.approved"
     PLAN_APPROVAL_REVOKED = "plan.approval_revoked"
+    # #2311 -- advisory audit trail: `cw dev-queue approve` found the ticket
+    # body changed since the plan stage last evaluated it. Never blocks.
+    PLAN_APPROVAL_BODY_DRIFT_WARNED = "plan.approval_body_drift_warned"
     PLAN_DRAFT_PROMOTED = "plan.draft_promoted"
     # Companion correction when a ticket approval event was written but the
     # queue mutation did not remain durable (#2337).
