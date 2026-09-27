@@ -9,6 +9,7 @@ import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 from click.testing import CliRunner
@@ -1949,7 +1950,7 @@ class TestTickSummaryLaneOccupants:
         result = _extract_lane_occupants(raw)
         assert result["good"] == [{"ticket_id": "T1", "status": "running"}]
         assert "bad-value" not in result
-        assert 5 not in result
+        assert 5 not in cast("dict[object, object]", result)
 
 
 # ---------------------------------------------------------------------------
