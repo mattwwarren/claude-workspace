@@ -17,7 +17,13 @@ from cw.cli import main
 from cw.config import load_state, save_state, sessions_lock
 from cw.events import read_events
 from cw.exceptions import EmitSessionNotFoundError, EmitValidationError
-from cw.models import CwState, LastResultSource, OrchestratorEventType, Session, SessionPurpose
+from cw.models import (
+    CwState,
+    LastResultSource,
+    OrchestratorEventType,
+    Session,
+    SessionPurpose,
+)
 from cw.plan_fingerprint import compute_plan_draft_fingerprint
 from cw.result import (
     EmitOutcome,
@@ -488,9 +494,7 @@ class TestEmitResultLocked:
                 _valid_payload(), "test1234", source=LastResultSource.EMIT_CLI
             )
 
-        events = read_events(
-            event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED]
-        )
+        events = read_events(event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED])
         assert len(events) == 1
         event = events[0]
         assert event.correlation_id == "GEN-42"
@@ -538,9 +542,7 @@ class TestEmitResultLocked:
             )
 
         assert outcome.refused is True
-        events = read_events(
-            event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED]
-        )
+        events = read_events(event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED])
         assert events == []
 
     def test_emit_result_locked_audit_append_failure_leaves_last_result_unchanged(
@@ -594,12 +596,10 @@ class TestEmitResultLocked:
                 _valid_payload(), "test1234", source=LastResultSource.EMIT_CLI
             )
 
-        events = read_events(
-            event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED]
-        )
+        events = read_events(event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED])
         assert len(events) == 1
 
-    def test_emit_result_locked_audit_event_ticket_id_uses_session_name_for_blocked_shape(
+    def test_emit_result_locked_audit_ticket_id_for_blocked_shape(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """A BlockedResult-shaped payload (no schema_version) still records a
@@ -617,9 +617,7 @@ class TestEmitResultLocked:
 
         assert outcome.refused is False
         assert isinstance(outcome.result, BlockedResult)
-        events = read_events(
-            event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED]
-        )
+        events = read_events(event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED])
         assert len(events) == 1
         assert events[0].payload["ticket_id"] == "GEN-42"
 
@@ -631,9 +629,7 @@ def test_session_result_emitted_absent_from_reconcile_and_dispatch_consumer_sets
     must never appear in a reconcile/dispatch consumer's event_types filter,
     nor be referenced at all under those trees. Mirrors
     tests/test_result_door_guard.py's regex + Path.rglob("*.py") shape."""
-    consumer_source = (
-        _REPO_ROOT / "src" / "cw" / "dispatch" / "loop.py"
-    ).read_text()
+    consumer_source = (_REPO_ROOT / "src" / "cw" / "dispatch" / "loop.py").read_text()
     match = re.search(
         r"consume_completed_sessions.*?event_types=\[(.*?)\]",
         consumer_source,
