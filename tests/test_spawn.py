@@ -2180,6 +2180,52 @@ class TestSpawnClose:
 
         assert self._reload_close_row().status == QueueItemStatus.CANCELLED
 
+    def test_spawn_close_cancels_when_emit_cli_result_is_not_terminal(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """An emit_cli-sourced ``last_result`` with no ``status`` (a merged
+        park marker) is not a staged result -> cancel."""
+        from cw.cli import _spawn_close_impl
+        from cw.models import LastResultSource, QueueItemStatus
+
+        sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
+        state = load_state()
+        stored = state.find_by_name_or_id(sess.id)
+        assert stored is not None
+        stored.last_result = {"paused_status": "silently_idle"}
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+        self._seed_close_row(sess.id, Stage.FINALIZE)
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=FakeNativeDaemonClient())
+
+        assert self._reload_close_row().status == QueueItemStatus.CANCELLED
+
+    def test_spawn_close_with_staged_result_but_no_running_row_still_closes(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """No RUNNING row owns the session -> nothing to route; the (no-op)
+        cancel runs and the session closes as before."""
+        from cw.cli import _spawn_close_impl
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, LastResultSource
+        from tests.test_result import _valid_payload
+
+        sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
+        state = load_state()
+        stored = state.find_by_name_or_id(sess.id)
+        assert stored is not None
+        stored.last_result = _valid_payload()
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=FakeNativeDaemonClient())
+
+        closed = load_state().find_by_name_or_id(sess.id)
+        assert closed is not None
+        assert closed.status == SessionStatus.COMPLETED
+
     def test_spawn_close_cancels_when_staged_result_is_unreconstructable(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
