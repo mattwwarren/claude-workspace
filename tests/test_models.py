@@ -2244,7 +2244,9 @@ class TestPackageExportCompleteness:
     ``PARK_COMMENT_MARKER_KEY``, ``ParkCommentMarker`` and
     ``read_park_comment_marker`` = 61, plus #2337's two scope-drift wire keys
     = 63, plus #2205's ``MUST_FIX_OVERRIDE_KEY`` and ``MustFixOverride`` = 65,
-    plus #2369's ``LocalLivenessBackend`` = 66) — hardcoded here, NOT
+    plus #2369's ``LocalLivenessBackend`` = 66, plus #2470's
+    ``WORKER_TMPDIR_RELATIVE_PATH`` and two ``DEFAULT_DISK_PRESSURE_MIN_FREE_
+    INODE*`` defaults = 69) — hardcoded here, NOT
     re-derived from the package, so a dropped or renamed export is a
     falsifiable failure rather than a tautology. A deliberate addition updates
     this set in the same commit.
@@ -2269,6 +2271,8 @@ class TestPackageExportCompleteness:
             "CwState",
             "DEFAULT_AUTO_PURPOSES",
             "DEFAULT_DISK_PRESSURE_MIN_FREE_GB",
+            "DEFAULT_DISK_PRESSURE_MIN_FREE_INODES",
+            "DEFAULT_DISK_PRESSURE_MIN_FREE_INODE_FRACTION",
             "DEFAULT_GLOBAL_ATTEMPT_CEILING",
             "DEFAULT_LANE",
             "DEFAULT_LOCAL_LIVENESS_BACKEND",
@@ -2324,6 +2328,7 @@ class TestPackageExportCompleteness:
             "TicketTask",
             "UsageLimitAct",
             "WORKER_PURPOSES",
+            "WORKER_TMPDIR_RELATIVE_PATH",
             "WatchedPr",
             "_DEFAULT_OPERATOR_EVENT_TYPES",
             "_DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES",
@@ -2336,6 +2341,33 @@ class TestPackageExportCompleteness:
             "read_park_comment_marker",
         }
         assert set(models.__all__) == expected
+
+
+class TestWorkerTmpdirAndInodeDefaults:
+    """#2470: per-worktree TMPDIR constant + inode-pressure config defaults."""
+
+    def test_worker_tmpdir_relative_path(self) -> None:
+        from cw.models import WORKER_TMPDIR_RELATIVE_PATH
+
+        assert Path(".cw", "tmp") == WORKER_TMPDIR_RELATIVE_PATH
+
+    def test_min_free_inodes_default(self) -> None:
+        from cw.models import DEFAULT_DISK_PRESSURE_MIN_FREE_INODES
+
+        assert DEFAULT_DISK_PRESSURE_MIN_FREE_INODES == 50_000
+        assert (
+            OrchestratorConfig().disk_pressure_min_free_inodes
+            == DEFAULT_DISK_PRESSURE_MIN_FREE_INODES
+        )
+
+    def test_min_free_inode_fraction_default(self) -> None:
+        from cw.models import DEFAULT_DISK_PRESSURE_MIN_FREE_INODE_FRACTION
+
+        assert DEFAULT_DISK_PRESSURE_MIN_FREE_INODE_FRACTION == 0.05
+        assert (
+            OrchestratorConfig().disk_pressure_min_free_inode_fraction
+            == DEFAULT_DISK_PRESSURE_MIN_FREE_INODE_FRACTION
+        )
 
 
 class TestExtractUnresolvedSpawnCount:

@@ -11,7 +11,8 @@ import pytest
 from cw.auto_dev_result import AutoDevResult
 from cw.config import load_state
 from cw.executor import OpencodeExecutor, resolve_executor
-from cw.executor.core import FakeFireAndForgetRunner
+from cw.executor.core import FakeFireAndForgetRunner, _PreflightOK
+from cw.executor.opencode import _opencode_preflight
 from cw.local_runner import LIVENESS_UNAVAILABLE, UNEXPECTED_ERROR
 from cw.models import (
     OPENCODE_BACKEND,
@@ -28,6 +29,7 @@ from cw.opencode_runner import (
     STAGE4A_MERGE_GATE,
     OpencodeRunner,
 )
+from cw.worktree import resolve_worker_tmpdir
 from tests.conftest import find_completed_session
 
 if TYPE_CHECKING:
@@ -338,6 +340,23 @@ def test_opencode_executor_spawn_threads_session_id_into_prompt(
         for proc in fake_runner.procs:
             proc.kill()
             proc.wait()
+
+
+def test_opencode_preflight_env_tmpdir_resolves_against_worktree(
+    tmp_path: Path,
+) -> None:
+    """Preflight threads the worktree into build_env's TMPDIR helper (#2470)."""
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    client = ClientConfig(name="test", workspace_path=tmp_path)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+
+    with patch("cw.executor.opencode.opencode_available", return_value=True):
+        result = _opencode_preflight(
+            config, task, tmp_path, client, Stage.IMPL, "sid-1"
+        )
+
+    assert isinstance(result, _PreflightOK)
+    assert result.env["TMPDIR"] == str(resolve_worker_tmpdir(tmp_path))
 
 
 def test_opencode_executor_stage_sentinel_schema(tmp_path: Path) -> None:

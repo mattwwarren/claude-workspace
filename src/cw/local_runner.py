@@ -38,7 +38,7 @@ from cw.executor_diagnostics import (
 from cw.executor_launch import _launch_logged_subprocess
 from cw.gh import fetch_approved_plan_comment
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
-from cw.worktree import _parse_numstat_totals
+from cw.worktree import _parse_numstat_totals, apply_worker_tmpdir
 
 if TYPE_CHECKING:
     from cw.models import TicketTask
@@ -460,6 +460,10 @@ _ENV_ALLOWLIST: frozenset[str] = frozenset(
         "USER",
         "LOGNAME",
         "SHELL",
+        # Always force-set by build_env's apply_worker_tmpdir call (#2470);
+        # listed so this allowlist names every var the builder forwards,
+        # in parity with opencode_runner's.
+        "TMPDIR",
         # Git identity — required for aider to commit
         "GIT_AUTHOR_NAME",
         "GIT_AUTHOR_EMAIL",
@@ -474,7 +478,7 @@ _ENV_ALLOWLIST: frozenset[str] = frozenset(
 )
 
 
-def build_env(endpoint: str) -> dict[str, str]:
+def build_env(endpoint: str, worktree: Path) -> dict[str, str]:
     """Return the subprocess env dict for aider pointing at a local endpoint.
 
     Passes only an explicit allowlist of env vars plus OPENAI_* overrides.
@@ -482,12 +486,17 @@ def build_env(endpoint: str) -> dict[str, str]:
 
     OPENAI_API_KEY must be set or aider refuses to start; LM Studio ignores its
     value, so "local" is the documented fallback.
+
+    TMPDIR/TMP/TEMP are force-set to *worktree*'s own scratch dir via
+    :func:`cw.worktree.apply_worker_tmpdir` (#2470), after the allowlist
+    filter, so the forced value wins over any ambient one.
     """
     env = {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST}
     # Forward all AIDER_* vars (dynamic; not enumerated in the static allowlist)
     env.update({k: v for k, v in os.environ.items() if k.startswith("AIDER_")})
     env["OPENAI_API_BASE"] = endpoint
     env["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY", "local")
+    apply_worker_tmpdir(env, worktree)
     return env
 
 

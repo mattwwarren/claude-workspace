@@ -79,7 +79,7 @@ def _opencode_preflight(
     )
     return _PreflightOK(
         argv=build_opencode_argv(config.model, worktree, prompt),
-        env=build_opencode_env(),
+        env=build_opencode_env(worktree),
     )
 
 

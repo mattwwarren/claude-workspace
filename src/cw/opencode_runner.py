@@ -38,6 +38,7 @@ from cw.executor_diagnostics import (
     persist_diagnostics_bundle,
 )
 from cw.executor_launch import _launch_logged_subprocess
+from cw.worktree import apply_worker_tmpdir
 
 if TYPE_CHECKING:
     import subprocess
@@ -171,7 +172,7 @@ def build_argv(model: str | None, worktree: Path, prompt: str) -> list[str]:
     return argv
 
 
-def build_env() -> dict[str, str]:
+def build_env(worktree: Path) -> dict[str, str]:
     """Return the subprocess env dict for opencode.
 
     Passes only an explicit allowlist of env vars. All operator shell secrets
@@ -182,9 +183,14 @@ def build_env() -> dict[str, str]:
     SLACK_MCP_CLIENT_SECRET) are passed through because opencode's config
     references them via ``{env:...}`` substitution — without them, Slack MCP
     authentication silently fails in the subprocess. TMPDIR is required for
-    tempfile access (macOS resolves to ``/var/folders/.../T/``).
+    tempfile access; it is no longer merely passed through from the parent
+    but force-set (with TMP/TEMP) to *worktree*'s own scratch dir via
+    :func:`cw.worktree.apply_worker_tmpdir` (#2470), so the worker never
+    writes to the host's shared ``/tmp``.
     """
-    return {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST}
+    env = {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST}
+    apply_worker_tmpdir(env, worktree)
+    return env
 
 
 # Entry-point stage_reached marker per supported pipeline stage. A failure

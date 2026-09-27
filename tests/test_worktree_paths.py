@@ -12,7 +12,9 @@ from cw.models import (
 )
 from cw.worktree import (
     _hashed_worktree_base,
+    apply_worker_tmpdir,
     effective_worktree_bases,
+    resolve_worker_tmpdir,
     resolve_worktree_base,
     slugify_branch,
     worktree_path_for,
@@ -177,3 +179,43 @@ class TestWorktreePathFor:
         )
         result = worktree_path_for(client, "feat/x")
         assert result == override / "feat-x"
+
+
+class TestResolveWorkerTmpdir:
+    """#2470: pure per-worktree TMPDIR path computation."""
+
+    def test_existing_worktree(self, tmp_path: Path) -> None:
+        assert resolve_worker_tmpdir(tmp_path) == tmp_path / ".cw" / "tmp"
+
+    def test_missing_worktree_is_not_created(self, tmp_path: Path) -> None:
+        worktree = tmp_path / "not-yet-created"
+        assert resolve_worker_tmpdir(worktree) == worktree / ".cw" / "tmp"
+        assert not worktree.exists()
+
+
+class TestApplyWorkerTmpdir:
+    """#2470: the one shared resolve -> mkdir -> force-set helper (R6)."""
+
+    def test_creates_dir_and_force_sets_all_three_vars(self, tmp_path: Path) -> None:
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        env = {"TMPDIR": "/tmp", "TMP": "/elsewhere", "PATH": "/usr/bin"}
+
+        result = apply_worker_tmpdir(env, worktree)
+
+        expected = resolve_worker_tmpdir(worktree)
+        assert result == expected
+        assert expected.is_dir()
+        assert env["TMPDIR"] == str(expected)
+        assert env["TMP"] == str(expected)
+        assert env["TEMP"] == str(expected)
+        assert env["PATH"] == "/usr/bin"
+
+    def test_idempotent_when_dir_already_exists(self, tmp_path: Path) -> None:
+        resolve_worker_tmpdir(tmp_path).mkdir(parents=True)
+        env: dict[str, str] = {}
+
+        result = apply_worker_tmpdir(env, tmp_path)
+
+        assert result.is_dir()
+        assert env["TMPDIR"] == str(result)

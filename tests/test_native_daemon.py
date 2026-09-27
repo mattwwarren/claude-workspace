@@ -23,6 +23,7 @@ from cw.native_daemon import (
     resolve_permission_mode,
     wait_for_roster_presence,
 )
+from cw.worktree import resolve_worker_tmpdir
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -209,6 +210,29 @@ class TestRealNativeDaemonClientSpawnGitEnv:
         assert env["PWD"] == str(worktree), (
             f"PWD must be overridden to str(cwd); got {env.get('PWD')!r}"
         )
+
+    def test_tmpdir_delegates_to_shared_worker_tmpdir_helper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """TMPDIR must point at the worktree's own scratch dir (#2470).
+
+        Delegation assertion only: the override-vs-ambient behavior itself is
+        covered once, on ``apply_worker_tmpdir`` in test_worktree_paths.py.
+        """
+        captured: dict[str, object] = {}
+
+        def fake_run(args: object, **kwargs: object) -> _FakeCompleted:
+            captured.update(kwargs)
+            return _FakeCompleted(stdout="backgrounded · a1b2c3d4\n")
+
+        monkeypatch.setenv("TMPDIR", "/tmp")
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        RealNativeDaemonClient().spawn_bg(cwd=tmp_path, prompt="x")
+
+        env = captured.get("env")
+        assert isinstance(env, dict)
+        assert env["TMPDIR"] == str(resolve_worker_tmpdir(tmp_path))
 
 
 @pytest.fixture

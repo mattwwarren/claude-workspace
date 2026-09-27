@@ -104,6 +104,16 @@ DEFAULT_GLOBAL_ATTEMPT_CEILING = 10
 # DEFAULT_GLOBAL_ATTEMPT_CEILING above.
 DEFAULT_DISK_PRESSURE_MIN_FREE_GB = 5.0
 
+# Inode dimension of the same claim-time gate (#2470): a tmpfs can exhaust its
+# inodes long before its bytes (the 2026-09-27 ENOSPC incident). The gate
+# refuses a spawn when free inodes fall below
+# ``max(DEFAULT_DISK_PRESSURE_MIN_FREE_INODES,
+# DEFAULT_DISK_PRESSURE_MIN_FREE_INODE_FRACTION * total_inodes)`` -- the
+# absolute floor protects small mounts, the fraction scales to large ones.
+# Judgment defaults, same posture as DEFAULT_DISK_PRESSURE_MIN_FREE_GB above.
+DEFAULT_DISK_PRESSURE_MIN_FREE_INODES = 50_000
+DEFAULT_DISK_PRESSURE_MIN_FREE_INODE_FRACTION = 0.05
+
 
 CLAUDE_NATIVE_BACKEND: str = "claude-native"
 LOCAL_BACKEND: str = "local"
@@ -125,6 +135,14 @@ CONTEXT_JSON_RELATIVE_PATH: Path = Path(".cw", "context.json")
 # path — the defect #1730 shipped, where the pending_operator_comment read
 # pointed at .cw/context.json and silently always returned False.
 HOOK_CONTEXT_RELATIVE_PATH: Path = Path(".claude", "cw-context.json")
+
+# Relative path of the per-worktree scratch directory every dispatched worker
+# (Claude, aider, opencode, codex) gets as its TMPDIR/TMP/TEMP (#2470), so no
+# worker writes scratch files to the host's shared /tmp tmpfs. Lives under the
+# already-excluded ``.cw/`` tree and is removed with the worktree. Shared by
+# ``cw.worktree.resolve_worker_tmpdir`` and every reader, same one-literal
+# convention as CONTEXT_JSON_RELATIVE_PATH above.
+WORKER_TMPDIR_RELATIVE_PATH: Path = Path(".cw", "tmp")
 
 # Keys of the ``agent_spawn_stamp`` object inside cw-context.json (#1646).
 # Three modules touch this one object across two layers that cannot import
@@ -975,6 +993,14 @@ class OrchestratorConfig(BaseModel):
     # DEFAULT_DISK_PRESSURE_MIN_FREE_GB for why the default is a judgment
     # call rather than a measured threshold.
     disk_pressure_min_free_gb: float = DEFAULT_DISK_PRESSURE_MIN_FREE_GB
+    # Inode floor for the same gate (#2470): the effective minimum free-inode
+    # count is max(disk_pressure_min_free_inodes,
+    # disk_pressure_min_free_inode_fraction * total_inodes). See
+    # DEFAULT_DISK_PRESSURE_MIN_FREE_INODES for the rationale.
+    disk_pressure_min_free_inodes: float = DEFAULT_DISK_PRESSURE_MIN_FREE_INODES
+    disk_pressure_min_free_inode_fraction: float = (
+        DEFAULT_DISK_PRESSURE_MIN_FREE_INODE_FRACTION
+    )
     # GitHub #1862 — operator escape hatch for the pre-dispatch open-PR gate
     # (cw.dispatch.pr_gate.resolve_stale_pr_ticket_ids). Default True (gate
     # stays enforced), mirroring ssh_key_gate_enabled's fail-safe default: it

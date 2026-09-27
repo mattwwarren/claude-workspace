@@ -48,6 +48,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.result import EmitOutcome
+from cw.worktree import resolve_worker_tmpdir
 from tests.conftest import commit_tracked_file, find_completed_session
 
 if TYPE_CHECKING:
@@ -709,6 +710,8 @@ def test_local_preflight_success_returns_preflight_ok(
 
     assert isinstance(result, _PreflightOK)
     assert result.env["OPENAI_API_BASE"] == "http://localhost:1234/v1"
+    # #2470: preflight threads the worktree into build_env's TMPDIR helper.
+    assert result.env["TMPDIR"] == str(resolve_worker_tmpdir(worktree))
     assert _flag_value(result.argv, "--model") == "openai/qwen"
     # Post-#1905: the plan body reaches the model through the read-only
     # task-context file, never through the mention-scanned --message string.

@@ -58,6 +58,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.worktree import resolve_worker_tmpdir
 from tests._codex_review_helpers import _mk_codex_proc
 from tests.conftest import _seed_completed_session, find_completed_session
 
@@ -421,6 +422,28 @@ def test_codex_executor_env_is_full_os_environ(
     env = fake_runner.calls[0]["env"]
     assert isinstance(env, dict)
     assert env["CW_TEST_CODEX_ENV_SENTINEL"] == "inherited"
+
+
+def test_codex_executor_env_tmpdir_resolves_against_worktree(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    fake_runner: FakeFireAndForgetRunner,
+) -> None:
+    """Preflight threads the worktree into build_codex_run_env (#2470)."""
+    worktree = make_git_repo("wt-codex-tmpdir")
+    executor = _codex_executor(runner=fake_runner)
+
+    with patch(_WHICH, return_value=_CODEX_PATH):
+        executor.spawn(
+            stage=Stage.REVIEW,
+            task=_review_task("T-tmpdir"),
+            worktree=worktree,
+            client=_client(worktree),
+        )
+
+    env = fake_runner.calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["TMPDIR"] == str(resolve_worker_tmpdir(worktree))
 
 
 def test_spawn_stamps_session_id_before_launch(
