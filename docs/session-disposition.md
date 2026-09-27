@@ -483,7 +483,10 @@ signal-stop` can now route that row itself.
 Once armed, the park fires on four-part evidence:
 
 1. the Stop fired with **no pending background tasks** (the existing
-   `background_tasks` guard in `signal_stop` already establishes this);
+   `background_tasks` guard in `signal_stop` establishes this — with one
+   narrow exception since #2458: a Stop with pending background work reaches
+   the park when the session holds a staged `cw result emit` result that
+   fails reconstruction, see §6d);
 2. **no sentinel** was parsed from the transcript;
 3. the worktree's `.claude/cw-context.json` carries a `park_comment_marker`
    matching the current cw session id, the ticket id, and the **`RUNNING`
@@ -567,6 +570,82 @@ is still live; close it first with `cw spawn close --confirmed-dead`.
 
 ---
 
+### 6d. Stop-hook sentinel-unroutable attention (#2458)
+
+A worker that runs `cw result emit` stages its result on the session
+(`last_result`, `last_result_source=emit_cli`) before its turn ends. Three
+authorities can route that staged result to the dev-queue row:
+
+- **The Stop hook.** `signal_stop` routes a staged emit_cli result on the next
+  Stop, **including one whose `background_tasks` is still non-empty**. A
+  lock-free peek at the session decides whether anything is staged. With
+  nothing staged, the hook defers exactly as it always has (issue #151). With
+  a staged result, the task is routed immediately, but the session's own
+  completion (`SESSION_COMPLETED`, daemon stop) waits until the background work
+  drains. The one exception is a `BlockedResult` that lands the row
+  terminal-`FAILED` (#1273). That worker is provably leaked, so its daemon is
+  stopped at once.
+- **The idle sweep (backstop).** A live DAEMON session holding a staged
+  emit_cli result is routed as `ROUTE_EMITTED_SENTINEL` once
+  `sentinel_unrouted_check_seconds` (default 300 s, measured from session
+  start) has passed. This catches the shape the hook cannot: an upstream
+  `claude --bg` async-completion wakeup that is dropped entirely (#1889), so
+  that no further Stop ever fires for the session. The sweep audits the
+  staged result rather than re-emitting it through the door, and a #1031
+  stage-mismatch refusal is merged into `last_result` as
+  `sentinel_advance_refused`, so the worker's record is never overwritten.
+- **`cw spawn close`.** Closing a DAEMON session routes a staged result first.
+  The #317 cancel runs only when nothing is staged, the staged dict does not
+  reconstruct, or the route is refused.
+
+**The `sentinel_unroutable` page.** `sentinel_unroutable` is a narrower net
+than either routing authority. It fires when an emit_cli-staged, headless
+Stop hook (with or without `background_tasks` outstanding) reaches its
+resolution step and lands in none of the known bails, meaning the staged
+result failed reconstruction **and** the transcript fallback found no
+sentinel either. In that case `signal_stop` logs a WARNING (session id,
+ticket id, `last_result_source`) and fires `session.needs_attention` with
+`paused_status=sentinel_unroutable`. The `cw.result` warning just before it
+names the pydantic field errors.
+
+It is **not** fired for the other bails, each of which already has its own
+signal:
+
+- a #1031 stage-mismatch refusal (`sentinel.stage_mismatch`);
+- a `BlockedResult` landing terminal (#1273, daemon stopped);
+- the §6c abandoned-exit park (`stopped_without_sentinel`).
+
+It is the dropped-wakeup and `background_tasks`-defer shapes that the Stop
+hook's routing and the idle sweep now close between them. This page is
+defense in depth for the rarer case of a Stop hook that *did* run but found
+the staged result unroutable.
+
+It mutates **only** the event stream. There is **no task-row mutation**,
+unlike §6c's park. The row stays `RUNNING`, so a later Stop, the idle sweep,
+or an operator can still route it. Nothing is reaped, and the row is not
+concierge-eligible (there is no false park to requeue).
+
+**Signal-only, not escalation-eligible.** `sentinel_unroutable` is the same
+class as the liveness sweep's `session_unresponsive` page. It is not a
+member of `cw.reconcile.escalation._ELIGIBLE_DISPOSITIONS` and must never be
+added there: `_is_escalation_eligible` only considers a `BLOCKED_ON_USER`
+row with an eligible disposition or an `AWAITING_OPERATOR_SIGNOFF`/`FAILED`
+row, and this page leaves the row `RUNNING`, so the entry would be dead code.
+
+**Not suppressed in the liveness sweep.** Unlike §6c, the liveness sweep's
+`session_unresponsive` distress signal is **not** withheld for this state.
+That suppression keys on a `BLOCKED_ON_USER` row carrying
+`stopped_without_sentinel`, and this row stays `RUNNING`. A quiet session
+holding an unroutable staged result can therefore page through both signals.
+
+**Operator recovery.** Read the staged result with `cw session result
+<session>`, and read the `cw.result` warning for the failing fields. The row
+is still `RUNNING`, so `cw dev-queue requeue` does not accept it yet. For an
+unreconstructable result, `cw spawn close` cancels the row as before; then
+`cw dev-queue requeue --from-cancelled` re-runs the stage.
+
+---
+
 ## 7. Cross-references
 
 - [`docs/dispatch-runbook.md`](dispatch-runbook.md) — full end-to-end dispatch procedure.
@@ -575,6 +654,9 @@ is still live; close it first with `cw spawn close --confirmed-dead`.
 - `src/cw/cli/_sentinels.py:_parse_sentinel_from_transcript` — transcript sentinel reader.
 - `src/cw/cli/_sentinels.py:_sentinel_frame_after` — the §6c false-park guard (negative evidence only).
 - `src/cw/cli/signal_park.py` — `cw signal-park`, the §6c park-marker writer.
+- `src/cw/cli/stop_hook.py:_page_sentinel_unroutable` — the §6d page; `_peek_staged_emit_result` — the lock-free staged-result peek on the `background_tasks` path.
+- `src/cw/reconcile/idle/_detect.py:_staged_emit_candidate` — the §6d idle-sweep backstop producer.
+- `src/cw/cli/spawn.py:_route_staged_emit_result` — `cw spawn close`'s route-before-cancel.
 - `src/cw/models/park_comment_marker.py` — the marker model and its reader.
 - `src/cw/reconcile/_shared.py:_locate_session_transcript` — transcript path resolver.
 - `src/cw/reconcile/_shared.py:_csid_from_transcript` — claude_session_id derivation.
