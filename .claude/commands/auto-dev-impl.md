@@ -258,7 +258,7 @@ Before starting S2 work, run `detect_current_stage()` (see [Resume Detection](#r
 ```bash
 cw event record stage.entered \
   --correlation-id "$TICKET" \
-  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s2_impl_started\",\"prev_stage\":\"s1_plan_reviewed\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
+  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s2_impl_started\",\"prev_stage\":\"s1_plan_reviewed\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
 ```
 
 Stage 2 agent spawn:
@@ -555,7 +555,7 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
 ```bash
 cw event record stage.entered \
   --correlation-id "$TICKET" \
-  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s2_impl_complete\",\"prev_stage\":\"s2_impl_started\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
+  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s2_impl_complete\",\"prev_stage\":\"s2_impl_started\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
 ```
 
 This step replaces "trust the agent's `Could work be incomplete?: NO`" with "verify the facts the agent claims", entirely against the pushed branch.

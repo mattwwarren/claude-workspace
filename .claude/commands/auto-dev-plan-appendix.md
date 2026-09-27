@@ -34,7 +34,7 @@ The durable revocation is the approval source of truth: Checkpoint 1 MUST honor 
      ```bash
      cw event record stage.entered \
        --correlation-id "$TICKET" \
-       --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_skipped\",\"prev_stage\":\"s1_plan_generated\",\"reason\":\"approved_fingerprint_match\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
+       --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s1_ambiguity_scan_skipped\",\"prev_stage\":\"s1_plan_generated\",\"reason\":\"approved_fingerprint_match\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
      ```
      — in place of, not in addition to, `s1_ambiguity_scan_complete`.
    - **No match (or absent evidence) → proceed to Step 1c.0 / Step 1c as today**, now evaluated against the (possibly just-revised) draft.

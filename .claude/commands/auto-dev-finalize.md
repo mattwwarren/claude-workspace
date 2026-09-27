@@ -602,7 +602,7 @@ After `/prep-pr` returns with a PR number:
    ```bash
    cw event record stage.entered \
      --correlation-id "$TICKET" \
-     --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s4_pr_created\",\"prev_stage\":\"s3_review_complete\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
+     --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s4_pr_created\",\"prev_stage\":\"s3_review_complete\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
    ```
 7. **Proceed to Stage 5** (CI Wait)
 
@@ -616,7 +616,7 @@ Note: monitor registration happens inside `/prep-pr` Step 9 — do NOT re-regist
 ```bash
 cw event record stage.entered \
   --correlation-id "$TICKET" \
-  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s5_ci_waiting\",\"prev_stage\":\"s4_pr_created\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
+  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"s5_ci_waiting\",\"prev_stage\":\"s4_pr_created\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
 ```
 
 After every push (PR creation or fix push), wait up to 10 minutes for CI to complete.
@@ -655,7 +655,7 @@ After PR creation, auto-merge enablement, and CI monitoring complete, emit the `
 # Emit done event (pipeline path only)
 cw event record stage.entered \
   --correlation-id "$TICKET" \
-  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"done\",\"prev_stage\":\"s5_ci_waiting\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || true
+  --payload "{\"session_id\":\"$CW_SESSION\",\"ticket_id\":\"$TICKET\",\"stage\":\"done\",\"prev_stage\":\"s5_ci_waiting\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
 
 # Record the sentinel through cw (fix-and-re-run until exit 0), then frame it
 printf '%s' "$SENTINEL_JSON" | cw result emit -
