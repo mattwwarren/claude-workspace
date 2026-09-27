@@ -39,6 +39,15 @@ def test_guard_invokes_staleness_script() -> None:
     assert "--regressed-into-stage" in section
 
 
+def test_guard_reads_comments_file_from_guard_root() -> None:
+    """#2315: the guard's `--comments-file` argument reads the same
+    worktree-scoped path the Orientation step wrote, not the old
+    `$CW_SESSION`-keyed `/tmp` path — and reuses the fence's already-computed
+    `$GUARD_ROOT` rather than deriving a new anchor."""
+    section = _guard_section()
+    assert '--comments-file "$GUARD_ROOT/.cw/impl-comments.json"' in section
+
+
 def test_guard_reads_regressed_into_stage_from_queue_metadata() -> None:
     section = _guard_section()
     assert "queue_metadata.regressed_into_stage" in section
@@ -90,6 +99,25 @@ def test_orientation_live_fetches_comments_not_cache() -> None:
     window = _after(content, "**Comments are live, not cached", span=900)
     assert "MUST live-fetch the ticket comments on every invocation" in window
     assert "Stage 0 does NOT re-run between pipeline stages" in window
+
+
+def test_orientation_writes_impl_comments_cache_under_guard_root() -> None:
+    """#2315: the impl-comments cache is worktree-scoped, not `$CW_SESSION`-keyed.
+
+    A fixed `/tmp/impl-comments-$CW_SESSION.json` name collides across two
+    workers whose parent shell shares an inherited/machine-wide `$CW_SESSION`.
+    Both Orientation-step write sites (the fresh-fetch write and the
+    fetch-failure fallback write) must target `$GUARD_ROOT/.cw/impl-comments.json`
+    instead, and the paragraph must forbid improvising a fixed path.
+    """
+    content = _cmd("auto-dev-impl.md")
+    window = _after(content, "**Comments are live, not cached", span=3200)
+    assert window.count("$GUARD_ROOT/.cw/impl-comments.json") == 2, (
+        "expected both the fresh-fetch write and the fetch-failure-fallback "
+        "write to target the new worktree-scoped path"
+    )
+    assert "Never write this cache to a fixed" in window
+    assert "not guaranteed unique across" in window
 
 
 def test_orientation_cites_per_stage_dispatch_mechanism() -> None:
@@ -153,7 +181,7 @@ def test_orientation_regressed_comments_fetch_failure_hard_blocks() -> None:
     a stale cached array would defeat it. The non-regress WARN branch must
     survive unchanged alongside the new hard-block branch."""
     content = _cmd("auto-dev-impl.md")
-    window = _after(content, "**Comments are live, not cached", span=2800)
+    window = _after(content, "**Comments are live, not cached", span=3200)
     assert (
         f'blocker.reason: "{IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON}"'
         in window
@@ -161,3 +189,22 @@ def test_orientation_regressed_comments_fetch_failure_hard_blocks() -> None:
     assert "queue_metadata.regressed_into_stage" in window
     assert "impl_comments_fetch_failed" in window
     assert "a stale-but-real array is better evidence than none" in window
+
+
+def test_no_cw_session_keyed_tmp_path_remains_in_impl_docs() -> None:
+    """#2315 AC7: no fixed `$CW_SESSION`-keyed `/tmp` scratch path may remain
+    anywhere in either the core doc or its appendix, for any of the three
+    re-keyed scratch files (impl-comments cache, touched-files, approved-extra)
+    — a machine-wide/inherited `$CW_SESSION` collides two workers' caches
+    regardless of which of the three files it names."""
+    docs = {
+        "auto-dev-impl.md": _cmd("auto-dev-impl.md"),
+        "auto-dev-impl-appendix.md": _appendix("impl"),
+    }
+    for doc, content in docs.items():
+        for forbidden in (
+            "impl-comments-$CW_SESSION",
+            "touched_files-$CW_SESSION",
+            "approved-extra-$CW_SESSION",
+        ):
+            assert forbidden not in content, f"{doc}: still contains {forbidden!r}"
