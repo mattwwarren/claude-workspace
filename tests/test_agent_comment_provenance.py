@@ -57,6 +57,18 @@ def _blocker_reason_table() -> str:
     return content[start:end]
 
 
+def _status_enum_table() -> str:
+    """Return the Status Enum (closed) table body from auto-dev.md (#2442).
+
+    Bounded by the next heading, the `blocker.reason` Values table -- which
+    ``_blocker_reason_table`` parses and this table never reaches.
+    """
+    content = _cmd("auto-dev.md")
+    start = content.index("### Status Enum (closed)")
+    end = content.index("### `blocker.reason` Values", start)
+    return content[start:end]
+
+
 def _table_reasons(table: str) -> list[str]:
     """Return the first-column code span of every data row in *table*."""
     reasons: list[str] = []
@@ -323,3 +335,15 @@ def test_every_documented_reason_is_registered() -> None:
     documented = _table_reasons(_blocker_reason_table())
     assert documented, "blocker.reason table parsed as empty — anchor drifted"
     assert set(documented) <= KNOWN_BLOCKER_REASONS
+
+
+def test_tracker_mcp_gate_status_row_exists_in_the_auto_dev_table() -> None:
+    """The #2442 Status Enum row is pinned here, not by the sweep above.
+
+    ``test_every_documented_reason_is_registered`` walks only the
+    `blocker.reason` Values table, so a Status Enum row has no automatic
+    drift protection without this dedicated check.
+    """
+    table = _status_enum_table()
+    assert "tracker_mcp_unavailable" in _table_reasons(table)
+    assert "#2442" in table

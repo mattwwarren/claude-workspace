@@ -310,6 +310,11 @@ def _make_clients_yaml(
             lines.append(f"    occupancy_gate_enabled: {token}\n")
         if client.worktree_base is not None:
             lines.append(f"    worktree_base: {client.worktree_base}\n")
+        if client.tracker_mcp_gate is not None:
+            gate = client.tracker_mcp_gate
+            lines.append("    tracker_mcp_gate:\n")
+            lines.append(f"      enabled: {str(gate.enabled).lower()}\n")
+            lines.append(f'      plugin_id: "{gate.plugin_id}"\n')
         if client.lanes:
             lines.append("    lanes:\n")
             for lane in client.lanes:
@@ -21634,6 +21639,247 @@ class TestClaimNextPendingStalePr:
             t for t in load_dev_queue().tasks if t.ticket_id == "GEN-toggle-off"
         )
         assert claimed.status == QueueItemStatus.RUNNING
+
+
+class TestClaimNextPendingTrackerMcpGate:
+    """The pre-dispatch tracker-MCP gate in ``_claim_next_pending`` (#2442).
+
+    Mirrors ``TestClaimNextPendingStalePr``: drive a real ``dispatch_tick`` and
+    assert the task is parked instead of claimed. The gate's *resolution* is
+    covered by ``tests/test_dispatch_tracker_mcp_gate.py``; this class pins the
+    per-client toggle guard and the claim-path wiring.
+    """
+
+    _PLUGIN = "linear@acme"
+
+    def _config(self) -> OrchestratorConfig:
+        return OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"test-client": 1},
+        )
+
+    def _gated_client(self, client: ClientConfig) -> ClientConfig:
+        from cw.models.client import TrackerMcpGateConfig
+
+        return client.model_copy(
+            update={
+                "tracker_mcp_gate": TrackerMcpGateConfig(
+                    enabled=True, plugin_id=self._PLUGIN
+                )
+            }
+        )
+
+    def _stub_resolver(
+        self, monkeypatch: pytest.MonkeyPatch, *ticket_ids: str
+    ) -> list[str]:
+        """Patch the lanes-level resolver to report a hit per *ticket_ids*."""
+        from cw.dispatch.tracker_mcp_gate import TrackerMcpGateHit
+
+        calls: list[str] = []
+
+        def _fake(
+            client: ClientConfig, snapshot: DevQueueStore
+        ) -> dict[str, TrackerMcpGateHit]:
+            calls.append(client.name)
+            return {
+                tid: TrackerMcpGateHit(
+                    branch=f"dev/{tid}",
+                    file_inspected=".claude/settings.json",
+                    expected_plugin=self._PLUGIN,
+                )
+                for tid in ticket_ids
+            }
+
+        monkeypatch.setattr("cw.dispatch.lanes.resolve_tracker_mcp_gate_hits", _fake)
+        return calls
+
+    def _seed(self, ticket_id: str, stage: Stage = Stage.PLAN) -> TicketTask:
+        task = _make_ticket_task(
+            ticket_id=ticket_id,
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            stage=stage,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    def test_tracker_mcp_gate_blocks_pending_task_when_plugin_unavailable(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """R6 case 3: parked BLOCKED_ON_USER, nothing charged, nothing spawned,
+        and the attention event carries the R1 additive detail fields."""
+        from cw.dev_queue import TRACKER_MCP_GATE_DISPOSITION
+        from cw.dev_queue.lifecycle import _PRE_DISPATCH_TRACKER_MCP_REASON
+
+        _make_clients_yaml(tmp_dispatch_dirs, self._gated_client(sample_client_config))
+        self._stub_resolver(monkeypatch, "GEN-2442")
+        task = self._seed("GEN-2442")
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._config(), native_daemon=daemon)
+
+        parked = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-2442")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == TRACKER_MCP_GATE_DISPOSITION
+        assert parked.blocked_reason == _PRE_DISPATCH_TRACKER_MCP_REASON
+        assert parked.attempts == 0
+        assert parked.unproductive_attempts == 0
+        assert daemon.spawn_calls == []
+
+        events = read_events(
+            consumer="test-2442-gate-events",
+            event_types=[
+                OrchestratorEventType.DISPATCH_TICK,
+                OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            ],
+        )
+        tick_events = [
+            e
+            for e in events
+            if e.payload.get("skip_reason")
+            == DispatchSkipReason.TRACKER_MCP_GATE_BLOCKED
+        ]
+        assert len(tick_events) == 1
+        assert tick_events[0].payload["ticket_id"] == "GEN-2442"
+        attention = [
+            e
+            for e in events
+            if e.payload.get("paused_status") == TRACKER_MCP_GATE_DISPOSITION
+        ]
+        assert len(attention) == 1
+        payload = attention[0].payload
+        assert payload["ticket_id"] == "GEN-2442"
+        assert payload["lane"] == task.lane
+        assert payload["breadcrumbs"] == ""
+        assert payload["branch"] == "dev/GEN-2442"
+        assert payload["file_inspected"] == ".claude/settings.json"
+        assert payload["expected_plugin"] == self._PLUGIN
+        assert payload["details"] == (
+            "branch=dev/GEN-2442; file_inspected=.claude/settings.json;"
+            f" expected_plugin={self._PLUGIN}"
+        )
+
+    def test_tracker_mcp_gate_allows_dispatch_when_plugin_enabled(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """R6 case 1: no hit -> the task claims and spawns normally."""
+        _make_clients_yaml(tmp_dispatch_dirs, self._gated_client(sample_client_config))
+        calls = self._stub_resolver(monkeypatch)
+        self._seed("GEN-enabled")
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        assert calls == ["test-client"]
+        claimed = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == "GEN-enabled"
+        )
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.attempts == 1
+
+    def test_tracker_mcp_gate_fails_open_and_dispatches_when_settings_file_missing(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """R6 case 2: the real resolver runs, stubbed only at its git-read
+        boundary to report the missing-file (None) outcome -> spawn proceeds."""
+        _make_clients_yaml(tmp_dispatch_dirs, self._gated_client(sample_client_config))
+        reads: list[str] = []
+
+        def _missing(client: ClientConfig, branch: str, relpath: str) -> None:
+            reads.append(f"{branch}:{relpath}")
+
+        monkeypatch.setattr("cw.dispatch.tracker_mcp_gate._read_branch_json", _missing)
+        self._seed("GEN-missing")
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        assert reads == ["dev/GEN-missing:.claude/settings.json"]
+        claimed = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == "GEN-missing"
+        )
+        assert claimed.status == QueueItemStatus.RUNNING
+
+    def test_tracker_mcp_gate_disabled_by_default_skips_resolver_entirely(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """R6 case 4: ``tracker_mcp_gate`` unset -> the resolver never runs."""
+        assert sample_client_config.tracker_mcp_gate is None
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        def _explode(client: ClientConfig, snapshot: DevQueueStore) -> None:
+            msg = "tracker-MCP resolver must not run for an opted-out client"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.dispatch.lanes.resolve_tracker_mcp_gate_hits", _explode
+        )
+        self._seed("GEN-default")
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        claimed = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == "GEN-default"
+        )
+        assert claimed.status == QueueItemStatus.RUNNING
+
+    def test_tracker_mcp_gate_skipped_when_client_has_no_capacity(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Slot-gated like its #1862 sibling: a saturated client never pays
+        the settings-file read."""
+        _make_clients_yaml(tmp_dispatch_dirs, self._gated_client(sample_client_config))
+        calls = self._stub_resolver(monkeypatch, "GEN-nocap")
+        self._seed("GEN-nocap")
+        sess = Session(
+            id="running-sess",
+            name="test-client/auto-dev/OTHER-1",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client_config.workspace_path,
+        )
+        save_state(CwState(sessions=[sess]))
+
+        dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+
+        assert calls == []
+        untouched = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == "GEN-nocap"
+        )
+        assert untouched.status == QueueItemStatus.PENDING
+
+    def test_tracker_mcp_gate_never_parks_a_review_stage_task(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Stage-scoped at the point of use, like ``_is_stale_pr_gated``."""
+        _make_clients_yaml(tmp_dispatch_dirs, self._gated_client(sample_client_config))
+        self._stub_resolver(monkeypatch, "GEN-rev")
+        self._seed("GEN-rev", stage=Stage.REVIEW)
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        claimed = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-rev")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.disposition is None
 
 
 # ---------------------------------------------------------------------------
