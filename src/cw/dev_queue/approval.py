@@ -30,6 +30,7 @@ from cw.config import dev_queue_file, get_client
 from cw.dev_queue.crud import _APPROVABLE_STATUSES, _find_ticket
 from cw.dev_queue.lifecycle import (
     BRANCH_STALENESS_GATE_DISPOSITION,
+    FINALIZE_GATE_HELD_DISPOSITION,
     REVIEW_STALENESS_GATE_DISPOSITION,
     _advance_task_pointer,
     _clear_signoff_gate,
@@ -379,10 +380,14 @@ def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
     conditions can satisfy the gate: the session's ``last_result`` status is
     one of ``SCOPE_GATED_APPROVAL_STATUSES`` (the ``plan_pending_approval`` /
     ``review_pending_approval`` release path), or the task's ``disposition``
-    records a park armed by the ``scope_hint`` escalation gate
-    (``_APPROVAL_GATE_REASON``, GitHub #1640). ``approve`` proceeds if either
-    condition holds -- unless the #1823 branch-staleness override below fires
-    first, which vetoes both.
+    records a park this entry point is authorised to release --
+    ``_APPROVAL_GATE_REASON`` (the ``scope_hint`` escalation gate, GitHub
+    #1640) or ``FINALIZE_GATE_HELD_DISPOSITION`` (the RFC 0011 A3 force hold,
+    GitHub #2410 -- a plain ``stage_complete`` completion never satisfies the
+    status condition, so without this the operator-initiated bypass inside
+    ``_approve_ticket_locked`` is never reached). ``approve`` proceeds if
+    either condition holds -- unless the #1823 branch-staleness override below
+    fires first, which vetoes both.
     """
     from cw.auto_dev_result import SCOPE_GATED_APPROVAL_STATUSES
     from cw.dispatch import _APPROVAL_GATE_REASON
@@ -414,7 +419,10 @@ def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
         session.last_result is None
         or session.last_result.get("status") not in SCOPE_GATED_APPROVAL_STATUSES
     )
-    not_at_disposition_gate = task.disposition != _APPROVAL_GATE_REASON
+    not_at_disposition_gate = task.disposition not in (
+        _APPROVAL_GATE_REASON,
+        FINALIZE_GATE_HELD_DISPOSITION,
+    )
     return not_at_status_gate and not_at_disposition_gate
 
 
@@ -450,8 +458,9 @@ def _raise_if_not_at_approval_gate(
     msg = (
         f"Cannot approve ticket '{ticket_id}': not at an approval gate"
         f" (disposition={task.disposition!r}, last_result status={actual!r})."
-        " Expected disposition 'approval_gate', or last_result status one of:"
-        " plan_pending_approval, review_pending_approval."
+        " Expected disposition 'approval_gate' or 'finalize_gate_held', or"
+        " last_result status one of: plan_pending_approval,"
+        " review_pending_approval."
     )
     raise ApproveGateError(msg)
 
