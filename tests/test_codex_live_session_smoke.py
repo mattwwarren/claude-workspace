@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
@@ -17,6 +19,7 @@ MODEL = "gpt-5.6-luna"
 SESSION = "thread.smoke-2463"
 VERSION = "codex-cli 0.156.1"
 UNAVAILABLE_MESSAGE = "unavailable-secret"
+_REAL_POPEN = subprocess.Popen
 
 
 @pytest.fixture(autouse=True)
@@ -48,6 +51,29 @@ def completed(
     return subprocess.CompletedProcess(argv, code, stdout, stderr)
 
 
+class FakePopen:
+    def __init__(
+        self,
+        argv: list[str],
+        result: subprocess.CompletedProcess[str],
+        *,
+        timeout: bool = False,
+    ) -> None:
+        self.argv = argv
+        self.stdout = io.BytesIO(result.stdout.encode("utf-8", errors="replace"))
+        self._returncode = result.returncode
+        self._timeout = timeout
+        self._killed = False
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self._timeout and timeout is not None:
+            raise subprocess.TimeoutExpired(self.argv, timeout)
+        return -9 if self._killed else self._returncode
+
+    def kill(self) -> None:
+        self._killed = True
+
+
 def fake_run(
     calls: list[dict[str, object]],
     **options: object,
@@ -60,6 +86,7 @@ def fake_run(
     timeout_stage = cast("str | None", options.get("timeout_stage"))
     unavailable_stage = cast("str | None", options.get("unavailable_stage"))
     stderr = cast("str", options.get("stderr", ""))
+    real_git = cast("bool", options.get("real_git", False))
 
     def run(
         argv: list[str],
@@ -91,8 +118,22 @@ def fake_run(
         if argv[:2] == ["git", "init"]:
             if timeout_stage == "git":
                 raise subprocess.TimeoutExpired(argv, timeout)
+            if real_git:
+                assert cwd.is_dir()
+                proc = _REAL_POPEN(
+                    argv,
+                    cwd=cwd,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                proc.wait(timeout=timeout)
+                return completed(argv, code=cast("int", proc.returncode))
             return completed(argv, code=git_code, stderr=stderr)
         if argv[:3] == ["codex", "exec", "resume"]:
+            if real_git:
+                assert (cwd / ".git").is_dir()
             if unavailable_stage == "resume":
                 raise FileNotFoundError(UNAVAILABLE_MESSAGE)
             if timeout_stage == "resume":
@@ -104,13 +145,46 @@ def fake_run(
             raise FileNotFoundError(UNAVAILABLE_MESSAGE)
         if timeout_stage == "create":
             raise subprocess.TimeoutExpired(argv, timeout)
+        if real_git and argv[:2] == ["codex", "exec"]:
+            assert (cwd / ".git").is_dir()
         return completed(argv, code=create_code, stdout=create_stdout, stderr=stderr)
 
     return run
 
 
 def set_runner(monkeypatch: pytest.MonkeyPatch, runner: Callable[..., object]) -> None:
-    monkeypatch.setattr("scripts.probe_codex_live_session.subprocess.run", runner)
+    def popen(
+        argv: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        stdin: int,
+        stdout: int,
+        stderr: int,
+    ) -> FakePopen:
+        assert stdin == subprocess.DEVNULL
+        assert stdout == subprocess.PIPE
+        assert stderr == subprocess.DEVNULL
+        try:
+            result = cast(
+                "subprocess.CompletedProcess[str]",
+                runner(
+                    argv,
+                    cwd=cwd,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                    timeout=probe.PROCESS_TIMEOUT_SECONDS,
+                ),
+            )
+        except subprocess.TimeoutExpired:
+            return FakePopen(argv, completed(argv), timeout=True)
+        return FakePopen(argv, result)
+
+    monkeypatch.setattr("scripts.probe_codex_live_session.subprocess.Popen", popen)
 
 
 class TestParser:
@@ -211,7 +285,24 @@ class TestProbe:
             "error_code": "opt_in_required",
         }
 
-    @pytest.mark.parametrize("model", [None, "bad/model", "x" * 65])
+    @pytest.mark.parametrize(
+        "model",
+        [
+            None,
+            "bad/model",
+            "x" * 65,
+            "--last",
+            "--ephemeral",
+            "--approve-for-me",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--sandbox",
+            "--model=--last",
+            "-m",
+            "-o",
+            "read-only",
+            "workspace-write",
+        ],
+    )
     def test_invalid_model_launches_nothing(
         self, monkeypatch: pytest.MonkeyPatch, model: str | None
     ) -> None:
@@ -295,10 +386,6 @@ class TestProbe:
         assert all(call["encoding"] == "utf-8" for call in calls)
         assert all(call["errors"] == "replace" for call in calls)
         assert all(call["timeout"] == 120 for call in calls)
-        assert all(
-            call["capture_output"] and call["text"] and not call["check"]
-            for call in calls
-        )
         forbidden = {
             "--last",
             "--ephemeral",
@@ -309,6 +396,65 @@ class TestProbe:
         }
         assert forbidden.isdisjoint(calls[2]["argv"])
         assert forbidden.isdisjoint(calls[3]["argv"])
+
+    @pytest.mark.parametrize(
+        ("create_code", "expected_status"),
+        [(0, "passed"), (9, "failed")],
+    )
+    def test_disposable_git_repo_is_initialized_and_removed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        create_code: int,
+        expected_status: str,
+    ) -> None:
+        calls: list[dict[str, object]] = []
+        temporary_roots: list[Path] = []
+        real_temporary_directory = tempfile.TemporaryDirectory
+
+        def recording_temporary_directory(
+            *, prefix: str, **kwargs: str
+        ) -> tempfile.TemporaryDirectory[str]:
+            temporary_directory = real_temporary_directory(
+                prefix=prefix, dir=kwargs["dir"]
+            )
+            temporary_roots.append(Path(temporary_directory.name))
+            return temporary_directory
+
+        monkeypatch.setattr(
+            "scripts.probe_codex_live_session.tempfile.TemporaryDirectory",
+            recording_temporary_directory,
+        )
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        set_runner(
+            monkeypatch,
+            fake_run(calls, create_code=create_code, real_git=True),
+        )
+        result = probe.run_probe(MODEL)
+        assert result["status"] == expected_status
+        assert len(temporary_roots) == 1
+        assert not temporary_roots[0].exists()
+        git_init_calls = [
+            call for call in calls if call["argv"] == ["git", "init", "--quiet"]
+        ]
+        assert len(git_init_calls) == 1
+        repo = cast("Path", git_init_calls[0]["cwd"])
+        assert repo == temporary_roots[0] / "repo"
+        assert not repo.exists()
+
+    def test_stdout_limit_is_enforced_and_transcript_is_not_retained(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(probe, "MAX_PROCESS_OUTPUT_BYTES", 64)
+        attempt = probe._attempt(
+            [sys.executable, "-c", "import os; os.write(1, b'x' * 8192)"],
+            cwd=tmp_path,
+            env=os.environ.copy(),
+            stage="create",
+        )
+        assert attempt.error_code == "create_malformed_jsonl"
+        assert attempt.outcome.output_exceeded_limit
+        assert attempt.outcome.stdout == ""
+        assert attempt.stream.error == "malformed_jsonl"
 
     @pytest.mark.parametrize(
         ("kwargs", "error"),
@@ -470,13 +616,13 @@ class TestProbe:
             result = probe.run_probe(MODEL)
             assert result["error_code"] == "version_unavailable"
 
-    def test_codex_home_inside_checkout_is_rejected_before_launch(
+    def test_codex_home_inside_checkout_fails_setup_before_launch(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
         monkeypatch.setenv("CODEX_HOME", str(probe._checkout_root() / ".codex"))
         set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
-        assert probe.run_probe(MODEL)["error_code"] == "unsafe_environment"
+        assert probe.run_probe(MODEL)["error_code"] == "repo_setup_failed"
 
     def test_codex_home_defaults_to_home_dot_codex(
         self, monkeypatch: pytest.MonkeyPatch
@@ -493,14 +639,18 @@ class TestProbe:
         assert result.exit_code == 0
         assert result.stdout == "\ufffd"
 
-    def test_cleanup_failure_is_sanitized(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    @pytest.mark.parametrize("create_code", [0, 7])
+    def test_cleanup_failure_preserves_sanitized_result(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        create_code: int,
     ) -> None:
         class BrokenTemporaryDirectory:
-            name = str(tmp_path)
+            name = str(tmp_path / "temp-root")
 
             def __init__(self, **_kwargs: object) -> None:
-                Path(self.name).mkdir(exist_ok=True)
+                Path(self.name).mkdir(parents=True, exist_ok=True)
 
             def cleanup(self) -> None:
                 cleanup_error = "cleanup-secret"
@@ -512,20 +662,44 @@ class TestProbe:
             "scripts.probe_codex_live_session.tempfile.TemporaryDirectory",
             BrokenTemporaryDirectory,
         )
-        set_runner(monkeypatch, fake_run(calls, stderr="stderr-secret"))
+        set_runner(
+            monkeypatch,
+            fake_run(calls, create_code=create_code, stderr="stderr-secret"),
+        )
         result = probe.run_probe(MODEL)
         assert result["status"] == "failed"
         assert result["error_code"] == "cleanup_failed"
-        assert set(result) == {
-            "status",
-            "cli_version",
-            "model",
-            "session_id",
-            "create",
-            "resume",
-            "error_code",
+        expected: probe.SmokeResult = {
+            "status": "failed",
+            "cli_version": VERSION,
+            "model": MODEL,
+            "session_id": SESSION,
+            "create": {
+                "exit_code": create_code,
+                "terminal_event": "turn.completed",
+            },
+            "resume": None,
+            "error_code": "cleanup_failed",
         }
+        if create_code == 0:
+            expected["resume"] = {
+                "exit_code": 0,
+                "terminal_event": "turn.completed",
+                "id_matches": True,
+            }
+        assert result == expected
         assert "cleanup-secret" not in json.dumps(result)
+
+    def test_failed_cli_probe_exits_nonzero_with_one_sanitized_json_line(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        set_runner(monkeypatch, fake_run([], create_code=7))
+        assert probe.main(["--model", MODEL]) == 1
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out.count("\n") == 1
+        assert json.loads(captured.out)["error_code"] == "create_nonzero_exit"
 
     def test_result_does_not_expose_raw_output_or_environment(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

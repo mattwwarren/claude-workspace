@@ -3,25 +3,48 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypedDict, cast
+from typing import Final, Literal, TypedDict, cast
 
 FIXED_PROMPT = "Reply exactly cw-session-smoke-ok. Do not use tools or modify files."
 FIXED_RESUME_PROMPT = (
     "Reply exactly cw-session-smoke-resumed-ok. Do not use tools or modify files."
 )
 PROCESS_TIMEOUT_SECONDS = 120
+MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024
+PROCESS_OUTPUT_CHUNK_BYTES = 64 * 1024
 MAX_VERSION_LENGTH = 64
 _VERSION_RE = re.compile(r"^codex-cli [0-9]+\.[0-9]+\.[0-9]+$")
-_MODEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_FORBIDDEN_MODEL_VALUES = frozenset(
+    {
+        "--last",
+        "--ephemeral",
+        "--approve-for-me",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--sandbox",
+        "-m",
+        "-o",
+        "read-only",
+        "workspace-write",
+    }
+)
+
+THREAD_STARTED_EVENT: Final = "thread.started"
+TURN_STARTED_EVENT: Final = "turn.started"
+TURN_COMPLETED_EVENT: Final = "turn.completed"
+TURN_FAILED_EVENT: Final = "turn.failed"
 
 type ParseError = Literal[
     "malformed_jsonl",
@@ -31,13 +54,13 @@ type ParseError = Literal[
     "invalid_terminal",
 ]
 type TerminalEvent = Literal["turn.completed", "turn.failed"]
+type ProbeStage = Literal["create", "resume"]
 type ErrorCode = Literal[
     "opt_in_required",
     "invalid_model",
     "version_unavailable",
     "version_invalid",
     "cli_unavailable",
-    "unsafe_environment",
     "repo_setup_failed",
     "create_timeout",
     "create_nonzero_exit",
@@ -56,6 +79,22 @@ type ErrorCode = Literal[
     "resume_invalid_terminal",
     "cleanup_failed",
 ]
+
+_PARSE_ERROR_CODES: dict[tuple[ProbeStage, ParseError], ErrorCode] = {
+    ("create", "malformed_jsonl"): "create_malformed_jsonl",
+    ("create", "missing_thread"): "create_missing_thread",
+    ("create", "invalid_thread_id"): "create_invalid_thread_id",
+    ("create", "duplicate_thread_started"): "create_duplicate_thread_started",
+    ("create", "invalid_terminal"): "create_invalid_terminal",
+    ("resume", "malformed_jsonl"): "resume_malformed_jsonl",
+    ("resume", "missing_thread"): "resume_missing_thread",
+    ("resume", "invalid_thread_id"): "resume_invalid_thread_id",
+    ("resume", "duplicate_thread_started"): "resume_duplicate_thread_started",
+    ("resume", "invalid_terminal"): "resume_invalid_terminal",
+}
+_TERMINAL_EVENTS: frozenset[TerminalEvent] = frozenset(
+    {TURN_COMPLETED_EVENT, TURN_FAILED_EVENT}
+)
 
 
 class CreateSummary(TypedDict):
@@ -92,6 +131,13 @@ class ProcessOutcome:
     stdout: str
     timed_out: bool
     unavailable: bool = False
+    output_exceeded_limit: bool = False
+
+
+@dataclass
+class _OutputCapture:
+    data: bytearray
+    exceeded_limit: bool = False
 
 
 @dataclass
@@ -126,12 +172,12 @@ def _handle_other(event_type: str, state: _StreamState) -> ParseError | None:
     error: ParseError | None = None
     if state.terminal_event is not None:
         error = "invalid_terminal"
-    elif event_type in ("turn.completed", "turn.failed"):
+    elif event_type in _TERMINAL_EVENTS:
         if not state.thread_seen:
             error = "missing_thread"
         else:
-            state.terminal_event = cast("TerminalEvent", event_type)
-    elif event_type.startswith("turn.") and event_type != "turn.started":
+            state.terminal_event = event_type
+    elif event_type.startswith("turn.") and event_type != TURN_STARTED_EVENT:
         error = "invalid_terminal"
     return error
 
@@ -142,7 +188,7 @@ def _parse_line(line: str, state: _StreamState) -> ParseError | None:
         event_type = cast("str", event["type"])
         error = (
             _handle_thread(event, state)
-            if event_type == "thread.started"
+            if event_type == THREAD_STARTED_EVENT
             else _handle_other(event_type, state)
         )
     return error
@@ -151,7 +197,7 @@ def _parse_line(line: str, state: _StreamState) -> ParseError | None:
 def _parse_stream(stdout: str) -> ParsedStream:
     """Strictly validate a Codex JSONL stream without retaining payloads."""
     state = _StreamState()
-    for line in stdout.splitlines():
+    for line in io.StringIO(stdout):
         if line.strip():
             error = _parse_line(line, state)
             if error is not None:
@@ -177,24 +223,90 @@ def _parse_version(stdout: str) -> str | None:
     )
 
 
+def _kill_process(process: subprocess.Popen[bytes]) -> None:
+    with contextlib.suppress(OSError):
+        process.kill()
+
+
+def _start_stdout_reader(
+    process: subprocess.Popen[bytes],
+) -> tuple[threading.Thread, _OutputCapture]:
+    capture = _OutputCapture(bytearray())
+
+    def drain_stdout() -> None:
+        if process.stdout is None:
+            capture.exceeded_limit = True
+            return
+        try:
+            stdout = cast("io.BufferedReader", process.stdout)
+            while chunk := stdout.read1(PROCESS_OUTPUT_CHUNK_BYTES):
+                remaining = MAX_PROCESS_OUTPUT_BYTES - len(capture.data)
+                if len(chunk) > remaining:
+                    if remaining > 0:
+                        capture.data.extend(chunk[:remaining])
+                    capture.exceeded_limit = True
+                    _kill_process(process)
+                elif not capture.exceeded_limit:
+                    capture.data.extend(chunk)
+        except OSError:
+            capture.exceeded_limit = True
+            _kill_process(process)
+
+    reader = threading.Thread(target=drain_stdout, daemon=True)
+    reader.start()
+    return reader, capture
+
+
+def _finish_stdout_capture(
+    process: subprocess.Popen[bytes],
+    reader: threading.Thread,
+    capture: _OutputCapture,
+) -> str:
+    reader.join()
+    if process.stdout is not None:
+        with contextlib.suppress(OSError):
+            process.stdout.close()
+    return bytes(capture.data).decode("utf-8", errors="replace")
+
+
 def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessOutcome:
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             argv,
             cwd=cwd,
             env=env,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            timeout=PROCESS_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
         )
-    except subprocess.TimeoutExpired:
-        return ProcessOutcome(None, "", True)
     except (FileNotFoundError, OSError):
         return ProcessOutcome(None, "", False, unavailable=True)
-    return ProcessOutcome(completed.returncode, completed.stdout, False)
+
+    reader, capture = _start_stdout_reader(process)
+    timed_out = False
+    unavailable = False
+    try:
+        exit_code = process.wait(timeout=PROCESS_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill_process(process)
+        try:
+            exit_code = process.wait()
+        except OSError:
+            exit_code = None
+            unavailable = True
+    except OSError:
+        exit_code = None
+        unavailable = True
+        _kill_process(process)
+    stdout = _finish_stdout_capture(process, reader, capture)
+    return ProcessOutcome(
+        exit_code,
+        stdout,
+        timed_out,
+        unavailable=unavailable,
+        output_exceeded_limit=capture.exceeded_limit,
+    )
 
 
 def _result(
@@ -230,35 +342,45 @@ def _attempt(
     *,
     cwd: Path,
     env: dict[str, str],
-    stage: Literal["create", "resume"],
+    stage: ProbeStage,
 ) -> _Attempt:
     outcome = _run_process(argv, cwd=cwd, env=env)
     stream = _parse_stream(outcome.stdout)
+    if outcome.output_exceeded_limit:
+        stream = ParsedStream(stream.session_id, None, "malformed_jsonl")
     error_code: ErrorCode | None = None
     if outcome.timed_out:
         error_code = "create_timeout" if stage == "create" else "resume_timeout"
     elif outcome.unavailable:
         error_code = "cli_unavailable"
+    elif outcome.output_exceeded_limit:
+        error_code = _stream_error_code(stage, "malformed_jsonl")
     elif outcome.exit_code != 0:
         error_code = (
             "create_nonzero_exit" if stage == "create" else "resume_nonzero_exit"
         )
     elif stream.error is not None:
         error_code = _stream_error_code(stage, stream.error)
-    elif stream.terminal_event != "turn.completed":
+    elif stream.terminal_event != TURN_COMPLETED_EVENT:
         error_code = (
             "create_invalid_terminal"
             if stage == "create"
             else "resume_invalid_terminal"
         )
-    return _Attempt(outcome, stream, error_code)
+    # Retain only the parsed summary: the create transcript must be gone before
+    # the resume subprocess starts.
+    compact_outcome = ProcessOutcome(
+        outcome.exit_code,
+        "",
+        outcome.timed_out,
+        unavailable=outcome.unavailable,
+        output_exceeded_limit=outcome.output_exceeded_limit,
+    )
+    return _Attempt(compact_outcome, stream, error_code)
 
 
-def _stream_error_code(
-    stage: Literal["create", "resume"], error: ParseError
-) -> ErrorCode:
-    prefix = "create_" if stage == "create" else "resume_"
-    return cast("ErrorCode", prefix + error)
+def _stream_error_code(stage: ProbeStage, error: ParseError) -> ErrorCode:
+    return _PARSE_ERROR_CODES[(stage, error)]
 
 
 def _create_summary(attempt: _Attempt) -> CreateSummary:
@@ -457,7 +579,7 @@ def _run_disposable(*, model: str) -> SmokeResult:
                 "failed",
                 cli_version=None,
                 model=model,
-                error_code="unsafe_environment",
+                error_code="repo_setup_failed",
             )
         temp_parent.mkdir(parents=True, exist_ok=True)
         temp_parent = temp_parent.resolve()
@@ -466,7 +588,7 @@ def _run_disposable(*, model: str) -> SmokeResult:
                 "failed",
                 cli_version=None,
                 model=model,
-                error_code="unsafe_environment",
+                error_code="repo_setup_failed",
             )
         temporary_directory = tempfile.TemporaryDirectory(
             prefix="cw-codex-live-session-", dir=str(temp_parent)
@@ -489,7 +611,7 @@ def _run_disposable(*, model: str) -> SmokeResult:
                 "failed",
                 cli_version=None,
                 model=model,
-                error_code="unsafe_environment",
+                error_code="repo_setup_failed",
             )
         else:
             worktree = temp_root / "repo"
@@ -529,8 +651,11 @@ def _run_disposable(*, model: str) -> SmokeResult:
         except OSError:
             result = _result(
                 "failed",
-                cli_version=cli_version,
-                model=model,
+                cli_version=result["cli_version"],
+                model=result["model"],
+                session_id=result["session_id"],
+                create=result["create"],
+                resume=result["resume"],
                 error_code="cleanup_failed",
             )
     return result
@@ -545,7 +670,12 @@ def run_probe(model: str | None) -> SmokeResult:
             model=None,
             error_code="opt_in_required",
         )
-    if model is None or _MODEL_RE.fullmatch(model) is None:
+    if (
+        model is None
+        or model.startswith("-")
+        or model in _FORBIDDEN_MODEL_VALUES
+        or _MODEL_RE.fullmatch(model) is None
+    ):
         return _result(
             "failed", cli_version=None, model=None, error_code="invalid_model"
         )
