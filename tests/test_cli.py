@@ -5286,6 +5286,156 @@ class TestSignalStop:
         assert updated.status == SessionStatus.ACTIVE
         assert daemon.stop_calls == []
 
+    def test_signal_stop_partial_route_drained_second_stop_completes_once_no_reroute(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fix cycle 4 Action 1, test 1: a genuine drained second Stop must
+        not re-route the already-consumed sentinel.
+
+        Unlike ``test_signal_stop_routed_partial_route_clears_staged_flag_
+        no_race_miss_on_replay`` above (both Stops keep ``background_tasks``
+        non-empty, so the second never even re-enters
+        ``_resolve_and_complete_headless_session`` -- the lock-free peek flag
+        alone short-circuits it), this fires the second Stop with
+        ``background_tasks=[]``: ``complete_session`` flips True, bypassing
+        that peek fast path entirely and re-entering the emit-precedence
+        routing logic for real. Advance class (``stage_complete``): the task
+        row and daemon-stop count must show exactly one route/completion.
+        """
+        worktree, session, daemon = self._emit_case(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "bg-routed-drain",
+            payload=self._plan_stage_complete_payload(),
+            stage=Stage.PLAN,
+        )
+        claude_session_id = "sfref-2458-bg-routed-drain-uuid"
+        bg_tasks = [{"id": "bg-1", "description": "trailing finalize subagent"}]
+
+        self._invoke_stop(
+            worktree, session_id=claude_session_id, background_tasks=bg_tasks
+        )
+        assert self._reload_task().stage == Stage.IMPL
+        after_first = self._reload_task().model_dump()
+
+        self._invoke_stop(worktree, session_id=claude_session_id, background_tasks=[])
+
+        assert self._reload_task().model_dump() == after_first
+        completed_events = read_events(
+            consumer="t2458-bg-routed-drain-completed",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(completed_events) == 1
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+        assert daemon.stop_calls == ["sfref-2458-bg-routed-drain"]
+
+    def test_signal_stop_partial_route_drained_second_stop_no_race_miss_for_shipped(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fix cycle 4 Action 1, test 2: terminal class (``shipped``) must not
+        fire a spurious SENTINEL_RACE_MISS on a drained second Stop.
+
+        The first partial route lands the row COMPLETED (out of RUNNING), so
+        an un-fixed second Stop's re-derived route finds no RUNNING/parked
+        match under this session, misclassifies it as a race, and fires
+        SENTINEL_RACE_MISS even though nothing actually raced.
+        """
+        from cw.models import QueueItemStatus
+
+        worktree, session, daemon = self._emit_case(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "bg-shipped-drain",
+            payload={**_valid_payload(), "ticket_id": self.SEED_TICKET_ID},
+            stage=Stage.FINALIZE,
+        )
+        claude_session_id = "sfref-2458-bg-shipped-drain-uuid"
+        bg_tasks = [{"id": "bg-1", "description": "trailing finalize subagent"}]
+
+        self._invoke_stop(
+            worktree, session_id=claude_session_id, background_tasks=bg_tasks
+        )
+        assert self._reload_task().status == QueueItemStatus.COMPLETED
+
+        self._invoke_stop(worktree, session_id=claude_session_id, background_tasks=[])
+
+        assert (
+            read_events(
+                consumer="t2458-bg-shipped-drain",
+                event_types=[OrchestratorEventType.SENTINEL_RACE_MISS],
+            )
+            == []
+        )
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+        assert daemon.stop_calls == ["sfref-2458-bg-shipped-drain"]
+
+    def test_signal_stop_partial_route_drained_second_stop_single_park_attention(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fix cycle 4 Action 1, test 3: park class must not re-page or reset
+        the escalation latch on a drained second Stop.
+
+        A parked (BLOCKED_ON_USER) task retains its session_id by design
+        (#918 rescue), so an un-fixed second Stop's re-derived route
+        re-matches it and re-parks -- firing a second ``plan_parked``
+        SESSION_NEEDS_ATTENTION and, per ``transition_task_status``'s
+        unconditional latch clear, resetting whatever
+        ``escalation_parked_at``/``escalation_fired_at`` the escalation sweep
+        stamped in between the two Stops.
+        """
+        from datetime import datetime as _dt
+
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+
+        worktree, session, _daemon = self._emit_case(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "bg-premises-drain",
+            payload=_sentinel_payload(
+                _SENTINEL_316_PREMISES_PENDING_V2, schema_version=4
+            ),
+            stage=Stage.PLAN,
+        )
+        claude_session_id = "sfref-2458-bg-premises-drain-uuid"
+        bg_tasks = [{"id": "bg-1", "description": "trailing finalize subagent"}]
+
+        self._invoke_stop(
+            worktree, session_id=claude_session_id, background_tasks=bg_tasks
+        )
+        assert self._attention_statuses("t2458-bg-premises-drain") == ["plan_parked"]
+
+        # Simulate the escalation sweep stamping the latch between the two
+        # Stops -- the field an un-fixed second route would silently reset.
+        parked_at = _dt(2026, 1, 1, 0, 5, 30, tzinfo=UTC)
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        task.escalation_parked_at = parked_at
+        task.escalation_fired_at = parked_at
+        save_dev_queue(store)
+
+        self._invoke_stop(worktree, session_id=claude_session_id, background_tasks=[])
+
+        assert self._attention_statuses("t2458-bg-premises-drain") == ["plan_parked"]
+        reloaded = self._reload_task()
+        assert reloaded.escalation_parked_at == parked_at
+        assert reloaded.escalation_fired_at == parked_at
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
     def test_signal_stop_landed_terminal_blocked_stops_daemon_with_bg_tasks_pending(
         self,
         tmp_config_dir: Path,

@@ -34,7 +34,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from cw.reconcile._shared import ProposedAction
+from cw.reconcile._shared import _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY, ProposedAction
 from cw.reconcile.idle import (
     _act_on_idle_candidates,
     _detect_idle_candidates,
@@ -518,6 +518,59 @@ def test_detect_idle_candidates_skips_emit_cli_already_routed_by_stop_hook(
     assert session.status is SessionStatus.COMPLETED
     assert session.last_result == payload
     assert session.last_result_source is LastResultSource.EMIT_CLI
+
+
+def test_detect_idle_candidates_skips_partial_route_consumed_live_session(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    no_transcript_parse: None,
+    idle_daemon: FakeNativeDaemonClient,
+) -> None:
+    """#2458 fix cycle 4, Action 1 test 4: no re-arm for a partial-route-
+    consumed staged result on a still-live (not yet COMPLETED) session.
+
+    Reconstructs the exact state a #2458 ``complete_session=False`` partial
+    route leaves behind while ``background_tasks`` are still draining: the
+    session stays ACTIVE (unlike the COMPLETED-row twin above), its task was
+    already routed by the Stop hook's own emit-precedence path, and
+    ``last_result`` now carries ``_SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY``
+    merged in alongside the still terminal-shaped payload. Before this fix,
+    ``holds_staged_emit_result`` read EMIT_CLI source + a terminal sentinel
+    alone, so this session still qualified as a fresh ROUTE_EMITTED_SENTINEL
+    candidate -- a second, race-prone router for a result the Stop hook
+    already routed once.
+    """
+    _write_staged_client()
+    _seed_row(QueueItemStatus.RUNNING, Stage.IMPL)
+    before = _reload_row().model_dump()
+    payload = _impl_stage_complete()
+    state = _emit_cli_state(tmp_path, payload)
+    state.sessions[0].last_result = {
+        **payload,
+        _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY: True,
+    }
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=_NOW_PAST_CHECK,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+
+    assert candidates == []
+    assert _reload_row().model_dump() == before
+    assert (
+        read_events(
+            consumer="t2458-idle-partial-route-consumed",
+            event_types=[OrchestratorEventType.SENTINEL_RACE_MISS],
+        )
+        == []
+    )
+    session = state.sessions[0]
+    assert session.status is SessionStatus.ACTIVE
+    assert idle_daemon.stop_calls == []
 
 
 def test_detect_idle_candidates_completes_session_for_already_forward_advanced_row(

@@ -36,6 +36,23 @@ _DOOR_MODULE = "result.py"
 # any new write site trips TestNoLastResultAssignmentOutsideDoor until it is
 # individually classified and added here.
 _ALLOWLIST: dict[str, dict[str, str]] = {
+    "reconcile/_shared.py": {
+        (
+            "session.last_result = {\n"
+            "**existing,\n"
+            "_SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY: True,\n"
+            "}"
+        ): (
+            "_shared.py (_stamp_sentinel_partial_route_consumed) — #2458 fix "
+            "cycle 4 Action 1: merges a 'routed, consumed' flag alongside an "
+            "already-terminal-shaped last_result once a complete_session=False "
+            "partial route has accepted the task route; 'status' stays present "
+            "(has_terminal_result() stays True) so a later Stop hook can still "
+            "complete the session from it, while holds_staged_emit_result() "
+            "reads the new flag to answer False, closing both the Stop-hook "
+            "re-fire and idle-sweep re-arm double-route paths"
+        ),
+    },
     "reconcile/idle/_mutations.py": {
         (
             "session.last_result = {\n"

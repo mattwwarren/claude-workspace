@@ -17,7 +17,7 @@ from cw._hook_context import _read_cw_context, _write_cw_context_locked
 from cw._util import claude_project_dir
 from cw.auto_dev_result import AutoDevResult
 from cw.cli._base import handle_errors, main
-from cw.cli._hook_io import _read_hook_stdin_json
+from cw.cli._hook_io import _context_str, _read_hook_stdin_json
 from cw.cli._sentinels import (
     _parse_sentinel_from_transcript,
     _sentinel_frame_after,
@@ -47,6 +47,8 @@ from cw.reconcile import (
     _apply_sentinel_to_task,
     _has_terminal_sentinel,
     _route_stopped_without_sentinel,
+    _sentinel_partial_route_consumed,
+    _stamp_sentinel_partial_route_consumed,
     find_running_task_for_session,
     holds_staged_emit_result,
     park_gate_open,
@@ -478,6 +480,18 @@ def _resolve_and_complete_headless_session(
     if is_headless and _has_terminal_sentinel(session):
         parsed_sentinel = _reconstruct_emitted_sentinel(session)
         emit_terminal = parsed_sentinel is not None
+    # #2458 fix cycle 4, Action 1: a prior complete_session=False partial
+    # route already routed this emitted sentinel to its task and merged
+    # _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY into last_result (see the
+    # ``if not complete_session:`` branch below). Recognize that here so this
+    # call -- a later Stop once background_tasks drains, or a repeat
+    # partial-route Stop racing the context-flag clear -- skips
+    # _apply_sentinel_to_task instead of re-deriving and re-routing the same
+    # already-consumed sentinel a second time (duplicate PARK/terminal
+    # events, spurious SENTINEL_RACE_MISS). last_result stays terminal-shaped
+    # throughout, so emit_terminal/parsed_sentinel above are unaffected --
+    # this call still completes the session from it normally.
+    already_routed = emit_terminal and _sentinel_partial_route_consumed(session)
     if not emit_terminal and is_headless:
         parsed_sentinel = _parse_headless_sentinel(
             session, cwd_value, claude_session_id
@@ -498,7 +512,12 @@ def _resolve_and_complete_headless_session(
     # no_op and similar terminal outcomes to trigger infinite re-dispatch.
     rescued = False
     task_already_terminal = False
-    if is_headless and parsed_sentinel is not None and isinstance(ticket_id_value, str):
+    if (
+        is_headless
+        and parsed_sentinel is not None
+        and isinstance(ticket_id_value, str)
+        and not already_routed
+    ):
         outcome = _apply_sentinel_to_task(ticket_id_value, session, parsed_sentinel)
         rescued = outcome.rescued
         task_already_terminal = outcome.task_already_terminal
@@ -524,6 +543,19 @@ def _resolve_and_complete_headless_session(
         # this module: a missed clear just means the peek re-fires next
         # turn, exactly as it did before this fix.
         _write_cw_context_locked(cwd_value, _clear_staged_emit_result_marker)
+        # Round-4 fix (#2458 Action 1): also neutralize the staged sentinel on
+        # the authoritative Session model, not just the ephemeral context
+        # peek flag -- a later Stop hook (once background_tasks finally
+        # drains to []) and the idle sweep's holds_staged_emit_result
+        # candidacy check both read session.last_result directly and would
+        # otherwise still see this consumed sentinel as live. Idempotent: a
+        # repeat partial-route Stop (already_routed True) re-merges the same
+        # flag. No-op when this call never resolved an emitted sentinel
+        # (emit_terminal False -- the transcript-only path never reaches
+        # complete_session=False, see this function's docstring).
+        if emit_terminal:
+            _stamp_sentinel_partial_route_consumed(session)
+            save_state(state)
         return _HeadlessResolution(
             rescued=rescued,
             landed_terminal=False,
@@ -994,7 +1026,7 @@ def _page_sentinel_unroutable(session: Session, context: dict[str, object]) -> N
     a later Stop can still route it. Fired outside ``sessions_lock``, like
     ``SESSION_COMPLETED``.
     """
-    ticket_id = tid if isinstance(tid := context.get("ticket_id"), str) else None
+    ticket_id = _context_str(context, "ticket_id")
     logger.warning(
         "sentinel_unroutable: session=%s ticket=%s last_result_source=%s -- "
         "a staged emit_cli result could not be reconstructed and the "
