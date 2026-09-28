@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from contextlib import suppress
@@ -212,6 +213,40 @@ def cleanup_process(pid: int | None) -> None:
             os.kill(pid, signal.SIGKILL)
 
 
+def assert_isolated_child_environment(
+    call: dict[str, object], checkout: Path, configured_codex_home: Path
+) -> None:
+    cwd = cast("Path", call["cwd"])
+    env = cast("dict[str, str]", call["env"])
+    assert cwd.is_relative_to(Path.home() / ".cache" / "cw-live-tests")
+    assert not probe._is_within(cwd, checkout)
+    assert env["PWD"] == str(cwd)
+    assert env["HOME"] == env["USERPROFILE"] == str(cwd.parent)
+    assert env["TMPDIR"] == env["TMP"] == env["TEMP"]
+    assert Path(env["TMPDIR"]).is_relative_to(cwd.parent)
+    assert "GIT_DIR" not in env
+    assert "GIT_WORK_TREE" not in env
+    assert env["HTTPS_PROXY"] == "https://proxy.example:8443"
+    assert env["LC_ALL"] == "C.UTF-8"
+    assert "LC_SECRET" not in env
+    assert "CODEX_SANDBOX" not in env
+    assert "XDG_CONFIG_HOME" not in env
+    assert "NODE_OPTIONS" not in env
+    if call["argv"] == ["git", "init", "--quiet"]:
+        assert "CODEX_HOME" not in env
+        assert "CODEX_API_KEY" not in env
+        assert "OPENAI_API_KEY" not in env
+    else:
+        assert env["CODEX_HOME"] == str(configured_codex_home)
+        assert env["CODEX_API_KEY"] == "auth-material-secret"
+        assert env["OPENAI_API_KEY"] == "openai-auth-secret"
+    assert all(
+        key.casefold() in probe._CHILD_ENV_KEYS
+        or key in {"CODEX_HOME", "PWD", "TMPDIR", "TMP", "TEMP"}
+        for key in env
+    )
+
+
 class TestParser:
     @pytest.mark.parametrize(
         ("payload", "error"),
@@ -293,6 +328,16 @@ class TestParser:
         )
         assert parsed.error == "invalid_terminal"
 
+    def test_unknown_nonterminal_event_is_rejected(self) -> None:
+        parsed = probe._parse_stream(
+            jsonl(
+                {"type": "thread.started", "thread_id": SESSION},
+                {"type": "error", "message": "future terminal error"},
+                {"type": "turn.completed"},
+            )
+        )
+        assert parsed.error == "malformed_jsonl"
+
 
 class TestProbe:
     def test_opt_out_is_exact_and_launches_nothing(
@@ -341,7 +386,16 @@ class TestProbe:
             forbid_temporary_directory,
         )
         set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
-        assert probe.run_probe(model)["error_code"] == "invalid_model"
+        result = probe.run_probe(model)
+        assert result == {
+            "status": "failed",
+            "cli_version": None,
+            "model": None,
+            "session_id": None,
+            "create": None,
+            "resume": None,
+            "error_code": "invalid_model",
+        }
 
     @pytest.mark.parametrize(
         "model", ["--last", "--dangerously-bypass-approvals-and-sandbox"]
@@ -378,6 +432,8 @@ class TestProbe:
         monkeypatch.setenv("CODEX_SANDBOX", "workspace-write")
         monkeypatch.setenv("XDG_CONFIG_HOME", "/untrusted/config")
         monkeypatch.setenv("NODE_OPTIONS", "--require=untrusted")
+        monkeypatch.setenv("LC_ALL", "C.UTF-8")
+        monkeypatch.setenv("LC_SECRET", "untrusted-locale-secret")
         monkeypatch.setenv("GIT_DIR", "/checkout/.git")
         monkeypatch.setenv("GIT_WORK_TREE", "/checkout")
         monkeypatch.setenv("TMPDIR", "/checkout/tmp")
@@ -432,34 +488,7 @@ class TestProbe:
         assert calls[0]["cwd"] == calls[1]["cwd"] == calls[2]["cwd"] == calls[3]["cwd"]
         checkout = probe._checkout_root()
         for call in calls:
-            cwd = cast("Path", call["cwd"])
-            env = cast("dict[str, str]", call["env"])
-            assert cwd.is_relative_to(Path.home() / ".cache" / "cw-live-tests")
-            assert not probe._is_within(cwd, checkout)
-            assert env["PWD"] == str(cwd)
-            assert env["HOME"] == env["USERPROFILE"] == str(cwd.parent)
-            assert env["TMPDIR"] == env["TMP"] == env["TEMP"]
-            assert Path(env["TMPDIR"]).is_relative_to(cwd.parent)
-            assert "GIT_DIR" not in env
-            assert "GIT_WORK_TREE" not in env
-            assert env["HTTPS_PROXY"] == "https://proxy.example:8443"
-            assert "CODEX_SANDBOX" not in env
-            assert "XDG_CONFIG_HOME" not in env
-            assert "NODE_OPTIONS" not in env
-            if call["argv"] == ["git", "init", "--quiet"]:
-                assert "CODEX_HOME" not in env
-                assert "CODEX_API_KEY" not in env
-                assert "OPENAI_API_KEY" not in env
-            else:
-                assert env["CODEX_HOME"] == str(configured_codex_home)
-                assert env["CODEX_API_KEY"] == "auth-material-secret"
-                assert env["OPENAI_API_KEY"] == "openai-auth-secret"
-            assert all(
-                key.casefold() in probe._CHILD_ENV_KEYS
-                or key.casefold().startswith("lc_")
-                or key in {"CODEX_HOME", "PWD", "TMPDIR", "TMP", "TEMP"}
-                for key in env
-            )
+            assert_isolated_child_environment(call, checkout, configured_codex_home)
         assert wait_timeouts == [probe.PROCESS_TIMEOUT_SECONDS] * len(calls)
         forbidden = {
             "--last",
@@ -539,8 +568,10 @@ class TestProbe:
     ) -> None:
         monkeypatch.setattr(probe, "MAX_PROCESS_OUTPUT_BYTES", 1024)
         code = (
-            "import os, time; "
-            "print(f'DESCENDANT_PID={os.getpid()}', flush=True); "
+            "import os, subprocess, sys, time; "
+            "child = subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(30)']); "
+            "print(f'DESCENDANT_PID={child.pid}', flush=True); "
             "os.write(1, b'x' * 8192); time.sleep(30)"
         )
         pid: int | None = None
@@ -563,6 +594,40 @@ class TestProbe:
             assert elapsed < 5
             assert wait_for_process_exit(pid)
         finally:
+            cleanup_process(pid)
+
+    @pytest.mark.skipif(
+        sys.platform != "linux", reason="process liveness check uses /proc"
+    )
+    def test_parent_interrupt_kills_and_reaps_child(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        pid_file = tmp_path / "child.pid"
+        code = (
+            "import os, time; "
+            f"open({str(pid_file)!r}, 'w').write(str(os.getpid())); "
+            "time.sleep(30)"
+        )
+        monkeypatch.setattr(probe, "PROCESS_TIMEOUT_SECONDS", 2)
+
+        def interrupt_parent(_signum: int, _frame: object) -> None:
+            raise KeyboardInterrupt
+
+        previous_handler = signal.signal(signal.SIGUSR1, interrupt_parent)
+        timer = threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGUSR1))
+        pid: int | None = None
+        try:
+            timer.start()
+            outcome = probe._run_process(
+                [sys.executable, "-c", code], cwd=tmp_path, env=os.environ.copy()
+            )
+            assert outcome.timed_out
+            pid = int(pid_file.read_text(encoding="utf-8"))
+            assert wait_for_process_exit(pid)
+        finally:
+            timer.cancel()
+            timer.join(timeout=1)
+            signal.signal(signal.SIGUSR1, previous_handler)
             cleanup_process(pid)
 
     @pytest.mark.parametrize(
@@ -655,6 +720,9 @@ class TestProbe:
         if kwargs.get("unavailable_stage") == "resume":
             assert result["resume"] is not None
             assert result["resume"]["exit_code"] is None
+        if error == "resume_id_mismatch":
+            assert result["resume"] is not None
+            assert result["resume"]["id_matches"] is False
 
     @pytest.mark.parametrize(
         ("runner_error", "error"),
@@ -733,12 +801,32 @@ class TestProbe:
         set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
         assert probe.run_probe(MODEL)["error_code"] == "repo_setup_failed"
 
+    @pytest.mark.skipif(
+        os.name == "nt", reason="directory symlink creation may require elevation"
+    )
     def test_codex_home_sessions_symlink_into_checkout_fails_before_launch(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         codex_home = tmp_path / "codex-home"
         codex_home.mkdir()
         (codex_home / probe.CODEX_SESSION_ARTIFACT_DIR).symlink_to(
+            probe._checkout_root(), target_is_directory=True
+        )
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
+        assert probe.run_probe(MODEL)["error_code"] == "repo_setup_failed"
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="directory symlink creation may require elevation"
+    )
+    def test_codex_home_nested_sessions_symlink_fails_before_launch(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        codex_home = tmp_path / "codex-home"
+        nested_year = codex_home / probe.CODEX_SESSION_ARTIFACT_DIR / "2026"
+        nested_year.mkdir(parents=True)
+        (nested_year / "09").symlink_to(
             probe._checkout_root(), target_is_directory=True
         )
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
@@ -884,6 +972,46 @@ class TestProbe:
         assert raw not in captured.out
         assert auth not in captured.out
 
+    @pytest.mark.parametrize(
+        ("stage", "expected_error"),
+        [
+            ("create", "create_nonzero_exit"),
+            ("resume", "resume_nonzero_exit"),
+        ],
+    )
+    def test_failure_results_do_not_expose_raw_output_or_stderr(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        stage: str,
+        expected_error: str,
+    ) -> None:
+        transcript_marker = "failure-transcript-marker"
+        stderr_marker = "failure-stderr-marker"
+        stream_with_secret = jsonl(
+            {"type": "thread.started", "thread_id": SESSION, "text": transcript_marker},
+            {"type": "item.completed", "text": transcript_marker},
+            {"type": "turn.completed", "text": transcript_marker},
+        )
+        options: dict[str, object] = {
+            "stderr": stderr_marker,
+        }
+        if stage == "create":
+            options.update(create_code=7, create_stdout=stream_with_secret)
+        else:
+            options.update(resume_code=7, resume_stdout=stream_with_secret)
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        set_runner(monkeypatch, fake_run([], **options))
+
+        assert probe.main(["--model", MODEL]) == 1
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out.count("\n") == 1
+        result = json.loads(captured.out)
+        assert result["error_code"] == expected_error
+        assert transcript_marker not in captured.out
+        assert stderr_marker not in captured.out
+
 
 def test_main_emits_one_json_line_and_no_stderr(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -906,3 +1034,33 @@ def test_main_help_is_the_documented_human_readable_exception(
     assert captured.out.startswith("usage:")
     assert "--model" in captured.out
     assert captured.err == ""
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+def test_main_maps_parent_signals_to_sanitized_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    signum: signal.Signals,
+) -> None:
+    previous_handler = signal.getsignal(signum)
+
+    def raise_signal(_model: str | None) -> probe.SmokeResult:
+        signal.raise_signal(signum)
+        message = "the installed signal handler should interrupt"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(probe, "run_probe", raise_signal)
+    assert probe.main(["--model", MODEL]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.count("\n") == 1
+    assert json.loads(captured.out) == {
+        "status": "failed",
+        "cli_version": None,
+        "model": None,
+        "session_id": None,
+        "create": None,
+        "resume": None,
+        "error_code": "repo_setup_failed",
+    }
+    assert signal.getsignal(signum) is previous_handler

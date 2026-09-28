@@ -27,15 +27,22 @@ inherits the create session's read-only policy. The probe never uses `--last`,
 `--dangerously-bypass-approvals-and-sandbox`, or `workspace-write`.
 
 Each subprocess has a 120-second timeout and runs in its own process group on
-POSIX. Timeout or output overflow kills the group, including descendants that
-might otherwise keep stdout open. The stdout reader has a bounded shutdown
-wait, so it cannot defeat the process timeout. Stdout is read incrementally
-with a 1 MiB cap; exceeding it fails JSONL validation. Stderr is discarded,
-and no `-o` file is created. The parser reads the bounded JSONL stream line by
-line and releases it before starting the resume command. Acceptance requires
-one valid `thread.started` ID before one terminal event; only
-`turn.completed` passes. Malformed, duplicate, out-of-order, failed, missing,
-oversized, or invalid events fail.
+POSIX. Timeout, output overflow, or a parent SIGINT/SIGTERM kills the group,
+including descendants that might otherwise keep stdout open. Parent-side
+exceptions also trigger process-group termination, stdout closure, bounded
+reader shutdown, and child reaping. An operator interrupt returns the
+sanitized timeout result for an interrupted subprocess, or `repo_setup_failed`
+if interrupted outside a subprocess, instead of leaving Codex running or
+printing a traceback. The stdout reader has a bounded shutdown wait, so it
+cannot defeat the process timeout. Stdout is read incrementally with a 1 MiB
+cap; exceeding it fails JSONL validation. Stderr is discarded, and no `-o`
+file is created. The parser reads the bounded JSONL stream line by line and
+releases it before starting the resume command. It accepts the known
+nonterminal event types `turn.started`, `item.started`, `item.updated`, and
+`item.completed`; unknown event types are rejected. Acceptance requires one
+valid `thread.started` ID before one terminal event; only `turn.completed`
+passes. Malformed, duplicate, out-of-order, failed, missing, oversized, or
+invalid events fail.
 
 The model value must be 1–64 characters, begin with an alphanumeric character,
 and contain only letters, digits, `.`, `_`, or `-`. Reserved Codex flags and
@@ -48,16 +55,18 @@ The disposable repo and subprocess scratch directory are explicitly placed
 under the home tree so snap-confined Codex can access them. Codex processes
 receive a minimal allowlisted environment: executable search path, an isolated
 temporary `HOME`, `CODEX_HOME`, `CODEX_API_KEY`/`OPENAI_API_KEY`, proxy/TLS
-transport variables, locale, and platform runtime paths. Git initialization
-uses a separate allowlist that excludes `CODEX_HOME` and API keys. Git routing,
-XDG, Codex policy/profile, and unrelated runtime variables are not inherited.
+transport variables, `LANG`/`LC_ALL`/`LC_CTYPE`, and platform runtime paths.
+Other `LC_*` variables are not inherited. Git initialization uses a separate
+allowlist that excludes `CODEX_HOME` and API keys. Git routing, XDG, Codex
+policy/profile, and unrelated runtime variables are not inherited.
 The existing `CODEX_HOME` (or the normal `~/.codex` default) is passed as an
-absolute path. The probe rejects a home inside the source checkout, a symlinked
-`sessions` artifact directory, or a `sessions` directory resolving into the
-checkout. If the temporary parent cannot be proven to remain outside the
-checkout, the probe stops with the approved `error_code: "repo_setup_failed"`
-rather than emit an error outside the documented closed enum or risk writing
-session state into the checkout.
+absolute path. The probe rejects a home inside the source checkout, any
+symlink anywhere under the `sessions` artifact tree (including nested year or
+month directories), or a `sessions` directory resolving into the checkout.
+This conservative check avoids writing through pre-existing links. If the
+temporary parent cannot be proven to remain outside the checkout, the probe
+stops with the approved `error_code: "repo_setup_failed"` rather than risk
+writing session state into the checkout.
 
 Except for the standard human-readable `--help` response, the script prints
 exactly one compact JSON object to stdout and nothing to stderr. Its fixed keys
@@ -73,9 +82,11 @@ stderr, environment values, exception text, or authentication material.
 run uses `error_code: "opt_in_required"`, a passing run uses `error_code: null`,
 and a failure uses one of the closed documented `*_timeout`,
 `*_nonzero_exit`, JSONL-validation, setup, version, model, ID, or cleanup error
-codes. A create/resume launch failure uses `cli_unavailable`; an oversized
-JSONL stream uses the matching `*_malformed_jsonl` code. A failed command exits
-1; opt-out and a passing probe exit 0.
+codes. A create/resume launch failure uses `cli_unavailable`; an oversized or
+unrecognized JSONL event uses the matching `*_malformed_jsonl` code. SIGINT or
+SIGTERM during a subprocess uses that command's timeout error code; an
+interrupt outside a subprocess uses `repo_setup_failed`. A failed command
+exits 1; opt-out and a passing probe exit 0.
 
 The temporary repository is cleaned up on success and ordinary failure. If
 cleanup itself fails, the probe reports `cleanup_failed` while preserving the

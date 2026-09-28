@@ -13,9 +13,17 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal, NoReturn, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, TypedDict, cast
+
+if TYPE_CHECKING:
+    from types import FrameType
+
+type _SignalHandler = (
+    Callable[[int, FrameType | None], Any] | int | signal.Handlers | None
+)
 
 FIXED_PROMPT = "Reply exactly cw-session-smoke-ok. Do not use tools or modify files."
 FIXED_RESUME_PROMPT = (
@@ -100,6 +108,9 @@ THREAD_STARTED_EVENT: Final = "thread.started"
 TURN_STARTED_EVENT: Final = "turn.started"
 TURN_COMPLETED_EVENT: Final = "turn.completed"
 TURN_FAILED_EVENT: Final = "turn.failed"
+ITEM_STARTED_EVENT: Final = "item.started"
+ITEM_UPDATED_EVENT: Final = "item.updated"
+ITEM_COMPLETED_EVENT: Final = "item.completed"
 
 type ParseError = Literal[
     "malformed_jsonl",
@@ -151,6 +162,14 @@ _PARSE_ERROR_CODES: dict[tuple[ProbeStage, ParseError], ErrorCode] = {
 }
 _TERMINAL_EVENTS: frozenset[TerminalEvent] = frozenset(
     {TURN_COMPLETED_EVENT, TURN_FAILED_EVENT}
+)
+_KNOWN_NONTERMINAL_EVENTS: frozenset[str] = frozenset(
+    {
+        TURN_STARTED_EVENT,
+        ITEM_STARTED_EVENT,
+        ITEM_UPDATED_EVENT,
+        ITEM_COMPLETED_EVENT,
+    }
 )
 
 
@@ -262,8 +281,10 @@ def _handle_other(event_type: str, state: _StreamState) -> ParseError | None:
             error = "missing_thread"
         else:
             state.terminal_event = event_type
-    elif event_type.startswith("turn.") and event_type != TURN_STARTED_EVENT:
-        error = "invalid_terminal"
+    elif event_type not in _KNOWN_NONTERMINAL_EVENTS:
+        error = (
+            "invalid_terminal" if event_type.startswith("turn.") else "malformed_jsonl"
+        )
     return error
 
 
@@ -321,11 +342,29 @@ def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
         process.kill()
 
 
-def _start_stdout_reader(
-    process: subprocess.Popen[bytes],
-) -> tuple[threading.Thread, _OutputCapture]:
-    capture = _OutputCapture(bytearray())
+def _contains_symlink(path: Path) -> bool:
+    """Fail closed if a Codex session artifact path contains any symlink."""
+    pending = [path]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_symlink():
+                            return True
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                    except OSError:
+                        return True
+        except OSError:
+            return True
+    return False
 
+
+def _make_stdout_reader(
+    process: subprocess.Popen[bytes], capture: _OutputCapture
+) -> threading.Thread:
     def drain_stdout() -> None:
         if process.stdout is None:
             capture.exceeded_limit = True
@@ -345,9 +384,7 @@ def _start_stdout_reader(
             capture.exceeded_limit = True
             _kill_process_group(process)
 
-    reader = threading.Thread(target=drain_stdout, daemon=True)
-    reader.start()
-    return reader, capture
+    return threading.Thread(target=drain_stdout, daemon=True)
 
 
 def _finish_stdout_capture(
@@ -384,25 +421,56 @@ def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessO
     except (FileNotFoundError, OSError):
         return ProcessOutcome(None, "", False, unavailable=True)
 
-    reader, capture = _start_stdout_reader(process)
-    timed_out = False
-    unavailable = False
+    reader: threading.Thread | None = None
+    capture: _OutputCapture | None = None
     try:
-        exit_code = process.wait(timeout=PROCESS_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        _kill_process_group(process)
+        capture = _OutputCapture(bytearray())
+        reader = _make_stdout_reader(process, capture)
+        reader.start()
+        timed_out = False
+        unavailable = False
         try:
-            exit_code = process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
-        except (OSError, subprocess.TimeoutExpired):
+            exit_code = process.wait(timeout=PROCESS_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            timed_out = True
             _kill_process_group(process)
+            try:
+                exit_code = process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
+            except (OSError, subprocess.TimeoutExpired):
+                _kill_process_group(process)
+                exit_code = None
+                unavailable = True
+        except OSError:
             exit_code = None
             unavailable = True
-    except OSError:
-        exit_code = None
-        unavailable = True
+            _kill_process_group(process)
+        stdout, reader_incomplete = _finish_stdout_capture(process, reader, capture)
+    except BaseException as error:
         _kill_process_group(process)
-    stdout, reader_incomplete = _finish_stdout_capture(process, reader, capture)
+        cleanup_exit_code: int | None = None
+        with contextlib.suppress(BaseException):
+            cleanup_exit_code = process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
+        stdout = ""
+        reader_incomplete = False
+        if reader is not None and reader.ident is not None and capture is not None:
+            with contextlib.suppress(BaseException):
+                stdout, reader_incomplete = _finish_stdout_capture(
+                    process, reader, capture
+                )
+        elif process.stdout is not None:
+            with contextlib.suppress(BaseException):
+                process.stdout.close()
+        if isinstance(error, KeyboardInterrupt):
+            return ProcessOutcome(
+                cleanup_exit_code,
+                stdout,
+                True,
+                output_exceeded_limit=(
+                    capture.exceeded_limit if capture is not None else False
+                ),
+                reader_incomplete=reader_incomplete,
+            )
+        raise
     return ProcessOutcome(
         exit_code,
         stdout,
@@ -567,6 +635,8 @@ def _codex_home(checkout: Path) -> Path | None:
         resolved_session_artifacts, checkout
     ):
         return None
+    if session_artifacts.exists() and _contains_symlink(session_artifacts):
+        return None
     return resolved
 
 
@@ -586,7 +656,7 @@ def _child_environment(
     environment = {
         key: value
         for key, value in os.environ.items()
-        if key.casefold() in allowed_keys or key.casefold().startswith("lc_")
+        if key.casefold() in allowed_keys
     }
     isolated_home = str(scratch.parent)
     environment.update(
@@ -695,6 +765,10 @@ def _version_result(*, cwd: Path, env: dict[str, str]) -> _VersionOutcome:
     if version is None:
         return _VersionFailure(ERROR_VERSION_INVALID)
     return _VersionSuccess(version)
+
+
+def _raise_for_parent_signal(_signum: int, _frame: FrameType | None) -> NoReturn:
+    raise KeyboardInterrupt
 
 
 def _run_disposable(*, model: str) -> SmokeResult:
@@ -827,7 +901,25 @@ def main(argv: list[str] | None = None) -> int:
         model = parser.parse_args(argv).model
     except _ArgumentParseError:
         model = None
-    result = run_probe(model)
+    previous_handlers: dict[signal.Signals, _SignalHandler] = {}
+    try:
+        if threading.current_thread() is threading.main_thread():
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                previous_handlers[signum] = signal.signal(
+                    signum, _raise_for_parent_signal
+                )
+        try:
+            result = run_probe(model)
+        except KeyboardInterrupt:
+            result = _result(
+                STATUS_FAILED,
+                cli_version=None,
+                model=None,
+                error_code=ERROR_REPO_SETUP_FAILED,
+            )
+    finally:
+        for previous_signum, previous_handler in previous_handlers.items():
+            signal.signal(previous_signum, previous_handler)
     sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
     return 0 if result["status"] in {STATUS_SKIPPED, STATUS_PASSED} else 1
 
