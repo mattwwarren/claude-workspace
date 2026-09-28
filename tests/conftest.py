@@ -2168,6 +2168,12 @@ def occupy_worktree(
     is the fail-closed case (occupancy cannot be ruled out). Shared by the
     fix-agent and dispatch-claim refusal tests (#2213 round 5).
 
+    #2480: a daemon-roster worker now counts as occupying only when its
+    ``surface_ref`` names a non-terminal cw session, so the ``roster`` source
+    also seeds a vouching session (``worktree_path=None`` -- it must vouch for
+    the worker's surface_ref only, not independently satisfy the ``state``
+    side) carrying that worker's short id as ``surface_ref``.
+
     *daemon* (#2213 round 7): pass the SAME :class:`FakeNativeDaemonClient`
     instance the caller is about to inject into ``create_worktree`` /
     ``dispatch_tick`` / ``_spawn_claimed_task``. Occupancy checks now consult
@@ -2198,7 +2204,8 @@ def occupy_worktree(
         return
     if daemon is not None:
         if source == "roster":
-            daemon.seed_live_worker(worktree)
+            short_id = daemon.seed_live_worker(worktree)
+            _vouch_for_roster_worker(client, short_id)
         else:
             daemon.roster_unreadable = True
         return
@@ -2207,5 +2214,39 @@ def occupy_worktree(
     if source == "roster":
         payload = {"workers": {"aaaa1111": {"pid": 1, "cwd": str(worktree)}}}
         roster.write_text(json.dumps(payload), encoding="utf-8")
+        _vouch_for_roster_worker(client, "aaaa1111")
     else:
         roster.write_text("{not json", encoding="utf-8")
+
+
+def _vouch_for_roster_worker(client: ClientConfig, short_id: str) -> None:
+    """Seed a non-terminal session vouching for *short_id* (#2480).
+
+    Companion to :func:`occupy_worktree`'s ``roster`` source: appends rather
+    than overwrites, so it composes with a ``state``-source occupant already
+    present in the same test's cw state.
+
+    ``status=BACKGROUNDED`` (not ``ACTIVE``) deliberately: BACKGROUNDED is
+    still non-terminal for occupancy purposes (``_NON_TERMINAL_SESSION_
+    STATUSES`` in ``cw.worktree._refresh`` includes it), but unlike ACTIVE/
+    IDLE it is NOT counted by dispatch's ``running_count`` (session-based
+    client slot budget, ``cw.dispatch.tick``) -- an ACTIVE vouch session here
+    would silently consume the client's entire slot budget in a
+    ``dispatch_tick``-driving test, starving ``available_client_slots`` to 0
+    and skipping the pre-claim occupancy screen entirely before it ever
+    reaches ``live_home_reason`` (discovered live while adding this helper).
+    """
+    state = load_state()
+    state.sessions.append(
+        Session(
+            name=f"{client.name}/impl/occupant-vouch",
+            client=client.name,
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=client.workspace_path,
+            worktree_path=None,
+            status=SessionStatus.BACKGROUNDED,
+            surface_ref=short_id,
+        )
+    )
+    save_state(state)

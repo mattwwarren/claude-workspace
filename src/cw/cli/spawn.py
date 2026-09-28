@@ -135,8 +135,18 @@ def _spawn_close_impl(
             msg = f"Session '{session_id}' not found."
             raise CwError(msg)
         if sess.status == SessionStatus.COMPLETED:
-            msg = f"Session '{session_id}' is already completed."
-            raise CwError(msg)
+            # #2480: an already-completed session's daemon surface may still be
+            # sitting live in the roster (the Stop hook's rescued=None bail, or
+            # any other completion path that never called daemon.stop()) --
+            # occupying the ticket's worktree forever and blocking
+            # re-dispatch. Stop it (idempotent: NativeDaemonClient.stop()
+            # swallows a missing/already-gone surface) instead of refusing the
+            # close outright, so a second `cw spawn close` genuinely clears the
+            # leak rather than erroring on the very case it exists to fix.
+            if sess.surface_ref is not None and sess.origin is SessionOrigin.DAEMON:
+                daemon = native_daemon or get_native_daemon_client()
+                daemon.stop(sess.surface_ref)
+            return
 
         if sess.surface_ref is not None:
             if sess.origin is SessionOrigin.DAEMON:
@@ -417,6 +427,20 @@ def _spawn_complete_impl(
                     " Use --force to no-op."
                 )
                 raise CwError(msg)
+            # #2480: same leak this function's own post-lock stop call closes
+            # for the normal completion path (below) -- a --force no-op on an
+            # already-completed session must still clear a lingering daemon
+            # surface, or the ticket's worktree stays reported occupied
+            # forever. Stopped here (under the lock, unlike the post-lock call
+            # below) rather than restructuring this early-return path to defer
+            # it: mirrors the already-established stop-under-lock precedent in
+            # _spawn_close_impl above, and NativeDaemonClient.stop() is
+            # itself a bounded (10s timeout), best-effort, swallow-failures
+            # call, not the kind of unbounded network op the lock-discipline
+            # comment on the main path below is guarding against.
+            if sess.surface_ref is not None and sess.origin is SessionOrigin.DAEMON:
+                daemon = native_daemon or get_native_daemon_client()
+                daemon.stop(sess.surface_ref)
             return
 
         effective_ticket_id = ticket_id or ticket_id_for_session(sess.name)

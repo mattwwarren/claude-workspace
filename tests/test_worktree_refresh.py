@@ -137,9 +137,21 @@ def _spy_git(monkeypatch: pytest.MonkeyPatch) -> list[tuple[tuple[str, ...], Pat
 
 
 def _seed_session(
-    workspace: Path, worktree: Path | None, status: SessionStatus
+    workspace: Path,
+    worktree: Path | None,
+    status: SessionStatus,
+    *,
+    surface_ref: str | None = None,
 ) -> None:
-    """Persist one session homed on *worktree* into the (tmp) cw state."""
+    """Persist one session homed on *worktree* into the (tmp) cw state.
+
+    *surface_ref*, when given, is #2480's link between a daemon-roster entry
+    and its owning cw session -- ``live_home_reason`` now counts a roster
+    worker as live only when its short id matches a NON-terminal session's
+    ``surface_ref``, so a test seeding a roster worker (``_seed_roster``,
+    hardcoded short id ``"aaaa1111"``) as genuinely LIVE must also seed a
+    session vouching for it via this parameter.
+    """
     save_state(
         CwState(
             sessions=[
@@ -151,6 +163,7 @@ def _seed_session(
                     origin=SessionOrigin.DAEMON,
                     workspace_path=workspace,
                     worktree_path=worktree,
+                    surface_ref=surface_ref,
                 )
             ]
         )
@@ -282,6 +295,104 @@ class TestLiveSessionWorktreePaths:
 
         with pytest.raises(RuntimeError, match="not a state-read failure"):
             live_session_worktree_paths()
+
+
+class TestNonTerminalSessionSurfaceRefs:
+    """_non_terminal_session_surface_refs: the surface_ref half of the #2480
+    occupancy filter, a deliberately separate state-load from
+    live_session_worktree_paths (see that function's own docstring for why)."""
+
+    @pytest.mark.parametrize(
+        "status",
+        [SessionStatus.ACTIVE, SessionStatus.IDLE, SessionStatus.BACKGROUNDED],
+    )
+    def test_non_terminal_session_surface_ref_included(
+        self, monkeypatch: pytest.MonkeyPatch, status: SessionStatus
+    ) -> None:
+        from cw.worktree._refresh import _non_terminal_session_surface_refs
+
+        state = CwState(
+            sessions=[
+                _seed_session_with_surface_ref("c/impl", status, "aaaa1111"),
+            ]
+        )
+        monkeypatch.setattr("cw.worktree._refresh.load_state", lambda: state)
+
+        assert _non_terminal_session_surface_refs() == frozenset({"aaaa1111"})
+
+    def test_terminal_and_refless_sessions_excluded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.worktree._refresh import _non_terminal_session_surface_refs
+
+        state = CwState(
+            sessions=[
+                _seed_session_with_surface_ref(
+                    "c/done", SessionStatus.COMPLETED, "bbbb2222"
+                ),
+                _seed_session_with_surface_ref("c/noref", SessionStatus.ACTIVE, None),
+            ]
+        )
+        monkeypatch.setattr("cw.worktree._refresh.load_state", lambda: state)
+
+        assert _non_terminal_session_surface_refs() == frozenset()
+
+    def test_state_load_failure_returns_none_and_warns(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from cw.worktree._refresh import _non_terminal_session_surface_refs
+
+        def _boom() -> CwState:
+            msg = "corrupt"
+            raise ValueError(msg)
+
+        monkeypatch.setattr("cw.worktree._refresh.load_state", _boom)
+
+        with caplog.at_level("WARNING", logger="cw.worktree"):
+            refs = _non_terminal_session_surface_refs()
+
+        assert refs is None
+        assert any(
+            "failed to load session state for surface_ref lookup" in r.getMessage()
+            for r in caplog.records
+        )
+
+
+def _seed_session_with_surface_ref(
+    name: str, status: SessionStatus, surface_ref: str | None
+) -> Session:
+    return Session(
+        name=name,
+        client="c",
+        purpose=SessionPurpose.IMPL,
+        status=status,
+        origin=SessionOrigin.DAEMON,
+        workspace_path=Path("/repo"),
+        surface_ref=surface_ref,
+    )
+
+
+class TestLiveHomeReasonSurfaceRefUnreadable:
+    """#2480: live_home_reason's own fail-closed branch for a
+    _non_terminal_session_surface_refs() failure, independent of
+    live_session_worktree_paths (which can succeed while this fails -- see
+    that function's docstring for why the two loads are kept separate)."""
+
+    def test_surface_ref_lookup_failure_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        good = tmp_path / "wt"
+        good.mkdir()
+        monkeypatch.setattr(
+            "cw.worktree._refresh.live_session_worktree_paths", frozenset
+        )
+        monkeypatch.setattr(
+            "cw.worktree._refresh._non_terminal_session_surface_refs", lambda: None
+        )
+
+        reason = live_home_reason(good, daemon=native_daemon.get_native_daemon_client())
+
+        assert reason == "session state unreadable, cannot rule out a live session"
 
 
 def _write_corrupt_state() -> Path:
@@ -1607,22 +1718,52 @@ class TestCreateWorktreeReuseRefresh:
         assert git_in(wt, "rev-parse", "HEAD") == new_sha
 
 
+# Short id every ``_seed_roster(cwd)`` call (no ``raw=``) writes its one
+# worker under. #2480: a roster worker only counts as a live occupant when
+# this id matches a NON-terminal session's ``surface_ref`` -- see
+# ``_vouch_for_roster_worker``.
+_ROSTER_SHORT_ID = "aaaa1111"
+
+
 def _seed_roster(cwd: Path | None = None, *, raw: str | None = None) -> Path:
     """Write the (tmp-isolated) daemon roster.
 
-    *cwd* records one live worker homed there; *raw* writes arbitrary bytes
-    instead. ``tests/conftest.py`` points ``native_daemon._ROSTER_PATH`` at a
-    tmp path, so this never touches the developer's real roster.
+    *cwd* records one live worker homed there (short id
+    :data:`_ROSTER_SHORT_ID`); *raw* writes arbitrary bytes instead.
+    ``tests/conftest.py`` points ``native_daemon._ROSTER_PATH`` at a tmp
+    path, so this never touches the developer's real roster.
+
+    #2480: since ``live_home_reason`` now excludes a roster worker whose
+    short id names no NON-terminal cw session, a test that wants THIS
+    worker recognized as genuinely live must pair this call with
+    :func:`_vouch_for_roster_worker`.
     """
     roster = native_daemon._ROSTER_PATH
     roster.parent.mkdir(parents=True, exist_ok=True)
     payload = (
         raw
         if raw is not None
-        else json.dumps({"workers": {"aaaa1111": {"pid": 1, "cwd": str(cwd)}}})
+        else json.dumps({"workers": {_ROSTER_SHORT_ID: {"pid": 1, "cwd": str(cwd)}}})
     )
     roster.write_text(payload, encoding="utf-8")
     return roster
+
+
+def _vouch_for_roster_worker(
+    workspace: Path,
+    *,
+    short_id: str = _ROSTER_SHORT_ID,
+    status: SessionStatus = SessionStatus.ACTIVE,
+) -> None:
+    """Seed a cw session whose ``surface_ref`` names a roster worker (#2480).
+
+    ``worktree_path=None`` deliberately: this session must vouch for the
+    roster worker's *surface_ref* only, never independently satisfy the
+    session-homed side of :func:`~cw.worktree.live_home_reason` (which would
+    mask which of the two sources actually matched in a test asserting the
+    specific "a live daemon worker is homed..." reason string).
+    """
+    _seed_session(workspace, None, status, surface_ref=short_id)
 
 
 def _unnormalizable_path(
@@ -1651,11 +1792,17 @@ def _unnormalizable_path(
 
 
 def _occupy(source: str, workspace: Path, path: Path) -> None:
-    """Make *path* look occupied via cw state or via the daemon roster."""
+    """Make *path* look occupied via cw state or via the daemon roster.
+
+    The "roster" source also vouches for the roster worker (#2480,
+    :func:`_vouch_for_roster_worker`) -- otherwise a roster-only entry with
+    no matching cw session is now a leaked worker, not an occupant.
+    """
     if source == "state":
         _seed_session(workspace, path, SessionStatus.ACTIVE)
     else:
         _seed_roster(path)
+        _vouch_for_roster_worker(workspace)
 
 
 def _seed_behind(
@@ -2145,10 +2292,11 @@ class TestReuseOccupancyRosterAndPaths:
         one. A worker seeded directly on an injected ``FakeNativeDaemonClient``
         -- never written to the real (tmp-isolated) roster file -- must still
         block the fast-forward, and the real roster must stay untouched."""
-        client, wt, _workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        client, wt, workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
         assert not native_daemon._ROSTER_PATH.exists()
         fake = native_daemon.FakeNativeDaemonClient()
-        fake.seed_live_worker(wt)
+        short_id = fake.seed_live_worker(wt)
+        _vouch_for_roster_worker(workspace, short_id=short_id)
 
         with pytest.raises(WorktreeOccupiedError) as excinfo:
             create_worktree(
@@ -2197,8 +2345,13 @@ class TestReuseOccupancyRosterAndPaths:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        client, wt, _workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
-        _seed_roster(wt)  # live in the roster, absent from cw state
+        client, wt, workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
+        # live in the roster, vouched for by a non-terminal session (#2480) --
+        # absent from cw state's *worktree-homed* side, distinct from being
+        # absent altogether (which would make it a leaked, non-occupying
+        # worker instead).
+        _seed_roster(wt)
+        _vouch_for_roster_worker(workspace)
         fetched = _spy_fetch(monkeypatch)
 
         error = _refresh_occupied_with_debug(client, caplog)
@@ -2323,6 +2476,7 @@ class TestReuseOccupancyRosterAndPaths:
                 _seed_session(workspace, wt, SessionStatus.ACTIVE)
             elif change == "roster":
                 _seed_roster(wt)
+                _vouch_for_roster_worker(workspace)
             elif change == "dirty":
                 (wt / "scratch.txt").write_text("late edit\n", encoding="utf-8")
             else:
@@ -2429,6 +2583,7 @@ class TestReuseOccupancyRosterAndPaths:
             )
         elif side == "worker":
             _seed_roster(bad)
+            _vouch_for_roster_worker(tmp_path)
 
         reason = live_home_reason(
             bad if side == "target" else good,
@@ -2517,6 +2672,7 @@ class TestReuseOccupancyRosterAndPaths:
             )
         else:
             _seed_roster(bad)
+            _vouch_for_roster_worker(tmp_path)
 
         reason = live_home_reason(good, daemon=native_daemon.get_native_daemon_client())
 
@@ -2544,6 +2700,7 @@ class TestReuseOccupancyRosterAndPaths:
             lambda: frozenset({target}),
         )
         _seed_roster(bad_worker)
+        _vouch_for_roster_worker(tmp_path)
         daemon = native_daemon.get_native_daemon_client()
 
         reason = live_home_reason(target, daemon=daemon)
@@ -2559,6 +2716,7 @@ class TestReuseOccupancyRosterAndPaths:
             lambda: frozenset({bad_session}),
         )
         _seed_roster(target)
+        _vouch_for_roster_worker(tmp_path)
 
         reason = live_home_reason(target, daemon=daemon)
 
@@ -2585,6 +2743,7 @@ class TestReuseOccupancyRosterAndPaths:
         (tmp_path / "w").mkdir()
         bad_worker = _unnormalizable_path("eacces", tmp_path / "w", monkeypatch)
         _seed_roster(bad_worker)
+        _vouch_for_roster_worker(tmp_path)
 
         reason = live_home_reason(good, daemon=native_daemon.get_native_daemon_client())
 
@@ -2655,6 +2814,7 @@ class TestReuseOccupancyRosterAndPaths:
             lambda: frozenset({bad}),
         )
         _seed_roster(bad)
+        _vouch_for_roster_worker(tmp_path)
         warned: set[UnresolvablePathWarningKey] = set()
 
         live_home_reason(

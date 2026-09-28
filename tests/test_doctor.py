@@ -7281,6 +7281,149 @@ class TestWedgeActiveNullLivenessOrphan:
 
 
 # ---------------------------------------------------------------------------
+# TestWedgeLeakedDaemonWorker (#2480)
+# ---------------------------------------------------------------------------
+
+
+class TestWedgeLeakedDaemonWorker:
+    """wedge/leaked-daemon-worker: a roster worker whose owning cw session is
+    terminal or absent -- the #2480 completion-path leak. Detected by
+    ``_check_wedge_leaked_daemon_worker`` and cleared under ``--reap`` via
+    the shared ``cw.reconcile.leaked_workers`` authority."""
+
+    def _patch_daemon(
+        self, monkeypatch: pytest.MonkeyPatch, daemon: FakeNativeDaemonClient
+    ) -> None:
+        """Both chokepoints must see the SAME fake: the wedge detector/reap
+        branch (``cw.doctor.wedge.get_native_daemon_client``) and the
+        unconditional reconcile-pass sweep ``--reap`` also triggers via
+        ``_check_reconcile`` (``cw.reconcile._deps.get_native_daemon_client``)."""
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
+        )
+
+    def test_completed_session_worker_detected_and_reaped(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.config import save_state
+        from cw.events import read_events
+        from cw.models import CwState, OrchestratorEventType, SessionStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        short_id = daemon.seed_live_worker(tmp_path / "leaked-wt")
+        self._patch_daemon(monkeypatch, daemon)
+
+        sess = _make_daemon_session(
+            id="done0001",
+            name="client-a/auto-dev/GEN-42",
+            client="client-a",
+            status=SessionStatus.COMPLETED,
+            surface_ref=short_id,
+            worktree_path=None,
+        )
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/leaked-daemon-worker" in classes
+        assert daemon.stop_calls == [short_id]
+
+        events = read_events(
+            consumer="test_leaked_daemon_worker_reap",
+            event_types=[OrchestratorEventType.DAEMON_LEAKED_WORKER_STOPPED],
+        )
+        assert len(events) == 1
+        assert events[0].payload["short_id"] == short_id
+        assert events[0].payload["ticket_id"] == "GEN-42"
+
+    def test_sessionless_worker_detected_and_reaped(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A roster worker with NO matching cw session at all is leaked too."""
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        short_id = daemon.seed_live_worker(tmp_path / "leaked-wt")
+        self._patch_daemon(monkeypatch, daemon)
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/leaked-daemon-worker" in classes
+        assert daemon.stop_calls == [short_id]
+
+        events = read_events(
+            consumer="test_leaked_daemon_worker_sessionless_reap",
+            event_types=[OrchestratorEventType.DAEMON_LEAKED_WORKER_STOPPED],
+        )
+        assert len(events) == 1
+        assert events[0].payload["session_id"] is None
+
+    def test_live_session_worker_not_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A worker whose session is still ACTIVE/IDLE/BACKGROUNDED is not a
+        leak -- it must never be surfaced or stopped."""
+        from cw.config import save_state
+        from cw.models import CwState, SessionStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        short_id = daemon.seed_live_worker(tmp_path / "live-wt")
+        self._patch_daemon(monkeypatch, daemon)
+
+        sess = _make_daemon_session(
+            id="live0001",
+            name="client-a/auto-dev/GEN-1",
+            client="client-a",
+            status=SessionStatus.IDLE,
+            surface_ref=short_id,
+            worktree_path=None,
+        )
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=True)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/leaked-daemon-worker" not in classes
+        assert daemon.stop_calls == []
+
+    def test_finding_surfaced_without_reap(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A plain `cw doctor` (no --reap) still surfaces the leak for
+        visibility, but never stops it."""
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        daemon.seed_live_worker(tmp_path / "leaked-wt")
+        self._patch_daemon(monkeypatch, daemon)
+
+        report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/leaked-daemon-worker" in classes
+        assert daemon.stop_calls == []
+
+
+# ---------------------------------------------------------------------------
 # TestCheckInboxSize (issue #856)
 # ---------------------------------------------------------------------------
 

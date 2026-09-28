@@ -2009,10 +2009,13 @@ class TestSpawnClose:
 
         assert "nonexistent" in error_msg
 
-    def test_already_completed_raises_cw_error(
+    def test_already_completed_stops_surface_and_exits_clean(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """spawn close: raises CwError when session is already completed."""
+        """#2480: an already-completed session's daemon surface is stopped
+        instead of erroring -- a stray roster worker from a completion path
+        that never called daemon.stop() must clear on a repeat close, not
+        just fail loudly forever."""
         from cw.cli import _spawn_close_impl
 
         workspace = tmp_path / "workspace" / "test-client"
@@ -2025,12 +2028,18 @@ class TestSpawnClose:
             origin=SessionOrigin.DAEMON,
             status=SessionStatus.COMPLETED,
             workspace_path=workspace,
+            surface_ref="deadbeef",
         )
         save_state(CwState(sessions=[sess]))
         daemon = FakeNativeDaemonClient()
 
-        with pytest.raises(CwError, match="already completed"):
-            _spawn_close_impl(session_id="done1234", native_daemon=daemon)
+        _spawn_close_impl(session_id="done1234", native_daemon=daemon)
+
+        assert daemon.stop_calls == ["deadbeef"]
+        state = load_state()
+        closed = state.find_by_name_or_id("done1234")
+        assert closed is not None
+        assert closed.status == SessionStatus.COMPLETED
 
     def test_no_surface_ref_skips_backend_close(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -2405,13 +2414,17 @@ class TestSpawnComplete:
     def test_already_completed_session_force_is_noop(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """Session already COMPLETED + --force → no-op, no extra events."""
+        """Session already COMPLETED + --force -> no new SESSION_COMPLETED
+        event, but #2480: the lingering daemon surface IS still stopped."""
         from cw.cli import _spawn_complete_impl
         from cw.events import read_events
         from cw.models import OrchestratorEventType
 
         sess = _seed_daemon_session(
-            tmp_path, tmp_config_dir, status=SessionStatus.COMPLETED
+            tmp_path,
+            tmp_config_dir,
+            status=SessionStatus.COMPLETED,
+            surface_ref="deadbeef",
         )
         daemon = FakeNativeDaemonClient()
 
@@ -2428,6 +2441,7 @@ class TestSpawnComplete:
             event_types=[OrchestratorEventType.SESSION_COMPLETED],
         )
         assert len(events) == 0
+        assert daemon.stop_calls == ["deadbeef"]
 
     @pytest.mark.parametrize("status_value", list(get_args(Status)))
     def test_status_routing_each_enum_value(
@@ -2626,6 +2640,30 @@ class TestSpawnCLI:
         result = runner.invoke(main, ["spawn", "close", sess.id, "--confirmed-dead"])
 
         assert result.exit_code == 0
+
+    def test_cli_already_completed_exits_clean_and_stops_surface(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2480: `cw spawn close` on an already-completed session exits 0
+        (not an error) and stops its lingering daemon surface."""
+        sess = _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            status=SessionStatus.COMPLETED,
+            surface_ref="deadbeef",
+        )
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.spawn.get_native_daemon_client", lambda: daemon)
+        runner = CliRunner()
+
+        result = runner.invoke(main, ["spawn", "close", sess.id])
+
+        assert result.exit_code == 0, result.output
+        assert "Closed session" in result.output
+        assert daemon.stop_calls == ["deadbeef"]
 
 
 class TestSpawnCloseRequeue:

@@ -548,28 +548,52 @@ def done_session(
     *,
     cleanup: bool = False,
     force: bool = False,
+    native_daemon: NativeDaemonClient | None = None,
 ) -> None:
-    """Mark a session as completed and optionally remove its worktree."""
+    """Mark a session as completed and optionally remove its worktree.
+
+    Stops the session's daemon surface (DAEMON-origin, ``surface_ref`` set)
+    outside the lock, best-effort -- both for a session that completes here
+    and one that was ALREADY completed (#2480): an earlier completion path
+    (e.g. the Stop hook's ``rescued=None`` bail) can leave a finished
+    session's daemon worker sitting live in the roster, which
+    :func:`~cw.worktree.live_home_reason` then reports as occupying the
+    ticket's worktree forever, blocking re-dispatch. A repeat ``cw done``
+    stops that stray surface instead of only raising on it, mirroring
+    :func:`cw.cli.spawn._spawn_close_impl`'s stop-then-return. Idempotent:
+    :meth:`~cw.native_daemon.NativeDaemonClient.stop` swallows a missing or
+    already-gone surface.
+    """
     # Why not mutate_state: remove_worktree (git subprocess) runs inside the
     # lock window on the --cleanup path (criterion 1: no subprocess in lock).
     with sessions_lock():
         state = load_state()
         session = _resolve_session(state, session_name)
+        already_completed = session.status == SessionStatus.COMPLETED
 
-        if session.status == SessionStatus.COMPLETED:
-            msg = f"Session {session.name} is already completed."
-            raise CwError(msg)
+        if not already_completed:
+            if cleanup and session.worktree_path and session.branch:
+                client = get_client(session.client)
+                click.echo(f"Removing worktree for branch '{session.branch}'...")
+                remove_worktree(client, session.branch, force=force)
+                click.echo("Worktree removed.")
 
-        if cleanup and session.worktree_path and session.branch:
-            client = get_client(session.client)
-            click.echo(f"Removing worktree for branch '{session.branch}'...")
-            remove_worktree(client, session.branch, force=force)
-            click.echo("Worktree removed.")
+            session.status = SessionStatus.COMPLETED
+            session.completed_reason = CompletionReason.USER
+            session.completed_at = datetime.now(UTC)
+            save_state(state)
 
-        session.status = SessionStatus.COMPLETED
-        session.completed_reason = CompletionReason.USER
-        session.completed_at = datetime.now(UTC)
-        save_state(state)
+    # Daemon stop is a network/subprocess call (bounded 10s timeout,
+    # best-effort) -- outside sessions_lock, mirroring the completion-path
+    # stop call in cw.cli.spawn._spawn_complete_impl.
+    if session.surface_ref is not None and session.origin is SessionOrigin.DAEMON:
+        daemon = native_daemon or get_native_daemon_client()
+        daemon.stop(session.surface_ref)
+
+    if already_completed:
+        click.echo(f"Session {session.name} is already completed.")
+        return
+
     record_event(
         session.client,
         HistoryEvent(

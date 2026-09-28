@@ -583,6 +583,22 @@ class OrchestratorEventType(StrEnum):
     # is an audit trail, not an operator alert, and fires on effectively every
     # accepted emit -- far higher volume than any currently-forwarded member.
     SESSION_RESULT_EMITTED = "session.result_emitted"
+    # GitHub #2480 -- audit record of the leaked-daemon-worker sweep
+    # (cw.reconcile.leaked_workers, and the mirrored `cw doctor --reap`
+    # wedge) stopping one roster worker whose surface_ref names a cw session
+    # already in a TERMINAL status, or no cw session at all. Without a
+    # completion path that stops the daemon surface (#2480's items 1-2), such
+    # a worker sits live in roster.json forever and
+    # cw.worktree.live_home_reason reports its ticket's worktree occupied
+    # indefinitely, blocking re-dispatch -- this event is the durable trace
+    # that the sweep cleared one, so an upgrade's automatic cleanup is
+    # diagnosable after the fact. Emitted per stop, mandatory (not gated by a
+    # feature flag), and deliberately NOT added to
+    # _DEFAULT_OPERATOR_EVENT_TYPES (orchestrator_config.py): a mechanical
+    # cleanup of a worker that was never going to do anything else is an
+    # audit trail, not an operator page -- same convention as
+    # WORKTREE_FAST_FORWARDED above.
+    DAEMON_LEAKED_WORKER_STOPPED = "daemon.leaked_worker_stopped"
 
 
 class StageIdentifier(StrEnum):
