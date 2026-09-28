@@ -120,6 +120,23 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "via _apply_sentinel_to_task carries 'status'"
         ),
     },
+    "cli/stop_hook.py": {
+        (
+            "session.last_result = {\n"
+            "**existing,\n"
+            "_STAGED_ROUTE_RESCUED_KEY: rescued,\n"
+            "_STAGED_ROUTE_TASK_ALREADY_TERMINAL_KEY: task_already_terminal,\n"
+            "}"
+        ): (
+            "stop_hook.py (_stamp_staged_route_outcome) — #2458 fix cycle 5 "
+            "Action 2: merges this call's rescued/task_already_terminal "
+            "outcome alongside the round-4 consumed flag on an already-"
+            "terminal-shaped last_result, so a later complete_session=True "
+            "call's already_routed short-circuit can restore them instead of "
+            "leaving them at their init-False defaults; 'status' stays "
+            "present (has_terminal_result() stays True)"
+        ),
+    },
     "dev_queue/requeue.py": {
         "session.last_result = None": (
             "requeue.py:322 — deliberate erasure ahead of a requeue; resets "

@@ -5304,6 +5304,20 @@ class TestSignalStop:
         that peek fast path entirely and re-entering the emit-precedence
         routing logic for real. Advance class (``stage_complete``): the task
         row and daemon-stop count must show exactly one route/completion.
+
+        Fix cycle 5, Action 4 (Test Reviewer, empirically verified): unlike
+        its ``no_race_miss_for_shipped``/``single_park_attention`` siblings
+        below, this specific advance/``stage_complete`` class stays green
+        even with the round-4 ``_stamp_sentinel_partial_route_consumed``
+        call disabled -- ``_apply_sentinel_to_task``'s own idempotent
+        handling of an already-advanced (now-not-RUNNING-at-this-session's
+        original stage) row happens to absorb the re-derived route as a
+        silent no-op on its own, coincidentally, not because the round-4 fix
+        pinned it. This test still documents and locks in the desired
+        end-to-end behavior (exactly one route/completion) -- it just does
+        not, by itself, prove the round-4 mechanism is what produces it for
+        this class. The siblings below carry that proof for the terminal and
+        park classes.
         """
         worktree, session, daemon = self._emit_case(
             tmp_config_dir,
@@ -5435,6 +5449,123 @@ class TestSignalStop:
         assert reloaded.escalation_fired_at == parked_at
         updated = next(s for s in load_state().sessions if s.id == session.id)
         assert updated.status == SessionStatus.COMPLETED
+
+    def test_signal_stop_stage_mismatch_bail_bg_pending_no_replay_refire(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fix cycle 5, Action 1, test 1: a #1031 stage-mismatch bail with
+        ``background_tasks`` still pending must not re-fire
+        ``SENTINEL_STAGE_MISMATCH`` on a second Stop.
+
+        Twin of
+        ``test_signal_stop_stage_mismatch_refusal_does_not_fire_sentinel_unroutable``
+        with ``background_tasks`` non-empty and a second Stop fired on top --
+        same shape as
+        ``test_signal_stop_routed_partial_route_clears_staged_flag_no_race_miss_on_replay``
+        but for the stage-mismatch bail instead of the accepted-route exit.
+        Left uncleared, the staged-emit-result peek flag stays True after the
+        first (refused) route above, so a second Stop firing while
+        ``background_tasks`` is still non-empty re-enters
+        ``_resolve_and_complete_headless_session``, re-derives the same
+        staged ``last_result``, and re-calls ``_apply_sentinel_to_task``,
+        which unconditionally re-fires ``SENTINEL_STAGE_MISMATCH`` a second
+        time even though nothing new happened.
+        """
+        worktree, _session, _daemon = self._emit_case(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "mismatch-replay",
+            payload=_sentinel_payload(_SENTINEL_918_STAGE_COMPLETE),
+            # The row already advanced past IMPL (#986 shape).
+            stage=Stage.REVIEW,
+        )
+        claude_session_id = "sfref-2458-mismatch-replay-uuid"
+        bg_tasks = [{"id": "bg-1", "description": "trailing finalize subagent"}]
+
+        self._invoke_stop(
+            worktree, session_id=claude_session_id, background_tasks=bg_tasks
+        )
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert STAGED_EMIT_RESULT_KEY not in context
+
+        self._invoke_stop(
+            worktree, session_id=claude_session_id, background_tasks=bg_tasks
+        )
+
+        mismatches = read_events(
+            consumer="t2458-mismatch-replay",
+            event_types=[OrchestratorEventType.SENTINEL_STAGE_MISMATCH],
+        )
+        assert len(mismatches) == 1
+        assert "sentinel_unroutable" not in self._attention_statuses(
+            "t2458-mismatch-replay-att"
+        )
+        assert self._reload_task().stage == Stage.REVIEW
+
+    def test_signal_stop_no_sentinel_bail_bg_pending_no_replay_refire(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fix cycle 5, Action 1, test 2: an unreconstructable staged result
+        with no transcript fallback, ``background_tasks`` still pending, must
+        page ``sentinel_unroutable`` exactly once across two Stops.
+
+        Twin of ``test_signal_stop_sentinel_unroutable_logs_and_pages`` with
+        ``background_tasks`` non-empty and a second Stop fired on top. Left
+        uncleared, the staged-emit-result peek flag stays True after the
+        first bail above, so a second Stop firing while ``background_tasks``
+        is still non-empty re-enters ``_resolve_and_complete_headless_
+        session``, re-fails the same reconstruction and transcript parse, and
+        re-pages ``SESSION_NEEDS_ATTENTION(paused_status=sentinel_unroutable)``
+        a second time even though nothing new happened.
+        """
+        from cw.models import QueueItemStatus
+
+        worktree, session, daemon = self._emit_case(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "unroutable-replay",
+            payload={"status": "blocked"},
+            stage=Stage.PLAN,
+        )
+        claude_session_id = "sfref-2458-unroutable-replay-uuid"
+        _write_transcript_records(
+            tmp_path / "fake-home-2458-unroutable-replay",
+            worktree,
+            [_ul_record("No sentinel here, just prose.")],
+            filename=f"{claude_session_id}.jsonl",
+        )
+        bg_tasks = [{"id": "bg-1", "description": "trailing finalize subagent"}]
+
+        self._invoke_stop(
+            worktree, session_id=claude_session_id, background_tasks=bg_tasks
+        )
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert STAGED_EMIT_RESULT_KEY not in context
+
+        self._invoke_stop(
+            worktree, session_id=claude_session_id, background_tasks=bg_tasks
+        )
+
+        attention = read_events(
+            consumer="t2458-unroutable-replay",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert [e.payload["paused_status"] for e in attention] == [
+            "sentinel_unroutable"
+        ]
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.ACTIVE
+        task = self._reload_task()
+        assert task.status == QueueItemStatus.RUNNING
+        assert daemon.stop_calls == []
 
     def test_signal_stop_landed_terminal_blocked_stops_daemon_with_bg_tasks_pending(
         self,
