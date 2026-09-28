@@ -65,6 +65,21 @@ def _apply_idle_routed_mutations(
     the stage-mismatch refusal-marker branch, which would otherwise orphan
     this session forever (mirrors the Stop-hook's #1692 carve-out).
 
+    #2458 round 2 (known, deliberate gap -- not fixed here): unlike
+    ``task_already_terminal``, ``outcome.landed_terminal`` -- a BlockedResult
+    that itself just landed the task terminal-FAILED via the attempt-cap
+    catch-all -- is never consumed here, only in the Stop hook's
+    ``_handle_unrouted_stop`` (#1273). A candidate whose route lands
+    ``landed_terminal=True`` therefore falls into the stage-mismatch-refusal
+    branch below (``routed=False``, ``task_already_terminal=False``) and is
+    left ACTIVE with no daemon stop, instead of completing. Currently
+    unreachable in production: ``cw result emit``'s ``_validate_or_exit``
+    (``cw.result``) only ever stages an ``AutoDevResult``, never the
+    synthetic ``BlockedResult`` shape that sets ``landed_terminal`` -- see
+    that gate's own docstring for the other half of this cross-reference. If
+    that gate is ever widened, this function needs a ``landed_terminal`` arm
+    mirroring the Stop hook's.
+
     Returns ``(accepted, state_mutated)``. ``accepted`` is only the candidates
     actually routed, so the caller's downstream event emission fires solely for
     those. ``state_mutated`` is True when any session state changed here --

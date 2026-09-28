@@ -37,6 +37,7 @@ from cw.reconcile.idle import (
 from cw.reconcile.idle import _detect as idle_detect
 from tests._reconcile_helpers import (
     _mk_headless_daemon_session,
+    _no_op_salvage_payload,
     _shipped_salvage_payload,
     _stage_complete_payload,
 )
@@ -346,6 +347,45 @@ def test_detect_idle_candidates_routes_live_emit_cli_shipped(
     assert idle_daemon.stop_calls == ["fake-short-id"]
 
 
+def test_detect_idle_candidates_routes_live_emit_cli_no_op(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    no_transcript_parse: None,
+    idle_daemon: FakeNativeDaemonClient,
+) -> None:
+    """A staged terminal ``no_op`` result completes the row, mirroring the
+    ``shipped`` case above -- comment 2's acceptance bar names ``no_op``
+    explicitly among the terminal classes that must be covered. Both statuses
+    land on the same ``_apply_sentinel_to_task`` COMPLETED branch, so this
+    closes the ticket's literal wording rather than a distinct code path."""
+    _write_staged_client()
+    _seed_row(QueueItemStatus.RUNNING, Stage.FINALIZE)
+    payload = {**_no_op_salvage_payload(), "ticket_id": _EMIT_TICKET}
+    state = _emit_cli_state(tmp_path, payload)
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=_NOW_PAST_CHECK,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert isinstance(candidate.routed_sentinel, AutoDevResult)
+    assert candidate.routed_sentinel.status == "no_op"
+
+    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+
+    assert _reload_row().status == QueueItemStatus.COMPLETED
+    session = state.sessions[0]
+    assert session.status is SessionStatus.COMPLETED
+    assert session.last_result == payload
+    assert session.last_result_source is LastResultSource.EMIT_CLI
+    assert idle_daemon.stop_calls == ["fake-short-id"]
+
+
 def test_detect_idle_candidates_emit_cli_respects_the_unrouted_check_delay(
     tmp_config_dir: Path, tmp_path: Path, no_transcript_parse: None
 ) -> None:
@@ -394,6 +434,62 @@ def test_detect_idle_candidates_skips_emit_cli_already_routed_by_stop_hook(
     assert session.status is SessionStatus.COMPLETED
     assert session.last_result == payload
     assert session.last_result_source is LastResultSource.EMIT_CLI
+
+
+def test_detect_idle_candidates_completes_session_for_already_forward_advanced_row(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    no_transcript_parse: None,
+    idle_daemon: FakeNativeDaemonClient,
+) -> None:
+    """Non-final-advance shape (comment 2 / round-2 finding, Action 4).
+
+    The other of the two shapes ``task_already_terminal`` covers: the Stop
+    hook already forward-advanced this row past ``cw.dev_queue.lifecycle``'s
+    session_id-clearing hop (``lifecycle.py:811``), so the row carries a
+    fresh ``session_id=None`` at its NEW stage -- unlike
+    ``test_detect_idle_candidates_skips_emit_cli_already_routed_by_stop_hook``,
+    which pins the terminal-completion shape (row COMPLETED, session_id
+    retained). The session itself still holds the stale non-terminal
+    ``stage_complete`` ``last_result`` the Stop hook already consumed. The
+    sweep must complete the (now orphaned) session and stop its daemon
+    without re-mutating the already-advanced row.
+    """
+    _write_staged_client()
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=_EMIT_TICKET,
+                    client="client-a",
+                    status=QueueItemStatus.PENDING,
+                    session_id=None,
+                    stage=Stage.REVIEW,
+                    attempts=1,
+                )
+            ]
+        )
+    )
+    before = _reload_row().model_dump()
+    payload = _impl_stage_complete()
+    state = _emit_cli_state(tmp_path, payload)
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=_NOW_PAST_CHECK,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+    assert len(candidates) == 1
+    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+
+    assert _reload_row().model_dump() == before
+    session = state.sessions[0]
+    assert session.status is SessionStatus.COMPLETED
+    assert session.last_result == payload
+    assert session.last_result_source is LastResultSource.EMIT_CLI
+    assert idle_daemon.stop_calls == ["fake-short-id"]
 
 
 def test_detect_idle_candidates_still_skips_transcript_only_when_last_result_is_none(
@@ -556,3 +652,69 @@ def test_detect_idle_candidates_routes_live_emit_cli_blocked_generic_reason(
     assert [e.payload["paused_status"] for e in attention] == ["blocked"]
     assert attention[0].payload["ticket_id"] == _EMIT_TICKET
     assert state.sessions[0].status is SessionStatus.COMPLETED
+
+
+def test_detect_idle_candidates_landed_terminal_blocked_tripwire(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    no_transcript_parse: None,
+    idle_daemon: FakeNativeDaemonClient,
+) -> None:
+    """Tripwire, not a passing-behavior assertion (comment 2 / round-2 finding).
+
+    The idle-sweep twin of the Stop hook's
+    ``test_signal_stop_landed_terminal_blocked_stops_daemon_with_bg_tasks_pending``:
+    a staged BlockedResult with an unrecognized reason at the attempt cap
+    lands the task terminal-FAILED with ``outcome.landed_terminal=True``. The
+    Stop hook consumes that flag (``_handle_unrouted_stop``, #1273) and stops
+    the daemon; ``_apply_idle_routed_mutations`` does not -- see the
+    ``#2458 round 2`` comment on that function. This staging bypasses ``cw
+    result emit``'s CLI validation gate directly at the data layer (the CLI
+    itself would refuse this bare shape, per
+    ``test_result_emit_cli_rejects_bare_blocked_shape_payload``) -- it is a
+    tripwire for the day that gate is widened, not a claim this path is
+    reachable in production today.
+
+    Recorded (not fixed, out of scope this cycle): the row lands FAILED as
+    expected, but the session is left ACTIVE with no daemon stop -- it falls
+    into the stage-mismatch-refusal branch instead of completing.
+    """
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=_EMIT_TICKET,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="salv-1",
+                    stage=Stage.PLAN,
+                    attempts=3,  # _VALIDATION_FAILED_MAX_ATTEMPTS
+                )
+            ]
+        )
+    )
+    payload = {
+        "status": "blocked",
+        "blocker": {
+            "stage": "unknown",
+            "reason": "unknown_reason_xyz",
+            "details": "parser-synthesized blocker",
+        },
+    }
+    state = _emit_cli_state(tmp_path, payload)
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=_NOW_PAST_CHECK,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+    assert len(candidates) == 1
+    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+
+    # Documents the actual (currently-wrong) behavior -- see docstring.
+    assert _reload_row().status == QueueItemStatus.FAILED
+    session = state.sessions[0]
+    assert session.status is SessionStatus.ACTIVE
+    assert idle_daemon.stop_calls == []

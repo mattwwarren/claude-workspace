@@ -5223,6 +5223,69 @@ class TestSignalStop:
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
         assert context["agent_spawn_stamp"]["unresolved_count"] == 1
 
+    def test_signal_stop_routed_partial_route_clears_staged_flag_no_race_miss_on_replay(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Round-2 fix: a routed ``complete_session=False`` partial route must
+        not re-derive its already-consumed sentinel on a later Stop.
+
+        Left uncleared, the staged-emit-result peek flag stays True after the
+        first (successful) route above, so a second Stop firing while
+        ``background_tasks`` is still non-empty re-parses the same stale
+        ``last_result``, re-calls ``_apply_sentinel_to_task``, no longer finds
+        the (already-advanced) row under this session, and logs a spurious
+        ``sentinel_race_miss_detected`` / ``SENTINEL_RACE_MISS`` event -- even
+        though nothing actually raced. This is the twin of
+        ``test_signal_stop_routes_staged_emit_cli_result_before_bg_tasks_defer``
+        with a second Stop fired on top.
+        """
+        worktree, session, daemon = self._emit_case(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "bg-routed-replay",
+            payload=self._plan_stage_complete_payload(),
+            stage=Stage.PLAN,
+        )
+        claude_session_id = "sfref-2458-bg-routed-replay-uuid"
+        bg_tasks = [{"id": "bg-1", "description": "trailing finalize subagent"}]
+
+        self._invoke_stop(
+            worktree, session_id=claude_session_id, background_tasks=bg_tasks
+        )
+
+        assert self._reload_task().stage == Stage.IMPL
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert STAGED_EMIT_RESULT_KEY not in context
+
+        self._invoke_stop(
+            worktree, session_id=claude_session_id, background_tasks=bg_tasks
+        )
+
+        # Second fire must be a pure no-op: no re-mutation of the already
+        # advanced row, no daemon stop, no spurious race-miss event.
+        assert self._reload_task().stage == Stage.IMPL
+        assert (
+            read_events(
+                consumer="t2458-bg-routed-replay",
+                event_types=[OrchestratorEventType.SENTINEL_RACE_MISS],
+            )
+            == []
+        )
+        assert (
+            read_events(
+                consumer="t2458-bg-routed-replay-completed",
+                event_types=[OrchestratorEventType.SESSION_COMPLETED],
+            )
+            == []
+        )
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.ACTIVE
+        assert daemon.stop_calls == []
+
     def test_signal_stop_landed_terminal_blocked_stops_daemon_with_bg_tasks_pending(
         self,
         tmp_config_dir: Path,

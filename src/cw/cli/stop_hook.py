@@ -517,6 +517,16 @@ def _resolve_and_complete_headless_session(
     if not complete_session:
         # #2458: the task is routed; the session's own completion waits for
         # its background work to drain (see this function's docstring).
+        # Round-2 fix: clear the staged-emit-result peek flag now that the
+        # route has landed -- left set, a later Stop with background_tasks
+        # still non-empty re-derives the same already-consumed sentinel and
+        # re-calls _apply_sentinel_to_task, which no longer finds the task
+        # under this session (routed or landed terminal here) and logs a
+        # spurious sentinel_race_miss_detected / SENTINEL_RACE_MISS on every
+        # subsequent turn. Best-effort like every other context write in
+        # this module: a missed clear just means the peek re-fires next
+        # turn, exactly as it did before this fix.
+        _write_cw_context_locked(cwd_value, _clear_staged_emit_result_marker)
         return _HeadlessResolution(
             rescued=rescued,
             landed_terminal=False,
@@ -784,6 +794,19 @@ def _peek_staged_emit_result(context: dict[str, object]) -> bool:
     if not context.get("headless"):
         return False
     return bool(context.get(STAGED_EMIT_RESULT_KEY))
+
+
+def _clear_staged_emit_result_marker(context: dict[str, object]) -> dict[str, object]:
+    """Drop ``STAGED_EMIT_RESULT_KEY`` -- the counterpart of the stamp
+    ``cw.result._stamp_staged_emit_result`` writes.
+
+    Called once a ``complete_session=False`` partial route has consumed the
+    staged result (see ``_resolve_and_complete_headless_session``), so a
+    later ``_peek_staged_emit_result`` on the same still-deferred session
+    answers False instead of re-triggering a re-derivation of an
+    already-routed sentinel.
+    """
+    return {k: v for k, v in context.items() if k != STAGED_EMIT_RESULT_KEY}
 
 
 class _LockedStop(NamedTuple):

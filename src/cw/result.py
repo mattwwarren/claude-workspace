@@ -80,6 +80,18 @@ def _validate_or_exit(
     output (the ``field: message`` lines from :func:`_format_errors`) can't drift
     apart. *extra_stderr_line*, if given, is echoed after the field-error lines
     (``emit`` uses this to note that no state was mutated).
+
+    Cross-module invariant (#2458 round 2): this gate accepts ``AutoDevResult``
+    ONLY -- ``cw result emit`` can therefore never stage a ``BlockedResult``
+    whose ``landed_terminal`` outcome the idle sweep's
+    ``cw.reconcile.idle._mutations._apply_idle_routed_mutations`` does not
+    branch on (unlike the Stop hook's ``_handle_unrouted_stop``, #1692). If
+    this gate is ever widened to accept the ``BlockedResult`` shape (the way
+    the Stop-hook harvest door already does, RFC 0012 A1 / #1457), the idle
+    sweep must also gain a ``landed_terminal`` arm, or a staged
+    landed-terminal-FAILED result routed through the idle backstop instead of
+    the Stop hook falls into the stage-mismatch-refusal branch and never
+    completes the session or stops the daemon.
     """
     try:
         return AutoDevResult.model_validate(payload)
