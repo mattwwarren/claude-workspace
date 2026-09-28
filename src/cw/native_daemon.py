@@ -24,7 +24,7 @@ import subprocess
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from cw._text import _bounded, redact
@@ -315,6 +315,22 @@ def _spawn_clean_env(cwd: Path) -> dict[str, str]:
     return env
 
 
+class WorkerHome(NamedTuple):
+    """One roster worker's short id paired with the ``cwd`` it was spawned in.
+
+    :meth:`NativeDaemonClient.list_live_worker_cwds` collapses the roster
+    down to bare paths, which is enough to ask "is *this* path occupied" but
+    not enough to ask "does *this* roster entry still belong to a live cw
+    session" -- that requires the short id to match against
+    ``Session.surface_ref`` (#2480). :meth:`NativeDaemonClient.
+    list_live_worker_homes` keeps both fields for callers that need the
+    latter, chiefly :func:`cw.worktree.live_home_reason`.
+    """
+
+    short_id: str
+    cwd: Path
+
+
 @runtime_checkable
 class NativeDaemonClient(Protocol):
     """Protocol for interacting with the Claude background daemon."""
@@ -378,6 +394,19 @@ class NativeDaemonClient(Protocol):
         understood and the caller must assume a worker may be live. An
         *absent* roster (no daemon has ever run) is an empty frozenset. Paths
         are returned exactly as recorded; callers normalize before comparing.
+        """
+        ...
+
+    def list_live_worker_homes(self) -> frozenset[WorkerHome] | None:
+        """Return (short id, cwd) for every daemon worker, or None (fail closed).
+
+        Same fail-closed contract as :meth:`list_live_worker_cwds` (an absent
+        roster is an empty frozenset; anything else wrong is ``None``), but
+        keeps each entry's short id alongside its ``cwd`` so a caller can
+        match it against ``Session.surface_ref`` -- occupancy is decided by
+        *which cw session, if any, owns this worker*, not by ``cwd`` alone
+        (#2480). Paths are returned exactly as recorded; callers normalize
+        before comparing.
         """
         ...
 
@@ -550,11 +579,28 @@ class RealNativeDaemonClient:
         unreadable or malformed file, or a worker entry that is not an object
         with a non-empty string ``cwd`` -- is ``None`` (logged at WARNING): a
         worker whose home cannot be determined might be homed on any worktree.
+
+        A thin projection of :meth:`list_live_worker_homes` onto just the
+        ``cwd`` half, so the two views can never disagree about what the
+        roster says (#2480).
+        """
+        homes = self.list_live_worker_homes()
+        if homes is None:
+            return None
+        return frozenset(home.cwd for home in homes)
+
+    def list_live_worker_homes(self) -> frozenset[WorkerHome] | None:
+        """Return (short id, cwd) for every roster worker, or None (fail closed).
+
+        Same failure semantics as :meth:`list_live_worker_cwds`: an absent
+        roster is an empty frozenset; an unreadable or malformed file, or a
+        worker entry with no usable non-empty string ``cwd``, is ``None``
+        (logged at WARNING).
         """
         workers = _read_roster_workers(self._roster_path)
         if workers is None:
             return None
-        cwds: set[Path] = set()
+        homes: set[WorkerHome] = set()
         for short_id, entry in workers.items():
             cwd = entry.get("cwd") if isinstance(entry, dict) else None
             if not isinstance(cwd, str) or not cwd:
@@ -564,8 +610,8 @@ class RealNativeDaemonClient:
                     short_id,
                 )
                 return None
-            cwds.add(Path(cwd))
-        return frozenset(cwds)
+            homes.add(WorkerHome(short_id, Path(cwd)))
+        return frozenset(homes)
 
     def stop(self, short_id: str) -> None:
         """Run ``claude stop <short_id>`` swallowing failures.
@@ -668,9 +714,29 @@ class FakeNativeDaemonClient:
 
     def list_live_worker_cwds(self) -> frozenset[Path] | None:
         """Return the spawn cwds of still-live workers; None if unreadable."""
+        homes = self.list_live_worker_homes()
+        if homes is None:
+            return None
+        return frozenset(home.cwd for home in homes)
+
+    def list_live_worker_homes(self) -> frozenset[WorkerHome] | None:
+        """Return (short id, cwd) of still-live workers; None if unreadable.
+
+        A short id in ``_live`` with no recorded ``_cwd_by_id`` entry -- a
+        test that pokes ``_live`` directly rather than going through
+        ``spawn_bg``/``seed_live_worker`` -- is treated the same as the real
+        client's "entry has no usable cwd": the whole read fails closed
+        (``None``) instead of raising ``KeyError``.
+        """
         if self.roster_unreadable:
             return None
-        return frozenset(self._cwd_by_id[short_id] for short_id in self._live)
+        homes: set[WorkerHome] = set()
+        for short_id in self._live:
+            cwd = self._cwd_by_id.get(short_id)
+            if cwd is None:
+                return None
+            homes.add(WorkerHome(short_id, cwd))
+        return frozenset(homes)
 
     def stop(self, short_id: str) -> None:
         """Record call and drop from live set (idempotent)."""

@@ -16,6 +16,7 @@ from cw.native_daemon import (
     SKIP_PERMISSIONS_MODE,
     FakeNativeDaemonClient,
     RealNativeDaemonClient,
+    WorkerHome,
     _is_native_surface_ref,
     get_native_daemon_client,
     model_supports_auto,
@@ -1001,6 +1002,55 @@ class TestRealNativeDaemonClientWorkerCwds:
         assert client.list_live_worker_cwds() is None
 
 
+class TestRealNativeDaemonClientWorkerHomes:
+    """list_live_worker_homes: (short id, cwd) pairs for #2480's surface_ref match."""
+
+    def test_returns_short_id_and_cwd_pairs(self, tmp_path: Path) -> None:
+        roster = tmp_path / "roster.json"
+        roster.write_text(
+            json.dumps(
+                {
+                    "workers": {
+                        "aaaa1111": {"pid": 1, "cwd": "/wt/one"},
+                        "bbbb2222": {"pid": 2, "cwd": "/wt/two"},
+                    }
+                }
+            )
+        )
+        client = RealNativeDaemonClient(roster_path=roster)
+        assert client.list_live_worker_homes() == frozenset(
+            {
+                WorkerHome("aaaa1111", Path("/wt/one")),
+                WorkerHome("bbbb2222", Path("/wt/two")),
+            }
+        )
+
+    def test_absent_roster_returns_empty_set(self, tmp_path: Path) -> None:
+        client = RealNativeDaemonClient(roster_path=tmp_path / "nope.json")
+        assert client.list_live_worker_homes() == frozenset()
+
+    def test_malformed_entry_returns_none(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        roster = tmp_path / "roster.json"
+        roster.write_text(json.dumps({"workers": {"aaaa1111": {"pid": 1}}}))
+        client = RealNativeDaemonClient(roster_path=roster)
+        with caplog.at_level("WARNING", logger="cw.native_daemon"):
+            assert client.list_live_worker_homes() is None
+        assert any("no usable cwd" in r.getMessage() for r in caplog.records)
+
+    def test_cwds_view_is_a_projection_of_homes(self, tmp_path: Path) -> None:
+        """list_live_worker_cwds and list_live_worker_homes share one parser
+        (#2480), so they can never disagree about what the roster says."""
+        roster = tmp_path / "roster.json"
+        roster.write_text(json.dumps({"workers": {"aaaa1111": {"cwd": "/wt/one"}}}))
+        client = RealNativeDaemonClient(roster_path=roster)
+        assert client.list_live_worker_cwds() == frozenset({Path("/wt/one")})
+        assert client.list_live_worker_homes() == frozenset(
+            {WorkerHome("aaaa1111", Path("/wt/one"))}
+        )
+
+
 class TestRealNativeDaemonClientShortIdsFailClosed:
     """list_live_session_short_ids_fail_closed: the requeue guard's view (#2275).
 
@@ -1118,6 +1168,27 @@ class TestFakeNativeDaemonClient:
         client.spawn_bg(cwd=tmp_path, prompt="x")
         client.roster_unreadable = True
         assert client.list_live_worker_cwds() is None
+
+    def test_worker_homes_track_live_spawns(self, tmp_path: Path) -> None:
+        client = FakeNativeDaemonClient()
+        first = client.spawn_bg(cwd=tmp_path / "one", prompt="a")
+        second = client.spawn_bg(cwd=tmp_path / "two", prompt="b")
+        assert client.list_live_worker_homes() == frozenset(
+            {
+                WorkerHome(first, tmp_path / "one"),
+                WorkerHome(second, tmp_path / "two"),
+            }
+        )
+        client.stop(first)
+        assert client.list_live_worker_homes() == frozenset(
+            {WorkerHome(second, tmp_path / "two")}
+        )
+
+    def test_worker_homes_none_when_roster_unreadable(self, tmp_path: Path) -> None:
+        client = FakeNativeDaemonClient()
+        client.spawn_bg(cwd=tmp_path, prompt="x")
+        client.roster_unreadable = True
+        assert client.list_live_worker_homes() is None
 
     def test_short_ids_fail_closed_none_when_roster_unreadable(
         self, tmp_path: Path

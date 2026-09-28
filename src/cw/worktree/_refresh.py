@@ -413,6 +413,13 @@ def live_session_worktree_paths() -> frozenset[Path] | None:
     Lives here rather than in ``cw.worktree_gc`` because that module imports
     ``cw.dev_queue``, whose requeue/lifecycle modules import this one -- a
     top-level import of it from here would be a cycle.
+
+    A dedicated module-level function (rather than a thin wrapper sharing a
+    private state-loading helper with :func:`_non_terminal_session_surface_refs`
+    below) so its existing test seam -- callers monkeypatch
+    ``cw.worktree._refresh.live_session_worktree_paths`` directly to control
+    what :func:`live_home_reason` sees for the session-homed side -- keeps
+    working unchanged.
     """
     try:
         state = load_state()
@@ -427,6 +434,42 @@ def live_session_worktree_paths() -> frozenset[Path] | None:
         ):
             live.add(session.worktree_path)
     return frozenset(live)
+
+
+def _non_terminal_session_surface_refs() -> frozenset[str] | None:
+    """Return ``surface_ref`` of every non-terminal cw session, or None (#2480).
+
+    The companion :func:`live_home_reason` needs to tell a daemon-roster
+    worker that still belongs to a live cw session apart from one whose
+    owning session already finished (or never existed) -- matching by
+    ``surface_ref`` rather than by worktree path, since a per-ticket
+    worktree is reused by many sessions across its pipeline lifetime and a
+    path match alone cannot tell which of them, if any, currently owns a
+    given roster entry.
+
+    Same fail-closed contract as :func:`live_session_worktree_paths`
+    (``None`` means "cannot rule out a live session"), and deliberately a
+    SEPARATE ``load_state()`` call rather than sharing one with it: the two
+    have independent test seams (this one has none patched anywhere yet;
+    ``live_session_worktree_paths`` is monkeypatched directly by many
+    existing tests), and merging them would make ``live_home_reason`` stop
+    consulting the monkeypatched ``live_session_worktree_paths`` seam that
+    those tests depend on.
+    """
+    try:
+        state = load_state()
+    except _STATE_READ_ERRORS as exc:
+        _log.warning(
+            "live-path guard: failed to load session state for surface_ref lookup: %s",
+            exc,
+        )
+        return None
+    return frozenset(
+        session.surface_ref
+        for session in state.sessions
+        if session.status in _NON_TERMINAL_SESSION_STATUSES
+        and session.surface_ref is not None
+    )
 
 
 def _normalize_path(path: Path) -> Path:
@@ -557,13 +600,22 @@ def live_home_reason(
     Consults BOTH sources and reports occupied when either says so:
 
     - cw's persisted session state (:func:`live_session_worktree_paths`), and
-    - *daemon*'s live workers, each recorded with the ``cwd`` it was spawned in
-      (:meth:`~cw.native_daemon.NativeDaemonClient.list_live_worker_cwds`) --
-      a worker can be live in the roster before, or after, cw state reflects
-      it. *daemon* is the caller's own client -- never defaulted here -- so a
-      test that injects :class:`~cw.native_daemon.FakeNativeDaemonClient` is
-      actually consulted instead of this function silently reading the host's
-      real roster.
+    - *daemon*'s live workers whose ``surface_ref`` still names a non-terminal
+      cw session (:meth:`~cw.native_daemon.NativeDaemonClient.
+      list_live_worker_homes`) -- a worker can be live in the roster before
+      cw state reflects it, so those are still counted. *daemon* is the
+      caller's own client -- never defaulted here -- so a test that injects
+      :class:`~cw.native_daemon.FakeNativeDaemonClient` is actually consulted
+      instead of this function silently reading the host's real roster.
+
+      A roster worker whose ``surface_ref`` maps to a session already in a
+      TERMINAL status (COMPLETED/TIMED_OUT), or to no cw session at all
+      (never tracked, or the record is gone), is NOT counted as occupying --
+      it is a leaked daemon worker the session-completion stop should have
+      cleaned up (#2480; see :mod:`cw.reconcile.leaked_workers` for the sweep
+      that clears it). Without this filter a finished worker's idle roster
+      entry reports its ticket's worktree occupied forever, and the ticket
+      can never be re-dispatched.
 
     Fails closed on the TARGET path exactly as before: any ``OSError``
     other than the deliberate ``FileNotFoundError`` carve-out (see
@@ -595,9 +647,12 @@ def live_home_reason(
     sessions = live_session_worktree_paths()
     if sessions is None:
         return "session state unreadable, cannot rule out a live session"
-    workers = daemon.list_live_worker_cwds()
+    workers = daemon.list_live_worker_homes()
     if workers is None:
         return "daemon roster unreadable, cannot rule out a live session"
+    surface_refs = _non_terminal_session_surface_refs()
+    if surface_refs is None:
+        return "session state unreadable, cannot rule out a live session"
     try:
         target = _normalize_path(wt_path)
     except OSError as exc:
@@ -606,8 +661,12 @@ def live_home_reason(
     session_homes, skipped_sessions = _normalize_records(
         sessions, "session", warned_unresolvable
     )
+    # Only a worker whose surface_ref still names a non-terminal cw session
+    # counts as occupying -- a terminal-mapped or session-less roster entry
+    # is a leaked worker, not a live one (#2480).
+    live_worker_paths = (home.cwd for home in workers if home.short_id in surface_refs)
     worker_homes, skipped_workers = _normalize_records(
-        workers, "worker", warned_unresolvable
+        live_worker_paths, "worker", warned_unresolvable
     )
     return _home_match_reason(
         target, session_homes, worker_homes, skipped_sessions + skipped_workers

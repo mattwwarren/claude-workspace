@@ -79,6 +79,11 @@ class WedgeFinding:
     ticket_id: str | None
     recipe: str
     state_file: str
+    # Daemon roster short id (#2480), set only by
+    # ``wedge/leaked-daemon-worker`` findings -- that class keys off a live
+    # roster entry, which may have no matching cw ``session_id`` at all (a
+    # leaked worker that was never tracked, or whose record is gone).
+    daemon_short_id: str | None = None
 
 
 @dataclass

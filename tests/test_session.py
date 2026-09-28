@@ -1451,11 +1451,16 @@ class TestDoneSession:
         updated = load_state()
         assert updated.sessions[0].status == SessionStatus.COMPLETED
 
-    def test_already_completed_raises(
+    def test_already_completed_stops_daemon_and_returns(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
     ) -> None:
+        """#2480: a repeat `cw done` on an already-COMPLETED DAEMON session
+        stops any stray daemon surface instead of raising -- a completion
+        path that never called daemon.stop() (the bug this closes) can leave
+        a finished worker sitting live in the roster, occupying the ticket's
+        worktree forever."""
         state = CwState(
             sessions=[
                 Session(
@@ -1464,14 +1469,76 @@ class TestDoneSession:
                     client="test-client",
                     purpose=SessionPurpose.IMPL,
                     status=SessionStatus.COMPLETED,
+                    origin=SessionOrigin.DAEMON,
+                    workspace_path=sample_client.workspace_path,
+                    surface_ref="deadbeef",
+                )
+            ]
+        )
+        save_state(state)
+        daemon = FakeNativeDaemonClient()
+
+        done_session("test-client/impl", native_daemon=daemon)
+
+        assert daemon.stop_calls == ["deadbeef"]
+        updated = load_state()
+        assert updated.sessions[0].status == SessionStatus.COMPLETED
+
+    def test_already_completed_user_origin_skips_daemon_stop(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+    ) -> None:
+        """A USER-origin session (no daemon surface to leak) is a clean no-op."""
+        state = CwState(
+            sessions=[
+                Session(
+                    id="done0007",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.COMPLETED,
+                    origin=SessionOrigin.USER,
                     workspace_path=sample_client.workspace_path,
                 )
             ]
         )
         save_state(state)
+        daemon = FakeNativeDaemonClient()
 
-        with pytest.raises(CwError, match="already completed"):
-            done_session("test-client/impl")
+        done_session("test-client/impl", native_daemon=daemon)
+
+        assert daemon.stop_calls == []
+
+    def test_stops_daemon_surface_on_completion(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+    ) -> None:
+        """#2480: cw done stops the daemon surface on the normal completion
+        path too -- previously done_session never touched the daemon at all."""
+        state = CwState(
+            sessions=[
+                Session(
+                    id="done0008",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    origin=SessionOrigin.DAEMON,
+                    workspace_path=sample_client.workspace_path,
+                    surface_ref="cafebabe",
+                )
+            ]
+        )
+        save_state(state)
+        daemon = FakeNativeDaemonClient()
+
+        done_session("test-client/impl", native_daemon=daemon)
+
+        assert daemon.stop_calls == ["cafebabe"]
+        updated = load_state()
+        assert updated.sessions[0].status == SessionStatus.COMPLETED
 
     def test_cleanup_calls_remove_worktree(
         self,

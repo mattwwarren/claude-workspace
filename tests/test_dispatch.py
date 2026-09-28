@@ -108,6 +108,7 @@ from tests.conftest import (
     _make_tick_summary,
     _make_ticket_task,
     _symlink_loop,
+    _vouch_for_roster_worker,
     git_in,
     occupy_worktree,
     tree_fingerprint,
@@ -4186,7 +4187,12 @@ class TestStaleWorktreeYieldsToLiveOccupant:
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         self._stub_stale(monkeypatch, unsaved=None)
         daemon = FakeNativeDaemonClient()
-        daemon.seed_live_worker(_symlink_loop(tmp_dispatch_dirs, "poisoned"))
+        short_id = daemon.seed_live_worker(_symlink_loop(tmp_dispatch_dirs, "poisoned"))
+        # #2480: the worker must be vouched for (a matching non-terminal
+        # session) or it is excluded as a leaked worker before its poisoned
+        # path is ever normalized, and the warning this test asserts on
+        # never fires.
+        _vouch_for_roster_worker(sample_client_config, short_id)
         warned: set[UnresolvablePathWarningKey] = set()
 
         caplog.set_level(logging.WARNING, logger="cw.worktree._refresh")
@@ -4228,7 +4234,9 @@ class TestStaleWorktreeYieldsToLiveOccupant:
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         self._stub_stale(monkeypatch, unsaved=None)
         daemon = FakeNativeDaemonClient()
-        daemon.seed_live_worker(_symlink_loop(tmp_dispatch_dirs, "poisoned"))
+        short_id = daemon.seed_live_worker(_symlink_loop(tmp_dispatch_dirs, "poisoned"))
+        # #2480: see the deduped-warning test above for why vouching is needed.
+        _vouch_for_roster_worker(sample_client_config, short_id)
         warned: set[UnresolvablePathWarningKey] = set()
 
         caplog.set_level(logging.WARNING, logger="cw.worktree._refresh")
@@ -4246,7 +4254,10 @@ class TestStaleWorktreeYieldsToLiveOccupant:
                 == 1
             )
 
-            daemon.seed_live_worker(_symlink_loop(tmp_dispatch_dirs, "poisoned-2"))
+            second_short_id = daemon.seed_live_worker(
+                _symlink_loop(tmp_dispatch_dirs, "poisoned-2")
+            )
+            _vouch_for_roster_worker(sample_client_config, second_short_id)
             frozen.tick(delta=timedelta(seconds=_OCCUPIED_DEFER_SECONDS + 1))
             second = dispatch_tick(
                 simple_config, native_daemon=daemon, warned_unresolvable=warned
