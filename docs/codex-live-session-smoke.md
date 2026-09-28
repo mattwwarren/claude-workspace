@@ -11,7 +11,8 @@ CW_CODEX_LIVE_SESSION_SMOKE=1 python scripts/probe_codex_live_session.py --model
 
 Without the exact opt-in value, it launches nothing and returns a skipped
 result. With opt-in it validates exactly `codex --version`, initializes one
-disposable temporary Git repository, then runs:
+disposable temporary Git repository below `$HOME/.cache/cw-live-tests`, then
+runs:
 
 ```text
 codex exec --json --sandbox read-only --ignore-user-config --model MODEL PROMPT
@@ -30,6 +31,16 @@ memory. There is no `-o` file. JSONL acceptance requires one valid
 `thread.started` ID before one terminal event; only `turn.completed` passes.
 Malformed, duplicate, out-of-order, failed, missing, or invalid events fail.
 
+The disposable repo and subprocess scratch directory are explicitly placed
+under the home tree so snap-confined Codex can access them. The subprocess
+environment removes inherited `GIT_*` routing variables, sets `PWD`, `TMPDIR`,
+`TMP`, and `TEMP` to the isolated paths, and preserves authentication
+environment. The existing `CODEX_HOME` (or the normal `~/.codex` default) is
+passed as an absolute path; if it resolves inside the source checkout, the
+probe stops with `error_code: "unsafe_environment"` rather than risk writing
+session state into the checkout. The temp parent is also validated to remain
+outside the checkout.
+
 The script prints exactly one compact JSON object to stdout and nothing to
 stderr. Its fixed keys are `status`, `cli_version`, `model`, `session_id`,
 `create`, `resume`, and `error_code`; it never prints paths, prompts, raw JSONL,
@@ -42,7 +53,8 @@ stderr, environment values, exception text, or authentication material.
 `turn.failed`, and null. `status` is `skipped`, `passed`, or `failed`; a skipped
 run uses `error_code: "opt_in_required"`, a passing run uses `error_code: null`,
 and a failure uses one of the documented `*_timeout`, `*_nonzero_exit`,
-JSONL-validation, setup, version, model, ID, or cleanup error codes. A failed
+JSONL-validation, setup, version, model, ID, unsafe-environment, or cleanup
+error codes. A create/resume launch failure uses `cli_unavailable`; a failed
 command exits 1; opt-out and a passing probe exit 0.
 
 The temporary repository is always cleaned up. One normal persistent Codex
