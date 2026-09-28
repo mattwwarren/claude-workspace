@@ -26,29 +26,36 @@ inherits the create session's read-only policy. The probe never uses `--last`,
 `--ephemeral`, `--approve-for-me`,
 `--dangerously-bypass-approvals-and-sandbox`, or `workspace-write`.
 
-Each subprocess has a 120-second timeout. Stdout is read incrementally with a
-1 MiB cap; exceeding it terminates that process and fails JSONL validation.
-Stderr is discarded, and no `-o` file is created. The parser reads the bounded
-JSONL stream line by line and releases it before starting the resume command.
-Acceptance requires one valid `thread.started` ID before one terminal event;
-only `turn.completed` passes. Malformed, duplicate, out-of-order, failed,
-missing, oversized, or invalid events fail.
+Each subprocess has a 120-second timeout and runs in its own process group on
+POSIX. Timeout or output overflow kills the group, including descendants that
+might otherwise keep stdout open. The stdout reader has a bounded shutdown
+wait, so it cannot defeat the process timeout. Stdout is read incrementally
+with a 1 MiB cap; exceeding it fails JSONL validation. Stderr is discarded,
+and no `-o` file is created. The parser reads the bounded JSONL stream line by
+line and releases it before starting the resume command. Acceptance requires
+one valid `thread.started` ID before one terminal event; only
+`turn.completed` passes. Malformed, duplicate, out-of-order, failed, missing,
+oversized, or invalid events fail.
 
 The model value must be 1–64 characters, begin with an alphanumeric character,
 and contain only letters, digits, `.`, `_`, or `-`. Reserved Codex flags and
 policy values—including `--last`, `-o`, `--sandbox`, and `workspace-write`—are
-rejected before any subprocess is launched.
+rejected before any subprocess is launched. Even an option-shaped value such
+as `--model --last` produces the sanitized `invalid_model` JSON result with no
+argparse text on stderr.
 
 The disposable repo and subprocess scratch directory are explicitly placed
-under the home tree so snap-confined Codex can access them. The subprocess
-environment removes inherited `GIT_*` routing variables, sets `PWD`, `TMPDIR`,
-`TMP`, and `TEMP` to the isolated paths, and preserves authentication
-environment. The existing `CODEX_HOME` (or the normal `~/.codex` default) is
-passed as an absolute path. If it resolves inside the source checkout, or the
-temporary parent cannot be proven to remain outside the checkout, the probe
-stops with the approved `error_code: "repo_setup_failed"` rather than emit an
-error outside the documented closed enum or risk writing session state into
-the checkout.
+under the home tree so snap-confined Codex can access them. Child processes
+receive a minimal allowlisted environment: executable search path, an isolated
+temporary `HOME`, `CODEX_HOME`, `CODEX_API_KEY`/`OPENAI_API_KEY`, proxy/TLS
+transport variables, locale, and platform runtime paths. Git routing, XDG,
+Codex policy/profile, and unrelated runtime variables are not inherited. The
+existing `CODEX_HOME` (or the normal `~/.codex` default) is passed as an
+absolute path. If it resolves inside the source checkout, or the temporary
+parent cannot be proven to remain outside the checkout, the probe stops with
+the approved `error_code: "repo_setup_failed"` rather than emit an error
+outside the documented closed enum or risk writing session state into the
+checkout.
 
 The script prints exactly one compact JSON object to stdout and nothing to
 stderr. Its fixed keys are `status`, `cli_version`, `model`, `session_id`,

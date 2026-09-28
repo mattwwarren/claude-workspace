@@ -8,22 +8,28 @@ import io
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal, TypedDict, cast
+from typing import Final, Literal, NoReturn, TypedDict, cast
 
 FIXED_PROMPT = "Reply exactly cw-session-smoke-ok. Do not use tools or modify files."
 FIXED_RESUME_PROMPT = (
     "Reply exactly cw-session-smoke-resumed-ok. Do not use tools or modify files."
 )
 PROCESS_TIMEOUT_SECONDS = 120
+PROCESS_CLEANUP_TIMEOUT_SECONDS = 1
+PROCESS_READER_JOIN_TIMEOUT_SECONDS = 1
 MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024
 PROCESS_OUTPUT_CHUNK_BYTES = 64 * 1024
 MAX_VERSION_LENGTH = 64
+CODEX_EXECUTABLE: Final = "codex"
+CODEX_EXEC_SUBCOMMAND: Final = "exec"
+CODEX_VERSION_FLAG: Final = "--version"
 _VERSION_RE = re.compile(r"^codex-cli [0-9]+\.[0-9]+\.[0-9]+$")
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -38,6 +44,28 @@ _FORBIDDEN_MODEL_VALUES = frozenset(
         "-o",
         "read-only",
         "workspace-write",
+    }
+)
+_CHILD_ENV_KEYS = frozenset(
+    {
+        "path",
+        "home",
+        "userprofile",
+        "systemroot",
+        "windir",
+        "openai_api_key",
+        "codex_api_key",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+        "ssl_cert_file",
+        "ssl_cert_dir",
+        "requests_ca_bundle",
+        "curl_ca_bundle",
+        "lang",
+        "lc_all",
+        "lc_ctype",
     }
 )
 
@@ -132,6 +160,7 @@ class ProcessOutcome:
     timed_out: bool
     unavailable: bool = False
     output_exceeded_limit: bool = False
+    reader_incomplete: bool = False
 
 
 @dataclass
@@ -145,6 +174,29 @@ class _StreamState:
     session_id: str | None = None
     terminal_event: TerminalEvent | None = None
     thread_seen: bool = False
+
+
+@dataclass(frozen=True)
+class _VersionSuccess:
+    cli_version: str
+
+
+@dataclass(frozen=True)
+class _VersionFailure:
+    error_code: Literal["cli_unavailable", "version_unavailable", "version_invalid"]
+
+
+type _VersionOutcome = _VersionSuccess | _VersionFailure
+
+
+class _ArgumentParseError(Exception):
+    """A CLI argument error that must be rendered through the JSON contract."""
+
+
+class _SanitizedArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        del message
+        raise _ArgumentParseError
 
 
 def _decode_event(line: str) -> tuple[dict[str, object] | None, ParseError | None]:
@@ -223,7 +275,15 @@ def _parse_version(stdout: str) -> str | None:
     )
 
 
-def _kill_process(process: subprocess.Popen[bytes]) -> None:
+def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
+    """Kill the command and descendants which may keep stdout open."""
+    if os.name == "posix" and process.pid is not None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        else:
+            return
     with contextlib.suppress(OSError):
         process.kill()
 
@@ -245,12 +305,12 @@ def _start_stdout_reader(
                     if remaining > 0:
                         capture.data.extend(chunk[:remaining])
                     capture.exceeded_limit = True
-                    _kill_process(process)
+                    _kill_process_group(process)
                 elif not capture.exceeded_limit:
                     capture.data.extend(chunk)
-        except OSError:
+        except (OSError, ValueError):
             capture.exceeded_limit = True
-            _kill_process(process)
+            _kill_process_group(process)
 
     reader = threading.Thread(target=drain_stdout, daemon=True)
     reader.start()
@@ -261,12 +321,20 @@ def _finish_stdout_capture(
     process: subprocess.Popen[bytes],
     reader: threading.Thread,
     capture: _OutputCapture,
-) -> str:
-    reader.join()
+) -> tuple[str, bool]:
+    reader.join(timeout=PROCESS_READER_JOIN_TIMEOUT_SECONDS)
+    reader_incomplete = reader.is_alive()
+    if reader_incomplete:
+        _kill_process_group(process)
+        reader.join(timeout=PROCESS_READER_JOIN_TIMEOUT_SECONDS)
     if process.stdout is not None:
         with contextlib.suppress(OSError):
             process.stdout.close()
-    return bytes(capture.data).decode("utf-8", errors="replace")
+    reader.join(timeout=PROCESS_READER_JOIN_TIMEOUT_SECONDS)
+    return (
+        bytes(capture.data).decode("utf-8", errors="replace"),
+        reader_incomplete or reader.is_alive(),
+    )
 
 
 def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessOutcome:
@@ -278,6 +346,7 @@ def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessO
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            start_new_session=os.name == "posix",
         )
     except (FileNotFoundError, OSError):
         return ProcessOutcome(None, "", False, unavailable=True)
@@ -289,23 +358,25 @@ def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessO
         exit_code = process.wait(timeout=PROCESS_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         timed_out = True
-        _kill_process(process)
+        _kill_process_group(process)
         try:
-            exit_code = process.wait()
-        except OSError:
+            exit_code = process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
+        except (OSError, subprocess.TimeoutExpired):
+            _kill_process_group(process)
             exit_code = None
             unavailable = True
     except OSError:
         exit_code = None
         unavailable = True
-        _kill_process(process)
-    stdout = _finish_stdout_capture(process, reader, capture)
+        _kill_process_group(process)
+    stdout, reader_incomplete = _finish_stdout_capture(process, reader, capture)
     return ProcessOutcome(
         exit_code,
         stdout,
         timed_out,
         unavailable=unavailable,
         output_exceeded_limit=capture.exceeded_limit,
+        reader_incomplete=reader_incomplete,
     )
 
 
@@ -346,14 +417,14 @@ def _attempt(
 ) -> _Attempt:
     outcome = _run_process(argv, cwd=cwd, env=env)
     stream = _parse_stream(outcome.stdout)
-    if outcome.output_exceeded_limit:
+    if outcome.output_exceeded_limit or outcome.reader_incomplete:
         stream = ParsedStream(stream.session_id, None, "malformed_jsonl")
     error_code: ErrorCode | None = None
     if outcome.timed_out:
         error_code = "create_timeout" if stage == "create" else "resume_timeout"
     elif outcome.unavailable:
         error_code = "cli_unavailable"
-    elif outcome.output_exceeded_limit:
+    elif outcome.output_exceeded_limit or outcome.reader_incomplete:
         error_code = _stream_error_code(stage, "malformed_jsonl")
     elif outcome.exit_code != 0:
         error_code = (
@@ -375,6 +446,7 @@ def _attempt(
         outcome.timed_out,
         unavailable=outcome.unavailable,
         output_exceeded_limit=outcome.output_exceeded_limit,
+        reader_incomplete=outcome.reader_incomplete,
     )
     return _Attempt(compact_outcome, stream, error_code)
 
@@ -413,8 +485,8 @@ def _common_exec_flags(model: str, *, after_json: tuple[str, ...] = ()) -> list[
 
 def _create_argv(model: str) -> list[str]:
     return [
-        "codex",
-        "exec",
+        CODEX_EXECUTABLE,
+        CODEX_EXEC_SUBCOMMAND,
         *_common_exec_flags(model, after_json=("--sandbox", "read-only")),
         FIXED_PROMPT,
     ]
@@ -422,8 +494,8 @@ def _create_argv(model: str) -> list[str]:
 
 def _resume_argv(session_id: str, model: str) -> list[str]:
     return [
-        "codex",
-        "exec",
+        CODEX_EXECUTABLE,
+        CODEX_EXEC_SUBCOMMAND,
         "resume",
         session_id,
         *_common_exec_flags(model),
@@ -456,14 +528,18 @@ def _codex_home(checkout: Path) -> Path | None:
 
 
 def _child_environment(*, cwd: Path, scratch: Path, codex_home: Path) -> dict[str, str]:
-    """Preserve auth/config while removing ambient Git and temp path routing."""
-    environment = os.environ.copy()
-    for key in tuple(environment):
-        if key.startswith("GIT_"):
-            del environment[key]
+    """Build a minimal env, retaining only paths, auth and network transport."""
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key.casefold() in _CHILD_ENV_KEYS or key.casefold().startswith("lc_")
+    }
+    isolated_home = str(scratch.parent)
     environment.update(
         {
             "CODEX_HOME": str(codex_home),
+            "HOME": isolated_home,
+            "USERPROFILE": isolated_home,
             "PWD": str(cwd),
             "TMPDIR": str(scratch),
             "TMP": str(scratch),
@@ -549,24 +625,16 @@ def _run_session(
     )
 
 
-def _version_result(
-    model: str, *, cwd: Path, env: dict[str, str]
-) -> tuple[str | None, SmokeResult | None]:
-    outcome = _run_process(["codex", "--version"], cwd=cwd, env=env)
+def _version_result(*, cwd: Path, env: dict[str, str]) -> _VersionOutcome:
+    outcome = _run_process([CODEX_EXECUTABLE, CODEX_VERSION_FLAG], cwd=cwd, env=env)
     if outcome.unavailable:
-        return None, _result(
-            "failed", cli_version=None, model=model, error_code="cli_unavailable"
-        )
+        return _VersionFailure("cli_unavailable")
     if outcome.timed_out or outcome.exit_code != 0:
-        return None, _result(
-            "failed", cli_version=None, model=model, error_code="version_unavailable"
-        )
-    version = _parse_version(outcome.stdout)
+        return _VersionFailure("version_unavailable")
+    version = None if outcome.reader_incomplete else _parse_version(outcome.stdout)
     if version is None:
-        return None, _result(
-            "failed", cli_version=None, model=model, error_code="version_invalid"
-        )
-    return version, None
+        return _VersionFailure("version_invalid")
+    return _VersionSuccess(version)
 
 
 def _run_disposable(*, model: str) -> SmokeResult:
@@ -603,7 +671,6 @@ def _run_disposable(*, model: str) -> SmokeResult:
     result = _result(
         "failed", cli_version=None, model=model, error_code="repo_setup_failed"
     )
-    cli_version: str | None = None
     try:
         temp_root = Path(temporary_directory.name).resolve()
         if _is_within(temp_root, checkout) or _is_within(codex_home, temp_root):
@@ -621,27 +688,25 @@ def _run_disposable(*, model: str) -> SmokeResult:
             env = _child_environment(
                 cwd=worktree, scratch=scratch, codex_home=codex_home
             )
-            cli_version, failure = _version_result(model, cwd=worktree, env=env)
-            if failure is not None:
-                result = failure
-            elif cli_version is None:
+            version_outcome = _version_result(cwd=worktree, env=env)
+            if isinstance(version_outcome, _VersionFailure):
                 result = _result(
                     "failed",
                     cli_version=None,
                     model=model,
-                    error_code="version_unavailable",
+                    error_code=version_outcome.error_code,
                 )
             else:
                 result = _run_session(
                     worktree=worktree,
                     env=env,
-                    cli_version=cli_version,
+                    cli_version=version_outcome.cli_version,
                     model=model,
                 )
     except (OSError, RuntimeError):
         result = _result(
             "failed",
-            cli_version=cli_version,
+            cli_version=None,
             model=model,
             error_code="repo_setup_failed",
         )
@@ -683,9 +748,13 @@ def run_probe(model: str | None) -> SmokeResult:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the Codex session smoke probe.")
+    parser = _SanitizedArgumentParser(description="Run the Codex session smoke probe.")
     parser.add_argument("--model", help="Explicit Codex model identifier.")
-    result = run_probe(parser.parse_args(argv).model)
+    try:
+        model = parser.parse_args(argv).model
+    except _ArgumentParseError:
+        model = None
+    result = run_probe(model)
     sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
     return 0 if result["status"] in {"skipped", "passed"} else 1
 
