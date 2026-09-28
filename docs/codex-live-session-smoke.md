@@ -45,20 +45,23 @@ as `--model --last` produces the sanitized `invalid_model` JSON result with no
 argparse text on stderr.
 
 The disposable repo and subprocess scratch directory are explicitly placed
-under the home tree so snap-confined Codex can access them. Child processes
+under the home tree so snap-confined Codex can access them. Codex processes
 receive a minimal allowlisted environment: executable search path, an isolated
 temporary `HOME`, `CODEX_HOME`, `CODEX_API_KEY`/`OPENAI_API_KEY`, proxy/TLS
-transport variables, locale, and platform runtime paths. Git routing, XDG,
-Codex policy/profile, and unrelated runtime variables are not inherited. The
-existing `CODEX_HOME` (or the normal `~/.codex` default) is passed as an
-absolute path. If it resolves inside the source checkout, or the temporary
-parent cannot be proven to remain outside the checkout, the probe stops with
-the approved `error_code: "repo_setup_failed"` rather than emit an error
-outside the documented closed enum or risk writing session state into the
-checkout.
+transport variables, locale, and platform runtime paths. Git initialization
+uses a separate allowlist that excludes `CODEX_HOME` and API keys. Git routing,
+XDG, Codex policy/profile, and unrelated runtime variables are not inherited.
+The existing `CODEX_HOME` (or the normal `~/.codex` default) is passed as an
+absolute path. The probe rejects a home inside the source checkout, a symlinked
+`sessions` artifact directory, or a `sessions` directory resolving into the
+checkout. If the temporary parent cannot be proven to remain outside the
+checkout, the probe stops with the approved `error_code: "repo_setup_failed"`
+rather than emit an error outside the documented closed enum or risk writing
+session state into the checkout.
 
-The script prints exactly one compact JSON object to stdout and nothing to
-stderr. Its fixed keys are `status`, `cli_version`, `model`, `session_id`,
+Except for the standard human-readable `--help` response, the script prints
+exactly one compact JSON object to stdout and nothing to stderr. Its fixed keys
+are `status`, `cli_version`, `model`, `session_id`,
 `create`, `resume`, and `error_code`; it never prints paths, prompts, raw JSONL,
 stderr, environment values, exception text, or authentication material.
 

@@ -5,11 +5,13 @@ from __future__ import annotations
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import cast
 
@@ -181,6 +183,33 @@ def set_runner(
 
 def forbid_temporary_directory(*_args: object, **_kwargs: object) -> None:
     pytest.fail("created a temporary repository before the probe was accepted")
+
+
+def process_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    return state.rsplit(")", 1)[1].strip().split()[0] != "Z"
+
+
+def wait_for_process_exit(pid: int, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while process_is_running(pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return not process_is_running(pid)
+
+
+def cleanup_process(pid: int | None) -> None:
+    if pid is not None and process_is_running(pid):
+        with suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
 
 
 class TestParser:
@@ -408,18 +437,23 @@ class TestProbe:
             assert cwd.is_relative_to(Path.home() / ".cache" / "cw-live-tests")
             assert not probe._is_within(cwd, checkout)
             assert env["PWD"] == str(cwd)
-            assert env["CODEX_HOME"] == str(configured_codex_home)
             assert env["HOME"] == env["USERPROFILE"] == str(cwd.parent)
             assert env["TMPDIR"] == env["TMP"] == env["TEMP"]
             assert Path(env["TMPDIR"]).is_relative_to(cwd.parent)
             assert "GIT_DIR" not in env
             assert "GIT_WORK_TREE" not in env
-            assert env["CODEX_API_KEY"] == "auth-material-secret"
-            assert env["OPENAI_API_KEY"] == "openai-auth-secret"
             assert env["HTTPS_PROXY"] == "https://proxy.example:8443"
             assert "CODEX_SANDBOX" not in env
             assert "XDG_CONFIG_HOME" not in env
             assert "NODE_OPTIONS" not in env
+            if call["argv"] == ["git", "init", "--quiet"]:
+                assert "CODEX_HOME" not in env
+                assert "CODEX_API_KEY" not in env
+                assert "OPENAI_API_KEY" not in env
+            else:
+                assert env["CODEX_HOME"] == str(configured_codex_home)
+                assert env["CODEX_API_KEY"] == "auth-material-secret"
+                assert env["OPENAI_API_KEY"] == "openai-auth-secret"
             assert all(
                 key.casefold() in probe._CHILD_ENV_KEYS
                 or key.casefold().startswith("lc_")
@@ -496,6 +530,40 @@ class TestProbe:
         assert attempt.outcome.output_exceeded_limit
         assert attempt.outcome.stdout == ""
         assert attempt.stream.error == "malformed_jsonl"
+
+    @pytest.mark.skipif(
+        sys.platform != "linux", reason="process liveness check uses /proc"
+    )
+    def test_output_overflow_terminates_live_producer(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(probe, "MAX_PROCESS_OUTPUT_BYTES", 1024)
+        code = (
+            "import os, time; "
+            "print(f'DESCENDANT_PID={os.getpid()}', flush=True); "
+            "os.write(1, b'x' * 8192); time.sleep(30)"
+        )
+        pid: int | None = None
+        started = time.monotonic()
+        try:
+            result = probe._run_process(
+                [sys.executable, "-c", code],
+                cwd=tmp_path,
+                env=os.environ.copy(),
+            )
+            elapsed = time.monotonic() - started
+            pid_line = next(
+                line
+                for line in result.stdout.splitlines()
+                if line.startswith("DESCENDANT_PID=")
+            )
+            pid = int(pid_line.split("=", 1)[1])
+            assert result.output_exceeded_limit
+            assert result.exit_code != 0
+            assert elapsed < 5
+            assert wait_for_process_exit(pid)
+        finally:
+            cleanup_process(pid)
 
     @pytest.mark.parametrize(
         ("kwargs", "error"),
@@ -665,6 +733,19 @@ class TestProbe:
         set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
         assert probe.run_probe(MODEL)["error_code"] == "repo_setup_failed"
 
+    def test_codex_home_sessions_symlink_into_checkout_fails_before_launch(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / probe.CODEX_SESSION_ARTIFACT_DIR).symlink_to(
+            probe._checkout_root(), target_is_directory=True
+        )
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
+        assert probe.run_probe(MODEL)["error_code"] == "repo_setup_failed"
+
     def test_codex_home_defaults_to_home_dot_codex(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -681,25 +762,38 @@ class TestProbe:
         assert result.stdout == "\ufffd"
 
     @pytest.mark.skipif(
-        os.name != "posix", reason="process-group termination is POSIX-specific"
+        sys.platform != "linux", reason="process liveness check uses /proc"
     )
     def test_reader_shutdown_kills_descendant_holding_stdout(
         self, tmp_path: Path
     ) -> None:
         code = (
-            "import subprocess, sys; "
-            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+            "import os, subprocess, sys; "
+            "child = subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(30)']); "
+            "print(f'DESCENDANT_PID={child.pid}', flush=True); "
             "print('parent-finished', flush=True)"
         )
+        pid: int | None = None
         started = time.monotonic()
-        result = probe._run_process(
-            [sys.executable, "-c", code], cwd=tmp_path, env=os.environ.copy()
-        )
-        elapsed = time.monotonic() - started
-        assert result.exit_code == 0
-        assert result.reader_incomplete
-        assert "parent-finished" in result.stdout
-        assert elapsed < 5
+        try:
+            result = probe._run_process(
+                [sys.executable, "-c", code], cwd=tmp_path, env=os.environ.copy()
+            )
+            elapsed = time.monotonic() - started
+            pid_line = next(
+                line
+                for line in result.stdout.splitlines()
+                if line.startswith("DESCENDANT_PID=")
+            )
+            pid = int(pid_line.split("=", 1)[1])
+            assert result.exit_code == 0
+            assert result.reader_incomplete
+            assert "parent-finished" in result.stdout
+            assert elapsed < 5
+            assert wait_for_process_exit(pid)
+        finally:
+            cleanup_process(pid)
 
     @pytest.mark.parametrize("create_code", [0, 7])
     def test_cleanup_failure_preserves_sanitized_result(
@@ -800,3 +894,15 @@ def test_main_emits_one_json_line_and_no_stderr(
     assert captured.err == ""
     assert captured.out.count("\n") == 1
     assert json.loads(captured.out)["error_code"] == "opt_in_required"
+
+
+def test_main_help_is_the_documented_human_readable_exception(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        probe.main(["--help"])
+    captured = capsys.readouterr()
+    assert exit_info.value.code == 0
+    assert captured.out.startswith("usage:")
+    assert "--model" in captured.out
+    assert captured.err == ""
