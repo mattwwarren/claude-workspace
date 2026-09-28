@@ -37,12 +37,14 @@ printing a traceback. The stdout reader has a bounded shutdown wait, so it
 cannot defeat the process timeout. Stdout is read incrementally with a 1 MiB
 cap; exceeding it fails JSONL validation. Stderr is discarded, and no `-o`
 file is created. The parser reads the bounded JSONL stream line by line and
-releases it before starting the resume command. It accepts the known
-nonterminal event types `turn.started`, `item.started`, `item.updated`, and
-`item.completed`; unknown event types are rejected. Acceptance requires one
-valid `thread.started` ID before one terminal event; only `turn.completed`
-passes. Malformed, duplicate, out-of-order, failed, missing, oversized, or
-invalid events fail.
+releases it before starting the resume command. It recognizes `turn.started`,
+`item.started`, `item.updated`, and `item.completed`; a top-level `error` event
+must contain a string message. Well-formed unrelated event types are ignored
+for forward compatibility, while unknown `turn.*` or terminal-shaped event
+types are rejected. An error event followed by `turn.completed` cannot pass;
+`turn.failed` remains a failure. Acceptance requires one valid `thread.started`
+ID before one terminal event; only `turn.completed` passes. Malformed,
+duplicate, out-of-order, failed, missing, oversized, or invalid events fail.
 
 The model value must be 1–64 characters, begin with an alphanumeric character,
 and contain only letters, digits, `.`, `_`, or `-`. Reserved Codex flags and

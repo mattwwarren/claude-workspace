@@ -30,6 +30,7 @@ _REAL_POPEN = subprocess.Popen
 def isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Keep the probe's snap-visible temporary root inside pytest's sandbox."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
 
 
 def stream(session: str = SESSION, terminal: str = "turn.completed") -> str:
@@ -328,15 +329,45 @@ class TestParser:
         )
         assert parsed.error == "invalid_terminal"
 
-    def test_unknown_nonterminal_event_is_rejected(self) -> None:
+    def test_future_unrelated_nonterminal_event_is_ignored(self) -> None:
         parsed = probe._parse_stream(
             jsonl(
                 {"type": "thread.started", "thread_id": SESSION},
-                {"type": "error", "message": "future terminal error"},
+                {"type": "future.notice", "detail": "ignored"},
                 {"type": "turn.completed"},
             )
         )
-        assert parsed.error == "malformed_jsonl"
+        assert parsed == probe.ParsedStream(SESSION, "turn.completed", None)
+
+    def test_error_event_before_failed_turn_is_structurally_valid(self) -> None:
+        parsed = probe._parse_stream(
+            jsonl(
+                {"type": "thread.started", "thread_id": SESSION},
+                {"type": "error", "message": "Codex failure"},
+                {"type": "turn.failed"},
+            )
+        )
+        assert parsed == probe.ParsedStream(SESSION, "turn.failed", None)
+
+    def test_error_event_does_not_allow_a_success_terminal(self) -> None:
+        parsed = probe._parse_stream(
+            jsonl(
+                {"type": "thread.started", "thread_id": SESSION},
+                {"type": "error", "message": "Codex failure"},
+                {"type": "turn.completed"},
+            )
+        )
+        assert parsed.error == "invalid_terminal"
+
+    def test_unknown_terminal_suffix_is_rejected(self) -> None:
+        parsed = probe._parse_stream(
+            jsonl(
+                {"type": "thread.started", "thread_id": SESSION},
+                {"type": "session.completed"},
+                {"type": "turn.completed"},
+            )
+        )
+        assert parsed.error == "invalid_terminal"
 
 
 class TestProbe:
@@ -630,6 +661,59 @@ class TestProbe:
             signal.signal(signal.SIGUSR1, previous_handler)
             cleanup_process(pid)
 
+    @pytest.mark.skipif(
+        sys.platform != "linux" or not hasattr(signal, "pthread_sigmask"),
+        reason="launch interruption check requires POSIX signal masking and /proc",
+    )
+    def test_interrupt_during_launch_kills_and_reaps_child(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        child_pids: list[int] = []
+
+        def interrupt_parent(_signum: int, _frame: object) -> None:
+            raise KeyboardInterrupt
+
+        def launch_then_interrupt(
+            argv: list[str],
+            *,
+            cwd: Path,
+            env: dict[str, str],
+            stdin: int | None,
+            stdout: int | None,
+            stderr: int | None,
+            start_new_session: bool,
+        ) -> subprocess.Popen[bytes]:
+            child = _REAL_POPEN(
+                argv,
+                cwd=cwd,
+                env=env,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+                start_new_session=start_new_session,
+            )
+            child_pids.append(child.pid)
+            os.kill(os.getpid(), signal.SIGINT)
+            return child
+
+        previous_handler = signal.signal(signal.SIGINT, interrupt_parent)
+        monkeypatch.setattr(
+            "scripts.probe_codex_live_session.subprocess.Popen", launch_then_interrupt
+        )
+        try:
+            outcome = probe._run_process(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd=tmp_path,
+                env=os.environ.copy(),
+            )
+            assert outcome.timed_out
+            assert len(child_pids) == 1
+            assert wait_for_process_exit(child_pids[0])
+        finally:
+            signal.signal(signal.SIGINT, previous_handler)
+            for child_pid in child_pids:
+                cleanup_process(child_pid)
+
     @pytest.mark.parametrize(
         ("kwargs", "error"),
         [
@@ -833,6 +917,25 @@ class TestProbe:
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
         set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
         assert probe.run_probe(MODEL)["error_code"] == "repo_setup_failed"
+
+    def test_session_artifact_scan_fails_closed_at_entry_limit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        artifact_root = tmp_path / "sessions"
+        artifact_root.mkdir()
+        (artifact_root / "one.jsonl").touch()
+        (artifact_root / "two.jsonl").touch()
+        monkeypatch.setattr(probe, "MAX_SESSION_ARTIFACT_SCAN_ENTRIES", 1)
+        assert probe._contains_symlink(artifact_root)
+
+    def test_session_artifact_scan_fails_closed_if_root_cannot_be_opened(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        def fail_scandir(_path: object) -> object:
+            raise PermissionError
+
+        monkeypatch.setattr("scripts.probe_codex_live_session.os.scandir", fail_scandir)
+        assert probe._contains_symlink(tmp_path)
 
     def test_codex_home_defaults_to_home_dot_codex(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1064,3 +1167,21 @@ def test_main_maps_parent_signals_to_sanitized_json(
         "error_code": "repo_setup_failed",
     }
     assert signal.getsignal(signum) is previous_handler
+
+
+def test_main_maps_unexpected_exception_to_sanitized_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exception_marker = "private-operational-marker"
+
+    def raise_unexpected(_model: str | None) -> probe.SmokeResult:
+        raise RuntimeError(exception_marker)
+
+    monkeypatch.setattr(probe, "run_probe", raise_unexpected)
+    assert probe.main(["--model", MODEL]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.count("\n") == 1
+    assert exception_marker not in captured.out
+    assert json.loads(captured.out)["error_code"] == "repo_setup_failed"

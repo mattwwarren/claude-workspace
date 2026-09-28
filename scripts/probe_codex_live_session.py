@@ -13,8 +13,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, TypedDict, cast
 
@@ -35,6 +37,9 @@ PROCESS_READER_JOIN_TIMEOUT_SECONDS = 1
 MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024
 PROCESS_OUTPUT_CHUNK_BYTES = 64 * 1024
 MAX_VERSION_LENGTH = 64
+MAX_SESSION_ARTIFACT_SCAN_ENTRIES = 50_000
+MAX_SESSION_ARTIFACT_SCAN_SECONDS = 1.0
+MAX_SESSION_ARTIFACT_SCAN_DEPTH = 32
 CODEX_EXECUTABLE: Final = "codex"
 CODEX_EXEC_SUBCOMMAND: Final = "exec"
 CODEX_VERSION_FLAG: Final = "--version"
@@ -111,14 +116,17 @@ TURN_FAILED_EVENT: Final = "turn.failed"
 ITEM_STARTED_EVENT: Final = "item.started"
 ITEM_UPDATED_EVENT: Final = "item.updated"
 ITEM_COMPLETED_EVENT: Final = "item.completed"
+ERROR_EVENT: Final = "error"
 
-type ParseError = Literal[
-    "malformed_jsonl",
-    "missing_thread",
-    "invalid_thread_id",
-    "duplicate_thread_started",
-    "invalid_terminal",
-]
+
+class ParseError(StrEnum):
+    MALFORMED_JSONL = "malformed_jsonl"
+    MISSING_THREAD = "missing_thread"
+    INVALID_THREAD_ID = "invalid_thread_id"
+    DUPLICATE_THREAD_STARTED = "duplicate_thread_started"
+    INVALID_TERMINAL = "invalid_terminal"
+
+
 type TerminalEvent = Literal["turn.completed", "turn.failed"]
 type ProbeStage = Literal["create", "resume"]
 # Keep literals in type aliases; mypy does not expand Final string constants here.
@@ -149,16 +157,20 @@ type ErrorCode = Literal[
 type ProbeStatus = Literal["skipped", "passed", "failed"]
 
 _PARSE_ERROR_CODES: dict[tuple[ProbeStage, ParseError], ErrorCode] = {
-    ("create", "malformed_jsonl"): ERROR_CREATE_MALFORMED_JSONL,
-    ("create", "missing_thread"): ERROR_CREATE_MISSING_THREAD,
-    ("create", "invalid_thread_id"): ERROR_CREATE_INVALID_THREAD_ID,
-    ("create", "duplicate_thread_started"): ERROR_CREATE_DUPLICATE_THREAD_STARTED,
-    ("create", "invalid_terminal"): ERROR_CREATE_INVALID_TERMINAL,
-    ("resume", "malformed_jsonl"): ERROR_RESUME_MALFORMED_JSONL,
-    ("resume", "missing_thread"): ERROR_RESUME_MISSING_THREAD,
-    ("resume", "invalid_thread_id"): ERROR_RESUME_INVALID_THREAD_ID,
-    ("resume", "duplicate_thread_started"): ERROR_RESUME_DUPLICATE_THREAD_STARTED,
-    ("resume", "invalid_terminal"): ERROR_RESUME_INVALID_TERMINAL,
+    ("create", ParseError.MALFORMED_JSONL): ERROR_CREATE_MALFORMED_JSONL,
+    ("create", ParseError.MISSING_THREAD): ERROR_CREATE_MISSING_THREAD,
+    ("create", ParseError.INVALID_THREAD_ID): ERROR_CREATE_INVALID_THREAD_ID,
+    ("create", ParseError.DUPLICATE_THREAD_STARTED): (
+        ERROR_CREATE_DUPLICATE_THREAD_STARTED
+    ),
+    ("create", ParseError.INVALID_TERMINAL): ERROR_CREATE_INVALID_TERMINAL,
+    ("resume", ParseError.MALFORMED_JSONL): ERROR_RESUME_MALFORMED_JSONL,
+    ("resume", ParseError.MISSING_THREAD): ERROR_RESUME_MISSING_THREAD,
+    ("resume", ParseError.INVALID_THREAD_ID): ERROR_RESUME_INVALID_THREAD_ID,
+    ("resume", ParseError.DUPLICATE_THREAD_STARTED): (
+        ERROR_RESUME_DUPLICATE_THREAD_STARTED
+    ),
+    ("resume", ParseError.INVALID_TERMINAL): ERROR_RESUME_INVALID_TERMINAL,
 }
 _TERMINAL_EVENTS: frozenset[TerminalEvent] = frozenset(
     {TURN_COMPLETED_EVENT, TURN_FAILED_EVENT}
@@ -169,6 +181,7 @@ _KNOWN_NONTERMINAL_EVENTS: frozenset[str] = frozenset(
         ITEM_STARTED_EVENT,
         ITEM_UPDATED_EVENT,
         ITEM_COMPLETED_EVENT,
+        ERROR_EVENT,
     }
 )
 
@@ -222,6 +235,7 @@ class _StreamState:
     session_id: str | None = None
     terminal_event: TerminalEvent | None = None
     thread_seen: bool = False
+    error_event_seen: bool = False
 
 
 @dataclass(frozen=True)
@@ -255,36 +269,47 @@ def _decode_event(line: str) -> tuple[dict[str, object] | None, ParseError | Non
     try:
         event = json.loads(line)
     except json.JSONDecodeError:
-        return None, "malformed_jsonl"
+        return None, ParseError.MALFORMED_JSONL
     if not isinstance(event, dict) or not isinstance(event.get("type"), str):
-        return None, "malformed_jsonl"
+        return None, ParseError.MALFORMED_JSONL
     return cast("dict[str, object]", event), None
 
 
 def _handle_thread(event: dict[str, object], state: _StreamState) -> ParseError | None:
     if state.thread_seen:
-        return "duplicate_thread_started"
+        return ParseError.DUPLICATE_THREAD_STARTED
     session_id = event.get("thread_id")
     if not isinstance(session_id, str) or _SESSION_ID_RE.fullmatch(session_id) is None:
-        return "invalid_thread_id"
+        return ParseError.INVALID_THREAD_ID
     state.session_id = session_id
     state.thread_seen = True
     return None
 
 
-def _handle_other(event_type: str, state: _StreamState) -> ParseError | None:
+def _handle_other(event: dict[str, object], state: _StreamState) -> ParseError | None:
+    event_type = cast("str", event["type"])
     error: ParseError | None = None
     if state.terminal_event is not None:
-        error = "invalid_terminal"
+        error = ParseError.INVALID_TERMINAL
     elif event_type in _TERMINAL_EVENTS:
         if not state.thread_seen:
-            error = "missing_thread"
+            error = ParseError.MISSING_THREAD
         else:
             state.terminal_event = event_type
-    elif event_type not in _KNOWN_NONTERMINAL_EVENTS:
-        error = (
-            "invalid_terminal" if event_type.startswith("turn.") else "malformed_jsonl"
-        )
+    elif event_type == ERROR_EVENT:
+        if (
+            not state.thread_seen
+            or state.error_event_seen
+            or not isinstance(event.get("message"), str)
+        ):
+            error = ParseError.MALFORMED_JSONL
+        else:
+            state.error_event_seen = True
+    elif event_type not in _KNOWN_NONTERMINAL_EVENTS and (
+        event_type.startswith("turn.")
+        or event_type.endswith((".completed", ".failed", ".error"))
+    ):
+        error = ParseError.INVALID_TERMINAL
     return error
 
 
@@ -295,7 +320,7 @@ def _parse_line(line: str, state: _StreamState) -> ParseError | None:
         error = (
             _handle_thread(event, state)
             if event_type == THREAD_STARTED_EVENT
-            else _handle_other(event_type, state)
+            else _handle_other(event, state)
         )
     return error
 
@@ -309,9 +334,17 @@ def _parse_stream(stdout: str) -> ParsedStream:
             if error is not None:
                 return ParsedStream(state.session_id, state.terminal_event, error)
     if not state.thread_seen:
-        return ParsedStream(state.session_id, state.terminal_event, "missing_thread")
+        return ParsedStream(
+            state.session_id, state.terminal_event, ParseError.MISSING_THREAD
+        )
     if state.terminal_event is None:
-        return ParsedStream(state.session_id, state.terminal_event, "invalid_terminal")
+        return ParsedStream(
+            state.session_id, state.terminal_event, ParseError.INVALID_TERMINAL
+        )
+    if state.error_event_seen and state.terminal_event == TURN_COMPLETED_EVENT:
+        return ParsedStream(
+            state.session_id, state.terminal_event, ParseError.INVALID_TERMINAL
+        )
     return ParsedStream(state.session_id, state.terminal_event, None)
 
 
@@ -343,23 +376,49 @@ def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
 
 
 def _contains_symlink(path: Path) -> bool:
-    """Fail closed if a Codex session artifact path contains any symlink."""
-    pending = [path]
-    while pending:
-        directory = pending.pop()
-        try:
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    try:
-                        if entry.is_symlink():
-                            return True
-                        if entry.is_dir(follow_symlinks=False):
-                            pending.append(Path(entry.path))
-                    except OSError:
-                        return True
-        except OSError:
-            return True
-    return False
+    """Fail closed on symlinks or when the bounded session scan is inconclusive."""
+    deadline = time.monotonic() + MAX_SESSION_ARTIFACT_SCAN_SECONDS
+    entries_seen = 0
+    try:
+        scanners = [(os.scandir(path), 0)]
+    except OSError:
+        return True
+    has_symlink_or_error = False
+    try:
+        while scanners:
+            if time.monotonic() > deadline:
+                has_symlink_or_error = True
+                break
+            scanner, depth = scanners[-1]
+            try:
+                entry = next(scanner)
+            except StopIteration:
+                with contextlib.suppress(OSError):
+                    scanner.close()
+                scanners.pop()
+                continue
+            entries_seen += 1
+            if (
+                entries_seen > MAX_SESSION_ARTIFACT_SCAN_ENTRIES
+                or time.monotonic() > deadline
+            ):
+                has_symlink_or_error = True
+                break
+            if entry.is_symlink():
+                has_symlink_or_error = True
+                break
+            if entry.is_dir(follow_symlinks=False):
+                if depth >= MAX_SESSION_ARTIFACT_SCAN_DEPTH:
+                    has_symlink_or_error = True
+                    break
+                scanners.append((os.scandir(entry.path), depth + 1))
+    except OSError:
+        has_symlink_or_error = True
+    finally:
+        for scanner, _depth in scanners:
+            with contextlib.suppress(OSError):
+                scanner.close()
+    return has_symlink_or_error
 
 
 def _make_stdout_reader(
@@ -378,8 +437,10 @@ def _make_stdout_reader(
                         capture.data.extend(chunk[:remaining])
                     capture.exceeded_limit = True
                     _kill_process_group(process)
-                elif not capture.exceeded_limit:
-                    capture.data.extend(chunk)
+                    with contextlib.suppress(OSError, ValueError):
+                        stdout.close()
+                    return
+                capture.data.extend(chunk)
         except (OSError, ValueError):
             capture.exceeded_limit = True
             _kill_process_group(process)
@@ -407,19 +468,100 @@ def _finish_stdout_capture(
     )
 
 
-def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessOutcome:
+def _stop_process(process: subprocess.Popen[bytes]) -> int | None:
+    _kill_process_group(process)
+    exit_code: int | None = None
+    with contextlib.suppress(BaseException):
+        exit_code = process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
+    if process.stdout is not None:
+        with contextlib.suppress(BaseException):
+            process.stdout.close()
+    return exit_code
+
+
+def _launch_process(
+    argv: list[str], *, cwd: Path, env: dict[str, str]
+) -> subprocess.Popen[bytes] | ProcessOutcome | None:
+    process: subprocess.Popen[bytes] | None = None
+    blocked_signals: set[int | signal.Signals] | None = None
     try:
-        process = subprocess.Popen(
-            argv,
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            start_new_session=os.name == "posix",
-        )
-    except (FileNotFoundError, OSError):
+        if os.name == "posix" and threading.current_thread() is threading.main_thread():
+            blocked_signals = signal.pthread_sigmask(
+                signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM}
+            )
+        try:
+            process = subprocess.Popen(
+                argv,
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                start_new_session=os.name == "posix",
+            )
+        except (FileNotFoundError, OSError):
+            return None
+        finally:
+            if blocked_signals is not None:
+                signal.pthread_sigmask(signal.SIG_SETMASK, blocked_signals)
+    except BaseException as error:
+        cleanup_exit_code: int | None = None
+        if process is not None:
+            cleanup_exit_code = _stop_process(process)
+        if isinstance(error, KeyboardInterrupt):
+            return ProcessOutcome(cleanup_exit_code, "", True)
+        raise
+    return process
+
+
+def _wait_for_process(
+    process: subprocess.Popen[bytes],
+) -> tuple[int | None, bool, bool]:
+    try:
+        return process.wait(timeout=PROCESS_TIMEOUT_SECONDS), False, False
+    except subprocess.TimeoutExpired:
+        _kill_process_group(process)
+        try:
+            return (
+                process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS),
+                True,
+                False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            _kill_process_group(process)
+            return None, True, True
+    except OSError:
+        _kill_process_group(process)
+        return None, False, True
+
+
+def _cleanup_interrupted_process(
+    process: subprocess.Popen[bytes],
+    reader: threading.Thread | None,
+    capture: _OutputCapture | None,
+) -> ProcessOutcome:
+    exit_code = _stop_process(process)
+    stdout = ""
+    reader_incomplete = False
+    if reader is not None and reader.ident is not None and capture is not None:
+        with contextlib.suppress(BaseException):
+            stdout, reader_incomplete = _finish_stdout_capture(process, reader, capture)
+    return ProcessOutcome(
+        exit_code,
+        stdout,
+        True,
+        output_exceeded_limit=capture.exceeded_limit if capture is not None else False,
+        reader_incomplete=reader_incomplete,
+    )
+
+
+def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessOutcome:
+    launched = _launch_process(argv, cwd=cwd, env=env)
+    if isinstance(launched, ProcessOutcome):
+        return launched
+    if launched is None:
         return ProcessOutcome(None, "", False, unavailable=True)
+    process = launched
 
     reader: threading.Thread | None = None
     capture: _OutputCapture | None = None
@@ -427,49 +569,12 @@ def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessO
         capture = _OutputCapture(bytearray())
         reader = _make_stdout_reader(process, capture)
         reader.start()
-        timed_out = False
-        unavailable = False
-        try:
-            exit_code = process.wait(timeout=PROCESS_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            _kill_process_group(process)
-            try:
-                exit_code = process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
-            except (OSError, subprocess.TimeoutExpired):
-                _kill_process_group(process)
-                exit_code = None
-                unavailable = True
-        except OSError:
-            exit_code = None
-            unavailable = True
-            _kill_process_group(process)
+        exit_code, timed_out, unavailable = _wait_for_process(process)
         stdout, reader_incomplete = _finish_stdout_capture(process, reader, capture)
     except BaseException as error:
-        _kill_process_group(process)
-        cleanup_exit_code: int | None = None
-        with contextlib.suppress(BaseException):
-            cleanup_exit_code = process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
-        stdout = ""
-        reader_incomplete = False
-        if reader is not None and reader.ident is not None and capture is not None:
-            with contextlib.suppress(BaseException):
-                stdout, reader_incomplete = _finish_stdout_capture(
-                    process, reader, capture
-                )
-        elif process.stdout is not None:
-            with contextlib.suppress(BaseException):
-                process.stdout.close()
         if isinstance(error, KeyboardInterrupt):
-            return ProcessOutcome(
-                cleanup_exit_code,
-                stdout,
-                True,
-                output_exceeded_limit=(
-                    capture.exceeded_limit if capture is not None else False
-                ),
-                reader_incomplete=reader_incomplete,
-            )
+            return _cleanup_interrupted_process(process, reader, capture)
+        _cleanup_interrupted_process(process, reader, capture)
         raise
     return ProcessOutcome(
         exit_code,
@@ -519,14 +624,14 @@ def _attempt(
     outcome = _run_process(argv, cwd=cwd, env=env)
     stream = _parse_stream(outcome.stdout)
     if outcome.output_exceeded_limit or outcome.reader_incomplete:
-        stream = ParsedStream(stream.session_id, None, "malformed_jsonl")
+        stream = ParsedStream(stream.session_id, None, ParseError.MALFORMED_JSONL)
     error_code: ErrorCode | None = None
     if outcome.timed_out:
         error_code = ERROR_CREATE_TIMEOUT if stage == "create" else ERROR_RESUME_TIMEOUT
     elif outcome.unavailable:
         error_code = ERROR_CLI_UNAVAILABLE
     elif outcome.output_exceeded_limit or outcome.reader_incomplete:
-        error_code = _stream_error_code(stage, "malformed_jsonl")
+        error_code = _stream_error_code(stage, ParseError.MALFORMED_JSONL)
     elif outcome.exit_code != 0:
         error_code = (
             ERROR_CREATE_NONZERO_EXIT
@@ -771,31 +876,100 @@ def _raise_for_parent_signal(_signum: int, _frame: FrameType | None) -> NoReturn
     raise KeyboardInterrupt
 
 
+def _new_temporary_directory(
+    checkout: Path,
+) -> tempfile.TemporaryDirectory[str] | None:
+    try:
+        temp_parent = (Path.home() / ".cache" / "cw-live-tests").resolve()
+        if _is_within(temp_parent, checkout):
+            return None
+        temp_parent.mkdir(parents=True, exist_ok=True)
+        temp_parent = temp_parent.resolve()
+        if _is_within(temp_parent, checkout):
+            return None
+        return tempfile.TemporaryDirectory(
+            prefix="cw-codex-live-session-", dir=str(temp_parent)
+        )
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _run_in_disposable_directory(
+    *, temp_root: Path, checkout: Path, codex_home: Path, model: str
+) -> SmokeResult:
+    if _is_within(temp_root, checkout) or _is_within(codex_home, temp_root):
+        return _result(
+            STATUS_FAILED,
+            cli_version=None,
+            model=model,
+            error_code=ERROR_REPO_SETUP_FAILED,
+        )
+    worktree = temp_root / "repo"
+    scratch = temp_root / "tmp"
+    worktree.mkdir()
+    scratch.mkdir()
+    codex_env = _child_environment(cwd=worktree, scratch=scratch, codex_home=codex_home)
+    git_env = _child_environment(
+        cwd=worktree,
+        scratch=scratch,
+        codex_home=None,
+        include_codex_auth=False,
+    )
+    version_outcome = _version_result(cwd=worktree, env=codex_env)
+    if isinstance(version_outcome, _VersionFailure):
+        return _result(
+            STATUS_FAILED,
+            cli_version=None,
+            model=model,
+            error_code=version_outcome.error_code,
+        )
+    return _run_session(
+        worktree=worktree,
+        codex_env=codex_env,
+        git_env=git_env,
+        cli_version=version_outcome.cli_version,
+        model=model,
+    )
+
+
+def _cleanup_temporary_directory(
+    temporary_directory: tempfile.TemporaryDirectory[str], result: SmokeResult
+) -> SmokeResult:
+    try:
+        temporary_directory.cleanup()
+    except OSError:
+        return _result(
+            STATUS_FAILED,
+            cli_version=result["cli_version"],
+            model=result["model"],
+            session_id=result["session_id"],
+            create=result["create"],
+            resume=result["resume"],
+            error_code=ERROR_CLEANUP_FAILED,
+        )
+    return result
+
+
 def _run_disposable(*, model: str) -> SmokeResult:
     try:
         checkout = _checkout_root()
         codex_home = _codex_home(checkout)
-        temp_parent = (Path.home() / ".cache" / "cw-live-tests").resolve()
-        if codex_home is None or _is_within(temp_parent, checkout):
-            return _result(
-                STATUS_FAILED,
-                cli_version=None,
-                model=model,
-                error_code=ERROR_REPO_SETUP_FAILED,
-            )
-        temp_parent.mkdir(parents=True, exist_ok=True)
-        temp_parent = temp_parent.resolve()
-        if _is_within(temp_parent, checkout):
-            return _result(
-                STATUS_FAILED,
-                cli_version=None,
-                model=model,
-                error_code=ERROR_REPO_SETUP_FAILED,
-            )
-        temporary_directory = tempfile.TemporaryDirectory(
-            prefix="cw-codex-live-session-", dir=str(temp_parent)
-        )
     except (OSError, RuntimeError, ValueError):
+        return _result(
+            STATUS_FAILED,
+            cli_version=None,
+            model=model,
+            error_code=ERROR_REPO_SETUP_FAILED,
+        )
+    if codex_home is None:
+        return _result(
+            STATUS_FAILED,
+            cli_version=None,
+            model=model,
+            error_code=ERROR_REPO_SETUP_FAILED,
+        )
+    temporary_directory = _new_temporary_directory(checkout)
+    if temporary_directory is None:
         return _result(
             STATUS_FAILED,
             cli_version=None,
@@ -810,44 +984,13 @@ def _run_disposable(*, model: str) -> SmokeResult:
     )
     try:
         temp_root = Path(temporary_directory.name).resolve()
-        if _is_within(temp_root, checkout) or _is_within(codex_home, temp_root):
-            result = _result(
-                STATUS_FAILED,
-                cli_version=None,
-                model=model,
-                error_code=ERROR_REPO_SETUP_FAILED,
-            )
-        else:
-            worktree = temp_root / "repo"
-            scratch = temp_root / "tmp"
-            worktree.mkdir()
-            scratch.mkdir()
-            codex_env = _child_environment(
-                cwd=worktree, scratch=scratch, codex_home=codex_home
-            )
-            git_env = _child_environment(
-                cwd=worktree,
-                scratch=scratch,
-                codex_home=None,
-                include_codex_auth=False,
-            )
-            version_outcome = _version_result(cwd=worktree, env=codex_env)
-            if isinstance(version_outcome, _VersionFailure):
-                result = _result(
-                    STATUS_FAILED,
-                    cli_version=None,
-                    model=model,
-                    error_code=version_outcome.error_code,
-                )
-            else:
-                result = _run_session(
-                    worktree=worktree,
-                    codex_env=codex_env,
-                    git_env=git_env,
-                    cli_version=version_outcome.cli_version,
-                    model=model,
-                )
-    except (OSError, RuntimeError):
+        result = _run_in_disposable_directory(
+            temp_root=temp_root,
+            checkout=checkout,
+            codex_home=codex_home,
+            model=model,
+        )
+    except (OSError, RuntimeError, ValueError):
         result = _result(
             STATUS_FAILED,
             cli_version=None,
@@ -855,18 +998,7 @@ def _run_disposable(*, model: str) -> SmokeResult:
             error_code=ERROR_REPO_SETUP_FAILED,
         )
     finally:
-        try:
-            temporary_directory.cleanup()
-        except OSError:
-            result = _result(
-                STATUS_FAILED,
-                cli_version=result["cli_version"],
-                model=result["model"],
-                session_id=result["session_id"],
-                create=result["create"],
-                resume=result["resume"],
-                error_code=ERROR_CLEANUP_FAILED,
-            )
+        result = _cleanup_temporary_directory(temporary_directory, result)
     return result
 
 
@@ -901,6 +1033,13 @@ def main(argv: list[str] | None = None) -> int:
         model = parser.parse_args(argv).model
     except _ArgumentParseError:
         model = None
+    failure_result = _result(
+        STATUS_FAILED,
+        cli_version=None,
+        model=None,
+        error_code=ERROR_REPO_SETUP_FAILED,
+    )
+    result = failure_result
     previous_handlers: dict[signal.Signals, _SignalHandler] = {}
     try:
         if threading.current_thread() is threading.main_thread():
@@ -911,15 +1050,13 @@ def main(argv: list[str] | None = None) -> int:
         try:
             result = run_probe(model)
         except KeyboardInterrupt:
-            result = _result(
-                STATUS_FAILED,
-                cli_version=None,
-                model=None,
-                error_code=ERROR_REPO_SETUP_FAILED,
-            )
+            result = failure_result
+        except Exception:  # noqa: BLE001 - preserve the CLI's JSON-only contract
+            result = failure_result
     finally:
         for previous_signum, previous_handler in previous_handlers.items():
-            signal.signal(previous_signum, previous_handler)
+            with contextlib.suppress(Exception):
+                signal.signal(previous_signum, previous_handler)
     sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
     return 0 if result["status"] in {STATUS_SKIPPED, STATUS_PASSED} else 1
 
