@@ -37,6 +37,7 @@ type ErrorCode = Literal[
     "version_unavailable",
     "version_invalid",
     "cli_unavailable",
+    "unsafe_environment",
     "repo_setup_failed",
     "create_timeout",
     "create_nonzero_exit",
@@ -176,13 +177,16 @@ def _parse_version(stdout: str) -> str | None:
     )
 
 
-def _run_process(argv: list[str], *, cwd: Path | None) -> ProcessOutcome:
+def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessOutcome:
     try:
         completed = subprocess.run(
             argv,
             cwd=cwd,
+            env=env,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
             timeout=PROCESS_TIMEOUT_SECONDS,
         )
@@ -222,13 +226,19 @@ class _Attempt:
 
 
 def _attempt(
-    argv: list[str], *, cwd: Path, stage: Literal["create", "resume"]
+    argv: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    stage: Literal["create", "resume"],
 ) -> _Attempt:
-    outcome = _run_process(argv, cwd=cwd)
+    outcome = _run_process(argv, cwd=cwd, env=env)
     stream = _parse_stream(outcome.stdout)
     error_code: ErrorCode | None = None
     if outcome.timed_out:
         error_code = "create_timeout" if stage == "create" else "resume_timeout"
+    elif outcome.unavailable:
+        error_code = "cli_unavailable"
     elif outcome.exit_code != 0:
         error_code = (
             "create_nonzero_exit" if stage == "create" else "resume_nonzero_exit"
@@ -268,8 +278,83 @@ def _resume_summary(attempt: _Attempt, session_id: str) -> ResumeSummary:
     }
 
 
-def _run_session(*, worktree: Path, cli_version: str, model: str) -> SmokeResult:
-    git_init = _run_process(["git", "init", "--quiet"], cwd=worktree)
+def _common_exec_flags(model: str, *, after_json: tuple[str, ...] = ()) -> list[str]:
+    """Build the shared JSON/config/model flags for create and resume."""
+    return [
+        "--json",
+        *after_json,
+        "--ignore-user-config",
+        "--model",
+        model,
+    ]
+
+
+def _create_argv(model: str) -> list[str]:
+    return [
+        "codex",
+        "exec",
+        *_common_exec_flags(model, after_json=("--sandbox", "read-only")),
+        FIXED_PROMPT,
+    ]
+
+
+def _resume_argv(session_id: str, model: str) -> list[str]:
+    return [
+        "codex",
+        "exec",
+        "resume",
+        session_id,
+        *_common_exec_flags(model),
+        FIXED_RESUME_PROMPT,
+    ]
+
+
+def _is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _checkout_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _codex_home(checkout: Path) -> Path | None:
+    configured = os.environ.get("CODEX_HOME")
+    path = Path(configured).expanduser() if configured else Path.home() / ".codex"
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError):
+        return None
+    return None if _is_within(resolved, checkout) else resolved
+
+
+def _child_environment(*, cwd: Path, scratch: Path, codex_home: Path) -> dict[str, str]:
+    """Preserve auth/config while removing ambient Git and temp path routing."""
+    environment = os.environ.copy()
+    for key in tuple(environment):
+        if key.startswith("GIT_"):
+            del environment[key]
+    environment.update(
+        {
+            "CODEX_HOME": str(codex_home),
+            "PWD": str(cwd),
+            "TMPDIR": str(scratch),
+            "TMP": str(scratch),
+            "TEMP": str(scratch),
+        }
+    )
+    return environment
+
+
+def _run_session(
+    *, worktree: Path, env: dict[str, str], cli_version: str, model: str
+) -> SmokeResult:
+    git_init = _run_process(["git", "init", "--quiet"], cwd=worktree, env=env)
     if git_init.unavailable or git_init.timed_out or git_init.exit_code != 0:
         return _result(
             "failed",
@@ -279,18 +364,9 @@ def _run_session(*, worktree: Path, cli_version: str, model: str) -> SmokeResult
         )
 
     create = _attempt(
-        [
-            "codex",
-            "exec",
-            "--json",
-            "--sandbox",
-            "read-only",
-            "--ignore-user-config",
-            "--model",
-            model,
-            FIXED_PROMPT,
-        ],
+        _create_argv(model),
         cwd=worktree,
+        env=env,
         stage="create",
     )
     create_summary = _create_summary(create)
@@ -314,18 +390,9 @@ def _run_session(*, worktree: Path, cli_version: str, model: str) -> SmokeResult
         )
 
     resume = _attempt(
-        [
-            "codex",
-            "exec",
-            "resume",
-            session_id,
-            "--json",
-            "--ignore-user-config",
-            "--model",
-            model,
-            FIXED_RESUME_PROMPT,
-        ],
+        _resume_argv(session_id, model),
         cwd=worktree,
+        env=env,
         stage="resume",
     )
     resume_summary = _resume_summary(resume, session_id)
@@ -360,8 +427,10 @@ def _run_session(*, worktree: Path, cli_version: str, model: str) -> SmokeResult
     )
 
 
-def _version_result(model: str) -> tuple[str | None, SmokeResult | None]:
-    outcome = _run_process(["codex", "--version"], cwd=None)
+def _version_result(
+    model: str, *, cwd: Path, env: dict[str, str]
+) -> tuple[str | None, SmokeResult | None]:
+    outcome = _run_process(["codex", "--version"], cwd=cwd, env=env)
     if outcome.unavailable:
         return None, _result(
             "failed", cli_version=None, model=model, error_code="cli_unavailable"
@@ -378,26 +447,81 @@ def _version_result(model: str) -> tuple[str | None, SmokeResult | None]:
     return version, None
 
 
-def _run_disposable(*, cli_version: str, model: str) -> SmokeResult:
+def _run_disposable(*, model: str) -> SmokeResult:
     try:
+        checkout = _checkout_root()
+        codex_home = _codex_home(checkout)
+        temp_parent = (Path.home() / ".cache" / "cw-live-tests").resolve()
+        if codex_home is None or _is_within(temp_parent, checkout):
+            return _result(
+                "failed",
+                cli_version=None,
+                model=model,
+                error_code="unsafe_environment",
+            )
+        temp_parent.mkdir(parents=True, exist_ok=True)
+        temp_parent = temp_parent.resolve()
+        if _is_within(temp_parent, checkout):
+            return _result(
+                "failed",
+                cli_version=None,
+                model=model,
+                error_code="unsafe_environment",
+            )
         temporary_directory = tempfile.TemporaryDirectory(
-            prefix="cw-codex-live-session-"
+            prefix="cw-codex-live-session-", dir=str(temp_parent)
         )
-    except OSError:
+    except (OSError, RuntimeError, ValueError):
         return _result(
             "failed",
-            cli_version=cli_version,
+            cli_version=None,
             model=model,
             error_code="repo_setup_failed",
         )
     result = _result(
-        "failed", cli_version=cli_version, model=model, error_code="repo_setup_failed"
+        "failed", cli_version=None, model=model, error_code="repo_setup_failed"
     )
+    cli_version: str | None = None
     try:
-        result = _run_session(
-            worktree=Path(temporary_directory.name),
+        temp_root = Path(temporary_directory.name).resolve()
+        if _is_within(temp_root, checkout) or _is_within(codex_home, temp_root):
+            result = _result(
+                "failed",
+                cli_version=None,
+                model=model,
+                error_code="unsafe_environment",
+            )
+        else:
+            worktree = temp_root / "repo"
+            scratch = temp_root / "tmp"
+            worktree.mkdir()
+            scratch.mkdir()
+            env = _child_environment(
+                cwd=worktree, scratch=scratch, codex_home=codex_home
+            )
+            cli_version, failure = _version_result(model, cwd=worktree, env=env)
+            if failure is not None:
+                result = failure
+            elif cli_version is None:
+                result = _result(
+                    "failed",
+                    cli_version=None,
+                    model=model,
+                    error_code="version_unavailable",
+                )
+            else:
+                result = _run_session(
+                    worktree=worktree,
+                    env=env,
+                    cli_version=cli_version,
+                    model=model,
+                )
+    except (OSError, RuntimeError):
+        result = _result(
+            "failed",
             cli_version=cli_version,
             model=model,
+            error_code="repo_setup_failed",
         )
     finally:
         try:
@@ -425,14 +549,7 @@ def run_probe(model: str | None) -> SmokeResult:
         return _result(
             "failed", cli_version=None, model=None, error_code="invalid_model"
         )
-    cli_version, failure = _version_result(model)
-    if failure is not None:
-        return failure
-    if cli_version is None:
-        return _result(
-            "failed", cli_version=None, model=model, error_code="version_unavailable"
-        )
-    return _run_disposable(cli_version=cli_version, model=model)
+    return _run_disposable(model=model)
 
 
 def main(argv: list[str] | None = None) -> int:

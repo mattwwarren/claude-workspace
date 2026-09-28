@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
@@ -14,6 +16,13 @@ from scripts import probe_codex_live_session as probe
 MODEL = "gpt-5.6-luna"
 SESSION = "thread.smoke-2463"
 VERSION = "codex-cli 0.156.1"
+UNAVAILABLE_MESSAGE = "unavailable-secret"
+
+
+@pytest.fixture(autouse=True)
+def isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep the probe's snap-visible temporary root inside pytest's sandbox."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
 
 def stream(session: str = SESSION, terminal: str = "turn.completed") -> str:
@@ -49,14 +58,18 @@ def fake_run(
     resume_code = cast("int", options.get("resume_code", 0))
     git_code = cast("int", options.get("git_code", 0))
     timeout_stage = cast("str | None", options.get("timeout_stage"))
+    unavailable_stage = cast("str | None", options.get("unavailable_stage"))
     stderr = cast("str", options.get("stderr", ""))
 
     def run(
         argv: list[str],
         *,
-        cwd: Path | None = None,
+        cwd: Path,
+        env: dict[str, str],
         capture_output: bool,
         text: bool,
+        encoding: str,
+        errors: str,
         check: bool,
         timeout: int,
     ) -> subprocess.CompletedProcess[str]:
@@ -64,8 +77,11 @@ def fake_run(
             {
                 "argv": list(argv),
                 "cwd": cwd,
+                "env": dict(env),
                 "capture_output": capture_output,
                 "text": text,
+                "encoding": encoding,
+                "errors": errors,
                 "check": check,
                 "timeout": timeout,
             }
@@ -77,11 +93,15 @@ def fake_run(
                 raise subprocess.TimeoutExpired(argv, timeout)
             return completed(argv, code=git_code, stderr=stderr)
         if argv[:3] == ["codex", "exec", "resume"]:
+            if unavailable_stage == "resume":
+                raise FileNotFoundError(UNAVAILABLE_MESSAGE)
             if timeout_stage == "resume":
                 raise subprocess.TimeoutExpired(argv, timeout)
             return completed(
                 argv, code=resume_code, stdout=resume_stdout, stderr=stderr
             )
+        if unavailable_stage == "create":
+            raise FileNotFoundError(UNAVAILABLE_MESSAGE)
         if timeout_stage == "create":
             raise subprocess.TimeoutExpired(argv, timeout)
         return completed(argv, code=create_code, stdout=create_stdout, stderr=stderr)
@@ -204,6 +224,12 @@ class TestProbe:
     ) -> None:
         calls: list[dict[str, object]] = []
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        monkeypatch.setenv("CODEX_API_KEY", "auth-material-secret")
+        configured_codex_home = Path.home() / "codex-state"
+        monkeypatch.setenv("CODEX_HOME", str(configured_codex_home))
+        monkeypatch.setenv("GIT_DIR", "/checkout/.git")
+        monkeypatch.setenv("GIT_WORK_TREE", "/checkout")
+        monkeypatch.setenv("TMPDIR", "/checkout/tmp")
         set_runner(monkeypatch, fake_run(calls))
         result = probe.run_probe(MODEL)
         assert set(result) == {
@@ -252,7 +278,22 @@ class TestProbe:
             MODEL,
             probe.FIXED_RESUME_PROMPT,
         ]
-        assert calls[2]["cwd"] == calls[1]["cwd"] == calls[3]["cwd"]
+        assert calls[0]["cwd"] == calls[1]["cwd"] == calls[2]["cwd"] == calls[3]["cwd"]
+        checkout = probe._checkout_root()
+        for call in calls:
+            cwd = cast("Path", call["cwd"])
+            env = cast("dict[str, str]", call["env"])
+            assert cwd.is_relative_to(Path.home() / ".cache" / "cw-live-tests")
+            assert not probe._is_within(cwd, checkout)
+            assert env["PWD"] == str(cwd)
+            assert env["CODEX_HOME"] == str(configured_codex_home)
+            assert env["TMPDIR"] == env["TMP"] == env["TEMP"]
+            assert Path(env["TMPDIR"]).is_relative_to(cwd.parent)
+            assert "GIT_DIR" not in env
+            assert "GIT_WORK_TREE" not in env
+            assert env["CODEX_API_KEY"] == "auth-material-secret"
+        assert all(call["encoding"] == "utf-8" for call in calls)
+        assert all(call["errors"] == "replace" for call in calls)
         assert all(call["timeout"] == 120 for call in calls)
         assert all(
             call["capture_output"] and call["text"] and not call["check"]
@@ -288,6 +329,7 @@ class TestProbe:
             ),
             ({"create_code": 9}, "create_nonzero_exit"),
             ({"timeout_stage": "create"}, "create_timeout"),
+            ({"unavailable_stage": "create"}, "cli_unavailable"),
             ({"git_code": 9}, "repo_setup_failed"),
             ({"timeout_stage": "git"}, "repo_setup_failed"),
         ],
@@ -306,6 +348,10 @@ class TestProbe:
         assert result["error_code"] == error
         assert result["resume"] is None
         assert "TimeoutExpired" not in json.dumps(result)
+        assert UNAVAILABLE_MESSAGE not in json.dumps(result)
+        if kwargs.get("unavailable_stage") == "create":
+            assert result["create"] is not None
+            assert result["create"]["exit_code"] is None
 
     @pytest.mark.parametrize(
         ("kwargs", "error"),
@@ -326,6 +372,7 @@ class TestProbe:
             ),
             ({"resume_code": 9}, "resume_nonzero_exit"),
             ({"timeout_stage": "resume"}, "resume_timeout"),
+            ({"unavailable_stage": "resume"}, "cli_unavailable"),
             ({"resume_stdout": stream("other-thread")}, "resume_id_mismatch"),
         ],
     )
@@ -350,6 +397,9 @@ class TestProbe:
             "resume",
             "error_code",
         }
+        if kwargs.get("unavailable_stage") == "resume":
+            assert result["resume"] is not None
+            assert result["resume"]["exit_code"] is None
 
     @pytest.mark.parametrize(
         ("runner_error", "error"),
@@ -419,6 +469,29 @@ class TestProbe:
             set_runner(monkeypatch, run)
             result = probe.run_probe(MODEL)
             assert result["error_code"] == "version_unavailable"
+
+    def test_codex_home_inside_checkout_is_rejected_before_launch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        monkeypatch.setenv("CODEX_HOME", str(probe._checkout_root() / ".codex"))
+        set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
+        assert probe.run_probe(MODEL)["error_code"] == "unsafe_environment"
+
+    def test_codex_home_defaults_to_home_dot_codex(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+        assert probe._codex_home(probe._checkout_root()) == Path.home() / ".codex"
+
+    def test_invalid_utf8_is_replaced_at_process_boundary(self, tmp_path: Path) -> None:
+        result = probe._run_process(
+            [sys.executable, "-c", "import os; os.write(1, b'\\xff')"],
+            cwd=tmp_path,
+            env=os.environ.copy(),
+        )
+        assert result.exit_code == 0
+        assert result.stdout == "\ufffd"
 
     def test_cleanup_failure_is_sanitized(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
