@@ -293,7 +293,16 @@ def _spawn_clean_env(cwd: Path) -> dict[str, str]:
     documented knob is ``GH_PROMPT_DISABLED``. ``CI`` is deliberately excluded
     — it silently reshapes the behavior of other tools (pytest plugins, etc.)
     beyond just prompt suppression.
+
+    Finally points TMPDIR/TMP/TEMP at ``<cwd>/.cw/tmp`` via the shared
+    :func:`cw.worktree.apply_worker_tmpdir` (#2470), so the worker's scratch
+    files never land on the host's shared ``/tmp`` tmpfs. The import is
+    function-local on purpose: ``cw.worktree``'s package ``__init__`` imports
+    ``_lifecycle``, which imports ``get_native_daemon_client`` from this
+    module at module scope, so a module-level import here would be circular.
     """
+    from cw.worktree import apply_worker_tmpdir
+
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["PWD"] = str(cwd)
     # Unconditional overrides (not setdefault) — a worker's inherited
@@ -302,6 +311,7 @@ def _spawn_clean_env(cwd: Path) -> dict[str, str]:
     env["GH_PAGER"] = "cat"
     env["GH_NO_UPDATE_NOTIFIER"] = "1"
     env["GIT_TERMINAL_PROMPT"] = "0"
+    apply_worker_tmpdir(env, cwd)
     return env
 
 

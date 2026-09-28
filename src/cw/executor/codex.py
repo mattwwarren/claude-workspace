@@ -103,7 +103,7 @@ def _codex_preflight(
             session_id=sess.id,
             wall_clock_budget_seconds=wall_clock_budget_seconds,
         ),
-        env=build_codex_run_env(),
+        env=build_codex_run_env(worktree),
     )
 
 

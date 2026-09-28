@@ -26,7 +26,6 @@ from cw.models import (
     OrchestratorEvent,
     OrchestratorEventType,
 )
-from cw.models.enums import STAGE_IDENTIFIERS
 
 # --- Queue command group ---
 
@@ -68,30 +67,6 @@ def event() -> None:
 
 _VALID_EVENT_TYPES = {e.value for e in OrchestratorEventType}
 
-# Event types whose payload carries the closed headless-contract §10.2 stage
-# vocabulary in ``stage`` (required) and ``prev_stage`` (optional) (#2429).
-_STAGE_EVENT_TYPES = frozenset(
-    {OrchestratorEventType.STAGE_ENTERED, OrchestratorEventType.STAGE_ERRORED}
-)
-
-
-def _validate_stage_payload(payload_dict: dict[str, Any]) -> None:
-    """Reject a stage-event payload whose stage fields leave the §10.2 enum.
-
-    ``stage`` is required, so a missing one fails the membership test the
-    same way a typo does. ``prev_stage`` is optional and checked only when
-    present. ``error_kind`` is an open enum (§10.3) and is not checked.
-    """
-    valid = ", ".join(sorted(STAGE_IDENTIFIERS))
-    stage = payload_dict.get("stage")
-    if stage not in STAGE_IDENTIFIERS:
-        msg = f"Unknown stage '{stage}'. Valid stages: {valid}"
-        raise CwError(msg)
-    prev_stage = payload_dict.get("prev_stage")
-    if prev_stage is not None and prev_stage not in STAGE_IDENTIFIERS:
-        msg = f"Unknown prev_stage '{prev_stage}'. Valid stages: {valid}"
-        raise CwError(msg)
-
 
 @event.command(name="record")
 @click.argument("event_type")
@@ -130,8 +105,6 @@ def event_record(
         raise CwError(msg)
 
     etype = OrchestratorEventType(event_type)
-    if etype in _STAGE_EVENT_TYPES:
-        _validate_stage_payload(payload_dict)
 
     recorded = record_event(
         etype,

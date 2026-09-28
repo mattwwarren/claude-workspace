@@ -19,7 +19,7 @@ from cw.cli import main
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket, save_dev_queue
 from cw.dispatch import FRESHNESS_MAIN_BEHIND, FRESHNESS_NON_MAIN_HEAD
-from cw.events import read_events, record_event
+from cw.events import inbox_path, read_events, record_event
 from cw.exceptions import CwError
 from cw.gh import github_pr_url
 from cw.models import (
@@ -1458,9 +1458,15 @@ class TestRunningSessionLastStage:
     ) -> None:
         """A STAGE_ENTERED stage outside the §10.2 enum renders as None (#2429).
 
-        Written with ``record_event`` directly, bypassing ``cw event record``'s
-        validation exactly as an internal producer would, so the consumer's
-        own membership filter is what keeps the raw string out of the output.
+        Since #2443, ``record_event`` itself rejects an out-of-enum stage for
+        every caller (CLI and internal alike), so this out-of-set value can no
+        longer arrive via a live producer call -- only via historical or
+        hand-edited inbox data written before that record-time gate existed
+        (or a direct edit of the inbox file). This test simulates exactly
+        that: it appends the event straight to the inbox JSONL, bypassing
+        ``record_event`` entirely, to prove the render-time consumer filter
+        (``_derive_last_stage_by_session``) still degrades such a value to
+        ``None`` as defense-in-depth.
         """
         save_state(
             CwState(
@@ -1469,15 +1475,19 @@ class TestRunningSessionLastStage:
                 ]
             )
         )
-        record_event(
-            OrchestratorEventType.STAGE_ENTERED,
-            {
+        event = OrchestratorEvent(
+            type=OrchestratorEventType.STAGE_ENTERED,
+            payload={
                 "session_id": "s1",
                 "ticket_id": "2429",
                 "stage": "s2_impl_startd",
                 "started_at": "2026-09-26T13:00:00Z",
             },
         )
+        inbox = inbox_path()
+        inbox.parent.mkdir(parents=True, exist_ok=True)
+        with inbox.open("a") as f:
+            f.write(event.model_dump_json() + "\n")
 
         snapshot = orchestrator_status()
         by_id = {s.id: s for s in snapshot.running_sessions}

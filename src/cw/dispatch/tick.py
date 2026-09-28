@@ -24,6 +24,8 @@ from cw.dev_queue import (
 from cw.executor_diagnostics import cleanup_expired_diagnostics
 from cw.models import (
     DEFAULT_DISK_PRESSURE_MIN_FREE_GB,
+    DEFAULT_DISK_PRESSURE_MIN_FREE_INODE_FRACTION,
+    DEFAULT_DISK_PRESSURE_MIN_FREE_INODES,
     ClientConfig,
     QueueItemStatus,
     SessionOrigin,
@@ -376,6 +378,10 @@ def _run_preflight_gates(
     ssh_key_gate_enabled: bool = True,
     disk_pressure_gate_enabled: bool = True,
     disk_pressure_min_free_gb: float = DEFAULT_DISK_PRESSURE_MIN_FREE_GB,
+    disk_pressure_min_free_inodes: float = DEFAULT_DISK_PRESSURE_MIN_FREE_INODES,
+    disk_pressure_min_free_inode_fraction: float = (
+        DEFAULT_DISK_PRESSURE_MIN_FREE_INODE_FRACTION
+    ),
 ) -> _PreflightGateResult:
     """Resolve + apply the three preflight gates, in precedence order.
 
@@ -411,6 +417,8 @@ def _run_preflight_gates(
     :func:`~cw.dispatch.gating._apply_disk_pressure_gate` (extracted rather
     than inlined here to keep this function under the PLR0911 six-return
     ceiling -- see that helper's docstring).
+    ``disk_pressure_min_free_inodes`` / ``disk_pressure_min_free_inode_fraction``
+    (#2470) add that gate's inode dimension.
     """
     resolved_available = _resolve_availability_once(available)
     if not resolved_available:
@@ -448,6 +456,8 @@ def _run_preflight_gates(
         emit=emit,
         warned_disk_pressure=warned_disk_pressure,
         min_free_gb=disk_pressure_min_free_gb,
+        min_free_inodes=disk_pressure_min_free_inodes,
+        min_free_inode_fraction=disk_pressure_min_free_inode_fraction,
         gate_enabled=disk_pressure_gate_enabled,
     ):
         return _PreflightGateResult(
@@ -683,6 +693,10 @@ def dispatch_tick(
             ssh_key_gate_enabled=config.ssh_key_gate_enabled,
             disk_pressure_gate_enabled=config.disk_pressure_gate_enabled,
             disk_pressure_min_free_gb=config.disk_pressure_min_free_gb,
+            disk_pressure_min_free_inodes=config.disk_pressure_min_free_inodes,
+            disk_pressure_min_free_inode_fraction=(
+                config.disk_pressure_min_free_inode_fraction
+            ),
         )
         if gated:
             continue

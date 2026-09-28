@@ -38,6 +38,7 @@ from cw.local_runner import (
     read_process_start_time_ns,
     synthesize_git_result,
 )
+from cw.worktree import resolve_worker_tmpdir
 from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
@@ -473,54 +474,54 @@ def test_build_aiderignore_fails_open_when_git_ls_files_errors(
 # ---------------------------------------------------------------------------
 
 
-def test_build_env_sets_api_base() -> None:
+def test_build_env_sets_api_base(tmp_path: Path) -> None:
     """build_env sets OPENAI_API_BASE to the given endpoint."""
-    env = build_env("http://localhost:1234/v1")
+    env = build_env("http://localhost:1234/v1", tmp_path)
     assert env["OPENAI_API_BASE"] == "http://localhost:1234/v1"
 
 
-def test_build_env_sets_api_key_fallback() -> None:
+def test_build_env_sets_api_key_fallback(tmp_path: Path) -> None:
     """build_env sets OPENAI_API_KEY to 'local' when env var is absent."""
     with patch.dict(os.environ, {}, clear=False):
         env_without_key = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
         with patch.dict(os.environ, env_without_key, clear=True):
-            env = build_env("http://localhost:1234/v1")
+            env = build_env("http://localhost:1234/v1", tmp_path)
     assert env.get("OPENAI_API_KEY") == "local"
 
 
-def test_build_env_does_not_forward_secrets() -> None:
+def test_build_env_does_not_forward_secrets(tmp_path: Path) -> None:
     """build_env excludes operator shell secrets via the allowlist."""
     with patch.dict(
         os.environ,
         {"AWS_SECRET_ACCESS_KEY": "shhh", "GITHUB_TOKEN": "ghp_xxx"},
         clear=False,
     ):
-        env = build_env("http://localhost:1234/v1")
+        env = build_env("http://localhost:1234/v1", tmp_path)
     assert "AWS_SECRET_ACCESS_KEY" not in env
     assert "GITHUB_TOKEN" not in env
 
 
-def test_build_env_forwards_aider_vars() -> None:
+def test_build_env_forwards_aider_vars(tmp_path: Path) -> None:
     """build_env forwards AIDER_* vars into the subprocess env."""
     with patch.dict(
         os.environ,
         {"AIDER_MODEL": "gpt-4o", "AIDER_SOMETHING_NEW": "1"},
         clear=False,
     ):
-        env = build_env("http://localhost:1234/v1")
+        env = build_env("http://localhost:1234/v1", tmp_path)
     assert env["AIDER_MODEL"] == "gpt-4o"
     assert env["AIDER_SOMETHING_NEW"] == "1"
 
 
-def test_build_env_always_sets_openai_keys() -> None:
+def test_build_env_always_sets_openai_keys(tmp_path: Path) -> None:
     """build_env always sets OPENAI_API_BASE and OPENAI_API_KEY."""
     with patch.dict(os.environ, {"OPENAI_API_KEY": "real-key"}, clear=False):
-        env = build_env("http://localhost:1234/v1")
+        env = build_env("http://localhost:1234/v1", tmp_path)
     assert env["OPENAI_API_BASE"] == "http://localhost:1234/v1"
     assert env["OPENAI_API_KEY"] == "real-key"
 
 
-def test_build_env_forwards_git_identity() -> None:
+def test_build_env_forwards_git_identity(tmp_path: Path) -> None:
     """build_env forwards git identity vars required for aider commits."""
     with patch.dict(
         os.environ,
@@ -532,14 +533,14 @@ def test_build_env_forwards_git_identity() -> None:
         },
         clear=False,
     ):
-        env = build_env("http://localhost:1234/v1")
+        env = build_env("http://localhost:1234/v1", tmp_path)
     assert env["GIT_AUTHOR_NAME"] == "Alice"
     assert env["GIT_AUTHOR_EMAIL"] == "alice@example.com"
     assert env["GIT_COMMITTER_NAME"] == "Alice"
     assert env["GIT_COMMITTER_EMAIL"] == "alice@example.com"
 
 
-def test_build_env_output_bounded_to_allowlist() -> None:
+def test_build_env_output_bounded_to_allowlist(tmp_path: Path) -> None:
     """build_env output contains no keys outside allowlist + AIDER_* + OPENAI_*."""
     from cw.local_runner import _ENV_ALLOWLIST
 
@@ -553,15 +554,31 @@ def test_build_env_output_bounded_to_allowlist() -> None:
         "GITHUB_TOKEN": "ghp_xxx",
     }
     with patch.dict(os.environ, controlled_env, clear=True):
-        env = build_env("http://localhost:1234/v1")
+        env = build_env("http://localhost:1234/v1", tmp_path)
     unexpected = {
         k
         for k in env
         if k not in _ENV_ALLOWLIST
         and not k.startswith("AIDER_")
         and k not in {"OPENAI_API_BASE", "OPENAI_API_KEY"}
+        # Force-set by apply_worker_tmpdir (#2470), never read from os.environ.
+        and k not in {"TMP", "TEMP"}
     }
     assert not unexpected, f"Unexpected keys leaked into subprocess env: {unexpected}"
+
+
+def test_env_allowlist_includes_tmpdir() -> None:
+    """TMPDIR is allowlisted, in parity with opencode_runner (#2470 R5)."""
+    from cw.local_runner import _ENV_ALLOWLIST
+
+    assert "TMPDIR" in _ENV_ALLOWLIST
+
+
+def test_build_env_delegates_tmpdir_to_shared_helper(tmp_path: Path) -> None:
+    """TMPDIR comes from apply_worker_tmpdir, overriding the ambient value (#2470)."""
+    with patch.dict(os.environ, {"TMPDIR": "/tmp"}, clear=False):
+        env = build_env("http://localhost:1234/v1", tmp_path)
+    assert env["TMPDIR"] == str(resolve_worker_tmpdir(tmp_path))
 
 
 # ---------------------------------------------------------------------------

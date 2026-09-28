@@ -5,8 +5,9 @@ state — usage-limit backoff expiry, the fleet-wide gh-availability probe cache
 (RFC 0011 A5), the per-client main-checkout-drift attention latches (#1258),
 a per-(client, ticket) marker recording an in-flight blocking review, so
 ``cw dev-queue status``/``cw doctor`` can distinguish a dead dispatch loop from
-one legitimately busy (#1742), and the per-(client, ticket) open-PR probe cache
-backing the pre-dispatch stale-dispatch gate (#1862).
+one legitimately busy (#1742), the per-(client, ticket) open-PR probe cache
+backing the pre-dispatch stale-dispatch gate (#1862), and the per-client
+worker-tmp inode-exhaustion attention latches (#2470).
 Extracted from ``cw.config``; depends on ``cw.config`` for the state-dir
 accessors and the #1017 write guard, one-directional (``cw.config`` never
 imports this module).
@@ -117,6 +118,32 @@ class OpenPrProbeCache(NamedTuple):
 
     probed_at: datetime
     has_open_pr: bool
+
+
+class HostTmpProbeCache(NamedTuple):
+    """One client's worker-tmp inode-exhaustion latch (#2470).
+
+    Persisted in DISPATCH_STATE_FILE under the ``"host_tmp_probe"`` key, one
+    entry per client name. Per-client (like :func:`load_main_drift_latches`
+    and :class:`OpenPrProbeCache`) rather than fleet-wide (like
+    :class:`AvailabilityProbeCache`): the disk-pressure gate it instruments
+    probes each client's own worktree-base mount, so one client's exhausted
+    mount must never clobber or mask another client's entry. A NamedTuple
+    for the same transient-state reason as :class:`AvailabilityProbeCache`.
+    """
+
+    probed_at: datetime
+    exhausted: bool
+    latched: bool  # True once SESSION_NEEDS_ATTENTION has fired for this
+    # client's current unbroken run of exhausted probes; False once a
+    # subsequent probe is healthy (edge-triggered reset).
+
+
+# A failed sidecar write must not erase an edge-triggered latch in the current
+# process: the next probe would otherwise re-emit SESSION_NEEDS_ATTENTION.
+# Include the state-file path because tests, and callers embedding cw, can
+# redirect state between independent stores in one process.
+_HOST_TMP_PROBE_FALLBACK: dict[tuple[str, str], HostTmpProbeCache] = {}
 
 
 def _executor_blocked_key(client: str, ticket_id: str) -> str:
@@ -817,3 +844,101 @@ def save_open_pr_probe_entries(
             for ticket_id, entry in entries_by_ticket_id.items()
         }
     )
+
+
+def _parse_host_tmp_probe_entry(entry: object) -> HostTmpProbeCache | None:
+    """Validate one raw ``"host_tmp_probe"`` entry, or None when malformed.
+
+    Per-entry, same reasoning as :func:`_parse_open_pr_probe_entry`: one bad
+    client entry must not blind the reader to its well-formed siblings.
+    """
+    if not isinstance(entry, dict):
+        return None
+    probed_at = entry.get("probed_at")
+    exhausted = entry.get("exhausted")
+    latched = entry.get("latched")
+    if (
+        not isinstance(probed_at, str)
+        or not isinstance(exhausted, bool)
+        or not isinstance(latched, bool)
+    ):
+        return None
+    try:
+        parsed_probed_at = datetime.fromisoformat(probed_at)
+    except ValueError:
+        return None
+    return HostTmpProbeCache(
+        probed_at=parsed_probed_at, exhausted=exhausted, latched=latched
+    )
+
+
+def load_host_tmp_probe_cache() -> dict[str, HostTmpProbeCache]:
+    """Load every per-client worker-tmp inode latch (#2470), keyed by client.
+
+    Returns ``{}`` when the file is absent, unreadable, malformed, or missing
+    the ``"host_tmp_probe"`` key. Individual malformed entries are dropped.
+    """
+    cache: dict[str, HostTmpProbeCache] = {}
+    path = DISPATCH_STATE_FILE
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError, ValueError, TypeError):
+            raw = None
+        if isinstance(raw, dict):
+            entries = raw.get("host_tmp_probe")
+            if isinstance(entries, dict):
+                for client_name, entry in entries.items():
+                    parsed = _parse_host_tmp_probe_entry(entry)
+                    if parsed is not None:
+                        cache[client_name] = parsed
+    state_path = str(DISPATCH_STATE_FILE)
+    cache.update(
+        {
+            client_name: entry
+            for (fallback_path, client_name), entry in _HOST_TMP_PROBE_FALLBACK.items()
+            if fallback_path == state_path
+        }
+    )
+    return cache
+
+
+def save_host_tmp_probe_cache(client_name: str, cache: HostTmpProbeCache) -> bool:
+    """Persist one client's worker-tmp inode latch (#2470).
+
+    Read-merge-writes the shared sidecar (other keys preserved, #1157) and
+    merges into the existing ``"host_tmp_probe"`` dict so other clients keep
+    their own entries. Silently swallows write errors, same posture as
+    :func:`save_main_drift_latches`. When persistence fails, retain a
+    process-local per-client fallback so a set cannot re-fire attention on
+    every tick; a later healthy probe replaces that fallback with an
+    unlatched entry.
+
+    Returns whether the sidecar write succeeded.
+    """
+    try:
+        refuse_real_state_write(DISPATCH_STATE_FILE)
+        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with dispatch_state_lock():
+            payload = _load_dispatch_state_raw()
+            entries = payload.get("host_tmp_probe")
+            if not isinstance(entries, dict):
+                entries = {}
+            entries[client_name] = {
+                "probed_at": cache.probed_at.isoformat(),
+                "exhausted": cache.exhausted,
+                "latched": cache.latched,
+            }
+            payload["host_tmp_probe"] = entries
+            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
+    except OSError:
+        _HOST_TMP_PROBE_FALLBACK[(str(DISPATCH_STATE_FILE), client_name)] = cache
+        logger.warning(
+            "dispatch_state: failed to persist host_tmp_probe (client=%s)",
+            client_name,
+            exc_info=True,
+        )
+        return False
+    else:
+        _HOST_TMP_PROBE_FALLBACK.pop((str(DISPATCH_STATE_FILE), client_name), None)
+        return True

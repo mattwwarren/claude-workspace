@@ -27,6 +27,7 @@ from cw.doctor.config_checks import (
     _check_review_recipe_liveness,
     _check_review_strategy,
     _check_state_file,
+    _check_worker_tmp_pressure,
 )
 from cw.doctor.linkage import (
     _check_cross_repo_rows,
@@ -114,6 +115,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.extend(_check_loop_health())
     report.checks.extend(_check_loop_liveness())
     report.checks.append(_check_inbox_size())
+    report.checks.extend(_check_worker_tmp_pressure(_clients))
     report.checks.extend(_check_workspace_paths())
     report.checks.extend(_check_dispatch_repo_head(_clients))
     report.checks.extend(_check_cross_repo_rows(_clients))

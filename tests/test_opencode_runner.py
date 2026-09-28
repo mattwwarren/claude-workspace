@@ -29,6 +29,7 @@ from cw.opencode_runner import (
     stage_entry_marker,
     synthesize_opencode_result,
 )
+from cw.worktree import resolve_worker_tmpdir
 
 if TYPE_CHECKING:
     pass
@@ -88,24 +89,33 @@ def test_build_argv_without_model(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_env_filters_secrets() -> None:
+def test_build_env_filters_secrets(tmp_path: Path) -> None:
     """build_env excludes non-allowlisted vars (e.g. AWS_SECRET_KEY)."""
     slack_id_key = "SLACK_MCP_CLIENT_ID"
     slack_secret_key = "SLACK_MCP_" + "CLIENT_SECRET"
     env_patch = {
         "AWS_SECRET_KEY": "leaked",
         "HOME": "/tmp",
-        "TMPDIR": "/var/folders/xx/T/",
         slack_id_key: "test-id",
         slack_secret_key: "test-secret-value",
     }
     with patch.dict("os.environ", env_patch, clear=False):
-        env = build_env()
+        env = build_env(tmp_path)
     assert "AWS_SECRET_KEY" not in env
     assert env["HOME"] == "/tmp"
-    assert env["TMPDIR"] == "/var/folders/xx/T/"
     assert env[slack_id_key] == "test-id"
     assert env[slack_secret_key] == "test-secret-value"
+
+
+def test_build_env_delegates_tmpdir_to_shared_helper(tmp_path: Path) -> None:
+    """An ambient TMPDIR is overridden by the per-worktree one (#2470).
+
+    Before #2470 the allowlist passed the orchestrator's own TMPDIR straight
+    through -- the regression this asserts against.
+    """
+    with patch.dict("os.environ", {"TMPDIR": "/var/folders/xx/T/"}, clear=False):
+        env = build_env(tmp_path)
+    assert env["TMPDIR"] == str(resolve_worker_tmpdir(tmp_path))
 
 
 # ---------------------------------------------------------------------------

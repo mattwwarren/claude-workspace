@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from cw.executor_launch import _launch_logged_subprocess
+from cw.worktree import apply_worker_tmpdir
 
 # Per-run output of the detached ``cw codex run`` job. Private: harvest never
 # parses it — reconcile/local's codex branch (A1) decides from git and audit
@@ -65,7 +66,7 @@ def build_codex_run_argv(
     return argv
 
 
-def build_codex_run_env() -> dict[str, str]:
+def build_codex_run_env(worktree: Path) -> dict[str, str]:
     """Return the full parent environment for the ``cw codex run`` job.
 
     Deliberately NOT aider/opencode's narrow allowlist. The subprocess is
@@ -75,8 +76,15 @@ def build_codex_run_env() -> dict[str, str]:
     The in-process review's ``codex exec`` calls already inherited the full
     serve environment unfiltered; narrowing it here would silently change what
     ``codex exec`` can see.
+
+    The one exception: TMPDIR/TMP/TEMP are force-set to *worktree*'s own
+    scratch dir via :func:`cw.worktree.apply_worker_tmpdir` (#2470).
+    ``RealCodexRunner.run``'s ``Popen`` passes no ``env=``, so every per-role
+    ``codex exec`` the driver starts inherits this value transitively.
     """
-    return dict(os.environ)
+    env = dict(os.environ)
+    apply_worker_tmpdir(env, worktree)
+    return env
 
 
 class RealCodexJobRunner:

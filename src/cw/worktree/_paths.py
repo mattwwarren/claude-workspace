@@ -2,7 +2,9 @@
 
 Pure path computation: ``slugify_branch`` -> ``worktree_path_for`` ->
 ``resolve_task_worktree``. The only git call is the checked-out-branch probe
-``resolve_task_worktree`` uses to trust an on-disk worktree.
+``resolve_task_worktree`` uses to trust an on-disk worktree. The one
+filesystem mutation is :func:`apply_worker_tmpdir`, which creates the
+per-worktree scratch directory it points a worker's TMPDIR at (#2470).
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cw.models import WORKER_TMPDIR_RELATIVE_PATH
 from cw.worktree._git import _checked_out_branch, _git_dir
 
 if TYPE_CHECKING:
@@ -100,6 +103,39 @@ def worktree_path_for(client: ClientConfig, branch: str) -> Path:
     if client.worktree_base is not None or len(str(candidate)) <= _WORKTREE_NAME_CAP:
         return candidate
     return _hashed_worktree_base(client) / slug
+
+
+def resolve_worker_tmpdir(worktree: Path) -> Path:
+    """Return the per-worktree scratch directory for a worker's TMPDIR (#2470).
+
+    Pure computation -- does not create the directory; see
+    :func:`apply_worker_tmpdir` for the spawn-time mutator.
+    """
+    return worktree / WORKER_TMPDIR_RELATIVE_PATH
+
+
+def apply_worker_tmpdir(env: dict[str, str], worktree: Path) -> Path:
+    """Point *env*'s TMPDIR/TMP/TEMP at *worktree*'s scratch dir; return it.
+
+    The one shared resolve -> mkdir -> force-set step every executor env
+    builder calls (``native_daemon._spawn_clean_env``,
+    ``codex_runner.build_codex_run_env``, ``local_runner.build_env``,
+    ``opencode_runner.build_env``), so a worker never writes scratch files to
+    the host's shared ``/tmp`` tmpfs -- the 2026-09-27 ENOSPC incident.
+    Unconditionally overrides (not ``setdefault``) any inherited value, the
+    same posture ``_spawn_clean_env`` takes for its ``GH_*`` prompt
+    suppressors: an ambient ``TMPDIR`` from the orchestrator's own
+    environment is exactly the value that must not leak through. ``TMP`` and
+    ``TEMP`` are set too for tools that read those instead of ``TMPDIR``.
+    Mutates *env* in place.
+    """
+    path = resolve_worker_tmpdir(worktree)
+    path.mkdir(parents=True, exist_ok=True)
+    value = str(path)
+    env["TMPDIR"] = value
+    env["TMP"] = value
+    env["TEMP"] = value
+    return path
 
 
 def resolve_task_worktree(

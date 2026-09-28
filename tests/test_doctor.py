@@ -7811,3 +7811,136 @@ class TestRunDoctorReviewRecipeWiring:
         names = [c.name for c in report.checks]
         assert any(n.startswith("review-recipe-liveness") for n in names)
         assert any(n == "attention-state-census" for n in names)
+
+
+class TestCheckWorkerTmpPressure:
+    """#2470: per-client free-inode/space check on the worktree-base mount.
+
+    The conftest autouse ``_mock_disk_usage`` fixture defaults both
+    ``cw.doctor.config_checks.check_disk_usage`` and
+    ``cw.doctor.config_checks.check_inode_usage`` to a roomy mount; the
+    below-threshold cases override those seams explicitly.
+    """
+
+    @staticmethod
+    def _clients(root: Path) -> dict[str, ClientConfig]:
+        from cw.models import ClientConfig
+
+        return {
+            "client-a": ClientConfig(
+                name="client-a",
+                workspace_path=root,
+                worktree_base=root / "worktrees",
+            )
+        }
+
+    def test_healthy_mount_is_ok(self, tmp_path: Path) -> None:
+        from cw.doctor.config_checks import _check_worker_tmp_pressure
+
+        results = _check_worker_tmp_pressure(self._clients(tmp_path))
+
+        assert len(results) == 1
+        assert results[0].name == "worker-tmp/client-a"
+        assert results[0].ok is True
+        assert "900,000 free inodes (min 50,000)" in results[0].detail
+
+    def test_low_inodes_fail_naming_client_and_floor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.disk import InodeUsage
+        from cw.doctor.config_checks import _check_worker_tmp_pressure
+
+        monkeypatch.setattr(
+            "cw.doctor.config_checks.check_inode_usage",
+            lambda _path: InodeUsage(total_inodes=1_000_000, free_inodes=10_000),
+        )
+
+        (result,) = _check_worker_tmp_pressure(self._clients(tmp_path))
+
+        assert result.ok is False
+        assert "'client-a'" in result.detail
+        assert "10,000 free inodes, below the 50,000 floor" in result.detail
+        assert "max(50,000, 5% of 1,000,000)" in result.detail
+
+    def test_low_space_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.disk import DiskUsage
+        from cw.doctor.config_checks import _check_worker_tmp_pressure
+
+        monkeypatch.setattr(
+            "cw.doctor.config_checks.check_disk_usage",
+            lambda _path: DiskUsage(total_gb=500.0, free_gb=1.5),
+        )
+
+        (result,) = _check_worker_tmp_pressure(self._clients(tmp_path))
+
+        assert result.ok is False
+        assert "1.5 GB free, below the 5.0 GB floor" in result.detail
+
+    def test_zero_total_inodes_is_ok_and_says_so(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """btrfs reports no fixed inode budget: not a failure."""
+        from cw.disk import InodeUsage
+        from cw.doctor.config_checks import _check_worker_tmp_pressure
+
+        monkeypatch.setattr(
+            "cw.doctor.config_checks.check_inode_usage",
+            lambda _path: InodeUsage(total_inodes=0, free_inodes=0),
+        )
+
+        (result,) = _check_worker_tmp_pressure(self._clients(tmp_path))
+
+        assert result.ok is True
+        assert "inode count not reported" in result.detail
+
+    def test_probe_oserror_fails_with_detail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.disk import InodeUsage
+        from cw.doctor.config_checks import _check_worker_tmp_pressure
+
+        probe_error = "statvfs exploded"
+
+        def _raise(_path: Path) -> InodeUsage:
+            raise OSError(probe_error)
+
+        monkeypatch.setattr("cw.doctor.config_checks.check_inode_usage", _raise)
+
+        (result,) = _check_worker_tmp_pressure(self._clients(tmp_path))
+
+        assert result.ok is False
+        assert probe_error in result.detail
+
+    def test_bad_orchestrator_config_degrades_to_defaults(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.doctor.config_checks import _check_worker_tmp_pressure
+        from cw.exceptions import ConfigValidationError
+
+        config_error = "bad orchestrator.yaml"
+
+        def _raise() -> object:
+            raise ConfigValidationError(config_error)
+
+        monkeypatch.setattr("cw.doctor.config_checks.load_orchestrator_config", _raise)
+
+        (result,) = _check_worker_tmp_pressure(self._clients(tmp_path))
+
+        assert result.ok is True
+        assert "(min 50,000)" in result.detail
+
+    def test_registered_in_run_doctor(
+        self,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _stub_claude_version_ok(monkeypatch)
+        clients = self._clients(tmp_path)
+        monkeypatch.setattr("cw.doctor._deps.load_clients", lambda: clients)
+
+        report = run_doctor()
+
+        assert "worker-tmp/client-a" in {c.name for c in report.checks}

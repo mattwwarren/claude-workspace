@@ -25,14 +25,17 @@ import pytest
 from cw.dispatch_state import (
     AvailabilityProbeCache,
     ExecutorBlockedMarker,
+    HostTmpProbeCache,
     OpenPrProbeCache,
     load_availability_probe_cache,
     load_executor_blocked_markers,
+    load_host_tmp_probe_cache,
     load_open_pr_probe_cache,
     load_usage_limited_until,
     merge_and_save_usage_limited_until,
     save_availability_probe_cache,
     save_executor_blocked_marker,
+    save_host_tmp_probe_cache,
     save_main_drift_latches,
     save_open_pr_probe_entries,
     save_open_pr_probe_entry,
@@ -414,6 +417,109 @@ class TestOpenPrProbeCacheSidecar:
         )
 
         assert load_open_pr_probe_cache() == {}
+
+
+class TestHostTmpProbeCacheSidecar:
+    """Round-trip + fail-soft contract for the #2470 per-client inode latch."""
+
+    def test_round_trip_and_per_client_entries_coexist(
+        self, tmp_config_dir: Path
+    ) -> None:
+        now = datetime.now(UTC)
+        save_host_tmp_probe_cache(
+            "acme", HostTmpProbeCache(probed_at=now, exhausted=True, latched=True)
+        )
+        save_host_tmp_probe_cache(
+            "other", HostTmpProbeCache(probed_at=now, exhausted=False, latched=False)
+        )
+
+        cache = load_host_tmp_probe_cache()
+
+        assert set(cache) == {"acme", "other"}
+        assert cache["acme"].latched is True
+        assert cache["acme"].exhausted is True
+        assert cache["other"].latched is False
+        assert abs((cache["acme"].probed_at - now).total_seconds()) < 1
+
+    def test_absent_file_returns_empty(self, tmp_config_dir: Path) -> None:
+        assert load_host_tmp_probe_cache() == {}
+
+    def test_corrupt_file_returns_empty(self, tmp_config_dir: Path) -> None:
+        import cw.dispatch_state
+
+        cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text("{not json")
+
+        assert load_host_tmp_probe_cache() == {}
+
+    @pytest.mark.parametrize(
+        "payload",
+        [["not", "a", "dict"], {"host_tmp_probe": ["not", "a", "dict"]}],
+    )
+    def test_non_dict_shapes_return_empty(
+        self, tmp_config_dir: Path, payload: object
+    ) -> None:
+        import cw.dispatch_state
+
+        cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text(json.dumps(payload))
+
+        assert load_host_tmp_probe_cache() == {}
+
+    def test_malformed_entry_is_dropped_not_poisoning_siblings(
+        self, tmp_config_dir: Path
+    ) -> None:
+        import cw.dispatch_state
+
+        save_host_tmp_probe_cache(
+            "good",
+            HostTmpProbeCache(datetime.now(UTC), exhausted=True, latched=True),
+        )
+        payload = json.loads(cw.dispatch_state.DISPATCH_STATE_FILE.read_text())
+        payload["host_tmp_probe"]["bad-shape"] = {"probed_at": 42}
+        payload["host_tmp_probe"]["bad-ts"] = {
+            "probed_at": "not-a-timestamp",
+            "exhausted": True,
+            "latched": True,
+        }
+        payload["host_tmp_probe"]["not-a-dict"] = "nope"
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text(json.dumps(payload))
+
+        assert set(load_host_tmp_probe_cache()) == {"good"}
+
+    def test_write_preserves_sibling_keys(self, tmp_config_dir: Path) -> None:
+        save_open_pr_probe_entry(
+            "acme", "1862", OpenPrProbeCache(datetime.now(UTC), has_open_pr=True)
+        )
+
+        save_host_tmp_probe_cache(
+            "acme", HostTmpProbeCache(datetime.now(UTC), exhausted=True, latched=True)
+        )
+
+        assert "acme/1862" in load_open_pr_probe_cache()
+        assert "acme" in load_host_tmp_probe_cache()
+
+    def test_write_failure_is_swallowed(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.dispatch_state.atomic_write_text", _boom)
+
+        save_host_tmp_probe_cache(
+            "acme", HostTmpProbeCache(datetime.now(UTC), exhausted=True, latched=True)
+        )
+
+        # The process-local fallback keeps the just-set latch visible even
+        # when the sidecar write fails, preventing repeated attention events.
+        assert load_host_tmp_probe_cache()["acme"].latched is True
+
+        save_host_tmp_probe_cache(
+            "acme", HostTmpProbeCache(datetime.now(UTC), exhausted=False, latched=False)
+        )
+        assert load_host_tmp_probe_cache()["acme"].latched is False
 
 
 class TestOpenPrProbeEntriesBatch:

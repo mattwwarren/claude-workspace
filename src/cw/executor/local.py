@@ -99,7 +99,7 @@ def _local_preflight(
             worktree / TASK_CONTEXT_RELATIVE_PATH,
             build_aiderignore(worktree, files),
         ),
-        env=build_env(config.endpoint),  # narrowed: is-None check above
+        env=build_env(config.endpoint, worktree),  # narrowed: is-None check above
     )
 
 

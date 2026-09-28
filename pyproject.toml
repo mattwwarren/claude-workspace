@@ -420,6 +420,12 @@ ignore = [
 # (_run_fix_and_commit parks through its builders), so a module-level import of
 # commit here would close that cycle. Inline import is the sanctioned mechanism.
 "src/cw/codex_fix_loop/park.py" = ["PLC0415"]
+# native_daemon defers cw.worktree.apply_worker_tmpdir inside _spawn_clean_env
+# (#2470): cw.worktree's package __init__ imports _lifecycle, which imports
+# get_native_daemon_client from this module at module top, so a module-level
+# import here would hit a partially initialized module. Inline import is the
+# sanctioned mechanism, not a workaround.
+"src/cw/native_daemon.py" = ["PLC0415"]
 # Channel test files guard imports behind pytest.importorskip("starlette"/"mcp"),
 # so module-level imports legitimately follow executable code (E402).
 "tests/test_cw_pr_events_channel.py" = ["E402"]

@@ -18,6 +18,7 @@ from cw.codex_runner import (
     build_codex_run_argv,
     build_codex_run_env,
 )
+from cw.worktree import resolve_worker_tmpdir
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -59,16 +60,36 @@ def test_build_codex_run_argv_includes_wall_clock_flag_when_set() -> None:
     assert argv[-2:] == ["--wall-clock-budget-seconds", "120"]
 
 
+_TMP_VARS = frozenset({"TMPDIR", "TMP", "TEMP"})
+
+
 def test_build_codex_run_env_inherits_full_os_environ(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Unlike aider/opencode's allowlist, the job inherits the full environment."""
+    """Unlike aider/opencode's allowlist, the job inherits the full environment.
+
+    The one exception is the per-worktree TMPDIR/TMP/TEMP trio (#2470), which
+    is force-set rather than inherited.
+    """
     monkeypatch.setenv("CW_TEST_CODEX_RUN_SENTINEL", "kept")
 
-    env = build_codex_run_env()
+    env = build_codex_run_env(tmp_path)
 
     assert env["CW_TEST_CODEX_RUN_SENTINEL"] == "kept"
-    assert env == dict(os.environ)
+    assert {k: v for k, v in env.items() if k not in _TMP_VARS} == {
+        k: v for k, v in os.environ.items() if k not in _TMP_VARS
+    }
+
+
+def test_build_codex_run_env_delegates_tmpdir_to_shared_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TMPDIR comes from apply_worker_tmpdir, not the serve process (#2470)."""
+    monkeypatch.setenv("TMPDIR", "/tmp")
+
+    env = build_codex_run_env(tmp_path)
+
+    assert env["TMPDIR"] == str(resolve_worker_tmpdir(tmp_path))
 
 
 def test_real_codex_job_runner_launch_writes_to_codex_driver_log(
