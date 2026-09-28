@@ -10,12 +10,14 @@ package import graph stays acyclic. The one-directional discipline holds:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import yaml
 from pydantic import ValidationError
 
 from cw import __version__
 from cw.doctor import _deps
-from cw.doctor._shared import DoctorReport
+from cw.doctor._shared import DoctorReport, WedgeFinding
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
 from cw.doctor.config_checks import (
     _check_attention_state_census,
@@ -58,6 +60,7 @@ from cw.doctor.wedge import (
     _check_wedge_active_no_daemon_entry,
     _check_wedge_active_null_liveness_orphan,
     _check_wedge_dead_session_blocked_on_user,
+    _check_wedge_leaked_daemon_worker,
     _check_wedge_repo_ahead,
     _check_wedge_task_running_completed_session,
     _check_wedge_task_running_no_session,
@@ -65,6 +68,32 @@ from cw.doctor.wedge import (
     _reap_wedge_findings,
 )
 from cw.exceptions import CwError
+
+if TYPE_CHECKING:
+    from cw.models import CwState, DevQueueStore
+
+
+def _collect_wedge_findings(
+    link_state: CwState, queue: DevQueueStore
+) -> list[WedgeFinding]:
+    """Run every wedge detector against *link_state*/*queue*; return findings.
+
+    Extracted from :func:`run_doctor` (#2480) to keep it under the PLR0915
+    statement budget (CLAUDE.md) after the class-10 (leaked-daemon-worker)
+    check was added — every detector here was previously inlined directly
+    into ``run_doctor``.
+    """
+    findings: list[WedgeFinding] = []
+    findings.extend(_check_wedge_task_running_no_session(link_state, queue))
+    findings.extend(_check_wedge_task_running_completed_session(link_state, queue))
+    findings.extend(_check_wedge_repo_ahead(link_state, queue))
+    findings.extend(_check_wedge_dead_session_blocked_on_user(link_state, queue))
+    findings.extend(_check_wedge_terminal_sibling_park(queue))
+    findings.extend(_check_wedge_active_no_daemon_entry(link_state))
+    findings.extend(_check_wedge_active_daemon_stale_no_sentinel(link_state, queue))
+    findings.extend(_check_wedge_active_null_liveness_orphan(link_state, queue))
+    findings.extend(_check_wedge_leaked_daemon_worker(link_state))
+    return findings
 
 
 def run_doctor(*, reap: bool = False) -> DoctorReport:
@@ -125,24 +154,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
         report.checks.extend(_check_timed_out_merged(link_state, _clients))
         # Wedge checks: load queue once, run every check off it.
         queue = _deps.load_dev_queue()
-        report.wedge_findings.extend(
-            _check_wedge_task_running_no_session(link_state, queue)
-        )
-        report.wedge_findings.extend(
-            _check_wedge_task_running_completed_session(link_state, queue)
-        )
-        report.wedge_findings.extend(_check_wedge_repo_ahead(link_state, queue))
-        report.wedge_findings.extend(
-            _check_wedge_dead_session_blocked_on_user(link_state, queue)
-        )
-        report.wedge_findings.extend(_check_wedge_terminal_sibling_park(queue))
-        report.wedge_findings.extend(_check_wedge_active_no_daemon_entry(link_state))
-        report.wedge_findings.extend(
-            _check_wedge_active_daemon_stale_no_sentinel(link_state, queue)
-        )
-        report.wedge_findings.extend(
-            _check_wedge_active_null_liveness_orphan(link_state, queue)
-        )
+        report.wedge_findings.extend(_collect_wedge_findings(link_state, queue))
         if reap and report.wedge_findings:
             _reap_wedge_findings(report.wedge_findings)
 

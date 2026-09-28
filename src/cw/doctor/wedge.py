@@ -30,7 +30,7 @@ from pydantic import ValidationError
 
 from cw._git import run_git
 from cw.auto_dev_result import PAUSED_FOR_USER_INPUT_STATUSES
-from cw.config import load_orchestrator_config, state_file
+from cw.config import load_orchestrator_config, load_state, state_file
 from cw.dev_queue import dev_queue_lock, save_dev_queue, transition_task_status
 from cw.dispatch.claim import _find_running_row
 from cw.doctor import _deps
@@ -57,6 +57,10 @@ from cw.reconcile import (
     compute_drift,
     feature_branch_key,
     ticket_id_for_session,
+)
+from cw.reconcile.leaked_workers import (
+    find_leaked_daemon_workers,
+    sweep_leaked_daemon_workers,
 )
 from cw.reconcile.liveness import _classify_liveness_bucket
 
@@ -125,6 +129,15 @@ _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL = "wedge/active-daemon-stale-no-sentinel"
 # absence plus elapsed time, with no roster, PID, or terminal-result evidence,
 # so --reap never mutates it; the recipe names `cw spawn close <id>` instead.
 _WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN = "wedge/active-null-liveness-orphan"
+
+# Wedge class for daemon roster workers whose surface_ref names a cw session
+# already TERMINAL, or no cw session at all (#2480). Distinct from every
+# class above: those key off a queue task or cw Session; this one keys off a
+# live *roster* entry that has outlived its (or never had a) owning session
+# -- the leak that makes cw.worktree.live_home_reason report a finished
+# ticket's worktree occupied forever. See cw.reconcile.leaked_workers for the
+# shared detection/stop authority this check and its --reap remedy both use.
+_WEDGE_LEAKED_DAEMON_WORKER = "wedge/leaked-daemon-worker"
 
 _log = logging.getLogger(__name__)
 
@@ -729,6 +742,50 @@ def _check_wedge_active_null_liveness_orphan(
     return findings
 
 
+def _check_wedge_leaked_daemon_worker(state: CwState) -> list[WedgeFinding]:
+    """Detect daemon roster workers whose owning cw session is gone (#2480).
+
+    Surfaces every :class:`~cw.reconcile.leaked_workers.LeakedWorker`
+    (:func:`~cw.reconcile.leaked_workers.find_leaked_daemon_workers`) as a
+    wedge finding, even on a plain ``cw doctor`` run with no ``--reap`` --
+    an operator asking "why won't this ticket re-dispatch" can see the leak
+    named here before deciding to clear it. ``daemon_short_id`` carries the
+    roster id the ``--reap`` remedy (:func:`_reap_wedge_findings`) needs,
+    since a leaked worker with no matching cw session has no ``session_id``
+    to key off.
+
+    Returns no findings when the roster cannot be read
+    (:func:`~cw.reconcile.leaked_workers.find_leaked_daemon_workers` returns
+    ``None``) -- there is nothing to safely report or act on this run.
+    """
+    leaked = find_leaked_daemon_workers(state, daemon=get_native_daemon_client())
+    if not leaked:
+        return []
+    findings: list[WedgeFinding] = []
+    for worker in leaked:
+        session = worker.session
+        if session is not None:
+            owner = f"owning session {session.id} is {session.status.value}"
+        else:
+            owner = "no matching cw session"
+        findings.append(
+            WedgeFinding(
+                wedge_class=_WEDGE_LEAKED_DAEMON_WORKER,
+                session_id=session.id if session is not None else None,
+                ticket_id=(
+                    ticket_id_for_session(session.name) if session is not None else None
+                ),
+                recipe=(
+                    f"Daemon worker {worker.short_id} at {worker.cwd} is leaked"
+                    f" ({owner}). Run: cw doctor --reap to stop it."
+                ),
+                state_file=str(state_file()),
+                daemon_short_id=worker.short_id,
+            )
+        )
+    return findings
+
+
 def _collapse_blocked_on_user_tasks(
     queue: DevQueueStore,
     blocked_ticket_ids: set[str],
@@ -860,6 +917,15 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         PENDING). ADR-0014: its eligibility is an elapsed-time cutoff with no
         roster/PID/terminal-result evidence; the recipe names
         ``cw spawn close <id>`` for the operator.
+    Class-10 (leaked-daemon-worker, #2480): stop every worker
+        :func:`_check_wedge_leaked_daemon_worker` found via
+        ``cw.reconcile.leaked_workers.sweep_leaked_daemon_workers`` (the same
+        detect+stop+audit authority the unconditional reconcile-pass sweep
+        uses) — re-reads state fresh rather than trusting the findings'
+        snapshot, mirroring class-6/8's per-session re-selection. Listed in
+        the running_ticket_ids exclusion set: its remedy is a daemon stop, not
+        a queue-task revert (a RUNNING task whose session already completed is
+        class-3's job, not this class's).
 
     The former class-1 (pane-idle-but-active) wedge was removed with the
     multiplexer substrate — under the native daemon there are no panes to
@@ -877,6 +943,7 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
             _WEDGE_TERMINAL_SIBLING,
             _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL,
             _WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN,
+            _WEDGE_LEAKED_DAEMON_WORKER,
         }
     }
     blocked_ticket_ids: set[str] = {
@@ -901,12 +968,16 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         and f.wedge_class
         in {_WEDGE_ACTIVE_NO_DAEMON_ENTRY, _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL}
     ]
+    has_leaked_worker_findings = any(
+        f.wedge_class == _WEDGE_LEAKED_DAEMON_WORKER for f in findings
+    )
 
     if not (
         running_ticket_ids
         or blocked_ticket_ids
         or terminal_sibling_ticket_ids
         or daemon_reap_findings
+        or has_leaked_worker_findings
     ):
         return
 
@@ -938,3 +1009,10 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
     # dev_queue_lock above).
     for session_id, wedge_class in daemon_reap_findings:
         _reap_session_by_selector(session_id, proposed_action=wedge_class)
+
+    # Class-10 (#2480): re-detect fresh (state may have changed since the
+    # findings were collected) and stop every leaked worker still leaked,
+    # via the shared reconcile authority so the audit-event payload matches
+    # the unconditional reconcile-pass sweep exactly.
+    if has_leaked_worker_findings:
+        sweep_leaked_daemon_workers(load_state(), daemon=get_native_daemon_client())

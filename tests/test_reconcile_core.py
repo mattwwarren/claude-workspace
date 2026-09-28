@@ -688,6 +688,40 @@ def test_reconcile_with_native_live_proceeds(
     assert report.phantom_session_ids == ["dead-native"]
 
 
+def test_reconcile_sweeps_a_leaked_daemon_worker(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2480: reconcile() stops a roster worker whose session already
+    COMPLETED, before the daemon-outage guard -- and regardless of it, since
+    this sweep reads the roster directly rather than ``claude agents --json``."""
+    from cw.events import OrchestratorEventType
+
+    daemon = FakeNativeDaemonClient()
+    short_id = daemon.seed_live_worker(Path("/tmp/leaked-wt"))
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+
+    completed = _make_daemon_session(
+        id="done0001",
+        name="client-a/auto-dev/GEN-99",
+        status=SessionStatus.COMPLETED,
+        surface_ref=short_id,
+    )
+    save_state(CwState(sessions=[completed]))
+
+    reconcile()
+
+    assert daemon.stop_calls == [short_id]
+    events = read_events(
+        consumer="test_reconcile_sweeps_leaked_worker",
+        event_types=[OrchestratorEventType.DAEMON_LEAKED_WORKER_STOPPED],
+    )
+    assert len(events) == 1
+    assert events[0].payload["short_id"] == short_id
+    assert events[0].payload["ticket_id"] == "GEN-99"
+
+
 def test_reconcile_timed_out_session_reverts_dev_queue_task_to_pending(
     tmp_config_dir: Path,
 ) -> None:
