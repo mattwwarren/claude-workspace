@@ -17,7 +17,7 @@ owns the ``agent_spawn_stamp`` write, driven off the hook payload's own
 turn-accounting (the same field ``pendingBackgroundAgentCount`` values fed
 into the replay). A turn ending with pending background work snapshots the
 live count; a turn ending with none clears it. Both writes share
-``cw.cli._hook_io._write_cw_context_locked`` with the pre-existing
+``cw._hook_context._write_cw_context_locked`` with the pre-existing
 ``agent-spawn-pre`` writer (tested in ``tests/test_cli_agent_spawn_stamp.py``).
 """
 
@@ -264,7 +264,7 @@ def test_signal_stop_stamp_write_fails_open_on_lock_contention(
     import fcntl
 
     monkeypatch.setattr(
-        "cw.cli._hook_io._LOCK_TIMEOUT_SECS_DEFAULT", 0.05, raising=True
+        "cw._hook_context._LOCK_TIMEOUT_SECS_DEFAULT", 0.05, raising=True
     )
 
     worktree = tmp_path / "wt-locked"

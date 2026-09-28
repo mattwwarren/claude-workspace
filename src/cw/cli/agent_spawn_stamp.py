@@ -54,14 +54,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from cw._hook_context import _write_cw_context_locked
 from cw.cli._base import main
-from cw.cli._hook_io import (
-    _LOCK_TIMEOUT_SECS_DEFAULT,
-    _context_lock,
-    _read_hook_stdin_json,
-    _write_cw_context_locked,
-    enforce,
-)
+from cw.cli._hook_io import _read_hook_stdin_json, enforce
 from cw.cli._subagent_policy import classify_spawn
 from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
@@ -70,11 +65,7 @@ from cw.models import (
     extract_unresolved_spawn_count,
 )
 
-__all__ = [
-    "_LOCK_TIMEOUT_SECS_DEFAULT",
-    "_context_lock",
-    "agent_spawn_pre",
-]
+__all__ = ["agent_spawn_pre"]
 
 
 def _unresolved_count(context: dict[str, object]) -> int:
@@ -112,14 +103,14 @@ def _hook_cwd(payload: dict[str, object] | None) -> str | None:
 def _adjust_unresolved_count(delta: int, payload: dict[str, object] | None) -> None:
     """Apply *delta* to the unresolved-spawn counter for the hook's worktree.
 
-    Read-modify-write via :func:`cw.cli._hook_io._write_cw_context_locked`,
+    Read-modify-write via :func:`cw._hook_context._write_cw_context_locked`,
     floored at zero: a caller with no matching prior Pre (a reused worktree, a
     hook wired mid-flight) must not drive the counter negative, which would
     swallow the *next* real crash. Only ever called with ``delta=1`` since
     #1947 removed the decrementing ``agent-spawn-post`` counterpart — kept
     general rather than hardcoded to +1 since the flooring/carry-forward
     logic below is delta-agnostic and the shape matches
-    :func:`cw.cli._hook_io._write_cw_context_locked`'s mutate-fn contract
+    :func:`cw._hook_context._write_cw_context_locked`'s mutate-fn contract
     either way.
 
     ``last_stamped_at`` advances only when the count increases — it answers

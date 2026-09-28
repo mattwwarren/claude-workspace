@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import click
 from pydantic import ValidationError
 
+from cw._hook_context import _read_cw_context, _write_cw_context_locked
 from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.config import load_state, save_state, sessions_lock
 from cw.events import record_event
@@ -25,6 +26,7 @@ from cw.exceptions import (
     PlanDraftBindingError,
 )
 from cw.models import (
+    HOOK_CONTEXT_RELATIVE_PATH,
     PLAN_DRAFT_FINGERPRINT_KEY,
     STAGED_EMIT_RESULT_KEY,
     LastResultSource,
@@ -85,13 +87,14 @@ def _validate_or_exit(
     ONLY -- ``cw result emit`` can therefore never stage a ``BlockedResult``
     whose ``landed_terminal`` outcome the idle sweep's
     ``cw.reconcile.idle._mutations._apply_idle_routed_mutations`` does not
-    branch on (unlike the Stop hook's ``_handle_unrouted_stop``, #1692). If
+    branch on (unlike the Stop hook's ``_handle_unrouted_stop``, #1273). If
     this gate is ever widened to accept the ``BlockedResult`` shape (the way
-    the Stop-hook harvest door already does, RFC 0012 A1 / #1457), the idle
-    sweep must also gain a ``landed_terminal`` arm, or a staged
+    the Stop-hook harvest door already was, RFC 0012 A1 / #1457), the idle
+    sweep must also gain a ``landed_terminal`` arm (#2482), or a staged
     landed-terminal-FAILED result routed through the idle backstop instead of
     the Stop hook falls into the stage-mismatch-refusal branch and never
-    completes the session or stops the daemon.
+    completes the session or stops the daemon. Pinned by
+    ``test_validate_or_exit_rejects_bare_blocked_result_shape``.
     """
     try:
         return AutoDevResult.model_validate(payload)
@@ -184,12 +187,8 @@ def _resolve_emit_session_id(session_id: str | None) -> str:
     if session_id is not None:
         return session_id
 
-    # Function-local import breaks the cw.cli <-> cw.result circular dependency;
-    # inline import is the sanctioned mechanism (PLC0415), not a workaround.
-    from cw.cli._hook_io import _read_cw_context
-
     cwd = str(Path.cwd())
-    context_path = Path(cwd) / ".claude" / "cw-context.json"
+    context_path = Path(cwd) / HOOK_CONTEXT_RELATIVE_PATH
     context = _read_cw_context(cwd)
     if context is None:
         click.echo(
@@ -596,10 +595,6 @@ def _stamp_staged_emit_result(session_id: str) -> None:
     peek that misses the flag just defers as it did before #2458, which a
     later Stop or the idle sweep recovers from.
     """
-    # Function-local import breaks the cw.cli <-> cw.result circular dependency;
-    # inline import is the sanctioned mechanism (PLC0415), not a workaround.
-    from cw.cli._hook_io import _read_cw_context, _write_cw_context_locked
-
     cwd = str(Path.cwd())
     context = _read_cw_context(cwd)
     if context is None or context.get("session_id") != session_id:

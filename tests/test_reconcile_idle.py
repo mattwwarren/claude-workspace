@@ -8,6 +8,7 @@ and the removal itself.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -18,6 +19,10 @@ from cw.config import clients_file
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.models import (
+    AGENT_SPAWN_LAST_STAMPED_AT_KEY,
+    AGENT_SPAWN_STAMP_KEY,
+    AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
+    HOOK_CONTEXT_RELATIVE_PATH,
     CwState,
     DevQueueStore,
     LastResultSource,
@@ -403,6 +408,85 @@ def test_detect_idle_candidates_emit_cli_respects_the_unrouted_check_delay(
     assert candidates == []
 
 
+def _stamp_background_work(worktree: Path, *, count: int, stamped_at: datetime) -> None:
+    """Overwrite the worktree's ``agent_spawn_stamp`` as a deferring Stop does."""
+    context_path = worktree / HOOK_CONTEXT_RELATIVE_PATH
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    context[AGENT_SPAWN_STAMP_KEY] = {
+        AGENT_SPAWN_UNRESOLVED_COUNT_KEY: count,
+        AGENT_SPAWN_LAST_STAMPED_AT_KEY: stamped_at.isoformat(),
+    }
+    context_path.write_text(json.dumps(context), encoding="utf-8")
+
+
+def test_idle_sweep_holds_off_staged_emit_while_background_work_drains(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    no_transcript_parse: None,
+    idle_daemon: FakeNativeDaemonClient,
+) -> None:
+    """A ``complete_session=False`` partial route leaves the session ACTIVE,
+    still holding its staged result, while ``background_tasks`` drain. Well
+    past ``sentinel_unrouted_check_seconds`` from ``started_at``, but with a
+    fresh outstanding ``agent_spawn_stamp``, the backstop must not complete
+    the session or stop its daemon under the still-running subagent (#151)."""
+    _write_staged_client()
+    _seed_row(QueueItemStatus.RUNNING, Stage.IMPL)
+    state = _emit_cli_state(tmp_path, _impl_stage_complete())
+    _stamp_background_work(
+        tmp_path / "wt", count=1, stamped_at=_NOW_PAST_CHECK - timedelta(seconds=30)
+    )
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=_NOW_PAST_CHECK,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+
+    assert candidates == []
+    assert state.sessions[0].status is SessionStatus.ACTIVE
+    assert idle_daemon.stop_calls == []
+    assert _reload_row().status == QueueItemStatus.RUNNING
+
+
+def test_idle_sweep_routes_staged_emit_once_background_stamp_outlives_deadline(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    no_transcript_parse: None,
+    idle_daemon: FakeNativeDaemonClient,
+) -> None:
+    """The dropped-wakeup case (#1889) still routes: an outstanding stamp
+    whose last deferring Stop is older than ``fix_loop_await_deadline_minutes``
+    means no further Stop is coming, so the backstop routes and completes."""
+    _write_staged_client()
+    _seed_row(QueueItemStatus.RUNNING, Stage.IMPL)
+    state = _emit_cli_state(tmp_path, _impl_stage_complete())
+    config = OrchestratorConfig()
+    _stamp_background_work(
+        tmp_path / "wt",
+        count=1,
+        stamped_at=_NOW_HOURS_LATER
+        - timedelta(minutes=config.fix_loop_await_deadline_minutes, seconds=1),
+    )
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=_NOW_HOURS_LATER,
+        native_live={"fake-short-id"},
+        config=config,
+        task_by_ticket={},
+    )
+    _act_on_idle_candidates(state, candidates, now=_NOW_HOURS_LATER)
+
+    assert len(candidates) == 1
+    assert _reload_row().stage == Stage.REVIEW
+    assert state.sessions[0].status is SessionStatus.COMPLETED
+    assert idle_daemon.stop_calls == ["fake-short-id"]
+
+
 def test_detect_idle_candidates_skips_emit_cli_already_routed_by_stop_hook(
     tmp_config_dir: Path,
     tmp_path: Path,
@@ -675,9 +759,9 @@ def test_detect_idle_candidates_landed_terminal_blocked_tripwire(
     tripwire for the day that gate is widened, not a claim this path is
     reachable in production today.
 
-    Recorded (not fixed, out of scope this cycle): the row lands FAILED as
-    expected, but the session is left ACTIVE with no daemon stop -- it falls
-    into the stage-mismatch-refusal branch instead of completing.
+    Recorded, tracked in #2482: the row lands FAILED as expected, but the
+    session is left ACTIVE with no daemon stop -- it falls into the
+    stage-mismatch-refusal branch instead of completing.
     """
     save_dev_queue(
         DevQueueStore(

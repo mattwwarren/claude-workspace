@@ -24,6 +24,7 @@ from cw.dev_queue import (
     dev_queue_lock,
     load_dev_queue,
     requeue_ticket,
+    running_task_for_session,
 )
 from cw.dispatch import _DISPATCH_CONSUMER, _apply_events_to_store
 from cw.events import advance_cursor, record_event
@@ -89,28 +90,22 @@ def _route_staged_emit_result(sess: Session) -> bool:
     session owns no RUNNING row, or the shared authority refuses the route
     (a #1031 stage mismatch, or a BlockedResult landing the row FAILED).
 
-    The row is found by ``session_id`` -- the same key
-    ``cancel_task_for_session`` uses -- via a lock-free read;
-    ``_apply_sentinel_to_task`` re-resolves it under ``dev_queue_lock``.
-    Called under ``sessions_lock``, the same ``sessions_lock`` ->
-    ``dev_queue_lock`` nesting ``signal_stop`` already uses.
+    The row is found by :func:`~cw.dev_queue.running_task_for_session` --
+    the lookup ``cancel_task_for_session`` itself uses -- via a lock-free
+    read; ``_apply_sentinel_to_task`` re-resolves it under
+    ``dev_queue_lock``. Called under ``sessions_lock``, the same
+    ``sessions_lock`` -> ``dev_queue_lock`` nesting ``signal_stop`` already
+    uses.
     """
     if not holds_staged_emit_result(sess):
         return False
     staged = reconstruct_staged_sentinel(sess.last_result)
     if staged is None:
         return False
-    ticket_id = next(
-        (
-            task.ticket_id
-            for task in load_dev_queue().tasks
-            if task.session_id == sess.id and task.status == QueueItemStatus.RUNNING
-        ),
-        None,
-    )
-    if ticket_id is None:
+    task = running_task_for_session(load_dev_queue(), sess.id)
+    if task is None:
         return False
-    outcome = _apply_sentinel_to_task(ticket_id, sess, staged)
+    outcome = _apply_sentinel_to_task(task.ticket_id, sess, staged)
     return outcome.routed or outcome.task_already_terminal
 
 

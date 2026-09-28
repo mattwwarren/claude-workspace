@@ -65,7 +65,7 @@ def _apply_idle_routed_mutations(
     the stage-mismatch refusal-marker branch, which would otherwise orphan
     this session forever (mirrors the Stop-hook's #1692 carve-out).
 
-    #2458 round 2 (known, deliberate gap -- not fixed here): unlike
+    #2458 round 2 (known gap, tracked in #2482): unlike
     ``task_already_terminal``, ``outcome.landed_terminal`` -- a BlockedResult
     that itself just landed the task terminal-FAILED via the attempt-cap
     catch-all -- is never consumed here, only in the Stop hook's
@@ -76,9 +76,12 @@ def _apply_idle_routed_mutations(
     unreachable in production: ``cw result emit``'s ``_validate_or_exit``
     (``cw.result``) only ever stages an ``AutoDevResult``, never the
     synthetic ``BlockedResult`` shape that sets ``landed_terminal`` -- see
-    that gate's own docstring for the other half of this cross-reference. If
-    that gate is ever widened, this function needs a ``landed_terminal`` arm
-    mirroring the Stop hook's.
+    that gate's own docstring for the other half of this cross-reference,
+    and ``tests/test_result.py``'s
+    ``test_validate_or_exit_rejects_bare_blocked_result_shape`` for the test
+    that pins it. If that gate is ever widened the way RFC 0012 A1 / #1457
+    widened the Stop-hook harvest door, this function needs a
+    ``landed_terminal`` arm mirroring the Stop hook's (#2482).
 
     Returns ``(accepted, state_mutated)``. ``accepted`` is only the candidates
     actually routed, so the caller's downstream event emission fires solely for

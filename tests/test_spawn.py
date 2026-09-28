@@ -2149,6 +2149,36 @@ class TestSpawnClose:
         assert closed.last_result == _valid_payload()
         assert closed.last_result_source == LastResultSource.EMIT_CLI
 
+    def test_spawn_close_advances_staged_non_terminal_stage_complete(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A staged non-terminal ``stage_complete`` advances the row to its
+        next stage on close -- the close path routes a genuine mid-pipeline
+        advance, not only a terminal ``shipped``, and never cancels it."""
+        from cw.cli import _spawn_close_impl
+        from cw.models import LastResultSource, QueueItemStatus
+        from tests._reconcile_helpers import _stage_complete_payload
+
+        sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
+        state = load_state()
+        stored = state.find_by_name_or_id(sess.id)
+        assert stored is not None
+        stored.last_result = _stage_complete_payload()
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+        self._write_staged_client()
+        self._seed_close_row(sess.id, Stage.IMPL)
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=FakeNativeDaemonClient())
+
+        row = self._reload_close_row()
+        assert row.stage == Stage.REVIEW
+        assert row.status == QueueItemStatus.PENDING
+        closed = load_state().find_by_name_or_id(sess.id)
+        assert closed is not None
+        assert closed.status == SessionStatus.COMPLETED
+        assert closed.completed_reason == CompletionReason.USER
+
     def test_spawn_close_falls_back_to_cancel_when_nothing_staged(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:

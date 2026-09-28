@@ -13,14 +13,11 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
+from cw._hook_context import _read_cw_context, _write_cw_context_locked
 from cw._util import claude_project_dir
 from cw.auto_dev_result import AutoDevResult
 from cw.cli._base import handle_errors, main
-from cw.cli._hook_io import (
-    _read_cw_context,
-    _read_hook_stdin_json,
-    _write_cw_context_locked,
-)
+from cw.cli._hook_io import _read_hook_stdin_json
 from cw.cli._sentinels import (
     _parse_sentinel_from_transcript,
     _sentinel_frame_after,

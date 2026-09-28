@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -30,6 +31,7 @@ from cw.models import (
 from cw.plan_fingerprint import compute_plan_draft_fingerprint
 from cw.result import (
     EmitOutcome,
+    _validate_or_exit,
     emit_result,
     emit_result_locked,
     emit_result_on,
@@ -1037,6 +1039,35 @@ class TestResultEmit:
 
         sess = next(s for s in load_state().sessions if s.id == "test1234")
         assert sess.last_result is None
+
+    def test_validate_or_exit_rejects_bare_blocked_result_shape(self) -> None:
+        """#2458: pins the cross-module invariant ``_validate_or_exit`` and
+        ``_apply_idle_routed_mutations`` both document -- ``cw result emit``
+        never stages a ``BlockedResult``, so the idle sweep's missing
+        ``landed_terminal`` arm (#2482) stays unreachable. The payload is a
+        genuine ``BlockedResult``, so a failure here means the gate itself
+        was widened (as #1457 widened the harvest door), not that the
+        fixture drifted."""
+        blocked_payload = {
+            "status": "blocked",
+            "blocker": {"stage": "s1", "reason": "validation_failed", "details": "x"},
+        }
+        assert isinstance(BlockedResult.model_validate(blocked_payload), BlockedResult)
+
+        with pytest.raises(click.exceptions.Exit) as exc_info:
+            _validate_or_exit(blocked_payload)
+
+        assert exc_info.value.exit_code == 1
+
+    def test_result_module_does_not_import_cw_cli(self) -> None:
+        """#2458: ``cw.result`` sits below ``cw.cli`` (``cw.cli`` imports it);
+        its cw-context.json read and stamp write go through
+        ``cw._hook_context``, never ``cw.cli._hook_io``."""
+        import cw.result as result_mod
+
+        source = Path(result_mod.__file__).read_text(encoding="utf-8")
+        assert "from cw.cli" not in source
+        assert "import cw.cli" not in source
 
     # ------------------------------------------------------------------
     # #2458 round 2: ``_stamp_staged_emit_result``'s write side had zero

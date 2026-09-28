@@ -590,7 +590,11 @@ authorities can route that staged result to the dev-queue row:
   `sentinel_unrouted_check_seconds` (default 300 s, measured from session
   start) has passed. This catches the shape the hook cannot: an upstream
   `claude --bg` async-completion wakeup that is dropped entirely (#1889), so
-  that no further Stop ever fires for the session. The sweep audits the
+  that no further Stop ever fires for the session. It holds off while the
+  worktree's `agent_spawn_stamp` shows background work outstanding and was
+  last refreshed by a deferring Stop within `fix_loop_await_deadline_minutes`
+  (default 30), because that session is draining normally and stopping its
+  daemon would kill the subagent (#151). The sweep audits the
   staged result rather than re-emitting it through the door. A #1031
   stage-mismatch refusal leaves the row and the live session untouched, and
   stamps the #1149 refusal marker (`paused_status=sentinel_stage_mismatch_refused`)

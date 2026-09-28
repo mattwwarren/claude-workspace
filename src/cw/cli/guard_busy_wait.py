@@ -38,13 +38,12 @@ from typing import NamedTuple
 
 import click
 
+from cw._hook_context import _read_cw_context, _write_cw_context_locked
 from cw.cli._base import main
 from cw.cli._hook_io import (
     _context_str,
     _extract_bash_command,
-    _read_cw_context,
     _read_hook_stdin_json,
-    _write_cw_context_locked,
     find_lane_config,
 )
 from cw.config import load_orchestrator_config
@@ -213,7 +212,7 @@ def _repeat_threshold_tripped(
     """Append this call to the rolling window; return whether it trips.
 
     The read-prune-count-append runs inside
-    :func:`cw.cli._hook_io._write_cw_context_locked`, the shared locked
+    :func:`cw._hook_context._write_cw_context_locked`, the shared locked
     read-modify-write primitive ``cw agent-spawn-pre`` and ``cw signal-stop``
     already use against the same file — this guard is its third consumer,
     exactly the case its docstring anticipates.

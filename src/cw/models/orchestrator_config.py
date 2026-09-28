@@ -917,6 +917,12 @@ class OrchestratorConfig(BaseModel):
     # evaluated at: the deadline is only ever consulted for a session already
     # in (or entering) the top staleness bucket. 30m sits comfortably under
     # that 45m floor so the field has real effect out of the box.
+    #
+    # #2458: also the age bound under which the idle sweep's staged-emit
+    # backstop treats an outstanding stamp as background work still draining
+    # and holds off routing (cw.reconcile.idle._detect). Past it, the backstop
+    # routes the staged result and completes the session -- constructive
+    # completion off the worker's own emitted result, not a timeout reap.
     fix_loop_await_deadline_minutes: int = Field(default=30, ge=1)
     # #2012 — total window (seconds) `cw agent-spawn-verify` polls for a fresh
     # subagent transcript before exiting 1. Operator-tunable rather than a code

@@ -31,8 +31,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw._hook_context import _LOCK_TIMEOUT_SECS_DEFAULT, _context_lock
 from cw.cli import main
-from cw.cli._hook_io import _LOCK_TIMEOUT_SECS_DEFAULT, _context_lock
 from cw.cli.agent_spawn_stamp import _last_stamped_at, _unresolved_count
 from cw.models import (
     AGENT_SPAWN_STAMP_KEY,
@@ -179,7 +179,7 @@ def test_pre_hook_never_crashes_on_missing_context_file(tmp_path: Path) -> None:
 
     Distinct from ``test_pre_hook_never_crashes_on_malformed_context`` (a
     *present* but corrupt file): this exercises
-    ``_hook_io._write_cw_context_locked``'s ``not context_path.is_file()``
+    ``_hook_context._write_cw_context_locked``'s ``not context_path.is_file()``
     guard, reachable from a bare/legacy worktree that never got
     ``spawn._write_hook_context`` seeded.
     """
@@ -200,7 +200,7 @@ def test_pre_hook_write_cw_context_locked_fails_open_on_write_error(
     Distinct from ``test_pre_hook_survives_unexpected_error`` (which patches
     ``_adjust_unresolved_count`` wholesale, proving only the command-level
     try/except): this patches ``atomic_write_text`` so the failure originates
-    *inside* ``_hook_io._write_cw_context_locked``'s own try/except, proving
+    *inside* ``_hook_context._write_cw_context_locked``'s own try/except, proving
     that inner guard is what fails open -- the counter must not advance.
     """
 
@@ -208,7 +208,7 @@ def test_pre_hook_write_cw_context_locked_fails_open_on_write_error(
         msg = "disk full"
         raise OSError(msg)
 
-    monkeypatch.setattr("cw.cli._hook_io.atomic_write_text", _boom)
+    monkeypatch.setattr("cw._hook_context.atomic_write_text", _boom)
     worktree = _stamped_worktree(tmp_path)
 
     result = _invoke_hook_command("agent-spawn-pre", _payload(_PRE_PAYLOAD, worktree))
@@ -243,14 +243,14 @@ def test_pre_hook_fails_open_on_lock_exhaustion(
     worker itself on contention. Exhaustion must fail open (skip the stamp),
     never block.
 
-    Patches ``cw.cli._hook_io._LOCK_TIMEOUT_SECS_DEFAULT`` (#1947 moved the
-    lock primitive there so ``cw signal-stop`` can share it) rather than the
-    re-exported name on ``cw.cli.agent_spawn_stamp`` — ``_context_lock``
-    reads the module-global where it is *defined*, so patching the
-    re-exported copy would silently be a no-op.
+    Patches ``cw._hook_context._LOCK_TIMEOUT_SECS_DEFAULT`` (#1947 shared
+    the lock primitive with ``cw signal-stop``; #2458 moved it below
+    ``cw.cli``) — ``_context_lock`` reads the module-global where it is
+    *defined*, so patching a copy imported elsewhere would silently be a
+    no-op.
     """
     monkeypatch.setattr(
-        "cw.cli._hook_io._LOCK_TIMEOUT_SECS_DEFAULT", 0.05, raising=True
+        "cw._hook_context._LOCK_TIMEOUT_SECS_DEFAULT", 0.05, raising=True
     )
     worktree = _stamped_worktree(tmp_path)
 

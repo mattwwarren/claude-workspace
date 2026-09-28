@@ -327,12 +327,12 @@ def test_noop_on_lock_contention(
 ) -> None:
     """A held per-worktree lock exhausts the retry budget and fails open.
 
-    Patches ``cw.cli._hook_io._LOCK_TIMEOUT_SECS_DEFAULT`` where it is
+    Patches ``cw._hook_context._LOCK_TIMEOUT_SECS_DEFAULT`` where it is
     *defined* -- ``_context_lock`` reads that module-global, so patching a
     re-exported copy would silently be a no-op (#1947).
     """
     monkeypatch.setattr(
-        "cw.cli._hook_io._LOCK_TIMEOUT_SECS_DEFAULT", 0.05, raising=True
+        "cw._hook_context._LOCK_TIMEOUT_SECS_DEFAULT", 0.05, raising=True
     )
     worktree = _worktree(tmp_path)
 

@@ -26,6 +26,7 @@ from cw.reconcile._shared import (
     ReapCandidate,
     _has_terminal_sentinel,
     _parse_any_sentinel_from_transcript,
+    _unresolved_subagent_spawn_age_seconds,
     holds_staged_emit_result,
     ticket_id_for_session,
 )
@@ -35,6 +36,32 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from cw.models import CwState, OrchestratorConfig, Session, TicketTask
+
+_SECONDS_PER_MINUTE = 60
+
+
+def _background_work_still_draining(
+    session: Session, *, now: datetime, config: OrchestratorConfig
+) -> bool:
+    """Whether the Stop hook is still legitimately waiting on background work.
+
+    A ``complete_session=False`` partial route (#2458) routes the task but
+    leaves the session ACTIVE, still holding its staged result, while
+    ``background_tasks`` drain -- and ``elapsed`` since ``started_at`` is past
+    ``sentinel_unrouted_check_seconds`` for almost any real stage by then.
+    Completing it here would stop the daemon under a still-running subagent
+    (#151). The worktree's ``agent_spawn_stamp`` tells the two apart: every
+    deferring Stop re-snapshots it with a fresh ``last_stamped_at``, so an
+    outstanding stamp younger than ``fix_loop_await_deadline_minutes`` means
+    a Stop fired recently and more are expected. Past that bound -- or with
+    no outstanding stamp -- the async-completion wakeup is treated as dropped
+    (#1889) and the backstop routes. Same age bound, and the same "no
+    readable bound means do not suppress" direction, as the liveness sweep's
+    #2012 subagent-await suppression.
+    """
+    spawn_age = _unresolved_subagent_spawn_age_seconds(session.worktree_path, now)
+    deadline_seconds = config.fix_loop_await_deadline_minutes * _SECONDS_PER_MINUTE
+    return spawn_age is not None and spawn_age < deadline_seconds
 
 
 def _staged_emit_result_refused(session: Session) -> bool:
@@ -108,15 +135,19 @@ def _detect_idle_candidate_for_session(
 
     Two producers share that delay. A staged ``cw result emit`` result
     (:func:`~cw.reconcile._shared.holds_staged_emit_result`) is routed off
-    ``last_result`` itself (#2458). Otherwise the guard ``last_result is
-    None`` means signal_stop never ran -- prevents double-routing -- and the
-    transcript is re-parsed. Constructive, not a reap. See GitHub #578, #2458.
+    ``last_result`` itself (#2458), unless the worktree shows background work
+    still draining (:func:`_background_work_still_draining`). Otherwise the
+    guard ``last_result is None`` means signal_stop never ran -- prevents
+    double-routing -- and the transcript is re-parsed. Constructive, not a
+    reap. See GitHub #578, #2458.
     """
     elapsed = (now - session.started_at).total_seconds()
     if elapsed < config.sentinel_unrouted_check_seconds:
         return None
     lane = task.lane if task else DEFAULT_LANE
     if holds_staged_emit_result(session):
+        if _background_work_still_draining(session, now=now, config=config):
+            return None
         return _staged_emit_candidate(
             session, ticket_id=ticket_id, lane=lane, elapsed=elapsed
         )
