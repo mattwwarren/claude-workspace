@@ -44,6 +44,7 @@ from cw.reconcile.escalation import run_escalation_sweep
 from cw.reconcile.fix_dispatch import run_fix_dispatch
 from cw.reconcile.gate_recipes import run_gate_recipes
 from cw.reconcile.idle import _act_on_idle_candidates, _detect_idle_candidates
+from cw.reconcile.leaked_workers import sweep_leaked_daemon_workers
 from cw.reconcile.liveness import record_session_liveness_changes
 from cw.reconcile.local import (
     _act_on_local_harvest_candidates,
@@ -384,6 +385,19 @@ def _reconcile_locked(
     # only: emits SESSION_NEEDS_ATTENTION, mutates no session or queue state.
     main_drift_candidates = _detect_main_drift_candidates(state, clients)
     _act_on_main_drift_candidates(main_drift_candidates)
+
+    # Leaked-daemon-worker sweep (#2480): stop every roster worker whose
+    # surface_ref names a cw session already TERMINAL, or no cw session at
+    # all -- a finished worker whose completion path never called
+    # daemon.stop() otherwise sits live in roster.json forever, and
+    # cw.worktree.live_home_reason reports its ticket's worktree occupied
+    # indefinitely. Reads roster.json directly (NativeDaemonClient), not
+    # `claude agents --json`, so it runs BEFORE the daemon query + outage
+    # guard below, mirroring the local-harvest and main-drift sweeps above.
+    # Unconditional (not reap_policy-gated, ADR-0006): the owning session, if
+    # any, is already terminal, so there is no live queue/session state this
+    # stop could clobber.
+    sweep_leaked_daemon_workers(state, daemon=_deps.get_native_daemon_client())
 
     try:
         # `claude agents --json` returns sessionId as a full UUID
