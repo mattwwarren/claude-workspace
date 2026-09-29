@@ -33,7 +33,9 @@ exceptions also trigger process-group termination, stdout closure, bounded
 reader shutdown, and child reaping. An operator interrupt returns the
 sanitized timeout result for an interrupted subprocess, or `repo_setup_failed`
 if interrupted outside a subprocess, instead of leaving Codex running or
-printing a traceback. The stdout reader has a bounded shutdown wait, so it
+printing a traceback. Unexpected internal errors produce a sanitized
+`internal_error` result and a nonzero exit rather than being mislabeled as a
+setup failure. The stdout reader has a bounded shutdown wait, so it
 cannot defeat the process timeout. Stdout is read incrementally with a 1 MiB
 cap; exceeding it fails JSONL validation. Stderr is discarded, and no `-o`
 file is created. The parser reads the bounded JSONL stream line by line and
@@ -41,7 +43,8 @@ releases it before starting the resume command. It recognizes `turn.started`,
 `item.started`, `item.updated`, and `item.completed`; a top-level `error` event
 must contain a string message. Well-formed unrelated event types are ignored
 for forward compatibility, while unknown `turn.*` or terminal-shaped event
-types are rejected. An error event followed by `turn.completed` cannot pass;
+types fail JSONL validation as `*_malformed_jsonl`. An error event followed by
+`turn.completed` cannot pass;
 `turn.failed` remains a failure. Acceptance requires one valid `thread.started`
 ID before one terminal event; only `turn.completed` passes. Malformed,
 duplicate, out-of-order, failed, missing, oversized, or invalid events fail.
@@ -54,21 +57,21 @@ as `--model --last` produces the sanitized `invalid_model` JSON result with no
 argparse text on stderr.
 
 The disposable repo and subprocess scratch directory are explicitly placed
-under the home tree so snap-confined Codex can access them. Codex processes
-receive a minimal allowlisted environment: executable search path, an isolated
-temporary `HOME`, `CODEX_HOME`, `CODEX_API_KEY`/`OPENAI_API_KEY`, proxy/TLS
-transport variables, `LANG`/`LC_ALL`/`LC_CTYPE`, and platform runtime paths.
+under the home tree so snap-confined Codex can access them. The `codex --version`
+check uses an allowlisted environment without `CODEX_HOME` or API keys. Create
+and resume receive a minimal allowlisted environment: executable search path,
+an isolated temporary `HOME`, the existing `CODEX_HOME` (or normal default),
+`CODEX_API_KEY`/`OPENAI_API_KEY`, proxy/TLS transport variables,
+`LANG`/`LC_ALL`/`LC_CTYPE`, and platform runtime paths.
 Other `LC_*` variables are not inherited. Git initialization uses a separate
 allowlist that excludes `CODEX_HOME` and API keys. Git routing, XDG, Codex
 policy/profile, and unrelated runtime variables are not inherited.
 The existing `CODEX_HOME` (or the normal `~/.codex` default) is passed as an
-absolute path. The probe rejects a home inside the source checkout, any
-symlink anywhere under the `sessions` artifact tree (including nested year or
-month directories), or a `sessions` directory resolving into the checkout.
-This conservative check avoids writing through pre-existing links. If the
-temporary parent cannot be proven to remain outside the checkout, the probe
-stops with the approved `error_code: "repo_setup_failed"` rather than risk
-writing session state into the checkout.
+absolute path. Existing pre-launch path checks catch a configured home or
+session-artifact path that already resolves into the source checkout when
+validation runs. They guard against accidental redirection; this opt-in probe
+assumes a trusted local user and is not an atomic sandbox against concurrent
+same-user changes.
 
 Except for the standard human-readable `--help` response, the script prints
 exactly one compact JSON object to stdout and nothing to stderr. Its fixed keys
@@ -84,7 +87,8 @@ stderr, environment values, exception text, or authentication material.
 run uses `error_code: "opt_in_required"`, a passing run uses `error_code: null`,
 and a failure uses one of the closed documented `*_timeout`,
 `*_nonzero_exit`, JSONL-validation, setup, version, model, ID, or cleanup error
-codes. A create/resume launch failure uses `cli_unavailable`; an oversized or
+codes, or `internal_error` for an unexpected defect. A create/resume launch
+failure uses `cli_unavailable`; an oversized or
 unrecognized JSONL event uses the matching `*_malformed_jsonl` code. SIGINT or
 SIGTERM during a subprocess uses that command's timeout error code; an
 interrupt outside a subprocess uses `repo_setup_failed`. A failed command
@@ -96,5 +100,5 @@ validated session ID and create/resume summaries so the operator can recover;
 cleanup failure takes precedence as the single reported error code. One normal
 persistent Codex thread remains in `CODEX_HOME`; the emitted validated ID lets
 the operator inspect or delete it with normal Codex tooling. The probe does
-not modify the source checkout, CW state, queue, executor, roster, or event
-history.
+not intentionally modify the source checkout, CW state, queue, executor,
+roster, or event history.

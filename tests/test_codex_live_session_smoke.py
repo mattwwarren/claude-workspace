@@ -112,7 +112,7 @@ def fake_run(
         )
         if argv == ["codex", "--version"]:
             return completed(argv, stdout=f"{VERSION}\n", stderr=stderr)
-        if argv[:2] == ["git", "init"]:
+        if argv == ["git", "init", "--quiet"]:
             if timeout_stage == "git":
                 raise subprocess.TimeoutExpired(argv, 0)
             if real_git:
@@ -128,7 +128,8 @@ def fake_run(
                 proc.wait(timeout=probe.PROCESS_TIMEOUT_SECONDS)
                 return completed(argv, code=cast("int", proc.returncode))
             return completed(argv, code=git_code, stderr=stderr)
-        if argv[:3] == ["codex", "exec", "resume"]:
+        if len(argv) > 3 and argv[:3] == ["codex", "exec", "resume"]:
+            assert argv == probe._resume_argv(argv[3], MODEL)
             if real_git:
                 assert (cwd / ".git").is_dir()
             if unavailable_stage == "resume":
@@ -138,13 +139,18 @@ def fake_run(
             return completed(
                 argv, code=resume_code, stdout=resume_stdout, stderr=stderr
             )
-        if unavailable_stage == "create":
-            raise FileNotFoundError(UNAVAILABLE_MESSAGE)
-        if timeout_stage == "create":
-            raise subprocess.TimeoutExpired(argv, 0)
-        if real_git and argv[:2] == ["codex", "exec"]:
-            assert (cwd / ".git").is_dir()
-        return completed(argv, code=create_code, stdout=create_stdout, stderr=stderr)
+        if argv == probe._create_argv(MODEL):
+            if real_git:
+                assert (cwd / ".git").is_dir()
+            if unavailable_stage == "create":
+                raise FileNotFoundError(UNAVAILABLE_MESSAGE)
+            if timeout_stage == "create":
+                raise subprocess.TimeoutExpired(argv, 0)
+            return completed(
+                argv, code=create_code, stdout=create_stdout, stderr=stderr
+            )
+        message = f"unexpected subprocess argv: {argv!r}"
+        raise AssertionError(message)
 
     return run
 
@@ -193,12 +199,17 @@ def process_is_running(pid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        pass
-    try:
-        state = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return False
-    return state.rsplit(")", 1)[1].strip().split()[0] != "Z"
+        return True
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        try:
+            state = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        return state.rsplit(")", 1)[1].strip().split()[0] != "Z"
+    return True
 
 
 def wait_for_process_exit(pid: int, timeout: float = 2.0) -> bool:
@@ -233,7 +244,10 @@ def assert_isolated_child_environment(
     assert "CODEX_SANDBOX" not in env
     assert "XDG_CONFIG_HOME" not in env
     assert "NODE_OPTIONS" not in env
-    if call["argv"] == ["git", "init", "--quiet"]:
+    if call["argv"] in (
+        ["git", "init", "--quiet"],
+        ["codex", "--version"],
+    ):
         assert "CODEX_HOME" not in env
         assert "CODEX_API_KEY" not in env
         assert "OPENAI_API_KEY" not in env
@@ -266,7 +280,7 @@ class TestParser:
             (
                 json.dumps({"type": "thread.started", "thread_id": SESSION})
                 + '\n{"type":"turn.cancelled"}\n',
-                "invalid_terminal",
+                "malformed_jsonl",
             ),
             (
                 json.dumps({"type": "thread.started", "thread_id": SESSION}) + "\n",
@@ -327,7 +341,7 @@ class TestParser:
                 {"type": "turn.cancelled"},
             )
         )
-        assert parsed.error == "invalid_terminal"
+        assert parsed.error == "malformed_jsonl"
 
     def test_future_unrelated_nonterminal_event_is_ignored(self) -> None:
         parsed = probe._parse_stream(
@@ -349,6 +363,30 @@ class TestParser:
         )
         assert parsed == probe.ParsedStream(SESSION, "turn.failed", None)
 
+    @pytest.mark.parametrize(
+        "events",
+        [
+            ({"type": "error", "message": "Codex failure"},),
+            (
+                {"type": "thread.started", "thread_id": SESSION},
+                {"type": "error"},
+            ),
+            (
+                {"type": "thread.started", "thread_id": SESSION},
+                {"type": "error", "message": 7},
+            ),
+            (
+                {"type": "thread.started", "thread_id": SESSION},
+                {"type": "error", "message": "first"},
+                {"type": "error", "message": "second"},
+            ),
+        ],
+    )
+    def test_malformed_error_events_are_rejected(
+        self, events: tuple[dict[str, object], ...]
+    ) -> None:
+        assert probe._parse_stream(jsonl(*events)).error == "malformed_jsonl"
+
     def test_error_event_does_not_allow_a_success_terminal(self) -> None:
         parsed = probe._parse_stream(
             jsonl(
@@ -367,7 +405,7 @@ class TestParser:
                 {"type": "turn.completed"},
             )
         )
-        assert parsed.error == "invalid_terminal"
+        assert parsed.error == "malformed_jsonl"
 
 
 class TestProbe:
@@ -591,9 +629,54 @@ class TestProbe:
         assert attempt.outcome.stdout == ""
         assert attempt.stream.error == "malformed_jsonl"
 
-    @pytest.mark.skipif(
-        sys.platform != "linux", reason="process liveness check uses /proc"
-    )
+    @pytest.mark.skipif(os.name != "posix", reason="pthread signal masks are POSIX")
+    def test_launch_does_not_pass_blocked_interrupt_signals_to_child(
+        self, tmp_path: Path
+    ) -> None:
+        code = (
+            "import signal; "
+            "blocked = signal.pthread_sigmask(signal.SIG_BLOCK, set()); "
+            "print(f'{signal.SIGINT in blocked},{signal.SIGTERM in blocked}')"
+        )
+        outcome = probe._run_process(
+            [sys.executable, "-c", code], cwd=tmp_path, env=os.environ.copy()
+        )
+        assert outcome.exit_code == 0
+        assert outcome.stdout.strip() == "False,False"
+
+    @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+    def test_timeout_kills_and_reaps_real_process_group(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        code = (
+            "import subprocess, sys, time; "
+            "child = subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(30)']); "
+            "print(f'DESCENDANT_PID={child.pid}', flush=True); "
+            "time.sleep(30)"
+        )
+        monkeypatch.setattr(probe, "PROCESS_TIMEOUT_SECONDS", 0.2)
+        pid: int | None = None
+        started = time.monotonic()
+        try:
+            outcome = probe._run_process(
+                [sys.executable, "-c", code], cwd=tmp_path, env=os.environ.copy()
+            )
+            elapsed = time.monotonic() - started
+            pid_line = next(
+                line
+                for line in outcome.stdout.splitlines()
+                if line.startswith("DESCENDANT_PID=")
+            )
+            pid = int(pid_line.split("=", 1)[1])
+            assert outcome.timed_out
+            assert outcome.exit_code is not None
+            assert elapsed < 5
+            assert wait_for_process_exit(pid)
+        finally:
+            cleanup_process(pid)
+
+    @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
     def test_output_overflow_terminates_live_producer(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -627,9 +710,7 @@ class TestProbe:
         finally:
             cleanup_process(pid)
 
-    @pytest.mark.skipif(
-        sys.platform != "linux", reason="process liveness check uses /proc"
-    )
+    @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
     def test_parent_interrupt_kills_and_reaps_child(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -661,10 +742,7 @@ class TestProbe:
             signal.signal(signal.SIGUSR1, previous_handler)
             cleanup_process(pid)
 
-    @pytest.mark.skipif(
-        sys.platform != "linux" or not hasattr(signal, "pthread_sigmask"),
-        reason="launch interruption check requires POSIX signal masking and /proc",
-    )
+    @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
     def test_interrupt_during_launch_kills_and_reaps_child(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -719,6 +797,15 @@ class TestProbe:
         [
             ({"create_stdout": "garbage\n"}, "create_malformed_jsonl"),
             (
+                {
+                    "create_stdout": jsonl(
+                        {"type": "thread.started", "thread_id": SESSION},
+                        {"type": "turn.cancelled"},
+                    )
+                },
+                "create_malformed_jsonl",
+            ),
+            (
                 {"create_stdout": jsonl({"type": "turn.completed"})},
                 "create_missing_thread",
             ),
@@ -761,6 +848,15 @@ class TestProbe:
         ("kwargs", "error"),
         [
             ({"resume_stdout": "garbage\n"}, "resume_malformed_jsonl"),
+            (
+                {
+                    "resume_stdout": jsonl(
+                        {"type": "thread.started", "thread_id": SESSION},
+                        {"type": "session.completed"},
+                    )
+                },
+                "resume_malformed_jsonl",
+            ),
             (
                 {"resume_stdout": jsonl({"type": "turn.completed"})},
                 "resume_missing_thread",
@@ -952,9 +1048,7 @@ class TestProbe:
         assert result.exit_code == 0
         assert result.stdout == "\ufffd"
 
-    @pytest.mark.skipif(
-        sys.platform != "linux", reason="process liveness check uses /proc"
-    )
+    @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
     def test_reader_shutdown_kills_descendant_holding_stdout(
         self, tmp_path: Path
     ) -> None:
@@ -1169,7 +1263,7 @@ def test_main_maps_parent_signals_to_sanitized_json(
     assert signal.getsignal(signum) is previous_handler
 
 
-def test_main_maps_unexpected_exception_to_sanitized_json(
+def test_main_does_not_mask_unexpected_exception(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -1179,9 +1273,24 @@ def test_main_maps_unexpected_exception_to_sanitized_json(
         raise RuntimeError(exception_marker)
 
     monkeypatch.setattr(probe, "run_probe", raise_unexpected)
-    assert probe.main(["--model", MODEL]) == 1
+    with pytest.raises(RuntimeError, match=exception_marker):
+        probe.main(["--model", MODEL])
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out == ""
+
+
+def test_unhandled_exception_hook_emits_sanitized_internal_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exception_marker = "private-operational-marker"
+    probe._handle_unhandled_exception(
+        RuntimeError, RuntimeError(exception_marker), None
+    )
     captured = capsys.readouterr()
     assert captured.err == ""
     assert captured.out.count("\n") == 1
     assert exception_marker not in captured.out
-    assert json.loads(captured.out)["error_code"] == "repo_setup_failed"
+    result = json.loads(captured.out)
+    assert result["status"] == "failed"
+    assert result["error_code"] == "internal_error"

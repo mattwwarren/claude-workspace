@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, TypedDict, cast
 
 if TYPE_CHECKING:
-    from types import FrameType
+    from types import FrameType, TracebackType
 
 type _SignalHandler = (
     Callable[[int, FrameType | None], Any] | int | signal.Handlers | None
@@ -53,6 +53,7 @@ ERROR_VERSION_UNAVAILABLE: Final = "version_unavailable"
 ERROR_VERSION_INVALID: Final = "version_invalid"
 ERROR_CLI_UNAVAILABLE: Final = "cli_unavailable"
 ERROR_REPO_SETUP_FAILED: Final = "repo_setup_failed"
+ERROR_INTERNAL_ERROR: Final = "internal_error"
 ERROR_CREATE_TIMEOUT: Final = "create_timeout"
 ERROR_CREATE_NONZERO_EXIT: Final = "create_nonzero_exit"
 ERROR_CREATE_MALFORMED_JSONL: Final = "create_malformed_jsonl"
@@ -137,6 +138,7 @@ type ErrorCode = Literal[
     "version_invalid",
     "cli_unavailable",
     "repo_setup_failed",
+    "internal_error",
     "create_timeout",
     "create_nonzero_exit",
     "create_malformed_jsonl",
@@ -309,7 +311,7 @@ def _handle_other(event: dict[str, object], state: _StreamState) -> ParseError |
         event_type.startswith("turn.")
         or event_type.endswith((".completed", ".failed", ".error"))
     ):
-        error = ParseError.INVALID_TERMINAL
+        error = ParseError.MALFORMED_JSONL
     return error
 
 
@@ -483,27 +485,36 @@ def _launch_process(
     argv: list[str], *, cwd: Path, env: dict[str, str]
 ) -> subprocess.Popen[bytes] | ProcessOutcome | None:
     process: subprocess.Popen[bytes] | None = None
-    blocked_signals: set[int | signal.Signals] | None = None
+    signal_received = False
+    launch_failed = False
+    previous_handlers: dict[signal.Signals, _SignalHandler] = {}
+
+    def defer_signal(_signum: int, _frame: FrameType | None) -> None:
+        nonlocal signal_received
+        signal_received = True
+
     try:
-        if os.name == "posix" and threading.current_thread() is threading.main_thread():
-            blocked_signals = signal.pthread_sigmask(
-                signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM}
-            )
         try:
-            process = subprocess.Popen(
-                argv,
-                cwd=cwd,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                start_new_session=os.name == "posix",
-            )
-        except (FileNotFoundError, OSError):
-            return None
+            if threading.current_thread() is threading.main_thread():
+                for signum in (signal.SIGINT, signal.SIGTERM):
+                    previous_handlers[signum] = signal.signal(signum, defer_signal)
+            try:
+                process = subprocess.Popen(
+                    argv,
+                    cwd=cwd,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=os.name == "posix",
+                )
+            except OSError:
+                launch_failed = True
+            if signal_received:
+                raise KeyboardInterrupt
         finally:
-            if blocked_signals is not None:
-                signal.pthread_sigmask(signal.SIG_SETMASK, blocked_signals)
+            for signum, previous_handler in previous_handlers.items():
+                signal.signal(signum, previous_handler)
     except BaseException as error:
         cleanup_exit_code: int | None = None
         if process is not None:
@@ -511,6 +522,8 @@ def _launch_process(
         if isinstance(error, KeyboardInterrupt):
             return ProcessOutcome(cleanup_exit_code, "", True)
         raise
+    if launch_failed or process is None:
+        return None
     return process
 
 
@@ -876,6 +889,21 @@ def _raise_for_parent_signal(_signum: int, _frame: FrameType | None) -> NoReturn
     raise KeyboardInterrupt
 
 
+def _handle_unhandled_exception(
+    exc_type: type[BaseException],
+    exc_value: BaseException,
+    traceback: TracebackType | None,
+) -> None:
+    del exc_type, exc_value, traceback
+    result = _result(
+        STATUS_FAILED,
+        cli_version=None,
+        model=None,
+        error_code=ERROR_INTERNAL_ERROR,
+    )
+    sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
+
+
 def _new_temporary_directory(
     checkout: Path,
 ) -> tempfile.TemporaryDirectory[str] | None:
@@ -890,7 +918,7 @@ def _new_temporary_directory(
         return tempfile.TemporaryDirectory(
             prefix="cw-codex-live-session-", dir=str(temp_parent)
         )
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError):
         return None
 
 
@@ -906,8 +934,16 @@ def _run_in_disposable_directory(
         )
     worktree = temp_root / "repo"
     scratch = temp_root / "tmp"
-    worktree.mkdir()
-    scratch.mkdir()
+    try:
+        worktree.mkdir()
+        scratch.mkdir()
+    except OSError:
+        return _result(
+            STATUS_FAILED,
+            cli_version=None,
+            model=model,
+            error_code=ERROR_REPO_SETUP_FAILED,
+        )
     codex_env = _child_environment(cwd=worktree, scratch=scratch, codex_home=codex_home)
     git_env = _child_environment(
         cwd=worktree,
@@ -915,7 +951,13 @@ def _run_in_disposable_directory(
         codex_home=None,
         include_codex_auth=False,
     )
-    version_outcome = _version_result(cwd=worktree, env=codex_env)
+    version_env = _child_environment(
+        cwd=worktree,
+        scratch=scratch,
+        codex_home=None,
+        include_codex_auth=False,
+    )
+    version_outcome = _version_result(cwd=worktree, env=version_env)
     if isinstance(version_outcome, _VersionFailure):
         return _result(
             STATUS_FAILED,
@@ -954,7 +996,7 @@ def _run_disposable(*, model: str) -> SmokeResult:
     try:
         checkout = _checkout_root()
         codex_home = _codex_home(checkout)
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError):
         return _result(
             STATUS_FAILED,
             cli_version=None,
@@ -983,19 +1025,12 @@ def _run_disposable(*, model: str) -> SmokeResult:
         error_code=ERROR_REPO_SETUP_FAILED,
     )
     try:
-        temp_root = Path(temporary_directory.name).resolve()
+        temp_root = Path(temporary_directory.name)
         result = _run_in_disposable_directory(
             temp_root=temp_root,
             checkout=checkout,
             codex_home=codex_home,
             model=model,
-        )
-    except (OSError, RuntimeError, ValueError):
-        result = _result(
-            STATUS_FAILED,
-            cli_version=None,
-            model=model,
-            error_code=ERROR_REPO_SETUP_FAILED,
         )
     finally:
         result = _cleanup_temporary_directory(temporary_directory, result)
@@ -1051,8 +1086,6 @@ def main(argv: list[str] | None = None) -> int:
             result = run_probe(model)
         except KeyboardInterrupt:
             result = failure_result
-        except Exception:  # noqa: BLE001 - preserve the CLI's JSON-only contract
-            result = failure_result
     finally:
         for previous_signum, previous_handler in previous_handlers.items():
             with contextlib.suppress(Exception):
@@ -1062,4 +1095,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    sys.excepthook = _handle_unhandled_exception
     raise SystemExit(main())
