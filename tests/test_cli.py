@@ -5727,6 +5727,57 @@ class TestSignalStop:
         assert self._reload_task().status == QueueItemStatus.BLOCKED_ON_USER
         assert self._attention_statuses("t2458-park") == ["stopped_without_sentinel"]
 
+    def test_signal_stop_sentinel_unroutable_pages_once_across_repeat_drained_stops(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2458 fix cycle 6: a repeat bg_count==0 Stop landing on the same
+        still-unroutable bail must not re-page ``sentinel_unroutable``.
+
+        ``test_signal_stop_sentinel_unroutable_logs_and_pages`` above pins a
+        single Stop paging once. The bug this fix closes is specific to a
+        *second* Stop with ``background_tasks`` empty both times (the
+        drained-transition shape): round 5's fix
+        (``_maybe_clear_staged_emit_result``) only clears the *ephemeral*
+        cw-context.json peek flag that gates ``signal_stop``'s bg_count>0
+        fast path -- a bg_count==0 Stop never consults that flag at all and
+        unconditionally re-enters ``_resolve_and_complete_headless_session``,
+        which re-derives the identical bail (reconstruction still fails,
+        the transcript still carries no sentinel) every single time. Without
+        this cycle's ``_SENTINEL_UNROUTABLE_PAGED_KEY`` dedup stamp on
+        ``session.last_result``, this second Stop would page a second,
+        spurious ``SESSION_NEEDS_ATTENTION(paused_status=sentinel_unroutable)``.
+        """
+        from cw.models import QueueItemStatus
+
+        worktree, session, daemon = self._emit_case(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "unroutable-repeat",
+            payload={"status": "blocked"},
+            stage=Stage.PLAN,
+        )
+        claude_session_id = "sfref-2458-unroutable-repeat-uuid"
+        _write_transcript_records(
+            tmp_path / "fake-home-2458-unroutable-repeat",
+            worktree,
+            [_ul_record("No sentinel here, just prose.")],
+            filename=f"{claude_session_id}.jsonl",
+        )
+
+        self._invoke_stop(worktree, session_id=claude_session_id)
+        self._invoke_stop(worktree, session_id=claude_session_id)
+
+        attention = self._attention_statuses("t2458-unroutable-repeat")
+        assert attention == ["sentinel_unroutable"]
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.ACTIVE
+        assert self._reload_task().status == QueueItemStatus.RUNNING
+        assert daemon.stop_calls == []
+
 
 class TestHarvestLastResultThroughDoor:
     """Direct tests for _harvest_last_result_through_door (RFC 0012 A1, #1457).

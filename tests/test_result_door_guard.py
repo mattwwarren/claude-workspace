@@ -136,6 +136,18 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "leaving them at their init-False defaults; 'status' stays "
             "present (has_terminal_result() stays True)"
         ),
+        "session.last_result = {**existing, _SENTINEL_UNROUTABLE_PAGED_KEY: True}": (
+            "stop_hook.py (_maybe_stamp_sentinel_unroutable_paged) — #2458 "
+            "fix cycle 6: merges a paging-dedup-only flag alongside an "
+            "already-terminal-shaped last_result the first time the "
+            "no-sentinel/not-parked bail is found pageable, so a repeat "
+            "bg_count==0 drained-transition Stop landing on the same "
+            "still-unroutable bail does not re-page; 'status' stays present "
+            "(has_terminal_result() stays True) and this flag is deliberately "
+            "distinct from _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY -- it is never "
+            "read by holds_staged_emit_result(), so it does not gate the idle "
+            "sweep's or cw spawn close's retry candidacy"
+        ),
     },
     "dev_queue/requeue.py": {
         "session.last_result = None": (

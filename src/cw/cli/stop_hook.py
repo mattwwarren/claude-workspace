@@ -81,6 +81,19 @@ _SENTINEL_UNROUTABLE_REASON = "sentinel_unroutable"
 # them.
 _STAGED_ROUTE_RESCUED_KEY = "sentinel_partial_route_rescued"
 _STAGED_ROUTE_TASK_ALREADY_TERMINAL_KEY = "sentinel_partial_route_task_already_terminal"
+# Merged-in (never overwriting) flag stamped onto session.last_result the
+# first time the no-sentinel/not-parked bail below is found genuinely
+# pageable (#2458 fix cycle 6). Deliberately NOT
+# reconcile._shared._SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY: that flag means
+# "actually routed" and is read by holds_staged_emit_result, the shared
+# candidacy predicate for the idle sweep and cw spawn close's retry path --
+# setting it here (a route that never succeeded) would wrongly tell those
+# two call sites the result had been routed and block them from ever
+# retrying it. This flag only dedups the WARNING + SESSION_NEEDS_ATTENTION
+# sentinel_unroutable page across repeat Stops that land on the same
+# still-unroutable bail; it is local to this module and read only by
+# _sentinel_unroutable, never by holds_staged_emit_result.
+_SENTINEL_UNROUTABLE_PAGED_KEY = "sentinel_unroutable_paged"
 
 
 def _read_stop_hook_payload() -> tuple[dict[str, object], str] | None:
@@ -420,6 +433,23 @@ class _HeadlessResolution(NamedTuple):
     already fired ``SENTINEL_STAGE_MISMATCH``, or a non-terminal excluded row
     match); ``parked_abandoned`` is True when the #2135 park ran, which pages
     ``stopped_without_sentinel`` on its own.
+
+    ``sentinel_unroutable_already_paged`` (#2458 fix cycle 6) is True when the
+    no-sentinel/not-parked bail was *already* pageable on a previous call --
+    i.e. ``_SENTINEL_UNROUTABLE_PAGED_KEY`` was already stamped on
+    ``session.last_result`` before this call ran. It is computed from that
+    pre-stamp state, not re-derived from ``session`` after this function
+    returns, because the same bail also stamps the flag (see
+    ``_maybe_stamp_sentinel_unroutable_paged``) before returning -- a
+    post-hoc re-derivation in ``signal_stop`` would always see its own
+    just-written stamp and never page even the first time. ``signal_stop``'s
+    ``_sentinel_unroutable`` ANDs this field's negation into its page
+    decision so a drained-transition (``background_tasks`` empty) Stop that
+    re-lands on the same still-unroutable bail pages exactly once, not once
+    per Stop -- unlike the other three fields above, a bg_tasks-pending Stop
+    never even reaches this bail's resolution step at all once
+    ``_peek_staged_emit_result`` starts answering False, so this field only
+    ever matters for the bg_count==0 path that peek does not cover.
     """
 
     rescued: bool | None
@@ -427,6 +457,7 @@ class _HeadlessResolution(NamedTuple):
     task_already_terminal: bool = False
     stage_mismatch_refused: bool = False
     parked_abandoned: bool = False
+    sentinel_unroutable_already_paged: bool = False
 
 
 def _maybe_clear_staged_emit_result(
@@ -488,6 +519,43 @@ def _stamp_staged_route_outcome(
             _STAGED_ROUTE_TASK_ALREADY_TERMINAL_KEY: task_already_terminal,
         }
     save_state(state)
+
+
+def _sentinel_unroutable_already_paged(session: Session) -> bool:
+    """True when a prior bail already paged ``sentinel_unroutable`` (#2458 fix cycle 6).
+
+    Reads ``_SENTINEL_UNROUTABLE_PAGED_KEY``. Computed *before* this call's own
+    bail decides whether to stamp the flag -- see
+    :func:`_maybe_stamp_sentinel_unroutable_paged` -- so a fresh
+    ``_HeadlessResolution`` field can carry the pre-stamp state through to
+    ``signal_stop``'s outside-the-lock ``_sentinel_unroutable`` check without
+    that check racing its own just-written stamp.
+    """
+    last_result = session.last_result
+    return (
+        isinstance(last_result, dict)
+        and last_result.get(_SENTINEL_UNROUTABLE_PAGED_KEY) is True
+    )
+
+
+def _maybe_stamp_sentinel_unroutable_paged(
+    state: CwState, session: Session, *, already_paged: bool, pageable: bool
+) -> None:
+    """Merge ``_SENTINEL_UNROUTABLE_PAGED_KEY`` in once, the first time this
+    bail is pageable (#2458 fix cycle 6).
+
+    No-op when already paged (nothing to add) or not pageable (the #2135 park
+    ran, or nothing is actually staged -- ``holds_staged_emit_result`` is
+    False -- in which case ``_sentinel_unroutable`` will refuse to page on its
+    own conditions regardless, so stamping here would be a needless
+    fleet-wide ``save_state`` for a page that was never going to fire).
+    """
+    if already_paged or not pageable:
+        return
+    existing = session.last_result
+    if isinstance(existing, dict):
+        session.last_result = {**existing, _SENTINEL_UNROUTABLE_PAGED_KEY: True}
+        save_state(state)
 
 
 def _resolve_and_complete_headless_session(
@@ -584,14 +652,36 @@ def _resolve_and_complete_headless_session(
             parked = _park_if_abandoned(
                 session, context, cwd_value, claude_session_id, ticket_id_value
             )
-            # #2458 fix cycle 5, Action 1: left uncleared, a later Stop
-            # re-peeks True and re-reaches this same bail every turn,
-            # re-paging sentinel_unroutable each time via _handle_unrouted_
-            # stop / _sentinel_unroutable's own holds_staged_emit_result
-            # read. See _maybe_clear_staged_emit_result.
+            # #2458 fix cycle 5, Action 1: left uncleared, a later
+            # background_tasks-pending Stop re-peeks True and re-reaches this
+            # same bail every turn, re-paging sentinel_unroutable each time
+            # via _handle_unrouted_stop / _sentinel_unroutable's own
+            # holds_staged_emit_result read. See
+            # _maybe_clear_staged_emit_result. This only covers the
+            # bg_count>0 path -- it does nothing for a bg_count==0
+            # drained-transition Stop, which never consults the peek flag at
+            # all (see signal_stop) and reaches this same bail unconditionally
+            # every time background_tasks happens to be empty. The
+            # already-paged stamp below closes that second path.
             _maybe_clear_staged_emit_result(has_staged_emit_source, cwd_value)
+            # #2458 fix cycle 6: dedup the sentinel_unroutable page itself,
+            # independently of the peek-flag clear above (which only ever
+            # suppresses the bg_count>0 fast path). Computed and stamped here,
+            # inside sessions_lock (via this function's caller), rather than
+            # in _page_sentinel_unroutable itself (which runs after the lock
+            # releases) -- see _SENTINEL_UNROUTABLE_PAGED_KEY and
+            # _maybe_stamp_sentinel_unroutable_paged for why a post-lock
+            # stamp-and-check would race its own write.
+            already_paged = _sentinel_unroutable_already_paged(session)
+            pageable = not parked and holds_staged_emit_result(session)
+            _maybe_stamp_sentinel_unroutable_paged(
+                state, session, already_paged=already_paged, pageable=pageable
+            )
             return _HeadlessResolution(
-                rescued=None, landed_terminal=False, parked_abandoned=parked
+                rescued=None,
+                landed_terminal=False,
+                parked_abandoned=parked,
+                sentinel_unroutable_already_paged=already_paged,
             )
 
     # Issue #251: directly update the dev-queue task *before* marking the
@@ -1125,11 +1215,21 @@ def _sentinel_unroutable(session: Session, resolution: _HeadlessResolution) -> b
     fallback both failed. A route refusal (#1031, which fires
     ``SENTINEL_STAGE_MISMATCH``), a terminal landing (#1273) and the park
     (``stopped_without_sentinel``) each already have their own signal.
+
+    #2458 fix cycle 6: also False once ``sentinel_unroutable_already_paged``
+    -- a *different*, still-unroutable Stop landed on this exact bail before
+    and already paged it. Without this, every subsequent bg_count==0
+    drained-transition Stop for a session stuck in this bail re-pages
+    forever, since (unlike the bg_count>0 fast path, which
+    ``_peek_staged_emit_result`` short-circuits before resolution even runs)
+    nothing else gates a bg_count==0 Stop from reaching this bail's
+    resolution step every single time.
     """
     return (
         not resolution.landed_terminal
         and not resolution.parked_abandoned
         and not resolution.stage_mismatch_refused
+        and not resolution.sentinel_unroutable_already_paged
         and holds_staged_emit_result(session)
     )
 

@@ -573,6 +573,66 @@ def test_detect_idle_candidates_skips_partial_route_consumed_live_session(
     assert idle_daemon.stop_calls == []
 
 
+def test_detect_idle_candidates_routes_live_session_with_sentinel_unroutable_paged_flag(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    no_transcript_parse: None,
+    idle_daemon: FakeNativeDaemonClient,
+) -> None:
+    """#2458 fix cycle 6, non-regression: the new Stop-hook paging-dedup flag
+    must not gate retry candidacy.
+
+    Distinct from ``_SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY`` (the sibling test
+    above, ``test_detect_idle_candidates_skips_partial_route_consumed_
+    live_session``): that flag means "this result was already routed" and
+    correctly excludes the session from ``holds_staged_emit_result``'s
+    candidacy. The new ``cw.cli.stop_hook._SENTINEL_UNROUTABLE_PAGED_KEY``
+    (fix cycle 6) means only "the Stop hook's sentinel_unroutable WARNING
+    already fired once for this still-unrouted bail" -- routing never
+    actually succeeded, so a session carrying it must remain a live
+    ``ROUTE_EMITTED_SENTINEL`` candidate for both the idle sweep here and
+    ``cw spawn close``'s retry path (``cw.cli.spawn``, the other
+    ``holds_staged_emit_result`` consumer). Fixing the double-page bug must
+    not silently reintroduce the permanently-stuck-result defect #2458
+    exists to fix.
+    """
+    from cw.cli.stop_hook import _SENTINEL_UNROUTABLE_PAGED_KEY
+    from cw.reconcile import holds_staged_emit_result
+
+    _write_staged_client()
+    _seed_row(QueueItemStatus.RUNNING, Stage.IMPL)
+    payload = _impl_stage_complete()
+    state = _emit_cli_state(tmp_path, payload)
+    state.sessions[0].last_result = {
+        **payload,
+        _SENTINEL_UNROUTABLE_PAGED_KEY: True,
+    }
+
+    assert holds_staged_emit_result(state.sessions[0]) is True
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=_NOW_PAST_CHECK,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.proposed_action is ProposedAction.ROUTE_EMITTED_SENTINEL
+    assert candidate.ticket_id == _EMIT_TICKET
+
+    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+
+    assert _reload_row().stage == Stage.REVIEW
+    session = state.sessions[0]
+    assert session.status is SessionStatus.COMPLETED
+    assert session.last_result is not None
+    assert session.last_result[_SENTINEL_UNROUTABLE_PAGED_KEY] is True
+    assert idle_daemon.stop_calls == ["fake-short-id"]
+
+
 def test_detect_idle_candidates_completes_session_for_already_forward_advanced_row(
     tmp_config_dir: Path,
     tmp_path: Path,
