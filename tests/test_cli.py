@@ -5393,6 +5393,55 @@ class TestSignalStop:
         assert updated.status == SessionStatus.COMPLETED
         assert daemon.stop_calls == ["sfref-2458-bg-shipped-drain"]
 
+    def test_signal_stop_partial_route_drained_second_stop_reports_late_sentinel_rescue(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fix cycle 5, Action 2 (round-6 coverage gap): a #918 late-sentinel
+        rescue made by the ``complete_session=False`` partial route must still
+        surface on the eventual ``SESSION_COMPLETED`` payload.
+
+        The drained second Stop takes the ``already_routed`` short-circuit and
+        never re-derives the route, so ``rescued`` can only reach the payload
+        via ``_restore_staged_route_outcome`` reading the outcome the first
+        Stop stamped. Left unrestored it defaults to False and the rescue is
+        silently dropped.
+        """
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import QueueItemStatus
+
+        worktree, session, _daemon = self._emit_case(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            "bg-rescue-drain",
+            payload=self._plan_stage_complete_payload(),
+            stage=Stage.PLAN,
+        )
+        # Idle-park the row the way the #918 recurrence leaves it:
+        # BLOCKED_ON_USER, session_id retained.
+        store = load_dev_queue()
+        parked = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        parked.status = QueueItemStatus.BLOCKED_ON_USER
+        save_dev_queue(store)
+        claude_session_id = "sfref-2458-bg-rescue-drain-uuid"
+        bg_tasks = [{"id": "bg-1", "description": "trailing finalize subagent"}]
+
+        self._invoke_stop(
+            worktree, session_id=claude_session_id, background_tasks=bg_tasks
+        )
+        assert self._reload_task().stage == Stage.IMPL
+
+        self._invoke_stop(worktree, session_id=claude_session_id, background_tasks=[])
+
+        payload = self._session_completed_payload("t2458-bg-rescue-drain-completed")
+        assert payload["rescued"] is True
+        assert payload["rescue_reason"] == "late_sentinel"
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
     def test_signal_stop_partial_route_drained_second_stop_single_park_attention(
         self,
         tmp_config_dir: Path,
