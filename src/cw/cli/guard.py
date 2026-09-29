@@ -21,8 +21,9 @@ from pathlib import Path
 
 import click
 
+from cw._hook_context import _read_cw_context
 from cw.cli._base import main
-from cw.cli._hook_io import _read_cw_context, _read_hook_stdin_json
+from cw.cli._hook_io import _read_hook_stdin_json
 
 # PreToolUse contract: exit 2 blocks the tool call and feeds stderr back to the
 # agent; any other code (0 here) allows it. Distinct from

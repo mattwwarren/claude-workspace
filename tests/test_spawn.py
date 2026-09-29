@@ -28,6 +28,7 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    Stage,
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
@@ -2068,6 +2069,221 @@ class TestSpawnClose:
         closed = state.find_by_name_or_id("nosurf1")
         assert closed is not None
         assert closed.status == SessionStatus.COMPLETED
+
+    # -- #2458: a staged emit_cli result is routed, not thrown away ---------
+
+    _CLOSE_TICKET = "GEN-1234"
+
+    def _seed_close_row(self, session_id: str, stage: Stage) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id=self._CLOSE_TICKET,
+                        client="test-client",
+                        status=QueueItemStatus.RUNNING,
+                        session_id=session_id,
+                        stage=stage,
+                        attempts=1,
+                    )
+                ]
+            )
+        )
+
+    @staticmethod
+    def _write_staged_client() -> None:
+        from cw.config import clients_file
+
+        path = clients_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "clients:\n"
+            "  test-client:\n"
+            "    workspace_path: /tmp/ws-close-2458\n"
+            "    default_branch: main\n"
+            "    pipeline:\n"
+            "      stages: [plan, impl, review, finalize]\n"
+        )
+
+    @staticmethod
+    def _reload_close_row() -> TicketTask:
+        from cw.dev_queue import load_dev_queue
+
+        return next(
+            t
+            for t in load_dev_queue().tasks
+            if t.ticket_id == TestSpawnClose._CLOSE_TICKET
+        )
+
+    def test_spawn_close_routes_staged_emit_cli_result_instead_of_cancelling(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A worker that already emitted ``shipped`` has its row COMPLETED on
+        close -- not CANCELLED, which would force a manual
+        ``requeue --from-cancelled`` over already-validated work."""
+        from cw.cli import _spawn_close_impl
+        from cw.models import LastResultSource, QueueItemStatus
+        from tests.test_result import _valid_payload
+
+        sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
+        state = load_state()
+        stored = state.find_by_name_or_id(sess.id)
+        assert stored is not None
+        stored.last_result = _valid_payload()
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+        self._write_staged_client()
+        self._seed_close_row(sess.id, Stage.FINALIZE)
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=FakeNativeDaemonClient())
+
+        row = self._reload_close_row()
+        assert row.status == QueueItemStatus.COMPLETED
+        closed = load_state().find_by_name_or_id(sess.id)
+        assert closed is not None
+        assert closed.status == SessionStatus.COMPLETED
+        assert closed.completed_reason == CompletionReason.USER
+        assert closed.last_result == _valid_payload()
+        assert closed.last_result_source == LastResultSource.EMIT_CLI
+
+    def test_spawn_close_advances_staged_non_terminal_stage_complete(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A staged non-terminal ``stage_complete`` advances the row to its
+        next stage on close -- the close path routes a genuine mid-pipeline
+        advance, not only a terminal ``shipped``, and never cancels it."""
+        from cw.cli import _spawn_close_impl
+        from cw.models import LastResultSource, QueueItemStatus
+        from tests._reconcile_helpers import _stage_complete_payload
+
+        sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
+        state = load_state()
+        stored = state.find_by_name_or_id(sess.id)
+        assert stored is not None
+        stored.last_result = _stage_complete_payload()
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+        self._write_staged_client()
+        self._seed_close_row(sess.id, Stage.IMPL)
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=FakeNativeDaemonClient())
+
+        row = self._reload_close_row()
+        assert row.stage == Stage.REVIEW
+        assert row.status == QueueItemStatus.PENDING
+        closed = load_state().find_by_name_or_id(sess.id)
+        assert closed is not None
+        assert closed.status == SessionStatus.COMPLETED
+        assert closed.completed_reason == CompletionReason.USER
+
+    def test_spawn_close_falls_back_to_cancel_when_nothing_staged(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Regression: no staged result -> the #317 cancel runs as before."""
+        from cw.cli import _spawn_close_impl
+        from cw.models import QueueItemStatus
+
+        sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
+        self._seed_close_row(sess.id, Stage.FINALIZE)
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=FakeNativeDaemonClient())
+
+        row = self._reload_close_row()
+        assert row.status == QueueItemStatus.CANCELLED
+        assert row.session_id is None
+
+    def test_spawn_close_cancels_when_staged_result_is_refused(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A staged result the routing authority refuses (a #1031 stage
+        mismatch) leaves the row RUNNING, so the #317 cancel still runs."""
+        from cw.cli import _spawn_close_impl
+        from cw.models import LastResultSource, QueueItemStatus
+        from tests._reconcile_helpers import _stage_complete_payload
+
+        sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
+        state = load_state()
+        stored = state.find_by_name_or_id(sess.id)
+        assert stored is not None
+        # stage2_impl reported against a row already at FINALIZE.
+        stored.last_result = _stage_complete_payload()
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+        self._write_staged_client()
+        self._seed_close_row(sess.id, Stage.FINALIZE)
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=FakeNativeDaemonClient())
+
+        assert self._reload_close_row().status == QueueItemStatus.CANCELLED
+
+    def test_spawn_close_cancels_when_emit_cli_result_is_not_terminal(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """An emit_cli-sourced ``last_result`` with no ``status`` (a merged
+        park marker) is not a staged result -> cancel."""
+        from cw.cli import _spawn_close_impl
+        from cw.models import LastResultSource, QueueItemStatus
+
+        sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
+        state = load_state()
+        stored = state.find_by_name_or_id(sess.id)
+        assert stored is not None
+        stored.last_result = {"paused_status": "silently_idle"}
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+        self._seed_close_row(sess.id, Stage.FINALIZE)
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=FakeNativeDaemonClient())
+
+        assert self._reload_close_row().status == QueueItemStatus.CANCELLED
+
+    def test_spawn_close_with_staged_result_but_no_running_row_still_closes(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """No RUNNING row owns the session -> nothing to route; the (no-op)
+        cancel runs and the session closes as before."""
+        from cw.cli import _spawn_close_impl
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, LastResultSource
+        from tests.test_result import _valid_payload
+
+        sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
+        state = load_state()
+        stored = state.find_by_name_or_id(sess.id)
+        assert stored is not None
+        stored.last_result = _valid_payload()
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=FakeNativeDaemonClient())
+
+        closed = load_state().find_by_name_or_id(sess.id)
+        assert closed is not None
+        assert closed.status == SessionStatus.COMPLETED
+
+    def test_spawn_close_cancels_when_staged_result_is_unreconstructable(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A malformed staged dict carries nothing to route -> cancel."""
+        from cw.cli import _spawn_close_impl
+        from cw.models import LastResultSource, QueueItemStatus
+
+        sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
+        state = load_state()
+        stored = state.find_by_name_or_id(sess.id)
+        assert stored is not None
+        stored.last_result = {"status": "shipped"}
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+        self._seed_close_row(sess.id, Stage.FINALIZE)
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=FakeNativeDaemonClient())
+
+        assert self._reload_close_row().status == QueueItemStatus.CANCELLED
 
 
 # ---------------------------------------------------------------------------

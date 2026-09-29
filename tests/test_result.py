@@ -9,24 +9,29 @@ import re
 from pathlib import Path
 from typing import Any
 
+import click
 import pytest
 from click.testing import CliRunner
 
 from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.cli import main
 from cw.config import load_state, save_state, sessions_lock
+from cw.dev_queue import load_dev_queue
 from cw.events import read_events
 from cw.exceptions import EmitSessionNotFoundError, EmitValidationError
 from cw.models import (
+    STAGED_EMIT_RESULT_KEY,
     CwState,
     LastResultSource,
     OrchestratorEventType,
     Session,
     SessionPurpose,
+    SessionStatus,
 )
 from cw.plan_fingerprint import compute_plan_draft_fingerprint
 from cw.result import (
     EmitOutcome,
+    _validate_or_exit,
     emit_result,
     emit_result_locked,
     emit_result_on,
@@ -1035,6 +1040,170 @@ class TestResultEmit:
         sess = next(s for s in load_state().sessions if s.id == "test1234")
         assert sess.last_result is None
 
+    def test_validate_or_exit_rejects_bare_blocked_result_shape(self) -> None:
+        """#2458: pins the cross-module invariant ``_validate_or_exit`` and
+        ``_apply_idle_routed_mutations`` both document -- ``cw result emit``
+        never stages a ``BlockedResult``, so the idle sweep's missing
+        ``landed_terminal`` arm (#2482) stays unreachable. The payload is a
+        genuine ``BlockedResult``, so a failure here means the gate itself
+        was widened (as #1457 widened the harvest door), not that the
+        fixture drifted."""
+        blocked_payload = {
+            "status": "blocked",
+            "blocker": {"stage": "s1", "reason": "validation_failed", "details": "x"},
+        }
+        assert isinstance(BlockedResult.model_validate(blocked_payload), BlockedResult)
+
+        with pytest.raises(click.exceptions.Exit) as exc_info:
+            _validate_or_exit(blocked_payload)
+
+        assert exc_info.value.exit_code == 1
+
+    def test_result_module_does_not_import_cw_cli(self) -> None:
+        """#2458: ``cw.result`` sits below ``cw.cli`` (``cw.cli`` imports it);
+        its cw-context.json read and stamp write go through
+        ``cw._hook_context``, never ``cw.cli._hook_io``."""
+        import cw.result as result_mod
+
+        source = Path(result_mod.__file__).read_text(encoding="utf-8")
+        assert "from cw.cli" not in source
+        assert "import cw.cli" not in source
+
+    # ------------------------------------------------------------------
+    # #2458 round 2: ``_stamp_staged_emit_result``'s write side had zero
+    # coverage -- every case above uses ``_seed_daemon_session``, which never
+    # writes a ``cw-context.json`` at the test process's cwd, so the stamp's
+    # own first-line no-op (``context is None``) always short-circuited it
+    # before either the ``session_id`` match check or the locked write ran.
+    # ------------------------------------------------------------------
+
+    def test_emit_stamps_staged_emit_result_flag_when_context_names_this_session(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        worktree = _worktree_with_context(tmp_path, session_id="test1234")
+        monkeypatch.chdir(worktree)
+
+        result = CliRunner().invoke(
+            main, ["result", "emit", "-"], input=json.dumps(_valid_payload())
+        )
+
+        assert result.exit_code == 0, result.output
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context[STAGED_EMIT_RESULT_KEY] is True
+
+    def test_emit_does_not_stamp_when_context_names_a_different_session(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The foreign-worktree guard the docstring describes: ``--session-id``
+        overrides which session is recorded, but the stamp must not touch a
+        cw-context.json naming an unrelated session."""
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        worktree = _worktree_with_context(tmp_path, session_id="other999")
+        monkeypatch.chdir(worktree)
+
+        result = CliRunner().invoke(
+            main,
+            ["result", "emit", "-", "--session-id", "test1234"],
+            input=json.dumps(_valid_payload()),
+        )
+
+        assert result.exit_code == 0, result.output
+        sess = next(s for s in load_state().sessions if s.id == "test1234")
+        assert sess.last_result is not None
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert STAGED_EMIT_RESULT_KEY not in context
+
+    def test_emit_does_not_stamp_when_cwd_has_no_context_file(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        no_context = tmp_path / "no-context"
+        no_context.mkdir()
+        monkeypatch.chdir(no_context)
+
+        result = CliRunner().invoke(
+            main,
+            ["result", "emit", "-", "--session-id", "test1234"],
+            input=json.dumps(_valid_payload()),
+        )
+
+        assert result.exit_code == 0, result.output
+        sess = next(s for s in load_state().sessions if s.id == "test1234")
+        assert sess.last_result is not None
+        assert not (no_context / ".claude" / "cw-context.json").exists()
+
+    def test_emit_then_stop_hook_routes_the_staged_result(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Write and read halves together: ``cw result emit`` stamps the
+        flag, then a real Stop-hook fire with ``background_tasks`` pending
+        reads it back and routes on it (#2458's lock-free peek), instead of
+        every Stop-hook test continuing to hand-stamp the flag directly."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, Stage, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+        from tests.test_cli import _write_staged_clients_yaml_for_test
+
+        ticket_id = "GEN-2458-emit-stop"
+        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        worktree = _worktree_with_context(tmp_path, session_id="test1234")
+        _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="test1234",
+            worktree_path=worktree,
+            surface_ref="sfref-2458-emit-stop",
+        )
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="test-client",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="test1234",
+                        attempts=1,
+                        stage=Stage.FINALIZE,
+                    )
+                ]
+            )
+        )
+        (worktree / ".claude" / "cw-context.json").write_text(
+            json.dumps(
+                {"session_id": "test1234", "headless": True, "ticket_id": ticket_id}
+            )
+        )
+        fake_home = tmp_path / "fake-home-2458-emit-stop"
+        fake_home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+
+        monkeypatch.chdir(worktree)
+        emit_result_ = CliRunner().invoke(
+            main,
+            ["result", "emit", "-"],
+            input=json.dumps({**_valid_payload(), "ticket_id": ticket_id}),
+        )
+        assert emit_result_.exit_code == 0, emit_result_.output
+
+        stop_body = {
+            "session_id": "sfref-2458-emit-stop-uuid",
+            "cwd": str(worktree),
+            "hook_event_name": "Stop",
+            "background_tasks": [{"id": "bg-1", "description": "still running"}],
+        }
+        stop_result = CliRunner().invoke(
+            main, ["signal-stop"], input=json.dumps(stop_body)
+        )
+        assert stop_result.exit_code == 0, stop_result.output
+
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.COMPLETED
+        updated = next(s for s in load_state().sessions if s.id == "test1234")
+        assert updated.status == SessionStatus.ACTIVE  # session stays live for bg work
+
 
 def _claim(fingerprint: object) -> dict[str, Any]:
     """A v8 plan_pending payload carrying *fingerprint* as its claim."""
@@ -1344,6 +1513,23 @@ class TestReconstructStagedSentinelLegacyFingerprint:
 
         assert isinstance(reconstructed, AutoDevResult)
         assert reconstructed.plan_draft_fingerprint == "d" * 64
+
+    def test_validation_failure_logs_warning_with_errors(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """#2458: a staged result that fails validation says why, then
+        returns None so every caller still falls back rather than raising."""
+        from cw.result import reconstruct_staged_sentinel
+
+        with caplog.at_level(logging.WARNING, logger="cw.result"):
+            reconstructed = reconstruct_staged_sentinel({"status": "shipped"})
+
+        assert reconstructed is None
+        messages = [r.getMessage() for r in caplog.records if r.name == "cw.result"]
+        assert len(messages) == 1
+        assert "reconstruct_staged_sentinel: validation failed" in messages[0]
+        # The pydantic field-error text, not just a generic failure line.
+        assert "schema_version: Field required" in messages[0]
 
 
 class TestHasTerminalResult:

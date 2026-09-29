@@ -49,6 +49,7 @@ from cw.dev_queue.crud import (
     register_watched_pr,
     remove_ticket,
     resolve_client,
+    running_task_for_session,
     select_clearable_tickets,
     select_prunable_tickets,
 )
@@ -177,6 +178,7 @@ __all__ = [
     "requeue_ticket",
     "resolve_client",
     "revoke_plan_approval",
+    "running_task_for_session",
     "save_dev_queue",
     "save_plan",
     "select_clearable_tickets",

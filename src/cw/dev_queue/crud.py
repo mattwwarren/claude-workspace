@@ -6,8 +6,9 @@ operator-facing queue mutations (``add_ticket``, ``register_watched_pr``,
 ``move_ticket``, ``clear_tickets``, ``prune_tickets`` and its read-only
 preview ``select_prunable_tickets``), the read/resolution helpers
 (``resolve_client``, ``list_tickets``, ``_newest_by_created_at``,
-``_find_ticket``), the shared prune age-basis (``_prune_age_basis``), and
-the ``task.deleted`` event chokepoint (``_emit_task_deleted``).
+``_find_ticket``, ``running_task_for_session``), the shared prune
+age-basis (``_prune_age_basis``), and the ``task.deleted`` event chokepoint
+(``_emit_task_deleted``).
 
 Layering: imports ``lifecycle.transition_task_status`` at module level for the
 cancel paths. ``lifecycle.wait_for_terminal`` reaches back into ``_find_ticket``
@@ -391,6 +392,26 @@ def cancel_ticket(ticket_id: str, client: str) -> list[str | None]:
     return cleared
 
 
+def running_task_for_session(
+    store: DevQueueStore, session_id: str
+) -> TicketTask | None:
+    """Return the RUNNING TicketTask in *store* that owns *session_id*, or None.
+
+    The one definition of "the row this session owns", shared by
+    :func:`cancel_task_for_session` and ``cw spawn close``'s staged-result
+    routing (#2458) so the two cannot drift apart. Takes no lock: the caller
+    decides whether *store* was loaded under ``dev_queue_lock``.
+    """
+    return next(
+        (
+            task
+            for task in store.tasks
+            if task.session_id == session_id and task.status == QueueItemStatus.RUNNING
+        ),
+        None,
+    )
+
+
 def cancel_task_for_session(session_id: str) -> bool:
     """Mark the RUNNING TicketTask that owns *session_id* as CANCELLED.
 
@@ -400,13 +421,13 @@ def cancel_task_for_session(session_id: str) -> bool:
     """
     with _lock():
         store = load_dev_queue()
-        for task in store.tasks:
-            if task.session_id == session_id and task.status == QueueItemStatus.RUNNING:
-                transition_task_status(task, QueueItemStatus.CANCELLED)
-                task.session_id = None
-                save_dev_queue(store)
-                return True
-    return False
+        task = running_task_for_session(store, session_id)
+        if task is None:
+            return False
+        transition_task_status(task, QueueItemStatus.CANCELLED)
+        task.session_id = None
+        save_dev_queue(store)
+        return True
 
 
 def move_ticket(

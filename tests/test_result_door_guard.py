@@ -36,6 +36,23 @@ _DOOR_MODULE = "result.py"
 # any new write site trips TestNoLastResultAssignmentOutsideDoor until it is
 # individually classified and added here.
 _ALLOWLIST: dict[str, dict[str, str]] = {
+    "reconcile/_shared.py": {
+        (
+            "session.last_result = {\n"
+            "**existing,\n"
+            "_SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY: True,\n"
+            "}"
+        ): (
+            "_shared.py (_stamp_sentinel_partial_route_consumed) — #2458 fix "
+            "cycle 4 Action 1: merges a 'routed, consumed' flag alongside an "
+            "already-terminal-shaped last_result once a complete_session=False "
+            "partial route has accepted the task route; 'status' stays present "
+            "(has_terminal_result() stays True) so a later Stop hook can still "
+            "complete the session from it, while holds_staged_emit_result() "
+            "reads the new flag to answer False, closing both the Stop-hook "
+            "re-fire and idle-sweep re-arm double-route paths"
+        ),
+    },
     "reconcile/idle/_mutations.py": {
         (
             "session.last_result = {\n"
@@ -101,6 +118,35 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "routed-sentinel advance; audit is appended immediately before "
             "this legacy assignment, and the real terminal sentinel routed "
             "via _apply_sentinel_to_task carries 'status'"
+        ),
+    },
+    "cli/stop_hook.py": {
+        (
+            "session.last_result = {\n"
+            "**existing,\n"
+            "_STAGED_ROUTE_RESCUED_KEY: rescued,\n"
+            "_STAGED_ROUTE_TASK_ALREADY_TERMINAL_KEY: task_already_terminal,\n"
+            "}"
+        ): (
+            "stop_hook.py (_stamp_staged_route_outcome) — #2458 fix cycle 5 "
+            "Action 2: merges this call's rescued/task_already_terminal "
+            "outcome alongside the round-4 consumed flag on an already-"
+            "terminal-shaped last_result, so a later complete_session=True "
+            "call's already_routed short-circuit can restore them instead of "
+            "leaving them at their init-False defaults; 'status' stays "
+            "present (has_terminal_result() stays True)"
+        ),
+        "session.last_result = {**existing, _SENTINEL_UNROUTABLE_PAGED_KEY: True}": (
+            "stop_hook.py (_maybe_stamp_sentinel_unroutable_paged) — #2458 "
+            "fix cycle 6: merges a paging-dedup-only flag alongside an "
+            "already-terminal-shaped last_result the first time the "
+            "no-sentinel/not-parked bail is found pageable, so a repeat "
+            "bg_count==0 drained-transition Stop landing on the same "
+            "still-unroutable bail does not re-page; 'status' stays present "
+            "(has_terminal_result() stays True) and this flag is deliberately "
+            "distinct from _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY -- it is never "
+            "read by holds_staged_emit_result(), so it does not gate the idle "
+            "sweep's or cw spawn close's retry candidacy"
         ),
     },
     "dev_queue/requeue.py": {

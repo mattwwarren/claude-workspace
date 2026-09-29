@@ -161,6 +161,16 @@ AGENT_SPAWN_STAMP_KEY = "agent_spawn_stamp"
 AGENT_SPAWN_UNRESOLVED_COUNT_KEY = "unresolved_count"
 AGENT_SPAWN_LAST_STAMPED_AT_KEY = "last_stamped_at"
 
+# Set True in cw-context.json by a successful ``cw result emit`` (#2458).
+# The Stop hook's lock-free peek (``cw.cli.stop_hook._peek_staged_emit_result``)
+# reads this flag instead of ``load_state()`` -- the peek's whole reason to
+# exist is a near-zero-cost check on every Stop-hook fire with pending
+# background_tasks, which a fleet-wide sessions.json load defeats. Lives here
+# for the same reason AGENT_SPAWN_STAMP_KEY does: ``cw.result`` (writer) and
+# ``cw.cli.stop_hook`` (reader) cannot import each other directly, so both
+# import the literal from this shared, dependency-free module.
+STAGED_EMIT_RESULT_KEY = "staged_emit_result"
+
 # Tool names the ``cw background-tool-guard-pre`` hook (#2303) is both wired to
 # and branches on: ``cw.spawn._build_hook_settings`` writes them as PreToolUse
 # matchers, and ``cw.cli._background_tool_policy`` compares the payload's
@@ -907,6 +917,12 @@ class OrchestratorConfig(BaseModel):
     # evaluated at: the deadline is only ever consulted for a session already
     # in (or entering) the top staleness bucket. 30m sits comfortably under
     # that 45m floor so the field has real effect out of the box.
+    #
+    # #2458: also the age bound under which the idle sweep's staged-emit
+    # backstop treats an outstanding stamp as background work still draining
+    # and holds off routing (cw.reconcile.idle._detect). Past it, the backstop
+    # routes the staged result and completes the session -- constructive
+    # completion off the worker's own emitted result, not a timeout reap.
     fix_loop_await_deadline_minutes: int = Field(default=30, ge=1)
     # #2012 — total window (seconds) `cw agent-spawn-verify` polls for a fresh
     # subagent transcript before exiting 1. Operator-tunable rather than a code

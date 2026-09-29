@@ -342,6 +342,21 @@ _PAUSED_STATUS_KEY = "paused_status"
 # re-offering the doomed candidate) even when the marker itself can't be
 # written without destroying pre-existing content.
 _SENTINEL_ADVANCE_REFUSED_KEY = "sentinel_advance_refused"
+# Merged-in (never overwriting) flag stamped alongside session.last_result's
+# already-terminal-shaped payload once a #2458 complete_session=False partial
+# route (cw.cli.stop_hook._resolve_and_complete_headless_session) has accepted
+# the route (fix cycle 4, Action 1). Unlike _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+# -- a _PAUSED_STATUS_KEY-only stamp that clears the "status" key so a refused
+# candidate drops out of _has_terminal_sentinel -- this flag is merged in
+# ALONGSIDE the existing terminal dict: the payload is genuinely routed, not
+# refused, so a later Stop hook (once background_tasks drains) still needs
+# _has_terminal_sentinel True to recognize the session's own terminal result
+# and complete it, without re-deriving and re-routing the already-consumed
+# sentinel a second time. holds_staged_emit_result reads this flag to answer
+# False once consumed, which closes both re-routing paths at their one shared
+# predicate: the Stop hook's own emit-precedence routing guard below, and the
+# idle sweep's ROUTE_EMITTED_SENTINEL candidacy check (idle/_detect.py).
+_SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY = "sentinel_partial_route_consumed"
 # Git-state salvage constants (GitHub issue #497).
 _NEEDS_SALVAGE_REASON = "needs_salvage"
 _SALVAGE_KIND_GIT_STATE = "git_state_salvage"
@@ -475,6 +490,15 @@ class ReapCandidate:
     # reclassified INTERMEDIATE_ADVANCE_STATUSES case is a third producer,
     # onto ROUTE_EMITTED_SENTINEL rather than a new field. See #2426.
     routed_sentinel: AutoDevResult | BlockedResult | None = None
+    # Which authority produced ``routed_sentinel``, threaded into the
+    # ``_apply_sentinel_to_task_audited`` call's ``source`` kwarg instead of a
+    # hardcoded literal (#2458). Defaults to the transcript-reparse producer
+    # (the common case across every ReapCandidate site); the idle sweep's
+    # staged-``cw result emit`` producer (``_staged_emit_candidate``) is the
+    # one override, so an emit_cli-originated result routed via that backstop
+    # is audited with its true source instead of misattributed to
+    # SALVAGE_TRANSCRIPT.
+    result_source: LastResultSource = LastResultSource.SALVAGE_TRANSCRIPT
     usage_limit_detected: bool = False
     elapsed_seconds: float = 0.0
     reap_reason: ReapReason | None = None
@@ -2595,6 +2619,64 @@ def _stamp_session_id_mismatch_advisories(
             changed = True
         if changed:
             save_dev_queue(store)
+
+
+def holds_staged_emit_result(session: Session) -> bool:
+    """True when *session* carries a staged, still-routable ``cw result emit`` result.
+
+    The shared base predicate for "an emit_cli result is staged and not yet
+    routed" -- EMIT_CLI source plus a terminal-shaped sentinel. Hoisted here
+    (#2458) after three independent reviewers found this exact pair
+    re-derived four times across three files (``cw.cli.stop_hook``'s
+    ``_peek_staged_emit_result`` and ``_sentinel_unroutable``,
+    ``cw.reconcile.idle._detect``'s ``_holds_staged_emit_result``, and
+    ``cw.cli.spawn``'s ``_route_staged_emit_result``): this predicate is the
+    load-bearing gate for the exact defect class #2458 exists to fix, so a
+    future change to what counts as "staged and routable" now has one site to
+    update instead of four. Each caller ANDs its own extra context-specific
+    condition (DAEMON origin, no route refusal yet, etc.) on top of this base
+    pair.
+    """
+    return (
+        session.last_result_source is LastResultSource.EMIT_CLI
+        and _has_terminal_sentinel(session)
+        and not _sentinel_partial_route_consumed(session)
+    )
+
+
+def _sentinel_partial_route_consumed(session: Session) -> bool:
+    """True when a #2458 partial route already routed this staged sentinel.
+
+    See ``_SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY`` for why this is a merged-in
+    flag rather than a ``_PAUSED_STATUS_KEY`` replacement: the session's
+    terminal-shaped ``last_result`` must stay terminal-shaped (so a later Stop
+    hook can still complete the session from it) while no longer counting as
+    *staged and routable* for ``holds_staged_emit_result``'s callers.
+    """
+    last_result = session.last_result
+    return (
+        isinstance(last_result, dict)
+        and last_result.get(_SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY) is True
+    )
+
+
+def _stamp_sentinel_partial_route_consumed(session: Session) -> None:
+    """Merge ``_SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY`` into ``session.last_result``.
+
+    Mutates *session* in place; the caller is responsible for ``save_state``.
+    A no-op guard (``isinstance`` check) mirrors the merge-safe convention
+    ``stalled/_mutations.py`` and ``phantom/_mutations.py`` already use for
+    ``_SENTINEL_ADVANCE_REFUSED_KEY`` -- called only when ``last_result`` is
+    already known terminal-shaped (the emit-precedence path that ran
+    immediately before this call), so the ``dict`` branch is the only one that
+    should ever execute; the ``else`` is defensive, not an expected path.
+    """
+    existing = session.last_result
+    if isinstance(existing, dict):
+        session.last_result = {
+            **existing,
+            _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY: True,
+        }
 
 
 def _has_terminal_sentinel(session: Session) -> bool:

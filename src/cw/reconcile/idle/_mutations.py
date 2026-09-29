@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 
 from cw.models import (
     CompletionReason,
-    LastResultSource,
     SessionStatus,
 )
 from cw.reconcile._shared import (
@@ -20,6 +19,7 @@ from cw.reconcile._shared import (
     _apply_sentinel_to_task_audited,
     _resolve_routed_sentinel,
 )
+from cw.result import reconstruct_staged_sentinel
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -42,14 +42,13 @@ def _apply_idle_routed_mutations(
     shared ``_resolve_routed_sentinel`` guard (GitHub #1762), then mark the
     session COMPLETED/NORMAL -- but only when the route was accepted.
 
-    Not a byte-for-byte mirror, despite the older wording here: unlike phantom's
-    post-#1762 ``reconstruct_staged_sentinel`` producer, every candidate
-    ``_detect_idle_candidate_for_session`` builds carries a paired non-``None``
-    ``salvage_csid`` (both halves come out of the same
-    ``_parse_any_sentinel_from_transcript`` tuple). The csid half of the old
-    duplicated guard was therefore inert here; it is dropped rather than
-    preserved, because only phantom's genuinely ``None``-tolerant case ever
-    depended on it.
+    Since #2458 the detect phase has two producers, like phantom's: the
+    transcript re-parse (whose candidates carry a paired non-``None``
+    ``salvage_csid``) and the staged ``cw result emit`` producer, which reads
+    ``session.last_result`` and passes ``session.claude_session_id`` straight
+    back -- possibly ``None``, which the shared ``_resolve_routed_sentinel``
+    guard tolerates. A staged candidate is audited rather than re-emitted
+    through the door (``audit_existing_result``).
 
     GitHub #1031 (extends #1019's phantom-path guard): when
     ``_apply_sentinel_to_task`` reports ``routed=False`` (a stage-mismatch
@@ -65,6 +64,24 @@ def _apply_idle_routed_mutations(
     (``emit_result_on``) and completes the session instead of falling into
     the stage-mismatch refusal-marker branch, which would otherwise orphan
     this session forever (mirrors the Stop-hook's #1692 carve-out).
+
+    #2458 round 2 (known gap, tracked in #2482): unlike
+    ``task_already_terminal``, ``outcome.landed_terminal`` -- a BlockedResult
+    that itself just landed the task terminal-FAILED via the attempt-cap
+    catch-all -- is never consumed here, only in the Stop hook's
+    ``_handle_unrouted_stop`` (#1273). A candidate whose route lands
+    ``landed_terminal=True`` therefore falls into the stage-mismatch-refusal
+    branch below (``routed=False``, ``task_already_terminal=False``) and is
+    left ACTIVE with no daemon stop, instead of completing. Currently
+    unreachable in production: ``cw result emit``'s ``_validate_or_exit``
+    (``cw.result``) only ever stages an ``AutoDevResult``, never the
+    synthetic ``BlockedResult`` shape that sets ``landed_terminal`` -- see
+    that gate's own docstring for the other half of this cross-reference,
+    and ``tests/test_result.py``'s
+    ``test_validate_or_exit_rejects_bare_blocked_result_shape`` for the test
+    that pins it. If that gate is ever widened the way RFC 0012 A1 / #1457
+    widened the Stop-hook harvest door, this function needs a
+    ``landed_terminal`` arm mirroring the Stop hook's (#2482).
 
     Returns ``(accepted, state_mutated)``. ``accepted`` is only the candidates
     actually routed, so the caller's downstream event emission fires solely for
@@ -82,11 +99,26 @@ def _apply_idle_routed_mutations(
         session = session_by_id[candidate.session_id]
         routed = True
         task_already_terminal = False
+        # #2458: the staged-emit producer reconstructs routed_sentinel FROM
+        # session.last_result, so a fresh door emit would refuse it as an
+        # overwrite of itself (first-writer-wins) -- audit the already-staged
+        # result instead. Ported verbatim from phantom's #1762 comparison; see
+        # _apply_phantom_routed_mutations for why sentinels, not raw dicts, are
+        # compared. A transcript-derived candidate has last_result None here,
+        # so the comparison is False and that path is unchanged.
         audited = _apply_sentinel_to_task_audited(
             candidate.ticket_id,
             session,
             routed_sentinel,
-            source=LastResultSource.SALVAGE_TRANSCRIPT,
+            # #2458: the candidate's own result_source, not a hardcoded
+            # SALVAGE_TRANSCRIPT literal -- this call now serves two
+            # differently-sourced producers (the transcript-salvage one, and
+            # the staged-emit one below), and hardcoding one source here
+            # misattributed the other's audit event.
+            source=candidate.result_source,
+            audit_existing_result=(
+                reconstruct_staged_sentinel(session.last_result) == routed_sentinel
+            ),
         )
         if audited.emit is not None and audited.emit.refused:
             # #2140: the door refused a genuine overwrite attempt -- a foreign
@@ -105,6 +137,14 @@ def _apply_idle_routed_mutations(
             # gate (_detect_idle_candidate_for_session) stops re-proposing this same
             # doomed candidate forever. No "status" key -> _has_terminal_sentinel
             # stays False.
+            #
+            # #2458: a staged emit_cli candidate reaches here too, and the
+            # stamp replaces its staged result; with no "status" left,
+            # _holds_staged_emit_result turns False and the candidate is not
+            # re-offered. Only the emit's session.result_emitted audit event
+            # (status + payload digest) survives -- a merge-aware stamp would
+            # keep the full result but is a new door-guard write site (#2458
+            # follow-up).
             session.last_result = {
                 _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
             }

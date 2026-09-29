@@ -13,14 +13,11 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
+from cw._hook_context import _read_cw_context, _write_cw_context_locked
 from cw._util import claude_project_dir
 from cw.auto_dev_result import AutoDevResult
 from cw.cli._base import handle_errors, main
-from cw.cli._hook_io import (
-    _read_cw_context,
-    _read_hook_stdin_json,
-    _write_cw_context_locked,
-)
+from cw.cli._hook_io import _context_str, _read_hook_stdin_json
 from cw.cli._sentinels import (
     _parse_sentinel_from_transcript,
     _sentinel_frame_after,
@@ -36,6 +33,7 @@ from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
     AGENT_SPAWN_STAMP_KEY,
     AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
+    STAGED_EMIT_RESULT_KEY,
     CompletionReason,
     LastResultSource,
     OrchestratorEventType,
@@ -49,7 +47,10 @@ from cw.reconcile import (
     _apply_sentinel_to_task,
     _has_terminal_sentinel,
     _route_stopped_without_sentinel,
+    _sentinel_partial_route_consumed,
+    _stamp_sentinel_partial_route_consumed,
     find_running_task_for_session,
+    holds_staged_emit_result,
     park_gate_open,
 )
 from cw.result import emit_result_locked, reconstruct_staged_sentinel
@@ -60,6 +61,39 @@ if TYPE_CHECKING:
     from cw.models import CwState, ParkCommentMarker, Session, TicketTask
 
 logger = logging.getLogger(__name__)
+
+# ``paused_status`` of the signal-only ``session.needs_attention`` page fired
+# when a staged emit_cli result reaches the resolution step and neither its
+# reconstruction nor the transcript fallback yields a routable sentinel
+# (#2458). See docs/session-disposition.md §6d.
+_SENTINEL_UNROUTABLE_REASON = "sentinel_unroutable"
+
+# Merged-in (never overwriting) companions to reconcile._shared's own
+# _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY, stamped onto session.last_result
+# alongside it in the same complete_session=False accepted-route branch
+# (#2458 fix cycle 5, Action 2). The already_routed short-circuit skips
+# _apply_sentinel_to_task entirely on the completing call, which otherwise
+# leaves rescued/task_already_terminal at their init-False defaults even
+# when the first (partial-route) call's outcome was rescued=True (a #918
+# late-parked-task rescue) -- silently dropping that fact from the eventual
+# SESSION_COMPLETED payload. Local to this module (not reconcile/_shared.py,
+# out of this cycle's approved scope): only this function reads or writes
+# them.
+_STAGED_ROUTE_RESCUED_KEY = "sentinel_partial_route_rescued"
+_STAGED_ROUTE_TASK_ALREADY_TERMINAL_KEY = "sentinel_partial_route_task_already_terminal"
+# Merged-in (never overwriting) flag stamped onto session.last_result the
+# first time the no-sentinel/not-parked bail below is found genuinely
+# pageable (#2458 fix cycle 6). Deliberately NOT
+# reconcile._shared._SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY: that flag means
+# "actually routed" and is read by holds_staged_emit_result, the shared
+# candidacy predicate for the idle sweep and cw spawn close's retry path --
+# setting it here (a route that never succeeded) would wrongly tell those
+# two call sites the result had been routed and block them from ever
+# retrying it. This flag only dedups the WARNING + SESSION_NEEDS_ATTENTION
+# sentinel_unroutable page across repeat Stops that land on the same
+# still-unroutable bail; it is local to this module and read only by
+# _sentinel_unroutable, never by holds_staged_emit_result.
+_SENTINEL_UNROUTABLE_PAGED_KEY = "sentinel_unroutable_paged"
 
 
 def _read_stop_hook_payload() -> tuple[dict[str, object], str] | None:
@@ -211,8 +245,12 @@ def _armed_running_task(session: Session, ticket_id: str) -> TicketTask | None:
     length -- must not be read on every turn, and neither should a config file.
     The preconditions are therefore ordered by cost:
 
-    1. headless DAEMON session and empty ``background_tasks`` -- already
-       established, since ``signal_stop`` returns before this path otherwise;
+    1. headless DAEMON session -- already established, since ``signal_stop``
+       returns before this path otherwise. ``background_tasks`` is empty on
+       this path too, with one narrow exception since #2458: a Stop with
+       pending background work reaches here only when the session holds a
+       staged emit_cli result that failed reconstruction and the transcript
+       carries no sentinel either;
     2. the RUNNING dev-queue row this session owns (one lock-free
        ``dev_queue.json`` read). No row, or a row that is not RUNNING, means
        there is nothing to park;
@@ -279,8 +317,13 @@ def _park_if_abandoned(
     cwd_value: str,
     claude_session_id: object,
     ticket_id_value: object,
-) -> None:
+) -> bool:
     """Park the ticket's row when this Stop looks like an abandoned exit (#2135).
+
+    Returns True when the park was attempted -- every precondition held and
+    ``_route_stopped_without_sentinel`` ran, which pages on its own -- so the
+    caller does not page ``sentinel_unroutable`` a second time (#2458). False
+    on every fail-closed early return.
 
     Called only after the sentinel parse has already returned ``None``. The
     park ships **dark**: with ``park_on_abandoned_exit_enabled`` false (the
@@ -310,18 +353,19 @@ def _park_if_abandoned(
     before #2135.
     """
     if not isinstance(ticket_id_value, str) or not ticket_id_value:
-        return
+        return False
     task = _armed_running_task(session, ticket_id_value)
     if task is None:
-        return
+        return False
     marker = read_park_comment_marker(context)
     if marker is None or not marker.covers(
         session_id=session.id, ticket_id=ticket_id_value, stage=task.stage
     ):
-        return
+        return False
     if _sentinel_frame_follows_marker(session, cwd_value, claude_session_id, marker):
-        return
+        return False
     _route_stopped_without_sentinel(ticket_id_value, session)
+    return True
 
 
 def _harvest_last_result_through_door(
@@ -380,11 +424,138 @@ class _HeadlessResolution(NamedTuple):
     sub-cause is safe to complete the session on — no dispatch path will ever
     give this session another leg for this ticket — so it is threaded through
     to ``_build_completed_payload`` rather than causing a bail.
+
+    ``stage_mismatch_refused`` and ``parked_abandoned`` (#2458) tell the two
+    ``rescued=None`` bails apart from a genuinely unroutable sentinel, so
+    ``signal_stop`` pages ``sentinel_unroutable`` only for the latter:
+    ``stage_mismatch_refused`` is True when the shared authority refused the
+    route without landing the task terminal (a #1031 stage mismatch, which
+    already fired ``SENTINEL_STAGE_MISMATCH``, or a non-terminal excluded row
+    match); ``parked_abandoned`` is True when the #2135 park ran, which pages
+    ``stopped_without_sentinel`` on its own.
+
+    ``sentinel_unroutable_already_paged`` (#2458 fix cycle 6) is True when the
+    no-sentinel/not-parked bail was *already* pageable on a previous call --
+    i.e. ``_SENTINEL_UNROUTABLE_PAGED_KEY`` was already stamped on
+    ``session.last_result`` before this call ran. It is computed from that
+    pre-stamp state, not re-derived from ``session`` after this function
+    returns, because the same bail also stamps the flag (see
+    ``_maybe_stamp_sentinel_unroutable_paged``) before returning -- a
+    post-hoc re-derivation in ``signal_stop`` would always see its own
+    just-written stamp and never page even the first time. ``signal_stop``'s
+    ``_sentinel_unroutable`` ANDs this field's negation into its page
+    decision so a drained-transition (``background_tasks`` empty) Stop that
+    re-lands on the same still-unroutable bail pages exactly once, not once
+    per Stop -- unlike the other three fields above, a bg_tasks-pending Stop
+    never even reaches this bail's resolution step at all once
+    ``_peek_staged_emit_result`` starts answering False, so this field only
+    ever matters for the bg_count==0 path that peek does not cover.
     """
 
     rescued: bool | None
     landed_terminal: bool
     task_already_terminal: bool = False
+    stage_mismatch_refused: bool = False
+    parked_abandoned: bool = False
+    sentinel_unroutable_already_paged: bool = False
+
+
+def _maybe_clear_staged_emit_result(
+    has_staged_emit_source: bool, cwd_value: str
+) -> None:
+    """Clear the staged-emit-result context flag on a ``rescued=None`` bail.
+
+    #2458 fix cycle 5, Action 1: shared by both bail branches in
+    ``_resolve_and_complete_headless_session`` below -- left set, a later
+    background_tasks-pending Stop re-peeks True and re-reaches the same bail
+    every turn, re-firing that bail's event each time (a spurious
+    ``SENTINEL_STAGE_MISMATCH`` re-derivation, or a repeat ``sentinel_
+    unroutable`` page). Gated on *has_staged_emit_source* so the common
+    ordinary Stop-hook turn for a session that never called ``cw result
+    emit`` never pays a context-lock write for a no-op clear.
+    """
+    if has_staged_emit_source:
+        _write_cw_context_locked(cwd_value, _clear_staged_emit_result_marker)
+
+
+def _restore_staged_route_outcome(session: Session) -> tuple[bool, bool]:
+    """Restore ``(rescued, task_already_terminal)`` stamped by a prior
+    ``complete_session=False`` partial route (#2458 fix cycle 5, Action 2).
+
+    The completing call's ``already_routed`` short-circuit skips
+    ``_apply_sentinel_to_task`` entirely, so without this the eventual
+    ``SESSION_COMPLETED`` payload would silently drop a #918 late-sentinel
+    rescue it never re-derived.
+    """
+    staged_result = session.last_result
+    if isinstance(staged_result, dict):
+        return (
+            bool(staged_result.get(_STAGED_ROUTE_RESCUED_KEY, False)),
+            bool(staged_result.get(_STAGED_ROUTE_TASK_ALREADY_TERMINAL_KEY, False)),
+        )
+    return False, False
+
+
+def _stamp_staged_route_outcome(
+    state: CwState, session: Session, *, rescued: bool, task_already_terminal: bool
+) -> None:
+    """Merge the consumed flag and this call's routing outcome, then persist.
+
+    #2458 fix cycle 5, Actions 2 and 3: the consumed flag (round 4) lets a
+    later completing call skip re-deriving an already-routed sentinel; the
+    outcome alongside it (this cycle) lets that same later call restore
+    ``rescued``/``task_already_terminal`` via
+    :func:`_restore_staged_route_outcome` instead of leaving them at their
+    init-False defaults. Caller guards this with ``not already_routed`` so a
+    repeat partial-route Stop skips the redundant merge and fleet-wide
+    ``save_state``.
+    """
+    _stamp_sentinel_partial_route_consumed(session)
+    existing = session.last_result
+    if isinstance(existing, dict):
+        session.last_result = {
+            **existing,
+            _STAGED_ROUTE_RESCUED_KEY: rescued,
+            _STAGED_ROUTE_TASK_ALREADY_TERMINAL_KEY: task_already_terminal,
+        }
+    save_state(state)
+
+
+def _sentinel_unroutable_already_paged(session: Session) -> bool:
+    """True when a prior bail already paged ``sentinel_unroutable`` (#2458 fix cycle 6).
+
+    Reads ``_SENTINEL_UNROUTABLE_PAGED_KEY``. Computed *before* this call's own
+    bail decides whether to stamp the flag -- see
+    :func:`_maybe_stamp_sentinel_unroutable_paged` -- so a fresh
+    ``_HeadlessResolution`` field can carry the pre-stamp state through to
+    ``signal_stop``'s outside-the-lock ``_sentinel_unroutable`` check without
+    that check racing its own just-written stamp.
+    """
+    last_result = session.last_result
+    return (
+        isinstance(last_result, dict)
+        and last_result.get(_SENTINEL_UNROUTABLE_PAGED_KEY) is True
+    )
+
+
+def _maybe_stamp_sentinel_unroutable_paged(
+    state: CwState, session: Session, *, already_paged: bool, pageable: bool
+) -> None:
+    """Merge ``_SENTINEL_UNROUTABLE_PAGED_KEY`` in once, the first time this
+    bail is pageable (#2458 fix cycle 6).
+
+    No-op when already paged (nothing to add) or not pageable (the #2135 park
+    ran, or nothing is actually staged -- ``holds_staged_emit_result`` is
+    False -- in which case ``_sentinel_unroutable`` will refuse to page on its
+    own conditions regardless, so stamping here would be a needless
+    fleet-wide ``save_state`` for a page that was never going to fire).
+    """
+    if already_paged or not pageable:
+        return
+    existing = session.last_result
+    if isinstance(existing, dict):
+        session.last_result = {**existing, _SENTINEL_UNROUTABLE_PAGED_KEY: True}
+        save_state(state)
 
 
 def _resolve_and_complete_headless_session(
@@ -397,6 +568,7 @@ def _resolve_and_complete_headless_session(
     ticket_id_value: object,
     is_headless: bool,
     now: datetime,
+    complete_session: bool = True,
 ) -> _HeadlessResolution:
     """Resolve the headless sentinel and mark the session COMPLETED (#176, #251).
 
@@ -429,6 +601,16 @@ def _resolve_and_complete_headless_session(
 
     Returns ``_HeadlessResolution(rescued=<bool>)`` once the session has been
     marked COMPLETED and persisted.
+
+    #2458: ``complete_session=False`` (a Stop whose ``background_tasks`` is
+    still non-empty) runs the sentinel resolution and task routing exactly
+    as above -- including both bails -- but then returns WITHOUT the session's
+    own completion: no status/``completed_at``/``completed_reason``/
+    ``claude_session_id`` mutation, no ``save_state``, no harvest. Safe to
+    split because ``_apply_sentinel_to_task`` takes its own
+    ``dev_queue_lock``, persists its own queue write, and never mutates
+    *session*. A later Stop (background work drained) or the idle-sweep
+    backstop completes the session.
     """
     parsed_sentinel: AutoDevResult | BlockedResult | None = None
     # Issue #536: emit precedence. When the producer already pushed a
@@ -438,19 +620,69 @@ def _resolve_and_complete_headless_session(
     # forensic fallback: it still runs (and is still authoritative) whenever
     # no emitted result exists, so a worker that never emits is unaffected.
     emit_terminal = False
-    if is_headless and _has_terminal_sentinel(session):
+    # #2458 fix cycle 5, Action 1: captured once, ahead of the reconstruction
+    # attempt, so both rescued=None bails below can gate their own staged-
+    # emit-result neutralization on "was a staged result present at all"
+    # rather than on emit_terminal, which is False on both the plain
+    # never-emitted case AND the reconstruction-failure case below -- the
+    # latter still needs the neutralization even though emit_terminal itself
+    # stays False.
+    has_staged_emit_source = is_headless and _has_terminal_sentinel(session)
+    if has_staged_emit_source:
         parsed_sentinel = _reconstruct_emitted_sentinel(session)
         emit_terminal = parsed_sentinel is not None
+    # #2458 fix cycle 4, Action 1: a prior complete_session=False partial
+    # route already routed this emitted sentinel to its task and merged
+    # _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY into last_result (see the
+    # ``if not complete_session:`` branch below). Recognize that here so this
+    # call -- a later Stop once background_tasks drains, or a repeat
+    # partial-route Stop racing the context-flag clear -- skips
+    # _apply_sentinel_to_task instead of re-deriving and re-routing the same
+    # already-consumed sentinel a second time (duplicate PARK/terminal
+    # events, spurious SENTINEL_RACE_MISS). last_result stays terminal-shaped
+    # throughout, so emit_terminal/parsed_sentinel above are unaffected --
+    # this call still completes the session from it normally.
+    already_routed = emit_terminal and _sentinel_partial_route_consumed(session)
     if not emit_terminal and is_headless:
         parsed_sentinel = _parse_headless_sentinel(
             session, cwd_value, claude_session_id
         )
         if parsed_sentinel is None:
             _handle_headless_no_sentinel()
-            _park_if_abandoned(
+            parked = _park_if_abandoned(
                 session, context, cwd_value, claude_session_id, ticket_id_value
             )
-            return _HeadlessResolution(rescued=None, landed_terminal=False)
+            # #2458 fix cycle 5, Action 1: left uncleared, a later
+            # background_tasks-pending Stop re-peeks True and re-reaches this
+            # same bail every turn, re-paging sentinel_unroutable each time
+            # via _handle_unrouted_stop / _sentinel_unroutable's own
+            # holds_staged_emit_result read. See
+            # _maybe_clear_staged_emit_result. This only covers the
+            # bg_count>0 path -- it does nothing for a bg_count==0
+            # drained-transition Stop, which never consults the peek flag at
+            # all (see signal_stop) and reaches this same bail unconditionally
+            # every time background_tasks happens to be empty. The
+            # already-paged stamp below closes that second path.
+            _maybe_clear_staged_emit_result(has_staged_emit_source, cwd_value)
+            # #2458 fix cycle 6: dedup the sentinel_unroutable page itself,
+            # independently of the peek-flag clear above (which only ever
+            # suppresses the bg_count>0 fast path). Computed and stamped here,
+            # inside sessions_lock (via this function's caller), rather than
+            # in _page_sentinel_unroutable itself (which runs after the lock
+            # releases) -- see _SENTINEL_UNROUTABLE_PAGED_KEY and
+            # _maybe_stamp_sentinel_unroutable_paged for why a post-lock
+            # stamp-and-check would race its own write.
+            already_paged = _sentinel_unroutable_already_paged(session)
+            pageable = not parked and holds_staged_emit_result(session)
+            _maybe_stamp_sentinel_unroutable_paged(
+                state, session, already_paged=already_paged, pageable=pageable
+            )
+            return _HeadlessResolution(
+                rescued=None,
+                landed_terminal=False,
+                parked_abandoned=parked,
+                sentinel_unroutable_already_paged=already_paged,
+            )
 
     # Issue #251: directly update the dev-queue task *before* marking the
     # session COMPLETED. This closes the race where revert_completed_silent_tasks
@@ -459,14 +691,81 @@ def _resolve_and_complete_headless_session(
     # no_op and similar terminal outcomes to trigger infinite re-dispatch.
     rescued = False
     task_already_terminal = False
-    if is_headless and parsed_sentinel is not None and isinstance(ticket_id_value, str):
+    if already_routed:
+        # #2458 fix cycle 5, Action 2: the accepted-route complete_session=
+        # False call below stamped its outcome alongside the consumed flag --
+        # restore it here instead of leaving rescued/task_already_terminal at
+        # their init-False defaults, so this completing call's
+        # SESSION_COMPLETED payload still reports a #918 late-sentinel rescue
+        # accurately.
+        rescued, task_already_terminal = _restore_staged_route_outcome(session)
+    elif (
+        is_headless and parsed_sentinel is not None and isinstance(ticket_id_value, str)
+    ):
         outcome = _apply_sentinel_to_task(ticket_id_value, session, parsed_sentinel)
         rescued = outcome.rescued
         task_already_terminal = outcome.task_already_terminal
         if not outcome.routed and not outcome.task_already_terminal:
+            # A refusal that did not itself land the task terminal (#1031
+            # stage mismatch) already fired its own event (#2458). Fix cycle
+            # 5, Action 1: also clear the staged-emit-result context flag --
+            # left set, a later background_tasks-pending Stop re-peeks True,
+            # re-derives the same staged sentinel (already_routed stays False
+            # since it was never routed), and re-calls
+            # _apply_sentinel_to_task, which unconditionally re-fires
+            # SENTINEL_STAGE_MISMATCH via
+            # cw.dispatch.routing._route_staged_decision on every turn.
+            _maybe_clear_staged_emit_result(has_staged_emit_source, cwd_value)
             return _HeadlessResolution(
-                rescued=None, landed_terminal=outcome.landed_terminal
+                rescued=None,
+                landed_terminal=outcome.landed_terminal,
+                stage_mismatch_refused=not outcome.landed_terminal,
             )
+
+    if not complete_session:
+        # #2458: the task is routed; the session's own completion waits for
+        # its background work to drain (see this function's docstring).
+        # Round-2 fix: clear the staged-emit-result peek flag now that the
+        # route has landed -- left set, a later Stop with background_tasks
+        # still non-empty re-derives the same already-consumed sentinel and
+        # re-calls _apply_sentinel_to_task, which no longer finds the task
+        # under this session (routed or landed terminal here) and logs a
+        # spurious sentinel_race_miss_detected / SENTINEL_RACE_MISS on every
+        # subsequent turn. Best-effort like every other context write in
+        # this module: a missed clear just means the peek re-fires next
+        # turn, exactly as it did before this fix.
+        _write_cw_context_locked(cwd_value, _clear_staged_emit_result_marker)
+        # Round-4 fix (#2458 Action 1): also neutralize the staged sentinel on
+        # the authoritative Session model, not just the ephemeral context
+        # peek flag -- a later Stop hook (once background_tasks finally
+        # drains to []) and the idle sweep's holds_staged_emit_result
+        # candidacy check both read session.last_result directly and would
+        # otherwise still see this consumed sentinel as live. No-op when this
+        # call never resolved an emitted sentinel (emit_terminal False -- the
+        # transcript-only path never reaches complete_session=False, see this
+        # function's docstring).
+        #
+        # Fix cycle 5, Action 3: guarded with `not already_routed` too -- a
+        # repeat partial-route Stop (already_routed True, the narrow race the
+        # comment below the already_routed assignment above describes) was
+        # previously re-merging this same already-True flag and taking a
+        # full fleet-wide save_state() purely to re-persist an unchanged
+        # value every time. already_routed True also means rescued/
+        # task_already_terminal were just restored from the earlier stamp
+        # rather than freshly derived, so re-stamping them here would be
+        # redundant for the same reason.
+        if emit_terminal and not already_routed:
+            _stamp_staged_route_outcome(
+                state,
+                session,
+                rescued=rescued,
+                task_already_terminal=task_already_terminal,
+            )
+        return _HeadlessResolution(
+            rescued=rescued,
+            landed_terminal=False,
+            task_already_terminal=task_already_terminal,
+        )
 
     session.status = SessionStatus.COMPLETED
     session.completed_at = now
@@ -604,10 +903,18 @@ def signal_stop() -> None:
     so hook execution never blocks claude from exiting.
 
     Defers when the hook payload carries a non-empty ``background_tasks``
-    list: the Stop hook fires at every main-agent turn boundary, and
-    dispatching a ``run_in_background: true`` subagent ends the parent's
-    turn while the subagent is still running. Completing the session
-    here would orphan the subagent. See issue #151.
+    list AND the session holds no staged emit_cli result yet: the Stop hook
+    fires at every main-agent turn boundary, and dispatching a
+    ``run_in_background: true`` subagent ends the parent's turn while the
+    subagent is still running. Completing the session here would orphan the
+    subagent. See issue #151.
+
+    A session that already holds a staged ``cw result emit`` result is
+    routed immediately, even mid-background-task (#2458): the TASK is routed
+    now, while the SESSION's own completion (``SESSION_COMPLETED`` + daemon
+    stop) is deferred until ``background_tasks`` drains or the idle-sweep
+    backstop acts. The one exception is a BlockedResult that lands the task
+    terminal-FAILED, which stops the provably-leaked daemon worker at once.
     """
     resolved_context = _resolve_signal_stop_context()
     if resolved_context is None:
@@ -615,7 +922,8 @@ def signal_stop() -> None:
     hook_payload, context, cwd_value, cw_session_id = resolved_context
 
     bg_tasks = hook_payload.get("background_tasks")
-    if isinstance(bg_tasks, list) and bg_tasks:
+    bg_count = len(bg_tasks) if isinstance(bg_tasks, list) else 0
+    if bg_count:
         # Turn boundary with pending background work — leave the session
         # in its current status; another Stop hook will fire when the bg
         # work drains (the contract `claude --bg + run_in_background: true`
@@ -626,10 +934,6 @@ def signal_stop() -> None:
         # DAEMON-origin sessions, killed via `claude stop`, orphaning the
         # in-flight subagent. See issue #151.
         #
-        # Fast path: no session/dev_queue state I/O. The idempotency guard
-        # below is unreachable on this path by design — deferral leaves
-        # session state untouched regardless of current session status.
-        #
         # #1947: snapshot the live background_tasks count into cw-context.json
         # -- this is the replacement for the removed PostToolUse:Agent
         # decrement, which replaying a real async spawn showed balances at
@@ -639,33 +943,129 @@ def signal_stop() -> None:
         # _write_cw_context_locked's own contract -- never raises, never
         # blocks the Stop hook's remaining duties.
         _write_cw_context_locked(
-            cwd_value, lambda ctx: _snapshot_agent_spawn_stamp(ctx, len(bg_tasks))
+            cwd_value, lambda ctx: _snapshot_agent_spawn_stamp(ctx, bg_count)
         )
+        # #2458: that "another Stop hook will fire" is not guaranteed (#1889:
+        # the upstream async-completion wakeup can be dropped), so a result
+        # the worker already emitted must not wait on it. Fast path: one
+        # lock-free state read; with nothing staged the session is left
+        # untouched exactly as before. Backstops if no further Stop ever
+        # fires: the idle sweep routes a staged emit_cli result; the phantom
+        # sweep handles a daemon that has exited.
+        if not _peek_staged_emit_result(context):
+            return
+    elif not _agent_spawn_stamp_is_clear(context):
+        # #1947: this Stop has background_tasks empty/absent -- clear any
+        # stale agent_spawn_stamp snapshot a prior deferred turn left behind.
+        # Runs here (before the session lookup) so it fires even when no
+        # session in state.sessions matches this hook's session_id; fails
+        # open silently, same contract as the snapshot write above.
         #
-        # Backstop: if the second Stop hook ever fails to fire (daemon
-        # bug, subagent hard crash with no clean Stop), reconcile.py
-        # eventually detects the phantom and marks the session CRASHED,
-        # reverting any matching dev_queue task to PENDING for retry.
-        # Recovery, not silent wedge.
-        return
-
-    # #1947: every Stop that reaches this point has background_tasks
-    # empty/absent -- clear any stale agent_spawn_stamp snapshot a prior
-    # deferred turn left behind. Runs here (before the session lookup below)
-    # so it fires even when no session in state.sessions matches this hook's
-    # session_id; fails open silently, same contract as the snapshot write
-    # above.
-    #
-    # #2229: skipped when the stamp is already the resolved shape -- no lock,
-    # no rewrite. Safe because (a) ``last_stamped_at`` is unread at count 0
-    # (``reconcile/_shared.py`` returns early on a zero count), and (b) the
-    # decision uses the unlocked read from above, which is linearizable: an
-    # ``agent-spawn-pre`` increment landing after that read is equivalent to
-    # "this Stop cleared first, then the spawn incremented". The write path
-    # below re-reads under the lock and must never be handed ``context``.
-    if not _agent_spawn_stamp_is_clear(context):
+        # #2229: skipped when the stamp is already the resolved shape -- no
+        # lock, no rewrite. Safe because (a) ``last_stamped_at`` is unread at
+        # count 0 (``reconcile/_shared.py`` returns early on a zero count),
+        # and (b) the decision uses the unlocked read from above, which is
+        # linearizable: an ``agent-spawn-pre`` increment landing after that
+        # read is equivalent to "this Stop cleared first, then the spawn
+        # incremented". The write path re-reads under the lock and must never
+        # be handed ``context``.
         _write_cw_context_locked(cwd_value, _clear_agent_spawn_stamp)
 
+    locked = _resolve_stop_under_lock(
+        hook_payload,
+        context,
+        cwd_value=cwd_value,
+        cw_session_id=cw_session_id,
+        complete_session=not bg_count,
+    )
+    if locked is None:
+        return
+    session, claude_session_id, resolution = locked
+
+    if resolution.rescued is None:
+        _handle_unrouted_stop(session, context, resolution, bg_count)
+        return
+
+    if bg_count:
+        # #2458: the staged result has routed the task; the session stays
+        # live (and its daemon running) for the background work still in
+        # flight. A later Stop with background_tasks drained, or the idle
+        # sweep, completes it.
+        return
+
+    payload = _build_completed_payload(
+        session,
+        context,
+        claude_session_id,
+        hook_payload,
+        rescued=resolution.rescued,
+        task_already_terminal=resolution.task_already_terminal,
+    )
+    record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
+
+    # Native bg workers stay registered with the Claude daemon as
+    # ``idle`` after their turn ends; without an explicit stop they
+    # accumulate in roster.json across dispatches (the very failure
+    # mode that motivated GitHub issue #150 in the first place). The
+    # stop call is best-effort: native_daemon.stop logs and swallows
+    # missing-binary / timeout errors rather than failing the hook.
+    if session.origin is SessionOrigin.DAEMON and session.surface_ref is not None:
+        get_native_daemon_client().stop(session.surface_ref)
+
+
+def _peek_staged_emit_result(context: dict[str, object]) -> bool:
+    """Lock-free peek: does this session hold a staged emit_cli result? (#2458)
+
+    Reads the ``staged_emit_result`` flag ``cw result emit`` stamps into this
+    worktree's own ``cw-context.json`` (#2458) -- never ``load_state()``,
+    whose fleet-wide ``sessions.json`` this peek exists specifically to avoid
+    loading on every Stop-hook fire with pending ``background_tasks``. A
+    stale answer cannot corrupt anything: True just means the caller takes
+    the lock and re-makes every decision from a freshly loaded session; False
+    means it defers exactly as it did before #2458, which a later Stop or the
+    idle sweep recovers from.
+    """
+    if not context.get("headless"):
+        return False
+    return bool(context.get(STAGED_EMIT_RESULT_KEY))
+
+
+def _clear_staged_emit_result_marker(context: dict[str, object]) -> dict[str, object]:
+    """Drop ``STAGED_EMIT_RESULT_KEY`` -- the counterpart of the stamp
+    ``cw.result._stamp_staged_emit_result`` writes.
+
+    Called once a ``complete_session=False`` partial route has consumed the
+    staged result (see ``_resolve_and_complete_headless_session``), so a
+    later ``_peek_staged_emit_result`` on the same still-deferred session
+    answers False instead of re-triggering a re-derivation of an
+    already-routed sentinel.
+    """
+    return {k: v for k, v in context.items() if k != STAGED_EMIT_RESULT_KEY}
+
+
+class _LockedStop(NamedTuple):
+    """What ``signal_stop`` needs after ``sessions_lock`` releases."""
+
+    session: Session
+    claude_session_id: object
+    resolution: _HeadlessResolution
+
+
+def _resolve_stop_under_lock(
+    hook_payload: dict[str, object],
+    context: dict[str, object],
+    *,
+    cwd_value: str,
+    cw_session_id: str,
+    complete_session: bool,
+) -> _LockedStop | None:
+    """Look up the session and resolve this Stop under ``sessions_lock``.
+
+    Returns ``None`` when ``signal_stop`` has nothing further to do: no such
+    session, an already-settled one (idempotency guard), a stale hook, or a
+    USER-origin session (marked IDLE here). Extracted from ``signal_stop``
+    (#2458) to keep it under the branch/return caps.
+    """
     # Why not mutate_state: dual-lock (dev_queue_lock nested at the TIMED_OUT path)
     # and daemon.stop() network call inside the lock window (criteria 1 and 2).
     with sessions_lock():
@@ -676,7 +1076,7 @@ def signal_stop() -> None:
             SessionStatus.IDLE,
             SessionStatus.TIMED_OUT,
         ):
-            return
+            return None
 
         claude_session_id = hook_payload.get("session_id")
 
@@ -697,7 +1097,7 @@ def signal_stop() -> None:
             and session.surface_ref is not None
             and not claude_session_id.startswith(session.surface_ref)
         ):
-            return
+            return None
 
         # Issue #165 Phase B: USER-origin sessions are interactive — the Stop
         # hook fires at every agent turn but the human is still driving. Mark
@@ -707,13 +1107,13 @@ def signal_stop() -> None:
         # falls through to the existing COMPLETED transition below.
         if session.origin is SessionOrigin.USER:
             _handle_user_origin_stop(state, session, claude_session_id)
-            return
+            return None
 
         # Issue #176 Layer 1: headless backstop.
         #
         # A headless DAEMON session (ticket_id present in context) must NOT be
         # silently marked COMPLETED unless it emitted an AUTO_DEV_RESULT sentinel.
-        # The bg_tasks guard above correctly defers when a subagent is in flight,
+        # The bg_tasks guard in signal_stop defers when a subagent is in flight,
         # but the parent's *next* turn may end (with background_tasks=[]) before
         # it has finished its post-wait pipeline work — a silent orphan.
         #
@@ -736,14 +1136,14 @@ def signal_stop() -> None:
         now = datetime.now(UTC)
 
         # Resolves the sentinel, routes it through the #251 staged-advance
-        # authority, and (if accepted) marks the session COMPLETED. rescued
-        # is None when the caller must bail without further action -- no
-        # sentinel under budget, or a #1031 stage-mismatch route refusal.
-        # landed_terminal (#1273) distinguishes the case where the bail was
-        # itself a BlockedResult that landed the task terminal-FAILED, leaking
-        # the daemon worker. A #1189 raced-to-terminal lookup miss (#1692) is
-        # NOT a bail -- rescued comes back False (not None) and the session
-        # completes normally below, with task_already_terminal marking why.
+        # authority, and (if accepted, and complete_session) marks the session
+        # COMPLETED. rescued is None when the caller must bail without further
+        # action -- no sentinel under budget, or a #1031 stage-mismatch route
+        # refusal. landed_terminal (#1273) distinguishes the case where the
+        # bail was itself a BlockedResult that landed the task terminal-FAILED,
+        # leaking the daemon worker. A #1189 raced-to-terminal lookup miss
+        # (#1692) is NOT a bail -- rescued comes back False (not None) and the
+        # session completes normally, with task_already_terminal marking why.
         resolution = _resolve_and_complete_headless_session(
             state,
             session,
@@ -753,44 +1153,122 @@ def signal_stop() -> None:
             ticket_id_value=ticket_id_value,
             is_headless=is_headless,
             now=now,
+            complete_session=complete_session,
         )
-        rescued = resolution.rescued
-        landed_terminal = resolution.landed_terminal
-        task_already_terminal = resolution.task_already_terminal
+    return _LockedStop(session, claude_session_id, resolution)
 
-    if rescued is None:
-        # #1273: a BlockedResult that itself just landed the task
-        # terminal-FAILED leaks the DAEMON worker -- stop it even though the
-        # session is never marked COMPLETED. A stage-mismatch (#986) refusal
-        # leaves landed_terminal False, so a still-legitimate worker is left
-        # alone. Done after the lock releases, matching the
-        # network-call-outside-lock convention below.
-        if (
-            landed_terminal
-            and session.origin is SessionOrigin.DAEMON
-            and session.surface_ref is not None
-        ):
-            get_native_daemon_client().stop(session.surface_ref)
-        return
 
-    payload = _build_completed_payload(
-        session,
-        context,
-        claude_session_id,
-        hook_payload,
-        rescued=rescued,
-        task_already_terminal=task_already_terminal,
-    )
-    record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
+def _handle_unrouted_stop(
+    session: Session,
+    context: dict[str, object],
+    resolution: _HeadlessResolution,
+    bg_count: int,
+) -> None:
+    """Act on a ``rescued=None`` bail once ``sessions_lock`` has released.
 
-    # Native bg workers stay registered with the Claude daemon as
-    # ``idle`` after their turn ends; without an explicit stop they
-    # accumulate in roster.json across dispatches (the very failure
-    # mode that motivated GitHub issue #150 in the first place). The
-    # stop call is best-effort: native_daemon.stop logs and swallows
-    # missing-binary / timeout errors rather than failing the hook.
-    if session.origin is SessionOrigin.DAEMON and session.surface_ref is not None:
+    Pages ``sentinel_unroutable`` when the bail was neither a route refusal
+    nor the #2135 park (:func:`_sentinel_unroutable`), then applies the #1273
+    daemon stop. Runs identically whether or not ``background_tasks`` was
+    pending (#2458): a leaked worker is leaked whatever it is still waiting
+    on, and an unroutable staged result deserves a page either way.
+
+    *bg_count* is the hook payload's ``background_tasks`` length at this
+    Stop -- carried through only to log alongside the #1273 daemon stop
+    (#2458), so a post-incident read can tell "stopped a leaked worker" from
+    "stopped a worker with N background tasks still in flight" instead of
+    inferring it from the surrounding Stop-hook fires.
+    """
+    if _sentinel_unroutable(session, resolution):
+        # Defense in depth for a third, rarer failure mode: the hook DID run
+        # and resolve, but the staged result is genuinely unroutable. It does
+        # not by itself catch the dropped-wakeup shape (#1889 -- a session
+        # that never fires another Stop at all); the idle-sweep backstop and
+        # the background_tasks-routing in signal_stop close that between them.
+        _page_sentinel_unroutable(session, context)
+    # #1273: a BlockedResult that itself just landed the task
+    # terminal-FAILED leaks the DAEMON worker -- stop it even though the
+    # session is never marked COMPLETED. A stage-mismatch (#986) refusal
+    # leaves landed_terminal False, so a still-legitimate worker is left
+    # alone. Done after the lock releases, matching the
+    # network-call-outside-lock convention in signal_stop.
+    if (
+        resolution.landed_terminal
+        and session.origin is SessionOrigin.DAEMON
+        and session.surface_ref is not None
+    ):
+        logger.info(
+            "landed_terminal daemon stop: session=%s surface_ref=%s "
+            "pending_background_tasks=%d",
+            session.id,
+            session.surface_ref,
+            bg_count,
+        )
         get_native_daemon_client().stop(session.surface_ref)
+
+
+def _sentinel_unroutable(session: Session, resolution: _HeadlessResolution) -> bool:
+    """Whether a ``rescued=None`` bail left a staged emit_cli result unrouted.
+
+    True only when the session holds a terminal emit_cli result (so the
+    emit-precedence path ran) and the bail was the no-sentinel one without
+    the #2135 park -- i.e. that result's reconstruction AND the transcript
+    fallback both failed. A route refusal (#1031, which fires
+    ``SENTINEL_STAGE_MISMATCH``), a terminal landing (#1273) and the park
+    (``stopped_without_sentinel``) each already have their own signal.
+
+    #2458 fix cycle 6: also False once ``sentinel_unroutable_already_paged``
+    -- a *different*, still-unroutable Stop landed on this exact bail before
+    and already paged it. Without this, every subsequent bg_count==0
+    drained-transition Stop for a session stuck in this bail re-pages
+    forever, since (unlike the bg_count>0 fast path, which
+    ``_peek_staged_emit_result`` short-circuits before resolution even runs)
+    nothing else gates a bg_count==0 Stop from reaching this bail's
+    resolution step every single time.
+    """
+    return (
+        not resolution.landed_terminal
+        and not resolution.parked_abandoned
+        and not resolution.stage_mismatch_refused
+        and not resolution.sentinel_unroutable_already_paged
+        and holds_staged_emit_result(session)
+    )
+
+
+def _page_sentinel_unroutable(session: Session, context: dict[str, object]) -> None:
+    """WARNING + signal-only ``session.needs_attention`` (#2458, §6d).
+
+    No task-row mutation: the row stays RUNNING so the idle-sweep backstop or
+    a later Stop can still route it. Fired outside ``sessions_lock``, like
+    ``SESSION_COMPLETED``.
+    """
+    ticket_id = _context_str(context, "ticket_id")
+    logger.warning(
+        "sentinel_unroutable: session=%s ticket=%s last_result_source=%s -- "
+        "a staged emit_cli result could not be reconstructed and the "
+        "transcript carried no routable sentinel either",
+        session.id,
+        ticket_id,
+        session.last_result_source,
+    )
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": ticket_id,
+            "claude_session_id": session.claude_session_id,
+            "paused_status": _SENTINEL_UNROUTABLE_REASON,
+            "breadcrumbs": (
+                "Stop hook fired with an emit_cli result staged but no route "
+                "was accepted (emit reconstruction and transcript parse both "
+                "failed)"
+            ),
+            "crashed": False,
+            "lane": session.lane,
+        },
+        correlation_id=ticket_id,
+    )
 
 
 def _build_completed_payload(

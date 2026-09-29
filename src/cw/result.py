@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import click
 from pydantic import ValidationError
 
+from cw._hook_context import _read_cw_context, _write_cw_context_locked
 from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.config import load_state, save_state, sessions_lock
 from cw.events import record_event
@@ -25,7 +26,9 @@ from cw.exceptions import (
     PlanDraftBindingError,
 )
 from cw.models import (
+    HOOK_CONTEXT_RELATIVE_PATH,
     PLAN_DRAFT_FINGERPRINT_KEY,
+    STAGED_EMIT_RESULT_KEY,
     LastResultSource,
     OrchestratorEventType,
 )
@@ -79,6 +82,19 @@ def _validate_or_exit(
     output (the ``field: message`` lines from :func:`_format_errors`) can't drift
     apart. *extra_stderr_line*, if given, is echoed after the field-error lines
     (``emit`` uses this to note that no state was mutated).
+
+    Cross-module invariant (#2458 round 2): this gate accepts ``AutoDevResult``
+    ONLY -- ``cw result emit`` can therefore never stage a ``BlockedResult``
+    whose ``landed_terminal`` outcome the idle sweep's
+    ``cw.reconcile.idle._mutations._apply_idle_routed_mutations`` does not
+    branch on (unlike the Stop hook's ``_handle_unrouted_stop``, #1273). If
+    this gate is ever widened to accept the ``BlockedResult`` shape (the way
+    the Stop-hook harvest door already was, RFC 0012 A1 / #1457), the idle
+    sweep must also gain a ``landed_terminal`` arm (#2482), or a staged
+    landed-terminal-FAILED result routed through the idle backstop instead of
+    the Stop hook falls into the stage-mismatch-refusal branch and never
+    completes the session or stops the daemon. Pinned by
+    ``test_validate_or_exit_rejects_bare_blocked_result_shape``.
     """
     try:
         return AutoDevResult.model_validate(payload)
@@ -171,12 +187,8 @@ def _resolve_emit_session_id(session_id: str | None) -> str:
     if session_id is not None:
         return session_id
 
-    # Function-local import breaks the cw.cli <-> cw.result circular dependency;
-    # inline import is the sanctioned mechanism (PLC0415), not a workaround.
-    from cw.cli._hook_io import _read_cw_context
-
     cwd = str(Path.cwd())
-    context_path = Path(cwd) / ".claude" / "cw-context.json"
+    context_path = Path(cwd) / HOOK_CONTEXT_RELATIVE_PATH
     context = _read_cw_context(cwd)
     if context is None:
         click.echo(
@@ -289,7 +301,15 @@ def reconstruct_staged_sentinel(
         )
     try:
         return _validate_harvest_payload(sanitized)
-    except EmitValidationError:
+    except EmitValidationError as exc:
+        # #2458: every caller falls back on None (the Stop hook to the
+        # transcript, the reconcile sweeps to their next producer), so this is
+        # the only place the *reason* a staged result could not be routed is
+        # still known.
+        logger.warning(
+            "reconstruct_staged_sentinel: validation failed: %s",
+            "; ".join(exc.errors),
+        )
         return None
 
 
@@ -558,6 +578,30 @@ def _fail_no_mutation(message: str | None) -> click.exceptions.Exit:
     return click.exceptions.Exit(1)
 
 
+def _stamp_staged_emit_result(session_id: str) -> None:
+    """Best-effort: flag this worktree's cw-context.json after a successful emit.
+
+    #2458: the Stop hook's lock-free peek
+    (``cw.cli.stop_hook._peek_staged_emit_result``)
+    reads this flag instead of ``load_state()`` to answer "does this session
+    hold a staged emit_cli result" without a fleet-wide sessions.json load on
+    every Stop-hook fire with pending ``background_tasks``.
+
+    Only stamps when the invoking cwd's own cw-context.json already names
+    *session_id* as its session -- an operator running ``cw result emit
+    --session-id`` from an unrelated directory must not stamp a foreign
+    worktree's context. Silent no-op on any mismatch, missing file, or write
+    failure: purely an optimization for the peek, never load-bearing -- a
+    peek that misses the flag just defers as it did before #2458, which a
+    later Stop or the idle sweep recovers from.
+    """
+    cwd = str(Path.cwd())
+    context = _read_cw_context(cwd)
+    if context is None or context.get("session_id") != session_id:
+        return
+    _write_cw_context_locked(cwd, lambda ctx: {**ctx, STAGED_EMIT_RESULT_KEY: True})
+
+
 @result.command(name="emit")
 @click.argument("path")
 @click.option(
@@ -656,6 +700,7 @@ def result_emit(path: str, session_id: str | None, plan_draft: Path | None) -> N
         _echo_refusal(outcome.session_id, outcome.existing_source)
         return
 
+    _stamp_staged_emit_result(outcome.session_id)
     _echo_binding_note(binding)
     logger.info(
         "cw result emit: session=%s prior_status=%s new_status=%s",

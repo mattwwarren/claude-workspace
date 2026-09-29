@@ -1026,11 +1026,12 @@ def _hold_context_lock(worktree: Path) -> Iterator[None]:
     Reproduces the contended-lock condition every hook write path must fail
     open on. Hoisted from ``test_cli_agent_spawn_stamp.py``'s inline
     ``fcntl.flock`` setup so the three consumers of
-    ``cw.cli._hook_io._write_cw_context_locked`` share one technique instead
+    ``cw._hook_context._write_cw_context_locked`` share one technique instead
     of each re-deriving it — the same "don't duplicate the discipline"
-    reasoning that promoted the write primitive itself into ``_hook_io``.
+    reasoning that promoted the write primitive itself into one shared
+    module (now ``cw._hook_context``).
 
-    Callers must also shorten ``cw.cli._hook_io._LOCK_TIMEOUT_SECS_DEFAULT``
+    Callers must also shorten ``cw._hook_context._LOCK_TIMEOUT_SECS_DEFAULT``
     (patched where it is *defined*, never on a re-exporting module) so the
     bounded retry budget expires quickly.
     """

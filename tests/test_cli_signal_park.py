@@ -184,7 +184,7 @@ class TestSignalParkStamps:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Unknown keys round-trip through _write_cw_context_locked."""
-        from cw.cli._hook_io import _write_cw_context_locked
+        from cw._hook_context import _write_cw_context_locked
         from cw.cli.stop_hook import _clear_agent_spawn_stamp
         from cw.models import read_park_comment_marker
 
@@ -384,7 +384,7 @@ class TestSignalParkFailsOpen:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "cw.cli._hook_io._LOCK_TIMEOUT_SECS_DEFAULT", 0.05, raising=True
+            "cw._hook_context._LOCK_TIMEOUT_SECS_DEFAULT", 0.05, raising=True
         )
         worktree = _seeded_worktree(tmp_path)
         _seed_running_row(worktree)

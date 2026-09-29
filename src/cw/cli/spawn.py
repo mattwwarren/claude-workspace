@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast, get_args
+from typing import TYPE_CHECKING, cast, get_args
 
 import click
 
@@ -24,6 +24,7 @@ from cw.dev_queue import (
     dev_queue_lock,
     load_dev_queue,
     requeue_ticket,
+    running_task_for_session,
 )
 from cw.dispatch import _DISPATCH_CONSUMER, _apply_events_to_store
 from cw.events import advance_cursor, record_event
@@ -37,8 +38,16 @@ from cw.models import (
     SessionStatus,
 )
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
-from cw.reconcile import ticket_id_for_session
+from cw.reconcile import (
+    _apply_sentinel_to_task,
+    holds_staged_emit_result,
+    ticket_id_for_session,
+)
+from cw.result import reconstruct_staged_sentinel
 from cw.spawn import spawn_create_impl
+
+if TYPE_CHECKING:
+    from cw.models import Session
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +78,35 @@ def _spawn_create_impl(
         headless=headless,
         native_daemon=native_daemon,
     )
+
+
+def _route_staged_emit_result(sess: Session) -> bool:
+    """Route *sess*'s staged ``cw result emit`` result to its RUNNING row (#2458).
+
+    Returns True when the row is now dispositioned by that result -- routed,
+    or already landed terminal by a concurrent caller -- so the caller must
+    NOT also cancel it. Returns False (cancel as before) when nothing is
+    staged, the staged dict reconstructs into neither sentinel arm, the
+    session owns no RUNNING row, or the shared authority refuses the route
+    (a #1031 stage mismatch, or a BlockedResult landing the row FAILED).
+
+    The row is found by :func:`~cw.dev_queue.running_task_for_session` --
+    the lookup ``cancel_task_for_session`` itself uses -- via a lock-free
+    read; ``_apply_sentinel_to_task`` re-resolves it under
+    ``dev_queue_lock``. Called under ``sessions_lock``, the same
+    ``sessions_lock`` -> ``dev_queue_lock`` nesting ``signal_stop`` already
+    uses.
+    """
+    if not holds_staged_emit_result(sess):
+        return False
+    staged = reconstruct_staged_sentinel(sess.last_result)
+    if staged is None:
+        return False
+    task = running_task_for_session(load_dev_queue(), sess.id)
+    if task is None:
+        return False
+    outcome = _apply_sentinel_to_task(task.ticket_id, sess, staged)
+    return outcome.routed or outcome.task_already_terminal
 
 
 def _spawn_close_impl(
@@ -119,8 +157,10 @@ def _spawn_close_impl(
         # For DAEMON sessions, atomically cancel any RUNNING TicketTask that owns
         # this session so revert_completed_silent_tasks cannot revert it to PENDING
         # and the dispatcher cannot re-spawn the same ticket in the same tick.
-        # (See GitHub issue #317.)
-        if sess.origin is SessionOrigin.DAEMON:
+        # (See GitHub issue #317.) A worker that already emitted its result has
+        # that result routed first instead (#2458) -- cancelling would throw
+        # away validated work and force a manual `requeue --from-cancelled`.
+        if sess.origin is SessionOrigin.DAEMON and not _route_staged_emit_result(sess):
             cancel_task_for_session(sess.id)
 
         sess.status = SessionStatus.COMPLETED
