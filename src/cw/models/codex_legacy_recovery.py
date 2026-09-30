@@ -82,6 +82,18 @@ class Outcome(BaseModel):
     prior_stage: Stage | None = None
 
 
+class PendingOutcome(BaseModel):
+    """A durable intent for a session whose live recovery is in progress."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    ticket_id: str
+    client: str
+    prior_status: SessionStatus
+    prior_stage: Stage | None = None
+
+
 class CodexLegacyRecoveryMarker(BaseModel):
     """Per-session outcomes plus counts derived from them.
 
@@ -93,9 +105,10 @@ class CodexLegacyRecoveryMarker(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = CODEX_LEGACY_RECOVERY_SCHEMA_VERSION
-    # None is the explicitly authorized all-client scope.  A normal run
-    # records one client here so a retry cannot silently widen its scope.
+    # Records the last selected client for operator visibility.  It is not an
+    # authorization to mutate another client; covered_clients gates completion.
     client_scope: str | None = None
+    covered_clients: list[str] = Field(default_factory=list)
     completed_at: datetime | None = None
     scanned: int = 0
     requeued: int = 0
@@ -105,6 +118,7 @@ class CodexLegacyRecoveryMarker(BaseModel):
     skipped_writer_live: int = 0
     unresolved: list[UnresolvedEntry] = Field(default_factory=list)
     outcomes: list[Outcome] = Field(default_factory=list)
+    pending: list[PendingOutcome] = Field(default_factory=list)
 
     def validate_consistency(self) -> None:
         """Reject a marker that cannot safely serve as the B2 run record."""
@@ -125,6 +139,11 @@ class CodexLegacyRecoveryMarker(BaseModel):
             _raise_marker_error("marker counts must be non-negative")
         if len({outcome.session_id for outcome in self.outcomes}) != len(self.outcomes):
             _raise_marker_error("marker outcomes must contain one entry per session")
+        pending_ids = {pending.session_id for pending in self.pending}
+        if len(pending_ids) != len(self.pending) or pending_ids & {
+            outcome.session_id for outcome in self.outcomes
+        }:
+            _raise_marker_error("marker pending entries must be unique and unresolved")
         actual = Counter(outcome.disposition for outcome in self.outcomes)
         expected = {
             "requeued": actual[CodexLegacyDisposition.REQUEUED],
@@ -163,11 +182,9 @@ class CodexLegacyRecoveryMarker(BaseModel):
                 _raise_marker_error("unresolved entries must match failed outcomes")
             if (entry.client, entry.ticket_id) != (outcome.client, outcome.ticket_id):
                 _raise_marker_error("unresolved entry does not match its outcome")
-        if self.client_scope is not None and any(
-            outcome.client != self.client_scope
-            and outcome.disposition is not CodexLegacyDisposition.FAILED
-            for outcome in self.outcomes
-        ):
-            _raise_marker_error("marker outcome is outside its client scope")
-        if self.completed_at is not None and self.unresolved:
-            _raise_marker_error("a completed marker cannot have unresolved sessions")
+        if len(set(self.covered_clients)) != len(self.covered_clients):
+            _raise_marker_error("covered clients must be unique")
+        if self.completed_at is not None and (self.unresolved or self.pending):
+            _raise_marker_error(
+                "a completed marker cannot have unresolved or pending sessions"
+            )

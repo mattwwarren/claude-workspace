@@ -80,13 +80,7 @@ def codex_run(
     "--client",
     "client_name",
     default=None,
-    help="Limit recovery to this client (required when multiple clients exist).",
-)
-@click.option(
-    "--all-clients",
-    is_flag=True,
-    default=False,
-    help="Explicitly authorize recovery across every configured client.",
+    help="Recover this client (required when multiple clients exist).",
 )
 @click.option(
     "--preflight",
@@ -96,9 +90,9 @@ def codex_run(
 )
 @handle_errors
 def codex_migrate_legacy(
-    as_json: bool, client_name: str | None, all_clients: bool, preflight: bool
+    as_json: bool, client_name: str | None, preflight: bool
 ) -> None:
-    """Recover every live pre-RFC-0014 codex session, once.
+    """Recover live pre-RFC-0014 codex sessions for one client, once.
 
     Scans each legacy codex session's worktree for a live writer, then
     requeues or parks its task through the codex harvest gate. Safe to run
@@ -107,9 +101,7 @@ def codex_migrate_legacy(
     See docs/dispatch-runbook.md.
     """
     if preflight:
-        scope, candidates = preflight_codex_legacy_recovery(
-            client=client_name, all_clients=all_clients
-        )
+        scope, candidates = preflight_codex_legacy_recovery(client=client_name)
         if as_json:
             click.echo(
                 json.dumps(
@@ -128,6 +120,6 @@ def codex_migrate_legacy(
                 "no changes applied"
             )
         return
-    report = run_codex_legacy_recovery(client=client_name, all_clients=all_clients)
+    report = run_codex_legacy_recovery(client=client_name)
     click.echo(format_report_json(report) if as_json else format_report_text(report))
     raise click.exceptions.Exit(0 if report.ok else 1)

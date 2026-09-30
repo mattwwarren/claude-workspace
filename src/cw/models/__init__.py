@@ -40,6 +40,7 @@ from cw.models.codex_legacy_recovery import (
     CodexLegacyRecoveryMarker,
     LegacyRecoveryStatus,
     Outcome,
+    PendingOutcome,
     UnresolvedEntry,
 )
 from cw.models.enums import (
@@ -203,6 +204,7 @@ __all__ = [
     "Outcome",
     "ParkCommentMarker",
     "PendingFixDispatch",
+    "PendingOutcome",
     "PrState",
     "QueueItemStatus",
     "ReapPolicy",

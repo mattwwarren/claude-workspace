@@ -4,7 +4,8 @@ RFC 0014 B1 (#2389). A legacy codex session predates A2: its review ran on a
 thread inside ``serve`` and it carries no ``local_liveness`` handle, so the A1
 harvest sweep (``cw.reconcile.local``) never sees it, and only the boot sweep
 (``cw.reconcile.codex_boot``) would ever dispose of it. Before B2 retires that
-boot sweep, this command recovers every such session still live, once.
+boot sweep, this command recovers the selected client's live sessions, once;
+invoke it separately for each configured client.
 
 Per session, in order:
 
@@ -60,6 +61,7 @@ from cw.config import (
     sessions_lock,
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue
+from cw.events import read_events
 from cw.exceptions import CodexLegacyRecoveryMarkerError, CwError
 from cw.executor import resolve_executor_config
 from cw.models import (
@@ -69,7 +71,9 @@ from cw.models import (
     CodexLegacyDisposition,
     CodexLegacyRecoveryMarker,
     LegacyRecoveryStatus,
+    OrchestratorEventType,
     Outcome,
+    PendingOutcome,
     QueueItemStatus,
     SessionOrigin,
     SessionStatus,
@@ -99,11 +103,13 @@ REASON_LIVE_WRITER = "live_writer"
 REASON_CLIENT_MISSING = "client_config_missing"
 REASON_AUDIT_WRITE_FAILED = "audit_write_failed"
 REASON_STATE_WRITE_FAILED = "state_write_failed"
-REASON_MARKER_WRITE_FAILED = "marker_write_failed"
+REASON_PENDING_RECOVERY = "pending_recovery"
+REASON_EVENT_DELIVERY_FAILED = "event_delivery_failed"
 
 
 def _raise_scope_error(message: str) -> NoReturn:
     raise CwError(message)
+
 
 # Why a session resolved as skipped_already_handled; logged, not persisted.
 _WHY_ROW_UNBOUND = "its dev-queue row does not belong to it"
@@ -274,9 +280,13 @@ def _record_outcome(
     known.
     """
     session_id = outcome.session_id
+    old_outcomes = list(marker.outcomes)
+    old_unresolved = list(marker.unresolved)
+    old_pending = list(marker.pending)
     marker.outcomes = [o for o in marker.outcomes if o.session_id != session_id]
     marker.outcomes.append(outcome)
     marker.unresolved = [u for u in marker.unresolved if u.session_id != session_id]
+    marker.pending = [p for p in marker.pending if p.session_id != session_id]
     if outcome.disposition in _UNRESOLVED_DISPOSITIONS:
         marker.unresolved.append(
             UnresolvedEntry(
@@ -289,39 +299,47 @@ def _record_outcome(
     _recompute_counts(marker)
     try:
         save_codex_legacy_marker(marker)
-    except OSError:
-        # The live-state mutation has already happened.  Do not allow that
-        # session to disappear from the run record or let finalization claim
-        # success.  A retry is intentional: transient marker I/O failures
-        # become an explicit unresolved FAILED outcome; persistent failures
-        # remain a hard error rather than being silently discarded.
+    except OSError as err:
+        # Restore the durable intent in memory.  The on-disk marker either
+        # still contains that intent (the usual failed-write case), or the
+        # atomic replace completed and already contains the outcome.  In
+        # neither case may this process proceed to finalization.
+        marker.outcomes = old_outcomes
+        marker.unresolved = old_unresolved
+        marker.pending = old_pending
+        _recompute_counts(marker)
         _log.exception(
             "codex_legacy_recovery: could not persist outcome for session %s",
             session_id,
         )
-        failed = outcome.model_copy(
-            update={"disposition": CodexLegacyDisposition.FAILED}
+        msg = (
+            "could not persist the codex legacy recovery marker after a "
+            f"recovery mutation: session {session_id} remains pending: "
+            "the durable intent will be reconciled on the next run"
         )
-        marker.outcomes = [o for o in marker.outcomes if o.session_id != session_id]
-        marker.outcomes.append(failed)
-        marker.unresolved = [u for u in marker.unresolved if u.session_id != session_id]
-        marker.unresolved.append(
-            UnresolvedEntry(
-                session_id=session_id,
-                client=failed.client,
-                ticket_id=failed.ticket_id,
-                reason=REASON_MARKER_WRITE_FAILED,
-            )
-        )
+        raise CodexLegacyRecoveryMarkerError(msg) from err
+
+
+def _record_pending(marker: CodexLegacyRecoveryMarker, pending: PendingOutcome) -> None:
+    """Write a write-ahead intent before touching sessions or the queue."""
+    old_outcomes = list(marker.outcomes)
+    old_unresolved = list(marker.unresolved)
+    old_pending = list(marker.pending)
+    marker.outcomes = [o for o in marker.outcomes if o.session_id != pending.session_id]
+    marker.unresolved = [
+        u for u in marker.unresolved if u.session_id != pending.session_id
+    ]
+    marker.pending = [p for p in marker.pending if p.session_id != pending.session_id]
+    marker.pending.append(pending)
+    _recompute_counts(marker)
+    try:
+        save_codex_legacy_marker(marker)
+    except OSError:
+        marker.outcomes = old_outcomes
+        marker.unresolved = old_unresolved
+        marker.pending = old_pending
         _recompute_counts(marker)
-        try:
-            save_codex_legacy_marker(marker)
-        except OSError as retry_err:
-            msg = (
-                "could not persist the codex legacy recovery marker after a "
-                f"recovery mutation: {retry_err}"
-            )
-            raise CodexLegacyRecoveryMarkerError(msg) from retry_err
+        raise
 
 
 # --------------------------------------------------------------------------- #
@@ -409,6 +427,8 @@ def _work_list(
     marker: CodexLegacyRecoveryMarker,
     retry_ids: set[str],
     client_scope: str | None,
+    *,
+    include_unknown_for_diagnostic: bool = False,
 ) -> tuple[list[_Candidate], list[Outcome]]:
     """Candidates to recover, and earlier-unresolved sessions no longer eligible.
 
@@ -421,13 +441,13 @@ def _work_list(
         candidate
         for candidate in map(_as_candidate, snapshot.sessions)
         if candidate is not None
-        # An unknown client is retained only to record the non-mutating
-        # client-config failure; it cannot be acted on outside the selected
-        # scope. Known clients are strictly scope-filtered.
         and (
             client_scope is None
             or candidate.session.client == client_scope
-            or candidate.session.client not in snapshot.clients
+            or (
+                include_unknown_for_diagnostic
+                and candidate.session.client not in snapshot.clients
+            )
         )
         and (candidate.session.id in retry_ids or candidate.session.id not in seen)
     ]
@@ -503,6 +523,40 @@ def _bound_row(ticket_id: str, session: Session) -> TicketTask | None:
     )
 
 
+def _events_confirmed(
+    session_id: str, ticket_id: str, disposition: CodexLegacyDisposition
+) -> bool:
+    """Require both the audit and the disposition event before resolving."""
+    follow_up = (
+        OrchestratorEventType.TICKET_REQUEUED
+        if disposition is CodexLegacyDisposition.REQUEUED
+        else OrchestratorEventType.SESSION_NEEDS_ATTENTION
+    )
+    try:
+        events = read_events(
+            event_types=[
+                OrchestratorEventType.SESSION_COMPLETED,
+                follow_up,
+            ]
+        )
+    except (OSError, ValueError):
+        return False
+    audited = any(
+        event.type is OrchestratorEventType.SESSION_COMPLETED
+        and event.payload.get("session_id") == session_id
+        and event.payload.get("ticket_id") == ticket_id
+        and event.payload.get("legacy") is True
+        for event in events
+    )
+    transitioned = any(
+        event.type is follow_up
+        and event.payload.get("ticket_id") == ticket_id
+        and event.payload.get("session_id") == session_id
+        for event in events
+    )
+    return audited and transitioned
+
+
 def _revalidate_and_act(
     candidate: _Candidate,
     client: ClientConfig,
@@ -564,11 +618,21 @@ def _revalidate_and_act(
                 candidate.ticket_id,
             )
             return _Resolution(CodexLegacyDisposition.FAILED, REASON_STATE_WRITE_FAILED)
-    return _ACT_RESOLUTIONS[outcome]
+    resolution = _ACT_RESOLUTIONS[outcome]
+    if resolution.disposition in _ACTED_DISPOSITIONS and not _events_confirmed(
+        fresh.id, candidate.ticket_id, resolution.disposition
+    ):
+        return _Resolution(CodexLegacyDisposition.FAILED, REASON_EVENT_DELIVERY_FAILED)
+    return resolution
 
 
 def _recover(
-    candidate: _Candidate, snapshot: _Snapshot, *, now: datetime, retrying: bool
+    candidate: _Candidate,
+    snapshot: _Snapshot,
+    marker: CodexLegacyRecoveryMarker,
+    *,
+    now: datetime,
+    retrying: bool,
 ) -> _Resolution:
     classified = _classify(candidate, snapshot, retrying=retrying)
     if isinstance(classified, _Resolution):
@@ -577,6 +641,17 @@ def _recover(
     scan = _scan_for_writer(candidate)
     if isinstance(scan, _Resolution):
         return scan
+    row = snapshot.tasks[(candidate.ticket_id, candidate.session.client)]
+    _record_pending(
+        marker,
+        PendingOutcome(
+            session_id=candidate.session.id,
+            ticket_id=candidate.ticket_id,
+            client=candidate.session.client,
+            prior_status=candidate.session.status,
+            prior_stage=row.stage,
+        ),
+    )
     return _revalidate_and_act(candidate, client, snapshot, worktree=scan, now=now)
 
 
@@ -605,9 +680,22 @@ def _recover_all(
     snapshot: _Snapshot,
     now: datetime,
     client_scope: str | None,
+    *,
+    include_unknown_for_diagnostic: bool,
 ) -> None:
-    retry_ids = {entry.session_id for entry in marker.unresolved}
-    candidates, gone = _work_list(snapshot, marker, retry_ids, client_scope)
+    retry_ids = {
+        entry.session_id
+        for entry in marker.unresolved
+        if client_scope is None or entry.client == client_scope
+    }
+    _reconcile_pending(marker, snapshot, client_scope)
+    candidates, gone = _work_list(
+        snapshot,
+        marker,
+        retry_ids,
+        client_scope,
+        include_unknown_for_diagnostic=include_unknown_for_diagnostic,
+    )
     _log.info(
         "codex_legacy_recovery: %d candidate session(s), %d no longer eligible",
         len(candidates),
@@ -621,15 +709,29 @@ def _recover_all(
                 _WHY_NO_LONGER_ELIGIBLE,
             )
         _log_resolution(prior.session_id, prior.client, prior.ticket_id, resolution)
+        prior_reason = next(
+            (
+                entry.reason
+                for entry in marker.unresolved
+                if entry.session_id == prior.session_id
+            ),
+            resolution.reason,
+        )
         _record_outcome(
             marker,
             prior.model_copy(update={"disposition": resolution.disposition}),
-            None,
+            prior_reason
+            if resolution.disposition is CodexLegacyDisposition.FAILED
+            else resolution.reason,
         )
     for candidate in candidates:
         session = candidate.session
         resolution = _recover(
-            candidate, snapshot, now=now, retrying=session.id in retry_ids
+            candidate,
+            snapshot,
+            marker,
+            now=now,
+            retrying=session.id in retry_ids,
         )
         if resolution.disposition is None:
             continue
@@ -644,6 +746,82 @@ def _recover_all(
             prior_stage=row.stage if row is not None else None,
         )
         _record_outcome(marker, outcome, resolution.reason)
+
+
+def _pending_disposition(
+    pending: PendingOutcome, snapshot: _Snapshot
+) -> CodexLegacyDisposition | None:
+    """Infer a completed pending operation only with both state and events."""
+    session = next((s for s in snapshot.sessions if s.id == pending.session_id), None)
+    task = snapshot.tasks.get((pending.ticket_id, pending.client))
+    if session is None or task is None or session.status is not SessionStatus.COMPLETED:
+        return None
+    if task.status is QueueItemStatus.PENDING and task.session_id is None:
+        disposition = CodexLegacyDisposition.REQUEUED
+    elif (
+        task.status is QueueItemStatus.BLOCKED_ON_USER
+        and session.recovery_disposition == CODEX_HARVEST_ORPHANED_DISPOSITION
+    ):
+        disposition = CodexLegacyDisposition.PARKED
+    else:
+        return None
+    return (
+        disposition
+        if _events_confirmed(pending.session_id, pending.ticket_id, disposition)
+        else None
+    )
+
+
+def _reconcile_pending(
+    marker: CodexLegacyRecoveryMarker,
+    snapshot: _Snapshot,
+    client_scope: str | None,
+) -> None:
+    """Resolve or retain write-ahead intents before scanning new candidates."""
+    for pending in list(marker.pending):
+        if client_scope is not None and pending.client != client_scope:
+            continue
+        disposition = _pending_disposition(pending, snapshot)
+        if disposition is not None:
+            _record_outcome(
+                marker,
+                Outcome(
+                    session_id=pending.session_id,
+                    ticket_id=pending.ticket_id,
+                    client=pending.client,
+                    disposition=disposition,
+                    prior_status=pending.prior_status,
+                    prior_stage=pending.prior_stage,
+                ),
+                None,
+            )
+            continue
+        session = next(
+            (s for s in snapshot.sessions if s.id == pending.session_id), None
+        )
+        candidate = _as_candidate(session) if session is not None else None
+        task = snapshot.tasks.get((pending.ticket_id, pending.client))
+        if (
+            candidate is not None
+            and candidate.session.client == pending.client
+            and task is not None
+            and _row_owned_by(task, pending.session_id)
+        ):
+            # The process stopped before the act.  Keep the intent and let the
+            # normal candidate path retry it; it remains durable throughout.
+            continue
+        _record_outcome(
+            marker,
+            Outcome(
+                session_id=pending.session_id,
+                ticket_id=pending.ticket_id,
+                client=pending.client,
+                disposition=CodexLegacyDisposition.FAILED,
+                prior_status=pending.prior_status,
+                prior_stage=pending.prior_stage,
+            ),
+            REASON_PENDING_RECOVERY,
+        )
 
 
 def _verify_prior_failure(
@@ -662,22 +840,37 @@ def _verify_prior_failure(
         return _Resolution(CodexLegacyDisposition.FAILED, unresolved.reason)
     if task.session_id is not None:
         return _Resolution(CodexLegacyDisposition.FAILED, unresolved.reason)
-    if (
-        task.status is QueueItemStatus.PENDING
-        and session.recovery_disposition is None
-    ):
-        return _Resolution(CodexLegacyDisposition.REQUEUED)
-    if (
+    intended: CodexLegacyDisposition | None = None
+    if task.status is QueueItemStatus.PENDING and session.recovery_disposition is None:
+        intended = CodexLegacyDisposition.REQUEUED
+    elif (
         task.status is QueueItemStatus.BLOCKED_ON_USER
         and session.recovery_disposition == CODEX_HARVEST_ORPHANED_DISPOSITION
     ):
-        return _Resolution(CodexLegacyDisposition.PARKED)
+        intended = CodexLegacyDisposition.PARKED
+    if intended is not None:
+        if _events_confirmed(prior.session_id, prior.ticket_id, intended):
+            return _Resolution(intended)
+        return _Resolution(CodexLegacyDisposition.FAILED, unresolved.reason)
     return _Resolution(CodexLegacyDisposition.FAILED, unresolved.reason)
 
 
-def _finalize(marker: CodexLegacyRecoveryMarker, now: datetime) -> LegacyRecoveryReport:
+def _finalize(
+    marker: CodexLegacyRecoveryMarker,
+    now: datetime,
+    configured_clients: set[str],
+    client_scope: str | None,
+) -> LegacyRecoveryReport:
     status = LegacyRecoveryStatus.PARTIAL
-    if not marker.unresolved:
+    if (
+        client_scope is not None
+        and not any(entry.client == client_scope for entry in marker.unresolved)
+        and client_scope not in marker.covered_clients
+    ):
+        marker.covered_clients.append(client_scope)
+    if not marker.unresolved and configured_clients.issubset(
+        set(marker.covered_clients)
+    ):
         marker.completed_at = now
         status = LegacyRecoveryStatus.COMPLETED
     save_codex_legacy_marker(marker)
@@ -703,25 +896,23 @@ def _resolve_client_scope(
 ) -> str | None:
     if requested is not None and all_clients:
         _raise_scope_error("--client and --all-clients are mutually exclusive")
-    if requested is not None and requested not in clients:
-        _raise_scope_error(f"unknown client scope: {requested}")
-    scope = None if all_clients else requested
-    if scope is None and not all_clients and len(clients) == 1:
+    if all_clients:
+        _raise_scope_error(
+            "--all-clients is not supported; invoke recovery once per client"
+        )
+    scope = requested
+    if scope is None and len(clients) == 1:
         scope = next(iter(clients))
-    if scope is None and not all_clients and not clients:
+    if scope is None and not clients:
         # No configured client can be mutated. Keep an explicit empty scope
         # in the marker while still allowing the run to report an empty scan.
         scope = ""
-    if scope is None and not all_clients:
+    if scope is None:
         _raise_scope_error(
-            "select a client with --client or explicitly authorize all clients "
-            "with --all-clients"
+            "select exactly one client with --client; recovery is per-client"
         )
-    if marker.client_scope is not None and marker.client_scope != scope:
-        _raise_scope_error(
-            "this recovery marker is scoped to "
-            f"{marker.client_scope}; refusing scope {scope or 'all clients'}"
-        )
+    # Keep the last requested scope for operator visibility.  It is not an
+    # authorization for other clients; completion is gated by covered_clients.
     marker.client_scope = scope
     return scope
 
@@ -755,8 +946,15 @@ def run_codex_legacy_recovery(
         )
         # Persist the scope before the first live-state mutation.
         save_codex_legacy_marker(marker)
-        _recover_all(marker, snapshot, run_at, client_scope)
-        return _finalize(marker, run_at)
+        _recover_all(
+            marker,
+            snapshot,
+            run_at,
+            client_scope,
+            include_unknown_for_diagnostic=client is None
+            and len(snapshot.clients) == 1,
+        )
+        return _finalize(marker, run_at, set(snapshot.clients), client_scope)
 
 
 def preflight_codex_legacy_recovery(
@@ -766,14 +964,13 @@ def preflight_codex_legacy_recovery(
     existing = load_codex_legacy_marker()
     marker = existing if existing is not None else CodexLegacyRecoveryMarker()
     snapshot = _load_snapshot()
-    client_scope = _resolve_client_scope(
-        marker, snapshot.clients, client, all_clients
-    )
+    client_scope = _resolve_client_scope(marker, snapshot.clients, client, all_clients)
     candidates, _ = _work_list(
         snapshot,
         marker,
         {entry.session_id for entry in marker.unresolved},
         client_scope,
+        include_unknown_for_diagnostic=client is None and len(snapshot.clients) == 1,
     )
     return client_scope, len(candidates)
 
