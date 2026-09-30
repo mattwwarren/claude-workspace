@@ -11,10 +11,11 @@ the review's baseline). All four pass → requeue; any one fails → park. Eithe
 way the session closes ``COMPLETED``/``CRASHED`` behind a ``SESSION_COMPLETED``
 audit event recorded before any transition.
 
-Fixtures are shared with ``test_reconcile_codex_boot.py`` rather than
-re-implemented, including the configuration constructors used by the boot
-tests. The orchestrator config is injected through the sweep's ``config``
-parameter (what ``reconcile()`` passes).
+Fixtures are shared with ``test_reconcile_codex_boot.py`` through
+``tests/_codex_recovery_helpers.py`` rather than re-implemented, including the
+configuration constructors used by the boot tests. The orchestrator config is
+injected through the sweep's ``config`` parameter (what ``reconcile()``
+passes).
 """
 
 from __future__ import annotations
@@ -26,10 +27,11 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw import result as cw_result
-from cw.config import load_state, save_state
+from cw.config import load_clients, load_state, save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.models import (
+    CodexHarvestOutcome,
     CompletionReason,
     DevQueueStore,
     LocalLivenessHandle,
@@ -56,6 +58,8 @@ from cw.reconcile.codex_boot import (
 from cw.reconcile.local import (
     CODEX_HARVEST_CLEAN_REQUEUE_REASON,
     CODEX_HARVEST_ORPHANED_DISPOSITION,
+    _harvest_codex_candidate,
+    act_on_codex_harvest_candidate,
 )
 from cw.reconcile.tasks import revert_completed_silent_tasks
 from tests._codex_recovery_helpers import (
@@ -76,7 +80,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from cw.models import Session
+    from cw.models import Session, TicketTask
 
 _NOW = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
 _TICKET = "T-orphan"
@@ -533,3 +537,197 @@ def test_config_param_defaults_to_effective_config_when_omitted(
     assert loads == [1]
     # The loaded (auto) config is what the gate ran against.
     assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
+
+
+# --------------------------------------------------------------------------- #
+# Typed outcome (RFC 0014 B1, #2389): the act helper and the sweep wrapper
+# report what happened, so cw.codex_legacy_recovery never re-derives it.
+# --------------------------------------------------------------------------- #
+
+
+def _act(
+    config: OrchestratorConfig,
+    *,
+    legacy_reason: str | None = None,
+) -> CodexHarvestOutcome:
+    """Call ``act_on_codex_harvest_candidate`` directly on the seeded orphan.
+
+    A legacy caller passes no liveness handle; the A1 sweep passes the real one.
+    """
+    state = load_state()
+    session = state.sessions[0]
+    assert session.worktree_path is not None
+    clients = load_clients()
+    return act_on_codex_harvest_candidate(
+        state,
+        session,
+        None if legacy_reason is not None else session.local_liveness,
+        load_dev_queue().tasks[0],
+        clients["client-a"],
+        clients,
+        config,
+        worktree=session.worktree_path,
+        now=_NOW,
+        legacy_reason=legacy_reason,
+    )
+
+
+def _repoint_row(session_id: str) -> None:
+    store = load_dev_queue()
+    store.tasks[0].session_id = session_id
+    save_dev_queue(store)
+
+
+def test_act_returns_requeued(
+    tmp_config_dir: Path, tmp_path: Path, make_git_repo: Callable[..., Path]
+) -> None:
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+
+    assert _act(_AUTO) is CodexHarvestOutcome.REQUEUED
+    assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
+
+
+def test_act_returns_parked(
+    tmp_config_dir: Path, tmp_path: Path, make_git_repo: Callable[..., Path]
+) -> None:
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+
+    assert _act(_SIGNAL_ONLY) is CodexHarvestOutcome.PARKED
+    assert load_dev_queue().tasks[0].status is QueueItemStatus.BLOCKED_ON_USER
+
+
+def test_act_returns_audit_failed_and_transitions_nothing(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+    _failing_record_event(
+        monkeypatch, reconcile_local, OrchestratorEventType.SESSION_COMPLETED
+    )
+
+    assert _act(_AUTO) is CodexHarvestOutcome.AUDIT_FAILED
+
+    _assert_session_left_active()
+    assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
+
+
+def test_act_returns_transition_lost_when_the_revert_is_lost(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+    _repoint_row("fresh-session")
+    reverted: list[bool] = []
+    real_requeue = reconcile_local._requeue_codex_harvest_orphan
+
+    def _recording_requeue(session: Session, task: TicketTask) -> bool:
+        result = real_requeue(session, task)
+        reverted.append(result)
+        return result
+
+    monkeypatch.setattr(
+        reconcile_local, "_requeue_codex_harvest_orphan", _recording_requeue
+    )
+
+    assert _act(_AUTO) is CodexHarvestOutcome.TRANSITION_LOST
+
+    assert reverted == [False]
+    _assert_session_closed()
+    assert _requeued_events("codex-act-lost-revert") == []
+    assert load_dev_queue().tasks[0].session_id == "fresh-session"
+
+
+def test_act_returns_transition_lost_when_the_park_is_lost(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repo = _seed(tmp_config_dir, tmp_path, make_git_repo)
+    (repo / "extra.txt").write_text("stray\n")
+    _repoint_row("fresh-session")
+
+    with caplog.at_level(logging.WARNING, logger=reconcile_local.__name__):
+        assert _act(_AUTO) is CodexHarvestOutcome.TRANSITION_LOST
+
+    _assert_session_closed()
+    assert _attention_events("codex-act-lost-park") == []
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.RUNNING
+    assert task.session_id == "fresh-session"
+    assert "park skipped" in caplog.text
+
+
+def test_act_with_legacy_reason_and_no_handle_writes_the_legacy_payload(
+    tmp_config_dir: Path, tmp_path: Path, make_git_repo: Callable[..., Path]
+) -> None:
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+
+    _act(_SIGNAL_ONLY, legacy_reason="codex_legacy_recovery")
+
+    [payload] = _completed_events("codex-act-legacy-payload")
+    assert payload["reason"] == "codex_legacy_recovery"
+    assert payload["legacy"] is True
+    assert payload["detail"] == _PARK_REASON_REAP_POLICY_NOT_AUTO
+    assert payload["pid"] is None
+    assert payload["start_time_ns"] is None
+    assert payload["disposition"] == "parked"
+
+
+def _wrapper(
+    *, real_task: TicketTask | None, client_name: str | None
+) -> CodexHarvestOutcome:
+    state = load_state()
+    session = state.sessions[0]
+    assert session.local_liveness is not None
+    [candidate] = _detect_local_harvest_candidates(state)
+    assert candidate.worktree_path is not None
+    clients = load_clients()
+    return _harvest_codex_candidate(
+        state,
+        session,
+        session.local_liveness,
+        candidate,
+        worktree=candidate.worktree_path,
+        real_task=real_task,
+        client=clients[client_name] if client_name is not None else None,
+        clients=clients,
+        config=_AUTO,
+        now=_NOW,
+    )
+
+
+def test_harvest_wrapper_returns_no_row_without_a_row(
+    tmp_config_dir: Path, tmp_path: Path, make_git_repo: Callable[..., Path]
+) -> None:
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+
+    outcome = _wrapper(real_task=None, client_name="client-a")
+
+    assert outcome is CodexHarvestOutcome.NO_ROW
+    _assert_untouched("codex-wrapper-no-row")
+
+
+def test_harvest_wrapper_returns_no_row_without_a_client(
+    tmp_config_dir: Path, tmp_path: Path, make_git_repo: Callable[..., Path]
+) -> None:
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+
+    outcome = _wrapper(real_task=load_dev_queue().tasks[0], client_name=None)
+
+    assert outcome is CodexHarvestOutcome.NO_ROW
+    _assert_untouched("codex-wrapper-no-client")
+
+
+def test_harvest_wrapper_returns_the_act_outcome(
+    tmp_config_dir: Path, tmp_path: Path, make_git_repo: Callable[..., Path]
+) -> None:
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+
+    outcome = _wrapper(real_task=load_dev_queue().tasks[0], client_name="client-a")
+
+    assert outcome is CodexHarvestOutcome.REQUEUED
