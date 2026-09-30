@@ -465,14 +465,14 @@ def _classify(
     uncounted, unless an earlier run already counted the session.
     """
     session = candidate.session
+    client = snapshot.clients.get(session.client)
+    if client is None:
+        return _Resolution(CodexLegacyDisposition.FAILED, REASON_CLIENT_MISSING)
     task = snapshot.tasks.get((candidate.ticket_id, session.client))
     if task is None or not _row_owned_by(task, session.id):
         return _Resolution(
             CodexLegacyDisposition.SKIPPED_ALREADY_HANDLED, _WHY_ROW_UNBOUND
         )
-    client = snapshot.clients.get(session.client)
-    if client is None:
-        return _Resolution(CodexLegacyDisposition.FAILED, REASON_CLIENT_MISSING)
     if resolve_executor_config(task.stage, task, client).backend != CODEX_BACKEND:
         return _Resolution(
             CodexLegacyDisposition.SKIPPED_ALREADY_HANDLED if retrying else None,

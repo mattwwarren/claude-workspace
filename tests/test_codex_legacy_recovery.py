@@ -816,8 +816,12 @@ def test_state_write_failure_is_failed_and_leaves_the_session_live(
     assert len(_completed_events("state-write-failed")) == 1
 
 
+@pytest.mark.parametrize("remove_row", [False, True], ids=["row", "no-row"])
 def test_missing_client_config_is_failed(
-    codex_clients: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    codex_clients: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    remove_row: bool,
 ) -> None:
     _use_legacy_config(monkeypatch)
     _forbid_scan(monkeypatch)
@@ -826,6 +830,10 @@ def test_missing_client_config_is_failed(
     session = _seed_unscannable(
         "T-ghost", worktree, client="client-gone", context=b'{"headless": true}'
     )
+    if remove_row:
+        store = load_dev_queue()
+        store.tasks = [task for task in store.tasks if task.ticket_id != "T-ghost"]
+        save_dev_queue(store)
 
     marker = run_codex_legacy_recovery(now=_NOW).marker
 
