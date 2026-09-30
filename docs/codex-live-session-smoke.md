@@ -74,7 +74,9 @@ an isolated temporary `HOME`, the existing `CODEX_HOME` (or normal default),
 `LANG`/`LC_ALL`/`LC_CTYPE`, and platform runtime paths.
 Other `LC_*` variables are not inherited. Git initialization uses a separate
 allowlist that excludes `CODEX_HOME` and API keys. Git routing, XDG, Codex
-policy/profile, and unrelated runtime variables are not inherited.
+policy/profile, and unrelated runtime variables are not inherited. Git setup
+also disables system Git configuration, so host-wide init templates are not
+copied into the disposable repository.
 The existing `CODEX_HOME` (or the normal `~/.codex` default) is passed as an
 absolute path. Existing pre-launch path checks catch a configured home or
 session-artifact path that already resolves into the source checkout when

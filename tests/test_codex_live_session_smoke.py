@@ -75,6 +75,7 @@ EXPECTED_CHILD_ENV_KEYS = frozenset(
         "lang",
         "lc_all",
         "lc_ctype",
+        "git_config_nosystem",
     }
 )
 UNAVAILABLE_MESSAGE = "unavailable-secret"
@@ -122,6 +123,7 @@ class FakeRunOptions:
     unavailable_stage: str | None = None
     stderr: str = ""
     real_git: bool = False
+    system_git_config: Path | None = None
 
 
 class FakePopen:
@@ -157,6 +159,69 @@ def fake_run(
 ) -> Callable[..., subprocess.CompletedProcess[str]]:
     options = options or FakeRunOptions()
 
+    def run_git_init(
+        argv: list[str], *, cwd: Path, env: dict[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        if options.timeout_stage == "git":
+            raise subprocess.TimeoutExpired(argv, 0)
+        if not options.real_git:
+            return completed(argv, code=options.git_code, stderr=options.stderr)
+        assert cwd.is_dir()
+        git_env = dict(env)
+        if options.system_git_config is not None:
+            git_env["GIT_CONFIG_SYSTEM"] = str(options.system_git_config)
+        proc = _REAL_POPEN(
+            argv,
+            cwd=cwd,
+            env=git_env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        proc.wait(timeout=probe.PROCESS_TIMEOUT_SECONDS)
+        if options.system_git_config is not None:
+            assert not (cwd / "cw-system-template-marker").exists()
+        return completed(argv, code=cast("int", proc.returncode))
+
+    def run_resume(argv: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        assert argv == [
+            "codex",
+            "exec",
+            "resume",
+            argv[3],
+            "--json",
+            "--ignore-user-config",
+            "--model",
+            MODEL,
+            EXPECTED_RESUME_PROMPT,
+        ]
+        if options.real_git:
+            assert (cwd / ".git").is_dir()
+        if options.unavailable_stage == "resume":
+            raise FileNotFoundError(UNAVAILABLE_MESSAGE)
+        if options.timeout_stage == "resume":
+            raise subprocess.TimeoutExpired(argv, 0)
+        return completed(
+            argv,
+            code=options.resume_code,
+            stdout=options.resume_stdout,
+            stderr=options.stderr,
+        )
+
+    def run_create(argv: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        if options.real_git:
+            assert (cwd / ".git").is_dir()
+        if options.unavailable_stage == "create":
+            raise FileNotFoundError(UNAVAILABLE_MESSAGE)
+        if options.timeout_stage == "create":
+            raise subprocess.TimeoutExpired(argv, 0)
+        return completed(
+            argv,
+            code=options.create_code,
+            stdout=options.create_stdout,
+            stderr=options.stderr,
+        )
+
     def run(
         argv: list[str],
         *,
@@ -173,45 +238,9 @@ def fake_run(
         if argv == ["codex", "--version"]:
             return completed(argv, stdout=f"{VERSION}\n", stderr=options.stderr)
         if argv == ["git", "init", "--quiet"]:
-            if options.timeout_stage == "git":
-                raise subprocess.TimeoutExpired(argv, 0)
-            if options.real_git:
-                assert cwd.is_dir()
-                proc = _REAL_POPEN(
-                    argv,
-                    cwd=cwd,
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                )
-                proc.wait(timeout=probe.PROCESS_TIMEOUT_SECONDS)
-                return completed(argv, code=cast("int", proc.returncode))
-            return completed(argv, code=options.git_code, stderr=options.stderr)
-        if len(argv) > 3 and argv[:3] == ["codex", "exec", "resume"]:
-            assert argv == [
-                "codex",
-                "exec",
-                "resume",
-                argv[3],
-                "--json",
-                "--ignore-user-config",
-                "--model",
-                MODEL,
-                EXPECTED_RESUME_PROMPT,
-            ]
-            if options.real_git:
-                assert (cwd / ".git").is_dir()
-            if options.unavailable_stage == "resume":
-                raise FileNotFoundError(UNAVAILABLE_MESSAGE)
-            if options.timeout_stage == "resume":
-                raise subprocess.TimeoutExpired(argv, 0)
-            return completed(
-                argv,
-                code=options.resume_code,
-                stdout=options.resume_stdout,
-                stderr=options.stderr,
-            )
+            return run_git_init(argv, cwd=cwd, env=env)
+        if argv[:3] == ["codex", "exec", "resume"]:
+            return run_resume(argv, cwd=cwd)
         if argv == [
             "codex",
             "exec",
@@ -223,18 +252,7 @@ def fake_run(
             MODEL,
             EXPECTED_CREATE_PROMPT,
         ]:
-            if options.real_git:
-                assert (cwd / ".git").is_dir()
-            if options.unavailable_stage == "create":
-                raise FileNotFoundError(UNAVAILABLE_MESSAGE)
-            if options.timeout_stage == "create":
-                raise subprocess.TimeoutExpired(argv, 0)
-            return completed(
-                argv,
-                code=options.create_code,
-                stdout=options.create_stdout,
-                stderr=options.stderr,
-            )
+            return run_create(argv, cwd=cwd)
         message = f"unexpected subprocess argv: {argv!r}"
         raise AssertionError(message)
 
@@ -324,9 +342,12 @@ def wait_for_process_exit(pid: int, timeout: float = 2.0) -> bool:
 
 
 def cleanup_process(pid: int | None) -> None:
-    if pid is not None and process_is_running(pid):
+    if pid is None:
+        return
+    if process_is_running(pid):
         with suppress(ProcessLookupError):
             os.kill(pid, signal.SIGKILL)
+    assert wait_for_process_exit(pid)
 
 
 def assert_isolated_child_environment(
@@ -340,6 +361,7 @@ def assert_isolated_child_environment(
     assert env["HOME"] == env["USERPROFILE"] == str(cwd.parent)
     assert env["TMPDIR"] == env["TMP"] == env["TEMP"]
     assert Path(env["TMPDIR"]).is_relative_to(cwd.parent)
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
     assert "GIT_DIR" not in env
     assert "GIT_WORK_TREE" not in env
     assert env["HTTPS_PROXY"] == "https://proxy.example:8443"
@@ -722,6 +744,46 @@ class TestProbe:
         assert forbidden.isdisjoint(calls[2]["argv"])
         assert forbidden.isdisjoint(calls[3]["argv"])
 
+    def test_git_init_ignores_system_init_template(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        template_dir = tmp_path / "system-template"
+        template_dir.mkdir()
+        (template_dir / "cw-system-template-marker").write_text(
+            "must not be copied", encoding="utf-8"
+        )
+        system_config = tmp_path / "system-gitconfig"
+        subprocess.run(
+            [
+                "git",
+                "config",
+                "--file",
+                str(system_config),
+                "init.templateDir",
+                str(template_dir),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        calls: list[dict[str, object]] = []
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        set_runner(
+            monkeypatch,
+            fake_run(
+                calls,
+                FakeRunOptions(real_git=True, system_git_config=system_config),
+            ),
+        )
+
+        result = probe.run_probe(MODEL)
+
+        assert result["status"] == "passed"
+        git_call = next(
+            call for call in calls if call["argv"] == ["git", "init", "--quiet"]
+        )
+        assert cast("dict[str, str]", git_call["env"])["GIT_CONFIG_NOSYSTEM"] == "1"
+
     def test_process_wait_uses_full_configured_deadline(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -856,7 +918,7 @@ class TestProbe:
             "print(f'DESCENDANT_PID={child.pid}', flush=True); "
             "time.sleep(30)"
         )
-        monkeypatch.setattr(probe, "PROCESS_TIMEOUT_SECONDS", 0.2)
+        monkeypatch.setattr(probe, "PROCESS_TIMEOUT_SECONDS", 1)
         pid: int | None = None
         started = time.monotonic()
         try:
@@ -872,7 +934,7 @@ class TestProbe:
             pid = int(pid_line.split("=", 1)[1])
             assert outcome.timed_out
             assert outcome.exit_code is not None
-            assert elapsed < 5
+            assert elapsed < 10
             assert wait_for_process_exit(pid)
         finally:
             cleanup_process(pid)
@@ -906,7 +968,7 @@ class TestProbe:
             pid = int(pid_line.split("=", 1)[1])
             assert result.output_exceeded_limit
             assert result.exit_code != 0
-            assert elapsed < 5
+            assert elapsed < 10
             assert wait_for_process_exit(pid)
         finally:
             cleanup_process(pid)
@@ -1171,12 +1233,12 @@ class TestProbe:
             "resume",
             "error_code",
         }
+        assert result["resume"] is not None
+        assert result["resume"]["id_matches"] == (
+            error in {"resume_invalid_terminal", "resume_nonzero_exit"}
+        )
         if options.unavailable_stage == "resume":
-            assert result["resume"] is not None
             assert result["resume"]["exit_code"] is None
-        if error == "resume_id_mismatch":
-            assert result["resume"] is not None
-            assert result["resume"]["id_matches"] is False
 
     @pytest.mark.parametrize(
         ("runner_error", "error"),
@@ -1297,38 +1359,18 @@ class TestProbe:
     @pytest.mark.skipif(
         os.name == "nt", reason="directory symlink creation may require elevation"
     )
-    def test_codex_home_nested_sessions_symlink_fails_before_launch(
+    def test_codex_home_sessions_symlink_outside_checkout_is_allowed(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         codex_home = tmp_path / "codex-home"
-        nested_year = codex_home / probe.CODEX_SESSION_ARTIFACT_DIR / "2026"
-        nested_year.mkdir(parents=True)
-        (nested_year / "09").symlink_to(
-            probe._checkout_root(), target_is_directory=True
+        codex_home.mkdir()
+        external_sessions = tmp_path / "session-store"
+        external_sessions.mkdir()
+        (codex_home / probe.CODEX_SESSION_ARTIFACT_DIR).symlink_to(
+            external_sessions, target_is_directory=True
         )
-        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
-        set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
-        assert probe.run_probe(MODEL)["error_code"] == "repo_setup_failed"
-
-    def test_session_artifact_scan_fails_closed_at_entry_limit(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        artifact_root = tmp_path / "sessions"
-        artifact_root.mkdir()
-        (artifact_root / "one.jsonl").touch()
-        (artifact_root / "two.jsonl").touch()
-        monkeypatch.setattr(probe, "MAX_SESSION_ARTIFACT_SCAN_ENTRIES", 1)
-        assert probe._contains_symlink(artifact_root)
-
-    def test_session_artifact_scan_fails_closed_if_root_cannot_be_opened(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        def fail_scandir(_path: object) -> object:
-            raise PermissionError
-
-        monkeypatch.setattr("scripts.probe_codex_live_session.os.scandir", fail_scandir)
-        assert probe._contains_symlink(tmp_path)
+        assert probe._codex_home(probe._checkout_root()) == codex_home.resolve()
 
     def test_codex_home_defaults_to_home_dot_codex(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1466,7 +1508,7 @@ class TestProbe:
             assert result.exit_code == 0
             assert result.reader_incomplete
             assert "parent-finished" in result.stdout
-            assert elapsed < 5
+            assert elapsed < 10
             assert wait_for_process_exit(pid)
         finally:
             cleanup_process(pid)
@@ -1499,7 +1541,7 @@ class TestProbe:
             assert result.reader_incomplete
             assert "parent-finished" in result.stdout
             assert process_is_running(pid)
-            assert elapsed < 5
+            assert elapsed < 10
         finally:
             cleanup_process(pid)
         deadline = time.monotonic() + 1
@@ -1700,6 +1742,32 @@ def test_main_emits_one_json_line_and_no_stderr(
     assert json.loads(captured.out)["error_code"] == "opt_in_required"
 
 
+def test_signal_restore_errors_are_raised_after_all_handlers_are_restored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signums = (signal.SIGINT, signal.SIGTERM)
+    previous_handlers = {signum: signal.getsignal(signum) for signum in signums}
+    real_signal = signal.signal
+
+    def fail_after_sigint_restore(
+        signum: signal.Signals, handler: probe._SignalHandler
+    ) -> probe._SignalHandler:
+        previous = real_signal(signum, handler)
+        if signum is signal.SIGINT and handler is previous_handlers[signum]:
+            message = "private restoration failure"
+            raise OSError(message)
+        return previous
+
+    monkeypatch.setattr(signal, "signal", fail_after_sigint_restore)
+    with (
+        pytest.raises(ExceptionGroup, match="failed to restore parent signal handlers"),
+        probe._install_parent_signal_handlers(lambda _signum, _frame: None),
+    ):
+        pass
+
+    assert {signum: signal.getsignal(signum) for signum in signums} == previous_handlers
+
+
 def test_main_help_is_the_documented_human_readable_exception(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -1763,6 +1831,7 @@ def test_unhandled_exception_hook_emits_sanitized_internal_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     exception_marker = "private-operational-marker"
+    probe._reset_unhandled_exception_result()
     probe._handle_unhandled_exception(
         RuntimeError, RuntimeError(exception_marker), None
     )

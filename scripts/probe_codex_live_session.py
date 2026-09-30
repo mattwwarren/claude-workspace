@@ -39,9 +39,6 @@ PROCESS_READER_WAIT_TIMEOUT_SECONDS = 1
 MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024
 PROCESS_OUTPUT_CHUNK_BYTES = 64 * 1024
 MAX_VERSION_LENGTH = 64
-MAX_SESSION_ARTIFACT_SCAN_ENTRIES = 50_000
-MAX_SESSION_ARTIFACT_SCAN_SECONDS = 1.0
-MAX_SESSION_ARTIFACT_SCAN_DEPTH = 32
 CODEX_EXECUTABLE: Final = "codex"
 CODEX_EXEC_SUBCOMMAND: Final = "exec"
 CODEX_VERSION_FLAG: Final = "--version"
@@ -391,52 +388,6 @@ def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
         process.kill()
 
 
-def _contains_symlink(path: Path) -> bool:
-    """Fail closed on symlinks or when the bounded session scan is inconclusive."""
-    deadline = time.monotonic() + MAX_SESSION_ARTIFACT_SCAN_SECONDS
-    entries_seen = 0
-    try:
-        scanners = [(os.scandir(path), 0)]
-    except OSError:
-        return True
-    has_symlink_or_error = False
-    try:
-        while scanners:
-            if time.monotonic() > deadline:
-                has_symlink_or_error = True
-                break
-            scanner, depth = scanners[-1]
-            try:
-                entry = next(scanner)
-            except StopIteration:
-                with contextlib.suppress(OSError):
-                    scanner.close()
-                scanners.pop()
-                continue
-            entries_seen += 1
-            if (
-                entries_seen > MAX_SESSION_ARTIFACT_SCAN_ENTRIES
-                or time.monotonic() > deadline
-            ):
-                has_symlink_or_error = True
-                break
-            if entry.is_symlink():
-                has_symlink_or_error = True
-                break
-            if entry.is_dir(follow_symlinks=False):
-                if depth >= MAX_SESSION_ARTIFACT_SCAN_DEPTH:
-                    has_symlink_or_error = True
-                    break
-                scanners.append((os.scandir(entry.path), depth + 1))
-    except OSError:
-        has_symlink_or_error = True
-    finally:
-        for scanner, _depth in scanners:
-            with contextlib.suppress(OSError):
-                scanner.close()
-    return has_symlink_or_error
-
-
 def _make_stdout_reader(
     process: subprocess.Popen[bytes], capture: _OutputCapture
 ) -> Callable[[], None]:
@@ -538,7 +489,7 @@ def _stop_process(
 
 @contextlib.contextmanager
 def _install_parent_signal_handlers(
-    handler: _SignalHandler, *, ignore_restore_errors: bool = False
+    handler: _SignalHandler,
 ) -> Iterator[None]:
     previous_handlers: dict[signal.Signals, _SignalHandler] = {}
     try:
@@ -547,12 +498,15 @@ def _install_parent_signal_handlers(
                 previous_handlers[signum] = signal.signal(signum, handler)
         yield
     finally:
+        restoration_errors: list[Exception] = []
         for signum, previous_handler in previous_handlers.items():
-            if ignore_restore_errors:
-                with contextlib.suppress(Exception):
-                    signal.signal(signum, previous_handler)
-            else:
+            try:
                 signal.signal(signum, previous_handler)
+            except (OSError, ValueError) as error:
+                restoration_errors.append(error)
+        if restoration_errors:
+            message = "failed to restore parent signal handlers"
+            raise ExceptionGroup(message, restoration_errors)
 
 
 def _launch_process(
@@ -924,17 +878,12 @@ def _codex_home(checkout: Path) -> Path | None:
         return None
     try:
         resolved = path.resolve()
-        session_artifacts = resolved / CODEX_SESSION_ARTIFACT_DIR
-        resolved_session_artifacts = session_artifacts.resolve()
+        resolved_session_artifacts = (resolved / CODEX_SESSION_ARTIFACT_DIR).resolve()
     except (OSError, RuntimeError):
-        return None
-    if session_artifacts.is_symlink():
         return None
     if _is_within(resolved, checkout) or _is_within(
         resolved_session_artifacts, checkout
     ):
-        return None
-    if session_artifacts.exists() and _contains_symlink(session_artifacts):
         return None
     return resolved
 
@@ -966,6 +915,7 @@ def _child_environment(
             "TMPDIR": str(scratch),
             "TMP": str(scratch),
             "TEMP": str(scratch),
+            "GIT_CONFIG_NOSYSTEM": "1",
         }
     )
     if include_codex_auth and codex_home is not None:
@@ -1285,9 +1235,7 @@ def main(argv: list[str] | None = None) -> int:
         error_code=ERROR_REPO_SETUP_FAILED,
     )
     result = failure_result
-    with _install_parent_signal_handlers(
-        _raise_for_parent_signal, ignore_restore_errors=True
-    ):
+    with _install_parent_signal_handlers(_raise_for_parent_signal):
         try:
             result = run_probe(model)
         except KeyboardInterrupt:
