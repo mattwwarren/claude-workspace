@@ -39,11 +39,13 @@ setup failure. The stdout reader has a bounded shutdown wait, so it
 cannot defeat the process timeout. Stdout is read incrementally with a 1 MiB
 cap; exceeding it fails JSONL validation. Stderr is discarded, and no `-o`
 file is created. The parser reads the bounded JSONL stream line by line and
-releases it before starting the resume command. It recognizes `turn.started`,
-`item.started`, `item.updated`, and `item.completed`; a top-level `error` event
-must contain a string message. Well-formed unrelated event types are ignored
-for forward compatibility, while unknown `turn.*` or terminal-shaped event
-types fail JSONL validation as `*_malformed_jsonl`. An error event followed by
+releases it before starting the resume command. The first nonblank event must
+be `thread.started`; later nonterminal events before it are malformed. It
+recognizes `turn.started`, `item.started`, `item.updated`, and
+`item.completed`; a top-level `error` event must contain a string message.
+Well-formed unrelated event types are ignored for forward compatibility after
+`thread.started`, while unknown `turn.*` or terminal-shaped event types fail
+JSONL validation as `*_malformed_jsonl`. An error event followed by
 `turn.completed` cannot pass;
 `turn.failed` remains a failure. Acceptance requires one valid `thread.started`
 ID before one terminal event; only `turn.completed` passes. Malformed,
@@ -79,26 +81,44 @@ are `status`, `cli_version`, `model`, `session_id`,
 `create`, `resume`, and `error_code`; it never prints paths, prompts, raw JSONL,
 stderr, environment values, exception text, or authentication material.
 
+The result contract is revision 2 (2026-09-29). It preserves the same seven
+keys and field shapes as revision 1, and adds `internal_error` to the closed
+`error_code` enum. This code is emitted only when an unexpected defect escapes
+the expected-failure mappings; the result is failed, the CLI exits nonzero,
+and no exception details are included. There are no repository-local
+downstream consumers to update; external consumers that validate the v1
+closed enum must add `internal_error` before adopting revision 2.
+
 `create` is either null or `{"exit_code": INTEGER_OR_NULL,
 "terminal_event": EVENT_OR_NULL}`. `resume` is either null or
 `{"exit_code": INTEGER_OR_NULL, "terminal_event": EVENT_OR_NULL,
 "id_matches": BOOLEAN}`. The only terminal-event values are `turn.completed`,
 `turn.failed`, and null. `status` is `skipped`, `passed`, or `failed`; a skipped
 run uses `error_code: "opt_in_required"`, a passing run uses `error_code: null`,
-and a failure uses one of the closed documented `*_timeout`,
-`*_nonzero_exit`, JSONL-validation, setup, version, model, ID, or cleanup error
-codes, or `internal_error` for an unexpected defect. A create/resume launch
-failure uses `cli_unavailable`; an oversized or
-unrecognized JSONL event uses the matching `*_malformed_jsonl` code. SIGINT or
-SIGTERM during a subprocess uses that command's timeout error code; an
-interrupt outside a subprocess uses `repo_setup_failed`. A failed command
-exits 1; opt-out and a passing probe exit 0.
+and a failure uses exactly one of `invalid_model`, `version_unavailable`,
+`version_invalid`, `cli_unavailable`, `repo_setup_failed`, `internal_error`,
+`create_timeout`, `create_nonzero_exit`, `create_malformed_jsonl`,
+`create_missing_thread`, `create_invalid_thread_id`,
+`create_duplicate_thread_started`, `create_invalid_terminal`, `resume_timeout`,
+`resume_nonzero_exit`, `resume_malformed_jsonl`, `resume_missing_thread`,
+`resume_invalid_thread_id`, `resume_duplicate_thread_started`,
+`resume_id_mismatch`, `resume_invalid_terminal`, or `cleanup_failed`.
+`internal_error` is reserved for an unexpected defect; expected operational
+failures retain their specific codes. A create/resume launch failure uses
+`cli_unavailable`; an oversized or unrecognized JSONL event uses the matching
+`*_malformed_jsonl` code. SIGINT or SIGTERM during a subprocess uses that
+command's timeout error code; an interrupt outside a subprocess uses
+`repo_setup_failed`. A failed command exits 1; opt-out and a passing probe
+exit 0.
 
 The temporary repository is cleaned up on success and ordinary failure. If
 cleanup itself fails, the probe reports `cleanup_failed` while preserving the
 validated session ID and create/resume summaries so the operator can recover;
-cleanup failure takes precedence as the single reported error code. One normal
-persistent Codex thread remains in `CODEX_HOME`; the emitted validated ID lets
+cleanup failure takes precedence as the single reported error code. SIGINT or
+SIGTERM received during cleanup is deferred until the temporary directory has
+been removed; if cleanup succeeds, the result is `repo_setup_failed`, while an
+actual cleanup failure remains `cleanup_failed`. One normal persistent Codex
+thread remains in `CODEX_HOME`; the emitted validated ID lets
 the operator inspect or delete it with normal Codex tooling. The probe does
 not intentionally modify the source checkout, CW state, queue, executor,
 roster, or event history.

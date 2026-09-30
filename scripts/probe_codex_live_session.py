@@ -44,32 +44,60 @@ CODEX_EXECUTABLE: Final = "codex"
 CODEX_EXEC_SUBCOMMAND: Final = "exec"
 CODEX_VERSION_FLAG: Final = "--version"
 CODEX_SESSION_ARTIFACT_DIR: Final = "sessions"
+
+
+class ErrorCode(StrEnum):
+    OPT_IN_REQUIRED = "opt_in_required"
+    INVALID_MODEL = "invalid_model"
+    VERSION_UNAVAILABLE = "version_unavailable"
+    VERSION_INVALID = "version_invalid"
+    CLI_UNAVAILABLE = "cli_unavailable"
+    REPO_SETUP_FAILED = "repo_setup_failed"
+    INTERNAL_ERROR = "internal_error"
+    CREATE_TIMEOUT = "create_timeout"
+    CREATE_NONZERO_EXIT = "create_nonzero_exit"
+    CREATE_MALFORMED_JSONL = "create_malformed_jsonl"
+    CREATE_MISSING_THREAD = "create_missing_thread"
+    CREATE_INVALID_THREAD_ID = "create_invalid_thread_id"
+    CREATE_DUPLICATE_THREAD_STARTED = "create_duplicate_thread_started"
+    CREATE_INVALID_TERMINAL = "create_invalid_terminal"
+    RESUME_TIMEOUT = "resume_timeout"
+    RESUME_NONZERO_EXIT = "resume_nonzero_exit"
+    RESUME_MALFORMED_JSONL = "resume_malformed_jsonl"
+    RESUME_MISSING_THREAD = "resume_missing_thread"
+    RESUME_INVALID_THREAD_ID = "resume_invalid_thread_id"
+    RESUME_DUPLICATE_THREAD_STARTED = "resume_duplicate_thread_started"
+    RESUME_ID_MISMATCH = "resume_id_mismatch"
+    RESUME_INVALID_TERMINAL = "resume_invalid_terminal"
+    CLEANUP_FAILED = "cleanup_failed"
+
+
 STATUS_SKIPPED: Final = "skipped"
 STATUS_PASSED: Final = "passed"
 STATUS_FAILED: Final = "failed"
-ERROR_OPT_IN_REQUIRED: Final = "opt_in_required"
-ERROR_INVALID_MODEL: Final = "invalid_model"
-ERROR_VERSION_UNAVAILABLE: Final = "version_unavailable"
-ERROR_VERSION_INVALID: Final = "version_invalid"
-ERROR_CLI_UNAVAILABLE: Final = "cli_unavailable"
-ERROR_REPO_SETUP_FAILED: Final = "repo_setup_failed"
-ERROR_INTERNAL_ERROR: Final = "internal_error"
-ERROR_CREATE_TIMEOUT: Final = "create_timeout"
-ERROR_CREATE_NONZERO_EXIT: Final = "create_nonzero_exit"
-ERROR_CREATE_MALFORMED_JSONL: Final = "create_malformed_jsonl"
-ERROR_CREATE_MISSING_THREAD: Final = "create_missing_thread"
-ERROR_CREATE_INVALID_THREAD_ID: Final = "create_invalid_thread_id"
-ERROR_CREATE_DUPLICATE_THREAD_STARTED: Final = "create_duplicate_thread_started"
-ERROR_CREATE_INVALID_TERMINAL: Final = "create_invalid_terminal"
-ERROR_RESUME_TIMEOUT: Final = "resume_timeout"
-ERROR_RESUME_NONZERO_EXIT: Final = "resume_nonzero_exit"
-ERROR_RESUME_MALFORMED_JSONL: Final = "resume_malformed_jsonl"
-ERROR_RESUME_MISSING_THREAD: Final = "resume_missing_thread"
-ERROR_RESUME_INVALID_THREAD_ID: Final = "resume_invalid_thread_id"
-ERROR_RESUME_DUPLICATE_THREAD_STARTED: Final = "resume_duplicate_thread_started"
-ERROR_RESUME_ID_MISMATCH: Final = "resume_id_mismatch"
-ERROR_RESUME_INVALID_TERMINAL: Final = "resume_invalid_terminal"
-ERROR_CLEANUP_FAILED: Final = "cleanup_failed"
+ERROR_OPT_IN_REQUIRED: Final = ErrorCode.OPT_IN_REQUIRED
+ERROR_INVALID_MODEL: Final = ErrorCode.INVALID_MODEL
+ERROR_VERSION_UNAVAILABLE: Final = ErrorCode.VERSION_UNAVAILABLE
+ERROR_VERSION_INVALID: Final = ErrorCode.VERSION_INVALID
+ERROR_CLI_UNAVAILABLE: Final = ErrorCode.CLI_UNAVAILABLE
+ERROR_REPO_SETUP_FAILED: Final = ErrorCode.REPO_SETUP_FAILED
+ERROR_INTERNAL_ERROR: Final = ErrorCode.INTERNAL_ERROR
+ERROR_CREATE_TIMEOUT: Final = ErrorCode.CREATE_TIMEOUT
+ERROR_CREATE_NONZERO_EXIT: Final = ErrorCode.CREATE_NONZERO_EXIT
+ERROR_CREATE_MALFORMED_JSONL: Final = ErrorCode.CREATE_MALFORMED_JSONL
+ERROR_CREATE_MISSING_THREAD: Final = ErrorCode.CREATE_MISSING_THREAD
+ERROR_CREATE_INVALID_THREAD_ID: Final = ErrorCode.CREATE_INVALID_THREAD_ID
+ERROR_CREATE_DUPLICATE_THREAD_STARTED: Final = ErrorCode.CREATE_DUPLICATE_THREAD_STARTED
+ERROR_CREATE_INVALID_TERMINAL: Final = ErrorCode.CREATE_INVALID_TERMINAL
+ERROR_RESUME_TIMEOUT: Final = ErrorCode.RESUME_TIMEOUT
+ERROR_RESUME_NONZERO_EXIT: Final = ErrorCode.RESUME_NONZERO_EXIT
+ERROR_RESUME_MALFORMED_JSONL: Final = ErrorCode.RESUME_MALFORMED_JSONL
+ERROR_RESUME_MISSING_THREAD: Final = ErrorCode.RESUME_MISSING_THREAD
+ERROR_RESUME_INVALID_THREAD_ID: Final = ErrorCode.RESUME_INVALID_THREAD_ID
+ERROR_RESUME_DUPLICATE_THREAD_STARTED: Final = ErrorCode.RESUME_DUPLICATE_THREAD_STARTED
+ERROR_RESUME_ID_MISMATCH: Final = ErrorCode.RESUME_ID_MISMATCH
+ERROR_RESUME_INVALID_TERMINAL: Final = ErrorCode.RESUME_INVALID_TERMINAL
+ERROR_CLEANUP_FAILED: Final = ErrorCode.CLEANUP_FAILED
 _VERSION_RE = re.compile(r"^codex-cli [0-9]+\.[0-9]+\.[0-9]+$")
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -130,32 +158,6 @@ class ParseError(StrEnum):
 
 type TerminalEvent = Literal["turn.completed", "turn.failed"]
 type ProbeStage = Literal["create", "resume"]
-# Keep literals in type aliases; mypy does not expand Final string constants here.
-type ErrorCode = Literal[
-    "opt_in_required",
-    "invalid_model",
-    "version_unavailable",
-    "version_invalid",
-    "cli_unavailable",
-    "repo_setup_failed",
-    "internal_error",
-    "create_timeout",
-    "create_nonzero_exit",
-    "create_malformed_jsonl",
-    "create_missing_thread",
-    "create_invalid_thread_id",
-    "create_duplicate_thread_started",
-    "create_invalid_terminal",
-    "resume_timeout",
-    "resume_nonzero_exit",
-    "resume_malformed_jsonl",
-    "resume_missing_thread",
-    "resume_invalid_thread_id",
-    "resume_duplicate_thread_started",
-    "resume_id_mismatch",
-    "resume_invalid_terminal",
-    "cleanup_failed",
-]
 type ProbeStatus = Literal["skipped", "passed", "failed"]
 
 _PARSE_ERROR_CODES: dict[tuple[ProbeStage, ParseError], ErrorCode] = {
@@ -247,11 +249,7 @@ class _VersionSuccess:
 
 @dataclass(frozen=True)
 class _VersionFailure:
-    error_code: Literal[
-        "cli_unavailable",
-        "version_unavailable",
-        "version_invalid",
-    ]
+    error_code: ErrorCode
 
 
 type _VersionOutcome = _VersionSuccess | _VersionFailure
@@ -298,6 +296,8 @@ def _handle_other(event: dict[str, object], state: _StreamState) -> ParseError |
             error = ParseError.MISSING_THREAD
         else:
             state.terminal_event = event_type
+    elif not state.thread_seen:
+        error = ParseError.MALFORMED_JSONL
     elif event_type == ERROR_EVENT:
         if (
             not state.thread_seen
@@ -473,10 +473,10 @@ def _finish_stdout_capture(
 def _stop_process(process: subprocess.Popen[bytes]) -> int | None:
     _kill_process_group(process)
     exit_code: int | None = None
-    with contextlib.suppress(BaseException):
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
         exit_code = process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
     if process.stdout is not None:
-        with contextlib.suppress(BaseException):
+        with contextlib.suppress(OSError, ValueError, KeyboardInterrupt):
             process.stdout.close()
     return exit_code
 
@@ -945,19 +945,13 @@ def _run_in_disposable_directory(
             error_code=ERROR_REPO_SETUP_FAILED,
         )
     codex_env = _child_environment(cwd=worktree, scratch=scratch, codex_home=codex_home)
-    git_env = _child_environment(
+    setup_env = _child_environment(
         cwd=worktree,
         scratch=scratch,
         codex_home=None,
         include_codex_auth=False,
     )
-    version_env = _child_environment(
-        cwd=worktree,
-        scratch=scratch,
-        codex_home=None,
-        include_codex_auth=False,
-    )
-    version_outcome = _version_result(cwd=worktree, env=version_env)
+    version_outcome = _version_result(cwd=worktree, env=setup_env)
     if isinstance(version_outcome, _VersionFailure):
         return _result(
             STATUS_FAILED,
@@ -968,7 +962,7 @@ def _run_in_disposable_directory(
     return _run_session(
         worktree=worktree,
         codex_env=codex_env,
-        git_env=git_env,
+        git_env=setup_env,
         cli_version=version_outcome.cli_version,
         model=model,
     )
@@ -977,19 +971,41 @@ def _run_in_disposable_directory(
 def _cleanup_temporary_directory(
     temporary_directory: tempfile.TemporaryDirectory[str], result: SmokeResult
 ) -> SmokeResult:
+    signal_received = False
+    cleanup_failed = False
+    previous_handlers: dict[signal.Signals, _SignalHandler] = {}
+
+    def defer_signal(_signum: int, _frame: FrameType | None) -> None:
+        nonlocal signal_received
+        signal_received = True
+
     try:
-        temporary_directory.cleanup()
-    except OSError:
-        return _result(
-            STATUS_FAILED,
-            cli_version=result["cli_version"],
-            model=result["model"],
-            session_id=result["session_id"],
-            create=result["create"],
-            resume=result["resume"],
-            error_code=ERROR_CLEANUP_FAILED,
-        )
-    return result
+        if threading.current_thread() is threading.main_thread():
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                previous_handlers[signum] = signal.signal(signum, defer_signal)
+        try:
+            temporary_directory.cleanup()
+        except OSError:
+            cleanup_failed = True
+    finally:
+        for signum, previous_handler in previous_handlers.items():
+            signal.signal(signum, previous_handler)
+
+    if cleanup_failed:
+        error_code: ErrorCode = ERROR_CLEANUP_FAILED
+    elif signal_received:
+        error_code = ERROR_REPO_SETUP_FAILED
+    else:
+        return result
+    return _result(
+        STATUS_FAILED,
+        cli_version=result["cli_version"],
+        model=result["model"],
+        session_id=result["session_id"],
+        create=result["create"],
+        resume=result["resume"],
+        error_code=error_code,
+    )
 
 
 def _run_disposable(*, model: str) -> SmokeResult:
