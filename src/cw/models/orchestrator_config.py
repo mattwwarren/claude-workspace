@@ -91,7 +91,11 @@ class ConcurrencyOverrides(BaseModel):
     lanes: dict[str, LaneConcurrencyOverride] = Field(default_factory=dict)
 
 
-# Absolute ceiling on task.attempts across all kill causes (#786).
+# Ceiling on TicketTask.unproductive_attempts -- claims that left RUNNING
+# with no evidence of progress (#786, re-pointed at the narrower counter
+# by #1750). NOT a cap on the raw `attempts` claim counter, which bumps
+# once per pipeline stage and is never compared against this value
+# (#2256). Enforced at exactly one seam: dispatch/claim/screening.py.
 # Lives here so OrchestratorConfig.global_attempt_ceiling can reference it
 # directly without a circular import (dispatch.py imports from models.py).
 DEFAULT_GLOBAL_ATTEMPT_CEILING = 10

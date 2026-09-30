@@ -76,6 +76,7 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
         "STATUS",
         "SESSION_ID",
         "ATTEMPTS",
+        "UNPRODUCTIVE",
         "LANE",
         "SCOPE_HINT",
         "COMPUTED_SCOPE_TIER",
@@ -86,7 +87,7 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
         "ATTENTION",
         "STALE_GATE",
     ]
-    col_widths = [12, 16, 16, 12, 8, 12, 12, 20, 10, 20, 20, 10, 18, 10]
+    col_widths = [12, 16, 16, 12, 8, 12, 12, 12, 20, 10, 20, 20, 10, 18, 10]
     rows: list[list[str]] = []
     for t in tasks:
         attention = task_attention_state(t) or "—"
@@ -96,6 +97,7 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
             t.status.value[:16],
             (t.session_id or "-")[:12],
             str(t.attempts)[:8],
+            str(t.unproductive_attempts)[:12],
             t.lane[:12],
             (t.scope_hint or "—")[:12],
             (t.computed_scope_tier or "—")[:20],

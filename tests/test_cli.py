@@ -11738,7 +11738,11 @@ class TestDevQueueApproveCli:
         )
         assert result.exit_code == 0, result.output
         assert "re-queued at plan stage" in result.output
-        assert "recorded on the dev-queue row (plan_approved_at)" in result.output
+        assert (
+            "recorded on the dev-queue row (plan_approved_at +"
+            " plan_approved_fingerprint)" in result.output
+        )
+        assert "audit-only" not in result.output
         assert "Pass --post-marker" not in result.output
 
     def test_approve_plan_requeue_hint_shown_on_github_tracker(

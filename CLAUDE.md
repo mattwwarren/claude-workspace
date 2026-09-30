@@ -233,10 +233,6 @@ cw status
 cw start client-a
 cw start client-b
 
-# Switch between client workspaces
-cw switch client-a
-cw switch client-b
-
 # List all active sessions
 cw list
 ```

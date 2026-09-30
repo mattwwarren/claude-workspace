@@ -56,6 +56,10 @@ cw dev-queue remove PROJ-123 -c my-project --all
 
 ## The Daily Workflow
 
+Terms used below (ticket vs. task, session vs. worker, park, gate, sentinel,
+disposition vs. `blocked_reason`, the two attempt counters) are defined in one
+place: the **Vocabulary** section of `cw guide`.
+
 ### Sprint recipe (operator perspective)
 
 1. **Orient** — `cw dev-queue status` (expect empty/known), `cw doctor` (expect healthy)
@@ -64,7 +68,7 @@ cw dev-queue remove PROJ-123 -c my-project --all
 4. **Dispatch** — `cw dev-queue add <id> -c <client> -s large` → `cw dev-queue run --once`
 5. **Watch** — `cw watch` or `cw dev-queue wait`; monitor for transcript silence >25 min
 6. **Triage gates** — respond to `plan_pending_approval`, `ambiguities_pending_resolution`, `review_pending_approval`, `blocked` as they surface
-7. **Verify** — read the worker's sentinel, run the gate, check the PR
+7. **Verify** — read the worker's sentinel (`cw session result`), run the gate, check the PR
 8. **Clean up** — `cw done` → `cw spawn close` → `cw dev-queue remove`
 
 ### Information flow
@@ -110,7 +114,9 @@ You (coordinator)
 | `merge_gate_blocked` | A prior pipeline PR is still open. Merge or close it, re-dispatch. |
 | `scope_exceeded` | Diff grew past the declared scope tier. Re-scope the ticket or approve manually. |
 | `forbidden_area` | Change touches a forbidden path (see client config). Route to a human. |
-| `blocked` | Triage `blocker.reason` and `blocker.retry_eligible`. Re-dispatch if eligible. |
+| `empty_diff_blocked` | The branch has no commits ahead of the default branch at IMPL/REVIEW exit. Check what the worker did; requeue or close. |
+| `stale_dispatch` | The ticket already has an open, unmerged PR from an earlier dispatch. Merge or close that PR, then requeue. |
+| `blocked` | Triage `blocker.reason` and `blocker.retry_eligible`. Re-dispatch if eligible. The row copies `blocker.reason` into its `blocked_reason` (the `cw dev-queue tasks` REASON column). |
 
 Use the `/cw-session-watch` skill to read a session's exit status without hand-grepping events and transcripts, and `/cw-followup` to act on the sentinel automatically (close `no_op`, rebase+PR for `merge_gate_blocked`, draft a Decisions section for ambiguities/premises, escalate real blockers).
 
@@ -362,7 +368,7 @@ Key fields:
 | `workspace_path` | Absolute path to the project repo (or use `repo_path` + `branch` for worktree mode) |
 | `worker_model` | Model for DAEMON-origin workers (`claude --bg`). USER-origin sessions inherit the operator's default. |
 | `lanes` | Named dispatch lanes with `max_parallel`, `reap_policy`, and `priority` |
-| `auto_purposes` | Session purposes to start with `cw start`: `impl`, `idea`, `debt` (a fourth purpose, `orchestrate`, exists only for `cw orchestrate start` and is never selected via `auto_purposes`) |
+| `auto_purposes` | Session purposes to start with `cw start`: `impl`, `idea`, `debt`. Two more exist that `auto_purposes` never selects: `orchestrate` (`cw orchestrate start`) and `fix` (the REVIEW stage's fix-agent sessions). A purpose is a static spawn label, not the pipeline `stage`. |
 
 See [config/CONFIG_REFERENCE.md](config/CONFIG_REFERENCE.md) for all options and worktree-mode configuration.
 
@@ -392,7 +398,7 @@ See [`docs/adr/`](docs/adr/) for formal ADRs. Key decisions:
 
 - **Keystroke injection** — `cw bg` injects `/session-done` into active Claude sessions via the daemon API.
 - **On-demand reconciliation** — no background daemon; `reconcile()` runs on every read path.
-- **Sentinel as state** — pipeline state lives in Linear comments, git commit trailers, and GitHub PR fields. No `.auto-dev-state.json` files. Resume detection is pure derivation from these durable signals.
+- **Durable signals as state** — pipeline state lives in Linear comments, git commit trailers, and GitHub PR fields. No `.auto-dev-state.json` files. Resume detection is pure derivation from these durable signals.
 - **Fact gates advancement** — orchestrator completion gates (diff non-empty, tests pass, branch pushed) are deterministic; agent self-assessment is advisory only.
 
 ## Shell Completion

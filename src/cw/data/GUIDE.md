@@ -5,6 +5,161 @@ coordinator: you harden tickets, dispatch workers, watch, and verify. Workers im
 This guide is the operator-facing how-to; it ships with the tool, so it always matches the
 version you have (`cw guide`). For internals, see the repo's `docs/`.
 
+## Vocabulary
+
+One name per thing. The canonical term comes first; the names you will still
+meet in older docs, events, or field names follow in parentheses. Three
+different things are called a "status" — a task has one, a session has one, and
+a sentinel carries one — and they never share values, so always say which.
+
+**Work items**
+
+- **Ticket** — the tracker issue (GitHub issue or Linear ticket). `ticket_id`
+  is its number or key. What you enqueue, harden, approve, and close.
+- **Task** (queue row, `TicketTask`, "entry") — the dev-queue record for one
+  ticket on one client. `cw dev-queue tasks` prints one row per task; a ticket
+  that is requeued keeps its row. `add`, `remove`, `cancel`, `clear`, and
+  `prune` all act on tasks, addressed by ticket id.
+- **Client** (project) — one configured repo in `clients.yaml`, selected with
+  `-c <client>`. `cw init` calls it a project; the config calls it a client.
+- **Lane** — a scheduling boundary inside a client: its own `max_parallel`
+  concurrency cap, `reap_policy`, and executor overrides. `--lane`, `cw lane`.
+
+**Runtime**
+
+- **Session** — cw's record of one worker run in `sessions.json`: `session_id`
+  (short hex), client, purpose, worktree, branch, `surface_ref`,
+  `claude_session_id`, `last_result`, and a **session status** of its own:
+  `active`, `idle`, `backgrounded`, `completed`, `timed_out`.
+- **Worker** — the process behind a session: a `claude --bg` daemon session, or
+  a codex, opencode, or aider run. Docs say "worker" for the thing doing the
+  work and "session" for cw's record of it; they are one object. (In
+  `cw orchestrate workers` and `--parent`, "worker" narrows to a session an
+  orchestrator session spawned.)
+- **Surface** (`surface_ref`) — the daemon-side handle for a worker: the
+  native daemon's short id in `~/.claude/daemon/roster.json`. Its id-space is
+  different from the cw `session_id` and from `claude_session_id`
+  (the transcript file name) — three ids, one worker.
+- **Worktree** — the git checkout a worker is homed in, one per client and
+  ticket. **Occupied** means a live session or roster worker is homed there.
+- **Purpose** — a static label stamped on a session at spawn (`impl`,
+  `orchestrate`, `fix`; `idea`/`debt` are interactive-only). It never changes
+  and is *not* the pipeline stage: read `stage` for where the work is.
+- **Stage** — where a task is in the pipeline: `harden` → `plan` → `impl` →
+  `review` → `finalize`. Both the task and the session carry it. The
+  `/auto-dev` skill numbers its internal steps (Stage 0 Intake … Stage 5 CI
+  wait) and the sentinel's `stage_reached` uses `stage1_plan` … `stage5_post_create`;
+  those are the worker's own bookkeeping, not the queue's `stage`.
+
+**Task status** (`cw dev-queue tasks` STATUS column; `QueueItemStatus`)
+
+- `pending` — eligible for the next dispatch tick.
+- `running` — claimed; a session is, or should be, live. Holds a lane slot.
+- `blocked_on_user` — **parked**: waiting on an operator. Holds a lane slot.
+  "Park" is the verb, `blocked_on_user` is the status, and `disposition`
+  says why.
+- `awaiting_operator_signoff` — parked for a `--signoff operator` gate before
+  it ships. Holds a lane slot; cleared by a second `approve`.
+- `completed` / `failed` / `cancelled` — terminal. The row frees its slot.
+
+**Why a row stopped** — three fields, read in this order:
+
+- **Disposition** (`disposition`, DISPOSITION column) — the one-word reason
+  the row reached `completed`, `blocked_on_user`, or `failed`: usually the
+  sentinel status (`shipped`, `plan_pending_approval`, …), otherwise a
+  reconcile reason (`attempt_cap_blocked`, `stale_dispatch_gate`,
+  `finalize_gate_held`, `awaiting_operator`, …). Cleared on requeue.
+- **Blocked reason** (`blocked_reason`, REASON column) — the sentinel's
+  `blocker.reason` (`ci_check_failed`, `dirty_worktree`,
+  `codex_must_fix_findings`, …), copied onto the row when a `blocked`-shaped
+  sentinel parked it. Absent when the park carried no blocker.
+- **Advisory note** (`advisory_note`, the same REASON column with a `?`
+  prefix) — a live, per-tick hint on a row that is *not* parked. Clears itself.
+- **Gate** — a checkpoint the pipeline will not pass without evidence: plan
+  approval, review approval, operator signoff, the merge gate, the finalize
+  hold, the attempt ceiling. A gate that stops a row parks it;
+  `cw dev-queue approve` supplies the evidence. `finalize_gate_held` is the
+  deliberate `--hold-finalize` stop; `drain --held` releases only
+  `awaiting_operator` parks, never that hold.
+
+**Results**
+
+- **Sentinel** (result, `AUTO_DEV_RESULT`, `AutoDevResult`) — the
+  `<<<AUTO_DEV_RESULT … >>>` JSON block a worker emits at the end of a stage.
+  "The sentinel" and "the result" are the same artifact; `AutoDevResult` is
+  its parsed form. It is the only authoritative statement of what a run did.
+- **Sentinel status** (`status` inside the sentinel; §4 of
+  `docs/headless-contract.md`) — `shipped`, `stage_complete`, `no_op`,
+  `blocked`, `merge_pending`, `merge_gate_blocked`, `plan_pending_approval`,
+  `review_pending_approval`, `ambiguities_pending_resolution`,
+  `premises_pending_verification`, `scope_exceeded`, `forbidden_area`,
+  `empty_diff_blocked`, `stale_dispatch`. Not a task status.
+- **Blocker** (`blocker.reason`, `blocker.retry_eligible`, `blocker.details`) —
+  the structured payload inside a `blocked` sentinel. The task's
+  `blocked_reason` is a copy of `blocker.reason`.
+- **`last_result`** — the sentinel as recorded on the session (`cw session
+  result`). It is written through one door; `last_result_source` names which:
+  `emit_cli` (`cw result emit`), `stop_hook_harvest`, `executor_direct`,
+  `git_synthesis`, `salvage_transcript`.
+- **Emit** — a worker printing the sentinel into its transcript, or `cw result
+  emit` staging it onto the session. **Harvest** — reconcile reading a
+  finished session's sentinel and routing it to the task. **Salvage** —
+  reconstructing an outcome for a session that died with no sentinel from its
+  branch and transcript.
+
+**Operator actions**
+
+- **Approve** (`cw dev-queue approve`) — records approval on the row
+  (`plan_approved_at` + `plan_approved_fingerprint`, bound to the draft as it
+  stands) and moves the row past a plan, review, signoff, or finalize-hold
+  gate. `--post-marker` posts an audit-only comment that nothing reads back.
+- **Requeue** (`cw dev-queue requeue`) — `blocked_on_user` → `pending`, at the
+  same stage or `--stage`/`--regress`; `--from-cancelled`, `--from-failed`,
+  `--from-completed` recover terminal rows.
+- **Unblock** (`cw dev-queue unblock`) — requeue plus clearing the session's
+  salvage-park markers (`last_result`, `reap_reason`).
+- **Signoff** — the `awaiting_operator_signoff` gate armed by `add --signoff
+  operator` or a lane's `signoff:`; distinct from plan/review approval.
+
+**Attempts** (two counters, one gate)
+
+- `attempts` (ATTEMPTS column) — claims, one per stage entry. A healthy
+  ticket accrues them as it advances. **Gates nothing.**
+- `unproductive_attempts` (UNPRODUCTIVE column) — claims that left `running`
+  with no evidence of progress. The attempt ceiling (`global_attempt_ceiling`,
+  overridden per lane by `attempt_ceiling`) compares *this* counter and parks
+  the row `attempt_cap_blocked`.
+
+**Reconcile** (what the sweeps are called)
+
+- **Reconcile** — the pass every `cw status`, `cw list`, and dispatch tick
+  runs: compare `sessions.json`, the queue, and the daemon roster, then act
+  on drift. There is no background daemon of cw's own.
+- **Phantom** — a `running` session whose surface is gone from the roster.
+- **Stalled / idle** — a live session whose transcript has stopped advancing
+  (liveness buckets `live`, `stale_15m`, `stale_30m`, `stale_45m`). The idle
+  sweep routes a staged result or pages `session_unresponsive`.
+- **Leaked worker** — a roster entry whose session is already terminal;
+  stopped every tick. (The runbook's "worktree leak" is stray commits or
+  files in a worktree — unrelated.)
+- **Orphan** — a session that finished before reconcile read its sentinel,
+  or a codex review whose driver crashed (`cw codex migrate-legacy`).
+- **Reap** — the destructive act on a phantom or stalled session: revert the
+  row to `pending`, stop the daemon surface, remove the worktree. Under the
+  default `reap_policy: signal_only` reconcile only *proposes*
+  (`session.reap_proposed`) and parks the row; `reap_policy: auto` on the lane
+  or an explicit `cw doctor --reap` performs it.
+- **Wedge** — `cw doctor`'s word for a lane that cannot make progress
+  (`wedge/<class>` findings); `--reap` is the remedy.
+
+**Which command reads what**
+
+- `cw status`, `cw list`, `cw session show` — sessions.
+- `cw dev-queue status`, `cw dev-queue tasks` — the queue (task status).
+  `BLOCKED` in the status summary counts `blocked_on_user` only.
+- `cw board` — lanes × stages. `cw queue peek` — a liveness verdict per
+  `running` session. `cw session result` — one session's `last_result`.
+
 ## Orient (start of every sprint)
 
 ```bash
@@ -57,6 +212,9 @@ is the single biggest lever for first-try ships.
 - `cw-followup` — do whatever a finished run's sentinel says next (close no_op, ship a
   merge_gate_blocked branch, draft Decisions, escalate a blocker).
 - `cw-smoke-test` — one-ticket end-to-end dogfood of the `/auto-dev --headless` pipeline.
+- `orchestrate-sprint` — run a whole sprint as a long-lived orchestrator session (harden →
+  dispatch → monitor → triage → handoff), composing the skills above.
+- `queue-issues` — pick open tickets from the tracker and enqueue them for dispatch.
 
 **Dispatch:**
 ```bash
@@ -102,7 +260,8 @@ cw session show|result|wait <session>    # one session's state / last sentinel /
 cw dev-queue wait <ticket> -c <client>   # block until terminal; sentinel-aware exit codes
 cw event tail [-f] [--type <t>…]         # orchestrator event bus (poll or follow)
 cw doctor [--reap]                       # health; --reap clears a wedged lane
-cw orchestrate status|watch|workers      # orchestrator view
+cw orchestrate status|workers            # orchestrator view (`orchestrate watch` is
+                                         #   deprecated: use `cw board`)
 cw done <session> [--cleanup]            # mark completed; --cleanup removes its worktree
 ```
 Prefer the **event bus and blocking waits** (`cw dev-queue wait`, `cw session wait`,
@@ -199,12 +358,16 @@ cw `session_id` → `sessions.json` `surface_ref` / `claude_session_id` →
   authorized action (`cw dev-queue approve`/`requeue`, plus any tracker-side evidence) as the
   *next* step, before summarizing queue state. Narrating the events first is the sign the
   answer was never executed.
-- **`approve` moves the row; it is not approval evidence:** `cw dev-queue approve` clears the
-  queue-state gate. The Large-scope carve-out on a resumed draft separately greps the
-  live-fetched ticket comments for an operator reply posted after the park comment —
-  satisfying one does not satisfy the other. Skip the comment and the ticket silently
-  re-parks reporting "no operator reply received since the last park comment," which reads
-  like operator inaction, not a misfiled approval.
+- **`approve` is approval evidence, bound to one draft:** `cw dev-queue approve` stamps
+  `plan_approved_at` + `plan_approved_fingerprint` on the row, and the plan stage's
+  Checkpoint 1 reads them as operator approval (the row path). It accepts the row while the
+  approved draft is unchanged, or while no operator-authority comment postdates the approval
+  and the persisted `body_sha` still matches the live ticket body. Edit the body or post a
+  new operator comment *after* approving and the re-dispatched plan stage re-parks
+  `plan_pending_approval` quoting both fingerprints — a stale-approval re-ask, not operator
+  inaction. `--post-marker` posts an audit-only comment that nothing reads back. The comment
+  path (`<!-- auto-dev-comment-approval -->` as its own reply) is the CLI-free alternative;
+  Linear-tracked tickets have only the row path.
 - **Monitor noise drowns the signal:** a watcher that emits on every status change reports
   `pending → running` inside a single stage — roughly half of all events, none actionable.
   Key emission on stage transitions plus arrivals at `blocked_on_user`; let the periodic beat

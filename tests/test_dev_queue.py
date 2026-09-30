@@ -6039,6 +6039,7 @@ class TestDevQueueTasks:
         assert "STATUS" in result.output
         assert "SESSION_ID" in result.output
         assert "ATTEMPTS" in result.output
+        assert "UNPRODUCTIVE" in result.output
         assert "LANE" in result.output
         assert "DISPOSITION" in result.output
         assert "PR" in result.output

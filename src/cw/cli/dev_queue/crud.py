@@ -435,9 +435,10 @@ def dev_queue_drain(
 @click.option("--client", "-c", default=None, help="Client name.")
 @handle_errors
 def dev_queue_unblock(ticket_id: str, client: str | None) -> None:
-    """Clear salvage/park markers and requeue a SALVAGE_PARKED ticket.
+    """Clear salvage-park markers and requeue a ticket parked by salvage.
 
-    The ticket must be BLOCKED_ON_USER with a SALVAGE_PARKED session.
+    The ticket must be BLOCKED_ON_USER and its session's reap_reason must be
+    SALVAGE_PARKED (a session field, not a task status).
     Clears both last_result and reap_reason on the session, then
     sets the task back to PENDING.
     """
