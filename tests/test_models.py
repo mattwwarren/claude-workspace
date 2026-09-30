@@ -2318,6 +2318,7 @@ class TestPackageExportCompleteness:
             "SCOPE_DRIFT_APPROVED_HEAD_KEY",
             "STAGED_EMIT_RESULT_KEY",
             "PendingFixDispatch",
+            "PendingOutcome",
             "PrState",
             "QueueItemStatus",
             "ReapPolicy",
