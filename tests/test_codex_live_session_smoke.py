@@ -709,10 +709,8 @@ class TestProbe:
         checkout = probe._checkout_root()
         for call in calls:
             assert_isolated_child_environment(call, checkout, configured_codex_home)
+        assert probe.PROCESS_TIMEOUT_SECONDS == 120
         assert len(wait_timeouts) == len(calls)
-        assert all(
-            timeout is not None and 0 < timeout <= 0.05 for timeout in wait_timeouts
-        )
         forbidden = {
             "--last",
             "--ephemeral",
@@ -723,6 +721,53 @@ class TestProbe:
         }
         assert forbidden.isdisjoint(calls[2]["argv"])
         assert forbidden.isdisjoint(calls[3]["argv"])
+
+    def test_process_wait_uses_full_configured_deadline(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class Clock:
+            now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        class AdvancingProcess:
+            pid = None
+
+            def __init__(self, clock: Clock) -> None:
+                self.clock = clock
+                self.killed = False
+                self.wait_timeouts: list[float | None] = []
+
+            def wait(self, timeout: float | None = None) -> int:
+                self.wait_timeouts.append(timeout)
+                if self.killed:
+                    return -9
+                assert timeout is not None
+                self.clock.now += timeout
+                raise subprocess.TimeoutExpired(["codex"], timeout)
+
+            def kill(self) -> None:
+                self.killed = True
+
+        clock = Clock()
+        process = AdvancingProcess(clock)
+        monkeypatch.setattr(probe, "time", clock)
+        reader: Future[None] = Future()
+        reader.set_result(None)
+        outcome = probe._wait_for_process(
+            cast("subprocess.Popen[bytes]", process),
+            reader,
+            probe._OutputCapture(bytearray()),
+        )
+
+        assert probe.PROCESS_TIMEOUT_SECONDS == 120
+        assert outcome == (-9, True, False)
+        process_waits = [
+            timeout for timeout in process.wait_timeouts[:-1] if timeout is not None
+        ]
+        assert sum(process_waits) == pytest.approx(120)
+        assert process.wait_timeouts[-1] == probe.PROCESS_CLEANUP_TIMEOUT_SECONDS
 
     @pytest.mark.parametrize(
         ("create_code", "expected_status"),
@@ -776,7 +821,7 @@ class TestProbe:
             [sys.executable, "-c", "import os; os.write(1, b'x' * 8192)"],
             cwd=tmp_path,
             env=os.environ.copy(),
-            stage="create",
+            stage=probe.ProbeStage.CREATE,
         )
         assert attempt.error_code == "create_malformed_jsonl"
         assert attempt.outcome.output_exceeded_limit
@@ -1333,7 +1378,10 @@ class TestProbe:
             RuntimeError, match="unexpected probe stdout reader failure"
         ):
             probe._attempt(
-                ["codex", "--version"], cwd=Path.cwd(), env={}, stage="create"
+                ["codex", "--version"],
+                cwd=Path.cwd(),
+                env={},
+                stage=probe.ProbeStage.CREATE,
             )
 
     def test_finished_parent_reader_error_still_kills_process_group(
@@ -1355,6 +1403,29 @@ class TestProbe:
         ) == ("", False)
         assert capture.reader_failed
         assert len(killed) == 1
+
+    def test_base_exception_from_reader_stays_on_interrupt_path(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        def interrupt_reader() -> None:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(
+            probe, "_make_stdout_reader", lambda *_args: interrupt_reader
+        )
+        outcome = probe._run_process(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            cwd=tmp_path,
+            env=os.environ.copy(),
+        )
+
+        assert outcome.timed_out
+        assert not outcome.reader_failed
+        assert outcome.exit_code is not None
+        assert capsys.readouterr().err == ""
 
     def test_process_kill_failure_is_not_silenced(self) -> None:
         failure_message = "kill denied"
@@ -1399,6 +1470,46 @@ class TestProbe:
             assert wait_for_process_exit(pid)
         finally:
             cleanup_process(pid)
+
+    @pytest.mark.skipif(os.name != "posix", reason="requires POSIX sessions")
+    def test_detached_stdout_writer_cannot_block_probe_shutdown(
+        self, tmp_path: Path
+    ) -> None:
+        code = (
+            "import subprocess, sys; "
+            "child = subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(30)'], start_new_session=True); "
+            "print(f'DETACHED_PID={child.pid}', flush=True); "
+            "print('parent-finished', flush=True)"
+        )
+        pid: int | None = None
+        try:
+            started = time.monotonic()
+            result = probe._run_process(
+                [sys.executable, "-c", code], cwd=tmp_path, env=os.environ.copy()
+            )
+            elapsed = time.monotonic() - started
+            pid_line = next(
+                line
+                for line in result.stdout.splitlines()
+                if line.startswith("DETACHED_PID=")
+            )
+            pid = int(pid_line.split("=", 1)[1])
+            assert result.exit_code == 0
+            assert result.reader_incomplete
+            assert "parent-finished" in result.stdout
+            assert process_is_running(pid)
+            assert elapsed < 5
+        finally:
+            cleanup_process(pid)
+        deadline = time.monotonic() + 1
+        while any(thread.name == "cw-codex-stdout" for thread in threading.enumerate()):
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.02)
+        assert not any(
+            thread.name == "cw-codex-stdout" for thread in threading.enumerate()
+        )
 
     @pytest.mark.parametrize("create_code", [0, 7])
     def test_cleanup_failure_preserves_sanitized_result(
@@ -1722,4 +1833,64 @@ def test_entrypoint_converts_unhandled_exception_to_one_json_result() -> None:
         "create": {"exit_code": 0, "terminal_event": "turn.completed"},
         "resume": None,
         "error_code": "internal_error",
+    }
+
+
+def test_entrypoint_reports_cleanup_failure_over_unhandled_exception() -> None:
+    exception_marker = "private-operational-marker"
+    cleanup_marker = "private-cleanup-marker"
+    code = "\n".join(
+        [
+            "import importlib.util, sys",
+            "spec = importlib.util.spec_from_file_location(",
+            "    'probe_cleanup_entrypoint_test', sys.argv[1]",
+            ")",
+            "assert spec is not None and spec.loader is not None",
+            "module = importlib.util.module_from_spec(spec)",
+            "sys.modules[spec.name] = module",
+            "spec.loader.exec_module(module)",
+            "class BrokenTemporaryDirectory:",
+            "    name = '/tmp/cw-codex2463-cleanup-failure'",
+            "    def cleanup(self):",
+            f"        raise OSError({cleanup_marker!r})",
+            "module._codex_home = lambda *_args: module.Path('/tmp/codex-home')",
+            (
+                "module._new_temporary_directory = lambda _checkout: "
+                "BrokenTemporaryDirectory()"
+            ),
+            "def fail_directory(**kwargs):",
+            "    module._record_unhandled_exception_progress(",
+            "        cli_version='codex-cli 1.2.3', model=kwargs['model'],",
+            "        session_id='thread.smoke-2463',",
+            "        create={'exit_code': 0,",
+            "            'terminal_event': module.TURN_COMPLETED_EVENT})",
+            f"    raise RuntimeError({exception_marker!r})",
+            "module._run_in_disposable_directory = fail_directory",
+            "sys.argv = ['probe', '--model', 'gpt-5.6-luna']",
+            "module._entrypoint()",
+        ]
+    )
+    child_env = os.environ.copy()
+    child_env["CW_CODEX_LIVE_SESSION_SMOKE"] = "1"
+    completed_process = subprocess.run(
+        [sys.executable, "-c", code, str(Path(probe.__file__))],
+        capture_output=True,
+        check=False,
+        text=True,
+        env=child_env,
+        timeout=5,
+    )
+    assert completed_process.returncode == 1
+    assert completed_process.stderr == ""
+    assert completed_process.stdout.count("\n") == 1
+    assert exception_marker not in completed_process.stdout
+    assert cleanup_marker not in completed_process.stdout
+    assert json.loads(completed_process.stdout) == {
+        "status": "failed",
+        "cli_version": "codex-cli 1.2.3",
+        "model": MODEL,
+        "session_id": SESSION,
+        "create": {"exit_code": 0, "terminal_event": "turn.completed"},
+        "resume": None,
+        "error_code": "cleanup_failed",
     }

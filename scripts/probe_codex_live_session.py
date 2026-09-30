@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor, wait
+from concurrent.futures import Future, wait
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -159,25 +159,29 @@ class ParseError(StrEnum):
     INVALID_TERMINAL = "invalid_terminal"
 
 
+class ProbeStage(StrEnum):
+    CREATE = "create"
+    RESUME = "resume"
+
+
 type TerminalEvent = Literal["turn.completed", "turn.failed"]
-type ProbeStage = Literal["create", "resume"]
 type ProbeStatus = Literal["skipped", "passed", "failed"]
 
 _PARSE_ERROR_CODES: dict[tuple[ProbeStage, ParseError], ErrorCode] = {
-    ("create", ParseError.MALFORMED_JSONL): ERROR_CREATE_MALFORMED_JSONL,
-    ("create", ParseError.MISSING_THREAD): ERROR_CREATE_MISSING_THREAD,
-    ("create", ParseError.INVALID_THREAD_ID): ERROR_CREATE_INVALID_THREAD_ID,
-    ("create", ParseError.DUPLICATE_THREAD_STARTED): (
+    (ProbeStage.CREATE, ParseError.MALFORMED_JSONL): ERROR_CREATE_MALFORMED_JSONL,
+    (ProbeStage.CREATE, ParseError.MISSING_THREAD): ERROR_CREATE_MISSING_THREAD,
+    (ProbeStage.CREATE, ParseError.INVALID_THREAD_ID): ERROR_CREATE_INVALID_THREAD_ID,
+    (ProbeStage.CREATE, ParseError.DUPLICATE_THREAD_STARTED): (
         ERROR_CREATE_DUPLICATE_THREAD_STARTED
     ),
-    ("create", ParseError.INVALID_TERMINAL): ERROR_CREATE_INVALID_TERMINAL,
-    ("resume", ParseError.MALFORMED_JSONL): ERROR_RESUME_MALFORMED_JSONL,
-    ("resume", ParseError.MISSING_THREAD): ERROR_RESUME_MISSING_THREAD,
-    ("resume", ParseError.INVALID_THREAD_ID): ERROR_RESUME_INVALID_THREAD_ID,
-    ("resume", ParseError.DUPLICATE_THREAD_STARTED): (
+    (ProbeStage.CREATE, ParseError.INVALID_TERMINAL): ERROR_CREATE_INVALID_TERMINAL,
+    (ProbeStage.RESUME, ParseError.MALFORMED_JSONL): ERROR_RESUME_MALFORMED_JSONL,
+    (ProbeStage.RESUME, ParseError.MISSING_THREAD): ERROR_RESUME_MISSING_THREAD,
+    (ProbeStage.RESUME, ParseError.INVALID_THREAD_ID): ERROR_RESUME_INVALID_THREAD_ID,
+    (ProbeStage.RESUME, ParseError.DUPLICATE_THREAD_STARTED): (
         ERROR_RESUME_DUPLICATE_THREAD_STARTED
     ),
-    ("resume", ParseError.INVALID_TERMINAL): ERROR_RESUME_INVALID_TERMINAL,
+    (ProbeStage.RESUME, ParseError.INVALID_TERMINAL): ERROR_RESUME_INVALID_TERMINAL,
 }
 _TERMINAL_EVENTS: frozenset[TerminalEvent] = frozenset(
     {TURN_COMPLETED_EVENT, TURN_FAILED_EVENT}
@@ -440,16 +444,61 @@ def _make_stdout_reader(
         if process.stdout is None:
             raise _StdoutPipeUnavailableError
         stdout = cast("io.BufferedReader", process.stdout)
-        while chunk := stdout.read1(PROCESS_OUTPUT_CHUNK_BYTES):
-            remaining = MAX_PROCESS_OUTPUT_BYTES - len(capture.data)
-            if len(chunk) > remaining:
-                if remaining > 0:
-                    capture.data.extend(chunk[:remaining])
-                capture.exceeded_limit = True
-                return
-            capture.data.extend(chunk)
+        try:
+            while chunk := stdout.read1(PROCESS_OUTPUT_CHUNK_BYTES):
+                remaining = MAX_PROCESS_OUTPUT_BYTES - len(capture.data)
+                if len(chunk) > remaining:
+                    if remaining > 0:
+                        capture.data.extend(chunk[:remaining])
+                    capture.exceeded_limit = True
+                    return
+                capture.data.extend(chunk)
+        finally:
+            with contextlib.suppress(OSError, ValueError):
+                stdout.close()
 
     return drain_stdout
+
+
+class _FutureResultCapture:
+    def __init__(self, future: Future[None]) -> None:
+        self.future = future
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool:
+        del exc_type, traceback
+        if exc_value is None:
+            self.future.set_result(None)
+            return False
+        self.future.set_exception(exc_value)
+        return True
+
+
+def _start_stdout_reader(
+    process: subprocess.Popen[bytes], capture: _OutputCapture
+) -> Future[None]:
+    reader_future: Future[None] = Future()
+    reader = _make_stdout_reader(process, capture)
+
+    def drain_and_report() -> None:
+        if not reader_future.set_running_or_notify_cancel():
+            return
+        with _FutureResultCapture(reader_future):
+            reader()
+
+    threading.Thread(
+        target=drain_and_report,
+        name="cw-codex-stdout",
+        daemon=True,
+    ).start()
+    return reader_future
 
 
 def _finish_stdout_capture(
@@ -462,9 +511,6 @@ def _finish_stdout_capture(
     if reader_incomplete:
         _kill_process_group(process)
         _, pending = wait((reader,), timeout=PROCESS_READER_WAIT_TIMEOUT_SECONDS)
-    if process.stdout is not None:
-        with contextlib.suppress(OSError, ValueError):
-            process.stdout.close()
     if pending:
         _, pending = wait((reader,), timeout=PROCESS_READER_WAIT_TIMEOUT_SECONDS)
     if reader.done():
@@ -480,12 +526,11 @@ def _finish_stdout_capture(
     )
 
 
-def _stop_process(process: subprocess.Popen[bytes]) -> int | None:
-    _kill_process_group(process)
-    exit_code: int | None = None
-    with contextlib.suppress(OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
-        exit_code = process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
-    if process.stdout is not None:
+def _stop_process(
+    process: subprocess.Popen[bytes], reader: Future[None] | None = None
+) -> int | None:
+    exit_code, _timed_out, _unavailable = _kill_and_wait(process, timed_out=False)
+    if process.stdout is not None and reader is None:
         with contextlib.suppress(OSError, ValueError, KeyboardInterrupt):
             process.stdout.close()
     return exit_code
@@ -592,8 +637,10 @@ def _wait_for_process(
         except subprocess.TimeoutExpired:
             continue
         except OSError:
-            _kill_process_group(process)
-            return None, False, True
+            exit_code, _timed_out, _unavailable = _kill_and_wait(
+                process, timed_out=False
+            )
+            return exit_code, False, True
 
 
 def _cleanup_interrupted_process(
@@ -601,7 +648,7 @@ def _cleanup_interrupted_process(
     reader: Future[None] | None,
     capture: _OutputCapture | None,
 ) -> ProcessOutcome:
-    exit_code = _stop_process(process)
+    exit_code = _stop_process(process, reader)
     stdout = ""
     reader_incomplete = False
     if reader is not None and capture is not None:
@@ -632,13 +679,9 @@ def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessO
 
     reader: Future[None] | None = None
     capture: _OutputCapture | None = None
-    reader_executor: ThreadPoolExecutor | None = None
     try:
-        reader_executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="cw-codex-stdout"
-        )
         capture = _OutputCapture(bytearray())
-        reader = reader_executor.submit(_make_stdout_reader(process, capture))
+        reader = _start_stdout_reader(process, capture)
         exit_code, timed_out, unavailable = _wait_for_process(process, reader, capture)
         stdout, reader_incomplete = _finish_stdout_capture(process, reader, capture)
     except BaseException as error:
@@ -646,9 +689,6 @@ def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessO
             return _cleanup_interrupted_process(process, reader, capture)
         _cleanup_interrupted_process(process, reader, capture)
         raise
-    finally:
-        if reader_executor is not None:
-            reader_executor.shutdown(wait=True)
     return ProcessOutcome(
         exit_code,
         stdout,
@@ -724,6 +764,19 @@ def _record_unhandled_exception_progress(
     )
 
 
+def _set_unhandled_exception_code(error_code: ErrorCode) -> None:
+    previous = _UNHANDLED_EXCEPTION_DIAGNOSTIC.result
+    _UNHANDLED_EXCEPTION_DIAGNOSTIC.result = _result(
+        STATUS_FAILED,
+        cli_version=previous["cli_version"],
+        model=previous["model"],
+        session_id=previous["session_id"],
+        create=previous["create"],
+        resume=previous["resume"],
+        error_code=error_code,
+    )
+
+
 @dataclass(frozen=True)
 class _Attempt:
     outcome: ProcessOutcome
@@ -746,7 +799,9 @@ def _attempt(
         stream = ParsedStream(stream.session_id, None, ParseError.MALFORMED_JSONL)
     error_code: ErrorCode | None = None
     if outcome.timed_out:
-        error_code = ERROR_CREATE_TIMEOUT if stage == "create" else ERROR_RESUME_TIMEOUT
+        error_code = (
+            ERROR_CREATE_TIMEOUT if stage is ProbeStage.CREATE else ERROR_RESUME_TIMEOUT
+        )
     elif outcome.unavailable:
         error_code = ERROR_CLI_UNAVAILABLE
     elif outcome.output_exceeded_limit or outcome.reader_incomplete:
@@ -754,7 +809,7 @@ def _attempt(
     elif outcome.exit_code != 0:
         error_code = (
             ERROR_CREATE_NONZERO_EXIT
-            if stage == "create"
+            if stage is ProbeStage.CREATE
             else ERROR_RESUME_NONZERO_EXIT
         )
     elif stream.error is not None:
@@ -762,7 +817,7 @@ def _attempt(
     elif stream.terminal_event != TURN_COMPLETED_EVENT:
         error_code = (
             ERROR_CREATE_INVALID_TERMINAL
-            if stage == "create"
+            if stage is ProbeStage.CREATE
             else ERROR_RESUME_INVALID_TERMINAL
         )
     # Retain only the parsed summary: the create transcript must be gone before
@@ -952,7 +1007,7 @@ def _run_session(
         _create_argv(model),
         cwd=worktree,
         env=codex_env,
-        stage="create",
+        stage=ProbeStage.CREATE,
     )
     create_summary = _create_summary(create)
     _record_unhandled_exception_progress(
@@ -977,7 +1032,7 @@ def _run_session(
         _resume_argv(session_id, model),
         cwd=worktree,
         env=codex_env,
-        stage="resume",
+        stage=ProbeStage.RESUME,
     )
     resume_summary = _resume_summary(resume, session_id)
     _record_unhandled_exception_progress(
@@ -1129,6 +1184,7 @@ def _cleanup_temporary_directory(
 
     if cleanup_failed:
         error_code: ErrorCode = ERROR_CLEANUP_FAILED
+        _set_unhandled_exception_code(error_code)
     elif signal_received:
         error_code = ERROR_REPO_SETUP_FAILED
     else:
@@ -1191,6 +1247,7 @@ def _run_disposable(*, model: str) -> SmokeResult:
 
 def run_probe(model: str | None) -> SmokeResult:
     """Run the opt-in probe and return its sanitized result."""
+    _reset_unhandled_exception_result()
     if os.environ.get("CW_CODEX_LIVE_SESSION_SMOKE") != "1":
         return _result(
             STATUS_SKIPPED,

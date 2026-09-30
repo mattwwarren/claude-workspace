@@ -29,17 +29,21 @@ inherits the create session's read-only policy. The probe never uses `--last`,
 Each subprocess has a 120-second timeout and runs in its own process group on
 POSIX. Timeout, output overflow, or a parent SIGINT/SIGTERM kills the group,
 including descendants that might otherwise keep stdout open. Parent-side
-exceptions also trigger process-group termination, stdout closure, bounded
-reader waiting, and child reaping. Reader-worker exceptions are handed back to
-the process-waiting thread and become `internal_error`, without a worker-thread
-traceback. An operator interrupt returns the
+exceptions also trigger process-group termination, bounded reader waiting, and
+child reaping. The daemonized reader owns and closes its pipe when it finishes;
+an incomplete reader cannot hold interpreter shutdown hostage. A descendant
+that deliberately escapes the POSIX process group is outside the termination
+guarantee, but its open pipe is reported as incomplete rather than blocking the
+probe. Reader-worker exceptions are handed back to the process-waiting thread
+and become `internal_error`, without a worker-thread traceback. An operator
+interrupt returns the
 sanitized timeout result for an interrupted subprocess, or `repo_setup_failed`
 if interrupted outside a subprocess, instead of leaving Codex running or
 printing a traceback. Unexpected internal errors produce a sanitized
 `internal_error` result and a nonzero exit rather than being mislabeled as a
 setup failure. After child exit, the stdout reader has a bounded drain window;
-the probe then terminates the process group and closes the pipe if capture is
-still incomplete. Stdout is read incrementally with a 1 MiB
+the probe then terminates the process group if capture is still incomplete.
+Stdout is read incrementally with a 1 MiB
 cap; exceeding it fails JSONL validation. Stderr is discarded, and no `-o`
 file is created. The parser reads the bounded JSONL stream line by line and
 releases it before starting the resume command. The first nonblank event must
@@ -120,9 +124,9 @@ command's timeout error code; an interrupt outside a subprocess uses
 exit 0.
 
 The temporary repository is cleaned up on success and ordinary failure. If
-cleanup itself fails, the probe reports `cleanup_failed` while preserving the
-validated session ID and create/resume summaries so the operator can recover;
-cleanup failure takes precedence as the single reported error code. SIGINT or
+cleanup itself fails, `cleanup_failed` takes precedence over an earlier
+unexpected error while preserving the validated session ID and create/resume
+summaries so the operator can recover. SIGINT or
 SIGTERM received during cleanup is deferred until the temporary directory has
 been removed; if cleanup succeeds, the result is `repo_setup_failed`, while an
 actual cleanup failure remains `cleanup_failed`. One normal persistent Codex
