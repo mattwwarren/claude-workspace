@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`cw codex migrate-legacy` recovers every live pre-RFC-0014 codex session once, so the boot sweep can be retired (#2389, RFC 0014 B1):** a legacy codex session (no liveness handle, review run on a `serve` thread) is matched with the boot sweep's predicates, except that an unreadable or missing worktree/`cw-context.json` is counted and parked instead of silently dropped. Each session's worktree is scanned for a live codex writer first; a live, possibly-live, or unscannable writer leaves the session untouched and unresolved. Otherwise the session is revalidated under `sessions_lock` and routed through the A1 harvest gate, now the public `cw.reconcile.local.act_on_codex_harvest_candidate`, which returns a typed `CodexHarvestOutcome` and, for this caller, writes a `SESSION_COMPLETED` audit event with `reason: codex_legacy_recovery`, `legacy: true`, the gate reason in `detail`, and null `pid`/`start_time_ns`. A lost row transition is now reported (`TRANSITION_LOST`) rather than counted as a requeue or park: `_park_running_task_blocked_on_user` returns whether it parked. Per-session outcomes and counts persist to `~/.local/share/cw/codex_legacy_recovery.json` as they happen; a corrupt marker is a hard error. A partial run (exit 1) is retried by re-running; a completed marker makes later runs a no-op. `--json` prints status, counts and unresolved sessions. Recovery and reversal steps are in `docs/dispatch-runbook.md`.
+
 ## [1.61.0] - 2026-09-29
 
 ### Added

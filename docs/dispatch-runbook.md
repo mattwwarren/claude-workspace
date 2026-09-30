@@ -1305,6 +1305,79 @@ the recovery is needed -- the row carries no record of provenance by the time
 it reaches this flag. Check `cw dev-queue tasks -t <T> -c <CLIENT>` / the
 event history before requeuing it.
 
+### Legacy codex session recovery (`cw codex migrate-legacy`, RFC 0014 B1)
+
+A *legacy* codex session predates RFC 0014 A2: its review ran on a thread
+inside `serve`, so it carries no liveness handle and the crash-only harvest
+sweep never sees it. Until B2 retires the boot sweep, only a `serve` restart
+disposes of one. `cw codex migrate-legacy` recovers every such session still
+live, once, so B2 can land (#2389).
+
+**Prerequisites.** Run it after the Epic I release is installed and `serve`
+has been restarted on it (RFC 0014 D-6), so no new legacy session can appear.
+It may run while `serve` is up: it takes `sessions_lock` and
+`dev_queue_lock` like every other writer. Close any live sibling session on
+the same ticket first.
+
+```bash
+cw codex migrate-legacy          # text report
+cw codex migrate-legacy --json   # {"status", "counts", "unresolved"}
+```
+
+Per session it scans the worktree for a live codex writer first, then applies
+the codex harvest gate (`reap_policy: auto`, codex fix loop off, worktree
+clean apart from the review verdict, HEAD unmoved): all pass → the task is
+requeued (`TICKET_REQUEUED`, reason `codex_harvest_clean_requeue`), any fail →
+it is parked `BLOCKED_ON_USER` (`codex_review_orphaned_at_harvest`). Either
+way the session closes `COMPLETED`/`CRASHED` behind a `SESSION_COMPLETED`
+audit event with `reason: codex_legacy_recovery`, `legacy: true` and the
+gate's own reason in `detail`.
+
+**Reading the result.** The marker at
+`~/.local/share/cw/codex_legacy_recovery.json` is the run record. Its counts
+are `scanned`, `requeued`, `parked`, `failed`, `skipped_already_handled`
+(the row or session had already moved on; nothing to do) and
+`skipped_writer_live`. `outcomes` holds one entry per session with its
+`disposition`, `prior_status` and `prior_stage`. The command exits 0 for
+`completed` and `already_completed`, and 1 for `partial`.
+
+**Handling `partial`.** Every `unresolved` entry names a session and a
+`reason`. Resolve the cause, then re-run: a re-run retries only the unresolved
+sessions (plus any live one an interrupted run never reached) and leaves
+resolved ones alone. There is no `--force`.
+
+- `live_writer`: a codex process may still be writing in the worktree, or the
+  process scan was inconclusive. Wait for it to exit (or stop it yourself),
+  then re-run.
+- `worktree_unset`, `worktree_missing`, `context_missing`,
+  `context_unreadable`: the session has no recorded worktree, the worktree is
+  gone, or its `.claude/cw-context.json` is absent or unreadable, so a writer
+  cannot be ruled out. Inspect the session and its worktree, close the
+  session through the usual session-close path, then re-run. A session that is
+  no longer live resolves as `skipped_already_handled`.
+- `audit_write_failed`, `state_write_failed`: an I/O error on the event log or
+  `sessions.json`. Fix the disk problem and re-run.
+- `client_config_missing`: the session's client is not in `clients.yaml`.
+  Restore it, or close the session, and re-run.
+
+Audit events are attempt records. A `state_write_failed` session can carry two
+`SESSION_COMPLETED` events for one session id (the failed attempt and the
+retry); the marker's `outcomes` entry for that session is authoritative.
+
+**Reversing a disposition.** Read the session's `outcomes` entry
+(`prior_status`, `prior_stage`) first. No new command exists; use the
+existing ones:
+
+- `parked`: `cw dev-queue requeue <T> --client <C>`. `cw dev-queue unblock`
+  does not apply (it only clears `SALVAGE_PARKED` sessions).
+- `requeued`: `cw dev-queue cancel <T> -c <C>`, then inspect the worktree by
+  hand, since a closed session cannot be reopened. Optionally
+  `cw dev-queue requeue <T> -c <C> --from-cancelled` to put it back.
+
+**B2 gate.** B2 may retire the boot sweep once the marker exists,
+`completed_at` is set, and `unresolved` is empty. A completed marker makes
+every later run a no-op that prints `already completed at <ts>`.
+
 ### Requeue at a different stage (`--stage` / `--regress`)
 
 `cw dev-queue requeue` defaults to re-running the ticket's **current** stage.
