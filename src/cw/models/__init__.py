@@ -9,6 +9,9 @@ each submodule only imports from those above it (no cycles):
 - ``events`` — ``OrchestratorEvent``, ``PrState``, ``WatchedPr``.
 - ``focus`` — ``FocusEntry`` (the ``cw focus`` session pointer, #1644). Also a
   DAG root: imports nothing else in the package.
+- ``codex_legacy_recovery`` — ``CodexLegacyRecoveryMarker`` and its entry
+  models and enums, the ``cw codex migrate-legacy`` run record (#2389).
+  Depends only on ``enums``.
 - ``tasks`` — ``TicketTask``, ``DispatchPlan``, ``DevQueueStore``, the shared
   recipe-key validators, ``DEV_QUEUE_SCHEMA_VERSION``, ``DEFAULT_LANE``, and
   the ``PLAN_*_FINGERPRINT_KEY`` wire-key constants (#2102).
@@ -31,11 +34,20 @@ every ``from cw.models import X`` import site keeps working unchanged.
 from __future__ import annotations
 
 from cw.models.client import DEFAULT_AUTO_PURPOSES, ClientConfig
+from cw.models.codex_legacy_recovery import (
+    CODEX_LEGACY_RECOVERY_SCHEMA_VERSION,
+    CodexLegacyDisposition,
+    CodexLegacyRecoveryMarker,
+    LegacyRecoveryStatus,
+    Outcome,
+    UnresolvedEntry,
+)
 from cw.models.enums import (
     OCCUPIED_LANE_STATUSES,
     TERMINAL_QUEUE_STATUSES,
     TERMINAL_SESSION_STATUSES,
     WORKER_PURPOSES,
+    CodexHarvestOutcome,
     CompletionReason,
     DispatchSkipReason,
     LastResultSource,
@@ -128,6 +140,7 @@ __all__ = [
     "BASH_TOOL_NAME",
     "CLAUDE_NATIVE_BACKEND",
     "CODEX_BACKEND",
+    "CODEX_LEGACY_RECOVERY_SCHEMA_VERSION",
     "CONTEXT_JSON_RELATIVE_PATH",
     "CW_STATE_SCHEMA_VERSION",
     "DEFAULT_AUTO_PURPOSES",
@@ -163,6 +176,9 @@ __all__ = [
     "_USAGE_LIMIT_BACKOFF_SECONDS",
     "ClientConcurrencyOverride",
     "ClientConfig",
+    "CodexHarvestOutcome",
+    "CodexLegacyDisposition",
+    "CodexLegacyRecoveryMarker",
     "CompletionReason",
     "ConcurrencyOverrides",
     "CwState",
@@ -175,6 +191,7 @@ __all__ = [
     "LaneConcurrencyOverride",
     "LaneConfig",
     "LastResultSource",
+    "LegacyRecoveryStatus",
     "LivenessBucket",
     "LocalLivenessBackend",
     "LocalLivenessHandle",
@@ -183,6 +200,7 @@ __all__ = [
     "OrchestratorConfig",
     "OrchestratorEvent",
     "OrchestratorEventType",
+    "Outcome",
     "ParkCommentMarker",
     "PendingFixDispatch",
     "PrState",
@@ -199,6 +217,7 @@ __all__ = [
     "StageExecutorConfig",
     "StagePipelineConfig",
     "TicketTask",
+    "UnresolvedEntry",
     "UsageLimitAct",
     "WatchedPr",
     "_validate_gate_recipe_keys",

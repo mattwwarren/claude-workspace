@@ -2246,7 +2246,8 @@ class TestPackageExportCompleteness:
     = 63, plus #2205's ``MUST_FIX_OVERRIDE_KEY`` and ``MustFixOverride`` = 65,
     plus #2369's ``LocalLivenessBackend`` = 66, plus #2470's
     ``WORKER_TMPDIR_RELATIVE_PATH`` and two ``DEFAULT_DISK_PRESSURE_MIN_FREE_
-    INODE*`` defaults = 69) — hardcoded here, NOT
+    INODE*`` defaults = 69, plus #2389's ``CodexHarvestOutcome`` and the six
+    ``codex_legacy_recovery`` marker names = 76) — hardcoded here, NOT
     re-derived from the package, so a dropped or renamed export is a
     falsifiable failure rather than a tautology. A deliberate addition updates
     this set in the same commit.
@@ -2262,10 +2263,14 @@ class TestPackageExportCompleteness:
             "BASH_TOOL_NAME",
             "CLAUDE_NATIVE_BACKEND",
             "CODEX_BACKEND",
+            "CODEX_LEGACY_RECOVERY_SCHEMA_VERSION",
             "CONTEXT_JSON_RELATIVE_PATH",
             "CW_STATE_SCHEMA_VERSION",
             "ClientConcurrencyOverride",
             "ClientConfig",
+            "CodexHarvestOutcome",
+            "CodexLegacyDisposition",
+            "CodexLegacyRecoveryMarker",
             "CompletionReason",
             "ConcurrencyOverrides",
             "CwState",
@@ -2292,6 +2297,7 @@ class TestPackageExportCompleteness:
             "LaneConcurrencyOverride",
             "LaneConfig",
             "LastResultSource",
+            "LegacyRecoveryStatus",
             "LivenessBucket",
             "LocalLivenessBackend",
             "LocalLivenessHandle",
@@ -2301,6 +2307,7 @@ class TestPackageExportCompleteness:
             "OrchestratorConfig",
             "OrchestratorEvent",
             "OrchestratorEventType",
+            "Outcome",
             "PARK_COMMENT_MARKER_KEY",
             "PARK_ON_ABANDONED_EXIT_KEY",
             "ParkCommentMarker",
@@ -2327,6 +2334,7 @@ class TestPackageExportCompleteness:
             "TERMINAL_QUEUE_STATUSES",
             "TERMINAL_SESSION_STATUSES",
             "TicketTask",
+            "UnresolvedEntry",
             "UsageLimitAct",
             "WORKER_PURPOSES",
             "WORKER_TMPDIR_RELATIVE_PATH",
