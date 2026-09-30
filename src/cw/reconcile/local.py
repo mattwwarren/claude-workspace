@@ -21,9 +21,17 @@ auto``, codex fix loop off, worktree clean apart from the review verdict, HEAD
 unmoved since the review's baseline), all evaluated so the audit event records
 each one. All four pass → the task is requeued; any one fails → it is parked.
 Either way the session closes ``COMPLETED``/``CRASHED``, only after its
-``SESSION_COMPLETED`` audit event is recorded. The boot pass's live-writer
-process scan is not repeated here: the recycled-PID guard has already proven
-the codex process dead.
+``SESSION_COMPLETED`` audit event is recorded. The sweep does not repeat the
+boot pass's live-writer process scan: the recycled-PID guard has already
+proven the codex process dead.
+
+``act_on_codex_harvest_candidate`` has a second caller,
+``cw.codex_legacy_recovery`` (``cw codex migrate-legacy``, RFC 0014 B1,
+#2389). A legacy session carries no liveness handle, so that caller runs the
+boot pass's live-writer scan itself before acting, passes no handle, and
+passes a ``legacy_reason`` that marks the audit event as a legacy recovery.
+The act helper returns a :class:`CodexHarvestOutcome` so that caller never
+re-derives what happened from state.
 """
 
 from __future__ import annotations
@@ -45,6 +53,7 @@ from cw.local_runner import (
 from cw.models import (
     CODEX_BACKEND,
     DEFAULT_LANE,
+    CodexHarvestOutcome,
     CompletionReason,
     LastResultSource,
     OrchestratorEventType,
@@ -271,8 +280,10 @@ def _evaluate_codex_clean_requeue_gate(
 
     Reuses the boot pass's primitives unchanged but, unlike its short-
     circuiting ``_gate_clean_requeue``, evaluates every check so the audit
-    event can report each result. No live-writer scan: the caller already
-    proved the process dead through the recycled-PID guard.
+    event can report each result. No live-writer scan: the harvest sweep
+    already proved the process dead through the recycled-PID guard, and the
+    legacy caller (``cw.codex_legacy_recovery``) runs
+    ``codex_boot.live_writer_park`` before it gets here.
     """
     auto = _resolve_task_policy(task.client, task.lane, clients, config) is (
         ReapPolicy.AUTO
@@ -300,9 +311,11 @@ def _evaluate_codex_clean_requeue_gate(
 
 def _codex_recovery_audit_payload(
     session: Session,
-    handle: LocalLivenessHandle,
+    handle: LocalLivenessHandle | None,
     task: TicketTask,
     gate: _CodexGateResult,
+    *,
+    legacy_reason: str | None = None,
 ) -> dict[str, object]:
     """SESSION_COMPLETED payload for a dead codex process this sweep closes.
 
@@ -311,8 +324,14 @@ def _codex_recovery_audit_payload(
     gate check, and the PID/start-time the recycled-PID guard judged dead.
     ``crashed: True`` also keeps the dispatch consumer from completing the
     task off this event.
+
+    *legacy_reason* marks a legacy recovery (``cw codex migrate-legacy``,
+    #2389): it replaces ``reason``, the gate's own reason moves to
+    ``detail`` (the ``_close_audit_payload`` field), and ``legacy: True`` is
+    added. A legacy session has no liveness handle, so ``pid`` and
+    ``start_time_ns`` are None. Without it the payload is unchanged.
     """
-    return {
+    payload: dict[str, object] = {
         "session_id": session.id,
         "session_name": session.name,
         "ticket_id": task.ticket_id,
@@ -329,15 +348,21 @@ def _codex_recovery_audit_payload(
         ),
         "reason": gate.reason,
         "gate_checks": dict(gate.checks),
-        "pid": handle.pid,
-        "start_time_ns": handle.start_time_ns,
+        "pid": handle.pid if handle is not None else None,
+        "start_time_ns": handle.start_time_ns if handle is not None else None,
     }
+    if legacy_reason is not None:
+        payload["reason"] = legacy_reason
+        payload["legacy"] = True
+        payload["detail"] = gate.reason
+    return payload
 
 
-def _requeue_codex_harvest_orphan(session: Session, task: TicketTask) -> None:
+def _requeue_codex_harvest_orphan(session: Session, task: TicketTask) -> bool:
     """Revert the task to PENDING; report it only if the revert happened.
 
     Payload mirrors ``codex_boot._requeue_clean_orphan`` field for field.
+    Returns whether the revert happened.
     """
     # Deferred for the import-cycle reason codex_boot documents.
     from cw.dispatch.claim import _revert_claimed_task_to_pending
@@ -352,7 +377,7 @@ def _requeue_codex_harvest_orphan(session: Session, task: TicketTask) -> None:
             task.ticket_id,
             session.id,
         )
-        return
+        return False
     record_event(
         OrchestratorEventType.TICKET_REQUEUED,
         {
@@ -365,12 +390,13 @@ def _requeue_codex_harvest_orphan(session: Session, task: TicketTask) -> None:
         },
         correlation_id=task.ticket_id,
     )
+    return True
 
 
-def _act_on_codex_harvest_candidate(
+def act_on_codex_harvest_candidate(
     state: CwState,
     session: Session,
-    handle: LocalLivenessHandle,
+    handle: LocalLivenessHandle | None,
     task: TicketTask,
     client: ClientConfig,
     clients: dict[str, ClientConfig],
@@ -378,22 +404,33 @@ def _act_on_codex_harvest_candidate(
     *,
     worktree: Path,
     now: datetime,
-) -> None:
+    legacy_reason: str | None = None,
+) -> CodexHarvestOutcome:
     """Gate, audit, close, then requeue or park one dead codex process.
 
     Audit before effect (``codex_boot._close_session_audited``'s ordering): a
-    failed audit write transitions nothing, so the next tick re-detects the
-    same dead PID and retries. Session before task, the boot pass's
-    crash-recoverable order: a closed session whose task is still RUNNING is
-    picked up by reconcile's ``revert_completed_silent_tasks`` backstop. The
-    task transition re-verifies ``expected_session_id`` under the dev-queue
-    lock, so a row re-claimed since the caller's snapshot is left alone.
+    failed audit write transitions nothing (``AUDIT_FAILED``), so the next
+    tick re-detects the same dead PID and retries. Session before task, the
+    boot pass's crash-recoverable order: a closed session whose task is still
+    RUNNING is picked up by reconcile's ``revert_completed_silent_tasks``
+    backstop. The task transition re-verifies ``expected_session_id`` under
+    the dev-queue lock, so a row re-claimed since the caller's snapshot is
+    left alone and reported as ``TRANSITION_LOST``.
+
+    Mutates *session* and persists the caller's *state* with ``save_state``,
+    which takes no lock, and never re-reads the session: the caller must hold
+    ``sessions_lock`` across the call. An ``OSError`` from that write or from
+    a task transition propagates. *handle* is None and *legacy_reason* set
+    only for ``cw.codex_legacy_recovery`` (see
+    :func:`_codex_recovery_audit_payload`).
     """
     gate = _evaluate_codex_clean_requeue_gate(worktree, task, client, clients, config)
     try:
         record_event(
             OrchestratorEventType.SESSION_COMPLETED,
-            _codex_recovery_audit_payload(session, handle, task, gate),
+            _codex_recovery_audit_payload(
+                session, handle, task, gate, legacy_reason=legacy_reason
+            ),
             correlation_id=task.ticket_id,
         )
     except OSError:
@@ -404,7 +441,7 @@ def _act_on_codex_harvest_candidate(
             session.client,
             task.ticket_id,
         )
-        return
+        return CodexHarvestOutcome.AUDIT_FAILED
     if not gate.should_requeue:
         # Persist the task disposition with the session closure.  If this
         # process dies before the park helper runs, the completed-session
@@ -417,18 +454,28 @@ def _act_on_codex_harvest_candidate(
     session.completed_at = now
     save_state(state)
     if gate.should_requeue:
-        _requeue_codex_harvest_orphan(session, task)
-        return
+        if _requeue_codex_harvest_orphan(session, task):
+            return CodexHarvestOutcome.REQUEUED
+        return CodexHarvestOutcome.TRANSITION_LOST
     # Deferred for the import-cycle reason codex_boot documents.
     from cw.dispatch.claim import _park_running_task_blocked_on_user
 
-    _park_running_task_blocked_on_user(
+    if not _park_running_task_blocked_on_user(
         ticket_id=task.ticket_id,
         client_name=session.client,
         expected_session_id=session.id,
         disposition=CODEX_HARVEST_ORPHANED_DISPOSITION,
         breadcrumbs=f"{_CODEX_HARVEST_BREADCRUMBS} ({gate.reason}).",
-    )
+    ):
+        _log.warning(
+            "reconcile.local: %s/%s no longer belongs to codex session %s;"
+            " park skipped",
+            session.client,
+            task.ticket_id,
+            session.id,
+        )
+        return CodexHarvestOutcome.TRANSITION_LOST
+    return CodexHarvestOutcome.PARKED
 
 
 def _harvest_codex_candidate(
@@ -443,13 +490,14 @@ def _harvest_codex_candidate(
     clients: dict[str, ClientConfig],
     config: OrchestratorConfig,
     now: datetime,
-) -> None:
+) -> CodexHarvestOutcome:
     """Gate a dead codex process on its real dev-queue row and client config.
 
     *real_task* is the row looked up before the sweep's synthetic-task
     fallback: a synthetic task carries no lane, baseline, or claim to gate or
     transition, so a missing row (or one belonging to another client) leaves
-    the session untouched for a later tick rather than guessing.
+    the session untouched for a later tick rather than guessing (``NO_ROW``).
+    Otherwise returns the act helper's outcome.
     """
     if real_task is None or client is None or real_task.client != session.client:
         _log.warning(
@@ -459,8 +507,8 @@ def _harvest_codex_candidate(
             session.client,
             candidate.ticket_id,
         )
-        return
-    _act_on_codex_harvest_candidate(
+        return CodexHarvestOutcome.NO_ROW
+    return act_on_codex_harvest_candidate(
         state,
         session,
         handle,
@@ -540,6 +588,9 @@ def _act_on_local_harvest_candidates(
             )
         if session.local_liveness.backend == CODEX_BACKEND:
             # Never the synthetic `task` above: only a real row can be gated.
+            # The outcome is discarded: every non-final one (AUDIT_FAILED,
+            # NO_ROW) leaves the session ACTIVE, so the next tick re-detects
+            # it; only cw.codex_legacy_recovery needs to tell them apart.
             _harvest_codex_candidate(
                 state,
                 session,
