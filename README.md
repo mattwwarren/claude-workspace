@@ -345,7 +345,7 @@ clients:
     workspace_path: /path/to/repo
     default_branch: main
     auto_purposes: [impl, idea, debt]
-    worker_model: claude-sonnet-4-6   # pin model for autonomous workers
+    worker_model: claude-sonnet-5-5   # pin model for autonomous workers
     lanes:
       - name: default
         max_parallel: 2

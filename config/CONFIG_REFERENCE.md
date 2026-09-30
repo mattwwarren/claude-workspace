@@ -169,7 +169,7 @@ clients:
     default_branch: main
     # Workers run on Sonnet (cheaper than Opus) for auto-dev tasks.
     # Interactive `cw start thrifty-project` still uses your default model.
-    worker_model: claude-sonnet-4-6-20251015
+    worker_model: claude-sonnet-5-5
 
   exploratory-project:
     workspace_path: /home/user/projects/exploratory-project
@@ -208,8 +208,8 @@ clients:
     pipeline:
       executors:
         plan:   { backend: claude-native, model: claude-opus-4-8 }
-        impl:   { backend: claude-native, model: claude-sonnet-4-6-20251015 }
-        review: { backend: claude-native, model: claude-sonnet-4-6-20251015 }
+        impl:   { backend: claude-native, model: claude-sonnet-5-5 }
+        review: { backend: claude-native, model: claude-sonnet-5-5 }
 ```
 
 `backend` defaults to `claude-native` and can be omitted.
@@ -350,7 +350,7 @@ silently fall back to the client default.
 ### Recommended Per-Stage Defaults
 
 Recommended models per stage:
-- **plan/impl/review**: `claude-sonnet-4-6`
+- **plan/impl/review**: `claude-sonnet-5-5`
 - **finalize**: `claude-haiku-4-5-20251001`
 
 **Cost Rationale**:
