@@ -629,8 +629,8 @@ class TestProbe:
             "error_code": "invalid_model",
         }
 
-    @pytest.mark.parametrize("model", [".leading-model", "_leading-model"])
-    def test_model_pattern_accepts_dot_or_underscore_prefix(
+    @pytest.mark.parametrize("model", [".leading-model", "_leading-model", "x" * 64])
+    def test_model_pattern_accepts_prefixes_and_maximum_length(
         self, monkeypatch: pytest.MonkeyPatch, model: str
     ) -> None:
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
@@ -886,7 +886,7 @@ class TestProbe:
 
         assert probe.PROCESS_TIMEOUT_SECONDS == 120
         assert probe.PROCESS_POLL_INTERVAL_SECONDS == 0.25
-        assert outcome == (-9, True, False, False)
+        assert outcome == (-9, probe.ProcessStatus.TIMED_OUT)
         process_waits = [
             timeout for timeout in process.wait_timeouts[:-1] if timeout is not None
         ]
@@ -919,7 +919,7 @@ class TestProbe:
             cast("subprocess.Popen[bytes]", process), timed_out=True
         )
 
-        assert outcome == (-9, True, False, False)
+        assert outcome == (-9, probe.ProcessStatus.TIMED_OUT)
         assert process.wait_attempts == 2
         assert process.kill_attempts == 2
 
@@ -950,8 +950,44 @@ class TestProbe:
             env={},
             stage=probe.ProbeStage.CREATE,
         )
-        assert attempt.outcome.timed_out
-        assert attempt.outcome.cleanup_failed
+        assert attempt.outcome.status is probe.ProcessStatus.CLEANUP_FAILED
+        assert attempt.error_code == probe.ERROR_INTERNAL_ERROR
+
+    def test_post_launch_wait_error_maps_to_internal_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class WaitFailsOnceProcess:
+            pid = None
+            stdout = io.BytesIO()
+
+            def __init__(self) -> None:
+                self.wait_calls = 0
+                self.killed = False
+
+            def wait(self, timeout: float | None = None) -> int:
+                self.wait_calls += 1
+                if self.wait_calls == 1:
+                    message = "private wait failure"
+                    raise OSError(message)
+                assert self.killed
+                assert timeout == probe.PROCESS_CLEANUP_TIMEOUT_SECONDS
+                return -9
+
+            def kill(self) -> None:
+                self.killed = True
+
+        process = WaitFailsOnceProcess()
+        monkeypatch.setattr(probe, "_launch_process", lambda *_args, **_kwargs: process)
+        attempt = probe._attempt(
+            ["codex", "exec"],
+            cwd=Path.cwd(),
+            env={},
+            stage=probe.ProbeStage.CREATE,
+        )
+
+        assert process.wait_calls == 2
+        assert attempt.outcome.status is probe.ProcessStatus.WAIT_FAILED
+        assert not attempt.outcome.unavailable
         assert attempt.error_code == probe.ERROR_INTERNAL_ERROR
 
     @pytest.mark.parametrize(
@@ -961,11 +997,18 @@ class TestProbe:
     def test_disposable_git_repo_is_initialized_and_removed(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
         create_code: int,
         expected_status: str,
     ) -> None:
         calls: list[dict[str, object]] = []
         temporary_roots: list[Path] = []
+        codex_home = tmp_path / "codex-state"
+        sessions_directory = codex_home / probe.CODEX_SESSION_ARTIFACT_DIR
+        sessions_directory.mkdir(parents=True)
+        sentinel = sessions_directory / "existing-session.jsonl"
+        sentinel.write_text("existing session must remain", encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
         real_temporary_directory = tempfile.TemporaryDirectory
 
         def recording_temporary_directory(
@@ -990,6 +1033,9 @@ class TestProbe:
         assert result["status"] == expected_status
         assert len(temporary_roots) == 1
         assert not temporary_roots[0].exists()
+        assert codex_home.is_dir()
+        assert sessions_directory.is_dir()
+        assert sentinel.read_text(encoding="utf-8") == "existing session must remain"
         git_init_calls = [
             call for call in calls if call["argv"] == ["git", "init", "--quiet"]
         ]
@@ -1289,20 +1335,47 @@ class TestProbe:
             monkeypatch.setattr(probe, "PROCESS_TIMEOUT_SECONDS", 0.01)
         set_runner(monkeypatch, fake_run(calls, options))
         result = probe.run_probe(MODEL)
+        assert set(result) == {
+            "status",
+            "cli_version",
+            "model",
+            "session_id",
+            "create",
+            "resume",
+            "error_code",
+        }
         assert result["status"] == "failed"
+        assert result["cli_version"] == VERSION
+        assert result["model"] == MODEL
         assert result["error_code"] == error
         assert result["resume"] is None
         assert "TimeoutExpired" not in json.dumps(result)
         assert UNAVAILABLE_MESSAGE not in json.dumps(result)
-        if options.unavailable_stage == "create":
-            assert result["create"] is not None
-            assert result["create"]["exit_code"] is None
+        if options.timeout_stage == "git" or options.git_code != 0:
+            assert result["session_id"] is None
+            assert result["create"] is None
+        else:
+            expected_exit_code: int | None = options.create_code
+            expected_stdout = options.create_stdout
+            if options.unavailable_stage == "create":
+                expected_exit_code = None
+                expected_stdout = ""
+            elif options.timeout_stage == "create":
+                expected_exit_code = -9
+                expected_stdout = ""
+            parsed_create = probe._parse_stream(expected_stdout)
+            assert result["session_id"] == parsed_create.session_id
+            assert result["create"] == {
+                "exit_code": expected_exit_code,
+                "terminal_event": parsed_create.terminal_event,
+            }
 
     @pytest.mark.parametrize(
         ("capture_failure", "expected_error"),
         [
             ("reader_failed", "internal_error"),
             ("cleanup_failed", "internal_error"),
+            ("wait_failed", "internal_error"),
             ("output_exceeded_limit", "repo_setup_failed"),
             ("reader_incomplete", "repo_setup_failed"),
         ],
@@ -1321,16 +1394,23 @@ class TestProbe:
             del cwd, env
             calls.append(argv)
             if argv == ["codex", "--version"]:
-                return probe.ProcessOutcome(0, f"{VERSION}\n", False)
+                return probe.ProcessOutcome(
+                    0, f"{VERSION}\n", probe.ProcessStatus.EXITED
+                )
             if argv == ["git", "init", "--quiet"]:
                 return probe.ProcessOutcome(
                     0,
                     "",
-                    False,
+                    (
+                        probe.ProcessStatus.CLEANUP_FAILED
+                        if capture_failure == "cleanup_failed"
+                        else probe.ProcessStatus.WAIT_FAILED
+                        if capture_failure == "wait_failed"
+                        else probe.ProcessStatus.EXITED
+                    ),
                     output_exceeded_limit=capture_failure == "output_exceeded_limit",
                     reader_incomplete=capture_failure == "reader_incomplete",
                     reader_failed=capture_failure == "reader_failed",
-                    cleanup_failed=capture_failure == "cleanup_failed",
                 )
             pytest.fail(f"unexpected process launch: {argv!r}")
 
@@ -1433,15 +1513,16 @@ class TestProbe:
         assert probe.run_probe(MODEL)["error_code"] == error
         assert calls == [["codex", "--version"]]
 
-    def test_version_cleanup_failure_is_internal_error(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "status", [probe.ProcessStatus.WAIT_FAILED, probe.ProcessStatus.CLEANUP_FAILED]
+    )
+    def test_version_supervision_failures_are_internal_errors(
+        self, monkeypatch: pytest.MonkeyPatch, status: probe.ProcessStatus
     ) -> None:
         monkeypatch.setattr(
             probe,
             "_run_process",
-            lambda *_args, **_kwargs: probe.ProcessOutcome(
-                None, "", True, cleanup_failed=True
-            ),
+            lambda *_args, **_kwargs: probe.ProcessOutcome(None, "", status),
         )
         assert probe._version_result(cwd=Path.cwd(), env={}) == probe._VersionFailure(
             probe.ERROR_INTERNAL_ERROR
@@ -1849,6 +1930,52 @@ class TestProbe:
         assert not temporary_roots[0].exists()
         assert signal.getsignal(signal.SIGINT) is previous_handler
 
+    @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+    def test_interrupt_during_temporary_directory_allocation_cleans_root(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        signum: signal.Signals,
+    ) -> None:
+        temporary_roots: list[Path] = []
+        previous_handlers = {
+            item: signal.getsignal(item) for item in (signal.SIGINT, signal.SIGTERM)
+        }
+
+        class InterruptingTemporaryDirectory:
+            def __init__(self, *, prefix: str, **kwargs: str) -> None:
+                assert set(kwargs) == {"dir"}
+                root = Path(kwargs["dir"]) / f"{prefix}test"
+                root.mkdir()
+                self.name = str(root)
+                temporary_roots.append(root)
+                signal.raise_signal(signum)
+
+            def cleanup(self) -> None:
+                Path(self.name).rmdir()
+
+        monkeypatch.setattr(probe.Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        monkeypatch.setattr(
+            "scripts.probe_codex_live_session.tempfile.TemporaryDirectory",
+            InterruptingTemporaryDirectory,
+        )
+        monkeypatch.setattr(
+            probe,
+            "_run_process",
+            lambda *_args, **_kwargs: pytest.fail("signal must precede subprocesses"),
+        )
+
+        result = probe.run_probe(MODEL)
+
+        assert result["status"] == "failed"
+        assert result["error_code"] == "repo_setup_failed"
+        assert len(temporary_roots) == 1
+        assert not temporary_roots[0].exists()
+        assert {
+            item: signal.getsignal(item) for item in (signal.SIGINT, signal.SIGTERM)
+        } == previous_handlers
+
     def test_failed_cli_probe_exits_nonzero_with_one_sanitized_json_line(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -2003,6 +2130,44 @@ def test_main_maps_parent_signals_to_sanitized_json(
     assert signal.getsignal(signum) is previous_handler
 
 
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+def test_main_signal_preserves_known_session_progress(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    signum: signal.Signals,
+) -> None:
+    create_summary: probe.CreateSummary = {
+        "exit_code": 0,
+        "terminal_event": "turn.completed",
+    }
+
+    def interrupt_after_create(_model: str | None) -> probe.SmokeResult:
+        probe._record_unhandled_exception_progress(
+            cli_version=VERSION,
+            model=MODEL,
+            session_id=SESSION,
+            create=create_summary,
+        )
+        signal.raise_signal(signum)
+        pytest.fail("the installed signal handler should interrupt")
+
+    monkeypatch.setattr(probe, "run_probe", interrupt_after_create)
+
+    assert probe.main(["--model", MODEL]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.count("\n") == 1
+    assert json.loads(captured.out) == {
+        "status": "failed",
+        "cli_version": VERSION,
+        "model": MODEL,
+        "session_id": SESSION,
+        "create": create_summary,
+        "resume": None,
+        "error_code": "repo_setup_failed",
+    }
+
+
 def test_main_does_not_mask_unexpected_exception(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -2060,11 +2225,12 @@ def test_entrypoint_converts_unhandled_exception_to_one_json_result() -> None:
             "module._run_disposable = lambda *, model: module._run_session(",
             "    worktree=module.Path.cwd(), codex_env={}, git_env={},",
             "    cli_version='codex-cli 1.2.3', model=model)",
-            "module._run_process = lambda *a, **k: module.ProcessOutcome(0, '', False)",
+            "module._run_process = lambda *a, **k: module.ProcessOutcome(",
+            "    0, '', module.ProcessStatus.EXITED)",
             "def attempt(argv, *, cwd, env, stage):",
             "    if stage == 'create':",
             "        return module._Attempt(",
-            "            module.ProcessOutcome(0, '', False),",
+            "            module.ProcessOutcome(0, '', module.ProcessStatus.EXITED),",
             "            module.ParsedStream('thread.smoke-2463',",
             "                module.TURN_COMPLETED_EVENT, None), None)",
             f"    raise RuntimeError({exception_marker!r})",
