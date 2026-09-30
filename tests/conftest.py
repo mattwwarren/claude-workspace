@@ -1422,6 +1422,13 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     monkeypatch.setattr("cw.config.FOCUS_FILE", state_dir / "focus.json")
     monkeypatch.setattr("cw.config.FOCUS_LOCK", state_dir / ".focus.lock")
+    monkeypatch.setattr(
+        "cw.config.CODEX_LEGACY_RECOVERY_FILE", state_dir / "codex_legacy_recovery.json"
+    )
+    monkeypatch.setattr(
+        "cw.config.CODEX_LEGACY_RECOVERY_LOCK",
+        state_dir / ".codex_legacy_recovery.lock",
+    )
 
     # Redirect the native-daemon roster path so tests don't read the
     # user's real ~/.claude/daemon/roster.json. RealNativeDaemonClient

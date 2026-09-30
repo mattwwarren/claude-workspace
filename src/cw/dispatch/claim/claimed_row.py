@@ -223,8 +223,13 @@ def _park_running_task_blocked_on_user(
     unproductive: bool = True,
     created_at: datetime | None = None,
     codex_orphan_session_id: str | None = None,
-) -> None:
+) -> bool:
     """Move a still-RUNNING claimed task to BLOCKED_ON_USER, clearing session_id.
+
+    Returns whether a row was actually parked: ``False`` when no RUNNING row
+    matched, including an ``expected_session_id``/``created_at`` mismatch.
+    ``cw.reconcile.local``'s codex act helper reads it so a lost park is
+    never reported as parked (#2389); every other caller ignores it.
 
     ``unproductive`` is forwarded to :func:`transition_task_status` (#2114).
     The two pre-spawn callers (the dirty-worktree guard and the codex
@@ -316,6 +321,7 @@ def _park_running_task_blocked_on_user(
             if codex_orphan_session_id is not None:
                 stored_task.codex_orphan_session_id = codex_orphan_session_id
         save_dev_queue(store)
+    return stored_task is not None
 
 
 def _stamp_spawn_success(

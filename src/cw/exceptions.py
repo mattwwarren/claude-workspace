@@ -425,6 +425,20 @@ class LaneNotFoundError(CwError):
     __slots__ = ()
 
 
+class CodexLegacyRecoveryMarkerError(CwError):
+    """The ``cw codex migrate-legacy`` marker file is corrupt (#2389).
+
+    Raised by :func:`cw.codex_legacy_recovery.load_codex_legacy_marker` when
+    the marker is not valid JSON or fails its schema. A hard error on
+    purpose: reading a corrupt marker as "absent" would re-run recovery over
+    sessions it already acted on, and reading it as "complete" would let B2
+    retire the boot sweep with legacy sessions still live. The message names
+    the file so the operator can inspect it.
+    """
+
+    __slots__ = ()
+
+
 class ConfigValidationError(CwError):
     """A config-facing Pydantic model (``ClientConfig``, ``OrchestratorConfig``,
     etc.) failed validation while loading ``clients.yaml`` or

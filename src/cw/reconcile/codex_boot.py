@@ -78,6 +78,12 @@ codex session whose recorded PID has died. That branch skips the live-writer
 scan (the recycled-PID guard already proved the process dead) and evaluates
 every gate check rather than short-circuiting, so its audit event can report
 each one. Changing these helpers' contracts changes both consumers.
+
+``cw.codex_legacy_recovery`` (``cw codex migrate-legacy``, RFC 0014 B1,
+#2389) is a third consumer, through the public ``live_writer_park`` and
+``stale_snapshot_reason``: a legacy session carries no PID to prove dead, so
+it runs this pass's live-writer scan first, and it revalidates its unlocked
+snapshot with the same staleness check before acting.
 """
 
 from __future__ import annotations
@@ -352,7 +358,7 @@ def _format_pids(pids: Sequence[int]) -> str:
     return ", ".join(f"pid {pid}" for pid in pids)
 
 
-def _live_writer_park(worktree: Path) -> _OrphanDisposition | None:
+def live_writer_park(worktree: Path) -> _OrphanDisposition | None:
     """Park while a codex writer is, or may be, alive in *worktree*.
 
     ``None`` only when the scan affirmatively finds no writer. Nothing is ever
@@ -408,7 +414,7 @@ def _resolve_orphan_action(
         # path that is recorded but no longer on disk still gets its scan (see
         # _cwd_is_worktree).
         return _park_writer_may_be_live(_PARK_REASON_NO_WORKTREE_PATH)
-    live_writer = _live_writer_park(worktree)
+    live_writer = live_writer_park(worktree)
     if live_writer is not None:
         return live_writer
     policy = _resolve_task_policy(task.client, task.lane, clients, config)
@@ -544,7 +550,7 @@ def _row_still_bound(ticket_id: str, client_name: str, session_id: str) -> bool:
     )
 
 
-def _stale_snapshot_reason(
+def stale_snapshot_reason(
     session: Session, snapshot: Session, ticket_id: str
 ) -> str | None:
     """Why the locked record is no longer the orphan *snapshot* saw, or None.
@@ -592,7 +598,7 @@ def _close_or_propose_reap(
         session = next((s for s in state.sessions if s.id == snapshot.id), None)
         if session is None:
             return _leave_untouched(snapshot, ticket_id, _STALE_SESSION_GONE)
-        stale = _stale_snapshot_reason(session, snapshot, ticket_id)
+        stale = stale_snapshot_reason(session, snapshot, ticket_id)
         if stale is not None:
             return _leave_untouched(snapshot, ticket_id, stale)
         if disposition.close_session:

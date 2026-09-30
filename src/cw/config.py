@@ -92,6 +92,9 @@ CONCURRENCY_OVERRIDE_LOCK = STATE_DIR / ".concurrency_overrides.lock"
 # Claude Code session id; entries never expire and are never pruned.
 FOCUS_FILE = STATE_DIR / "focus.json"
 FOCUS_LOCK = STATE_DIR / ".focus.lock"
+# Run record and B2 gate for ``cw codex migrate-legacy`` (RFC 0014 B1, #2389).
+CODEX_LEGACY_RECOVERY_FILE = STATE_DIR / "codex_legacy_recovery.json"
+CODEX_LEGACY_RECOVERY_LOCK = STATE_DIR / ".codex_legacy_recovery.lock"
 # Process-lifetime singleton lock for the dispatch loop (#1362). A single
 # GLOBAL file (no --client keying): only one run_dispatch_loop may run at a
 # time against a given STATE_DIR.
@@ -216,6 +219,14 @@ def focus_file() -> Path:
 
 def focus_lock_file() -> Path:
     return FOCUS_LOCK
+
+
+def codex_legacy_recovery_file() -> Path:
+    return CODEX_LEGACY_RECOVERY_FILE
+
+
+def codex_legacy_recovery_lock_file() -> Path:
+    return CODEX_LEGACY_RECOVERY_LOCK
 
 
 def _under_pytest() -> bool:

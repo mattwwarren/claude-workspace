@@ -709,6 +709,29 @@ class ReapPolicy(StrEnum):
     AUTO = "auto"
 
 
+class CodexHarvestOutcome(StrEnum):
+    """What one codex gate-audit-close attempt did (RFC 0014 A1/B1, #2389).
+
+    Returned by ``cw.reconcile.local.act_on_codex_harvest_candidate`` and its
+    sweep wrapper so a caller never re-derives the result from state.
+
+    - ``REQUEUED``: the identity-checked revert happened and was reported.
+    - ``PARKED``: a RUNNING row still bound to the session was parked.
+    - ``AUDIT_FAILED``: the ``SESSION_COMPLETED`` audit write raised
+      ``OSError``; nothing was changed.
+    - ``NO_ROW``: the sweep wrapper found no matching row or client config;
+      the session is untouched.
+    - ``TRANSITION_LOST``: the session was closed, but its row no longer
+      belonged to it, so there was no revert or park to report.
+    """
+
+    REQUEUED = "requeued"
+    PARKED = "parked"
+    AUDIT_FAILED = "audit_failed"
+    NO_ROW = "no_row"
+    TRANSITION_LOST = "transition_lost"
+
+
 class ReasoningEffort(StrEnum):
     """Codex ``model_reasoning_effort`` levels a codex stage may pin.
 
