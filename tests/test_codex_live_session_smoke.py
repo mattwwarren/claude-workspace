@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -288,15 +289,31 @@ def process_is_running(pid: int) -> bool:
     proc_root = Path("/proc")
     if proc_root.is_dir():
         try:
-            (proc_root / str(pid) / "stat").stat()
+            process_stat = (proc_root / str(pid) / "stat").read_text(encoding="ascii")
         except FileNotFoundError:
-            return False
+            process_stat = ""
         except OSError:
-            return True
-        # A zombie has exited but is not yet reaped; require /proc/<pid> to go
-        # away instead of treating state Z as complete cleanup.
-        return True
+            process_stat = "?"
+        return _proc_stat_is_running(process_stat)
     return True
+
+
+def test_proc_stat_liveness_treats_zombies_as_exited() -> None:
+    assert not _proc_stat_is_running("123 (codex smoke (reader)) Z 1 2 3")
+    assert _proc_stat_is_running("123 (codex smoke (reader)) S 1 2 3")
+    assert not _proc_stat_is_running("")
+    assert _proc_stat_is_running("?")
+
+
+def _proc_stat_is_running(process_stat: str) -> bool:
+    if process_stat == "":
+        return False
+    if process_stat == "?":
+        return True
+    # The command name is parenthesized and may itself contain spaces or
+    # parentheses; the state is the first field after the final `)`.
+    fields = process_stat[process_stat.rfind(")") + 1 :].split()
+    return not (fields and fields[0] in {"Z", "X"})
 
 
 def wait_for_process_exit(pid: int, timeout: float = 2.0) -> bool:
@@ -692,7 +709,10 @@ class TestProbe:
         checkout = probe._checkout_root()
         for call in calls:
             assert_isolated_child_environment(call, checkout, configured_codex_home)
-        assert wait_timeouts == [probe.PROCESS_TIMEOUT_SECONDS] * len(calls)
+        assert len(wait_timeouts) == len(calls)
+        assert all(
+            timeout is not None and 0 < timeout <= 0.05 for timeout in wait_timeouts
+        )
         forbidden = {
             "--last",
             "--ephemeral",
@@ -987,6 +1007,8 @@ class TestProbe:
     ) -> None:
         calls: list[dict[str, object]] = []
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        if options.timeout_stage is not None:
+            monkeypatch.setattr(probe, "PROCESS_TIMEOUT_SECONDS", 0.01)
         set_runner(monkeypatch, fake_run(calls, options))
         result = probe.run_probe(MODEL)
         assert result["status"] == "failed"
@@ -1089,6 +1111,8 @@ class TestProbe:
     ) -> None:
         calls: list[dict[str, object]] = []
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        if options.timeout_stage is not None:
+            monkeypatch.setattr(probe, "PROCESS_TIMEOUT_SECONDS", 0.01)
         set_runner(monkeypatch, fake_run(calls, options))
         result = probe.run_probe(MODEL)
         assert result["status"] == "failed"
@@ -1161,6 +1185,7 @@ class TestProbe:
     def test_version_timeout_and_nonzero_are_unavailable(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        monkeypatch.setattr(probe, "PROCESS_TIMEOUT_SECONDS", 0.01)
         for code, timeout in [(9, False), (0, True)]:
 
             def run(
@@ -1276,35 +1301,33 @@ class TestProbe:
         assert result.stdout == "\ufffd"
 
     def test_unexpected_stdout_reader_error_is_sanitized_and_propagated(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         failure_marker = "private-reader-exception"
 
-        class BrokenStdout:
-            def read1(self, _size: int) -> bytes:
-                raise RuntimeError(failure_marker)
+        def fail_reader() -> None:
+            raise LookupError(failure_marker)
 
-        class FakeProcess:
-            stdout = BrokenStdout()
-            pid = 2463
-
-        monkeypatch.setattr(probe, "_kill_process_group", lambda _process: None)
-        capture = probe._OutputCapture(bytearray())
-        reader = probe._make_stdout_reader(
-            cast("subprocess.Popen[bytes]", FakeProcess()), capture
+        monkeypatch.setattr(probe, "_make_stdout_reader", lambda *_args: fail_reader)
+        monkeypatch.setattr(probe, "PROCESS_TIMEOUT_SECONDS", 5)
+        started = time.monotonic()
+        outcome = probe._run_process(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            cwd=tmp_path,
+            env=os.environ.copy(),
         )
-        reader.start()
-        reader.join(timeout=1)
-        assert not reader.is_alive()
-        assert capture.reader_failed
+        assert outcome.reader_failed
+        assert outcome.exit_code is not None
+        assert time.monotonic() - started < 3
         assert failure_marker not in capsys.readouterr().err
 
         monkeypatch.setattr(
             probe,
             "_run_process",
-            lambda *_args, **_kwargs: probe.ProcessOutcome(
-                0, "", False, reader_failed=True
-            ),
+            lambda *_args, **_kwargs: outcome,
         )
         with pytest.raises(
             RuntimeError, match="unexpected probe stdout reader failure"
@@ -1312,6 +1335,38 @@ class TestProbe:
             probe._attempt(
                 ["codex", "--version"], cwd=Path.cwd(), env={}, stage="create"
             )
+
+    def test_finished_parent_reader_error_still_kills_process_group(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class FakeProcess:
+            stdout = io.BytesIO()
+            pid = 2463
+
+        failure = LookupError("reader failure")
+        reader: Future[None] = Future()
+        reader.set_exception(failure)
+        capture = probe._OutputCapture(bytearray())
+        killed: list[object] = []
+        monkeypatch.setattr(probe, "_kill_process_group", killed.append)
+
+        assert probe._finish_stdout_capture(
+            cast("subprocess.Popen[bytes]", FakeProcess()), reader, capture
+        ) == ("", False)
+        assert capture.reader_failed
+        assert len(killed) == 1
+
+    def test_process_kill_failure_is_not_silenced(self) -> None:
+        failure_message = "kill denied"
+
+        class BrokenProcess:
+            pid = None
+
+            def kill(self) -> None:
+                raise PermissionError(failure_message)
+
+        with pytest.raises(PermissionError, match=failure_message):
+            probe._kill_process_group(cast("subprocess.Popen[bytes]", BrokenProcess()))
 
     @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
     def test_reader_shutdown_kills_descendant_holding_stdout(
@@ -1629,17 +1684,30 @@ def test_entrypoint_converts_unhandled_exception_to_one_json_result() -> None:
             "module = importlib.util.module_from_spec(spec)",
             "sys.modules[spec.name] = module",
             "spec.loader.exec_module(module)",
-            "def fail_main():",
+            "module._run_disposable = lambda *, model: module._run_session(",
+            "    worktree=module.Path.cwd(), codex_env={}, git_env={},",
+            "    cli_version='codex-cli 1.2.3', model=model)",
+            "module._run_process = lambda *a, **k: module.ProcessOutcome(0, '', False)",
+            "def attempt(argv, *, cwd, env, stage):",
+            "    if stage == 'create':",
+            "        return module._Attempt(",
+            "            module.ProcessOutcome(0, '', False),",
+            "            module.ParsedStream('thread.smoke-2463',",
+            "                module.TURN_COMPLETED_EVENT, None), None)",
             f"    raise RuntimeError({exception_marker!r})",
-            "module.main = fail_main",
+            "module._attempt = attempt",
+            "sys.argv = ['probe', '--model', 'gpt-5.6-luna']",
             "module._entrypoint()",
         ]
     )
+    child_env = os.environ.copy()
+    child_env["CW_CODEX_LIVE_SESSION_SMOKE"] = "1"
     completed_process = subprocess.run(
         [sys.executable, "-c", code, str(Path(probe.__file__))],
         capture_output=True,
         check=False,
         text=True,
+        env=child_env,
         timeout=5,
     )
     assert completed_process.returncode == 1
@@ -1648,10 +1716,10 @@ def test_entrypoint_converts_unhandled_exception_to_one_json_result() -> None:
     assert exception_marker not in completed_process.stdout
     assert json.loads(completed_process.stdout) == {
         "status": "failed",
-        "cli_version": None,
-        "model": None,
-        "session_id": None,
-        "create": None,
+        "cli_version": "codex-cli 1.2.3",
+        "model": MODEL,
+        "session_id": SESSION,
+        "create": {"exit_code": 0, "terminal_event": "turn.completed"},
         "resume": None,
         "error_code": "internal_error",
     }

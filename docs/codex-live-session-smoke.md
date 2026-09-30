@@ -30,13 +30,16 @@ Each subprocess has a 120-second timeout and runs in its own process group on
 POSIX. Timeout, output overflow, or a parent SIGINT/SIGTERM kills the group,
 including descendants that might otherwise keep stdout open. Parent-side
 exceptions also trigger process-group termination, stdout closure, bounded
-reader shutdown, and child reaping. An operator interrupt returns the
+reader waiting, and child reaping. Reader-worker exceptions are handed back to
+the process-waiting thread and become `internal_error`, without a worker-thread
+traceback. An operator interrupt returns the
 sanitized timeout result for an interrupted subprocess, or `repo_setup_failed`
 if interrupted outside a subprocess, instead of leaving Codex running or
 printing a traceback. Unexpected internal errors produce a sanitized
 `internal_error` result and a nonzero exit rather than being mislabeled as a
-setup failure. The stdout reader has a bounded shutdown wait, so it
-cannot defeat the process timeout. Stdout is read incrementally with a 1 MiB
+setup failure. After child exit, the stdout reader has a bounded drain window;
+the probe then terminates the process group and closes the pipe if capture is
+still incomplete. Stdout is read incrementally with a 1 MiB
 cap; exceeding it fails JSONL validation. Stderr is discarded, and no `-o`
 file is created. The parser reads the bounded JSONL stream line by line and
 releases it before starting the resume command. The first nonblank event must
@@ -106,7 +109,10 @@ and a failure uses exactly one of `invalid_model`, `version_unavailable`,
 `resume_invalid_thread_id`, `resume_duplicate_thread_started`,
 `resume_id_mismatch`, `resume_invalid_terminal`, or `cleanup_failed`.
 `internal_error` is reserved for an unexpected defect; expected operational
-failures retain their specific codes. A create/resume launch failure uses
+failures retain their specific codes. When known, it preserves the validated
+session ID and compact create/resume summaries so the operator can locate the
+session, without including transcripts, exception details, or credentials. A
+create/resume launch failure uses
 `cli_unavailable`; an oversized or unrecognized JSONL event uses the matching
 `*_malformed_jsonl` code. SIGINT or SIGTERM during a subprocess uses that
 command's timeout error code; an interrupt outside a subprocess uses

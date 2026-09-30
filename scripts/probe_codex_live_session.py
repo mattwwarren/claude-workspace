@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -34,7 +35,7 @@ FIXED_RESUME_PROMPT = (
 )
 PROCESS_TIMEOUT_SECONDS = 120
 PROCESS_CLEANUP_TIMEOUT_SECONDS = 1
-PROCESS_READER_JOIN_TIMEOUT_SECONDS = 1
+PROCESS_READER_WAIT_TIMEOUT_SECONDS = 1
 MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024
 PROCESS_OUTPUT_CHUNK_BYTES = 64 * 1024
 MAX_VERSION_LENGTH = 64
@@ -243,6 +244,10 @@ class _UnexpectedReaderError(RuntimeError):
         super().__init__("unexpected probe stdout reader failure")
 
 
+class _StdoutPipeUnavailableError(RuntimeError):
+    pass
+
+
 @dataclass
 class _StreamState:
     session_id: str | None = None
@@ -374,11 +379,11 @@ def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
     if os.name == "posix" and process.pid is not None:
         try:
             os.killpg(process.pid, signal.SIGKILL)
-        except OSError:
+        except ProcessLookupError:
             pass
         else:
             return
-    with contextlib.suppress(OSError):
+    with contextlib.suppress(ProcessLookupError):
         process.kill()
 
 
@@ -430,54 +435,48 @@ def _contains_symlink(path: Path) -> bool:
 
 def _make_stdout_reader(
     process: subprocess.Popen[bytes], capture: _OutputCapture
-) -> threading.Thread:
-    def fail_reader() -> None:
-        capture.reader_failed = True
-        # Keep cleanup failures from escaping the reader thread as well.
-        with contextlib.suppress(Exception):
-            _kill_process_group(process)
-
+) -> Callable[[], None]:
     def drain_stdout() -> None:
         if process.stdout is None:
-            fail_reader()
-            return
-        try:
-            stdout = cast("io.BufferedReader", process.stdout)
-            while chunk := stdout.read1(PROCESS_OUTPUT_CHUNK_BYTES):
-                remaining = MAX_PROCESS_OUTPUT_BYTES - len(capture.data)
-                if len(chunk) > remaining:
-                    if remaining > 0:
-                        capture.data.extend(chunk[:remaining])
-                    capture.exceeded_limit = True
-                    _kill_process_group(process)
-                    with contextlib.suppress(OSError, ValueError):
-                        stdout.close()
-                    return
-                capture.data.extend(chunk)
-        except (OSError, ValueError, RuntimeError, TypeError):
-            # Route pipe and reader failures through the sanitized main-thread path.
-            fail_reader()
+            raise _StdoutPipeUnavailableError
+        stdout = cast("io.BufferedReader", process.stdout)
+        while chunk := stdout.read1(PROCESS_OUTPUT_CHUNK_BYTES):
+            remaining = MAX_PROCESS_OUTPUT_BYTES - len(capture.data)
+            if len(chunk) > remaining:
+                if remaining > 0:
+                    capture.data.extend(chunk[:remaining])
+                capture.exceeded_limit = True
+                return
+            capture.data.extend(chunk)
 
-    return threading.Thread(target=drain_stdout, daemon=True)
+    return drain_stdout
 
 
 def _finish_stdout_capture(
     process: subprocess.Popen[bytes],
-    reader: threading.Thread,
+    reader: Future[None],
     capture: _OutputCapture,
 ) -> tuple[str, bool]:
-    reader.join(timeout=PROCESS_READER_JOIN_TIMEOUT_SECONDS)
-    reader_incomplete = reader.is_alive()
+    _, pending = wait((reader,), timeout=PROCESS_READER_WAIT_TIMEOUT_SECONDS)
+    reader_incomplete = bool(pending)
     if reader_incomplete:
         _kill_process_group(process)
-        reader.join(timeout=PROCESS_READER_JOIN_TIMEOUT_SECONDS)
+        _, pending = wait((reader,), timeout=PROCESS_READER_WAIT_TIMEOUT_SECONDS)
     if process.stdout is not None:
         with contextlib.suppress(OSError, ValueError):
             process.stdout.close()
-    reader.join(timeout=PROCESS_READER_JOIN_TIMEOUT_SECONDS)
+    if pending:
+        _, pending = wait((reader,), timeout=PROCESS_READER_WAIT_TIMEOUT_SECONDS)
+    if reader.done():
+        reader_error = reader.exception()
+        if isinstance(reader_error, Exception):
+            capture.reader_failed = True
+            _kill_process_group(process)
+        elif reader_error is not None:
+            raise reader_error
     return (
         bytes(capture.data).decode("utf-8", errors="replace"),
-        reader_incomplete or reader.is_alive(),
+        reader_incomplete or bool(pending),
     )
 
 
@@ -553,36 +552,59 @@ def _launch_process(
     return process
 
 
+def _kill_and_wait(
+    process: subprocess.Popen[bytes], *, timed_out: bool
+) -> tuple[int | None, bool, bool]:
+    _kill_process_group(process)
+    try:
+        return (
+            process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS),
+            timed_out,
+            False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        _kill_process_group(process)
+        return None, timed_out, True
+
+
 def _wait_for_process(
     process: subprocess.Popen[bytes],
+    reader: Future[None],
+    capture: _OutputCapture,
 ) -> tuple[int | None, bool, bool]:
-    try:
-        return process.wait(timeout=PROCESS_TIMEOUT_SECONDS), False, False
-    except subprocess.TimeoutExpired:
-        _kill_process_group(process)
+    deadline = time.monotonic() + PROCESS_TIMEOUT_SECONDS
+    while True:
+        if capture.exceeded_limit:
+            return _kill_and_wait(process, timed_out=False)
+        if reader.done():
+            reader_error = reader.exception()
+            if isinstance(reader_error, Exception):
+                capture.reader_failed = True
+            elif reader_error is not None:
+                raise reader_error
+            if capture.reader_failed:
+                return _kill_and_wait(process, timed_out=False)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _kill_and_wait(process, timed_out=True)
         try:
-            return (
-                process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS),
-                True,
-                False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
+            return process.wait(timeout=min(remaining, 0.05)), False, False
+        except subprocess.TimeoutExpired:
+            continue
+        except OSError:
             _kill_process_group(process)
-            return None, True, True
-    except OSError:
-        _kill_process_group(process)
-        return None, False, True
+            return None, False, True
 
 
 def _cleanup_interrupted_process(
     process: subprocess.Popen[bytes],
-    reader: threading.Thread | None,
+    reader: Future[None] | None,
     capture: _OutputCapture | None,
 ) -> ProcessOutcome:
     exit_code = _stop_process(process)
     stdout = ""
     reader_incomplete = False
-    if reader is not None and reader.ident is not None and capture is not None:
+    if reader is not None and capture is not None:
         try:
             stdout, reader_incomplete = _finish_stdout_capture(process, reader, capture)
         except (OSError, ValueError):
@@ -608,19 +630,25 @@ def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessO
         return ProcessOutcome(None, "", False, unavailable=True)
     process = launched
 
-    reader: threading.Thread | None = None
+    reader: Future[None] | None = None
     capture: _OutputCapture | None = None
+    reader_executor: ThreadPoolExecutor | None = None
     try:
+        reader_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="cw-codex-stdout"
+        )
         capture = _OutputCapture(bytearray())
-        reader = _make_stdout_reader(process, capture)
-        reader.start()
-        exit_code, timed_out, unavailable = _wait_for_process(process)
+        reader = reader_executor.submit(_make_stdout_reader(process, capture))
+        exit_code, timed_out, unavailable = _wait_for_process(process, reader, capture)
         stdout, reader_incomplete = _finish_stdout_capture(process, reader, capture)
     except BaseException as error:
         if isinstance(error, KeyboardInterrupt):
             return _cleanup_interrupted_process(process, reader, capture)
         _cleanup_interrupted_process(process, reader, capture)
         raise
+    finally:
+        if reader_executor is not None:
+            reader_executor.shutdown(wait=True)
     return ProcessOutcome(
         exit_code,
         stdout,
@@ -651,6 +679,49 @@ def _result(
         "resume": resume,
         "error_code": error_code,
     }
+
+
+@dataclass
+class _UnhandledExceptionDiagnostic:
+    result: SmokeResult
+
+
+_UNHANDLED_EXCEPTION_DIAGNOSTIC = _UnhandledExceptionDiagnostic(
+    _result(
+        STATUS_FAILED,
+        cli_version=None,
+        model=None,
+        error_code=ERROR_INTERNAL_ERROR,
+    )
+)
+
+
+def _reset_unhandled_exception_result() -> None:
+    _UNHANDLED_EXCEPTION_DIAGNOSTIC.result = _result(
+        STATUS_FAILED,
+        cli_version=None,
+        model=None,
+        error_code=ERROR_INTERNAL_ERROR,
+    )
+
+
+def _record_unhandled_exception_progress(
+    *,
+    cli_version: str,
+    model: str,
+    session_id: str | None = None,
+    create: CreateSummary | None = None,
+    resume: ResumeSummary | None = None,
+) -> None:
+    _UNHANDLED_EXCEPTION_DIAGNOSTIC.result = _result(
+        STATUS_FAILED,
+        cli_version=cli_version,
+        model=model,
+        session_id=session_id,
+        create=create,
+        resume=resume,
+        error_code=ERROR_INTERNAL_ERROR,
+    )
 
 
 @dataclass(frozen=True)
@@ -855,6 +926,7 @@ def _run_session(
     cli_version: str,
     model: str,
 ) -> SmokeResult:
+    _record_unhandled_exception_progress(cli_version=cli_version, model=model)
     git_init = _run_process(["git", "init", "--quiet"], cwd=worktree, env=git_env)
     if git_init.reader_failed:
         error_code = ERROR_INTERNAL_ERROR
@@ -883,6 +955,12 @@ def _run_session(
         stage="create",
     )
     create_summary = _create_summary(create)
+    _record_unhandled_exception_progress(
+        cli_version=cli_version,
+        model=model,
+        session_id=create.stream.session_id,
+        create=create_summary,
+    )
     if create.error_code is not None:
         return _result(
             STATUS_FAILED,
@@ -892,15 +970,8 @@ def _run_session(
             create=create_summary,
             error_code=create.error_code,
         )
-    session_id = create.stream.session_id
-    if session_id is None:
-        return _result(
-            STATUS_FAILED,
-            cli_version=cli_version,
-            model=model,
-            create=create_summary,
-            error_code=ERROR_CREATE_MISSING_THREAD,
-        )
+    # _attempt maps missing IDs to create_missing_thread before returning success.
+    session_id = cast("str", create.stream.session_id)
 
     resume = _attempt(
         _resume_argv(session_id, model),
@@ -909,6 +980,13 @@ def _run_session(
         stage="resume",
     )
     resume_summary = _resume_summary(resume, session_id)
+    _record_unhandled_exception_progress(
+        cli_version=cli_version,
+        model=model,
+        session_id=session_id,
+        create=create_summary,
+        resume=resume_summary,
+    )
     if resume.error_code is not None:
         return _result(
             STATUS_FAILED,
@@ -964,13 +1042,9 @@ def _handle_unhandled_exception(
     traceback: TracebackType | None,
 ) -> None:
     del exc_type, exc_value, traceback
-    result = _result(
-        STATUS_FAILED,
-        cli_version=None,
-        model=None,
-        error_code=ERROR_INTERNAL_ERROR,
+    sys.stdout.write(
+        json.dumps(_UNHANDLED_EXCEPTION_DIAGNOSTIC.result, separators=(",", ":")) + "\n"
     )
-    sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
 
 
 def _new_temporary_directory(
@@ -1146,6 +1220,7 @@ def main(argv: list[str] | None = None) -> int:
         model = parser.parse_args(argv).model
     except _ArgumentParseError:
         model = None
+    _reset_unhandled_exception_result()
     failure_result = _result(
         STATUS_FAILED,
         cli_version=None,
