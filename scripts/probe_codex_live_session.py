@@ -481,8 +481,7 @@ def _finish_stdout_capture(
     capture: _OutputCapture,
 ) -> tuple[str, bool]:
     _, pending = wait((reader,), timeout=PROCESS_READER_WAIT_TIMEOUT_SECONDS)
-    reader_incomplete = bool(pending)
-    if reader_incomplete:
+    if pending:
         _kill_process_group(process)
         _, pending = wait((reader,), timeout=PROCESS_READER_WAIT_TIMEOUT_SECONDS)
     if pending:
@@ -496,7 +495,7 @@ def _finish_stdout_capture(
             raise reader_error
     return (
         bytes(capture.data).decode("utf-8", errors="replace"),
-        reader_incomplete or bool(pending),
+        bool(pending),
     )
 
 

@@ -11,7 +11,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -923,6 +923,79 @@ class TestProbe:
         assert process.wait_attempts == 2
         assert process.kill_attempts == 2
 
+    def test_reader_completing_during_bounded_drain_is_not_incomplete(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class FakeProcess:
+            pid = 2463
+
+        process = FakeProcess()
+        reader: Future[None] = Future()
+        real_wait = probe.wait
+        wait_calls = 0
+
+        def complete_on_second_wait(
+            futures: Iterable[Future[None]], *, timeout: float | None = None
+        ) -> tuple[set[Future[None]], set[Future[None]]]:
+            nonlocal wait_calls
+            wait_calls += 1
+            if wait_calls == 2:
+                reader.set_result(None)
+            return real_wait(futures, timeout=timeout)
+
+        killed: list[object] = []
+        monkeypatch.setattr(probe, "PROCESS_READER_WAIT_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr(probe, "wait", complete_on_second_wait)
+        monkeypatch.setattr(probe, "_kill_process_group", killed.append)
+
+        stdout, reader_incomplete = probe._finish_stdout_capture(
+            cast("subprocess.Popen[bytes]", process),
+            reader,
+            probe._OutputCapture(bytearray()),
+        )
+
+        assert stdout == ""
+        assert not reader_incomplete
+        assert wait_calls == 2
+        assert killed == [process]
+
+    def test_unexpected_supervision_error_cleans_up_before_reraising(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        class FakeProcess:
+            pid = 2463
+            stdout = io.BytesIO()
+
+            def __init__(self) -> None:
+                self.reaped = False
+
+            def wait(self, timeout: float | None = None) -> int:
+                del timeout
+                self.reaped = True
+                return -9
+
+        process = FakeProcess()
+        reader: Future[None] = Future()
+        reader.set_result(None)
+        killed: list[object] = []
+        failure_message = "synthetic supervisor failure"
+
+        def fail_wait(
+            *_args: object, **_kwargs: object
+        ) -> tuple[int | None, probe.ProcessStatus]:
+            raise RuntimeError(failure_message)
+
+        monkeypatch.setattr(probe, "_launch_process", lambda *_args, **_kwargs: process)
+        monkeypatch.setattr(probe, "_start_stdout_reader", lambda *_args: reader)
+        monkeypatch.setattr(probe, "_wait_for_process", fail_wait)
+        monkeypatch.setattr(probe, "_kill_process_group", killed.append)
+
+        with pytest.raises(RuntimeError, match=failure_message):
+            probe._run_process(["codex"], cwd=tmp_path, env={})
+
+        assert killed == [process]
+        assert process.reaped
+
     def test_exhausted_process_cleanup_maps_to_internal_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1059,6 +1132,9 @@ class TestProbe:
         assert attempt.outcome.stdout == ""
         assert attempt.stream.error == "malformed_jsonl"
 
+    # Why: These offline tests launch only local Python and verify real OS
+    # kill/reap behavior that subprocess fakes cannot establish; POSIX cases
+    # are bounded and clean their exact child PIDs in finally blocks.
     @pytest.mark.skipif(os.name != "posix", reason="pthread signal masks are POSIX")
     def test_launch_child_inherits_parent_interrupt_signal_mask(
         self, tmp_path: Path
@@ -1486,6 +1562,11 @@ class TestProbe:
             "resume",
             "error_code",
         }
+        assert result["session_id"] == SESSION
+        assert result["create"] == {
+            "exit_code": 0,
+            "terminal_event": "turn.completed",
+        }
         assert result["resume"] is not None
         assert result["resume"]["id_matches"] == (
             error in {"resume_invalid_terminal", "resume_nonzero_exit"}
@@ -1792,7 +1873,7 @@ class TestProbe:
             )
             pid = int(pid_line.split("=", 1)[1])
             assert result.exit_code == 0
-            assert result.reader_incomplete
+            assert not result.reader_incomplete
             assert "parent-finished" in result.stdout
             assert elapsed < 10
             assert wait_for_process_exit(pid)
@@ -2013,6 +2094,20 @@ class TestProbe:
         assert probe.main(["--model", MODEL]) == 0
         captured = capsys.readouterr()
         assert captured.err == ""
+        assert captured.out.count("\n") == 1
+        assert json.loads(captured.out) == {
+            "status": "passed",
+            "cli_version": VERSION,
+            "model": MODEL,
+            "session_id": SESSION,
+            "create": {"exit_code": 0, "terminal_event": "turn.completed"},
+            "resume": {
+                "exit_code": 0,
+                "terminal_event": "turn.completed",
+                "id_matches": True,
+            },
+            "error_code": None,
+        }
         assert raw not in captured.out
         assert auth not in captured.out
 
