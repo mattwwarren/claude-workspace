@@ -15,14 +15,20 @@ Depends only on ``enums``; sits alongside it at the DAG root. See
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime
 from enum import StrEnum
+from typing import NoReturn
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from cw.models.enums import SessionStatus, Stage
 
 CODEX_LEGACY_RECOVERY_SCHEMA_VERSION = 1
+
+
+def _raise_marker_error(message: str) -> NoReturn:
+    raise ValueError(message)
 
 
 class CodexLegacyDisposition(StrEnum):
@@ -87,6 +93,9 @@ class CodexLegacyRecoveryMarker(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = CODEX_LEGACY_RECOVERY_SCHEMA_VERSION
+    # None is the explicitly authorized all-client scope.  A normal run
+    # records one client here so a retry cannot silently widen its scope.
+    client_scope: str | None = None
     completed_at: datetime | None = None
     scanned: int = 0
     requeued: int = 0
@@ -96,3 +105,69 @@ class CodexLegacyRecoveryMarker(BaseModel):
     skipped_writer_live: int = 0
     unresolved: list[UnresolvedEntry] = Field(default_factory=list)
     outcomes: list[Outcome] = Field(default_factory=list)
+
+    def validate_consistency(self) -> None:
+        """Reject a marker that cannot safely serve as the B2 run record."""
+        if self.schema_version != CODEX_LEGACY_RECOVERY_SCHEMA_VERSION:
+            _raise_marker_error(
+                f"unsupported schema_version {self.schema_version}; expected "
+                f"{CODEX_LEGACY_RECOVERY_SCHEMA_VERSION}"
+            )
+        counts = {
+            "scanned": self.scanned,
+            "requeued": self.requeued,
+            "parked": self.parked,
+            "failed": self.failed,
+            "skipped_already_handled": self.skipped_already_handled,
+            "skipped_writer_live": self.skipped_writer_live,
+        }
+        if any(value < 0 for value in counts.values()):
+            _raise_marker_error("marker counts must be non-negative")
+        if len({outcome.session_id for outcome in self.outcomes}) != len(self.outcomes):
+            _raise_marker_error("marker outcomes must contain one entry per session")
+        actual = Counter(outcome.disposition for outcome in self.outcomes)
+        expected = {
+            "requeued": actual[CodexLegacyDisposition.REQUEUED],
+            "parked": actual[CodexLegacyDisposition.PARKED],
+            "failed": actual[CodexLegacyDisposition.FAILED],
+            "skipped_already_handled": actual[
+                CodexLegacyDisposition.SKIPPED_ALREADY_HANDLED
+            ],
+            "skipped_writer_live": actual[CodexLegacyDisposition.SKIPPED_WRITER_LIVE],
+        }
+        if self.scanned != len(self.outcomes) or any(
+            counts[name] != value for name, value in expected.items()
+        ):
+            _raise_marker_error("marker counts do not match outcomes")
+        unresolved_ids = {entry.session_id for entry in self.unresolved}
+        if len(unresolved_ids) != len(self.unresolved):
+            _raise_marker_error("marker unresolved entries must be unique")
+        outcomes = {outcome.session_id: outcome for outcome in self.outcomes}
+        expected_unresolved = {
+            outcome.session_id
+            for outcome in self.outcomes
+            if outcome.disposition
+            in {
+                CodexLegacyDisposition.FAILED,
+                CodexLegacyDisposition.SKIPPED_WRITER_LIVE,
+            }
+        }
+        if unresolved_ids != expected_unresolved:
+            _raise_marker_error("unresolved entries do not match outcomes")
+        for entry in self.unresolved:
+            outcome = outcomes.get(entry.session_id)
+            if outcome is None or outcome.disposition not in {
+                CodexLegacyDisposition.FAILED,
+                CodexLegacyDisposition.SKIPPED_WRITER_LIVE,
+            }:
+                _raise_marker_error("unresolved entries must match failed outcomes")
+            if (entry.client, entry.ticket_id) != (outcome.client, outcome.ticket_id):
+                _raise_marker_error("unresolved entry does not match its outcome")
+        if self.client_scope is not None and any(
+            outcome.client != self.client_scope
+            and outcome.disposition is not CodexLegacyDisposition.FAILED
+            for outcome in self.outcomes
+        ):
+            _raise_marker_error("marker outcome is outside its client scope")
+        if self.completed_at is not None and self.unresolved:
+            _raise_marker_error("a completed marker cannot have unresolved sessions")

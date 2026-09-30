@@ -11,6 +11,8 @@ no-op'ing.
 
 from __future__ import annotations
 
+import json
+
 import click
 
 from cw.cli._base import handle_errors, main
@@ -23,6 +25,7 @@ from cw.codex_driver import (
 from cw.codex_legacy_recovery import (
     format_report_json,
     format_report_text,
+    preflight_codex_legacy_recovery,
     run_codex_legacy_recovery,
 )
 from cw.exceptions import CwError
@@ -73,8 +76,28 @@ def codex_run(
 @click.option(
     "--json", "as_json", is_flag=True, default=False, help="Output report as JSON."
 )
+@click.option(
+    "--client",
+    "client_name",
+    default=None,
+    help="Limit recovery to this client (required when multiple clients exist).",
+)
+@click.option(
+    "--all-clients",
+    is_flag=True,
+    default=False,
+    help="Explicitly authorize recovery across every configured client.",
+)
+@click.option(
+    "--preflight",
+    is_flag=True,
+    default=False,
+    help="Report the selected scope and candidates without changing state.",
+)
 @handle_errors
-def codex_migrate_legacy(as_json: bool) -> None:
+def codex_migrate_legacy(
+    as_json: bool, client_name: str | None, all_clients: bool, preflight: bool
+) -> None:
     """Recover every live pre-RFC-0014 codex session, once.
 
     Scans each legacy codex session's worktree for a live writer, then
@@ -83,6 +106,28 @@ def codex_migrate_legacy(as_json: bool) -> None:
     the causes are fixed. A completed run makes every later run a no-op.
     See docs/dispatch-runbook.md.
     """
-    report = run_codex_legacy_recovery()
+    if preflight:
+        scope, candidates = preflight_codex_legacy_recovery(
+            client=client_name, all_clients=all_clients
+        )
+        if as_json:
+            click.echo(
+                json.dumps(
+                    {
+                        "status": "preflight",
+                        "scope": scope or "all-clients",
+                        "candidates": candidates,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            click.echo(
+                "codex legacy recovery preflight: "
+                f"scope={scope or 'all-clients'}, candidates={candidates}; "
+                "no changes applied"
+            )
+        return
+    report = run_codex_legacy_recovery(client=client_name, all_clients=all_clients)
     click.echo(format_report_json(report) if as_json else format_report_text(report))
     raise click.exceptions.Exit(0 if report.ok else 1)
