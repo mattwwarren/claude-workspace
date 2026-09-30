@@ -58,8 +58,7 @@ from cw.reconcile.local import (
     CODEX_HARVEST_ORPHANED_DISPOSITION,
 )
 from cw.reconcile.tasks import revert_completed_silent_tasks
-from tests.conftest import commit_tracked_file
-from tests.test_reconcile_codex_boot import (
+from tests._codex_recovery_helpers import (
     _assert_session_closed,
     _assert_session_left_active,
     _attention_events,
@@ -71,6 +70,7 @@ from tests.test_reconcile_codex_boot import (
     _use_auto_reap_policy,
     _use_config,
 )
+from tests.conftest import commit_tracked_file
 
 if TYPE_CHECKING:
     from collections.abc import Callable
