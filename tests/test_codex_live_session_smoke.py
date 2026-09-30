@@ -516,16 +516,24 @@ class TestParser:
 
 
 class TestProbe:
+    @pytest.mark.parametrize("model", [None, MODEL])
+    @pytest.mark.parametrize("opt_in", [None, "", "0", "true"])
     def test_opt_out_is_exact_and_launches_nothing(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        model: str | None,
+        opt_in: str | None,
     ) -> None:
-        monkeypatch.delenv("CW_CODEX_LIVE_SESSION_SMOKE", raising=False)
+        if opt_in is None:
+            monkeypatch.delenv("CW_CODEX_LIVE_SESSION_SMOKE", raising=False)
+        else:
+            monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", opt_in)
         monkeypatch.setattr(
             "scripts.probe_codex_live_session.tempfile.TemporaryDirectory",
             forbid_temporary_directory,
         )
         set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
-        assert probe.run_probe(None) == {
+        assert probe.run_probe(model) == {
             "status": "skipped",
             "cli_version": None,
             "model": None,
@@ -756,9 +764,10 @@ class TestProbe:
         assert attempt.stream.error == "malformed_jsonl"
 
     @pytest.mark.skipif(os.name != "posix", reason="pthread signal masks are POSIX")
-    def test_launch_does_not_pass_blocked_interrupt_signals_to_child(
+    def test_launch_child_inherits_parent_interrupt_signal_mask(
         self, tmp_path: Path
     ) -> None:
+        parent_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
         code = (
             "import signal; "
             "blocked = signal.pthread_sigmask(signal.SIG_BLOCK, set()); "
@@ -768,7 +777,8 @@ class TestProbe:
             [sys.executable, "-c", code], cwd=tmp_path, env=os.environ.copy()
         )
         assert outcome.exit_code == 0
-        assert outcome.stdout.strip() == "False,False"
+        expected = f"{signal.SIGINT in parent_mask},{signal.SIGTERM in parent_mask}"
+        assert outcome.stdout.strip() == expected
 
     @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
     def test_timeout_kills_and_reaps_real_process_group(
@@ -989,6 +999,46 @@ class TestProbe:
             assert result["create"]["exit_code"] is None
 
     @pytest.mark.parametrize(
+        ("capture_failure", "expected_error"),
+        [
+            ("reader_failed", "internal_error"),
+            ("output_exceeded_limit", "repo_setup_failed"),
+            ("reader_incomplete", "repo_setup_failed"),
+        ],
+    )
+    def test_git_setup_capture_failures_stop_before_codex(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_failure: str,
+        expected_error: str,
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def run_process(
+            argv: list[str], *, cwd: Path, env: dict[str, str]
+        ) -> probe.ProcessOutcome:
+            del cwd, env
+            calls.append(argv)
+            if argv == ["codex", "--version"]:
+                return probe.ProcessOutcome(0, f"{VERSION}\n", False)
+            if argv == ["git", "init", "--quiet"]:
+                return probe.ProcessOutcome(
+                    0,
+                    "",
+                    False,
+                    output_exceeded_limit=capture_failure == "output_exceeded_limit",
+                    reader_incomplete=capture_failure == "reader_incomplete",
+                    reader_failed=capture_failure == "reader_failed",
+                )
+            pytest.fail(f"unexpected process launch: {argv!r}")
+
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        monkeypatch.setattr(probe, "_run_process", run_process)
+        result = probe.run_probe(MODEL)
+        assert result["error_code"] == expected_error
+        assert calls == [["codex", "--version"], ["git", "init", "--quiet"]]
+
+    @pytest.mark.parametrize(
         ("options", "error"),
         [
             (
@@ -1133,6 +1183,28 @@ class TestProbe:
     ) -> None:
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
         monkeypatch.setenv("CODEX_HOME", str(probe._checkout_root() / ".codex"))
+        set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
+        assert probe.run_probe(MODEL)["error_code"] == "repo_setup_failed"
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="directory symlink creation may require elevation"
+    )
+    def test_temporary_parent_inside_checkout_fails_before_launch(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        operator_home = tmp_path / "operator-home"
+        cache_directory = operator_home / ".cache"
+        cache_directory.mkdir(parents=True)
+        (cache_directory / "cw-live-tests").symlink_to(
+            probe._checkout_root(), target_is_directory=True
+        )
+        monkeypatch.setenv("HOME", str(operator_home))
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        monkeypatch.setattr(
+            "scripts.probe_codex_live_session.tempfile.TemporaryDirectory",
+            forbid_temporary_directory,
+        )
         set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
         assert probe.run_probe(MODEL)["error_code"] == "repo_setup_failed"
 

@@ -51,12 +51,12 @@ JSONL validation as `*_malformed_jsonl`. An error event followed by
 ID before one terminal event; only `turn.completed` passes. Malformed,
 duplicate, out-of-order, failed, missing, oversized, or invalid events fail.
 
-The model value must be 1–64 characters, begin with an alphanumeric character,
-and contain only letters, digits, `.`, `_`, or `-`. Reserved Codex flags and
-policy values—including `--last`, `-o`, `--sandbox`, and `workspace-write`—are
-rejected before any subprocess is launched. Even an option-shaped value such
-as `--model --last` produces the sanitized `invalid_model` JSON result with no
-argparse text on stderr.
+The model value must match `^[A-Za-z0-9._-]{1,64}$`; a leading `-` is rejected
+separately so a model cannot be interpreted as a CLI option. Reserved Codex
+flags and policy values—including `--last`, `-o`, `--sandbox`, and
+`workspace-write`—are rejected before any subprocess is launched. Even an
+option-shaped value such as `--model --last` produces the sanitized
+`invalid_model` JSON result with no argparse text on stderr.
 
 The disposable repo and subprocess scratch directory are explicitly placed
 under the home tree so snap-confined Codex can access them. The `codex --version`

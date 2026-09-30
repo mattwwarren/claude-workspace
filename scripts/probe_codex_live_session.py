@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib.util
 import io
 import json
 import os
@@ -14,7 +15,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -44,6 +45,7 @@ CODEX_EXECUTABLE: Final = "codex"
 CODEX_EXEC_SUBCOMMAND: Final = "exec"
 CODEX_VERSION_FLAG: Final = "--version"
 CODEX_SESSION_ARTIFACT_DIR: Final = "sessions"
+CODEX_HOME_ENV_KEY: Final = "CODEX_HOME"
 
 
 class ErrorCode(StrEnum):
@@ -452,7 +454,8 @@ def _make_stdout_reader(
                         stdout.close()
                     return
                 capture.data.extend(chunk)
-        except Exception:  # noqa: BLE001 - sanitize any failure at the thread boundary
+        except (OSError, ValueError, RuntimeError, TypeError):
+            # Route pipe and reader failures through the sanitized main-thread path.
             fail_reader()
 
     return threading.Thread(target=drain_stdout, daemon=True)
@@ -489,23 +492,42 @@ def _stop_process(process: subprocess.Popen[bytes]) -> int | None:
     return exit_code
 
 
+@contextlib.contextmanager
+def _install_parent_signal_handlers(
+    handler: _SignalHandler, *, ignore_restore_errors: bool = False
+) -> Iterator[None]:
+    previous_handlers: dict[signal.Signals, _SignalHandler] = {}
+    try:
+        if threading.current_thread() is threading.main_thread():
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                previous_handlers[signum] = signal.signal(signum, handler)
+        yield
+    finally:
+        for signum, previous_handler in previous_handlers.items():
+            if ignore_restore_errors:
+                with contextlib.suppress(Exception):
+                    signal.signal(signum, previous_handler)
+            else:
+                signal.signal(signum, previous_handler)
+
+
 def _launch_process(
     argv: list[str], *, cwd: Path, env: dict[str, str]
 ) -> subprocess.Popen[bytes] | ProcessOutcome | None:
     process: subprocess.Popen[bytes] | None = None
     signal_received = False
     launch_failed = False
-    previous_handlers: dict[signal.Signals, _SignalHandler] = {}
 
     def defer_signal(_signum: int, _frame: FrameType | None) -> None:
         nonlocal signal_received
         signal_received = True
 
+    def raise_if_signal_received() -> None:
+        if signal_received:
+            raise KeyboardInterrupt
+
     try:
-        try:
-            if threading.current_thread() is threading.main_thread():
-                for signum in (signal.SIGINT, signal.SIGTERM):
-                    previous_handlers[signum] = signal.signal(signum, defer_signal)
+        with _install_parent_signal_handlers(defer_signal):
             try:
                 process = subprocess.Popen(
                     argv,
@@ -518,11 +540,7 @@ def _launch_process(
                 )
             except OSError:
                 launch_failed = True
-            if signal_received:
-                raise KeyboardInterrupt
-        finally:
-            for signum, previous_handler in previous_handlers.items():
-                signal.signal(signum, previous_handler)
+            raise_if_signal_received()
     except BaseException as error:
         cleanup_exit_code: int | None = None
         if process is not None:
@@ -753,11 +771,31 @@ def _checkout_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _codex_home(checkout: Path) -> Path | None:
-    configured = os.environ.get("CODEX_HOME")
-    path = Path(configured).expanduser() if configured else Path.home() / ".codex"
+def _shared_codex_home(checkout: Path) -> Path | None:
+    resolver_path = checkout / ".claude" / "scripts" / "utils" / "runtime_paths.py"
+    spec = importlib.util.spec_from_file_location(
+        "cw_probe_runtime_paths", resolver_path
+    )
+    if spec is None or spec.loader is None:
+        return None
+    try:
+        resolver_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(resolver_module)
+        resolver = getattr(resolver_module, "codex_home", None)
+        if not callable(resolver):
+            return None
+        path = cast("Callable[[], Path]", resolver)()
+    except (ImportError, OSError, RuntimeError):
+        return None
     if not path.is_absolute():
         path = Path.cwd() / path
+    return path
+
+
+def _codex_home(checkout: Path) -> Path | None:
+    path = _shared_codex_home(checkout)
+    if path is None:
+        return None
     try:
         resolved = path.resolve()
         session_artifacts = resolved / CODEX_SESSION_ARTIFACT_DIR
@@ -805,7 +843,7 @@ def _child_environment(
         }
     )
     if include_codex_auth and codex_home is not None:
-        environment["CODEX_HOME"] = str(codex_home)
+        environment[CODEX_HOME_ENV_KEY] = str(codex_home)
     return environment
 
 
@@ -818,12 +856,24 @@ def _run_session(
     model: str,
 ) -> SmokeResult:
     git_init = _run_process(["git", "init", "--quiet"], cwd=worktree, env=git_env)
-    if git_init.unavailable or git_init.timed_out or git_init.exit_code != 0:
+    if git_init.reader_failed:
+        error_code = ERROR_INTERNAL_ERROR
+    elif (
+        git_init.unavailable
+        or git_init.timed_out
+        or git_init.output_exceeded_limit
+        or git_init.reader_incomplete
+        or git_init.exit_code != 0
+    ):
+        error_code = ERROR_REPO_SETUP_FAILED
+    else:
+        error_code = None
+    if error_code is not None:
         return _result(
             STATUS_FAILED,
             cli_version=cli_version,
             model=model,
-            error_code=ERROR_REPO_SETUP_FAILED,
+            error_code=error_code,
         )
 
     create = _attempt(
@@ -992,23 +1042,16 @@ def _cleanup_temporary_directory(
 ) -> SmokeResult:
     signal_received = False
     cleanup_failed = False
-    previous_handlers: dict[signal.Signals, _SignalHandler] = {}
 
     def defer_signal(_signum: int, _frame: FrameType | None) -> None:
         nonlocal signal_received
         signal_received = True
 
-    try:
-        if threading.current_thread() is threading.main_thread():
-            for signum in (signal.SIGINT, signal.SIGTERM):
-                previous_handlers[signum] = signal.signal(signum, defer_signal)
+    with _install_parent_signal_handlers(defer_signal):
         try:
             temporary_directory.cleanup()
         except OSError:
             cleanup_failed = True
-    finally:
-        for signum, previous_handler in previous_handlers.items():
-            signal.signal(signum, previous_handler)
 
     if cleanup_failed:
         error_code: ErrorCode = ERROR_CLEANUP_FAILED
@@ -1110,21 +1153,13 @@ def main(argv: list[str] | None = None) -> int:
         error_code=ERROR_REPO_SETUP_FAILED,
     )
     result = failure_result
-    previous_handlers: dict[signal.Signals, _SignalHandler] = {}
-    try:
-        if threading.current_thread() is threading.main_thread():
-            for signum in (signal.SIGINT, signal.SIGTERM):
-                previous_handlers[signum] = signal.signal(
-                    signum, _raise_for_parent_signal
-                )
+    with _install_parent_signal_handlers(
+        _raise_for_parent_signal, ignore_restore_errors=True
+    ):
         try:
             result = run_probe(model)
         except KeyboardInterrupt:
             result = failure_result
-    finally:
-        for previous_signum, previous_handler in previous_handlers.items():
-            with contextlib.suppress(Exception):
-                signal.signal(previous_signum, previous_handler)
     sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
     return 0 if result["status"] in {STATUS_SKIPPED, STATUS_PASSED} else 1
 
