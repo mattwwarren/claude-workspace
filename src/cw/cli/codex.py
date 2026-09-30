@@ -1,8 +1,12 @@
-"""``cw codex run`` — subprocess entry point for the codex review stage.
+"""``cw codex`` — codex executor subprocess and migration commands.
 
-RFC 0014 S1 / ADR-0018: thin CLI wiring over ``cw.codex_driver``'s testable
-core. ``--stage impl`` is not implemented yet (#1550) and exits non-zero
-naming that ticket rather than silently no-op'ing.
+``cw codex run``: RFC 0014 S1 / ADR-0018, thin CLI wiring over
+``cw.codex_driver``'s testable core. ``--stage impl`` is not implemented yet
+(#1550) and exits non-zero naming that ticket rather than silently
+no-op'ing.
+
+``cw codex migrate-legacy``: RFC 0014 B1 (#2389), thin CLI wiring over
+``cw.codex_legacy_recovery``.
 """
 
 from __future__ import annotations
@@ -15,6 +19,11 @@ from cw.codex_driver import (
     STAGE_IMPL,
     STAGE_REVIEW,
     run_codex_review_stage,
+)
+from cw.codex_legacy_recovery import (
+    format_report_json,
+    format_report_text,
+    run_codex_legacy_recovery,
 )
 from cw.exceptions import CwError
 
@@ -58,3 +67,22 @@ def codex_run(
         session_id=session_id,
         wall_clock_budget_seconds=wall_clock_budget_seconds,
     )
+
+
+@codex_group.command(name="migrate-legacy")
+@click.option(
+    "--json", "as_json", is_flag=True, default=False, help="Output report as JSON."
+)
+@handle_errors
+def codex_migrate_legacy(as_json: bool) -> None:
+    """Recover every live pre-RFC-0014 codex session, once.
+
+    Scans each legacy codex session's worktree for a live writer, then
+    requeues or parks its task through the codex harvest gate. Safe to run
+    while serve is up. Exits 1 while any session is unresolved; re-run once
+    the causes are fixed. A completed run makes every later run a no-op.
+    See docs/dispatch-runbook.md.
+    """
+    report = run_codex_legacy_recovery()
+    click.echo(format_report_json(report) if as_json else format_report_text(report))
+    raise click.exceptions.Exit(0 if report.ok else 1)
