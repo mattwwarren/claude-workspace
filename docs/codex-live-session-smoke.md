@@ -73,7 +73,9 @@ absolute path. Existing pre-launch path checks catch a configured home or
 session-artifact path that already resolves into the source checkout when
 validation runs. They guard against accidental redirection; this opt-in probe
 assumes a trusted local user and is not an atomic sandbox against concurrent
-same-user changes.
+same-user changes. The probe deliberately preserves and uses the operator's
+existing `CODEX_HOME`; it does not attempt to isolate Codex authentication in a
+replacement home or prevent a hostile same-user path swap during execution.
 
 Except for the standard human-readable `--help` response, the script prints
 exactly one compact JSON object to stdout and nothing to stderr. Its fixed keys

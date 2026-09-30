@@ -54,6 +54,28 @@ EXPECTED_ERROR_CODES = {
     "resume_invalid_terminal",
     "cleanup_failed",
 }
+EXPECTED_CHILD_ENV_KEYS = frozenset(
+    {
+        "path",
+        "home",
+        "userprofile",
+        "systemroot",
+        "windir",
+        "openai_api_key",
+        "codex_api_key",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+        "ssl_cert_file",
+        "ssl_cert_dir",
+        "requests_ca_bundle",
+        "curl_ca_bundle",
+        "lang",
+        "lc_all",
+        "lc_ctype",
+    }
+)
 UNAVAILABLE_MESSAGE = "unavailable-secret"
 _REAL_POPEN = subprocess.Popen
 
@@ -266,12 +288,14 @@ def process_is_running(pid: int) -> bool:
     proc_root = Path("/proc")
     if proc_root.is_dir():
         try:
-            state = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+            (proc_root / str(pid) / "stat").stat()
         except FileNotFoundError:
             return False
         except OSError:
             return True
-        return state.rsplit(")", 1)[1].strip().split()[0] != "Z"
+        # A zombie has exited but is not yet reaped; require /proc/<pid> to go
+        # away instead of treating state Z as complete cleanup.
+        return True
     return True
 
 
@@ -319,7 +343,7 @@ def assert_isolated_child_environment(
         assert env["CODEX_API_KEY"] == "auth-material-secret"
         assert env["OPENAI_API_KEY"] == "openai-auth-secret"
     assert all(
-        key.casefold() in probe._CHILD_ENV_KEYS
+        key.casefold() in EXPECTED_CHILD_ENV_KEYS
         or key in {"CODEX_HOME", "PWD", "TMPDIR", "TMP", "TEMP"}
         for key in env
     )
@@ -548,6 +572,25 @@ class TestProbe:
             "resume": None,
             "error_code": "invalid_model",
         }
+
+    @pytest.mark.parametrize("model", [".leading-model", "_leading-model"])
+    def test_model_pattern_accepts_dot_or_underscore_prefix(
+        self, monkeypatch: pytest.MonkeyPatch, model: str
+    ) -> None:
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        expected = probe._result(
+            probe.STATUS_PASSED,
+            cli_version=VERSION,
+            model=model,
+            error_code=None,
+        )
+
+        def run_disposable(*, model: str) -> probe.SmokeResult:
+            assert model == expected["model"]
+            return expected
+
+        monkeypatch.setattr(probe, "_run_disposable", run_disposable)
+        assert probe.run_probe(model) == expected
 
     @pytest.mark.parametrize(
         "model", ["--last", "--dangerously-bypass-approvals-and-sandbox"]
@@ -1160,6 +1203,44 @@ class TestProbe:
         assert result.exit_code == 0
         assert result.stdout == "\ufffd"
 
+    def test_unexpected_stdout_reader_error_is_sanitized_and_propagated(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        failure_marker = "private-reader-exception"
+
+        class BrokenStdout:
+            def read1(self, _size: int) -> bytes:
+                raise RuntimeError(failure_marker)
+
+        class FakeProcess:
+            stdout = BrokenStdout()
+            pid = 2463
+
+        monkeypatch.setattr(probe, "_kill_process_group", lambda _process: None)
+        capture = probe._OutputCapture(bytearray())
+        reader = probe._make_stdout_reader(
+            cast("subprocess.Popen[bytes]", FakeProcess()), capture
+        )
+        reader.start()
+        reader.join(timeout=1)
+        assert not reader.is_alive()
+        assert capture.reader_failed
+        assert failure_marker not in capsys.readouterr().err
+
+        monkeypatch.setattr(
+            probe,
+            "_run_process",
+            lambda *_args, **_kwargs: probe.ProcessOutcome(
+                0, "", False, reader_failed=True
+            ),
+        )
+        with pytest.raises(
+            RuntimeError, match="unexpected probe stdout reader failure"
+        ):
+            probe._attempt(
+                ["codex", "--version"], cwd=Path.cwd(), env={}, stage="create"
+            )
+
     @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
     def test_reader_shutdown_kills_descendant_holding_stdout(
         self, tmp_path: Path
@@ -1462,3 +1543,43 @@ def test_unhandled_exception_hook_emits_sanitized_internal_error(
         "error_code": "internal_error",
     }
     assert {error_code.value for error_code in probe.ErrorCode} == EXPECTED_ERROR_CODES
+
+
+def test_entrypoint_converts_unhandled_exception_to_one_json_result() -> None:
+    exception_marker = "private-operational-marker"
+    code = "\n".join(
+        [
+            "import importlib.util, sys",
+            "spec = importlib.util.spec_from_file_location(",
+            "    'probe_entrypoint_test', sys.argv[1]",
+            ")",
+            "assert spec is not None and spec.loader is not None",
+            "module = importlib.util.module_from_spec(spec)",
+            "sys.modules[spec.name] = module",
+            "spec.loader.exec_module(module)",
+            "def fail_main():",
+            f"    raise RuntimeError({exception_marker!r})",
+            "module.main = fail_main",
+            "module._entrypoint()",
+        ]
+    )
+    completed_process = subprocess.run(
+        [sys.executable, "-c", code, str(Path(probe.__file__))],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=5,
+    )
+    assert completed_process.returncode == 1
+    assert completed_process.stderr == ""
+    assert completed_process.stdout.count("\n") == 1
+    assert exception_marker not in completed_process.stdout
+    assert json.loads(completed_process.stdout) == {
+        "status": "failed",
+        "cli_version": None,
+        "model": None,
+        "session_id": None,
+        "create": None,
+        "resume": None,
+        "error_code": "internal_error",
+    }

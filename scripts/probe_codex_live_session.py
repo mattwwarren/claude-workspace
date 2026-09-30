@@ -99,7 +99,7 @@ ERROR_RESUME_ID_MISMATCH: Final = ErrorCode.RESUME_ID_MISMATCH
 ERROR_RESUME_INVALID_TERMINAL: Final = ErrorCode.RESUME_INVALID_TERMINAL
 ERROR_CLEANUP_FAILED: Final = ErrorCode.CLEANUP_FAILED
 _VERSION_RE = re.compile(r"^codex-cli [0-9]+\.[0-9]+\.[0-9]+$")
-_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_MODEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _FORBIDDEN_MODEL_VALUES = frozenset(
     {
@@ -226,12 +226,19 @@ class ProcessOutcome:
     unavailable: bool = False
     output_exceeded_limit: bool = False
     reader_incomplete: bool = False
+    reader_failed: bool = False
 
 
 @dataclass
 class _OutputCapture:
     data: bytearray
     exceeded_limit: bool = False
+    reader_failed: bool = False
+
+
+class _UnexpectedReaderError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("unexpected probe stdout reader failure")
 
 
 @dataclass
@@ -299,11 +306,7 @@ def _handle_other(event: dict[str, object], state: _StreamState) -> ParseError |
     elif not state.thread_seen:
         error = ParseError.MALFORMED_JSONL
     elif event_type == ERROR_EVENT:
-        if (
-            not state.thread_seen
-            or state.error_event_seen
-            or not isinstance(event.get("message"), str)
-        ):
+        if state.error_event_seen or not isinstance(event.get("message"), str):
             error = ParseError.MALFORMED_JSONL
         else:
             state.error_event_seen = True
@@ -426,9 +429,15 @@ def _contains_symlink(path: Path) -> bool:
 def _make_stdout_reader(
     process: subprocess.Popen[bytes], capture: _OutputCapture
 ) -> threading.Thread:
+    def fail_reader() -> None:
+        capture.reader_failed = True
+        # Keep cleanup failures from escaping the reader thread as well.
+        with contextlib.suppress(Exception):
+            _kill_process_group(process)
+
     def drain_stdout() -> None:
         if process.stdout is None:
-            capture.exceeded_limit = True
+            fail_reader()
             return
         try:
             stdout = cast("io.BufferedReader", process.stdout)
@@ -443,9 +452,8 @@ def _make_stdout_reader(
                         stdout.close()
                     return
                 capture.data.extend(chunk)
-        except (OSError, ValueError):
-            capture.exceeded_limit = True
-            _kill_process_group(process)
+        except Exception:  # noqa: BLE001 - sanitize any failure at the thread boundary
+            fail_reader()
 
     return threading.Thread(target=drain_stdout, daemon=True)
 
@@ -461,7 +469,7 @@ def _finish_stdout_capture(
         _kill_process_group(process)
         reader.join(timeout=PROCESS_READER_JOIN_TIMEOUT_SECONDS)
     if process.stdout is not None:
-        with contextlib.suppress(OSError):
+        with contextlib.suppress(OSError, ValueError):
             process.stdout.close()
     reader.join(timeout=PROCESS_READER_JOIN_TIMEOUT_SECONDS)
     return (
@@ -557,14 +565,20 @@ def _cleanup_interrupted_process(
     stdout = ""
     reader_incomplete = False
     if reader is not None and reader.ident is not None and capture is not None:
-        with contextlib.suppress(BaseException):
+        try:
             stdout, reader_incomplete = _finish_stdout_capture(process, reader, capture)
+        except (OSError, ValueError):
+            reader_incomplete = True
+        except KeyboardInterrupt:
+            _kill_process_group(process)
+            reader_incomplete = True
     return ProcessOutcome(
         exit_code,
         stdout,
         True,
         output_exceeded_limit=capture.exceeded_limit if capture is not None else False,
         reader_incomplete=reader_incomplete,
+        reader_failed=capture.reader_failed if capture is not None else False,
     )
 
 
@@ -596,6 +610,7 @@ def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessO
         unavailable=unavailable,
         output_exceeded_limit=capture.exceeded_limit,
         reader_incomplete=reader_incomplete,
+        reader_failed=capture.reader_failed,
     )
 
 
@@ -635,6 +650,8 @@ def _attempt(
     stage: ProbeStage,
 ) -> _Attempt:
     outcome = _run_process(argv, cwd=cwd, env=env)
+    if outcome.reader_failed:
+        raise _UnexpectedReaderError
     stream = _parse_stream(outcome.stdout)
     if outcome.output_exceeded_limit or outcome.reader_incomplete:
         stream = ParsedStream(stream.session_id, None, ParseError.MALFORMED_JSONL)
@@ -875,6 +892,8 @@ def _run_session(
 
 def _version_result(*, cwd: Path, env: dict[str, str]) -> _VersionOutcome:
     outcome = _run_process([CODEX_EXECUTABLE, CODEX_VERSION_FLAG], cwd=cwd, env=env)
+    if outcome.reader_failed:
+        raise _UnexpectedReaderError
     if outcome.unavailable:
         return _VersionFailure(ERROR_CLI_UNAVAILABLE)
     if outcome.timed_out or outcome.exit_code != 0:
@@ -1110,6 +1129,10 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if result["status"] in {STATUS_SKIPPED, STATUS_PASSED} else 1
 
 
-if __name__ == "__main__":
+def _entrypoint() -> NoReturn:
     sys.excepthook = _handle_unhandled_exception
     raise SystemExit(main())
+
+
+if __name__ == "__main__":
+    _entrypoint()
