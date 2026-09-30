@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import importlib.util
 import io
 import json
 import os
@@ -35,6 +34,7 @@ FIXED_RESUME_PROMPT = (
 )
 PROCESS_TIMEOUT_SECONDS = 120
 PROCESS_CLEANUP_TIMEOUT_SECONDS = 1
+PROCESS_CLEANUP_ATTEMPTS = 3
 PROCESS_READER_WAIT_TIMEOUT_SECONDS = 1
 MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024
 PROCESS_OUTPUT_CHUNK_BYTES = 64 * 1024
@@ -114,15 +114,14 @@ _FORBIDDEN_MODEL_VALUES = frozenset(
         "workspace-write",
     }
 )
-_CHILD_ENV_KEYS = frozenset(
+_CODEX_AUTH_ENV_KEYS = frozenset({"openai_api_key", "codex_api_key"})
+_BASE_CHILD_ENV_KEYS = frozenset(
     {
         "path",
         "home",
         "userprofile",
         "systemroot",
         "windir",
-        "openai_api_key",
-        "codex_api_key",
         "http_proxy",
         "https_proxy",
         "all_proxy",
@@ -136,7 +135,7 @@ _CHILD_ENV_KEYS = frozenset(
         "lc_ctype",
     }
 )
-_CODEX_AUTH_ENV_KEYS = frozenset({"openai_api_key", "codex_api_key"})
+_CHILD_ENV_KEYS = _BASE_CHILD_ENV_KEYS | _CODEX_AUTH_ENV_KEYS
 
 THREAD_STARTED_EVENT: Final = "thread.started"
 TURN_STARTED_EVENT: Final = "turn.started"
@@ -231,6 +230,7 @@ class ProcessOutcome:
     output_exceeded_limit: bool = False
     reader_incomplete: bool = False
     reader_failed: bool = False
+    cleanup_failed: bool = False
 
 
 @dataclass
@@ -479,12 +479,14 @@ def _finish_stdout_capture(
 
 def _stop_process(
     process: subprocess.Popen[bytes], reader: Future[None] | None = None
-) -> int | None:
-    exit_code, _timed_out, _unavailable = _kill_and_wait(process, timed_out=False)
+) -> tuple[int | None, bool]:
+    exit_code, _timed_out, _unavailable, cleanup_failed = _kill_and_wait(
+        process, timed_out=False
+    )
     if process.stdout is not None and reader is None:
         with contextlib.suppress(OSError, ValueError, KeyboardInterrupt):
             process.stdout.close()
-    return exit_code
+    return exit_code, cleanup_failed
 
 
 @contextlib.contextmanager
@@ -539,12 +541,19 @@ def _launch_process(
             except OSError:
                 launch_failed = True
             raise_if_signal_received()
+        raise_if_signal_received()
     except BaseException as error:
         cleanup_exit_code: int | None = None
+        cleanup_failed = False
         if process is not None:
-            cleanup_exit_code = _stop_process(process)
+            cleanup_exit_code, cleanup_failed = _stop_process(process)
         if isinstance(error, KeyboardInterrupt):
-            return ProcessOutcome(cleanup_exit_code, "", True)
+            return ProcessOutcome(
+                cleanup_exit_code,
+                "",
+                True,
+                cleanup_failed=cleanup_failed,
+            )
         raise
     if launch_failed or process is None:
         return None
@@ -553,24 +562,27 @@ def _launch_process(
 
 def _kill_and_wait(
     process: subprocess.Popen[bytes], *, timed_out: bool
-) -> tuple[int | None, bool, bool]:
+) -> tuple[int | None, bool, bool, bool]:
     _kill_process_group(process)
-    try:
-        return (
-            process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS),
-            timed_out,
-            False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        _kill_process_group(process)
-        return None, timed_out, True
+    for attempt in range(PROCESS_CLEANUP_ATTEMPTS):
+        try:
+            return (
+                process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS),
+                timed_out,
+                False,
+                False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            if attempt + 1 < PROCESS_CLEANUP_ATTEMPTS:
+                _kill_process_group(process)
+    return None, timed_out, False, True
 
 
 def _wait_for_process(
     process: subprocess.Popen[bytes],
     reader: Future[None],
     capture: _OutputCapture,
-) -> tuple[int | None, bool, bool]:
+) -> tuple[int | None, bool, bool, bool]:
     deadline = time.monotonic() + PROCESS_TIMEOUT_SECONDS
     while True:
         if capture.exceeded_limit:
@@ -587,14 +599,14 @@ def _wait_for_process(
         if remaining <= 0:
             return _kill_and_wait(process, timed_out=True)
         try:
-            return process.wait(timeout=min(remaining, 0.05)), False, False
+            return process.wait(timeout=min(remaining, 0.05)), False, False, False
         except subprocess.TimeoutExpired:
             continue
         except OSError:
-            exit_code, _timed_out, _unavailable = _kill_and_wait(
+            exit_code, _timed_out, _unavailable, cleanup_failed = _kill_and_wait(
                 process, timed_out=False
             )
-            return exit_code, False, True
+            return exit_code, False, True, cleanup_failed
 
 
 def _cleanup_interrupted_process(
@@ -602,7 +614,7 @@ def _cleanup_interrupted_process(
     reader: Future[None] | None,
     capture: _OutputCapture | None,
 ) -> ProcessOutcome:
-    exit_code = _stop_process(process, reader)
+    exit_code, cleanup_failed = _stop_process(process, reader)
     stdout = ""
     reader_incomplete = False
     if reader is not None and capture is not None:
@@ -620,6 +632,7 @@ def _cleanup_interrupted_process(
         output_exceeded_limit=capture.exceeded_limit if capture is not None else False,
         reader_incomplete=reader_incomplete,
         reader_failed=capture.reader_failed if capture is not None else False,
+        cleanup_failed=cleanup_failed,
     )
 
 
@@ -636,7 +649,9 @@ def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessO
     try:
         capture = _OutputCapture(bytearray())
         reader = _start_stdout_reader(process, capture)
-        exit_code, timed_out, unavailable = _wait_for_process(process, reader, capture)
+        exit_code, timed_out, unavailable, cleanup_failed = _wait_for_process(
+            process, reader, capture
+        )
         stdout, reader_incomplete = _finish_stdout_capture(process, reader, capture)
     except BaseException as error:
         if isinstance(error, KeyboardInterrupt):
@@ -651,6 +666,7 @@ def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessO
         output_exceeded_limit=capture.exceeded_limit,
         reader_incomplete=reader_incomplete,
         reader_failed=capture.reader_failed,
+        cleanup_failed=cleanup_failed,
     )
 
 
@@ -752,7 +768,9 @@ def _attempt(
     if outcome.output_exceeded_limit or outcome.reader_incomplete:
         stream = ParsedStream(stream.session_id, None, ParseError.MALFORMED_JSONL)
     error_code: ErrorCode | None = None
-    if outcome.timed_out:
+    if outcome.cleanup_failed:
+        error_code = ERROR_INTERNAL_ERROR
+    elif outcome.timed_out:
         error_code = (
             ERROR_CREATE_TIMEOUT if stage is ProbeStage.CREATE else ERROR_RESUME_TIMEOUT
         )
@@ -783,6 +801,7 @@ def _attempt(
         unavailable=outcome.unavailable,
         output_exceeded_limit=outcome.output_exceeded_limit,
         reader_incomplete=outcome.reader_incomplete,
+        cleanup_failed=outcome.cleanup_failed,
     )
     return _Attempt(compact_outcome, stream, error_code)
 
@@ -851,32 +870,22 @@ def _checkout_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _shared_codex_home(checkout: Path) -> Path | None:
-    resolver_path = checkout / ".claude" / "scripts" / "utils" / "runtime_paths.py"
-    spec = importlib.util.spec_from_file_location(
-        "cw_probe_runtime_paths", resolver_path
-    )
-    if spec is None or spec.loader is None:
-        return None
-    try:
-        resolver_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(resolver_module)
-        resolver = getattr(resolver_module, "codex_home", None)
-        if not callable(resolver):
-            return None
-        path = cast("Callable[[], Path]", resolver)()
-    except (ImportError, OSError, RuntimeError):
-        return None
+def _configured_codex_home() -> Path:
+    """Mirror runtime_paths.codex_home without executing a script by path."""
+    override = os.environ.get(CODEX_HOME_ENV_KEY)
+    return Path(override).expanduser() if override else Path.home() / ".codex"
+
+
+def _shared_codex_home() -> Path:
+    path = _configured_codex_home()
     if not path.is_absolute():
         path = Path.cwd() / path
     return path
 
 
 def _codex_home(checkout: Path) -> Path | None:
-    path = _shared_codex_home(checkout)
-    if path is None:
-        return None
     try:
+        path = _shared_codex_home()
         resolved = path.resolve()
         resolved_session_artifacts = (resolved / CODEX_SESSION_ARTIFACT_DIR).resolve()
     except (OSError, RuntimeError):
@@ -896,11 +905,7 @@ def _child_environment(
     include_codex_auth: bool = True,
 ) -> dict[str, str]:
     """Build an allowlisted environment for Codex or non-credentialed setup."""
-    allowed_keys = (
-        _CHILD_ENV_KEYS
-        if include_codex_auth
-        else _CHILD_ENV_KEYS - _CODEX_AUTH_ENV_KEYS
-    )
+    allowed_keys = _CHILD_ENV_KEYS if include_codex_auth else _BASE_CHILD_ENV_KEYS
     environment = {
         key: value
         for key, value in os.environ.items()
@@ -933,7 +938,7 @@ def _run_session(
 ) -> SmokeResult:
     _record_unhandled_exception_progress(cli_version=cli_version, model=model)
     git_init = _run_process(["git", "init", "--quiet"], cwd=worktree, env=git_env)
-    if git_init.reader_failed:
+    if git_init.reader_failed or git_init.cleanup_failed:
         error_code = ERROR_INTERNAL_ERROR
     elif (
         git_init.unavailable
@@ -1025,6 +1030,8 @@ def _run_session(
 
 def _version_result(*, cwd: Path, env: dict[str, str]) -> _VersionOutcome:
     outcome = _run_process([CODEX_EXECUTABLE, CODEX_VERSION_FLAG], cwd=cwd, env=env)
+    if outcome.cleanup_failed:
+        return _VersionFailure(ERROR_INTERNAL_ERROR)
     if outcome.reader_failed:
         raise _UnexpectedReaderError
     if outcome.unavailable:
@@ -1221,7 +1228,9 @@ def run_probe(model: str | None) -> SmokeResult:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = _SanitizedArgumentParser(description="Run the Codex session smoke probe.")
+    parser = _SanitizedArgumentParser(
+        description="Run the Codex session smoke probe.", add_help=False
+    )
     parser.add_argument("--model", help="Explicit Codex model identifier.")
     try:
         model = parser.parse_args(argv).model

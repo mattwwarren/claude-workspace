@@ -34,7 +34,9 @@ child reaping. The daemonized reader owns and closes its pipe when it finishes;
 an incomplete reader cannot hold interpreter shutdown hostage. A descendant
 that deliberately escapes the POSIX process group is outside the termination
 guarantee, but its open pipe is reported as incomplete rather than blocking the
-probe. Reader-worker exceptions are handed back to the process-waiting thread
+probe. If a child does not reap after the bounded cleanup retries, the probe
+reports `internal_error` rather than claiming a timeout or unavailable CLI.
+Reader-worker exceptions are handed back to the process-waiting thread
 and become `internal_error`, without a worker-thread traceback. An operator
 interrupt returns the
 sanitized timeout result for an interrupted subprocess, or `repo_setup_failed`
@@ -86,8 +88,10 @@ same-user changes. The probe deliberately preserves and uses the operator's
 existing `CODEX_HOME`; it does not attempt to isolate Codex authentication in a
 replacement home or prevent a hostile same-user path swap during execution.
 
-Except for the standard human-readable `--help` response, the script prints
-exactly one compact JSON object to stdout and nothing to stderr. Its fixed keys
+Every invocation, including `--help` and argument errors, prints exactly one
+compact JSON object to stdout and nothing to stderr. `--help` is not a separate
+human-readable mode; with opt-in enabled it returns `invalid_model` without
+launching a subprocess. Its fixed keys
 are `status`, `cli_version`, `model`, `session_id`,
 `create`, `resume`, and `error_code`; it never prints paths, prompts, raw JSONL,
 stderr, environment values, exception text, or authentication material.

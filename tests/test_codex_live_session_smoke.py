@@ -116,6 +116,7 @@ def completed(
 class FakeRunOptions:
     create_stdout: str = field(default_factory=stream)
     resume_stdout: str = field(default_factory=stream)
+    expected_resume_id: str = SESSION
     create_code: int = 0
     resume_code: int = 0
     git_code: int = 0
@@ -188,7 +189,7 @@ def fake_run(
             "codex",
             "exec",
             "resume",
-            argv[3],
+            options.expected_resume_id,
             "--json",
             "--ignore-user-config",
             "--model",
@@ -447,7 +448,9 @@ class TestParser:
             == "turn.failed"
         )
 
-    @pytest.mark.parametrize("session", ["", "bad/id", "x" * 129])
+    @pytest.mark.parametrize(
+        "session", ["", ".bad", "_bad", "-bad", "bad/id", "x" * 129]
+    )
     def test_invalid_thread_ids_are_rejected(self, session: str) -> None:
         parsed = probe._parse_stream(
             jsonl(
@@ -456,6 +459,12 @@ class TestParser:
             )
         )
         assert parsed.error == "invalid_thread_id"
+
+    def test_maximum_length_thread_id_is_accepted(self) -> None:
+        session = "a" + "x" * 127
+        assert probe._parse_stream(stream(session)) == probe.ParsedStream(
+            session, "turn.completed", None
+        )
 
     def test_non_string_thread_id_is_rejected(self) -> None:
         parsed = probe._parse_stream(
@@ -661,6 +670,33 @@ class TestProbe:
         assert result["status"] == "failed"
         assert result["error_code"] == "invalid_model"
 
+    @pytest.mark.parametrize("argv", [[], ["--help"]])
+    def test_main_missing_model_and_help_emit_one_json_result(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        argv: list[str],
+    ) -> None:
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        monkeypatch.setattr(
+            "scripts.probe_codex_live_session.tempfile.TemporaryDirectory",
+            forbid_temporary_directory,
+        )
+        set_runner(monkeypatch, lambda *_args, **_kwargs: pytest.fail("launched"))
+        assert probe.main(argv) == 1
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out.count("\n") == 1
+        assert json.loads(captured.out) == {
+            "status": "failed",
+            "cli_version": None,
+            "model": None,
+            "session_id": None,
+            "create": None,
+            "resume": None,
+            "error_code": "invalid_model",
+        }
+
     def test_success_has_exact_commands_policy_cwd_and_timeout(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -744,6 +780,31 @@ class TestProbe:
         assert forbidden.isdisjoint(calls[2]["argv"])
         assert forbidden.isdisjoint(calls[3]["argv"])
 
+    def test_create_session_id_is_passed_verbatim_to_resume(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        created_id = "thread.created-session-2463"
+        calls: list[dict[str, object]] = []
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        set_runner(
+            monkeypatch,
+            fake_run(
+                calls,
+                FakeRunOptions(
+                    create_stdout=stream(created_id),
+                    resume_stdout=stream(created_id),
+                    expected_resume_id=created_id,
+                ),
+            ),
+        )
+
+        result = probe.run_probe(MODEL)
+
+        assert result["status"] == "passed"
+        assert result["session_id"] == created_id
+        resume_argv = cast("list[str]", calls[3]["argv"])
+        assert resume_argv[3] == created_id
+
     def test_git_init_ignores_system_init_template(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -824,12 +885,73 @@ class TestProbe:
         )
 
         assert probe.PROCESS_TIMEOUT_SECONDS == 120
-        assert outcome == (-9, True, False)
+        assert outcome == (-9, True, False, False)
         process_waits = [
             timeout for timeout in process.wait_timeouts[:-1] if timeout is not None
         ]
         assert sum(process_waits) == pytest.approx(120)
         assert process.wait_timeouts[-1] == probe.PROCESS_CLEANUP_TIMEOUT_SECONDS
+
+    def test_process_cleanup_retries_wait_until_child_is_reaped(
+        self,
+    ) -> None:
+        class DelayedReapProcess:
+            pid = None
+
+            def __init__(self) -> None:
+                self.wait_attempts = 0
+                self.kill_attempts = 0
+
+            def wait(self, timeout: float | None = None) -> int:
+                assert timeout == probe.PROCESS_CLEANUP_TIMEOUT_SECONDS
+                self.wait_attempts += 1
+                if self.wait_attempts == 1:
+                    assert timeout is not None
+                    raise subprocess.TimeoutExpired(["codex"], timeout)
+                return -9
+
+            def kill(self) -> None:
+                self.kill_attempts += 1
+
+        process = DelayedReapProcess()
+        outcome = probe._kill_and_wait(
+            cast("subprocess.Popen[bytes]", process), timed_out=True
+        )
+
+        assert outcome == (-9, True, False, False)
+        assert process.wait_attempts == 2
+        assert process.kill_attempts == 2
+
+    def test_exhausted_process_cleanup_maps_to_internal_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class NeverReapedProcess:
+            pid = None
+            stdout = io.BytesIO()
+
+            def wait(self, timeout: float | None = None) -> int:
+                assert timeout == probe.PROCESS_CLEANUP_TIMEOUT_SECONDS
+                raise subprocess.TimeoutExpired(["codex"], timeout)
+
+            def kill(self) -> None:
+                pass
+
+        monkeypatch.setattr(probe, "PROCESS_TIMEOUT_SECONDS", 0)
+        monkeypatch.setattr(
+            probe,
+            "_launch_process",
+            lambda *_args, **_kwargs: NeverReapedProcess(),
+        )
+        monkeypatch.setattr(probe, "PROCESS_CLEANUP_ATTEMPTS", 2)
+        attempt = probe._attempt(
+            ["codex", "exec"],
+            cwd=Path.cwd(),
+            env={},
+            stage=probe.ProbeStage.CREATE,
+        )
+        assert attempt.outcome.timed_out
+        assert attempt.outcome.cleanup_failed
+        assert attempt.error_code == probe.ERROR_INTERNAL_ERROR
 
     @pytest.mark.parametrize(
         ("create_code", "expected_status"),
@@ -1055,6 +1177,54 @@ class TestProbe:
             for child_pid in child_pids:
                 cleanup_process(child_pid)
 
+    def test_signal_during_handler_restoration_kills_launched_child(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        class DeferredSignalContext:
+            def __init__(self, handler: probe._SignalHandler) -> None:
+                self.handler = cast("Callable[[int, object | None], object]", handler)
+
+            def __enter__(self) -> None:
+                return None
+
+            def __exit__(self, *_args: object) -> None:
+                self.handler(signal.SIGTERM, None)
+
+        class Child:
+            pid = None
+            stdout = None
+
+            def __init__(self) -> None:
+                self.killed = False
+
+            def kill(self) -> None:
+                self.killed = True
+
+            def wait(self, timeout: float | None = None) -> int:
+                assert timeout == probe.PROCESS_CLEANUP_TIMEOUT_SECONDS
+                if not self.killed:
+                    raise subprocess.TimeoutExpired(["codex"], timeout)
+                return -9
+
+        child = Child()
+        monkeypatch.setattr(
+            probe,
+            "_install_parent_signal_handlers",
+            DeferredSignalContext,
+        )
+        monkeypatch.setattr(
+            "scripts.probe_codex_live_session.subprocess.Popen",
+            lambda *_args, **_kwargs: child,
+        )
+
+        outcome = probe._launch_process(["codex", "--version"], cwd=tmp_path, env={})
+
+        assert isinstance(outcome, probe.ProcessOutcome)
+        assert outcome.timed_out
+        assert not outcome.cleanup_failed
+        assert child.killed
+        assert outcome.exit_code == -9
+
     @pytest.mark.parametrize(
         ("options", "error"),
         [
@@ -1131,6 +1301,7 @@ class TestProbe:
         ("capture_failure", "expected_error"),
         [
             ("reader_failed", "internal_error"),
+            ("cleanup_failed", "internal_error"),
             ("output_exceeded_limit", "repo_setup_failed"),
             ("reader_incomplete", "repo_setup_failed"),
         ],
@@ -1158,6 +1329,7 @@ class TestProbe:
                     output_exceeded_limit=capture_failure == "output_exceeded_limit",
                     reader_incomplete=capture_failure == "reader_incomplete",
                     reader_failed=capture_failure == "reader_failed",
+                    cleanup_failed=capture_failure == "cleanup_failed",
                 )
             pytest.fail(f"unexpected process launch: {argv!r}")
 
@@ -1259,6 +1431,20 @@ class TestProbe:
         set_runner(monkeypatch, run)
         assert probe.run_probe(MODEL)["error_code"] == error
         assert calls == [["codex", "--version"]]
+
+    def test_version_cleanup_failure_is_internal_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            probe,
+            "_run_process",
+            lambda *_args, **_kwargs: probe.ProcessOutcome(
+                None, "", True, cleanup_failed=True
+            ),
+        )
+        assert probe._version_result(cwd=Path.cwd(), env={}) == probe._VersionFailure(
+            probe.ERROR_INTERNAL_ERROR
+        )
 
     @pytest.mark.parametrize(
         "stdout",
@@ -1377,6 +1563,15 @@ class TestProbe:
     ) -> None:
         monkeypatch.delenv("CODEX_HOME", raising=False)
         assert probe._codex_home(probe._checkout_root()) == Path.home() / ".codex"
+
+    def test_codex_home_expands_operator_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CODEX_HOME", "~/codex-state")
+        assert (
+            probe._codex_home(probe._checkout_root())
+            == (Path.home() / "codex-state").resolve()
+        )
 
     def test_invalid_utf8_is_replaced_at_process_boundary(self, tmp_path: Path) -> None:
         result = probe._run_process(
@@ -1766,18 +1961,6 @@ def test_signal_restore_errors_are_raised_after_all_handlers_are_restored(
         pass
 
     assert {signum: signal.getsignal(signum) for signum in signums} == previous_handlers
-
-
-def test_main_help_is_the_documented_human_readable_exception(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with pytest.raises(SystemExit) as exit_info:
-        probe.main(["--help"])
-    captured = capsys.readouterr()
-    assert exit_info.value.code == 0
-    assert captured.out.startswith("usage:")
-    assert "--model" in captured.out
-    assert captured.err == ""
 
 
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
