@@ -885,6 +885,7 @@ class TestProbe:
         )
 
         assert probe.PROCESS_TIMEOUT_SECONDS == 120
+        assert probe.PROCESS_POLL_INTERVAL_SECONDS == 0.25
         assert outcome == (-9, True, False, False)
         process_waits = [
             timeout for timeout in process.wait_timeouts[:-1] if timeout is not None
@@ -1455,7 +1456,10 @@ class TestProbe:
         ],
     )
     def test_version_requires_one_valid_line(
-        self, monkeypatch: pytest.MonkeyPatch, stdout: str
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        stdout: str,
     ) -> None:
         calls: list[list[str]] = []
 
@@ -1471,8 +1475,14 @@ class TestProbe:
 
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
         set_runner(monkeypatch, run)
-        result = probe.run_probe(MODEL)
-        assert result["error_code"] == "version_invalid"
+        assert probe.main(["--model", MODEL]) == 1
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out.count("\n") == 1
+        assert "auth-secret" not in captured.out
+        assert "secret-transcript" not in captured.out
+        assert "codex-cli 0.156.1" not in captured.out
+        assert json.loads(captured.out)["error_code"] == "version_invalid"
         assert calls == [["codex", "--version"]]
 
     def test_version_timeout_and_nonzero_are_unavailable(

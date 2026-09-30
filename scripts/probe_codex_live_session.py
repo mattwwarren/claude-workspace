@@ -33,6 +33,7 @@ FIXED_RESUME_PROMPT = (
     "Reply exactly cw-session-smoke-resumed-ok. Do not use tools or modify files."
 )
 PROCESS_TIMEOUT_SECONDS = 120
+PROCESS_POLL_INTERVAL_SECONDS = 0.25
 PROCESS_CLEANUP_TIMEOUT_SECONDS = 1
 PROCESS_CLEANUP_ATTEMPTS = 3
 PROCESS_READER_WAIT_TIMEOUT_SECONDS = 1
@@ -599,7 +600,12 @@ def _wait_for_process(
         if remaining <= 0:
             return _kill_and_wait(process, timed_out=True)
         try:
-            return process.wait(timeout=min(remaining, 0.05)), False, False, False
+            return (
+                process.wait(timeout=min(remaining, PROCESS_POLL_INTERVAL_SECONDS)),
+                False,
+                False,
+                False,
+            )
         except subprocess.TimeoutExpired:
             continue
         except OSError:
