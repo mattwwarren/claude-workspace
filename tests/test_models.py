@@ -2727,3 +2727,156 @@ class TestScopeDriftApprovalFields:
         assert task.blocked_reason == "plan_scope_drift"
         assert task.scope_drift_approved_extra_files is None
         assert task.scope_drift_approved_head is None
+
+
+def _legacy_outcome(
+    session_id: str = "s1",
+    disposition: str = "failed",
+    *,
+    client: str = "client-a",
+    ticket_id: str = "T-1",
+) -> dict[str, object]:
+    return {
+        "session_id": session_id,
+        "ticket_id": ticket_id,
+        "client": client,
+        "disposition": disposition,
+        "prior_status": "active",
+    }
+
+
+def _legacy_entry(
+    session_id: str = "s1",
+    *,
+    client: str = "client-a",
+    ticket_id: str = "T-1",
+) -> dict[str, object]:
+    return {
+        "session_id": session_id,
+        "client": client,
+        "ticket_id": ticket_id,
+        "reason": "live_writer",
+    }
+
+
+def _legacy_pending(session_id: str = "s1") -> dict[str, object]:
+    return {
+        "session_id": session_id,
+        "ticket_id": "T-1",
+        "client": "client-a",
+        "prior_status": "active",
+    }
+
+
+class TestCodexLegacyRecoveryMarkerConsistency:
+    """``validate_consistency`` rejects every marker the B2 gate cannot trust."""
+
+    def test_consistent_failed_marker_passes(self) -> None:
+        from cw.models import CodexLegacyRecoveryMarker
+
+        marker = CodexLegacyRecoveryMarker.model_validate(
+            {
+                "scanned": 1,
+                "failed": 1,
+                "outcomes": [_legacy_outcome()],
+                "unresolved": [_legacy_entry()],
+                "covered_clients": ["client-a"],
+            }
+        )
+        marker.validate_consistency()
+
+    @pytest.mark.parametrize(
+        ("fields", "message"),
+        [
+            ({"schema_version": 2}, "unsupported schema_version 2"),
+            ({"requeued": -1}, "counts must be non-negative"),
+            (
+                {
+                    "scanned": 2,
+                    "failed": 2,
+                    "outcomes": [_legacy_outcome(), _legacy_outcome()],
+                },
+                "one entry per session",
+            ),
+            (
+                {"pending": [_legacy_pending(), _legacy_pending()]},
+                "pending entries must be unique",
+            ),
+            (
+                {
+                    "scanned": 1,
+                    "requeued": 1,
+                    "outcomes": [_legacy_outcome(disposition="requeued")],
+                    "pending": [_legacy_pending()],
+                },
+                "pending entries must be unique and unresolved",
+            ),
+            ({"scanned": 1}, "counts do not match outcomes"),
+            (
+                {
+                    "scanned": 1,
+                    "failed": 1,
+                    "outcomes": [_legacy_outcome()],
+                    "unresolved": [_legacy_entry(), _legacy_entry()],
+                },
+                "unresolved entries must be unique",
+            ),
+            (
+                {"scanned": 1, "failed": 1, "outcomes": [_legacy_outcome()]},
+                "unresolved entries do not match outcomes",
+            ),
+            (
+                {
+                    "scanned": 1,
+                    "failed": 1,
+                    "outcomes": [_legacy_outcome()],
+                    "unresolved": [_legacy_entry(ticket_id="T-other")],
+                },
+                "does not match its outcome",
+            ),
+            (
+                {"covered_clients": ["client-a", "client-a"]},
+                "covered clients must be unique",
+            ),
+            (
+                {
+                    "completed_at": "2026-02-01T12:00:00+00:00",
+                    "scanned": 1,
+                    "failed": 1,
+                    "outcomes": [_legacy_outcome()],
+                    "unresolved": [_legacy_entry()],
+                },
+                "completed marker cannot have unresolved or pending",
+            ),
+            (
+                {
+                    "completed_at": "2026-02-01T12:00:00+00:00",
+                    "pending": [_legacy_pending()],
+                },
+                "completed marker cannot have unresolved or pending",
+            ),
+        ],
+        ids=[
+            "schema-version",
+            "negative-count",
+            "duplicate-outcomes",
+            "duplicate-pending",
+            "pending-also-resolved",
+            "counts-mismatch",
+            "duplicate-unresolved",
+            "unresolved-missing",
+            "unresolved-identity-mismatch",
+            "duplicate-covered-clients",
+            "completed-with-unresolved",
+            "completed-with-pending",
+        ],
+    )
+    def test_inconsistent_marker_is_rejected(
+        self, fields: dict[str, object], message: str
+    ) -> None:
+        from cw.models import CodexLegacyRecoveryMarker
+
+        marker = CodexLegacyRecoveryMarker.model_validate(fields)
+
+        with pytest.raises(ValueError, match=message):
+            marker.validate_consistency()

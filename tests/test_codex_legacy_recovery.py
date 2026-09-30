@@ -1257,3 +1257,27 @@ def test_marker_round_trips_through_json(tmp_config_dir: Path) -> None:
 
     assert raw["schema_version"] == 1
     assert load_codex_legacy_marker() == marker
+
+
+@pytest.mark.parametrize("error", [OSError("log unreadable"), ValueError("bad line")])
+def test_unreadable_event_log_after_the_act_is_failed_for_retry(
+    codex_clients: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    """The act ran but its events cannot be confirmed: resolve nothing."""
+    _use_legacy_config(monkeypatch)
+    _no_codex_process(monkeypatch)
+    session = _seed_legacy(make_git_repo, "T-clean")
+
+    def _unreadable(**_kwargs: object) -> list[object]:
+        raise error
+
+    monkeypatch.setattr(codex_legacy_recovery, "read_events", _unreadable)
+
+    marker = run_codex_legacy_recovery(now=_NOW).marker
+
+    assert _dispositions(marker) == {session.id: CodexLegacyDisposition.FAILED}
+    assert _unresolved(marker) == {session.id: "event_delivery_failed"}
+    assert marker.completed_at is None

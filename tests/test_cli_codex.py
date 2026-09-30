@@ -237,3 +237,58 @@ def test_migrate_legacy_corrupt_marker_fails_through_handle_errors(
     assert code == 1
     assert "Error:" in output
     assert str(path) in output
+
+
+def test_migrate_legacy_preflight_text_reports_scope_without_changing_state(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    _seed_unscannable_legacy_session(tmp_config_dir, tmp_path)
+
+    code, output = _migrate("--preflight")
+
+    assert code == 0, output
+    assert (
+        "codex legacy recovery preflight: scope=client-a, candidates=1; "
+        "no changes applied"
+    ) in output
+    assert not codex_legacy_recovery_file().exists()
+
+
+def test_migrate_legacy_preflight_json_reports_all_clients_when_none_configured(
+    tmp_config_dir: Path,
+) -> None:
+    code, output = _migrate("--preflight", "--json")
+
+    assert code == 0, output
+    assert json.loads(output) == {
+        "status": "preflight",
+        "scope": "all-clients",
+        "candidates": 0,
+    }
+    assert not codex_legacy_recovery_file().exists()
+
+
+def test_migrate_legacy_preflight_json_names_selected_client(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    _seed_unscannable_legacy_session(tmp_config_dir, tmp_path)
+
+    code, output = _migrate("--preflight", "--json", "--client", "client-a")
+
+    assert code == 0, output
+    assert json.loads(output) == {
+        "status": "preflight",
+        "scope": "client-a",
+        "candidates": 1,
+    }
+
+
+def test_migrate_legacy_preflight_unknown_client_fails_through_handle_errors(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    _seed_unscannable_legacy_session(tmp_config_dir, tmp_path)
+
+    code, output = _migrate("--preflight", "--client", "nope")
+
+    assert code == 1
+    assert "unknown client 'nope'" in output
