@@ -1466,7 +1466,10 @@ which auto-requeues the common `stalled_retry_cap_parked` case when
 concierge is off, or when the row is refused at the attempt ceiling.
 
 A quota window or hang loop (#979) grinds a ticket to
-`attempt_cap_blocked` (`attempts` bumps on every claim AND stage transition).
+`attempt_cap_blocked`. The ceiling compares `unproductive_attempts` (claims
+that left RUNNING with no evidence of progress), not the raw `attempts`
+counter, which bumps on every claim AND stage transition and gates nothing
+(#1750).
 
 The number the park fired against is the *resolved* attempt ceiling — the
 row's lane `attempt_ceiling`, or `global_attempt_ceiling` when the lane sets

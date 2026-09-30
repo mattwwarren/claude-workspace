@@ -77,9 +77,11 @@ Each client can have sessions for different purposes:
 | `idea` | Ideation — brainstorming, architecture, design |
 | `debt` | Debt — refactoring, cleanup, tech debt |
 
-(A fourth purpose, `orchestrate`, exists for the session created by
-`cw orchestrate start` / `cw orchestrator-start`; it is excluded from the
-worker purposes and is not meant for `auto_purposes`.)
+(Two more purposes exist that `auto_purposes` never selects: `orchestrate`,
+stamped on the session created by `cw orchestrate start` /
+`cw orchestrator-start`, and `fix`, stamped on a fix-agent session the REVIEW
+stage's fix loop dispatches. A purpose is a static spawn-time label; it is not
+the pipeline `stage`.)
 
 ## Modes
 
@@ -863,9 +865,11 @@ operator_github_login_by_repo: {}
 # signal-only session.needs_attention (paused_status=session_unresponsive)
 # plus a push notification — the operator decides what happens next.
 
-# Absolute ceiling on task.attempts across ALL causes (#786) — a spawn-time
-# admission gate (parks BLOCKED_ON_USER instead of spawning again), not a
-# process-kill timer.
+# Ceiling on a row's unproductive_attempts (claims that left RUNNING with no
+# evidence of progress; #786, re-pointed at that counter by #1750) — a
+# spawn-time admission gate (parks BLOCKED_ON_USER as attempt_cap_blocked
+# instead of spawning again), not a process-kill timer. The raw `attempts`
+# claim counter is never compared against it.
 global_attempt_ceiling: 10
 
 # Consecutive spawn errors at which a lane's circuit breaker trips and
@@ -1009,7 +1013,8 @@ reap_policy: signal_only
 #                                 its base branch, so work is never silently
 #                                 lost to a stray cancel.
 #
-# The first two recipes gate on attempts < global_attempt_ceiling; at the
+# The first two recipes gate on unproductive_attempts < the resolved attempt
+# ceiling (lane attempt_ceiling, else global_attempt_ceiling); at the
 # ceiling the row is refused and left parked rather than requeued. See
 # docs/dispatch-runbook.md's "Concierge & Watchdog" section (#11) for the
 # full recipe preconditions and docs/events.md for the concierge.recovered

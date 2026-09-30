@@ -129,13 +129,14 @@ def result() -> None:
     a session's state as the authoritative completion record (see ``cw result
     emit --help``).
 
-    Field rules:
-    - schema_version: int -- must be 1-4
+    Field rules (``cw schema show auto-dev-result`` is authoritative):
+    - schema_version: int -- one of the accepted versions (currently 1-8)
     - ticket_id: str
-    - status: "shipped" | "no_op" | "plan_pending_approval" |
-      "ambiguities_pending_resolution" | "premises_pending_verification" |
-      "review_pending_approval" | "merge_gate_blocked" | "scope_exceeded" |
-      "forbidden_area" | "blocked"
+    - status: "shipped" | "stage_complete" | "no_op" | "blocked" |
+      "merge_pending" | "merge_gate_blocked" | "plan_pending_approval" |
+      "review_pending_approval" | "ambiguities_pending_resolution" |
+      "premises_pending_verification" | "scope_exceeded" | "forbidden_area" |
+      "empty_diff_blocked" | "stale_dispatch"
     - stage_reached: str literal (see cw schema show auto-dev-result for full list)
     - scope: {tier, files, lines_estimate, lines_actual, forbidden_touched}
     - plan_source: "linear_existing" | "github_issue_existing" | "generated" |
@@ -143,8 +144,9 @@ def result() -> None:
     - branch: str | null
 
     Constraints (cross-field invariants):
-    - pr: non-null iff status == "shipped"
-    - blocker: non-null iff status == "blocked"
+    - pr: non-null iff status in {"shipped", "merge_pending"}
+    - blocker: required when status == "blocked"; optional for
+      "merge_gate_blocked", "empty_diff_blocked", "stale_dispatch"; null otherwise
     - next_actions contains "wait_for_ci" iff status == "shipped"
     - scope.tier: required when stage_reached not in {stage1_plan, stage1_pre_flight}
     - scope.lines_actual: required when stage_reached not in

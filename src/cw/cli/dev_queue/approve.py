@@ -377,13 +377,18 @@ def dev_queue_approve(
             f"Approved {ticket_id} ({resolved}): plan not yet quality-reviewed"
             " — re-queued at plan stage to run Plan Quality Review."
             " Re-run auto-dev-plan (or dispatch) to proceed. The approval"
-            " is recorded on the dev-queue row (plan_approved_at); the"
-            " re-dispatched plan stage treats it as operator approval."
+            " is recorded on the dev-queue row (plan_approved_at +"
+            " plan_approved_fingerprint), bound to the draft as it stands now;"
+            " the re-dispatched plan stage accepts it while that draft is"
+            " unchanged, or while no operator comment postdates the approval."
+            " A changed draft with a newer operator comment re-parks"
+            " plan_pending_approval, quoting both fingerprints."
         )
         if not marker_already_recorded and _tracker_is_github_or_unknown(resolved):
             click.echo(
                 "Pass --post-marker to also post the plan-approved audit"
-                " marker comment on this ticket."
+                " marker comment on this ticket. The marker is audit-only;"
+                " nothing reads it back as approval evidence."
             )
     else:
         promoted_note = (
