@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import io
 import json
 import os
@@ -12,33 +11,19 @@ import signal
 import subprocess
 import sys
 import tempfile
-import threading
-import time
-from collections.abc import Callable, Iterator
-from concurrent.futures import Future, wait
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, TypedDict, cast
+from typing import TYPE_CHECKING, Final, Literal, NoReturn, TypedDict, cast
 
 if TYPE_CHECKING:
-    from types import FrameType, TracebackType
-
-type _SignalHandler = (
-    Callable[[int, FrameType | None], Any] | int | signal.Handlers | None
-)
+    from types import FrameType
 
 FIXED_PROMPT = "Reply exactly cw-session-smoke-ok. Do not use tools or modify files."
 FIXED_RESUME_PROMPT = (
     "Reply exactly cw-session-smoke-resumed-ok. Do not use tools or modify files."
 )
 PROCESS_TIMEOUT_SECONDS = 120
-PROCESS_POLL_INTERVAL_SECONDS = 0.25
-PROCESS_CLEANUP_TIMEOUT_SECONDS = 1
-PROCESS_CLEANUP_ATTEMPTS = 3
-PROCESS_READER_WAIT_TIMEOUT_SECONDS = 1
-MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024
-PROCESS_OUTPUT_CHUNK_BYTES = 64 * 1024
 MAX_VERSION_LENGTH = 64
 CODEX_EXECUTABLE: Final = "codex"
 CODEX_EXEC_SUBCOMMAND: Final = "exec"
@@ -226,8 +211,6 @@ class ProcessStatus(StrEnum):
     EXITED = "exited"
     TIMED_OUT = "timed_out"
     UNAVAILABLE = "unavailable"
-    WAIT_FAILED = "wait_failed"
-    CLEANUP_FAILED = "cleanup_failed"
 
 
 @dataclass(frozen=True)
@@ -235,41 +218,6 @@ class ProcessOutcome:
     exit_code: int | None
     stdout: str
     status: ProcessStatus
-    output_exceeded_limit: bool = False
-    reader_incomplete: bool = False
-    reader_failed: bool = False
-
-    @property
-    def timed_out(self) -> bool:
-        return self.status is ProcessStatus.TIMED_OUT
-
-    @property
-    def unavailable(self) -> bool:
-        return self.status is ProcessStatus.UNAVAILABLE
-
-    @property
-    def wait_failed(self) -> bool:
-        return self.status is ProcessStatus.WAIT_FAILED
-
-    @property
-    def cleanup_failed(self) -> bool:
-        return self.status is ProcessStatus.CLEANUP_FAILED
-
-
-@dataclass
-class _OutputCapture:
-    data: bytearray
-    exceeded_limit: bool = False
-    reader_failed: bool = False
-
-
-class _UnexpectedReaderError(RuntimeError):
-    def __init__(self) -> None:
-        super().__init__("unexpected probe stdout reader failure")
-
-
-class _StdoutPipeUnavailableError(RuntimeError):
-    pass
 
 
 @dataclass
@@ -398,301 +346,23 @@ def _parse_version(stdout: str) -> str | None:
     )
 
 
-def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
-    """Kill the command and descendants which may keep stdout open."""
-    if os.name == "posix" and process.pid is not None:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        else:
-            return
-    with contextlib.suppress(ProcessLookupError):
-        process.kill()
-
-
-def _make_stdout_reader(
-    process: subprocess.Popen[bytes], capture: _OutputCapture
-) -> Callable[[], None]:
-    def drain_stdout() -> None:
-        if process.stdout is None:
-            raise _StdoutPipeUnavailableError
-        stdout = cast("io.BufferedReader", process.stdout)
-        try:
-            while chunk := stdout.read1(PROCESS_OUTPUT_CHUNK_BYTES):
-                remaining = MAX_PROCESS_OUTPUT_BYTES - len(capture.data)
-                if len(chunk) > remaining:
-                    if remaining > 0:
-                        capture.data.extend(chunk[:remaining])
-                    capture.exceeded_limit = True
-                    return
-                capture.data.extend(chunk)
-        finally:
-            with contextlib.suppress(OSError, ValueError):
-                stdout.close()
-
-    return drain_stdout
-
-
-class _FutureResultCapture:
-    def __init__(self, future: Future[None]) -> None:
-        self.future = future
-
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> bool:
-        del exc_type, traceback
-        if exc_value is None:
-            self.future.set_result(None)
-            return False
-        self.future.set_exception(exc_value)
-        return True
-
-
-def _start_stdout_reader(
-    process: subprocess.Popen[bytes], capture: _OutputCapture
-) -> Future[None]:
-    reader_future: Future[None] = Future()
-    reader = _make_stdout_reader(process, capture)
-
-    def drain_and_report() -> None:
-        if not reader_future.set_running_or_notify_cancel():
-            return
-        with _FutureResultCapture(reader_future):
-            reader()
-
-    threading.Thread(
-        target=drain_and_report,
-        name="cw-codex-stdout",
-        daemon=True,
-    ).start()
-    return reader_future
-
-
-def _finish_stdout_capture(
-    process: subprocess.Popen[bytes],
-    reader: Future[None],
-    capture: _OutputCapture,
-) -> tuple[str, bool]:
-    _, pending = wait((reader,), timeout=PROCESS_READER_WAIT_TIMEOUT_SECONDS)
-    if pending:
-        _kill_process_group(process)
-        _, pending = wait((reader,), timeout=PROCESS_READER_WAIT_TIMEOUT_SECONDS)
-    if pending:
-        _, pending = wait((reader,), timeout=PROCESS_READER_WAIT_TIMEOUT_SECONDS)
-    if reader.done():
-        reader_error = reader.exception()
-        if isinstance(reader_error, Exception):
-            capture.reader_failed = True
-            _kill_process_group(process)
-        elif reader_error is not None:
-            raise reader_error
-    return (
-        bytes(capture.data).decode("utf-8", errors="replace"),
-        bool(pending),
-    )
-
-
-def _stop_process(
-    process: subprocess.Popen[bytes], reader: Future[None] | None = None
-) -> tuple[int | None, ProcessStatus]:
-    exit_code, status = _kill_and_wait(process, timed_out=False)
-    if process.stdout is not None and reader is None:
-        with contextlib.suppress(OSError, ValueError, KeyboardInterrupt):
-            process.stdout.close()
-    return exit_code, status
-
-
-@contextlib.contextmanager
-def _install_parent_signal_handlers(
-    handler: _SignalHandler,
-) -> Iterator[None]:
-    previous_handlers: dict[signal.Signals, _SignalHandler] = {}
-    try:
-        if threading.current_thread() is threading.main_thread():
-            for signum in (signal.SIGINT, signal.SIGTERM):
-                previous_handlers[signum] = signal.signal(signum, handler)
-        yield
-    finally:
-        restoration_errors: list[Exception] = []
-        for signum, previous_handler in previous_handlers.items():
-            try:
-                signal.signal(signum, previous_handler)
-            except (OSError, ValueError) as error:
-                restoration_errors.append(error)
-        if restoration_errors:
-            message = "failed to restore parent signal handlers"
-            raise ExceptionGroup(message, restoration_errors)
-
-
-def _launch_process(
-    argv: list[str], *, cwd: Path, env: dict[str, str]
-) -> subprocess.Popen[bytes] | ProcessOutcome | None:
-    process: subprocess.Popen[bytes] | None = None
-    signal_received = False
-    launch_failed = False
-
-    def defer_signal(_signum: int, _frame: FrameType | None) -> None:
-        nonlocal signal_received
-        signal_received = True
-
-    def raise_if_signal_received() -> None:
-        if signal_received:
-            raise KeyboardInterrupt
-
-    try:
-        with _install_parent_signal_handlers(defer_signal):
-            try:
-                process = subprocess.Popen(
-                    argv,
-                    cwd=cwd,
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=os.name == "posix",
-                )
-            except OSError:
-                launch_failed = True
-            raise_if_signal_received()
-        raise_if_signal_received()
-    except BaseException as error:
-        cleanup_exit_code: int | None = None
-        cleanup_status = ProcessStatus.EXITED
-        if process is not None:
-            cleanup_exit_code, cleanup_status = _stop_process(process)
-        if isinstance(error, KeyboardInterrupt):
-            return ProcessOutcome(
-                cleanup_exit_code,
-                "",
-                (
-                    ProcessStatus.CLEANUP_FAILED
-                    if cleanup_status is ProcessStatus.CLEANUP_FAILED
-                    else ProcessStatus.TIMED_OUT
-                ),
-            )
-        raise
-    if launch_failed or process is None:
-        return None
-    return process
-
-
-def _kill_and_wait(
-    process: subprocess.Popen[bytes], *, timed_out: bool
-) -> tuple[int | None, ProcessStatus]:
-    _kill_process_group(process)
-    for attempt in range(PROCESS_CLEANUP_ATTEMPTS):
-        try:
-            return (
-                process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS),
-                ProcessStatus.TIMED_OUT if timed_out else ProcessStatus.EXITED,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            if attempt + 1 < PROCESS_CLEANUP_ATTEMPTS:
-                _kill_process_group(process)
-    return None, ProcessStatus.CLEANUP_FAILED
-
-
-def _wait_for_process(
-    process: subprocess.Popen[bytes],
-    reader: Future[None],
-    capture: _OutputCapture,
-) -> tuple[int | None, ProcessStatus]:
-    deadline = time.monotonic() + PROCESS_TIMEOUT_SECONDS
-    while True:
-        if capture.exceeded_limit:
-            return _kill_and_wait(process, timed_out=False)
-        if reader.done():
-            reader_error = reader.exception()
-            if isinstance(reader_error, Exception):
-                capture.reader_failed = True
-            elif reader_error is not None:
-                raise reader_error
-            if capture.reader_failed:
-                return _kill_and_wait(process, timed_out=False)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return _kill_and_wait(process, timed_out=True)
-        try:
-            return process.wait(
-                timeout=min(remaining, PROCESS_POLL_INTERVAL_SECONDS)
-            ), ProcessStatus.EXITED
-        except subprocess.TimeoutExpired:
-            continue
-        except OSError:
-            exit_code, cleanup_status = _kill_and_wait(process, timed_out=False)
-            return (
-                exit_code,
-                ProcessStatus.CLEANUP_FAILED
-                if cleanup_status is ProcessStatus.CLEANUP_FAILED
-                else ProcessStatus.WAIT_FAILED,
-            )
-
-
-def _cleanup_interrupted_process(
-    process: subprocess.Popen[bytes],
-    reader: Future[None] | None,
-    capture: _OutputCapture | None,
-) -> ProcessOutcome:
-    exit_code, cleanup_status = _stop_process(process, reader)
-    stdout = ""
-    reader_incomplete = False
-    if reader is not None and capture is not None:
-        try:
-            stdout, reader_incomplete = _finish_stdout_capture(process, reader, capture)
-        except (OSError, ValueError):
-            reader_incomplete = True
-        except KeyboardInterrupt:
-            _kill_process_group(process)
-            reader_incomplete = True
-    return ProcessOutcome(
-        exit_code,
-        stdout,
-        (
-            ProcessStatus.CLEANUP_FAILED
-            if cleanup_status is ProcessStatus.CLEANUP_FAILED
-            else ProcessStatus.TIMED_OUT
-        ),
-        output_exceeded_limit=capture.exceeded_limit if capture is not None else False,
-        reader_incomplete=reader_incomplete,
-        reader_failed=capture.reader_failed if capture is not None else False,
-    )
-
-
 def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessOutcome:
-    launched = _launch_process(argv, cwd=cwd, env=env)
-    if isinstance(launched, ProcessOutcome):
-        return launched
-    if launched is None:
-        return ProcessOutcome(None, "", ProcessStatus.UNAVAILABLE)
-    process = launched
-
-    reader: Future[None] | None = None
-    capture: _OutputCapture | None = None
     try:
-        capture = _OutputCapture(bytearray())
-        reader = _start_stdout_reader(process, capture)
-        exit_code, status = _wait_for_process(process, reader, capture)
-        stdout, reader_incomplete = _finish_stdout_capture(process, reader, capture)
-    except BaseException as error:
-        if isinstance(error, KeyboardInterrupt):
-            return _cleanup_interrupted_process(process, reader, capture)
-        _cleanup_interrupted_process(process, reader, capture)
-        raise
-    return ProcessOutcome(
-        exit_code,
-        stdout,
-        status,
-        output_exceeded_limit=capture.exceeded_limit,
-        reader_incomplete=reader_incomplete,
-        reader_failed=capture.reader_failed,
-    )
+        completed = subprocess.run(
+            argv,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=PROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return ProcessOutcome(None, "", ProcessStatus.TIMED_OUT)
+    except OSError:
+        return ProcessOutcome(None, "", ProcessStatus.UNAVAILABLE)
+    return ProcessOutcome(completed.returncode, completed.stdout, ProcessStatus.EXITED)
 
 
 def _result(
@@ -716,62 +386,6 @@ def _result(
     }
 
 
-@dataclass
-class _UnhandledExceptionDiagnostic:
-    result: SmokeResult
-
-
-_UNHANDLED_EXCEPTION_DIAGNOSTIC = _UnhandledExceptionDiagnostic(
-    _result(
-        STATUS_FAILED,
-        cli_version=None,
-        model=None,
-        error_code=ERROR_INTERNAL_ERROR,
-    )
-)
-
-
-def _reset_unhandled_exception_result() -> None:
-    _UNHANDLED_EXCEPTION_DIAGNOSTIC.result = _result(
-        STATUS_FAILED,
-        cli_version=None,
-        model=None,
-        error_code=ERROR_INTERNAL_ERROR,
-    )
-
-
-def _record_unhandled_exception_progress(
-    *,
-    cli_version: str,
-    model: str,
-    session_id: str | None = None,
-    create: CreateSummary | None = None,
-    resume: ResumeSummary | None = None,
-) -> None:
-    _UNHANDLED_EXCEPTION_DIAGNOSTIC.result = _result(
-        STATUS_FAILED,
-        cli_version=cli_version,
-        model=model,
-        session_id=session_id,
-        create=create,
-        resume=resume,
-        error_code=ERROR_INTERNAL_ERROR,
-    )
-
-
-def _set_unhandled_exception_code(error_code: ErrorCode) -> None:
-    previous = _UNHANDLED_EXCEPTION_DIAGNOSTIC.result
-    _UNHANDLED_EXCEPTION_DIAGNOSTIC.result = _result(
-        STATUS_FAILED,
-        cli_version=previous["cli_version"],
-        model=previous["model"],
-        session_id=previous["session_id"],
-        create=previous["create"],
-        resume=previous["resume"],
-        error_code=error_code,
-    )
-
-
 @dataclass(frozen=True)
 class _Attempt:
     outcome: ProcessOutcome
@@ -787,16 +401,10 @@ def _attempt(
     stage: ProbeStage,
 ) -> _Attempt:
     outcome = _run_process(argv, cwd=cwd, env=env)
-    if outcome.reader_failed:
-        raise _UnexpectedReaderError
     stream = _parse_stream(outcome.stdout)
-    if outcome.output_exceeded_limit or outcome.reader_incomplete:
-        stream = ParsedStream(stream.session_id, None, ParseError.MALFORMED_JSONL)
     error_code = _process_status_error_code(outcome.status, stage)
     if error_code is None:
-        if outcome.output_exceeded_limit or outcome.reader_incomplete:
-            error_code = _stream_error_code(stage, ParseError.MALFORMED_JSONL)
-        elif outcome.exit_code != 0:
+        if outcome.exit_code != 0:
             error_code = (
                 ERROR_CREATE_NONZERO_EXIT
                 if stage is ProbeStage.CREATE
@@ -816,8 +424,6 @@ def _attempt(
         outcome.exit_code,
         "",
         outcome.status,
-        output_exceeded_limit=outcome.output_exceeded_limit,
-        reader_incomplete=outcome.reader_incomplete,
     )
     return _Attempt(compact_outcome, stream, error_code)
 
@@ -829,8 +435,6 @@ def _stream_error_code(stage: ProbeStage, error: ParseError) -> ErrorCode:
 def _process_status_error_code(
     status: ProcessStatus, stage: ProbeStage
 ) -> ErrorCode | None:
-    if status in {ProcessStatus.WAIT_FAILED, ProcessStatus.CLEANUP_FAILED}:
-        return ERROR_INTERNAL_ERROR
     if status is ProcessStatus.TIMED_OUT:
         return (
             ERROR_CREATE_TIMEOUT if stage is ProbeStage.CREATE else ERROR_RESUME_TIMEOUT
@@ -966,19 +570,8 @@ def _run_session(
     cli_version: str,
     model: str,
 ) -> SmokeResult:
-    _record_unhandled_exception_progress(cli_version=cli_version, model=model)
     git_init = _run_process(["git", "init", "--quiet"], cwd=worktree, env=git_env)
-    if git_init.reader_failed or git_init.status in {
-        ProcessStatus.WAIT_FAILED,
-        ProcessStatus.CLEANUP_FAILED,
-    }:
-        error_code = ERROR_INTERNAL_ERROR
-    elif (
-        git_init.status is not ProcessStatus.EXITED
-        or git_init.output_exceeded_limit
-        or git_init.reader_incomplete
-        or git_init.exit_code != 0
-    ):
+    if git_init.status is not ProcessStatus.EXITED or git_init.exit_code != 0:
         error_code = ERROR_REPO_SETUP_FAILED
     else:
         error_code = None
@@ -997,12 +590,6 @@ def _run_session(
         stage=ProbeStage.CREATE,
     )
     create_summary = _create_summary(create)
-    _record_unhandled_exception_progress(
-        cli_version=cli_version,
-        model=model,
-        session_id=create.stream.session_id,
-        create=create_summary,
-    )
     if create.error_code is not None:
         return _result(
             STATUS_FAILED,
@@ -1022,13 +609,6 @@ def _run_session(
         stage=ProbeStage.RESUME,
     )
     resume_summary = _resume_summary(resume, session_id)
-    _record_unhandled_exception_progress(
-        cli_version=cli_version,
-        model=model,
-        session_id=session_id,
-        create=create_summary,
-        resume=resume_summary,
-    )
     if resume.error_code is not None:
         return _result(
             STATUS_FAILED,
@@ -1062,15 +642,11 @@ def _run_session(
 
 def _version_result(*, cwd: Path, env: dict[str, str]) -> _VersionOutcome:
     outcome = _run_process([CODEX_EXECUTABLE, CODEX_VERSION_FLAG], cwd=cwd, env=env)
-    if outcome.status in {ProcessStatus.WAIT_FAILED, ProcessStatus.CLEANUP_FAILED}:
-        return _VersionFailure(ERROR_INTERNAL_ERROR)
-    if outcome.reader_failed:
-        raise _UnexpectedReaderError
     if outcome.status is ProcessStatus.UNAVAILABLE:
         return _VersionFailure(ERROR_CLI_UNAVAILABLE)
     if outcome.status is ProcessStatus.TIMED_OUT or outcome.exit_code != 0:
         return _VersionFailure(ERROR_VERSION_UNAVAILABLE)
-    version = None if outcome.reader_incomplete else _parse_version(outcome.stdout)
+    version = _parse_version(outcome.stdout)
     if version is None:
         return _VersionFailure(ERROR_VERSION_INVALID)
     return _VersionSuccess(version)
@@ -1078,17 +654,6 @@ def _version_result(*, cwd: Path, env: dict[str, str]) -> _VersionOutcome:
 
 def _raise_for_parent_signal(_signum: int, _frame: FrameType | None) -> NoReturn:
     raise KeyboardInterrupt
-
-
-def _handle_unhandled_exception(
-    exc_type: type[BaseException],
-    exc_value: BaseException,
-    traceback: TracebackType | None,
-) -> None:
-    del exc_type, exc_value, traceback
-    sys.stdout.write(
-        json.dumps(_UNHANDLED_EXCEPTION_DIAGNOSTIC.result, separators=(",", ":")) + "\n"
-    )
 
 
 def _new_temporary_directory(
@@ -1155,93 +720,8 @@ def _run_in_disposable_directory(
     )
 
 
-def _cleanup_temporary_directory(
-    temporary_directory: tempfile.TemporaryDirectory[str], result: SmokeResult
-) -> SmokeResult:
-    signal_received = False
-    cleanup_failed = False
-
-    def defer_signal(_signum: int, _frame: FrameType | None) -> None:
-        nonlocal signal_received
-        signal_received = True
-
-    with _install_parent_signal_handlers(defer_signal):
-        try:
-            temporary_directory.cleanup()
-        except OSError:
-            cleanup_failed = True
-
-    if cleanup_failed:
-        error_code: ErrorCode = ERROR_CLEANUP_FAILED
-        _set_unhandled_exception_code(error_code)
-    elif signal_received:
-        error_code = ERROR_REPO_SETUP_FAILED
-    else:
-        return result
-    return _result(
-        STATUS_FAILED,
-        cli_version=result["cli_version"],
-        model=result["model"],
-        session_id=result["session_id"],
-        create=result["create"],
-        resume=result["resume"],
-        error_code=error_code,
-    )
-
-
-def _run_disposable(*, model: str) -> SmokeResult:
-    try:
-        checkout = _checkout_root()
-        codex_home = _codex_home(checkout)
-    except (OSError, RuntimeError):
-        return _result(
-            STATUS_FAILED,
-            cli_version=None,
-            model=model,
-            error_code=ERROR_REPO_SETUP_FAILED,
-        )
-    if codex_home is None:
-        return _result(
-            STATUS_FAILED,
-            cli_version=None,
-            model=model,
-            error_code=ERROR_REPO_SETUP_FAILED,
-        )
-    result = _result(
-        STATUS_FAILED,
-        cli_version=None,
-        model=model,
-        error_code=ERROR_REPO_SETUP_FAILED,
-    )
-    temporary_directory: tempfile.TemporaryDirectory[str] | None = None
-    signal_received = False
-
-    def defer_signal(_signum: int, _frame: FrameType | None) -> None:
-        nonlocal signal_received
-        signal_received = True
-
-    try:
-        with _install_parent_signal_handlers(defer_signal):
-            temporary_directory = _new_temporary_directory(checkout)
-        if signal_received or temporary_directory is None:
-            _set_unhandled_exception_code(ERROR_REPO_SETUP_FAILED)
-        else:
-            temp_root = Path(temporary_directory.name)
-            result = _run_in_disposable_directory(
-                temp_root=temp_root,
-                checkout=checkout,
-                codex_home=codex_home,
-                model=model,
-            )
-    finally:
-        if temporary_directory is not None:
-            result = _cleanup_temporary_directory(temporary_directory, result)
-    return result
-
-
 def run_probe(model: str | None) -> SmokeResult:
     """Run the opt-in probe and return its sanitized result."""
-    _reset_unhandled_exception_result()
     if os.environ.get("CW_CODEX_LIVE_SESSION_SMOKE") != "1":
         return _result(
             STATUS_SKIPPED,
@@ -1261,7 +741,64 @@ def run_probe(model: str | None) -> SmokeResult:
             model=None,
             error_code=ERROR_INVALID_MODEL,
         )
-    return _run_disposable(model=model)
+    try:
+        checkout = _checkout_root()
+        codex_home = _codex_home(checkout)
+    except (OSError, RuntimeError):
+        return _result(
+            STATUS_FAILED,
+            cli_version=None,
+            model=model,
+            error_code=ERROR_REPO_SETUP_FAILED,
+        )
+    if codex_home is None:
+        return _result(
+            STATUS_FAILED,
+            cli_version=None,
+            model=model,
+            error_code=ERROR_REPO_SETUP_FAILED,
+        )
+
+    temporary_directory: tempfile.TemporaryDirectory[str] | None = None
+    result = _result(
+        STATUS_FAILED,
+        cli_version=None,
+        model=model,
+        error_code=ERROR_REPO_SETUP_FAILED,
+    )
+    try:
+        temporary_directory = _new_temporary_directory(checkout)
+        if temporary_directory is not None:
+            result = _run_in_disposable_directory(
+                temp_root=Path(temporary_directory.name),
+                checkout=checkout,
+                codex_home=codex_home,
+                model=model,
+            )
+    except KeyboardInterrupt:
+        pass
+    except Exception:  # noqa: BLE001 - the CLI contract sanitizes unexpected defects.
+        result = _result(
+            STATUS_FAILED,
+            cli_version=None,
+            model=None,
+            error_code=ERROR_INTERNAL_ERROR,
+        )
+    finally:
+        if temporary_directory is not None:
+            try:
+                temporary_directory.cleanup()
+            except OSError:
+                result = _result(
+                    STATUS_FAILED,
+                    cli_version=result["cli_version"],
+                    model=result["model"],
+                    session_id=result["session_id"],
+                    create=result["create"],
+                    resume=result["resume"],
+                    error_code=ERROR_CLEANUP_FAILED,
+                )
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1273,26 +810,23 @@ def main(argv: list[str] | None = None) -> int:
         model = parser.parse_args(argv).model
     except _ArgumentParseError:
         model = None
-    _reset_unhandled_exception_result()
-    failure_result = _result(
-        STATUS_FAILED,
-        cli_version=None,
-        model=None,
-        error_code=ERROR_REPO_SETUP_FAILED,
-    )
-    result = failure_result
-    with _install_parent_signal_handlers(_raise_for_parent_signal):
-        try:
-            result = run_probe(model)
-        except KeyboardInterrupt:
-            _set_unhandled_exception_code(ERROR_REPO_SETUP_FAILED)
-            result = _UNHANDLED_EXCEPTION_DIAGNOSTIC.result
+    previous_term_handler = signal.signal(signal.SIGTERM, _raise_for_parent_signal)
+    try:
+        result = run_probe(model)
+    except KeyboardInterrupt:
+        result = _result(
+            STATUS_FAILED,
+            cli_version=None,
+            model=None,
+            error_code=ERROR_REPO_SETUP_FAILED,
+        )
+    finally:
+        signal.signal(signal.SIGTERM, previous_term_handler)
     sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
     return 0 if result["status"] in {STATUS_SKIPPED, STATUS_PASSED} else 1
 
 
 def _entrypoint() -> NoReturn:
-    sys.excepthook = _handle_unhandled_exception
     raise SystemExit(main())
 
 
