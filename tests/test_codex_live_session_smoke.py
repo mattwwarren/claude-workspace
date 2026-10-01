@@ -14,7 +14,6 @@ from scripts import probe_codex_live_session as probe
 MODEL = "gpt-5.6-luna"
 SESSION = "thread.smoke-2463"
 VERSION = "codex-cli 0.156.1"
-_REAL_SUBPROCESS_RUN = subprocess.run
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +55,6 @@ def fake_run(
     create_code = cast("int", options.get("create_code", 0))
     resume_code = cast("int", options.get("resume_code", 0))
     git_code = cast("int", options.get("git_code", 0))
-    real_git_init = cast("bool", options.get("real_git_init", False))
     timeout_stage = cast("str | None", options.get("timeout_stage"))
     unavailable_stage = cast("str | None", options.get("unavailable_stage"))
     partial_create_stdout = cast(
@@ -92,21 +90,8 @@ def fake_run(
         if argv == ["git", "init", "--quiet"]:
             if timeout_stage == "git":
                 raise subprocess.TimeoutExpired(argv, timeout)
-            if real_git_init:
-                return _REAL_SUBPROCESS_RUN(
-                    argv,
-                    cwd=cwd,
-                    env=env,
-                    stdin=stdin,
-                    capture_output=capture_output,
-                    text=text,
-                    check=check,
-                    timeout=timeout,
-                )
-            return completed(argv, code=git_code, stderr=stderr)
-        if argv[:3] == ["codex", "exec", "resume"]:
-            if real_git_init:
-                assert (cwd / ".git").is_dir()
+            return _run_git_init(argv, cwd, env, options, git_code, stderr, timeout)
+        if _is_resume_call(argv, cwd, options):
             if unavailable_stage == "resume":
                 raise FileNotFoundError
             if timeout_stage == "resume":
@@ -114,9 +99,7 @@ def fake_run(
             return completed(
                 argv, code=resume_code, stdout=resume_stdout, stderr=stderr
             )
-        if argv == probe._create_argv(MODEL):
-            if real_git_init:
-                assert (cwd / ".git").is_dir()
+        if _is_create_call(argv, cwd, options):
             if unavailable_stage == "create":
                 raise FileNotFoundError
             if timeout_stage == "create":
@@ -130,13 +113,6 @@ def fake_run(
         raise AssertionError(message)
 
     return run
-
-
-def assert_no_resume_call(calls: list[dict[str, object]]) -> None:
-    assert all(
-        cast("list[str]", call["argv"])[:3] != ["codex", "exec", "resume"]
-        for call in calls
-    )
 
 
 def broken_temporary_directory(
@@ -1015,3 +991,55 @@ def test_keyboard_interrupt_cleans_temporary_directory_and_emits_json(
     assert captured.err == ""
     assert captured.out.count("\n") == 1
     assert json.loads(captured.out)["error_code"] == "repo_setup_failed"
+
+
+_REAL_SUBPROCESS_RUN = subprocess.run
+
+
+def assert_no_resume_call(calls: list[dict[str, object]]) -> None:
+    assert all(
+        cast("list[str]", call["argv"])[:3] != ["codex", "exec", "resume"]
+        for call in calls
+    )
+
+
+def _run_git_init(
+    argv: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    options: dict[str, object],
+    git_code: int,
+    stderr: str,
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    if not cast("bool", options.get("real_git_init", False)):
+        return completed(argv, code=git_code, stderr=stderr)
+    result = _REAL_SUBPROCESS_RUN(
+        argv,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=timeout,
+    )
+    assert result.returncode == 0
+    assert (cwd / ".git").is_dir()
+    return result
+
+
+def _is_resume_call(argv: list[str], cwd: Path, options: dict[str, object]) -> bool:
+    if argv[:3] != ["codex", "exec", "resume"]:
+        return False
+    if cast("bool", options.get("real_git_init", False)):
+        assert (cwd / ".git").is_dir()
+    return True
+
+
+def _is_create_call(argv: list[str], cwd: Path, options: dict[str, object]) -> bool:
+    if argv != probe._create_argv(MODEL):
+        return False
+    if cast("bool", options.get("real_git_init", False)):
+        assert (cwd / ".git").is_dir()
+    return True
