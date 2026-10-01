@@ -245,12 +245,6 @@ class _ArgumentParseError(Exception):
     """A CLI argument error that must be rendered through the JSON contract."""
 
 
-class _CleanupFailureError(Exception):
-    def __init__(self, result: SmokeResult) -> None:
-        super().__init__("temporary directory cleanup failed")
-        self.result = result
-
-
 class _SanitizedArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         del message
@@ -297,10 +291,7 @@ def _handle_other(event: dict[str, object], state: _StreamState) -> ParseError |
             error = ParseError.MALFORMED_JSONL
         else:
             state.error_event_seen = True
-    elif event_type not in _KNOWN_NONTERMINAL_EVENTS and (
-        event_type.startswith("turn.")
-        or event_type.endswith((".completed", ".failed", ".error"))
-    ):
+    elif event_type not in _KNOWN_NONTERMINAL_EVENTS and event_type.startswith("turn."):
         error = ParseError.INVALID_TERMINAL
     return error
 
@@ -731,8 +722,8 @@ def _run_in_disposable_directory(
     )
 
 
-def run_probe(model: str | None) -> SmokeResult:
-    """Run the opt-in probe and return its sanitized result."""
+def _run_probe(model: str | None) -> SmokeResult:
+    """Run the opt-in probe before its public sanitized exception boundary."""
     if os.environ.get("CW_CODEX_LIVE_SESSION_SMOKE") != "1":
         return _result(
             STATUS_SKIPPED,
@@ -791,7 +782,7 @@ def run_probe(model: str | None) -> SmokeResult:
             try:
                 temporary_directory.cleanup()
             except OSError:
-                cleanup_result = _result(
+                result = _result(
                     STATUS_FAILED,
                     cli_version=result["cli_version"],
                     model=result["model"],
@@ -800,8 +791,20 @@ def run_probe(model: str | None) -> SmokeResult:
                     resume=result["resume"],
                     error_code=ERROR_CLEANUP_FAILED,
                 )
-                raise _CleanupFailureError(cleanup_result) from None
     return result
+
+
+def run_probe(model: str | None) -> SmokeResult:
+    """Run the opt-in probe and return its sanitized result."""
+    try:
+        return _run_probe(model)
+    except Exception:  # noqa: BLE001 - owner-approved in Codex chat; sanitized boundary.
+        return _result(
+            STATUS_FAILED,
+            cli_version=None,
+            model=None,
+            error_code=ERROR_INTERNAL_ERROR,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -822,15 +825,6 @@ def main(argv: list[str] | None = None) -> int:
             cli_version=None,
             model=None,
             error_code=ERROR_REPO_SETUP_FAILED,
-        )
-    except _CleanupFailureError as exc:
-        result = exc.result
-    except Exception:  # noqa: BLE001 - owner approved this sanitized JSON boundary.
-        result = _result(
-            STATUS_FAILED,
-            cli_version=None,
-            model=None,
-            error_code=ERROR_INTERNAL_ERROR,
         )
     finally:
         signal.signal(signal.SIGTERM, previous_term_handler)

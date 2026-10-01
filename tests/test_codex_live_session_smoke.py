@@ -162,6 +162,19 @@ class TestParser:
         )
         assert parsed == probe.ParsedStream(SESSION, "turn.completed", None)
 
+    def test_success_ignores_unrelated_namespaced_completion_and_error_events(
+        self,
+    ) -> None:
+        parsed = probe._parse_stream(
+            jsonl(
+                {"type": "worker.completed"},
+                {"type": "extension.error"},
+                {"type": "thread.started", "thread_id": SESSION},
+                {"type": "turn.completed"},
+            )
+        )
+        assert parsed == probe.ParsedStream(SESSION, "turn.completed", None)
+
     def test_failed_turn_is_terminal_but_not_success(self) -> None:
         assert (
             probe._parse_stream(stream(terminal="turn.failed")).terminal_event
@@ -654,6 +667,60 @@ class TestProbe:
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
+    ) -> None:
+        class BrokenTemporaryDirectory:
+            name = str(tmp_path)
+
+            def __init__(self, **_kwargs: object) -> None:
+                Path(self.name).mkdir(exist_ok=True)
+
+            def cleanup(self) -> None:
+                cleanup_error = "cleanup-secret"
+                raise OSError(cleanup_error)
+
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        monkeypatch.setattr(
+            "scripts.probe_codex_live_session.tempfile.TemporaryDirectory",
+            BrokenTemporaryDirectory,
+        )
+
+        monkeypatch.setattr(
+            probe,
+            "_run_in_disposable_directory",
+            lambda **_kwargs: probe._result(
+                probe.STATUS_PASSED,
+                cli_version=VERSION,
+                model=MODEL,
+                session_id=SESSION,
+                create={"exit_code": 0, "terminal_event": "turn.completed"},
+                resume={
+                    "exit_code": 0,
+                    "terminal_event": "turn.completed",
+                    "id_matches": True,
+                },
+                error_code=None,
+            ),
+        )
+        result = probe.run_probe(MODEL)
+
+        assert result["status"] == "failed"
+        assert result["error_code"] == "cleanup_failed"
+        assert result["session_id"] == SESSION
+        assert set(result) == {
+            "status",
+            "cli_version",
+            "model",
+            "session_id",
+            "create",
+            "resume",
+            "error_code",
+        }
+        assert "cleanup-secret" not in json.dumps(result)
+
+    def test_cleanup_failure_does_not_hide_active_probe_exception(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         class BrokenTemporaryDirectory:
@@ -677,24 +744,15 @@ class TestProbe:
             raise RuntimeError(message)
 
         monkeypatch.setattr(probe, "_run_in_disposable_directory", fail_directory)
+
         assert probe.main(["--model", MODEL]) == 1
         captured = capsys.readouterr()
         assert captured.err == ""
         assert captured.out.count("\n") == 1
         result = json.loads(captured.out)
-        assert result["status"] == "failed"
-        assert result["error_code"] == "cleanup_failed"
-        assert set(result) == {
-            "status",
-            "cli_version",
-            "model",
-            "session_id",
-            "create",
-            "resume",
-            "error_code",
-        }
-        assert "cleanup-secret" not in json.dumps(result)
-        assert "private-secret" not in json.dumps(result)
+        assert result["error_code"] == "internal_error"
+        assert "cleanup-secret" not in captured.out
+        assert "private-secret" not in captured.out
 
     def test_unexpected_cleanup_error_is_sanitized(
         self,
