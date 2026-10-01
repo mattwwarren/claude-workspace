@@ -24,6 +24,8 @@ can inspect or remove by the returned ID. The version and Git setup processes
 receive no Codex home or API-key variables. Child `HOME` and temporary paths
 are isolated under the disposable directory. A preflight check rejects a
 configured Codex home or session-artifact directory inside the source checkout.
+Once create has returned a validated ID, later failures and Ctrl-C preserve
+that ID and the compact create summary so the operator can recover the session.
 
 Resume omits `--sandbox` because it inherits the create session's read-only
 policy. The probe never uses `--last`, `--ephemeral`, `--approve-for-me`,

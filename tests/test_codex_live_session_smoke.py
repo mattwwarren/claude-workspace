@@ -884,6 +884,11 @@ class TestProbe:
         assert captured.out.count("\n") == 1
         result = json.loads(captured.out)
         assert result["error_code"] == "internal_error"
+        assert result["session_id"] == SESSION
+        assert result["create"] == {
+            "exit_code": 0,
+            "terminal_event": "turn.completed",
+        }
         assert "cleanup-secret" not in captured.out
 
     def test_unexpected_error_is_reported_as_internal_error(
@@ -905,6 +910,84 @@ class TestProbe:
         assert captured.out.count("\n") == 1
         assert "private-secret" not in captured.out
         assert json.loads(captured.out)["error_code"] == "internal_error"
+
+    def test_unexpected_resume_error_preserves_created_session_id(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        calls: list[dict[str, object]] = []
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        set_runner(monkeypatch, fake_run(calls))
+        attempt = probe._attempt
+
+        def fail_resume(
+            argv: list[str],
+            *,
+            cwd: Path,
+            env: dict[str, str],
+            stage: probe.ProbeStage,
+        ) -> probe._Attempt:
+            if stage is probe.ProbeStage.RESUME:
+                message = "resume-private-secret"
+                raise RuntimeError(message)
+            return attempt(argv, cwd=cwd, env=env, stage=stage)
+
+        monkeypatch.setattr(probe, "_attempt", fail_resume)
+
+        assert probe.main(["--model", MODEL]) == 1
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out.count("\n") == 1
+        assert json.loads(captured.out) == {
+            "status": "failed",
+            "cli_version": VERSION,
+            "model": MODEL,
+            "session_id": SESSION,
+            "create": {"exit_code": 0, "terminal_event": "turn.completed"},
+            "resume": None,
+            "error_code": "internal_error",
+        }
+        assert "resume-private-secret" not in captured.out
+        assert_no_resume_call(calls)
+
+    def test_keyboard_interrupt_during_resume_preserves_created_session_id(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        calls: list[dict[str, object]] = []
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        set_runner(monkeypatch, fake_run(calls))
+        attempt = probe._attempt
+
+        def interrupt_resume(
+            argv: list[str],
+            *,
+            cwd: Path,
+            env: dict[str, str],
+            stage: probe.ProbeStage,
+        ) -> probe._Attempt:
+            if stage is probe.ProbeStage.RESUME:
+                raise KeyboardInterrupt
+            return attempt(argv, cwd=cwd, env=env, stage=stage)
+
+        monkeypatch.setattr(probe, "_attempt", interrupt_resume)
+
+        assert probe.main(["--model", MODEL]) == 1
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out.count("\n") == 1
+        assert json.loads(captured.out) == {
+            "status": "failed",
+            "cli_version": VERSION,
+            "model": MODEL,
+            "session_id": SESSION,
+            "create": {"exit_code": 0, "terminal_event": "turn.completed"},
+            "resume": None,
+            "error_code": "repo_setup_failed",
+        }
+        assert_no_resume_call(calls)
 
     def test_result_does_not_expose_raw_output_or_environment(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

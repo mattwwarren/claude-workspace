@@ -168,6 +168,35 @@ class SmokeResult(TypedDict):
     error_code: ErrorCode | None
 
 
+@dataclass
+class _ProbeProgress:
+    """Validated result fields retained across later unexpected failures."""
+
+    cli_version: str | None = None
+    model: str | None = None
+    session_id: str | None = None
+    create: CreateSummary | None = None
+    resume: ResumeSummary | None = None
+
+    def capture(self, result: SmokeResult) -> None:
+        self.cli_version = result["cli_version"]
+        self.model = result["model"]
+        self.session_id = result["session_id"]
+        self.create = result["create"]
+        self.resume = result["resume"]
+
+    def failed_result(self, error_code: ErrorCode) -> SmokeResult:
+        return _result(
+            STATUS_FAILED,
+            cli_version=self.cli_version,
+            model=self.model,
+            session_id=self.session_id,
+            create=self.create,
+            resume=self.resume,
+            error_code=error_code,
+        )
+
+
 @dataclass(frozen=True)
 class ParsedStream:
     session_id: str | None
@@ -530,6 +559,7 @@ def _run_session(
     git_env: dict[str, str],
     cli_version: str,
     model: str,
+    progress: _ProbeProgress,
 ) -> SmokeResult:
     git_init = _run_process(["git", "init", "--quiet"], cwd=worktree, env=git_env)
     if git_init.status is not ProcessStatus.EXITED or git_init.exit_code != 0:
@@ -550,7 +580,11 @@ def _run_session(
         env=codex_env,
         stage=ProbeStage.CREATE,
     )
+    progress.cli_version = cli_version
+    progress.model = model
+    progress.session_id = create.stream.session_id
     create_summary = _create_summary(create)
+    progress.create = create_summary
     if create.error_code is not None:
         return _result(
             STATUS_FAILED,
@@ -570,6 +604,7 @@ def _run_session(
         stage=ProbeStage.RESUME,
     )
     resume_summary = _resume_summary(resume, session_id)
+    progress.resume = resume_summary
     if resume.error_code is not None:
         return _result(
             STATUS_FAILED,
@@ -632,7 +667,12 @@ def _new_temporary_directory(
 
 
 def _run_in_disposable_directory(
-    *, temp_root: Path, checkout: Path, codex_home: Path, model: str
+    *,
+    temp_root: Path,
+    checkout: Path,
+    codex_home: Path,
+    model: str,
+    progress: _ProbeProgress,
 ) -> SmokeResult:
     if _is_within(temp_root, checkout) or _is_within(codex_home, temp_root):
         return _result(
@@ -674,10 +714,11 @@ def _run_in_disposable_directory(
         git_env=setup_env,
         cli_version=version_outcome.cli_version,
         model=model,
+        progress=progress,
     )
 
 
-def _run_probe(model: str | None) -> SmokeResult:
+def _run_probe(model: str | None, progress: _ProbeProgress) -> SmokeResult:
     """Run the opt-in probe before its public sanitized exception boundary."""
     if os.environ.get("CW_CODEX_LIVE_SESSION_SMOKE") != "1":
         return _result(
@@ -698,6 +739,7 @@ def _run_probe(model: str | None) -> SmokeResult:
             model=None,
             error_code=ErrorCode.INVALID_MODEL,
         )
+    progress.model = model
     try:
         checkout = _checkout_root()
         codex_home = _codex_home(checkout)
@@ -731,7 +773,9 @@ def _run_probe(model: str | None) -> SmokeResult:
                 checkout=checkout,
                 codex_home=codex_home,
                 model=model,
+                progress=progress,
             )
+            progress.capture(result)
     finally:
         if temporary_directory is not None:
             try:
@@ -746,20 +790,21 @@ def _run_probe(model: str | None) -> SmokeResult:
                     resume=result["resume"],
                     error_code=ErrorCode.CLEANUP_FAILED,
                 )
+    progress.capture(result)
     return result
 
 
-def run_probe(model: str | None) -> SmokeResult:
+def run_probe(
+    model: str | None, *, _progress: _ProbeProgress | None = None
+) -> SmokeResult:
     """Run the opt-in probe and return its sanitized result."""
+    progress = _progress or _ProbeProgress()
     try:
-        return _run_probe(model)
+        result = _run_probe(model, progress)
     except Exception:  # noqa: BLE001 - owner-approved in Codex chat; sanitized boundary.
-        return _result(
-            STATUS_FAILED,
-            cli_version=None,
-            model=None,
-            error_code=ErrorCode.INTERNAL_ERROR,
-        )
+        return progress.failed_result(ErrorCode.INTERNAL_ERROR)
+    progress.capture(result)
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -771,15 +816,11 @@ def main(argv: list[str] | None = None) -> int:
         model = parser.parse_args(argv).model
     except _ArgumentParseError:
         model = None
+    progress = _ProbeProgress()
     try:
-        result = run_probe(model)
+        result = run_probe(model, _progress=progress)
     except KeyboardInterrupt:
-        result = _result(
-            STATUS_FAILED,
-            cli_version=None,
-            model=None,
-            error_code=ErrorCode.REPO_SETUP_FAILED,
-        )
+        result = progress.failed_result(ErrorCode.REPO_SETUP_FAILED)
     sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
     return 0 if result["status"] in {STATUS_SKIPPED, STATUS_PASSED} else 1
 
