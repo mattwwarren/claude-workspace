@@ -7,17 +7,13 @@ import io
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Literal, NoReturn, TypedDict, cast
-
-if TYPE_CHECKING:
-    from types import FrameType
+from typing import Final, Literal, NoReturn, TypedDict, cast
 
 FIXED_PROMPT = "Reply exactly cw-session-smoke-ok. Do not use tools or modify files."
 FIXED_RESUME_PROMPT = (
@@ -61,29 +57,6 @@ class ErrorCode(StrEnum):
 STATUS_SKIPPED: Final = "skipped"
 STATUS_PASSED: Final = "passed"
 STATUS_FAILED: Final = "failed"
-ERROR_OPT_IN_REQUIRED: Final = ErrorCode.OPT_IN_REQUIRED
-ERROR_INVALID_MODEL: Final = ErrorCode.INVALID_MODEL
-ERROR_VERSION_UNAVAILABLE: Final = ErrorCode.VERSION_UNAVAILABLE
-ERROR_VERSION_INVALID: Final = ErrorCode.VERSION_INVALID
-ERROR_CLI_UNAVAILABLE: Final = ErrorCode.CLI_UNAVAILABLE
-ERROR_REPO_SETUP_FAILED: Final = ErrorCode.REPO_SETUP_FAILED
-ERROR_INTERNAL_ERROR: Final = ErrorCode.INTERNAL_ERROR
-ERROR_CREATE_TIMEOUT: Final = ErrorCode.CREATE_TIMEOUT
-ERROR_CREATE_NONZERO_EXIT: Final = ErrorCode.CREATE_NONZERO_EXIT
-ERROR_CREATE_MALFORMED_JSONL: Final = ErrorCode.CREATE_MALFORMED_JSONL
-ERROR_CREATE_MISSING_THREAD: Final = ErrorCode.CREATE_MISSING_THREAD
-ERROR_CREATE_INVALID_THREAD_ID: Final = ErrorCode.CREATE_INVALID_THREAD_ID
-ERROR_CREATE_DUPLICATE_THREAD_STARTED: Final = ErrorCode.CREATE_DUPLICATE_THREAD_STARTED
-ERROR_CREATE_INVALID_TERMINAL: Final = ErrorCode.CREATE_INVALID_TERMINAL
-ERROR_RESUME_TIMEOUT: Final = ErrorCode.RESUME_TIMEOUT
-ERROR_RESUME_NONZERO_EXIT: Final = ErrorCode.RESUME_NONZERO_EXIT
-ERROR_RESUME_MALFORMED_JSONL: Final = ErrorCode.RESUME_MALFORMED_JSONL
-ERROR_RESUME_MISSING_THREAD: Final = ErrorCode.RESUME_MISSING_THREAD
-ERROR_RESUME_INVALID_THREAD_ID: Final = ErrorCode.RESUME_INVALID_THREAD_ID
-ERROR_RESUME_DUPLICATE_THREAD_STARTED: Final = ErrorCode.RESUME_DUPLICATE_THREAD_STARTED
-ERROR_RESUME_ID_MISMATCH: Final = ErrorCode.RESUME_ID_MISMATCH
-ERROR_RESUME_INVALID_TERMINAL: Final = ErrorCode.RESUME_INVALID_TERMINAL
-ERROR_CLEANUP_FAILED: Final = ErrorCode.CLEANUP_FAILED
 _VERSION_RE = re.compile(r"^codex-cli [0-9]+\.[0-9]+\.[0-9]+$")
 _MODEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -127,10 +100,6 @@ THREAD_STARTED_EVENT: Final = "thread.started"
 TURN_STARTED_EVENT: Final = "turn.started"
 TURN_COMPLETED_EVENT: Final = "turn.completed"
 TURN_FAILED_EVENT: Final = "turn.failed"
-ITEM_STARTED_EVENT: Final = "item.started"
-ITEM_UPDATED_EVENT: Final = "item.updated"
-ITEM_COMPLETED_EVENT: Final = "item.completed"
-ERROR_EVENT: Final = "error"
 
 
 class ParseError(StrEnum):
@@ -150,32 +119,29 @@ type TerminalEvent = Literal["turn.completed", "turn.failed"]
 type ProbeStatus = Literal["skipped", "passed", "failed"]
 
 _PARSE_ERROR_CODES: dict[tuple[ProbeStage, ParseError], ErrorCode] = {
-    (ProbeStage.CREATE, ParseError.MALFORMED_JSONL): ERROR_CREATE_MALFORMED_JSONL,
-    (ProbeStage.CREATE, ParseError.MISSING_THREAD): ERROR_CREATE_MISSING_THREAD,
-    (ProbeStage.CREATE, ParseError.INVALID_THREAD_ID): ERROR_CREATE_INVALID_THREAD_ID,
+    (ProbeStage.CREATE, ParseError.MALFORMED_JSONL): ErrorCode.CREATE_MALFORMED_JSONL,
+    (ProbeStage.CREATE, ParseError.MISSING_THREAD): ErrorCode.CREATE_MISSING_THREAD,
+    (
+        ProbeStage.CREATE,
+        ParseError.INVALID_THREAD_ID,
+    ): ErrorCode.CREATE_INVALID_THREAD_ID,
     (ProbeStage.CREATE, ParseError.DUPLICATE_THREAD_STARTED): (
-        ERROR_CREATE_DUPLICATE_THREAD_STARTED
+        ErrorCode.CREATE_DUPLICATE_THREAD_STARTED
     ),
-    (ProbeStage.CREATE, ParseError.INVALID_TERMINAL): ERROR_CREATE_INVALID_TERMINAL,
-    (ProbeStage.RESUME, ParseError.MALFORMED_JSONL): ERROR_RESUME_MALFORMED_JSONL,
-    (ProbeStage.RESUME, ParseError.MISSING_THREAD): ERROR_RESUME_MISSING_THREAD,
-    (ProbeStage.RESUME, ParseError.INVALID_THREAD_ID): ERROR_RESUME_INVALID_THREAD_ID,
+    (ProbeStage.CREATE, ParseError.INVALID_TERMINAL): ErrorCode.CREATE_INVALID_TERMINAL,
+    (ProbeStage.RESUME, ParseError.MALFORMED_JSONL): ErrorCode.RESUME_MALFORMED_JSONL,
+    (ProbeStage.RESUME, ParseError.MISSING_THREAD): ErrorCode.RESUME_MISSING_THREAD,
+    (
+        ProbeStage.RESUME,
+        ParseError.INVALID_THREAD_ID,
+    ): ErrorCode.RESUME_INVALID_THREAD_ID,
     (ProbeStage.RESUME, ParseError.DUPLICATE_THREAD_STARTED): (
-        ERROR_RESUME_DUPLICATE_THREAD_STARTED
+        ErrorCode.RESUME_DUPLICATE_THREAD_STARTED
     ),
-    (ProbeStage.RESUME, ParseError.INVALID_TERMINAL): ERROR_RESUME_INVALID_TERMINAL,
+    (ProbeStage.RESUME, ParseError.INVALID_TERMINAL): ErrorCode.RESUME_INVALID_TERMINAL,
 }
 _TERMINAL_EVENTS: frozenset[TerminalEvent] = frozenset(
     {TURN_COMPLETED_EVENT, TURN_FAILED_EVENT}
-)
-_KNOWN_NONTERMINAL_EVENTS: frozenset[str] = frozenset(
-    {
-        TURN_STARTED_EVENT,
-        ITEM_STARTED_EVENT,
-        ITEM_UPDATED_EVENT,
-        ITEM_COMPLETED_EVENT,
-        ERROR_EVENT,
-    }
 )
 
 
@@ -225,7 +191,6 @@ class _StreamState:
     session_id: str | None = None
     terminal_event: TerminalEvent | None = None
     thread_seen: bool = False
-    error_event_seen: bool = False
 
 
 @dataclass(frozen=True)
@@ -282,16 +247,7 @@ def _handle_other(event: dict[str, object], state: _StreamState) -> ParseError |
             error = ParseError.MISSING_THREAD
         else:
             state.terminal_event = event_type
-    elif event_type == ERROR_EVENT:
-        if (
-            not state.thread_seen
-            or state.error_event_seen
-            or not isinstance(event.get("message"), str)
-        ):
-            error = ParseError.MALFORMED_JSONL
-        else:
-            state.error_event_seen = True
-    elif event_type not in _KNOWN_NONTERMINAL_EVENTS and event_type.startswith("turn."):
+    elif event_type.startswith("turn.") and event_type != TURN_STARTED_EVENT:
         error = ParseError.INVALID_TERMINAL
     return error
 
@@ -321,10 +277,6 @@ def _parse_stream(stdout: str) -> ParsedStream:
             state.session_id, state.terminal_event, ParseError.MISSING_THREAD
         )
     if state.terminal_event is None:
-        return ParsedStream(
-            state.session_id, state.terminal_event, ParseError.INVALID_TERMINAL
-        )
-    if state.error_event_seen and state.terminal_event == TURN_COMPLETED_EVENT:
         return ParsedStream(
             state.session_id, state.terminal_event, ParseError.INVALID_TERMINAL
         )
@@ -408,17 +360,17 @@ def _attempt(
     if error_code is None:
         if outcome.exit_code != 0:
             error_code = (
-                ERROR_CREATE_NONZERO_EXIT
+                ErrorCode.CREATE_NONZERO_EXIT
                 if stage is ProbeStage.CREATE
-                else ERROR_RESUME_NONZERO_EXIT
+                else ErrorCode.RESUME_NONZERO_EXIT
             )
         elif stream.error is not None:
             error_code = _stream_error_code(stage, stream.error)
         elif stream.terminal_event != TURN_COMPLETED_EVENT:
             error_code = (
-                ERROR_CREATE_INVALID_TERMINAL
+                ErrorCode.CREATE_INVALID_TERMINAL
                 if stage is ProbeStage.CREATE
-                else ERROR_RESUME_INVALID_TERMINAL
+                else ErrorCode.RESUME_INVALID_TERMINAL
             )
     # Retain only the parsed summary: the create transcript must be gone before
     # the resume subprocess starts.
@@ -439,10 +391,12 @@ def _process_status_error_code(
 ) -> ErrorCode | None:
     if status is ProcessStatus.TIMED_OUT:
         return (
-            ERROR_CREATE_TIMEOUT if stage is ProbeStage.CREATE else ERROR_RESUME_TIMEOUT
+            ErrorCode.CREATE_TIMEOUT
+            if stage is ProbeStage.CREATE
+            else ErrorCode.RESUME_TIMEOUT
         )
     if status is ProcessStatus.UNAVAILABLE:
-        return ERROR_CLI_UNAVAILABLE
+        return ErrorCode.CLI_UNAVAILABLE
     return None
 
 
@@ -574,7 +528,7 @@ def _run_session(
 ) -> SmokeResult:
     git_init = _run_process(["git", "init", "--quiet"], cwd=worktree, env=git_env)
     if git_init.status is not ProcessStatus.EXITED or git_init.exit_code != 0:
-        error_code = ERROR_REPO_SETUP_FAILED
+        error_code = ErrorCode.REPO_SETUP_FAILED
     else:
         error_code = None
     if error_code is not None:
@@ -629,7 +583,7 @@ def _run_session(
             session_id=session_id,
             create=create_summary,
             resume=resume_summary,
-            error_code=ERROR_RESUME_ID_MISMATCH,
+            error_code=ErrorCode.RESUME_ID_MISMATCH,
         )
     return _result(
         STATUS_PASSED,
@@ -645,17 +599,13 @@ def _run_session(
 def _version_result(*, cwd: Path, env: dict[str, str]) -> _VersionOutcome:
     outcome = _run_process([CODEX_EXECUTABLE, CODEX_VERSION_FLAG], cwd=cwd, env=env)
     if outcome.status is ProcessStatus.UNAVAILABLE:
-        return _VersionFailure(ERROR_CLI_UNAVAILABLE)
+        return _VersionFailure(ErrorCode.CLI_UNAVAILABLE)
     if outcome.status is ProcessStatus.TIMED_OUT or outcome.exit_code != 0:
-        return _VersionFailure(ERROR_VERSION_UNAVAILABLE)
+        return _VersionFailure(ErrorCode.VERSION_UNAVAILABLE)
     version = _parse_version(outcome.stdout)
     if version is None:
-        return _VersionFailure(ERROR_VERSION_INVALID)
+        return _VersionFailure(ErrorCode.VERSION_INVALID)
     return _VersionSuccess(version)
-
-
-def _raise_for_parent_signal(_signum: int, _frame: FrameType | None) -> NoReturn:
-    raise KeyboardInterrupt
 
 
 def _new_temporary_directory(
@@ -684,7 +634,7 @@ def _run_in_disposable_directory(
             STATUS_FAILED,
             cli_version=None,
             model=model,
-            error_code=ERROR_REPO_SETUP_FAILED,
+            error_code=ErrorCode.REPO_SETUP_FAILED,
         )
     worktree = temp_root / "repo"
     scratch = temp_root / "tmp"
@@ -696,7 +646,7 @@ def _run_in_disposable_directory(
             STATUS_FAILED,
             cli_version=None,
             model=model,
-            error_code=ERROR_REPO_SETUP_FAILED,
+            error_code=ErrorCode.REPO_SETUP_FAILED,
         )
     codex_env = _child_environment(cwd=worktree, scratch=scratch, codex_home=codex_home)
     setup_env = _child_environment(
@@ -729,7 +679,7 @@ def _run_probe(model: str | None) -> SmokeResult:
             STATUS_SKIPPED,
             cli_version=None,
             model=None,
-            error_code=ERROR_OPT_IN_REQUIRED,
+            error_code=ErrorCode.OPT_IN_REQUIRED,
         )
     if (
         model is None
@@ -741,7 +691,7 @@ def _run_probe(model: str | None) -> SmokeResult:
             STATUS_FAILED,
             cli_version=None,
             model=None,
-            error_code=ERROR_INVALID_MODEL,
+            error_code=ErrorCode.INVALID_MODEL,
         )
     try:
         checkout = _checkout_root()
@@ -751,14 +701,14 @@ def _run_probe(model: str | None) -> SmokeResult:
             STATUS_FAILED,
             cli_version=None,
             model=model,
-            error_code=ERROR_REPO_SETUP_FAILED,
+            error_code=ErrorCode.REPO_SETUP_FAILED,
         )
     if codex_home is None:
         return _result(
             STATUS_FAILED,
             cli_version=None,
             model=model,
-            error_code=ERROR_REPO_SETUP_FAILED,
+            error_code=ErrorCode.REPO_SETUP_FAILED,
         )
 
     temporary_directory: tempfile.TemporaryDirectory[str] | None = None
@@ -766,7 +716,7 @@ def _run_probe(model: str | None) -> SmokeResult:
         STATUS_FAILED,
         cli_version=None,
         model=model,
-        error_code=ERROR_REPO_SETUP_FAILED,
+        error_code=ErrorCode.REPO_SETUP_FAILED,
     )
     try:
         temporary_directory = _new_temporary_directory(checkout)
@@ -789,7 +739,7 @@ def _run_probe(model: str | None) -> SmokeResult:
                     session_id=result["session_id"],
                     create=result["create"],
                     resume=result["resume"],
-                    error_code=ERROR_CLEANUP_FAILED,
+                    error_code=ErrorCode.CLEANUP_FAILED,
                 )
     return result
 
@@ -803,7 +753,7 @@ def run_probe(model: str | None) -> SmokeResult:
             STATUS_FAILED,
             cli_version=None,
             model=None,
-            error_code=ERROR_INTERNAL_ERROR,
+            error_code=ErrorCode.INTERNAL_ERROR,
         )
 
 
@@ -816,7 +766,6 @@ def main(argv: list[str] | None = None) -> int:
         model = parser.parse_args(argv).model
     except _ArgumentParseError:
         model = None
-    previous_term_handler = signal.signal(signal.SIGTERM, _raise_for_parent_signal)
     try:
         result = run_probe(model)
     except KeyboardInterrupt:
@@ -824,10 +773,8 @@ def main(argv: list[str] | None = None) -> int:
             STATUS_FAILED,
             cli_version=None,
             model=None,
-            error_code=ERROR_REPO_SETUP_FAILED,
+            error_code=ErrorCode.REPO_SETUP_FAILED,
         )
-    finally:
-        signal.signal(signal.SIGTERM, previous_term_handler)
     sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
     return 0 if result["status"] in {STATUS_SKIPPED, STATUS_PASSED} else 1
 

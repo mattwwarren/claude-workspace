@@ -30,9 +30,10 @@ policy. The probe never uses `--last`, `--ephemeral`, `--approve-for-me`,
 `--dangerously-bypass-approvals-and-sandbox`, or `workspace-write`. It
 captures stdout/stderr in memory and writes no output file. It relies on
 Python's standard `subprocess.run` timeout behavior for the direct child; it
-is not a process-tree supervisor or a security boundary. SIGINT/SIGTERM are
-converted to a sanitized failure where Python unwinds, with temporary
-directory cleanup attempted.
+is not a process-tree supervisor or a security boundary. A normal SIGINT
+(`Ctrl-C`) becomes a Python interruption and returns a sanitized failure where
+Python unwinds, with temporary-directory cleanup attempted. SIGTERM keeps its
+normal process behavior.
 
 Every invocation emits one compact JSON line and no stderr. The object has
 exactly seven keys: `status`, `cli_version`, `model`, `session_id`,
@@ -41,6 +42,11 @@ summaries are returned; transcripts, prompts, paths, stderr, environment
 values, exception text, and authentication material are not included.
 Unexpected defects return `internal_error`; temporary-directory cleanup
 failures return `cleanup_failed`.
+
+The public result boundary contains one narrowly scoped Ruff `BLE001`
+suppression, explicitly approved by the issue owner on 2026-09-30. It maps
+unexpected defects to the fixed `internal_error` result without leaking a
+traceback to stderr; no other suppression is used by this probe.
 
 The `error_code` values are `null` (success), `opt_in_required`,
 `invalid_model`, `version_unavailable`, `version_invalid`, `cli_unavailable`,
