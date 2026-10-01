@@ -14,6 +14,7 @@ from scripts import probe_codex_live_session as probe
 MODEL = "gpt-5.6-luna"
 SESSION = "thread.smoke-2463"
 VERSION = "codex-cli 0.156.1"
+_REAL_SUBPROCESS_RUN = subprocess.run
 
 
 @pytest.fixture(autouse=True)
@@ -55,6 +56,7 @@ def fake_run(
     create_code = cast("int", options.get("create_code", 0))
     resume_code = cast("int", options.get("resume_code", 0))
     git_code = cast("int", options.get("git_code", 0))
+    real_git_init = cast("bool", options.get("real_git_init", False))
     timeout_stage = cast("str | None", options.get("timeout_stage"))
     unavailable_stage = cast("str | None", options.get("unavailable_stage"))
     partial_create_stdout = cast(
@@ -90,8 +92,21 @@ def fake_run(
         if argv[:2] == ["git", "init"]:
             if timeout_stage == "git":
                 raise subprocess.TimeoutExpired(argv, timeout)
+            if real_git_init:
+                return _REAL_SUBPROCESS_RUN(
+                    argv,
+                    cwd=cwd,
+                    env=env,
+                    stdin=stdin,
+                    capture_output=capture_output,
+                    text=text,
+                    check=check,
+                    timeout=timeout,
+                )
             return completed(argv, code=git_code, stderr=stderr)
         if argv[:3] == ["codex", "exec", "resume"]:
+            if real_git_init:
+                assert (cwd / ".git").is_dir()
             if unavailable_stage == "resume":
                 raise FileNotFoundError
             if timeout_stage == "resume":
@@ -100,6 +115,8 @@ def fake_run(
                 argv, code=resume_code, stdout=resume_stdout, stderr=stderr
             )
         if argv == probe._create_argv(MODEL):
+            if real_git_init:
+                assert (cwd / ".git").is_dir()
             if unavailable_stage == "create":
                 raise FileNotFoundError
             if timeout_stage == "create":
@@ -285,51 +302,6 @@ class TestProbe:
             "error_code": "opt_in_required",
         }
 
-    def test_disposable_repository_is_initialized_before_session_calls(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        temp_root = tmp_path / "disposable"
-        temp_root.mkdir()
-        codex_home = tmp_path / "codex-home"
-        codex_home.mkdir()
-        real_run_process = probe._run_process
-        codex_calls: list[list[str]] = []
-
-        def run_process(
-            argv: list[str], *, cwd: Path, env: dict[str, str]
-        ) -> probe.ProcessOutcome:
-            if argv == ["git", "init", "--quiet"]:
-                outcome = real_run_process(argv, cwd=cwd, env=env)
-                assert outcome.status is probe.ProcessStatus.EXITED
-                assert outcome.exit_code == 0
-                assert (cwd / ".git").is_dir()
-                return outcome
-            if argv == ["codex", "--version"]:
-                return probe.ProcessOutcome(
-                    0, f"{VERSION}\n", probe.ProcessStatus.EXITED
-                )
-
-            codex_calls.append(argv)
-            assert (cwd / ".git").is_dir()
-            if argv == probe._create_argv(MODEL):
-                return probe.ProcessOutcome(0, stream(), probe.ProcessStatus.EXITED)
-            if argv == probe._resume_argv(SESSION, MODEL):
-                return probe.ProcessOutcome(0, stream(), probe.ProcessStatus.EXITED)
-            message = f"unexpected subprocess argv: {argv!r}"
-            raise AssertionError(message)
-
-        monkeypatch.setattr(probe, "_run_process", run_process)
-        result = probe._run_in_disposable_directory(
-            temp_root=temp_root,
-            checkout=probe._checkout_root(),
-            codex_home=codex_home,
-            model=MODEL,
-        )
-
-        assert result["status"] == "passed"
-        assert len(codex_calls) == 2
-        assert (temp_root / "repo" / ".git").is_dir()
-
     @pytest.mark.parametrize(
         "model", [None, "bad/model", "x" * 65, "read-only", "workspace-write"]
     )
@@ -366,7 +338,7 @@ class TestProbe:
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
         set_runner(
             monkeypatch,
-            fake_run(calls, create_session_id=created_session_id),
+            fake_run(calls, create_session_id=created_session_id, real_git_init=True),
         )
         result = probe.run_probe(MODEL)
         assert set(result) == {
