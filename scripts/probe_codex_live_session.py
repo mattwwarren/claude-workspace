@@ -338,6 +338,8 @@ def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessO
             capture_output=True,
             check=False,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=PROCESS_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
@@ -674,7 +676,22 @@ def _run_in_disposable_directory(
     model: str,
     progress: _ProbeProgress,
 ) -> SmokeResult:
-    if _is_within(temp_root, checkout) or _is_within(codex_home, temp_root):
+    try:
+        resolved_temp_root = temp_root.resolve()
+        resolved_codex_home = codex_home.resolve()
+        session_artifacts = (resolved_codex_home / CODEX_SESSION_ARTIFACT_DIR).resolve()
+    except (OSError, RuntimeError):
+        return _result(
+            STATUS_FAILED,
+            cli_version=None,
+            model=model,
+            error_code=ErrorCode.REPO_SETUP_FAILED,
+        )
+    if (
+        _is_within(resolved_temp_root, checkout)
+        or _is_within(resolved_codex_home, resolved_temp_root)
+        or _is_within(session_artifacts, resolved_temp_root)
+    ):
         return _result(
             STATUS_FAILED,
             cli_version=None,
@@ -693,7 +710,9 @@ def _run_in_disposable_directory(
             model=model,
             error_code=ErrorCode.REPO_SETUP_FAILED,
         )
-    codex_env = _child_environment(cwd=worktree, scratch=scratch, codex_home=codex_home)
+    codex_env = _child_environment(
+        cwd=worktree, scratch=scratch, codex_home=resolved_codex_home
+    )
     setup_env = _child_environment(
         cwd=worktree,
         scratch=scratch,

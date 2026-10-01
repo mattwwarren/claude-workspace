@@ -45,13 +45,22 @@ def completed(
     return subprocess.CompletedProcess(argv, code, stdout, stderr)
 
 
+def decode_subprocess_text(value: str | bytes, *, errors: str) -> str:
+    return value.decode("utf-8", errors=errors) if isinstance(value, bytes) else value
+
+
 def fake_run(
     calls: list[dict[str, object]],
     **options: object,
 ) -> Callable[..., subprocess.CompletedProcess[str]]:
     create_session_id = cast("str", options.get("create_session_id", SESSION))
-    create_stdout = cast("str", options.get("create_stdout", stream(create_session_id)))
-    resume_stdout = cast("str", options.get("resume_stdout", stream(create_session_id)))
+    version_stdout = cast("str | bytes", options.get("version_stdout", f"{VERSION}\n"))
+    create_stdout = cast(
+        "str | bytes", options.get("create_stdout", stream(create_session_id))
+    )
+    resume_stdout = cast(
+        "str | bytes", options.get("resume_stdout", stream(create_session_id))
+    )
     create_code = cast("int", options.get("create_code", 0))
     resume_code = cast("int", options.get("resume_code", 0))
     git_code = cast("int", options.get("git_code", 0))
@@ -70,6 +79,8 @@ def fake_run(
         stdin: int,
         capture_output: bool,
         text: bool,
+        encoding: str,
+        errors: str,
         check: bool,
         timeout: float,
     ) -> subprocess.CompletedProcess[str]:
@@ -81,12 +92,18 @@ def fake_run(
                 "stdin": stdin,
                 "capture_output": capture_output,
                 "text": text,
+                "encoding": encoding,
+                "errors": errors,
                 "check": check,
                 "timeout": timeout,
             }
         )
         if argv == ["codex", "--version"]:
-            return completed(argv, stdout=f"{VERSION}\n", stderr=stderr)
+            return completed(
+                argv,
+                stdout=decode_subprocess_text(version_stdout, errors=errors),
+                stderr=stderr,
+            )
         if argv == ["git", "init", "--quiet"]:
             if timeout_stage == "git":
                 raise subprocess.TimeoutExpired(argv, timeout)
@@ -97,7 +114,10 @@ def fake_run(
             if timeout_stage == "resume":
                 raise subprocess.TimeoutExpired(argv, timeout)
             return completed(
-                argv, code=resume_code, stdout=resume_stdout, stderr=stderr
+                argv,
+                code=resume_code,
+                stdout=decode_subprocess_text(resume_stdout, errors=errors),
+                stderr=stderr,
             )
         if _is_create_call(argv, cwd, options):
             if unavailable_stage == "create":
@@ -107,7 +127,10 @@ def fake_run(
                     argv, timeout, output=partial_create_stdout
                 )
             return completed(
-                argv, code=create_code, stdout=create_stdout, stderr=stderr
+                argv,
+                code=create_code,
+                stdout=decode_subprocess_text(create_stdout, errors=errors),
+                stderr=stderr,
             )
         message = f"unexpected subprocess argv: {argv!r}"
         raise AssertionError(message)
@@ -367,6 +390,8 @@ class TestProbe:
             ),
         ]
         assert len(calls) == 4
+        assert all(call["encoding"] == "utf-8" for call in calls)
+        assert all(call["errors"] == "replace" for call in calls)
         assert calls[0]["cwd"] == calls[1]["cwd"] == calls[2]["cwd"] == calls[3]["cwd"]
         repo = cast("Path", calls[0]["cwd"])
         assert repo.name == "repo"
@@ -442,6 +467,28 @@ class TestProbe:
         set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
 
         assert probe.run_probe(MODEL)["error_code"] == "repo_setup_failed"
+
+    def test_sessions_symlink_into_disposable_repo_fails_before_launch(
+        self, tmp_path: Path
+    ) -> None:
+        temp_root = tmp_path / "disposable"
+        temp_root.mkdir()
+        external_home = tmp_path / "external-codex-home"
+        external_home.mkdir()
+        (external_home / "sessions").symlink_to(
+            temp_root / "repo", target_is_directory=True
+        )
+
+        result = probe._run_in_disposable_directory(
+            temp_root=temp_root,
+            checkout=probe._checkout_root(),
+            codex_home=external_home,
+            model=MODEL,
+            progress=probe._ProbeProgress(),
+        )
+
+        assert result["error_code"] == "repo_setup_failed"
+        assert not (temp_root / "repo").exists()
 
     def test_temporary_parent_inside_checkout_fails_before_launch(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -757,6 +804,44 @@ class TestProbe:
         assert "auth-secret" not in captured.out
         assert "secret-transcript" not in captured.out
         assert calls == [["codex", "--version"]]
+
+    def test_version_with_invalid_utf8_is_reported_as_invalid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[dict[str, object]] = []
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        set_runner(
+            monkeypatch,
+            fake_run(calls, version_stdout=b"codex-cli 0.156.1\xff\n"),
+        )
+
+        result = probe.run_probe(MODEL)
+
+        assert result["error_code"] == "version_invalid"
+        assert result["cli_version"] is None
+        assert result["session_id"] is None
+        assert len(calls) == 1
+        assert calls[0]["errors"] == "replace"
+
+    def test_invalid_utf8_session_output_is_malformed_and_keeps_valid_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[dict[str, object]] = []
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        set_runner(
+            monkeypatch,
+            fake_run(calls, create_stdout=stream().encode("utf-8") + b"\xff\n"),
+        )
+
+        result = probe.run_probe(MODEL)
+
+        assert result["error_code"] == "create_malformed_jsonl"
+        assert result["session_id"] == SESSION
+        assert result["create"] == {
+            "exit_code": 0,
+            "terminal_event": "turn.completed",
+        }
+        assert "\ufffd" not in json.dumps(result)
 
     def test_version_timeout_and_nonzero_are_unavailable(
         self, monkeypatch: pytest.MonkeyPatch

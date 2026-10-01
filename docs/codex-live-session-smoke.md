@@ -16,6 +16,9 @@ JSONL session, validates its session ID and completed turn, then resumes that
 same ID. The fixed prompts ask Codex not to use tools or modify files.
 Create and resume use the same disposable repository and each subprocess has a
 120-second timeout.
+Subprocess text is decoded as UTF-8 with invalid bytes replaced; replacement
+that disrupts the version token or JSONL stream uses the existing sanitized
+version-invalid or stage-specific malformed-stream result.
 
 The probe uses the operator's existing `CODEX_HOME` (or the normal
 `~/.codex` default) for create/resume. It does not replace, clean, or delete
@@ -35,7 +38,9 @@ Python's standard `subprocess.run` timeout behavior for the direct child; it
 is not a process-tree supervisor or a security boundary. A normal SIGINT
 (`Ctrl-C`) becomes a Python interruption and returns a sanitized failure where
 Python unwinds, with temporary-directory cleanup attempted. SIGTERM keeps its
-normal process behavior.
+normal process behavior and can bypass cleanup, leaving the disposable
+directory behind; SIGKILL is likewise uncatchable. The probe does not install a
+signal or child-process supervisor.
 
 Every invocation emits one compact JSON line and no stderr. The object has
 exactly seven keys: `status`, `cli_version`, `model`, `session_id`,
