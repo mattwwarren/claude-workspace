@@ -92,6 +92,26 @@ CODEX_REVIEW_PARTIAL = "codex_review_partial"
 # successful-but-out-of-policy fix, a distinct axis.
 CODEX_FIX_SCOPE_VIOLATION = "codex_fix_scope_violation"
 
+# Fix-loop scope fence (#2485): a fix cycle changed a path outside the plan's
+# ``## Files Modified`` manifest and the cycle-0 reviewed diff (which already
+# carries any operator ``--scope-drift`` grant the IMPL session honored).
+# Broader than CODEX_FIX_SCOPE_VIOLATION, which needs a sensitive-registry
+# match too. Its own code rather than ``plan_scope_drift``: that reason is the
+# IMPL gate's, and ``cw dev-queue approve --scope-drift`` refuses a row parked
+# anywhere but IMPL, so reusing it would advertise a recovery verb that fails.
+CODEX_FIX_SCOPE_DRIFT = "codex_fix_scope_drift"
+
+# Fix-loop revert guard (#2492): a fix cycle restored most of the branch's
+# changed files to their default-branch content (or emptied the branch diff
+# outright) while addressing findings that name none of them — a fix that
+# undoes the feature instead of patching it.
+CODEX_FIX_REVERTED_BRANCH = "codex_fix_reverted_branch"
+
+# Subject prefix of every fix-cycle commit (``<prefix> <N> — <summary>``).
+# Shared so the empty-diff recovery hint (#2492) can pick fix-cycle commits out
+# of a branch's log by the same literal the commit step writes.
+FIX_CYCLE_COMMIT_PREFIX = "fix(review): codex fix cycle"
+
 # Review-exit guard park (#2354): the fix loop converged clean, but local HEAD
 # is not on origin/<branch> and a self-heal push also failed. Reporting the
 # clean result anyway would hand a later stage work that exists only locally.

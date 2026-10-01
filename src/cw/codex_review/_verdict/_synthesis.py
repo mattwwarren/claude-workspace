@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from cw._git import git_output
+from cw._git import git_output, run_git
 from cw.auto_dev_result import (
     EMPTY_DIFF_BLOCKER_REASON,
     AutoDevResult,
@@ -27,6 +27,7 @@ from cw.codex_review._const import (
     CODEX_REVIEW_PARTIAL,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
+    FIX_CYCLE_COMMIT_PREFIX,
     STAGE3_REVIEW,
 )
 from cw.codex_review._context import _load_ticket_context
@@ -152,6 +153,50 @@ def _verdict_block_reason(verdict: ReviewVerdict) -> str | None:
     if verdict.run_failures_with_should_fix_discards:
         return CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS
     return None
+
+
+def _empty_diff_recovery_hint(worktree: Path, default_branch: str) -> str:
+    """Say what a measured-empty branch diff most likely means (#2492).
+
+    An empty net diff over a branch that HAS commits means a later commit
+    undid an earlier one, and a codex fix-cycle commit is the usual suspect —
+    so its sha and the pre-fix-cycle commit are named, sparing the operator a
+    manual ``git diff``/API dig. A branch with no commits never got IMPL's
+    work at all. Never raises: an unreadable log degrades to a generic hint.
+    """
+    upstream = f"origin/{default_branch}"
+    log = run_git(
+        ["log", "--format=%h %s", f"{upstream}..HEAD"],
+        cwd=worktree,
+        capture_output=True,
+    )
+    if log.returncode != 0:
+        return f"Inspect the branch's commits with `git log -p {upstream}..HEAD`."
+    commits = [line.split(" ", 1) for line in log.stdout.splitlines() if line]
+    if not commits:
+        return (
+            f"The branch has no commits ahead of {upstream}: IMPL never "
+            "committed its work. Requeue the ticket at IMPL."
+        )
+    hint = (
+        f"The branch carries {len(commits)} commit(s) whose net diff is "
+        "empty, so a later commit reverted an earlier one. Inspect them with "
+        f"`git log --stat {upstream}..HEAD`."
+    )
+    fix_shas = [
+        parts[0]
+        for parts in commits
+        if len(parts) > 1 and parts[1].startswith(FIX_CYCLE_COMMIT_PREFIX)
+    ]
+    if fix_shas:
+        # git log lists newest first, so the last entry is the earliest.
+        earliest = fix_shas[-1]
+        hint += (
+            f" Codex fix-cycle commit(s) {', '.join(fix_shas)} are the likeliest "
+            f"cause; the pre-fix-cycle branch state is {earliest}~1 "
+            f"(compare with `git diff {earliest}~1 HEAD`)."
+        )
+    return hint
 
 
 def synthesize_codex_review_result(
@@ -436,6 +481,7 @@ def synthesize_codex_review_result(
                     f"origin/{default_branch} (0 files, 0 lines) -- "
                     "nothing to review."
                 ),
+                recovery_hint=_empty_diff_recovery_hint(worktree, default_branch),
             ),
             worktree_path=str(worktree),
         )
