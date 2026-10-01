@@ -779,15 +779,7 @@ def _run_probe(model: str | None, progress: _ProbeProgress) -> SmokeResult:
             try:
                 temporary_directory.cleanup()
             except OSError:
-                result = _result(
-                    STATUS_FAILED,
-                    cli_version=result["cli_version"],
-                    model=result["model"],
-                    session_id=result["session_id"],
-                    create=result["create"],
-                    resume=result["resume"],
-                    error_code=ErrorCode.CLEANUP_FAILED,
-                )
+                result = progress.failed_result(ErrorCode.CLEANUP_FAILED)
     progress.capture(result)
     return result
 
