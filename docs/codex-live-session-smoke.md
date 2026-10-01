@@ -14,6 +14,8 @@ Without the exact opt-in value, it launches no subprocess and returns
 disposable repository below `$HOME/.cache/cw-live-tests`, creates a read-only
 JSONL session, validates its session ID and completed turn, then resumes that
 same ID. The fixed prompts ask Codex not to use tools or modify files.
+Set `CW_LIVE_TEST_TMPDIR` to choose a different temporary parent when needed;
+the probe resolves and rejects a selected parent inside the source checkout.
 Create and resume use the same disposable repository and each subprocess has a
 120-second timeout.
 Subprocess text is decoded as UTF-8 with invalid bytes replaced; replacement

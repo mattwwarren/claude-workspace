@@ -6,7 +6,7 @@ import json
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import NoReturn, cast
 
 import pytest
 from scripts import probe_codex_live_session as probe
@@ -20,6 +20,7 @@ VERSION = "codex-cli 0.156.1"
 def isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.delenv("CW_LIVE_TEST_TMPDIR", raising=False)
 
 
 def stream(session: str = SESSION, terminal: str = "turn.completed") -> str:
@@ -469,7 +470,7 @@ class TestProbe:
         assert probe.run_probe(MODEL)["error_code"] == "repo_setup_failed"
 
     def test_sessions_symlink_into_disposable_repo_fails_before_launch(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         temp_root = tmp_path / "disposable"
         temp_root.mkdir()
@@ -478,6 +479,13 @@ class TestProbe:
         (external_home / "sessions").symlink_to(
             temp_root / "repo", target_is_directory=True
         )
+        process_calls: list[object] = []
+
+        def fail_if_process_launched(*args: object, **kwargs: object) -> NoReturn:
+            process_calls.append((args, kwargs))
+            pytest.fail("preflight must reject before launching a subprocess")
+
+        monkeypatch.setattr(probe, "_run_process", fail_if_process_launched)
 
         result = probe._run_in_disposable_directory(
             temp_root=temp_root,
@@ -489,11 +497,36 @@ class TestProbe:
 
         assert result["error_code"] == "repo_setup_failed"
         assert not (temp_root / "repo").exists()
+        assert process_calls == []
+
+    def test_configured_live_test_tmpdir_is_used_and_cleaned(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        configured_parent = tmp_path / "configured-live-test-temp"
+        monkeypatch.setenv("CW_LIVE_TEST_TMPDIR", str(configured_parent))
+
+        temporary_directory = probe._new_temporary_directory(probe._checkout_root())
+
+        assert temporary_directory is not None
+        try:
+            assert Path(temporary_directory.name).parent == configured_parent.resolve()
+        finally:
+            temporary_directory.cleanup()
 
     def test_temporary_parent_inside_checkout_fails_before_launch(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setenv("HOME", str(probe._checkout_root()))
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "external-codex-home"))
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
+
+        assert probe.run_probe(MODEL)["error_code"] == "repo_setup_failed"
+
+    def test_configured_temporary_parent_inside_checkout_fails_before_launch(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("CW_LIVE_TEST_TMPDIR", str(probe._checkout_root() / ".cw"))
         monkeypatch.setenv("CODEX_HOME", str(tmp_path / "external-codex-home"))
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
         set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))

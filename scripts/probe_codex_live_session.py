@@ -655,7 +655,12 @@ def _new_temporary_directory(
     checkout: Path,
 ) -> tempfile.TemporaryDirectory[str] | None:
     try:
-        temp_parent = (Path.home() / ".cache" / "cw-live-tests").resolve()
+        configured_parent = os.environ.get("CW_LIVE_TEST_TMPDIR")
+        temp_parent = (
+            Path(configured_parent).expanduser()
+            if configured_parent
+            else Path.home() / ".cache" / "cw-live-tests"
+        ).resolve()
         if _is_within(temp_parent, checkout):
             return None
         temp_parent.mkdir(parents=True, exist_ok=True)
