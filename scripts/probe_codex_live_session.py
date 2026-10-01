@@ -330,6 +330,7 @@ def _parse_version(stdout: str) -> str | None:
 
 def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessOutcome:
     try:
+        # Decode CLI output predictably instead of inheriting the host locale.
         completed = subprocess.run(
             argv,
             cwd=cwd,
