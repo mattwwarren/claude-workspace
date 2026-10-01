@@ -245,6 +245,12 @@ class _ArgumentParseError(Exception):
     """A CLI argument error that must be rendered through the JSON contract."""
 
 
+class _CleanupFailureError(Exception):
+    def __init__(self, result: SmokeResult) -> None:
+        super().__init__("temporary directory cleanup failed")
+        self.result = result
+
+
 class _SanitizedArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         del message
@@ -282,10 +288,12 @@ def _handle_other(event: dict[str, object], state: _StreamState) -> ParseError |
             error = ParseError.MISSING_THREAD
         else:
             state.terminal_event = event_type
-    elif not state.thread_seen:
-        error = ParseError.MALFORMED_JSONL
     elif event_type == ERROR_EVENT:
-        if state.error_event_seen or not isinstance(event.get("message"), str):
+        if (
+            not state.thread_seen
+            or state.error_event_seen
+            or not isinstance(event.get("message"), str)
+        ):
             error = ParseError.MALFORMED_JSONL
         else:
             state.error_event_seen = True
@@ -293,7 +301,7 @@ def _handle_other(event: dict[str, object], state: _StreamState) -> ParseError |
         event_type.startswith("turn.")
         or event_type.endswith((".completed", ".failed", ".error"))
     ):
-        error = ParseError.MALFORMED_JSONL
+        error = ParseError.INVALID_TERMINAL
     return error
 
 
@@ -358,8 +366,11 @@ def _run_process(argv: list[str], *, cwd: Path, env: dict[str, str]) -> ProcessO
             text=True,
             timeout=PROCESS_TIMEOUT_SECONDS,
         )
-    except subprocess.TimeoutExpired:
-        return ProcessOutcome(None, "", ProcessStatus.TIMED_OUT)
+    except subprocess.TimeoutExpired as exc:
+        partial_stdout = exc.stdout or ""
+        if isinstance(partial_stdout, bytes):
+            partial_stdout = partial_stdout.decode("utf-8", errors="replace")
+        return ProcessOutcome(None, partial_stdout, ProcessStatus.TIMED_OUT)
     except OSError:
         return ProcessOutcome(None, "", ProcessStatus.UNAVAILABLE)
     return ProcessOutcome(completed.returncode, completed.stdout, ProcessStatus.EXITED)
@@ -775,21 +786,12 @@ def run_probe(model: str | None) -> SmokeResult:
                 codex_home=codex_home,
                 model=model,
             )
-    except KeyboardInterrupt:
-        pass
-    except Exception:  # noqa: BLE001 - the CLI contract sanitizes unexpected defects.
-        result = _result(
-            STATUS_FAILED,
-            cli_version=None,
-            model=None,
-            error_code=ERROR_INTERNAL_ERROR,
-        )
     finally:
         if temporary_directory is not None:
             try:
                 temporary_directory.cleanup()
             except OSError:
-                result = _result(
+                cleanup_result = _result(
                     STATUS_FAILED,
                     cli_version=result["cli_version"],
                     model=result["model"],
@@ -798,6 +800,7 @@ def run_probe(model: str | None) -> SmokeResult:
                     resume=result["resume"],
                     error_code=ERROR_CLEANUP_FAILED,
                 )
+                raise _CleanupFailureError(cleanup_result) from None
     return result
 
 
@@ -819,6 +822,15 @@ def main(argv: list[str] | None = None) -> int:
             cli_version=None,
             model=None,
             error_code=ERROR_REPO_SETUP_FAILED,
+        )
+    except _CleanupFailureError as exc:
+        result = exc.result
+    except Exception:  # noqa: BLE001 - owner approved this sanitized JSON boundary.
+        result = _result(
+            STATUS_FAILED,
+            cli_version=None,
+            model=None,
+            error_code=ERROR_INTERNAL_ERROR,
         )
     finally:
         signal.signal(signal.SIGTERM, previous_term_handler)

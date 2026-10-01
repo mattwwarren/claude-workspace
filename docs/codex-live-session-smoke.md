@@ -42,8 +42,8 @@ values, exception text, and authentication material are not included.
 Unexpected defects return `internal_error`; temporary-directory cleanup
 failures return `cleanup_failed`.
 
-The `error_code` values are `opt_in_required`, `invalid_model`,
-`version_unavailable`, `version_invalid`, `cli_unavailable`,
+The `error_code` values are `null` (success), `opt_in_required`,
+`invalid_model`, `version_unavailable`, `version_invalid`, `cli_unavailable`,
 `repo_setup_failed`, `internal_error`, `create_timeout`,
 `create_nonzero_exit`, `create_malformed_jsonl`, `create_missing_thread`,
 `create_invalid_thread_id`, `create_duplicate_thread_started`,

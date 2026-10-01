@@ -55,6 +55,10 @@ def fake_run(
     resume_code = cast("int", options.get("resume_code", 0))
     git_code = cast("int", options.get("git_code", 0))
     timeout_stage = cast("str | None", options.get("timeout_stage"))
+    unavailable_stage = cast("str | None", options.get("unavailable_stage"))
+    partial_create_stdout = cast(
+        "str | bytes", options.get("partial_create_stdout", "")
+    )
     stderr = cast("str", options.get("stderr", ""))
 
     def run(
@@ -86,15 +90,26 @@ def fake_run(
             if timeout_stage == "git":
                 raise subprocess.TimeoutExpired(argv, timeout)
             return completed(argv, code=git_code, stderr=stderr)
-        if argv[:3] == ["codex", "exec", "resume"]:
+        if argv == probe._resume_argv(SESSION, MODEL):
+            if unavailable_stage == "resume":
+                raise FileNotFoundError
             if timeout_stage == "resume":
                 raise subprocess.TimeoutExpired(argv, timeout)
             return completed(
                 argv, code=resume_code, stdout=resume_stdout, stderr=stderr
             )
-        if timeout_stage == "create":
-            raise subprocess.TimeoutExpired(argv, timeout)
-        return completed(argv, code=create_code, stdout=create_stdout, stderr=stderr)
+        if argv == probe._create_argv(MODEL):
+            if unavailable_stage == "create":
+                raise FileNotFoundError
+            if timeout_stage == "create":
+                raise subprocess.TimeoutExpired(
+                    argv, timeout, output=partial_create_stdout
+                )
+            return completed(
+                argv, code=create_code, stdout=create_stdout, stderr=stderr
+            )
+        message = f"unexpected subprocess argv: {argv!r}"
+        raise AssertionError(message)
 
     return run
 
@@ -121,7 +136,7 @@ class TestParser:
             (
                 json.dumps({"type": "thread.started", "thread_id": SESSION})
                 + '\n{"type":"turn.cancelled"}\n',
-                "malformed_jsonl",
+                "invalid_terminal",
             ),
             (
                 json.dumps({"type": "thread.started", "thread_id": SESSION}) + "\n",
@@ -134,6 +149,17 @@ class TestParser:
 
     def test_success_ignores_blank_and_unrelated_events(self) -> None:
         parsed = probe._parse_stream("\n" + stream())
+        assert parsed == probe.ParsedStream(SESSION, "turn.completed", None)
+
+    def test_success_ignores_unrelated_events_before_thread_started(self) -> None:
+        parsed = probe._parse_stream(
+            jsonl(
+                {"type": "turn.started"},
+                {"type": "item.started"},
+                {"type": "thread.started", "thread_id": SESSION},
+                {"type": "turn.completed"},
+            )
+        )
         assert parsed == probe.ParsedStream(SESSION, "turn.completed", None)
 
     def test_failed_turn_is_terminal_but_not_success(self) -> None:
@@ -182,7 +208,7 @@ class TestParser:
                 {"type": "turn.cancelled"},
             )
         )
-        assert parsed.error == "malformed_jsonl"
+        assert parsed.error == "invalid_terminal"
 
     @pytest.mark.parametrize(
         ("events", "error"),
@@ -230,7 +256,9 @@ class TestProbe:
             "error_code": "opt_in_required",
         }
 
-    @pytest.mark.parametrize("model", [None, "bad/model", "x" * 65])
+    @pytest.mark.parametrize(
+        "model", [None, "bad/model", "x" * 65, "read-only", "workspace-write"]
+    )
     def test_invalid_model_launches_nothing(
         self, monkeypatch: pytest.MonkeyPatch, model: str | None
     ) -> None:
@@ -291,6 +319,7 @@ class TestProbe:
             MODEL,
             probe.FIXED_RESUME_PROMPT,
         ]
+        assert len(calls) == 4
         assert calls[0]["cwd"] == calls[1]["cwd"] == calls[2]["cwd"] == calls[3]["cwd"]
         repo = cast("Path", calls[0]["cwd"])
         assert repo.name == "repo"
@@ -322,6 +351,8 @@ class TestProbe:
         sentinel = sessions / "existing-session.jsonl"
         sentinel.write_text("keep this session", encoding="utf-8")
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+        monkeypatch.setenv("CODEX_API_KEY", "codex-secret")
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
         calls: list[dict[str, object]] = []
         set_runner(monkeypatch, fake_run(calls))
@@ -335,13 +366,41 @@ class TestProbe:
             env = cast("dict[str, str]", call["env"])
             if call["argv"] in (["codex", "--version"], ["git", "init", "--quiet"]):
                 assert "CODEX_HOME" not in env
+                assert "OPENAI_API_KEY" not in env
+                assert "CODEX_API_KEY" not in env
             else:
                 assert env["CODEX_HOME"] == str(codex_home.resolve())
+                assert env["OPENAI_API_KEY"] == "openai-secret"
+                assert env["CODEX_API_KEY"] == "codex-secret"
 
     def test_codex_home_inside_checkout_fails_before_launch(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("CODEX_HOME", str(probe._checkout_root() / ".codex"))
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
+
+        assert probe.run_probe(MODEL)["error_code"] == "repo_setup_failed"
+
+    def test_sessions_symlink_into_checkout_fails_before_launch(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        external_home = tmp_path / "external-codex-home"
+        external_home.mkdir()
+        (external_home / "sessions").symlink_to(
+            probe._checkout_root() / "tests", target_is_directory=True
+        )
+        monkeypatch.setenv("CODEX_HOME", str(external_home))
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
+
+        assert probe.run_probe(MODEL)["error_code"] == "repo_setup_failed"
+
+    def test_temporary_parent_inside_checkout_fails_before_launch(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("HOME", str(probe._checkout_root()))
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "external-codex-home"))
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
         set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
 
@@ -385,26 +444,117 @@ class TestProbe:
         assert result["resume"] is None
         assert "TimeoutExpired" not in json.dumps(result)
 
+    def test_create_timeout_preserves_only_a_valid_partial_session_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        partial = jsonl(
+            {
+                "type": "thread.started",
+                "thread_id": SESSION,
+                "text": "timeout-transcript-secret",
+            }
+        ).encode()
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        set_runner(
+            monkeypatch,
+            fake_run([], timeout_stage="create", partial_create_stdout=partial),
+        )
+
+        result = probe.run_probe(MODEL)
+
+        assert result["status"] == "failed"
+        assert result["error_code"] == "create_timeout"
+        assert result["session_id"] == SESSION
+        assert result["create"] == {"exit_code": None, "terminal_event": None}
+        assert result["resume"] is None
+        assert "timeout-transcript-secret" not in json.dumps(result)
+
+    @pytest.mark.parametrize("stage", ["create", "resume"])
+    def test_session_cli_unavailable_is_sanitized(
+        self, monkeypatch: pytest.MonkeyPatch, stage: str
+    ) -> None:
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        set_runner(monkeypatch, fake_run([], unavailable_stage=stage))
+
+        result = probe.run_probe(MODEL)
+
+        assert result["status"] == "failed"
+        assert result["error_code"] == "cli_unavailable"
+        if stage == "create":
+            assert result["session_id"] is None
+            assert result["create"] == {"exit_code": None, "terminal_event": None}
+            assert result["resume"] is None
+        else:
+            assert result["session_id"] == SESSION
+            assert result["create"] == {
+                "exit_code": 0,
+                "terminal_event": "turn.completed",
+            }
+            assert result["resume"] == {
+                "exit_code": None,
+                "terminal_event": None,
+                "id_matches": False,
+            }
+
     @pytest.mark.parametrize(
-        ("kwargs", "error"),
+        ("kwargs", "error", "expected_resume"),
         [
-            ({"resume_stdout": "garbage\n"}, "resume_malformed_jsonl"),
+            (
+                {"resume_stdout": "garbage\n"},
+                "resume_malformed_jsonl",
+                {"exit_code": 0, "terminal_event": None, "id_matches": False},
+            ),
             (
                 {"resume_stdout": jsonl({"type": "turn.completed"})},
                 "resume_missing_thread",
+                {"exit_code": 0, "terminal_event": None, "id_matches": False},
             ),
-            ({"resume_stdout": stream("bad/id")}, "resume_invalid_thread_id"),
+            (
+                {"resume_stdout": stream("bad/id")},
+                "resume_invalid_thread_id",
+                {"exit_code": 0, "terminal_event": None, "id_matches": False},
+            ),
             (
                 {"resume_stdout": stream() + jsonl({"type": "thread.started"})},
                 "resume_duplicate_thread_started",
+                {
+                    "exit_code": 0,
+                    "terminal_event": "turn.completed",
+                    "id_matches": False,
+                },
             ),
             (
                 {"resume_stdout": stream(terminal="turn.failed")},
                 "resume_invalid_terminal",
+                {
+                    "exit_code": 0,
+                    "terminal_event": "turn.failed",
+                    "id_matches": True,
+                },
             ),
-            ({"resume_code": 9}, "resume_nonzero_exit"),
-            ({"timeout_stage": "resume"}, "resume_timeout"),
-            ({"resume_stdout": stream("other-thread")}, "resume_id_mismatch"),
+            (
+                {"resume_code": 9},
+                "resume_nonzero_exit",
+                {
+                    "exit_code": 9,
+                    "terminal_event": "turn.completed",
+                    "id_matches": True,
+                },
+            ),
+            (
+                {"timeout_stage": "resume"},
+                "resume_timeout",
+                {"exit_code": None, "terminal_event": None, "id_matches": False},
+            ),
+            (
+                {"resume_stdout": stream("other-thread")},
+                "resume_id_mismatch",
+                {
+                    "exit_code": 0,
+                    "terminal_event": "turn.completed",
+                    "id_matches": False,
+                },
+            ),
         ],
     )
     def test_resume_failures_are_sanitized(
@@ -412,6 +562,7 @@ class TestProbe:
         monkeypatch: pytest.MonkeyPatch,
         kwargs: dict[str, object],
         error: str,
+        expected_resume: dict[str, object],
     ) -> None:
         calls: list[dict[str, object]] = []
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
@@ -419,6 +570,7 @@ class TestProbe:
         result = probe.run_probe(MODEL)
         assert result["status"] == "failed"
         assert result["error_code"] == error
+        assert result["resume"] == expected_resume
         assert set(result) == {
             "status",
             "cli_version",
@@ -499,7 +651,10 @@ class TestProbe:
             assert result["error_code"] == "version_unavailable"
 
     def test_cleanup_failure_is_sanitized(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         class BrokenTemporaryDirectory:
             name = str(tmp_path)
@@ -522,7 +677,11 @@ class TestProbe:
             raise RuntimeError(message)
 
         monkeypatch.setattr(probe, "_run_in_disposable_directory", fail_directory)
-        result = probe.run_probe(MODEL)
+        assert probe.main(["--model", MODEL]) == 1
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out.count("\n") == 1
+        result = json.loads(captured.out)
         assert result["status"] == "failed"
         assert result["error_code"] == "cleanup_failed"
         assert set(result) == {
@@ -536,6 +695,53 @@ class TestProbe:
         }
         assert "cleanup-secret" not in json.dumps(result)
         assert "private-secret" not in json.dumps(result)
+
+    def test_unexpected_cleanup_error_is_sanitized(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        class BrokenTemporaryDirectory:
+            name = str(tmp_path)
+
+            def __init__(self, **_kwargs: object) -> None:
+                Path(self.name).mkdir(exist_ok=True)
+
+            def cleanup(self) -> None:
+                cleanup_error = "cleanup-secret"
+                raise RuntimeError(cleanup_error)
+
+        monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+        monkeypatch.setattr(
+            "scripts.probe_codex_live_session.tempfile.TemporaryDirectory",
+            BrokenTemporaryDirectory,
+        )
+        monkeypatch.setattr(
+            probe,
+            "_run_in_disposable_directory",
+            lambda **_kwargs: probe._result(
+                probe.STATUS_PASSED,
+                cli_version=VERSION,
+                model=MODEL,
+                session_id=SESSION,
+                create={"exit_code": 0, "terminal_event": "turn.completed"},
+                resume={
+                    "exit_code": 0,
+                    "terminal_event": "turn.completed",
+                    "id_matches": True,
+                },
+                error_code=None,
+            ),
+        )
+
+        assert probe.main(["--model", MODEL]) == 1
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out.count("\n") == 1
+        result = json.loads(captured.out)
+        assert result["error_code"] == "internal_error"
+        assert "cleanup-secret" not in captured.out
 
     def test_unexpected_error_is_reported_as_internal_error(
         self,
@@ -607,6 +813,39 @@ def test_sigterm_returns_a_sanitized_failure(
 
     assert probe.main(["--model", MODEL]) == 1
     captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.count("\n") == 1
+    assert json.loads(captured.out)["error_code"] == "repo_setup_failed"
+
+
+def test_keyboard_interrupt_cleans_temporary_directory_and_emits_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    class TrackingTemporaryDirectory:
+        name = str(tmp_path)
+        cleaned = False
+
+        def cleanup(self) -> None:
+            self.cleaned = True
+
+    temporary_directory = TrackingTemporaryDirectory()
+    monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
+    monkeypatch.setattr(
+        probe,
+        "_new_temporary_directory",
+        lambda _checkout: temporary_directory,
+    )
+
+    def interrupt(**_kwargs: object) -> probe.SmokeResult:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(probe, "_run_in_disposable_directory", interrupt)
+
+    assert probe.main(["--model", MODEL]) == 1
+    captured = capsys.readouterr()
+    assert temporary_directory.cleaned
     assert captured.err == ""
     assert captured.out.count("\n") == 1
     assert json.loads(captured.out)["error_code"] == "repo_setup_failed"
