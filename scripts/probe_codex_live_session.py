@@ -751,12 +751,7 @@ def _run_probe(model: str | None, progress: _ProbeProgress) -> SmokeResult:
             error_code=ErrorCode.REPO_SETUP_FAILED,
         )
     if codex_home is None:
-        return _result(
-            STATUS_FAILED,
-            cli_version=None,
-            model=model,
-            error_code=ErrorCode.REPO_SETUP_FAILED,
-        )
+        return progress.failed_result(ErrorCode.REPO_SETUP_FAILED)
 
     temporary_directory: tempfile.TemporaryDirectory[str] | None = None
     result = _result(
@@ -765,6 +760,7 @@ def _run_probe(model: str | None, progress: _ProbeProgress) -> SmokeResult:
         model=model,
         error_code=ErrorCode.REPO_SETUP_FAILED,
     )
+    result_complete = False
     try:
         temporary_directory = _new_temporary_directory(checkout)
         if temporary_directory is not None:
@@ -775,9 +771,11 @@ def _run_probe(model: str | None, progress: _ProbeProgress) -> SmokeResult:
                 model=model,
                 progress=progress,
             )
-            progress.capture(result)
+            result_complete = True
     finally:
         if temporary_directory is not None:
+            if result_complete:
+                progress.capture(result)
             try:
                 temporary_directory.cleanup()
             except OSError:
