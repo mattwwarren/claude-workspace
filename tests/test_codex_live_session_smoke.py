@@ -115,6 +115,22 @@ def fake_run(
     return run
 
 
+def broken_temporary_directory(
+    tmp_path: Path, cleanup_error_type: type[Exception]
+) -> type[object]:
+    class BrokenTemporaryDirectory:
+        name = str(tmp_path)
+
+        def __init__(self, **_kwargs: object) -> None:
+            Path(self.name).mkdir(exist_ok=True)
+
+        def cleanup(self) -> None:
+            cleanup_error = "cleanup-secret"
+            raise cleanup_error_type(cleanup_error)
+
+    return BrokenTemporaryDirectory
+
+
 def set_runner(monkeypatch: pytest.MonkeyPatch, runner: Callable[..., object]) -> None:
     monkeypatch.setattr("scripts.probe_codex_live_session.subprocess.run", runner)
 
@@ -764,20 +780,10 @@ class TestProbe:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        class BrokenTemporaryDirectory:
-            name = str(tmp_path)
-
-            def __init__(self, **_kwargs: object) -> None:
-                Path(self.name).mkdir(exist_ok=True)
-
-            def cleanup(self) -> None:
-                cleanup_error = "cleanup-secret"
-                raise OSError(cleanup_error)
-
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
         monkeypatch.setattr(
             "scripts.probe_codex_live_session.tempfile.TemporaryDirectory",
-            BrokenTemporaryDirectory,
+            broken_temporary_directory(tmp_path, OSError),
         )
 
         monkeypatch.setattr(
@@ -819,20 +825,10 @@ class TestProbe:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        class BrokenTemporaryDirectory:
-            name = str(tmp_path)
-
-            def __init__(self, **_kwargs: object) -> None:
-                Path(self.name).mkdir(exist_ok=True)
-
-            def cleanup(self) -> None:
-                cleanup_error = "cleanup-secret"
-                raise OSError(cleanup_error)
-
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
         monkeypatch.setattr(
             "scripts.probe_codex_live_session.tempfile.TemporaryDirectory",
-            BrokenTemporaryDirectory,
+            broken_temporary_directory(tmp_path, OSError),
         )
 
         def fail_directory(**_kwargs: object) -> probe.SmokeResult:
@@ -856,20 +852,10 @@ class TestProbe:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        class BrokenTemporaryDirectory:
-            name = str(tmp_path)
-
-            def __init__(self, **_kwargs: object) -> None:
-                Path(self.name).mkdir(exist_ok=True)
-
-            def cleanup(self) -> None:
-                cleanup_error = "cleanup-secret"
-                raise RuntimeError(cleanup_error)
-
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
         monkeypatch.setattr(
             "scripts.probe_codex_live_session.tempfile.TemporaryDirectory",
-            BrokenTemporaryDirectory,
+            broken_temporary_directory(tmp_path, RuntimeError),
         )
         monkeypatch.setattr(
             probe,

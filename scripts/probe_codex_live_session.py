@@ -26,6 +26,8 @@ CODEX_EXEC_SUBCOMMAND: Final = "exec"
 CODEX_VERSION_FLAG: Final = "--version"
 CODEX_SESSION_ARTIFACT_DIR: Final = "sessions"
 CODEX_HOME_ENV_KEY: Final = "CODEX_HOME"
+CODEX_SANDBOX_FLAG: Final = "--sandbox"
+CODEX_READ_ONLY_POLICY: Final = "read-only"
 
 
 class ErrorCode(StrEnum):
@@ -66,10 +68,10 @@ _FORBIDDEN_MODEL_VALUES = frozenset(
         "--ephemeral",
         "--approve-for-me",
         "--dangerously-bypass-approvals-and-sandbox",
-        "--sandbox",
+        CODEX_SANDBOX_FLAG,
         "-m",
         "-o",
-        "read-only",
+        CODEX_READ_ONLY_POLICY,
         "workspace-write",
     }
 )
@@ -432,7 +434,10 @@ def _create_argv(model: str) -> list[str]:
     return [
         CODEX_EXECUTABLE,
         CODEX_EXEC_SUBCOMMAND,
-        *_common_exec_flags(model, after_json=("--sandbox", "read-only")),
+        *_common_exec_flags(
+            model,
+            after_json=(CODEX_SANDBOX_FLAG, CODEX_READ_ONLY_POLICY),
+        ),
         FIXED_PROMPT,
     ]
 
