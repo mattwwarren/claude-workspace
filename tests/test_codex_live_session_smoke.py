@@ -517,7 +517,6 @@ class TestProbe:
         exit_code = probe.main(["--model", MODEL])
         captured = capsys.readouterr()
         result = json.loads(captured.out)
-        assert_no_resume_call(calls)
 
         assert exit_code == 1
         assert captured.err == ""
@@ -531,6 +530,7 @@ class TestProbe:
             "resume": None,
             "error_code": error,
         }
+        assert_no_resume_call(calls)
         assert "TimeoutExpired" not in captured.out
 
     def test_create_timeout_preserves_only_a_valid_partial_session_id(
