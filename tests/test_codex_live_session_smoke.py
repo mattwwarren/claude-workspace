@@ -89,7 +89,7 @@ def fake_run(
         )
         if argv == ["codex", "--version"]:
             return completed(argv, stdout=f"{VERSION}\n", stderr=stderr)
-        if argv[:2] == ["git", "init"]:
+        if argv == ["git", "init", "--quiet"]:
             if timeout_stage == "git":
                 raise subprocess.TimeoutExpired(argv, timeout)
             if real_git_init:
@@ -535,12 +535,13 @@ class TestProbe:
         session_id: str | None,
         create: dict[str, object] | None,
     ) -> None:
-        calls: list[dict[str, object]] = []
+        calls: list[dict[str, object]] = []  # Check failures never issue resume.
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
         set_runner(monkeypatch, fake_run(calls, **kwargs))
         exit_code = probe.main(["--model", MODEL])
         captured = capsys.readouterr()
         result = json.loads(captured.out)
+        assert_no_resume_call(calls)
 
         assert exit_code == 1
         assert captured.err == ""
@@ -555,7 +556,6 @@ class TestProbe:
             "error_code": error,
         }
         assert "TimeoutExpired" not in captured.out
-        assert_no_resume_call(calls)
 
     def test_create_timeout_preserves_only_a_valid_partial_session_id(
         self, monkeypatch: pytest.MonkeyPatch
