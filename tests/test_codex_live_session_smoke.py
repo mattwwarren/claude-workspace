@@ -939,7 +939,7 @@ class TestProbe:
             ),
         )
         exit_code = probe.main(["--model", MODEL])
-        captured = capsys.readouterr()
+        output = capsys.readouterr()
         expected = {
             "status": "passed",
             "cli_version": VERSION,
@@ -954,10 +954,10 @@ class TestProbe:
             "error_code": None,
         }
         assert exit_code == 0
-        assert captured.err == ""
-        assert captured.out == json.dumps(expected, separators=(",", ":")) + "\n"
-        assert raw not in captured.out
-        assert auth not in captured.out
+        assert not output.err
+        assert output.out == json.dumps(expected, separators=(",", ":")) + "\n"
+        assert raw not in output.out
+        assert auth not in output.out
 
 
 def test_main_emits_one_json_line_and_no_stderr(
