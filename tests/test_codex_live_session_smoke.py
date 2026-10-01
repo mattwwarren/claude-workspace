@@ -266,11 +266,29 @@ class TestProbe:
         "model", [None, "bad/model", "x" * 65, "read-only", "workspace-write"]
     )
     def test_invalid_model_launches_nothing(
-        self, monkeypatch: pytest.MonkeyPatch, model: str | None
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        model: str | None,
     ) -> None:
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
         set_runner(monkeypatch, lambda *_a, **_k: pytest.fail("launched"))
-        assert probe.run_probe(model)["error_code"] == "invalid_model"
+
+        args = [] if model is None else ["--model", model]
+        assert probe.main(args) == 1
+        captured = capsys.readouterr()
+
+        assert captured.err == ""
+        assert captured.out.count("\n") == 1
+        assert json.loads(captured.out) == {
+            "status": "failed",
+            "cli_version": None,
+            "model": None,
+            "session_id": None,
+            "create": None,
+            "resume": None,
+            "error_code": "invalid_model",
+        }
 
     def test_success_has_exact_commands_policy_cwd_and_timeout(
         self, monkeypatch: pytest.MonkeyPatch
@@ -316,7 +334,7 @@ class TestProbe:
             "--ignore-user-config",
             "--model",
             MODEL,
-            probe.FIXED_PROMPT,
+            "Reply exactly cw-session-smoke-ok. Do not use tools or modify files.",
         ]
         assert calls[3]["argv"] == [
             "codex",
@@ -327,9 +345,11 @@ class TestProbe:
             "--ignore-user-config",
             "--model",
             MODEL,
-            probe.FIXED_RESUME_PROMPT,
+            (
+                "Reply exactly cw-session-smoke-resumed-ok. "
+                "Do not use tools or modify files."
+            ),
         ]
-        assert calls[3]["argv"] == probe._resume_argv(created_session_id, MODEL)
         assert len(calls) == 4
         assert calls[0]["cwd"] == calls[1]["cwd"] == calls[2]["cwd"] == calls[3]["cwd"]
         repo = cast("Path", calls[0]["cwd"])
@@ -418,26 +438,52 @@ class TestProbe:
         assert probe.run_probe(MODEL)["error_code"] == "repo_setup_failed"
 
     @pytest.mark.parametrize(
-        ("kwargs", "error"),
+        ("kwargs", "error", "session_id", "create"),
         [
-            ({"create_stdout": "garbage\n"}, "create_malformed_jsonl"),
+            (
+                {"create_stdout": "garbage\n"},
+                "create_malformed_jsonl",
+                None,
+                {"exit_code": 0, "terminal_event": None},
+            ),
             (
                 {"create_stdout": jsonl({"type": "turn.completed"})},
                 "create_missing_thread",
+                None,
+                {"exit_code": 0, "terminal_event": None},
             ),
-            ({"create_stdout": stream("bad/id")}, "create_invalid_thread_id"),
+            (
+                {"create_stdout": stream("bad/id")},
+                "create_invalid_thread_id",
+                None,
+                {"exit_code": 0, "terminal_event": None},
+            ),
             (
                 {"create_stdout": stream() + jsonl({"type": "thread.started"})},
                 "create_duplicate_thread_started",
+                SESSION,
+                {"exit_code": 0, "terminal_event": "turn.completed"},
             ),
             (
                 {"create_stdout": stream(terminal="turn.failed")},
                 "create_invalid_terminal",
+                SESSION,
+                {"exit_code": 0, "terminal_event": "turn.failed"},
             ),
-            ({"create_code": 9}, "create_nonzero_exit"),
-            ({"timeout_stage": "create"}, "create_timeout"),
-            ({"git_code": 9}, "repo_setup_failed"),
-            ({"timeout_stage": "git"}, "repo_setup_failed"),
+            (
+                {"create_code": 9},
+                "create_nonzero_exit",
+                SESSION,
+                {"exit_code": 9, "terminal_event": "turn.completed"},
+            ),
+            (
+                {"timeout_stage": "create"},
+                "create_timeout",
+                None,
+                {"exit_code": None, "terminal_event": None},
+            ),
+            ({"git_code": 9}, "repo_setup_failed", None, None),
+            ({"timeout_stage": "git"}, "repo_setup_failed", None, None),
         ],
     )
     def test_create_failures_are_sanitized(
@@ -446,6 +492,8 @@ class TestProbe:
         capsys: pytest.CaptureFixture[str],
         kwargs: dict[str, object],
         error: str,
+        session_id: str | None,
+        create: dict[str, object] | None,
     ) -> None:
         calls: list[dict[str, object]] = []
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
@@ -457,9 +505,15 @@ class TestProbe:
         assert exit_code == 1
         assert captured.err == ""
         assert captured.out.count("\n") == 1
-        assert result["status"] == "failed"
-        assert result["error_code"] == error
-        assert result["resume"] is None
+        assert result == {
+            "status": "failed",
+            "cli_version": VERSION,
+            "model": MODEL,
+            "session_id": session_id,
+            "create": create,
+            "resume": None,
+            "error_code": error,
+        }
         assert "TimeoutExpired" not in captured.out
 
     def test_create_timeout_preserves_only_a_valid_partial_session_id(
@@ -593,17 +647,14 @@ class TestProbe:
         assert exit_code == 1
         assert captured.err == ""
         assert captured.out.count("\n") == 1
-        assert result["status"] == "failed"
-        assert result["error_code"] == error
-        assert result["resume"] == expected_resume
-        assert set(result) == {
-            "status",
-            "cli_version",
-            "model",
-            "session_id",
-            "create",
-            "resume",
-            "error_code",
+        assert result == {
+            "status": "failed",
+            "cli_version": VERSION,
+            "model": MODEL,
+            "session_id": SESSION,
+            "create": {"exit_code": 0, "terminal_event": "turn.completed"},
+            "resume": expected_resume,
+            "error_code": error,
         }
 
     @pytest.mark.parametrize(
@@ -611,7 +662,11 @@ class TestProbe:
         [("invalid", "version_invalid"), ("unavailable", "cli_unavailable")],
     )
     def test_version_failures_do_not_create_repo(
-        self, monkeypatch: pytest.MonkeyPatch, runner_error: str, error: str
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        runner_error: str,
+        error: str,
     ) -> None:
         calls: list[list[str]] = []
 
@@ -619,11 +674,24 @@ class TestProbe:
             calls.append(argv)
             if runner_error == "unavailable":
                 raise FileNotFoundError
-            return completed(argv, stdout="codex-cli (dev)\n")
+            return completed(argv, stdout="codex-cli (dev)\n", stderr="auth-secret")
 
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
         set_runner(monkeypatch, run)
-        assert probe.run_probe(MODEL)["error_code"] == error
+        assert probe.main(["--model", MODEL]) == 1
+        captured = capsys.readouterr()
+        expected = {
+            "status": "failed",
+            "cli_version": None,
+            "model": MODEL,
+            "session_id": None,
+            "create": None,
+            "resume": None,
+            "error_code": error,
+        }
+        assert captured.err == ""
+        assert captured.out == json.dumps(expected, separators=(",", ":")) + "\n"
+        assert "auth-secret" not in captured.out
         assert calls == [["codex", "--version"]]
 
     @pytest.mark.parametrize(
@@ -635,7 +703,10 @@ class TestProbe:
         ],
     )
     def test_version_requires_one_valid_line(
-        self, monkeypatch: pytest.MonkeyPatch, stdout: str
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        stdout: str,
     ) -> None:
         calls: list[list[str]] = []
 
@@ -651,8 +722,21 @@ class TestProbe:
 
         monkeypatch.setenv("CW_CODEX_LIVE_SESSION_SMOKE", "1")
         set_runner(monkeypatch, run)
-        result = probe.run_probe(MODEL)
-        assert result["error_code"] == "version_invalid"
+        assert probe.main(["--model", MODEL]) == 1
+        captured = capsys.readouterr()
+        expected = {
+            "status": "failed",
+            "cli_version": None,
+            "model": MODEL,
+            "session_id": None,
+            "create": None,
+            "resume": None,
+            "error_code": "version_invalid",
+        }
+        assert captured.err == ""
+        assert captured.out == json.dumps(expected, separators=(",", ":")) + "\n"
+        assert "auth-secret" not in captured.out
+        assert "secret-transcript" not in captured.out
         assert calls == [["codex", "--version"]]
 
     def test_version_timeout_and_nonzero_are_unavailable(
@@ -856,7 +940,21 @@ class TestProbe:
         )
         assert probe.main(["--model", MODEL]) == 0
         captured = capsys.readouterr()
+        expected = {
+            "status": "passed",
+            "cli_version": VERSION,
+            "model": MODEL,
+            "session_id": SESSION,
+            "create": {"exit_code": 0, "terminal_event": "turn.completed"},
+            "resume": {
+                "exit_code": 0,
+                "terminal_event": "turn.completed",
+                "id_matches": True,
+            },
+            "error_code": None,
+        }
         assert captured.err == ""
+        assert captured.out == json.dumps(expected, separators=(",", ":")) + "\n"
         assert raw not in captured.out
         assert auth not in captured.out
 
