@@ -22,6 +22,7 @@ from cw.codex_review import (
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
     CODEX_TIMEOUT,
+    FIX_CYCLE_COMMIT_PREFIX,
     _format_failures_detail,
     make_codex_blocked,
     render_verdict_comment,
@@ -49,6 +50,7 @@ from cw.codex_review._verdict._render import (
     _STALE_MAX_ROWS,
     _render_rejected_finding_text,
 )
+from cw.codex_review._verdict._synthesis import _empty_diff_recovery_hint
 from cw.events import read_events
 from cw.executor_diagnostics import render_bundle_path
 from cw.models.enums import OrchestratorEventType
@@ -3520,6 +3522,93 @@ class TestEmptyDiffCleanReview:
         assert result.status == "stage_complete"
         assert result.scope.files == 0
         assert result.scope.lines_actual == 0
+
+
+def _synthesize_empty(worktree: Path, session_id: str) -> AutoDevResult:
+    result, _verdict = synthesize_codex_review_result(
+        task=_task(),
+        worktree=worktree,
+        documents=[_make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))],
+        failures=[],
+        diff=_make_diff(),
+        reviewed_sha="sha",
+        session_id=session_id,
+        default_branch="main",
+        fix_loop_enabled=False,
+    )
+    assert result.status == "empty_diff_blocked"
+    return result
+
+
+class TestEmptyDiffRecoveryHint:
+    """#2492: empty_diff_blocked says what to compare, not just "empty"."""
+
+    def test_branch_without_commits_points_at_impl(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _make_empty_diff_repo(make_git_repo, "wt-hint-nocommits")
+
+        result = _synthesize_empty(worktree, "s-hint-nocommits")
+
+        assert result.blocker is not None
+        assert result.blocker.recovery_hint is not None
+        assert "no commits ahead of origin/main" in result.blocker.recovery_hint
+        assert "IMPL" in result.blocker.recovery_hint
+
+    def test_net_cancelling_fix_cycle_is_named(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _make_empty_diff_repo(make_git_repo, "wt-hint-fixcycle")
+        (worktree / "trim.py").write_text("x = 1\n", encoding="utf-8")
+        git_in(worktree, "add", "trim.py")
+        git_in(worktree, "commit", "-q", "-m", "feat: trim")
+        git_in(worktree, "rm", "-q", "trim.py")
+        git_in(
+            worktree,
+            "commit",
+            "-q",
+            "-m",
+            f"{FIX_CYCLE_COMMIT_PREFIX} 1 — 1 MUST_FIX finding",
+        )
+        fix_sha = git_in(worktree, "rev-parse", "--short", "HEAD")
+
+        result = _synthesize_empty(worktree, "s-hint-fixcycle")
+
+        assert result.blocker is not None
+        hint = result.blocker.recovery_hint
+        assert hint is not None
+        assert "2 commit(s) whose net diff is empty" in hint
+        assert fix_sha in hint
+        assert f"{fix_sha}~1" in hint
+
+    def test_net_cancelling_without_fix_cycle_stays_generic(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _make_empty_diff_repo(make_git_repo, "wt-hint-plain")
+        (worktree / "t.py").write_text("x = 1\n", encoding="utf-8")
+        git_in(worktree, "add", "t.py")
+        git_in(worktree, "commit", "-q", "-m", "feat: add")
+        git_in(worktree, "revert", "--no-edit", "HEAD")
+
+        result = _synthesize_empty(worktree, "s-hint-plain")
+
+        assert result.blocker is not None
+        hint = result.blocker.recovery_hint
+        assert hint is not None
+        assert "net diff is empty" in hint
+        assert "fix-cycle" not in hint
+
+    def test_unreadable_log_degrades_to_generic_hint(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = make_git_repo("wt-hint-nolog")
+
+        hint = _empty_diff_recovery_hint(worktree, "no-such-branch")
+
+        assert hint == (
+            "Inspect the branch's commits with "
+            "`git log -p origin/no-such-branch..HEAD`."
+        )
 
 
 # ---------------------------------------------------------------------------

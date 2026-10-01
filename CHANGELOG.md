@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.62.1] - 2026-10-01
+
+### Fixed
+
+- **The codex review fix loop can no longer grow a ticket past its plan or revert the branch it is fixing (#2485, #2492):** before a fix cycle is committed, a new fence (`cw.codex_fix_loop.fence`) measures the branch's net diff against its merge-base with the cycle's changes staged. A path the cycle leaves differing from the default branch must be in the plan's `## Files Modified` manifest or the cycle-0 reviewed diff (which already carries any `--scope-drift` grant IMPL honored); otherwise the cycle parks `codex_fix_scope_drift` instead of committing. Removing out-of-scope code passes, because a deleted or restored file drops out of the net diff. The fence is skipped when the plan has no parseable manifest. A cycle that empties the branch diff, or restores more than half of the branch's changed files to their default-branch content without an open finding naming them, parks `codex_fix_reverted_branch`. Both parks leave the rejected changes staged and uncommitted, and set `blocker.recovery_hint` to say where they are and what to compare. Every fix prompt now carries scope rules (resolve an "out of scope" finding by removing the code, not improving it; do not revert or re-add earlier commits; no new config flags or env vars unless a finding requires one) and, when a manifest exists, the list of files it may change. `empty_diff_blocked` from the codex review now sets `blocker.recovery_hint` too. It says whether the branch has no commits (requeue at IMPL) or carries commits that net-cancel, and when it does, names the codex fix-cycle commits and the pre-fix-cycle commit to compare against.
+
 ## [1.62.0] - 2026-09-30
 
 ### Added

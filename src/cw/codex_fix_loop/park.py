@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
     from cw.auto_dev_result import AutoDevResult, Health, Review
     from cw.codex_fix_loop.convergence import _OpenFindingKey
+    from cw.codex_fix_loop.fence import FenceBreach
     from cw.codex_fix_loop.snapshot import _PersistedSnapshot
     from cw.codex_review import _SensitiveHit
     from cw.executor_diagnostics import ExecutorFailureCategory
@@ -243,7 +244,86 @@ def _park_scope_violation(
     result. ``had_real_commit`` is the pre-this-cycle OR-across-cycles
     real-commit tracker (#1723) — this cycle's own commit never landed (that
     is why it is being parked), so the caller's already-accumulated value is
-    what is forwarded, not a fresh computation.
+    what is forwarded, not a fresh computation. Snapshot ordering (#1763)
+    is owned by :func:`_park_uncommitted_cycle`.
+    """
+    lines = [f"- {hit.path} ({hit.category}): {hit.reason}" for hit in violations]
+    details = "\n".join(
+        [
+            f"codex fix cycle {cycle} touched path(s) that are both out of the "
+            "cycle-0 reviewed diff's scope AND match the sensitive-files "
+            "registry:",
+            *lines,
+        ]
+    )
+    return _park_uncommitted_cycle(
+        task=task,
+        worktree=worktree,
+        session_id=session_id,
+        cycle=cycle,
+        reason=CODEX_FIX_SCOPE_VIOLATION,
+        details=details,
+        recovery_hint=None,
+        cycle0_review=cycle0_review,
+        open_findings=open_findings,
+        verdict=verdict,
+        snapshot=snapshot,
+        had_real_commit=had_real_commit,
+    )
+
+
+def _park_fence_breach(
+    *,
+    task: TicketTask,
+    worktree: Path,
+    session_id: str,
+    cycle: int,
+    breach: FenceBreach,
+    cycle0_review: Review,
+    open_findings: dict[_OpenFindingKey, AcceptedFinding],
+    verdict: ReviewVerdict,
+    snapshot: _PersistedSnapshot,
+    had_real_commit: bool,
+) -> tuple[AutoDevResult, ReviewVerdict]:
+    """Park a fix cycle the scope fence or revert guard rejected (#2485, #2492).
+
+    Same shape as :func:`_park_scope_violation`, plus the breach's
+    ``recovery_hint`` on the ``Blocker`` so the operator is told where the
+    rejected changes are and what to compare, instead of diffing the branch
+    by hand (#2492).
+    """
+    return _park_uncommitted_cycle(
+        task=task,
+        worktree=worktree,
+        session_id=session_id,
+        cycle=cycle,
+        reason=breach.reason,
+        details=breach.details,
+        recovery_hint=breach.recovery_hint,
+        cycle0_review=cycle0_review,
+        open_findings=open_findings,
+        verdict=verdict,
+        snapshot=snapshot,
+        had_real_commit=had_real_commit,
+    )
+
+
+def _park_uncommitted_cycle(
+    *,
+    task: TicketTask,
+    worktree: Path,
+    session_id: str,
+    cycle: int,
+    reason: str,
+    details: str,
+    recovery_hint: str | None,
+    cycle0_review: Review,
+    open_findings: dict[_OpenFindingKey, AcceptedFinding],
+    verdict: ReviewVerdict,
+    snapshot: _PersistedSnapshot,
+    had_real_commit: bool,
+) -> tuple[AutoDevResult, ReviewVerdict]:
+    """Shared body of the parks for a fix cycle whose changes were refused.
 
     ORDERING (#1763): the snapshot is finalized FIRST, from the verdict as
     persisted, because the rebind below replaces ``verdict.review`` with the
@@ -260,35 +340,28 @@ def _park_scope_violation(
         had_real_commit=had_real_commit,
     )
     verdict = verdict.model_copy(update={"review": review})
-    lines = [f"- {hit.path} ({hit.category}): {hit.reason}" for hit in violations]
-    details = "\n".join(
-        [
-            f"codex fix cycle {cycle} touched path(s) that are both out of the "
-            "cycle-0 reviewed diff's scope AND match the sensitive-files "
-            "registry:",
-            *lines,
-        ]
-    )
     blocked = make_codex_blocked(
         ticket_id=task.ticket_id,
         worktree=worktree,
-        reason=CODEX_FIX_SCOPE_VIOLATION,
+        reason=reason,
         details=details,
         retry_eligible=None,
     )
     health = blocked.health.model_copy(
         update={"fix_loop_escalated": cycle >= _ESCALATE_AT_CYCLE}
     )
-    patched = blocked.model_copy(
-        update={
-            "review": review,
-            "health": health,
-            "friction_highlights": _with_snapshot_pointer(
-                blocked.friction_highlights, snapshot.pointer
-            ),
-        }
-    )
-    return patched, verdict
+    update: dict[str, object] = {
+        "review": review,
+        "health": health,
+        "friction_highlights": _with_snapshot_pointer(
+            blocked.friction_highlights, snapshot.pointer
+        ),
+    }
+    if recovery_hint is not None and blocked.blocker is not None:
+        update["blocker"] = blocked.blocker.model_copy(
+            update={"recovery_hint": recovery_hint}
+        )
+    return blocked.model_copy(update=update), verdict
 
 
 def _clean_exit(
@@ -317,7 +390,7 @@ def _clean_exit(
     while ``rejected_must_fix`` is not (#1714/#1729). That is exactly the case
     #1763's terminal marker exists for, so the snapshot is finalized here —
     BEFORE the ``verdict.review`` rebind below, for the same reason spelled out
-    in :func:`_park_scope_violation`.
+    in :func:`_park_uncommitted_cycle`.
     """
     _finalize_snapshot(verdict, session_id=session_id, cycle=snapshot.cycle)
     review = _finalize_review(

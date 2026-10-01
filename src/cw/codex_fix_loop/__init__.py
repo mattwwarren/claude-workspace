@@ -20,6 +20,8 @@ must target the submodule that looks it up at call time
   wall-clock budget helpers, and the per-cycle exit decision.
 - ``commit`` — one cycle's fix invocation, out-of-scope sensitive-path check,
   and commit (argv/prompt builders included).
+- ``fence`` — the fix-cycle scope fence (#2485) and revert guard (#2492),
+  checked on the branch's net diff before a cycle is committed.
 - ``park`` — the terminal park/clean-exit builders and the terminal
   ``Review`` reconstruction.
 - ``snapshot`` — per-cycle ``ReviewVerdict`` snapshot persist/finalize and the

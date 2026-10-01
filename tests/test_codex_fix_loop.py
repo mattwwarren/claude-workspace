@@ -27,6 +27,8 @@ from cw.codex_review import (
     _MIN_ROLE_TIMEOUT_SECONDS,
     _REVIEWER_ROLE_AGENT_FILES,
     CODEX_BUDGET_EXHAUSTED,
+    CODEX_FIX_REVERTED_BRANCH,
+    CODEX_FIX_SCOPE_DRIFT,
     CODEX_FIX_SCOPE_VIOLATION,
     CODEX_MUST_FIX_FINDINGS,
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
@@ -1896,6 +1898,109 @@ class TestScopeViolationGate:
 
 
 # ---------------------------------------------------------------------------
+# TestFixFence — scope fence (#2485) + revert guard (#2492) in the loop
+# ---------------------------------------------------------------------------
+
+_FENCE_PLAN = "# Plan\n\n## Files Modified\n\n- `new.py`\n"
+
+
+def _with_plan(worktree: Path, plan: str = _FENCE_PLAN) -> Path:
+    """Materialize ``.cw/plan.md``, git-excluded as real worktrees do."""
+    exclude = worktree / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open("a", encoding="utf-8") as fh:
+        fh.write(".cw/\n")
+    _write(worktree / ".cw" / "plan.md", plan)
+    return worktree
+
+
+def _remover(name: str) -> Callable[[Path, list[str]], CodexRunResult]:
+    """Fix behavior that ``git rm``s *name* — a fix that undoes branch work."""
+
+    def _remove(worktree: Path, _argv: list[str]) -> CodexRunResult:
+        git_in(worktree, "rm", "-q", name)
+        return CodexRunResult(returncode=0, stdout="", stderr="")
+
+    return _remove
+
+
+class TestFixFence:
+    def test_fix_that_empties_branch_parks_reverted(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#2492: the fix cycle net-cancels the branch; it is never committed."""
+        worktree = _worktree(make_git_repo, "wt-fence-revert")
+        head_before = git_in(worktree, "rev-parse", "HEAD")
+        runner = _FixLoopRunner(
+            [_MF_DOC, _CLEAN_DOC], fix_behaviors=[_remover("new.py")]
+        )
+
+        out, verdict = _run_loop(runner, worktree, session_id="s-fence-revert")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_REVERTED_BRANCH
+        assert "new.py" in out.blocker.details
+        assert out.blocker.recovery_hint is not None
+        assert "git reset --hard HEAD" in out.blocker.recovery_hint
+        assert out.review.fix_cycles_used == 1
+        assert out.review.had_real_commit is False
+        assert verdict is not None
+        # No commit landed, and the loop stopped after the one fix cycle.
+        assert git_in(worktree, "rev-parse", "HEAD") == head_before
+        assert runner.fix_calls == 1
+
+    def test_fix_outside_plan_fence_parks_scope_drift(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#2485: a non-sensitive, out-of-plan file is now refused too."""
+        worktree = _with_plan(_worktree(make_git_repo, "wt-fence-drift"))
+        runner = _FixLoopRunner(
+            [_MF_DOC, _CLEAN_DOC],
+            fix_behaviors=[_editor(filename="server/route.py", content="r = 1\n")],
+        )
+
+        out, _ = _run_loop(runner, worktree, session_id="s-fence-drift")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_SCOPE_DRIFT
+        assert "server/route.py" in out.blocker.details
+        assert out.blocker.recovery_hint is not None
+        assert "Files Modified" in out.blocker.recovery_hint
+
+    def test_fix_inside_plan_fence_commits(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _with_plan(_worktree(make_git_repo, "wt-fence-ok"))
+        runner = _FixLoopRunner(
+            [_MF_DOC, _CLEAN_DOC],
+            fix_behaviors=[
+                _editor(filename="new.py", content="def fixed():\n    pass\n")
+            ],
+        )
+
+        out, _ = _run_loop(runner, worktree, session_id="s-fence-ok")
+
+        assert out.status == "stage_complete"
+        assert out.review.had_real_commit is True
+
+    def test_fix_prompt_carries_the_fence(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _with_plan(_worktree(make_git_repo, "wt-fence-prompt"))
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC])
+
+        _run_loop(runner, worktree, session_id="s-fence-prompt")
+
+        prompts = [str(call["stdin"]) for call in runner.calls]
+        fix_prompts = [p for p in prompts if p.startswith("# Codex Fix Cycle")]
+        assert len(fix_prompts) == 1
+        assert "## Files You May Change" in fix_prompts[0]
+        assert "- new.py" in fix_prompts[0]
+
+
+# ---------------------------------------------------------------------------
 # TestVerdictCommentDistinguishesHistories — #1705 R3
 # ---------------------------------------------------------------------------
 
@@ -1993,6 +2098,26 @@ class TestFixPromptAndArgv:
         assert "PLAN" in prompt
         assert "TICKET" in prompt
         assert "minimal change" in prompt
+        assert "## Scope Rules" in prompt
+        assert "never by improving it" in prompt
+        # No manifest handed in -> no file fence section.
+        assert "## Files You May Change" not in prompt
+
+    def test_prompt_renders_sorted_file_fence(self) -> None:
+        finding = _make_finding(severity="MUST_FIX", summary="the bug")
+        prompt = _build_fix_prompt(
+            [finding],
+            plan_text=None,
+            ticket_text=None,
+            cycle=1,
+            allowed_files=frozenset({"b.py", "a.py"}),
+        )
+        fence = prompt.split("## Files You May Change", 1)[1]
+        assert fence.index("- a.py") < fence.index("- b.py")
+        # The fence precedes the findings it constrains.
+        assert prompt.index("## Files You May Change") < prompt.index(
+            "## MUST_FIX Findings"
+        )
 
     def test_argv_omits_schema_and_output_flags(self) -> None:
         argv = _build_fix_codex_argv(model="gpt-x", reasoning_effort=None)

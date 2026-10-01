@@ -1,7 +1,8 @@
 """One fix cycle's invoke-scope-check-commit step for the codex fix loop.
 
 Builds the write-capable ``codex exec`` argv and the fix prompt, runs the fix
-invocation, rejects a cycle whose changes touch a sensitive out-of-scope path,
+invocation, rejects a cycle whose changes touch a sensitive out-of-scope path
+or breach the scope fence / revert guard (:mod:`cw.codex_fix_loop.fence`),
 and commits (then pushes and verifies, #2354) whatever the cycle produced. A
 failure at any step parks through the builders in :mod:`cw.codex_fix_loop.park`.
 """
@@ -13,9 +14,15 @@ import subprocess
 from typing import TYPE_CHECKING
 
 from cw._git import git_output
-from cw.codex_fix_loop.park import _park_fix_failure, _park_scope_violation
+from cw.codex_fix_loop.fence import check_fix_fence
+from cw.codex_fix_loop.park import (
+    _park_fence_breach,
+    _park_fix_failure,
+    _park_scope_violation,
+)
 from cw.codex_fix_loop.push import push_and_verify_head
 from cw.codex_review import (
+    FIX_CYCLE_COMMIT_PREFIX,
     _classify_codex_failure,
     _load_sensitive_hits,
     _reasoning_effort_argv,
@@ -57,12 +64,41 @@ def _build_fix_codex_argv(
     return argv
 
 
+# Standing fix-scope rules (#2485, #2492): every fix prompt carries them, so a
+# reviewer finding of the form "this out-of-scope code is wrong" is resolved by
+# removing that code rather than improving it, and a narrow finding never
+# turns into a rewrite or a revert of the branch's earlier commits.
+_FIX_SCOPE_RULES = (
+    "## Scope Rules\n"
+    "- If a finding says code is out of scope or not in the approved plan, "
+    "resolve it by removing that code (restoring the file to its "
+    "default-branch content, or deleting a file the branch added), never by "
+    "improving it.\n"
+    "- Do not revert, re-add, or rewrite work from earlier commits on this "
+    "branch beyond what a finding explicitly requires.\n"
+    "- Do not add new configuration flags, environment variables, or opt-in "
+    "toggles unless a finding explicitly requires one."
+)
+
+
+def _render_allowed_files(allowed_files: frozenset[str]) -> str:
+    """Render the scope fence as a prompt section (#2485)."""
+    listing = "\n".join(f"- {path}" for path in sorted(allowed_files))
+    return (
+        "## Files You May Change\n"
+        "Only these paths may differ from the default branch after your fix. "
+        "A change to any other path is rejected and parks the ticket:\n"
+        f"{listing}"
+    )
+
+
 def _build_fix_prompt(
     open_findings: list[Finding],
     *,
     plan_text: str | None,
     ticket_text: str | None,
     cycle: int,
+    allowed_files: frozenset[str] | None = None,
 ) -> str:
     """Render the fix-invocation prompt for one cycle's open MUST_FIX findings.
 
@@ -74,7 +110,9 @@ def _build_fix_prompt(
     That is a consistency choice, NOT a capability workaround — this very
     function's invocation runs under ``--sandbox workspace-write`` (see
     :func:`_build_fix_codex_argv`), which by construction can reach the
-    worktree (#1709). The prompt ends with an explicit minimal-fix instruction.
+    worktree (#1709). The scope rules and, when a plan manifest exists, the
+    file fence (#2485) follow the context, so the fix sees the same limits
+    :func:`~cw.codex_fix_loop.fence.check_fix_fence` enforces afterwards.
     """
     parts = [
         f"# Codex Fix Cycle {cycle}",
@@ -88,6 +126,9 @@ def _build_fix_prompt(
         parts.append(f"## Ticket Context\n{ticket_text}")
     if plan_text:
         parts.append(f"## Approved Plan\n{plan_text}")
+    parts.append(_FIX_SCOPE_RULES)
+    if allowed_files is not None:
+        parts.append(_render_allowed_files(allowed_files))
     parts.append("## MUST_FIX Findings")
     for index, finding in enumerate(open_findings, start=1):
         loc = finding.file
@@ -133,7 +174,7 @@ def _commit_fix_cycle(
         )
         return None
     git_output(["add", "-A"], cwd=worktree)
-    message = f"fix(review): codex fix cycle {cycle} — {_fix_commit_summary(findings)}"
+    message = f"{FIX_CYCLE_COMMIT_PREFIX} {cycle} — {_fix_commit_summary(findings)}"
     try:
         git_output(["commit", "-m", message], cwd=worktree)
     except subprocess.CalledProcessError:
@@ -225,6 +266,8 @@ def _run_fix_and_commit(
     cycle0_review: Review,
     snapshot: _PersistedSnapshot,
     had_real_commit_so_far: bool,
+    default_branch: str,
+    allowed_files: frozenset[str] | None,
 ) -> tuple[tuple[AutoDevResult, ReviewVerdict | None] | None, str | None]:
     """Run one cycle's fix invocation and commit; return ``(park, commit_sha)``.
 
@@ -234,11 +277,16 @@ def _run_fix_and_commit(
     update its cross-cycle real-commit tracker (#1723). A non-``None`` ``park``
     is the terminal park result for a failed fix invocation, a scope violation
     (an out-of-scope change that also matches the sensitive-files registry),
-    or a failed commit — ``commit_sha`` is always ``None`` alongside it.
+    a fence breach (#2485 scope fence, #2492 revert guard), or a failed
+    commit — ``commit_sha`` is always ``None`` alongside it.
     """
     findings = [af.finding for af in open_findings.values()]
     prompt = _build_fix_prompt(
-        findings, plan_text=plan_text, ticket_text=ticket_text, cycle=cycle
+        findings,
+        plan_text=plan_text,
+        ticket_text=ticket_text,
+        cycle=cycle,
+        allowed_files=allowed_files,
     )
     argv = _build_fix_codex_argv(model=model, reasoning_effort=reasoning_effort)
     result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
@@ -268,6 +316,29 @@ def _run_fix_and_commit(
                 session_id=session_id,
                 cycle=cycle,
                 violations=violations,
+                cycle0_review=cycle0_review,
+                open_findings=open_findings,
+                verdict=verdict,
+                snapshot=snapshot,
+                had_real_commit=had_real_commit_so_far,
+            ),
+            None,
+        )
+    breach = check_fix_fence(
+        worktree,
+        default_branch=default_branch,
+        allowed_files=allowed_files,
+        finding_files=frozenset(f.file for f in findings),
+        cycle=cycle,
+    )
+    if breach is not None:
+        return (
+            _park_fence_breach(
+                task=task,
+                worktree=worktree,
+                session_id=session_id,
+                cycle=cycle,
+                breach=breach,
                 cycle0_review=cycle0_review,
                 open_findings=open_findings,
                 verdict=verdict,

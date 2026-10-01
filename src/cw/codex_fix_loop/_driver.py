@@ -64,6 +64,7 @@ from cw.codex_fix_loop.divergence import (
     record_divergence_cycle,
     render_divergence_report,
 )
+from cw.codex_fix_loop.fence import fix_scope_allowlist
 from cw.codex_fix_loop.park import _clean_exit, _park_survivors
 from cw.codex_fix_loop.snapshot import _persist_cycle_snapshot, _with_snapshot_pointer
 from cw.codex_review import (
@@ -336,6 +337,9 @@ def run_review_with_fix_loop(
     cycle0_files = frozenset(cycle0_changed)
     scope_tier = resolve_tier(task.scope_hint)
     plan_text, ticket_text = _load_ticket_context(worktree)
+    # #2485: the file fence every fix cycle is held to — plan manifest plus
+    # cycle-0 diff; None (no fence) when the plan has no manifest.
+    allowed_files = fix_scope_allowlist(plan_text, cycle0_files)
     # #1837: one ledger object threaded through every cycle, accumulating the
     # findings the loop records instead of acting on.
     debt_ledger: dict[tuple[str, str], DebtRecord] = {}
@@ -402,6 +406,8 @@ def run_review_with_fix_loop(
             cycle0_review=cycle0_review,
             snapshot=snapshot,
             had_real_commit_so_far=had_real_commit,
+            default_branch=default_branch,
+            allowed_files=allowed_files,
         )
         if park is not None:
             return park
