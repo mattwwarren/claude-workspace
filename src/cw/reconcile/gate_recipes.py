@@ -1,25 +1,31 @@
 """Daemon-side gate recipes: mechanical gate-clearing reactor (RFC 0009).
 
-Gate recipes are the opt-in automation layer that clears an approval gate a
-human would otherwise have to clear by hand, but only when a fixed, verifiable
+Gate recipes are the automation layer that clears an approval gate a human
+would otherwise have to clear by hand, but only when a fixed, verifiable
 predicate holds. Unlike the concierge reactor (``cw.reconcile.concierge``),
 which *recovers* rows stuck behind dead sessions, gate recipes *advance* a live
-approval gate — so they gate on their own opt-in master switch
-(``OrchestratorConfig.gate_recipes_enabled``, default False) and forward their
-audit event to the operator channel, since an auto-advance with no human in the
-loop is attention-worthy.
+approval gate — so they sit behind their own master switch
+(``OrchestratorConfig.gate_recipes_enabled``, default True) and forward their
+audit event to the operator channel as a record of what was released.
 
 **P1+P2 scope (GitHub #1065):** the ``auto_approve_clean_review`` recipe. It
-auto-approves a ``review_pending_approval`` gate when the review came back
-completely clean — no MUST_FIX findings, nothing deferred, health
-recommendation PROCEED, no forbidden-area touch, and at least one reviewer
-agent actually ran (``agents_run > 0``).
+auto-approves a ``review_pending_approval`` gate when the review's health
+recommendation is PROCEED, no forbidden area was touched, and at least one
+reviewer agent actually ran (``agents_run > 0``).
 
 **P3 scope (GitHub #1066):** the ``auto_adopt_clean_plan`` recipe. It
-auto-adopts a ``plan_pending_approval`` gate when the plan-of-record carries
-both signoff markers (``plan-spec-reviewed`` and ``plan-soundness-reviewed``)
-appended by ``auto-dev-plan``. The per-lane ``resolve_gate_recipe_enabled``
-precedence (P4, #1067) remains out of scope here.
+auto-adopts a ``plan_pending_approval`` gate.
+
+**Size alone never pages the operator.** Both recipes are on by default and
+release a Large gate unless a predicate in :mod:`cw.reconcile.gate_predicates`
+(which documents the full policy) names a reason a person is needed. The plan
+recipe does not require the two signoff markers — a Large park runs its review
+stations in advisory mode and never writes them — so an unreviewed plan is
+released through ``_approve_ticket_locked``'s #968 same-stage requeue: the
+row-path approval stamped there lets the re-dispatched plan stage pass
+Checkpoint 1 and run the full ambiguity scan and quality review, which can
+still park for a genuine product or scope question. A reviewed plan advances
+to IMPL directly, as before.
 
 The recipe follows the repo's detect/act split (see ``concierge.py`` for the
 closest sibling): a pure ``_detect_auto_approve_review`` classification phase,
@@ -79,7 +85,24 @@ from cw.dev_queue import (
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.gh import fetch_approved_plan_comment, post_issue_comment
-from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.reconcile.gate_predicates import (
+    _PLAN_PENDING_APPROVAL,
+    _REVIEW_PENDING_APPROVAL,
+    _SNAPSHOT_KEY_FILES,
+    _SNAPSHOT_KEY_FINGERPRINT,
+    _SNAPSHOT_KEY_FORBIDDEN,
+    _SNAPSHOT_KEY_LINES,
+    _SNAPSHOT_KEY_REVIEWED,
+    _SNAPSHOT_KEY_SOUNDNESS,
+    _SNAPSHOT_KEY_SPEC,
+    _SNAPSHOT_KEY_TIER,
+    _clean_review_snapshot,
+    _plan_gate_snapshot,
+    _plan_predicate_holds,
+    _predicate_holds,
+    _row_eligible,
+)
 from cw.reconcile.tasks import _client_cwd, _is_dangling_client
 
 if TYPE_CHECKING:
@@ -125,13 +148,14 @@ RECIPE_AUTO_APPROVE_REVIEW = "auto_approve_clean_review"
 RECIPE_AUTO_ADOPT_PLAN = "auto_adopt_clean_plan"
 
 # RFC 0009 P4 (#1067) — tier-3 hardcoded fallback for the per-lane resolver.
-# Both recipes default OFF (inverted from concierge's all-True default): a gate
-# recipe auto-clears an approval gate with no human in the loop, so nothing
-# fires unless an operator opts a lane (or ticket) in. NOT a config field — it
-# is the floor the ticket/lane tiers fall through to.
+# Both recipes default ON: the operator is paged for a product or scope
+# question, never for a ticket's size alone (see the module docstring). A lane
+# or ticket opts back into manual gating with ``gate_recipes: {<recipe>:
+# false}``; ``gate_recipes_enabled: false`` turns both off globally. NOT a
+# config field — it is the floor the ticket/lane tiers fall through to.
 _DEFAULT_GATE_RECIPE_ENABLED: dict[str, bool] = {
-    RECIPE_AUTO_APPROVE_REVIEW: False,
-    RECIPE_AUTO_ADOPT_PLAN: False,
+    RECIPE_AUTO_APPROVE_REVIEW: True,
+    RECIPE_AUTO_ADOPT_PLAN: True,
 }
 
 
@@ -191,12 +215,6 @@ def _recipe_gate_open(
     )
 
 
-# The only sentinel status the review recipe fires on. A row whose owning
-# session's last_result is not at this gate is never a candidate.
-_REVIEW_PENDING_APPROVAL = "review_pending_approval"
-# The single health recommendation the clean-review predicate accepts.
-_RECOMMENDATION_PROCEED = "PROCEED"
-
 _AUTO_APPROVE_COMMENT_TEMPLATE = """\
 Auto-approved by gate recipe `{recipe}`.
 
@@ -212,33 +230,27 @@ The review met the clean-review predicate and was approved automatically
 See event `GATE_AUTO_APPROVED` for the full audit trail.
 """
 
-# The only sentinel status the plan recipe fires on. A row whose owning
-# session's last_result is not at this gate is never a candidate.
-_PLAN_PENDING_APPROVAL = "plan_pending_approval"
-
 # The two signoff markers auto-dev-plan appends to the plan-of-record body.
 # Canonical definition now lives in cw.dev_queue.lifecycle (#1567) — imported
 # above rather than redefined here. _PLAN_SPEC_MARKER still mirrors
 # gh._PLAN_MARKER, a genuinely separate definition in a different module;
 # test_plan_spec_marker_matches_gh_marker continues to guard that drift.
 
-# predicate_snapshot dict keys (R3) — named once so the producer
-# (_clean_plan_snapshot) and consumer (_post_auto_adopt_comment) can't drift
-# via a typo'd string literal at one site only.
-_SNAPSHOT_KEY_SPEC = "plan_spec_reviewed"
-_SNAPSHOT_KEY_SOUNDNESS = "plan_soundness_reviewed"
-
 _AUTO_ADOPT_COMMENT_TEMPLATE = """\
 Auto-approved by gate recipe `{recipe}`.
 
-The plan met the clean-plan predicate (both signoff markers present on the
-plan-of-record) and was approved automatically (no human review) by RFC 0009
-gate-recipe automation:
+The plan met the clean-plan predicate (no forbidden-area touch, no operator
+`scope_hint: large`, and a draft fingerprint the approval is bound to) and was
+approved automatically (no human review) by RFC 0009 gate-recipe automation:
 
-- plan_spec_reviewed: {plan_spec_reviewed}
-- plan_soundness_reviewed: {plan_soundness_reviewed}
+- scope: {tier} ({files} files, ~{lines_estimate} lines)
+- forbidden_touched: {forbidden_touched}
+- plan_draft_fingerprint: {plan_draft_fingerprint}
+- plan_reviewed: {plan_reviewed}
 
-See event `GATE_AUTO_APPROVED` for the full audit trail.
+An unreviewed plan returns to the plan stage, which runs the full ambiguity
+scan and quality review before implementation starts. See event
+`GATE_AUTO_APPROVED` for the full audit trail.
 """
 
 
@@ -271,72 +283,43 @@ class GateRecipeCandidate:
     session_id: str
 
 
-def _clean_review_snapshot(last_result: object) -> dict[str, object] | None:
-    """Extract the clean-review predicate snapshot, or None if not fireable.
+def gate_recipe_will_release(
+    task: TicketTask,
+    last_result: dict[str, object] | None,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
+) -> bool:
+    """Whether a gate recipe will release *task*'s pending approval gate.
 
-    Returns None (fail-closed) unless *last_result* is a dict at the
-    ``review_pending_approval`` gate whose ``review``/``health``/``scope``
-    sections are all present dicts. The returned snapshot holds the five
-    predicate field values verbatim; whether the predicate *holds* is a
-    separate check (:func:`_predicate_holds`) so detect and act share both the
-    extraction and the decision.
+    Called by dispatch routing (Rule 1) at park time, so it does not page the
+    operator about a gate the next reconcile tick clears without them. Pure
+    over the sentinel and the row: it shares each recipe's predicate and
+    enablement check but makes no tracker call, because whether the plan was
+    already reviewed changes how the plan recipe releases the gate, not
+    whether it does. A recipe whose act phase later fails emits the
+    operator-forwarded ``GATE_AUTO_APPROVE_FAILED``, so a suppressed page is
+    never a silent park.
     """
     if not isinstance(last_result, dict):
-        return None
-    if last_result.get("status") != _REVIEW_PENDING_APPROVAL:
-        return None
-    review = last_result.get("review")
-    health = last_result.get("health")
-    scope = last_result.get("scope")
-    if not (
-        isinstance(review, dict)
-        and isinstance(health, dict)
-        and isinstance(scope, dict)
-    ):
-        return None
-    return {
-        "must_fix_initial": review.get("must_fix_initial"),
-        # As of #1805, review.deferred on the Claude-native path is
-        # apply_adjudication's real deferral count, not the placeholder it was
-        # when every accepted finding carried an unearned disposition="fixed".
-        # auto_approve_clean_review's `deferred == 0` check (_predicate_holds
-        # below) therefore becomes semantically live once a lane enables the
-        # recipe: it will correctly stop auto-approving a review with genuinely
-        # deferred findings. That is the intended effect of making the field
-        # accurate, not a regression to guard against.
-        "deferred": review.get("deferred", 0),
-        "recommendation": health.get("recommendation"),
-        "forbidden_touched": scope.get("forbidden_touched"),
-        "agents_run": review.get("agents_run", 0),
-    }
-
-
-def _predicate_holds(snapshot: dict[str, object]) -> bool:
-    """True iff the five-field clean-review predicate is satisfied.
-
-    Every field is compared against its clean value; a missing/None field
-    (e.g. a malformed producer payload) fails the comparison and blocks the
-    fire — the predicate is fail-closed. ``agents_run`` is guarded with an
-    explicit ``isinstance`` check (rather than a bare ``> 0`` comparison)
-    since *snapshot* is typed ``dict[str, object]`` — a malformed
-    non-int producer value must fail closed, not raise or pass via truthy
-    coercion. ``bool`` is excluded explicitly: it is a subclass of ``int``
-    in Python, so a malformed ``agents_run: true`` payload would otherwise
-    satisfy both ``isinstance(agents_run, int)`` and ``agents_run > 0``.
-    """
-    agents_run = snapshot["agents_run"]
-    return (
-        snapshot["must_fix_initial"] == 0
-        # See _clean_review_snapshot's note: this comparison is unchanged by
-        # #1805, but the value it reads became accurate on the Claude-native
-        # path there.
-        and snapshot["deferred"] == 0
-        and snapshot["recommendation"] == _RECOMMENDATION_PROCEED
-        and snapshot["forbidden_touched"] is False
-        and isinstance(agents_run, int)
-        and not isinstance(agents_run, bool)
-        and agents_run > 0
-    )
+        return False
+    status = last_result.get("status")
+    if status == _REVIEW_PENDING_APPROVAL:
+        review_snapshot = _clean_review_snapshot(last_result)
+        return (
+            review_snapshot is not None
+            and _row_eligible(task, Stage.REVIEW)
+            and _predicate_holds(review_snapshot)
+            and _recipe_gate_open(config, task, clients, RECIPE_AUTO_APPROVE_REVIEW)
+        )
+    if status == _PLAN_PENDING_APPROVAL:
+        plan_snapshot = _plan_gate_snapshot(last_result)
+        return (
+            plan_snapshot is not None
+            and _row_eligible(task, Stage.PLAN)
+            and _plan_predicate_holds(plan_snapshot, task)
+            and _recipe_gate_open(config, task, clients, RECIPE_AUTO_ADOPT_PLAN)
+        )
+    return False
 
 
 def _plan_of_record_body(
@@ -371,37 +354,37 @@ def _clean_plan_snapshot(
 ) -> dict[str, object] | None:
     """Extract the clean-plan predicate snapshot, or None if not fireable.
 
-    Returns None (fail-closed) unless *last_result* is a dict at the
-    ``plan_pending_approval`` gate AND the plan-of-record body carries BOTH
-    signoff markers. Both markers are read from the SAME body (R2 — there is
-    exactly one ``body`` variable in scope, so same-source is structural, not
-    a separate check); a union across tracker + `.cw/plan.md` is impossible by
-    construction. The returned snapshot holds only the two marker-version
-    strings — the raw plan body is never placed in the snapshot, the event
-    payload, or the audit comment.
+    Returns None (fail-closed) unless *last_result* is at the
+    ``plan_pending_approval`` gate and :func:`_plan_predicate_holds` passes.
+    The predicate is checked before the plan-of-record is read, so a row that
+    cannot fire never pays for the tracker call.
+
+    The plan-of-record read decides only *how* the gate is released, recorded
+    as ``plan_reviewed``: a plan whose body carries BOTH signoff markers
+    advances to IMPL, and any other plan goes back to PLAN through the #968
+    same-stage requeue for its full quality review. Both markers are read from
+    the SAME body (R2 — there is exactly one ``body`` variable in scope, so
+    same-source is structural); a union across tracker + `.cw/plan.md` is
+    impossible by construction. The raw plan body is never placed in the
+    snapshot, the event payload, or the audit comment.
     """
-    if not isinstance(last_result, dict):
-        return None
-    if last_result.get("status") != _PLAN_PENDING_APPROVAL:
+    snapshot = _plan_gate_snapshot(last_result)
+    if snapshot is None or not _plan_predicate_holds(snapshot, task):
         return None
     body = _plan_of_record_body(task, client_cfg)
-    if body is None:
-        return None
-    if not _plan_body_signoff_ok(body):
-        return None
-    spec_version = _marker_version(body, marker=_PLAN_SPEC_MARKER)
-    soundness_version = _marker_version(body, marker=_PLAN_SOUNDNESS_MARKER)
-    # Defense-in-depth (#1567): _plan_body_signoff_ok already proved both
-    # calls below return non-None, since it composes the identical
-    # _marker_version checks over the same body. This guard is kept anyway so
-    # mypy sees the narrowed str type and so a future divergence between the
-    # two predicates fails closed here rather than raising on a None key.
-    if spec_version is None or soundness_version is None:
-        return None
-    return {
-        _SNAPSHOT_KEY_SPEC: spec_version,
-        _SNAPSHOT_KEY_SOUNDNESS: soundness_version,
-    }
+    reviewed = body is not None and _plan_body_signoff_ok(body)
+    snapshot[_SNAPSHOT_KEY_REVIEWED] = reviewed
+    snapshot[_SNAPSHOT_KEY_SPEC] = (
+        _marker_version(body, marker=_PLAN_SPEC_MARKER)
+        if reviewed and body is not None
+        else None
+    )
+    snapshot[_SNAPSHOT_KEY_SOUNDNESS] = (
+        _marker_version(body, marker=_PLAN_SOUNDNESS_MARKER)
+        if reviewed and body is not None
+        else None
+    )
+    return snapshot
 
 
 def _detect_auto_approve_review(
@@ -452,6 +435,8 @@ def _detect_auto_approve_review(
         # precisely the incident: clean numbers, wrong tree, nobody looking.
         if task.disposition == REVIEW_STALENESS_GATE_DISPOSITION:
             continue
+        if not _row_eligible(task, Stage.REVIEW):
+            continue
         if task.session_id is None:
             continue
         session = state.find_by_name_or_id(task.session_id)
@@ -487,17 +472,20 @@ def _detect_auto_adopt_plan(
     Mirrors :func:`_detect_auto_approve_review`'s guard chain (BLOCKED_ON_USER,
     ``gate_recipe_failed_at`` latch None, resolvable session) but swaps the
     clean-review snapshot for a clean-plan snapshot: the row's owning session
-    must sit at the ``plan_pending_approval`` gate and the plan-of-record must
-    carry both signoff markers. The plan-of-record read (tracker-first) happens
-    here at detect time — unlocked — never under the act-phase lock (R5). Not
-    a pure function (it makes a ``gh`` subprocess call and may read a file),
-    but it performs no writes/mutations.
+    must sit at the ``plan_pending_approval`` gate and
+    :func:`_plan_predicate_holds` must pass. The plan-of-record read
+    (tracker-first), which decides only whether the plan is already reviewed,
+    happens here at detect time — unlocked — never under the act-phase lock
+    (R5). Not a pure function (it makes a ``gh`` subprocess call and may read
+    a file), but it performs no writes/mutations.
     """
     candidates: list[GateRecipeCandidate] = []
     for task in tasks:
         if task.status != QueueItemStatus.BLOCKED_ON_USER:
             continue
         if task.gate_recipe_failed_at is not None:
+            continue
+        if not _row_eligible(task, Stage.PLAN):
             continue
         if task.session_id is None:
             continue
@@ -564,7 +552,7 @@ def _post_auto_adopt_comment(
 
     Mirrors :func:`_post_auto_approve_comment` exactly (same ``gh issue
     comment`` subprocess call, same best-effort log-on-failure behavior),
-    formatting the plan template with the two marker-version strings.
+    formatting the plan template with the predicate snapshot's fields.
 
     *cwd* scopes the gh call to the client's repo (GitHub #1269/#1279).
     """
@@ -577,8 +565,12 @@ def _post_auto_adopt_comment(
     # collided with the `recipe=` kwarg.
     body = _AUTO_ADOPT_COMMENT_TEMPLATE.format(
         recipe=RECIPE_AUTO_ADOPT_PLAN,
-        plan_spec_reviewed=snapshot[_SNAPSHOT_KEY_SPEC],
-        plan_soundness_reviewed=snapshot[_SNAPSHOT_KEY_SOUNDNESS],
+        tier=snapshot.get(_SNAPSHOT_KEY_TIER),
+        files=snapshot.get(_SNAPSHOT_KEY_FILES),
+        lines_estimate=snapshot.get(_SNAPSHOT_KEY_LINES),
+        forbidden_touched=snapshot.get(_SNAPSHOT_KEY_FORBIDDEN),
+        plan_draft_fingerprint=snapshot.get(_SNAPSHOT_KEY_FINGERPRINT),
+        plan_reviewed=snapshot.get(_SNAPSHOT_KEY_REVIEWED),
     )
     result = post_issue_comment(ticket_id, body, cwd=cwd)
     if result is None:
@@ -790,7 +782,7 @@ def _act_auto_approve_review(
         for candidate in by_key.values():
             state = load_state()
             task = _find_blocked_task(store, candidate.ticket_id, candidate.client)
-            if task is None:
+            if task is None or not _row_eligible(task, Stage.REVIEW):
                 continue
             if task.session_id is None:
                 continue
@@ -865,15 +857,16 @@ def _act_auto_adopt_plan(
 
     Mirrors :func:`_act_auto_approve_review` with one deliberate divergence
     (R5): the re-check under ``dev_queue_lock()`` reads ONLY already-loaded
-    in-memory state — the row is still BLOCKED_ON_USER, its session still
-    resolves, and ``session.last_result`` is still at the
-    ``plan_pending_approval`` gate. It does NOT re-run
-    :func:`_plan_of_record_body`/:func:`_clean_plan_snapshot`: the plan-of-
-    record read is a ~30s ``gh`` subprocess, and the signoff markers are
-    append-only, so cleanliness established at detect cannot regress between
-    detect and act. Only task/session state can. ``candidate.evidence`` (the
-    detect-time snapshot) is reused directly as the event's
-    ``predicate_snapshot`` and the audit-comment source.
+    in-memory state — the row is still BLOCKED_ON_USER and eligible, its
+    session still resolves, and ``session.last_result`` still passes the pure
+    :func:`_plan_gate_snapshot`/:func:`_plan_predicate_holds` pair. It does
+    NOT re-run :func:`_plan_of_record_body`: the plan-of-record read is a
+    ~30s ``gh`` subprocess, and the signoff markers are append-only, so a
+    plan reviewed at detect cannot become unreviewed before act. Only
+    task/session state can change. ``candidate.evidence`` (the detect-time
+    snapshot) is reused directly as the event's ``predicate_snapshot`` and
+    the audit-comment source, and its ``plan_reviewed`` value selects the
+    release path: advance to IMPL, or the #968 requeue back to PLAN.
     """
     if not candidates:
         return []
@@ -894,7 +887,7 @@ def _act_auto_adopt_plan(
         state = load_state()
         for candidate in by_key.values():
             task = _find_blocked_task(store, candidate.ticket_id, candidate.client)
-            if task is None:
+            if task is None or not _row_eligible(task, Stage.PLAN):
                 continue
             if task.session_id is None:
                 continue
@@ -904,11 +897,8 @@ def _act_auto_adopt_plan(
             # In-memory re-check only (R5): no plan-of-record re-fetch. The
             # markers are append-only, so only task/session state can have
             # changed since detect.
-            last_result = session.last_result
-            if (
-                not isinstance(last_result, dict)
-                or last_result.get("status") != _PLAN_PENDING_APPROVAL
-            ):
+            gate_snapshot = _plan_gate_snapshot(session.last_result)
+            if gate_snapshot is None or not _plan_predicate_holds(gate_snapshot, task):
                 continue
             snapshot = candidate.evidence
             record_event(
@@ -928,14 +918,18 @@ def _act_auto_adopt_plan(
                 # RFC 0009 / #1083: pin the mutation to THIS validated row's
                 # identity so _approve_ticket_locked cannot re-resolve to a
                 # newer AWAITING_OPERATOR_SIGNOFF duplicate and clear a signoff
-                # gate this recipe never checked. plan_reviewed=True (#968)
-                # documents the no-refetch contract explicitly: this recipe's
-                # detect phase already proved the clean-plan predicate holds
-                # (both signoff markers present -- see _clean_plan_snapshot),
-                # so the act phase must not trigger a second, redundant live
-                # _plan_is_reviewed() fetch of the plan-of-record.
+                # gate this recipe never checked. plan_reviewed is always an
+                # explicit bool (#968), never None, which documents the
+                # no-refetch contract: detect already read the plan-of-record
+                # (see _clean_plan_snapshot), so the act phase must not
+                # trigger a second live _plan_is_reviewed() fetch. True
+                # advances a reviewed plan to IMPL; False sends an unreviewed
+                # one back to PLAN for its full quality review.
                 _approve_ticket_locked(
-                    task.ticket_id, task.client, resolved_task=task, plan_reviewed=True
+                    task.ticket_id,
+                    task.client,
+                    resolved_task=task,
+                    plan_reviewed=snapshot.get(_SNAPSHOT_KEY_REVIEWED) is True,
                 )
             except CwError as exc:
                 _handle_gate_recipe_approve_failure(

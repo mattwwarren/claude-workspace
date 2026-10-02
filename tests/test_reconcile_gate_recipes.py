@@ -40,6 +40,7 @@ from cw.reconcile.gate_recipes import (
     _marker_version,
     _predicate_holds,
     _stamp_gate_recipe_failure,
+    gate_recipe_will_release,
     resolve_gate_recipe_enabled,
     run_gate_recipes,
 )
@@ -376,8 +377,6 @@ class TestDetect:
     @pytest.mark.parametrize(
         "kwargs",
         [
-            {"must_fix_initial": 1},
-            {"deferred": 1},
             {"recommendation": "EXIT_FOR_HUMAN_REVIEW"},
             {"forbidden_touched": True},
             {"agents_run": 0},
@@ -395,18 +394,57 @@ class TestDetect:
             == []
         )
 
-    def test_deferred_greater_than_zero_blocks_predicate_directly(self) -> None:
-        """#1805: a genuinely deferred finding blocks the clean-review predicate.
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{"must_fix_initial": 3}, {"deferred": 2}],
+    )
+    def test_resolved_and_deferred_findings_do_not_block(
+        self, kwargs: dict[str, Any]
+    ) -> None:
+        """Fixed MUST_FIX findings and deferred ones are not a reason to page.
 
-        Direct ``_predicate_holds``-level assertion (the integration-level
-        ``{"deferred": 1}`` case above proves the same via
-        ``_detect_auto_approve_review``). ``review.deferred`` becomes a real
-        count on the Claude-native path once ``apply_adjudication`` is wired in
-        — this pins the decision point that consumes it.
+        A Large review reaches ``review_pending_approval`` only after its fix
+        loop resolved every MUST_FIX, so ``must_fix_initial`` counts findings
+        that are already fixed. A deferred finding is out-of-scope work
+        recorded for follow-up. Both stay in the snapshot as audit fields.
         """
-        snapshot = _clean_review_snapshot(_clean_result(deferred=1))
+        result = _clean_result(**kwargs)
+        snapshot = _clean_review_snapshot(result)
         assert snapshot is not None
-        assert _predicate_holds(snapshot) is False
+        assert _predicate_holds(snapshot) is True
+        candidates = _detect_auto_approve_review(
+            CwState(sessions=[_make_session(last_result=result)]),
+            [_make_task()],
+            clients=_SEAM1_CLIENTS,
+            config=_config(),
+        )
+        assert len(candidates) == 1
+        assert candidates[0].evidence[next(iter(kwargs))] == next(iter(kwargs.values()))
+
+    @pytest.mark.parametrize(
+        "row_kwargs",
+        [{"scope_hint": "large"}, {"stage": Stage.PLAN}],
+        ids=["operator_scope_hint_large", "earlier_stage_row"],
+    )
+    def test_ineligible_row_yields_none(self, row_kwargs: dict[str, Any]) -> None:
+        """The operator's ``scope_hint: large`` and an off-stage row both page.
+
+        ``scope_hint: large`` is the operator's own "gate this ticket". A row
+        whose stage is not REVIEW is an earlier-stage report, and approving it
+        would advance past stage work that never ran.
+        """
+        task = _make_task(**row_kwargs)
+        session = _make_session(last_result=_clean_result())
+
+        assert (
+            _detect_auto_approve_review(
+                CwState(sessions=[session]),
+                [task],
+                clients=_SEAM1_CLIENTS,
+                config=_config(),
+            )
+            == []
+        )
 
     def test_clean_review_with_zero_agents_run_does_not_satisfy_predicate(
         self,
@@ -493,6 +531,76 @@ class TestDetect:
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
             == []
+        )
+
+
+class TestGateRecipeWillRelease:
+    """The park-time check dispatch Rule 1 uses to decide whether to page.
+
+    It must agree with the detect phase: a row it says will be released is a
+    row the next reconcile tick releases, and anything else pages.
+    """
+
+    def test_releasable_review_park(self) -> None:
+        assert gate_recipe_will_release(
+            _make_task(), _clean_result(), _SEAM1_CLIENTS, _config()
+        )
+
+    def test_releasable_plan_park(self) -> None:
+        assert gate_recipe_will_release(
+            _make_task(stage=Stage.PLAN), _plan_result(), _SEAM1_CLIENTS, _config()
+        )
+
+    @pytest.mark.parametrize(
+        ("label", "task_kwargs", "last_result", "config_kwargs"),
+        [
+            ("no sentinel", {}, None, {}),
+            ("not an approval gate", {}, {"status": "blocked"}, {}),
+            ("degraded review health", {}, "degraded", {}),
+            ("review gate on an off-stage row", {"stage": Stage.PLAN}, "review", {}),
+            ("forbidden-area plan", {"stage": Stage.PLAN}, "forbidden_plan", {}),
+            ("plan gate on an off-stage row", {}, "plan", {}),
+            ("master switch off", {}, "review", {"gate_recipes_enabled": False}),
+        ],
+    )
+    def test_reasons_to_page(
+        self,
+        label: str,
+        task_kwargs: dict[str, Any],
+        last_result: str | dict[str, object] | None,
+        config_kwargs: dict[str, Any],
+    ) -> None:
+        assert label
+        results: dict[str, dict[str, object]] = {
+            "degraded": _clean_result(recommendation="EXIT_FOR_HUMAN_REVIEW"),
+            "review": _clean_result(),
+            "forbidden_plan": _plan_result(forbidden_touched=True),
+            "plan": _plan_result(),
+        }
+        resolved = results[last_result] if isinstance(last_result, str) else last_result
+        assert not gate_recipe_will_release(
+            _make_task(**task_kwargs),
+            resolved,
+            _SEAM1_CLIENTS,
+            _config(**config_kwargs),
+        )
+
+    def test_lane_opt_out_pages(self) -> None:
+        clients = {
+            "acme": ClientConfig(
+                name="acme",
+                workspace_path=Path("/tmp/ws"),
+                default_branch="main",
+                lanes=[
+                    LaneConfig(
+                        name="default",
+                        gate_recipes={RECIPE_AUTO_APPROVE_REVIEW: False},
+                    )
+                ],
+            )
+        }
+        assert not gate_recipe_will_release(
+            _make_task(), _clean_result(), clients, _config()
         )
 
 
@@ -1237,11 +1345,17 @@ class TestActRecheckRace:
         _write_acme_clients_yaml(tmp_config_dir, tmp_path)
         task = _make_task()
         save_dev_queue(DevQueueStore(tasks=[task]))
-        # Persist a state where the predicate NO LONGER holds (must_fix_initial=1),
+        # Persist a state where the predicate NO LONGER holds (health degraded),
         # simulating a concurrent mutation between detect and act.
         save_state(
             CwState(
-                sessions=[_make_session(last_result=_clean_result(must_fix_initial=1))]
+                sessions=[
+                    _make_session(
+                        last_result=_clean_result(
+                            recommendation="EXIT_FOR_HUMAN_REVIEW"
+                        )
+                    )
+                ]
             )
         )
         stale_candidate = GateRecipeCandidate(
@@ -1375,22 +1489,59 @@ def test_recipe_constants_are_distinct() -> None:
 # RFC 0009 P3 — auto_adopt_clean_plan (#1066)
 # --------------------------------------------------------------------------- #
 
-# The predicate_snapshot the two markers in plan_body() extract to (R3):
-# snake_case keys, "<date> <vN>" string values, no other keys.
+# A valid plan-draft fingerprint (64 lowercase hex) the sentinel binds to.
+_PLAN_FP = "a" * 64
+
+# The predicate_snapshot a Large, unforbidden plan_pending_approval sentinel
+# plus a plan-of-record carrying both plan_body() markers extracts to (R3).
 _PLAN_SNAPSHOT: dict[str, object] = {
+    "tier": "large",
+    "files": 3,
+    "lines_estimate": 726,
+    "forbidden_touched": False,
+    "plan_draft_fingerprint": _PLAN_FP,
+    "plan_reviewed": True,
     "plan_spec_reviewed": "2026-07-08 v2",
     "plan_soundness_reviewed": "2026-07-08 v1",
 }
 
+# The same plan with no reviewed plan-of-record: still released, but back to
+# PLAN for its full quality review rather than on to IMPL.
+_UNREVIEWED_PLAN_SNAPSHOT: dict[str, object] = {
+    **_PLAN_SNAPSHOT,
+    "plan_reviewed": False,
+    "plan_spec_reviewed": None,
+    "plan_soundness_reviewed": None,
+}
 
-def _plan_result(status: str = "plan_pending_approval") -> dict[str, Any]:
-    """Build a last_result dict for a plan-gate sentinel snapshot.
 
-    The plan recipe only reads ``status`` off ``last_result`` (the review/
-    health/scope blocks are hardcoded zeros at plan-stage exit and are
-    intentionally NOT read), so this is deliberately minimal.
+def _plan_result(
+    status: str = "plan_pending_approval",
+    *,
+    forbidden_touched: object = False,
+    fingerprint: object = _PLAN_FP,
+) -> dict[str, Any]:
+    """Build a last_result dict for a Large plan-gate sentinel.
+
+    The plan recipe reads ``status``, the ``scope`` block, and the
+    ``plan_draft_fingerprint`` the approval is bound to.
     """
-    return {"status": status}
+    return {
+        "status": status,
+        "plan_draft_fingerprint": fingerprint,
+        "scope": {
+            "tier": "large",
+            "files": 3,
+            "lines_estimate": 726,
+            "forbidden_touched": forbidden_touched,
+        },
+    }
+
+
+def _assert_released_unreviewed(candidates: list[GateRecipeCandidate]) -> None:
+    """A plan with no reviewed plan-of-record is released for re-review."""
+    assert len(candidates) == 1
+    assert candidates[0].evidence == _UNREVIEWED_PLAN_SNAPSHOT
 
 
 class TestDetectAdoptPlan:
@@ -1415,7 +1566,92 @@ class TestDetectAdoptPlan:
         assert cand.session_id == "sess-1"
         assert cand.evidence == _PLAN_SNAPSHOT
 
-    def test_missing_soundness_marker_yields_none(
+    @pytest.mark.parametrize(
+        ("label", "result_kwargs", "row_kwargs"),
+        [
+            ("forbidden area touched", {"forbidden_touched": True}, {}),
+            ("forbidden_touched missing", {"forbidden_touched": None}, {}),
+            ("no draft fingerprint", {"fingerprint": None}, {}),
+            ("malformed draft fingerprint", {"fingerprint": "abc123"}, {}),
+            ("operator scope_hint large", {}, {"scope_hint": "large"}),
+            ("row not at the plan stage", {}, {"stage": Stage.REVIEW}),
+            (
+                "this exact draft already approved",
+                {},
+                {"plan_approved_at": _NOW, "plan_approved_fingerprint": _PLAN_FP},
+            ),
+        ],
+    )
+    def test_reasons_a_person_is_needed_yield_none(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        label: str,
+        result_kwargs: dict[str, Any],
+        row_kwargs: dict[str, Any],
+    ) -> None:
+        """Each predicate exclusion keeps the park for the operator.
+
+        The already-approved case is the loop guard: the worker re-parked a
+        draft the row already holds an approval for, so releasing it again
+        would only re-park it again.
+        """
+        assert label
+        stub_fetch_plan(monkeypatch, plan_body())
+        task = _make_task(**{"stage": Stage.PLAN, **row_kwargs})
+        session = _make_session(last_result=_plan_result(**result_kwargs))
+
+        assert (
+            _detect_auto_adopt_plan(
+                CwState(sessions=[session]),
+                [task],
+                clients=_SEAM1_CLIENTS,
+                config=_config(),
+            )
+            == []
+        )
+
+    def test_approval_for_a_different_draft_does_not_block(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An amended draft re-parked after an earlier approval is released.
+
+        The row's approval is bound to the earlier draft; this draft differs,
+        so it is a new plan, not a loop.
+        """
+        stub_fetch_plan(monkeypatch, plan_body())
+        task = _make_task(
+            stage=Stage.PLAN,
+            plan_approved_at=_NOW,
+            plan_approved_fingerprint="b" * 64,
+        )
+        session = _make_session(last_result=_plan_result())
+
+        candidates = _detect_auto_adopt_plan(
+            CwState(sessions=[session]),
+            [task],
+            clients=_SEAM1_CLIENTS,
+            config=_config(),
+        )
+
+        assert len(candidates) == 1
+
+    def test_non_dict_scope_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        stub_fetch_plan(monkeypatch, plan_body())
+        result = _plan_result()
+        result["scope"] = "not-a-dict"
+        session = _make_session(last_result=result)
+
+        assert (
+            _detect_auto_adopt_plan(
+                CwState(sessions=[session]),
+                [_make_task(stage=Stage.PLAN)],
+                clients=_SEAM1_CLIENTS,
+                config=_config(),
+            )
+            == []
+        )
+
+    def test_missing_soundness_marker_releases_unreviewed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         stub_fetch_plan(monkeypatch, plan_body(soundness=False))
@@ -1423,14 +1659,13 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert (
+        _assert_released_unreviewed(
             _detect_auto_adopt_plan(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
-            == []
         )
 
-    def test_missing_spec_marker_yields_none(
+    def test_missing_spec_marker_releases_unreviewed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         stub_fetch_plan(monkeypatch, plan_body(spec=False))
@@ -1438,11 +1673,10 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert (
+        _assert_released_unreviewed(
             _detect_auto_adopt_plan(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
-            == []
         )
 
     def test_non_plan_pending_status_yields_none(
@@ -1549,29 +1783,28 @@ class TestDetectAdoptPlan:
         assert len(candidates) == 1
         assert candidates[0].evidence == _PLAN_SNAPSHOT
 
-    def test_no_worktree_path_when_tracker_returns_none_yields_none(
+    def test_no_worktree_path_when_tracker_returns_none_releases_unreviewed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A None tracker read AND a None worktree_path leaves no fallback —
-        the recipe must return None rather than raise on Path(None)."""
+        the plan reads as unreviewed rather than raising on Path(None)."""
         stub_fetch_plan(monkeypatch, None)
         task = _make_task(stage=Stage.PLAN, worktree_path=None)
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert (
+        _assert_released_unreviewed(
             _detect_auto_adopt_plan(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
-            == []
         )
 
-    def test_missing_cw_plan_md_when_tracker_returns_none_yields_none(
+    def test_missing_cw_plan_md_when_tracker_returns_none_releases_unreviewed(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Tracker returns None and the worktree exists but has no
-        `.cw/plan.md` on disk — the fallback is unavailable, so the recipe
-        returns None (the ``plan_path.exists()`` False branch)."""
+        `.cw/plan.md` on disk — the fallback is unavailable, so the plan reads
+        as unreviewed (the ``plan_path.exists()`` False branch)."""
         stub_fetch_plan(monkeypatch, None)
         ws = tmp_path / "ws"
         ws.mkdir()
@@ -1579,21 +1812,20 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert (
+        _assert_released_unreviewed(
             _detect_auto_adopt_plan(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
-            == []
         )
 
-    def test_tracker_spec_only_body_not_completed_by_cw_plan_md(
+    def test_tracker_spec_only_body_not_completed_by_cw_plan_md_releases_unreviewed(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """R2: same-source only, no cross-source union. The tracker returns a
         spec-only body (non-None, so the `.cw/plan.md` fallback is never
         consulted); even though plan.md on disk carries BOTH markers, the
-        soundness marker is absent from the single body in scope -> NOT
-        detected. Proves markers are never unioned across tracker + file."""
+        soundness marker is absent from the single body in scope -> read as
+        unreviewed. Proves markers are never unioned across tracker + file."""
         stub_fetch_plan(monkeypatch, plan_body(soundness=False))
         ws = tmp_path / "ws"
         (ws / ".cw").mkdir(parents=True)
@@ -1602,20 +1834,19 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert (
+        _assert_released_unreviewed(
             _detect_auto_adopt_plan(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
-            == []
         )
 
-    def test_unclosed_marker_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_unclosed_marker_releases_unreviewed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Fail-closed on a malformed marker: the soundness marker's prefix is
-        present but the comment is never closed with ``-->``. Without a
-        closure check, str.split would silently return the rest of the body
-        as the "version" — leaking raw plan text into the snapshot. Proves
-        _marker_version's fail-closed branch, not just the prefix-presence
-        check in _clean_plan_snapshot."""
+        present but the comment is never closed with ``-->``, so the plan
+        reads as unreviewed and no raw plan text leaks into the snapshot as a
+        "version"."""
         unclosed_body = (
             "# Plan\n\n"
             "<!-- plan-spec-reviewed: 2026-07-08 v2 -->\n"
@@ -1626,19 +1857,19 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert (
+        _assert_released_unreviewed(
             _detect_auto_adopt_plan(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
-            == []
         )
 
-    def test_plan_md_read_error_yields_none(
+    def test_plan_md_read_error_releases_unreviewed(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """A read failure between .exists() and read_text() (permission
-        error, file removed mid-read, etc.) degrades to "no plan body"
-        rather than propagating — an unhandled exception here would abort
+        error, file removed mid-read, etc.) degrades to "no plan body" (an
+        unreviewed plan) rather than propagating — an unhandled exception would
+        abort
         the entire reconcile tick, including the unrelated
         auto_approve_clean_review recipe processed in the same
         run_gate_recipes() call."""
@@ -1657,14 +1888,13 @@ class TestDetectAdoptPlan:
 
         monkeypatch.setattr(Path, "read_text", _boom_read_text)
 
-        assert (
+        _assert_released_unreviewed(
             _detect_auto_adopt_plan(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
-            == []
         )
 
-    def test_plan_md_non_utf8_content_yields_none(
+    def test_plan_md_non_utf8_content_releases_unreviewed(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """UnicodeDecodeError is not an OSError subclass, so it needs its
@@ -1681,11 +1911,10 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert (
+        _assert_released_unreviewed(
             _detect_auto_adopt_plan(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
-            == []
         )
 
 
@@ -1757,8 +1986,35 @@ class TestRunAdoptPlan:
         assert argv[:4] == ["gh", "issue", "comment", "GEN-1"]
         body = argv[-1]
         assert "auto_adopt_clean_plan" in body
-        assert "plan_spec_reviewed: 2026-07-08 v2" in body
-        assert "plan_soundness_reviewed: 2026-07-08 v1" in body
+        assert "scope: large (3 files, ~726 lines)" in body
+        assert "forbidden_touched: False" in body
+        assert f"plan_draft_fingerprint: {_PLAN_FP}" in body
+        assert "plan_reviewed: True" in body
+
+    def test_unreviewed_plan_is_released_back_to_plan_for_review(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A Large park with no reviewed plan-of-record is released, not paged.
+
+        It goes back to PLAN (PENDING) through the #968 same-stage requeue
+        with the row-path approval bound to this draft, so the re-dispatched
+        plan stage passes Checkpoint 1 and runs its full quality review before
+        any implementation starts.
+        """
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(monkeypatch, None)
+        task = _make_task(stage=Stage.PLAN)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        recovered = run_gate_recipes(now=_NOW, config=_config())
+
+        assert recovered == ["GEN-1"]
+        released = load_dev_queue().tasks[0]
+        assert released.status == QueueItemStatus.PENDING
+        assert released.stage == Stage.PLAN
+        assert released.plan_approved_at is not None
+        assert released.plan_approved_fingerprint == _PLAN_FP
 
     def test_review_then_plan_order(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2233,51 +2489,61 @@ class TestResolveGateRecipeEnabled:
         )
 
     def test_tier2_lane_map_recipe_miss_falls_through_to_default(self) -> None:
-        """A lane map that sets one recipe but not the other leaves the
-        unset recipe on its hardcoded default-off, not implicitly enabled."""
+        """A lane map that disables one recipe leaves the other on its
+        hardcoded default (on), not implicitly disabled with it."""
         clients = {
             "acme": _client_with_lanes(
                 LaneConfig(
                     name="default",
-                    gate_recipes={RECIPE_AUTO_APPROVE_REVIEW: True},
+                    gate_recipes={RECIPE_AUTO_APPROVE_REVIEW: False},
                 )
             )
         }
-        task = _make_task()
-        assert (
-            resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_ADOPT_PLAN) is False
-        )
-
-    def test_tier3_default_off_when_nothing_configured(self) -> None:
-        clients = {"acme": _client_with_lanes(LaneConfig(name="default"))}
         task = _make_task()
         assert (
             resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_APPROVE_REVIEW)
             is False
         )
         assert (
-            resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_ADOPT_PLAN) is False
+            resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_ADOPT_PLAN) is True
+        )
+
+    def test_tier3_default_on_when_nothing_configured(self) -> None:
+        """Size alone never pages the operator: both recipes default on."""
+        clients = {"acme": _client_with_lanes(LaneConfig(name="default"))}
+        task = _make_task()
+        assert (
+            resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_APPROVE_REVIEW)
+            is True
+        )
+        assert (
+            resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_ADOPT_PLAN) is True
+        )
+
+    def test_unknown_recipe_name_falls_through_to_off(self) -> None:
+        clients = {"acme": _client_with_lanes(LaneConfig(name="default"))}
+        assert (
+            resolve_gate_recipe_enabled(_make_task(), clients, "no_such_recipe")
+            is False
         )
 
     def test_client_absent_falls_through_to_default(self) -> None:
         task = _make_task(client="ghost")
-        assert (
-            resolve_gate_recipe_enabled(task, {}, RECIPE_AUTO_APPROVE_REVIEW) is False
-        )
+        assert resolve_gate_recipe_enabled(task, {}, RECIPE_AUTO_APPROVE_REVIEW) is True
 
     def test_lane_absent_from_client_falls_through_to_default(self) -> None:
         clients = {
             "acme": _client_with_lanes(
                 LaneConfig(
                     name="default",
-                    gate_recipes={RECIPE_AUTO_APPROVE_REVIEW: True},
+                    gate_recipes={RECIPE_AUTO_APPROVE_REVIEW: False},
                 )
             )
         }
         task = _make_task(lane="nonexistent")
         assert (
             resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_APPROVE_REVIEW)
-            is False
+            is True
         )
 
 
@@ -2444,10 +2710,11 @@ class TestDetectAdoptPlanTrackerAware:
         assert len(candidates) == 1
         assert candidates[0].evidence == _PLAN_SNAPSHOT
 
-    def test_linear_tracker_no_worktree_yields_no_candidate(
+    def test_linear_tracker_no_worktree_releases_unreviewed(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """No local plan and no GitHub to ask: fail closed, gh untouched."""
+        """No local plan and no GitHub to ask: the plan reads as unreviewed
+        (released back to PLAN for its full review), and gh is untouched."""
         monkeypatch.setattr(
             "cw.reconcile.gate_recipes.fetch_approved_plan_comment",
             _fetch_must_not_run,
@@ -2460,14 +2727,13 @@ class TestDetectAdoptPlanTrackerAware:
         task = _make_task(stage=Stage.PLAN, worktree_path=None)
         state = CwState(sessions=[_make_session(last_result=_plan_result())])
 
-        assert (
+        _assert_released_unreviewed(
             _detect_auto_adopt_plan(
                 state,
                 [task],
                 clients=_linear_clients(tmp_path / "ws"),
                 config=_config(),
             )
-            == []
         )
 
     def test_dangling_client_keeps_github_first_behavior(

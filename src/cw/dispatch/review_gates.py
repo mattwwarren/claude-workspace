@@ -419,6 +419,26 @@ def _should_gate_for_signoff(
     return resolve_signoff(task, clients, config) is not None
 
 
+def _gate_recipe_will_release(
+    task: TicketTask,
+    last_result: dict[str, object] | None,
+    clients: dict[str, ClientConfig],
+) -> bool:
+    """True iff a gate recipe will release *task*'s Large approval park.
+
+    Rule 1 still parks the row BLOCKED_ON_USER (the recipes act on parked
+    rows), but skips the SESSION_NEEDS_ATTENTION page when this holds: the
+    next reconcile tick clears the gate with no one involved, so paging the
+    operator for it is noise. Lazily loads ``OrchestratorConfig`` exactly as
+    :func:`_should_gate_for_signoff` does, and defers the
+    ``cw.reconcile.gate_recipes`` import because that module imports
+    ``cw.dev_queue``, which reaches back into this package.
+    """
+    from cw.reconcile.gate_recipes import gate_recipe_will_release
+
+    return gate_recipe_will_release(task, last_result, clients, load_effective_config())
+
+
 def resolve_hold_finalize(
     task: TicketTask,
     clients: dict[str, ClientConfig],

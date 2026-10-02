@@ -11087,6 +11087,99 @@ class TestApplyStagedDecision:
             == []
         )
 
+    # -- Large park pages only when no gate recipe will release it ---------
+
+    @staticmethod
+    def _large_plan_result(*, forbidden_touched: bool) -> dict[str, object]:
+        return {
+            "status": "plan_pending_approval",
+            "plan_draft_fingerprint": "a" * 64,
+            "scope": {
+                "tier": "large",
+                "files": 3,
+                "lines_estimate": 726,
+                "forbidden_touched": forbidden_touched,
+            },
+        }
+
+    def test_large_plan_park_a_recipe_will_release_does_not_page(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """Size alone never pages: the row parks for the recipe, silently."""
+        from cw.dispatch import apply_staged_decision
+
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        task = self._make_running_task("BIG-1", stage=Stage.PLAN)
+
+        apply_staged_decision(
+            task,
+            "plan_pending_approval",
+            self._large_plan_result(forbidden_touched=False),
+            self._clients(tmp_path),
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert attention == []
+
+    def test_large_plan_park_touching_a_forbidden_area_pages(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """A forbidden-area touch is a reason a person is needed: it pages."""
+        from cw.dispatch import apply_staged_decision
+
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        task = self._make_running_task("BIG-2", stage=Stage.PLAN)
+
+        apply_staged_decision(
+            task,
+            "plan_pending_approval",
+            self._large_plan_result(forbidden_touched=True),
+            self._clients(tmp_path),
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert len(attention) == 1
+        assert attention[0][1]["paused_status"] == "approval_gate"
+
+    def test_large_plan_park_pages_when_gate_recipes_are_off(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """``gate_recipes_enabled: false`` restores manual approval and paging."""
+        from cw.dispatch import apply_staged_decision
+
+        monkeypatch.setattr(
+            "cw.dispatch.review_gates.load_effective_config",
+            lambda: OrchestratorConfig(gate_recipes_enabled=False),
+        )
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        task = self._make_running_task("BIG-3", stage=Stage.PLAN)
+
+        apply_staged_decision(
+            task,
+            "plan_pending_approval",
+            self._large_plan_result(forbidden_touched=False),
+            self._clients(tmp_path),
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert len(attention) == 1
+
     # -- #1717: FINALIZE self-heal regress round-trip repeat detection -----
 
     def test_finalize_regress_round_trip_no_commit_emits_repeat_not_silent_rearm(

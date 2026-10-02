@@ -2063,12 +2063,13 @@ class TestConciergeAndEscalationModelSurface:
 
         assert OrchestratorEventType.PR_ACTION_FAILED in _DEFAULT_OPERATOR_EVENT_TYPES
 
-    def test_orchestrator_config_gate_recipes_enabled_defaults_false(self) -> None:
-        assert OrchestratorConfig().gate_recipes_enabled is False
+    def test_orchestrator_config_gate_recipes_enabled_defaults_true(self) -> None:
+        """Size alone never pages the operator: the recipes are on by default."""
+        assert OrchestratorConfig().gate_recipes_enabled is True
 
-    def test_orchestrator_config_gate_recipes_enabled_accepts_true(self) -> None:
-        cfg = OrchestratorConfig(gate_recipes_enabled=True)
-        assert cfg.gate_recipes_enabled is True
+    def test_orchestrator_config_gate_recipes_enabled_accepts_false(self) -> None:
+        cfg = OrchestratorConfig(gate_recipes_enabled=False)
+        assert cfg.gate_recipes_enabled is False
 
     # -- GitHub #2135 abandoned-exit park master switch ----------------------
 

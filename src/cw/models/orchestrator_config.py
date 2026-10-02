@@ -860,15 +860,15 @@ class OrchestratorConfig(BaseModel):
     default_finalize_gate: Literal["auto", "manual"] = "auto"
     # Global default for the codex backend's autonomous MUST_FIX fix loop
     # (#1553), used when the ticket's lane (LaneConfig.codex_fix_loop_enabled)
-    # sets no override. Default False, mirroring gate_recipes_enabled's and
-    # concierge_enabled's fail-safe defaults: enabling `review: {backend:
+    # sets no override. Default False, mirroring concierge_enabled's
+    # fail-safe default: enabling `review: {backend:
     # codex}` must not implicitly enable autonomous fix commits. Superseded
     # the removed ClientConfig.codex_fix_loop_enabled (#1465) with a 2-tier
     # (lane -> global) resolver -- see
     # cw.codex_background._resolve_codex_fix_loop_enabled.
     default_codex_fix_loop_enabled: bool = False
     # #2210 — master opt-in for the codex review ledger's fuzzy claim-match
-    # suppression tier. Default False, mirroring gate_recipes_enabled's
+    # suppression tier. Default False, mirroring concierge_enabled's
     # fail-safe posture. BOTH this and the task's lane
     # (LaneConfig.codex_review_tiers["claim_suppression"]) must be true for the
     # tier to suppress anything; either one set False is a kill switch. While
@@ -966,22 +966,25 @@ class OrchestratorConfig(BaseModel):
     # "park_marker_poison_clear", "cancelled_row_restore".
     concierge_recoveries: dict[str, bool] = Field(default_factory=dict)
     # RFC 0009 P1+P2 (#1065) — gate-recipe automation master switch. Default
-    # False: the auto_approve_clean_review recipe in cw.reconcile.gate_recipes
-    # approves a review gate with NO human review, so nothing fires without an
-    # explicit operator opt-in — mirroring concierge_enabled's fail-safe
-    # default. Per-recipe / per-lane resolution (LaneConfig.gate_recipes,
-    # resolve_gate_recipe_enabled) is deferred to #1067.
-    gate_recipes_enabled: bool = False
+    # True: the operator is paged for a product or scope question, never for a
+    # ticket's size alone, so the two recipes in cw.reconcile.gate_recipes
+    # release a Large plan/review gate whose predicate finds no reason a person
+    # is needed (forbidden-area touch, operator scope_hint "large", degraded
+    # review health, unbound plan draft). Set False to restore manual approval
+    # of every Large gate; per-lane / per-ticket opt-out is
+    # LaneConfig.gate_recipes / TicketTask.gate_recipes (resolved by
+    # resolve_gate_recipe_enabled).
+    gate_recipes_enabled: bool = True
     # RFC 0010 P1 (#1096) — review-recipe automation master switch (detect
     # phase only in P1; no act phase exists yet, so True is inert by
     # construction until P2 ships). Default False, mirroring
-    # gate_recipes_enabled's fail-safe default.
+    # concierge_enabled's fail-safe default.
     review_recipes_enabled: bool = False
     # GitHub #2135 — master switch for the Stop-hook abandoned-exit park.
     # Default False: the park is a state-mutating auto-actor that moves a
     # dev-queue row RUNNING -> BLOCKED_ON_USER off the worker's recorded park
     # marker, so it ships dark and is armed per-lane by an operator —
-    # mirroring gate_recipes_enabled's fail-safe default and
+    # mirroring concierge_enabled's fail-safe default and
     # docs/release-playbook.md's default-off floor for this change class. With
     # this False the Stop hook defers on a sentinel-less exit exactly as it did
     # before #2135, without reading the marker. Per-lane / per-ticket
@@ -990,7 +993,7 @@ class OrchestratorConfig(BaseModel):
     park_on_abandoned_exit_enabled: bool = False
     # GitHub #1437 — operator escape hatch for the SSH-agent-key preflight
     # gate (#927). Default True (gate stays enforced): unlike
-    # concierge_enabled/gate_recipes_enabled above, this does NOT gate new
+    # concierge_enabled above, this does NOT gate new
     # automation -- it gates an already-live safety probe that holds the
     # fleet PENDING rather than risk a guaranteed-failing spawn. Setting this
     # False bypasses that skip fleet-wide when the probe reports unavailable;
