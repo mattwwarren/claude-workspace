@@ -1715,20 +1715,21 @@ class TestReviewSettle:
         assert not out_path.exists()
         assert read_events() == []
 
-    @pytest.mark.parametrize("headless", [False, None])
+    @pytest.mark.parametrize("shape", ["interactive", "nearest_is_session", "root"])
     def test_a_non_worker_tmpdir_does_not_refuse(
         self,
         runner: CliRunner,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
-        headless: bool | None,
+        shape: str,
     ) -> None:
-        """A TMPDIR whose nearest context is an interactive session's."""
+        """A TMPDIR whose nearest context is an interactive session's, or one
+        with no cw context above it at all (``/``)."""
         scratch = tmp_path / "scratch"
-        if headless is not None:
-            _write_session_context(scratch, headless=headless)
+        if shape == "interactive":
+            _write_session_context(scratch, headless=False)
         scratch.mkdir(exist_ok=True)
-        monkeypatch.setenv("TMPDIR", str(scratch))
+        monkeypatch.setenv("TMPDIR", "/" if shape == "root" else str(scratch))
 
         result = self._invoke(runner, _settle_payload())
 
