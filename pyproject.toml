@@ -280,6 +280,11 @@ ignore = [
 # Inline import is the sanctioned mechanism, not a workaround.
 "src/cw/reconcile/phantom/_mutations.py" = ["PLC0415"]
 "src/cw/reconcile/stalled/_mutations.py" = ["PLC0415"]
+# gate_recipes defers cw.dispatch.review_gates.resolve_hold_finalize inside
+# _finalize_hold_armed for the same cw.dispatch ↔ cw.reconcile cycle as the
+# tasks.py entry above. Inline import is the sanctioned mechanism, not a
+# workaround.
+"src/cw/reconcile/gate_recipes.py" = ["PLC0415"]
 # codex_background defers cw.executor's _complete_session_via_door /
 # _post_review_comment / _resolve_codex_fix_loop_enabled and cw.dispatch.claim's
 # _revert_claimed_task_to_pending inside _run_codex_review_and_complete (#1727):

@@ -714,7 +714,7 @@ class TicketTask(BaseModel):
     attention_digest_buffered_at: datetime | None = None
     # Ticket-level gate-recipe enablement override (RFC 0009 P4, #1067). Highest
     # tier in resolve_gate_recipe_enabled's 3-tier precedence: a recipe present
-    # here wins over LaneConfig.gate_recipes and the hardcoded default-off. None
+    # here wins over LaneConfig.gate_recipes and the hardcoded floor (on). None
     # (or a recipe absent from the map) defers to the lane map, then the
     # default. Recognised keys: "auto_approve_clean_review",
     # "auto_adopt_clean_plan".

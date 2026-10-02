@@ -585,6 +585,31 @@ class TestGateRecipeWillRelease:
             _config(**config_kwargs),
         )
 
+    def test_review_row_with_a_finalize_hold_pages(self) -> None:
+        """The automatic approve always declines a held row, so it is never
+        released: routing must page for it rather than wait on the recipe."""
+        assert not gate_recipe_will_release(
+            _make_task(hold_finalize="manual"),
+            _clean_result(),
+            _SEAM1_CLIENTS,
+            _config(),
+        )
+
+    def test_held_review_row_is_not_detected(self) -> None:
+        """Detect skips a held row: acting on it would only emit another
+        GATE_AUTO_APPROVE_HELD every reconcile tick."""
+        state = CwState(sessions=[_make_session(last_result=_clean_result())])
+
+        assert (
+            _detect_auto_approve_review(
+                state,
+                [_make_task(hold_finalize="manual")],
+                clients=_SEAM1_CLIENTS,
+                config=_config(),
+            )
+            == []
+        )
+
     def test_lane_opt_out_pages(self) -> None:
         clients = {
             "acme": ClientConfig(
@@ -1018,11 +1043,19 @@ class TestActApproveFailure:
 
         _write_acme_clients_yaml(tmp_config_dir, tmp_path)
         task = _make_task()
-        task.hold_finalize = "manual"
         save_dev_queue(DevQueueStore(tasks=[task]))
-        save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
+        state = CwState(sessions=[_make_session(last_result=_clean_result())])
+        save_state(state)
+        candidates = _detect_auto_approve_review(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        )
+        assert len(candidates) == 1
+        # The hold is armed after detect, inside the detect-to-act race window.
+        held = load_dev_queue()
+        held.tasks[0].hold_finalize = "manual"
+        save_dev_queue(held)
 
-        recovered = run_gate_recipes(now=_NOW, config=_config())
+        recovered = _act_auto_approve_review(candidates, now=_NOW)
 
         assert recovered == []
         store = load_dev_queue()
@@ -1506,7 +1539,7 @@ _PLAN_SNAPSHOT: dict[str, object] = {
 }
 
 # The same plan with no reviewed plan-of-record: still released, but back to
-# PLAN for its full quality review rather than on to IMPL.
+# PLAN for Plan Quality Review rather than on to IMPL.
 _UNREVIEWED_PLAN_SNAPSHOT: dict[str, object] = {
     **_PLAN_SNAPSHOT,
     "plan_reviewed": False,
@@ -1998,7 +2031,7 @@ class TestRunAdoptPlan:
 
         It goes back to PLAN (PENDING) through the #968 same-stage requeue
         with the row-path approval bound to this draft, so the re-dispatched
-        plan stage passes Checkpoint 1 and runs its full quality review before
+        plan stage passes Checkpoint 1 and runs Plan Quality Review before
         any implementation starts.
         """
         _write_acme_clients_yaml(tmp_config_dir, tmp_path)

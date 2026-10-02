@@ -345,7 +345,10 @@ be read in light of that arithmetic — it is not evidence of "N real failures."
   supply the delta (answer/harden/approve on the ticket) and THEN release —
   via `cw dev-queue requeue`/`approve`, never by `cw dev-queue add` (a
   re-add against a parked row is refused and would otherwise mint a
-  duplicate row that later surfaces as `terminal_sibling` noise).
+  duplicate row that later surfaces as `terminal_sibling` noise). For a
+  `plan_pending_approval` / `review_pending_approval` park, `cw dev-queue
+  approve` is itself the delta: it records the approval on the queue row,
+  which is the evidence the plan stage reads. A prose approval comment is not.
 - **Premise-pending-verification on an external unknown** → it's human-gated.
   Park it, write the gate down, tell the operator what un-gates it (rule 6).
 - **Stalled / retry-cap / reap_proposed** → a wedge. Stop the session

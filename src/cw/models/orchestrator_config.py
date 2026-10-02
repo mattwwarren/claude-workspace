@@ -383,7 +383,7 @@ class LaneConfig(BaseModel):
     # resolve_gate_recipe_enabled's 3-tier precedence: consulted when the ticket
     # carries no override for the recipe, and itself overridden by
     # TicketTask.gate_recipes. A recipe absent from this map (or None) defers to
-    # the hardcoded default-off. Recognised keys: "auto_approve_clean_review",
+    # the hardcoded floor (on). Recognised keys: "auto_approve_clean_review",
     # "auto_adopt_clean_plan".
     gate_recipes: dict[str, bool] | None = None
     # Lane-level review-recipe enablement map (RFC 0010 P3, #1098). Middle tier
@@ -511,24 +511,24 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # operator does not need paged for, recorded via record_event but
         # never added to this forward-set.
         OrchestratorEventType.OPERATOR_ESCALATION,
-        # RFC 0009 P1+P2 (#1065): a gate recipe auto-approving a review with no
-        # human in the loop is operator-attention-worthy — forwarded by default
-        # (contrast CONCIERGE_RECOVERED, excluded above as audit-only).
-        OrchestratorEventType.GATE_AUTO_APPROVED,
+        # GATE_AUTO_APPROVED is deliberately EXCLUDED (since v1.63.0), like
+        # CONCIERGE_RECOVERED above: the gate recipes are on by default and
+        # release Large gates whose only "reason" was size, so forwarding each
+        # release would page the operator for the very noise the recipes
+        # remove. It stays in the event log and the ticket's audit comment.
         # Forwarded alongside TICKET_APPROVED: without this correction, a
         # failed queue write/rollback could leave an approval event standing
         # alone as a false-positive operator signal (#2337).
         OrchestratorEventType.TICKET_APPROVAL_FAILED,
-        # Forwarded alongside GATE_AUTO_APPROVED: without this, a failed
-        # act-phase mutation would leave GATE_AUTO_APPROVED standing alone on
-        # the operator channel as an uncorrected false-positive "approved"
-        # signal.
+        # A failed act-phase mutation leaves the row parked with its page
+        # suppressed (dispatch Rule 1 skips SESSION_NEEDS_ATTENTION for a park
+        # a recipe will release), so this correction is how the operator
+        # learns a person is needed after all.
         OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
-        # RFC 0011 A3 (#1160): forwarded alongside GATE_AUTO_APPROVED for the
-        # same reason as GATE_AUTO_APPROVE_FAILED above -- an A3 force hold
-        # declining the mutation would otherwise leave GATE_AUTO_APPROVED
-        # standing alone on the operator channel as an uncorrected "approved"
-        # signal. Declined rather than raised, but the correction is identical.
+        # RFC 0011 A3 (#1160): an A3 force hold declining the automatic
+        # mutation leaves the row parked for a person, same as a failure.
+        # Declined rather than raised, but the operator needs to know either
+        # way.
         OrchestratorEventType.GATE_AUTO_APPROVE_HELD,
         # RFC 0010 P2 (#1097): a review recipe dispatching an /address-review
         # action with no human in the loop is operator-attention-worthy —
@@ -538,8 +538,7 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         OrchestratorEventType.PR_ACTION_TAKEN,
         OrchestratorEventType.PR_ACTION_FAILED,
         # GitHub #1437: the ssh_key_gate operator escape hatch suppressing an
-        # already-live safety probe is attention-worthy, same rationale as
-        # GATE_AUTO_APPROVED above.
+        # already-live safety probe is attention-worthy.
         OrchestratorEventType.SSH_KEY_GATE_BYPASSED,
         # GitHub #1887: the disk_pressure_gate operator escape hatch
         # suppressing an already-live safety probe is attention-worthy, same
@@ -548,11 +547,10 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # GitHub #1730: a review-stage requeue proceeding with no operator-visible
         # confirmation that the send-back comment actually reached the reviewer is
         # a no-human-in-the-loop decision -- operator-attention-worthy, forwarded
-        # by default, same rationale as GATE_AUTO_APPROVED above (contrast
-        # CONCIERGE_RECOVERED, excluded as audit-only). No companion "delivery
-        # succeeded" event exists to pair this with (see #1730 Decisions item 4)
-        # -- this event is self-contained, not a correction to another forwarded
-        # signal.
+        # by default (contrast CONCIERGE_RECOVERED, excluded as audit-only).
+        # No companion "delivery succeeded" event exists to pair this with
+        # (see #1730 Decisions item 4) -- this event is self-contained, not a
+        # correction to another forwarded signal.
         OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
     }
 )

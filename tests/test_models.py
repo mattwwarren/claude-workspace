@@ -1773,7 +1773,6 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.PR_MERGED,
                 OrchestratorEventType.SESSION_LIVENESS_CHANGED,
                 OrchestratorEventType.OPERATOR_ESCALATION,
-                OrchestratorEventType.GATE_AUTO_APPROVED,
                 OrchestratorEventType.TICKET_APPROVAL_FAILED,
                 OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
                 OrchestratorEventType.GATE_AUTO_APPROVE_HELD,
@@ -2001,13 +2000,17 @@ class TestConciergeAndEscalationModelSurface:
     def test_orchestrator_event_type_includes_gate_auto_approved(self) -> None:
         assert OrchestratorEventType.GATE_AUTO_APPROVED == "gate.auto_approved"
 
-    def test_gate_auto_approved_in_default_forward_set(self) -> None:
-        """GATE_AUTO_APPROVED IS forwarded by default: an auto-approve with no
-        human review is operator-attention-worthy (contrast CONCIERGE_RECOVERED,
-        which is audit-only)."""
+    def test_gate_auto_approved_not_in_default_forward_set(self) -> None:
+        """GATE_AUTO_APPROVED is audit-only by default (since v1.63.0), like
+        CONCIERGE_RECOVERED: the recipes are on by default and release Large
+        gates whose only reason was size, so forwarding each release would
+        page the operator for exactly the noise the recipes remove."""
         from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
 
-        assert OrchestratorEventType.GATE_AUTO_APPROVED in _DEFAULT_OPERATOR_EVENT_TYPES
+        assert (
+            OrchestratorEventType.GATE_AUTO_APPROVED
+            not in _DEFAULT_OPERATOR_EVENT_TYPES
+        )
 
     def test_orchestrator_event_type_includes_gate_auto_approve_failed(self) -> None:
         assert (
@@ -2015,8 +2018,9 @@ class TestConciergeAndEscalationModelSurface:
         )
 
     def test_gate_auto_approve_failed_in_default_forward_set(self) -> None:
-        """GATE_AUTO_APPROVE_FAILED IS forwarded by default: it corrects a
-        false-positive GATE_AUTO_APPROVED already on the operator channel."""
+        """GATE_AUTO_APPROVE_FAILED IS forwarded by default: the failed row
+        stays parked with its page suppressed, so this is how the operator
+        learns a person is needed."""
         from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
 
         assert (
@@ -2030,8 +2034,8 @@ class TestConciergeAndEscalationModelSurface:
         assert OrchestratorEventType.GATE_AUTO_APPROVE_HELD == "gate.auto_approve_held"
 
     def test_gate_auto_approve_held_in_default_forward_set(self) -> None:
-        """GATE_AUTO_APPROVE_HELD IS forwarded by default: it corrects a
-        GATE_AUTO_APPROVED that the A3 force hold then declined to act on."""
+        """GATE_AUTO_APPROVE_HELD IS forwarded by default: the A3 force hold
+        declined the automatic approve, so the row needs a person."""
         from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
 
         assert (
@@ -2050,7 +2054,7 @@ class TestConciergeAndEscalationModelSurface:
     def test_pr_action_taken_in_default_forward_set(self) -> None:
         """PR_ACTION_TAKEN IS forwarded by default: a review recipe dispatching
         an /address-review action with no human in the loop is
-        operator-attention-worthy (mirrors GATE_AUTO_APPROVED)."""
+        operator-attention-worthy."""
         from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
 
         assert OrchestratorEventType.PR_ACTION_TAKEN in _DEFAULT_OPERATOR_EVENT_TYPES

@@ -75,7 +75,10 @@ not amended or superseded; the two seams stay independent.
    checkout, or a directory outside any repository). It refuses a worker
    (`headless: true`), a context file that exists but is unreadable,
    malformed, has no `headless` key or a non-bool `headless`, and a linked
-   git worktree with no context file. Round 4 refused every directory with no
+   git worktree with no context file. Ahead of the cwd checks it also refuses
+   when `$TMPDIR` lies inside a headless worker's worktree (every cw executor
+   points it there, #2470), the worker signal a `cd` does not change. Round 4
+   refused every directory with no
    context file, because `find_cw_context` cannot distinguish "there is no
    dispatch context here" from "the dispatch context could not be read", so
    a worker with a missing or truncated context could have settled its own

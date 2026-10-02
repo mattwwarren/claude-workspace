@@ -50,9 +50,10 @@ The flag convention (mirror it for every new auto-actor):
 - A **per-lane** `dict[str,bool] | None` map on `LaneConfig` (+ a `TicketTask`
   override) resolved most-specific-wins (ticket → lane → hardcoded-off floor),
   so risk is armed per lane, never globally by accident. See
-  `resolve_gate_recipe_enabled` for the shape.
+  `resolve_gate_recipe_enabled` for the shape (its floor is on — the
+  exception above).
 
-A fresh install therefore auto-does nothing. This is what lets the pipeline
+A fresh install therefore auto-does nothing new until it is armed. This is what lets the pipeline
 merge aggressively.
 
 ### 3. Merge waves (sequence by dependency, parallelise the rest)

@@ -1066,15 +1066,15 @@ park_on_abandoned_exit_enabled: false
 codex_claim_suppression_enabled: false
 
 # SSH-agent-key preflight gate operator escape hatch (GitHub #1437). Default
-# true (gate stays enforced) -- contrast concierge_enabled/gate_recipes_enabled/
-# review_recipes_enabled above, all default-false because they gate NEW
+# true (gate stays enforced) -- contrast concierge_enabled/
+# review_recipes_enabled above, default-false because they gate NEW
 # automation opting in. This field gates an already-live safety probe (#927):
 # when the fleet-wide `ssh-add -l` probe reports no key loaded, every client
 # stays PENDING (no claim, no attempts consumed) rather than risk a
 # guaranteed-failing spawn. Setting this false bypasses that skip fleet-wide
 # whenever the probe reports unavailable -- each bypass records a
-# gate.ssh_key_bypassed event (forwarded to the operator channel by default,
-# same as gate.auto_approved) so the operator sees every suppressed gate.
+# gate.ssh_key_bypassed event (forwarded to the operator channel by default)
+# so the operator sees every suppressed gate.
 ssh_key_gate_enabled: true
 
 # Claim-time disk-pressure preflight gate operator escape hatch (GitHub
@@ -1086,8 +1086,7 @@ ssh_key_gate_enabled: true
 # a session filling an already-tight disk. Setting this false bypasses
 # that skip whenever the probe reports pressure -- each bypass records a
 # gate.disk_pressure_bypassed event (forwarded to the operator channel by
-# default, same as gate.auto_approved) so the operator sees every
-# suppressed gate.
+# default) so the operator sees every suppressed gate.
 disk_pressure_gate_enabled: true
 
 # Minimum free space, in GB, required on a client's worktree-base mount
@@ -1196,7 +1195,6 @@ operator_channel_forward:
     - pr.merged
     - session.liveness_changed
     - operator.escalation
-    - gate.auto_approved        # RFC 0009 — a gate recipe approved with no human review
     - ticket.approval_failed    # #2337 — correction for an approval whose queue mutation did not remain durable
     - gate.auto_approve_failed
     - gate.auto_approve_held    # RFC 0011 A3 — a finalize hold declined an auto-approval
@@ -1300,11 +1298,12 @@ the ticket the operator wrote is what authorizes the work.
   area is touched, the draft carries a valid `plan_draft_fingerprint` the
   approval binds to, and the row does not already hold an approval for that
   exact draft (the loop guard). A reviewed plan advances to IMPL; an
-  unreviewed one goes back to PLAN for its full ambiguity scan and quality
-  review, which can still park for a real product or scope question.
+  unreviewed one goes back to PLAN for Plan Quality Review (its ambiguity
+  scan already ran in the round that parked).
 
 Neither recipe releases a row whose operator `scope_hint` is `large` ("gate
-this ticket"), or a row that is not at the gate's own stage. Dispatch does not
+this ticket"), or a row that is not at the gate's own stage, and the review
+recipe never releases a row with an armed finalize hold. Dispatch does not
 page (`session.needs_attention`) for a Large park a recipe will release on the
 next reconcile tick. Each release emits `gate.auto_approved` and posts an
 audit comment on the ticket.

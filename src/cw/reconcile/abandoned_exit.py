@@ -12,11 +12,11 @@ mutation is least safe exactly when the config is broken, and the Stop hook
 must never raise out of ``claude`` exiting.
 
 Shaped on ``cw.reconcile.gate_recipes``' enablement pair
-(``resolve_gate_recipe_enabled`` / ``_recipe_gate_open``) deliberately: a
-default-off master switch in ``orchestrator.yaml`` plus a per-lane map whose
-floor is False is the release-playbook floor for a new state-mutating
-auto-actor, and reusing that exact shape means an operator arms this the same
-way they arm a gate recipe.
+(``resolve_gate_recipe_enabled`` / ``_recipe_gate_open``) deliberately, but
+off by default: a default-off master switch in ``orchestrator.yaml`` plus a
+per-lane map whose floor is False is the release-playbook floor for a new
+state-mutating auto-actor, and reusing that exact shape means an operator arms
+this the same way they arm a gate recipe.
 
 Import discipline: this module sits above ``cw.models`` and ``cw.config`` and
 below ``cw.cli``. It imports nothing from ``cw.reconcile._shared``, so

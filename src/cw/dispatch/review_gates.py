@@ -330,8 +330,8 @@ def _should_gate_for_review_health(last_result: dict[str, object] | None) -> boo
     that shape (``PROCEED`` + ``agents_run: 0``) past this gate to the Stage 4
     approval prompt. ``gate_recipes.auto_approve_clean_review`` (#1194, contract
     Note A9) already treated ``agents_run > 0`` as part of a clean review, but
-    that recipe is opt-in and default-OFF; this *mandatory* gate had no such
-    check. Sharing ``review_health_gate``'s disposition/paused_status
+    that recipe was opt-in and default-OFF at the time; this *mandatory* gate
+    had no such check. Sharing ``review_health_gate``'s disposition/paused_status
     deliberately: both mean "the review did not vouch for this", which is one
     operator-facing class, not two.
 

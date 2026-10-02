@@ -207,7 +207,7 @@ If `GATE` is one of `plan_pending_approval`, `review_pending_approval`,
    - `plan_pending_approval` → `cw dev-queue approve <T> -c <CLIENT>` when
      the plan stays within the ticket's agreed scope. Approve binds the
      draft's fingerprint to the row. An unreviewed plan goes back to PLAN as
-     PENDING (#968 same-stage requeue) and runs its full quality review
+     PENDING (#968 same-stage requeue) and runs Plan Quality Review
      there; a reviewed one advances to impl. Do NOT post a prose approval
      comment: it is not plan-approval evidence, and the ticket re-parks.
      Before approving a Large plan, grep its text for the literal strings the
@@ -362,7 +362,11 @@ fanout: client=claude-workspace wave=[204,205,206] → all shipped; 0 need atten
 - **Approve-session-not-found** — `cw dev-queue approve <T>` raises
   `ApproveGateError` when the target session is no longer in the daemon roster
   (e.g. the session died before the approval). Fall back to
-  `cw dev-queue requeue <T>` to re-enter the ticket via a fresh session.
+  `cw dev-queue requeue <T>` to re-enter the ticket via a fresh session. On a
+  `plan_pending_approval` gate that requeue records no approval, so the plan
+  stage re-parks once; the `auto_adopt_clean_plan` gate recipe then releases
+  that fresh park on the next reconcile tick (unless it touches a forbidden
+  area or carries `scope_hint: large`, which is the operator's call anyway).
 - **`needs_attention` storm** — many tickets pause at once (often the same
   ambiguity across a batch). For known gate types, the inline loop calls
   `/cw-followup` per gate ticket in sequence — if multiple tickets share the

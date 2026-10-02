@@ -406,8 +406,8 @@ a client whose push remote is `http` or `local` never reaches the probe, so
 neither this event nor the `ssh_key_gate` skip is ever emitted for it.
 Earlier sibling of
 `gate.disk_pressure_bypassed` (#1887), which mirrors this bypass shape;
-forwarded to the operator-attention channel by default (same as
-`gate.auto_approved`), since an SSH-key-gate bypass is attention-worthy.
+forwarded to the operator-attention channel by default, since an
+SSH-key-gate bypass is attention-worthy.
 
 `correlation_id` is `None` (per-client, not per-ticket).
 
@@ -435,8 +435,8 @@ disabled the gate, so the client proceeds to claim this tick instead of being
 held PENDING, and this event records that the skip was suppressed. The
 inode fields are `null` when that dimension does not apply. Mirrors
 `gate.ssh_key_bypassed` (#1437)'s bypass shape; forwarded to the
-operator-attention channel by default (same as `gate.auto_approved`),
-since a disk-pressure bypass is attention-worthy.
+operator-attention channel by default, since a disk-pressure bypass is
+attention-worthy.
 
 `correlation_id` is `None` (per-client, not per-ticket).
 
@@ -2021,16 +2021,23 @@ verbatim `blocker.reason`; `attempts` is `target.attempts` at decision time.
 **Semantics:** RFC 0009 P1+P2 (#1065). Emitted before the approve mutation
 when a gate recipe auto-clears a clean review/plan gate with no human review —
 the event is durably recorded even if the subsequent `_approve_ticket_locked`
-write fails, so the decision trace survives a partial write. Unlike
-`concierge.recovered` (audit-only), this **is** forwarded to the
-operator-attention channel by default — an auto-approve bypassing human review
-is attention-worthy.
+write fails, so the decision trace survives a partial write. Like
+`concierge.recovered`, it is an audit record and is **not** forwarded to the
+operator-attention channel by default (since v1.63.0): the recipes release
+Large gates whose only "reason" was size, and paging the operator for each of
+those is exactly the noise they exist to remove. Add it to
+`operator_channel_forward.event_types` to be notified anyway. The corrections
+`gate.auto_approve_failed` and `gate.auto_approve_held` still forward by
+default — those are rows a person must look at.
 
-`predicate_snapshot` is recipe-specific: for `auto_approve_clean_review` it
-holds the four field values that licensed the fire (`must_fix_initial: int`,
-`deferred: int`, `recommendation: str`, `forbidden_touched: bool`); for
-`auto_adopt_clean_plan` it holds the two signoff marker-version strings
-(`plan_spec_reviewed: str`, `plan_soundness_reviewed: str`).
+`predicate_snapshot` is recipe-specific. For `auto_approve_clean_review` it
+holds `must_fix_initial: int` and `deferred: int` (audit only, not part of the
+predicate), and `recommendation: str`, `forbidden_touched: bool` and
+`agents_run: int` (the predicate). For `auto_adopt_clean_plan` it holds the
+plan's `tier`, `files`, `lines_estimate`, `forbidden_touched: bool`,
+`plan_draft_fingerprint: str` and `plan_reviewed: bool`, plus the two signoff
+marker-version strings `plan_spec_reviewed` and `plan_soundness_reviewed`
+(`null` when the plan is unreviewed).
 
 `correlation_id` is the `ticket_id`.
 
@@ -2052,8 +2059,9 @@ holds the four field values that licensed the fire (`must_fix_initial: int`,
 `gate.auto_approved`. Emitted when the act-phase `_approve_ticket_locked`
 mutation raises `CwError` after `gate.auto_approved` was already recorded —
 so the durable event stream carries a correction, not a standing
-false-positive "approved" signal on the operator channel. Forwarded to the
-operator-attention channel by default alongside `gate.auto_approved`. Stamps
+false-positive "approved" record. Forwarded to the operator-attention
+channel by default: the row stays parked with its page suppressed, so this
+is how the operator learns a person is needed. Stamps
 `TicketTask.gate_recipe_failed_at` as a one-shot latch so a persisting
 failure doesn't re-detect and re-emit both events every reconcile tick; the
 latch clears itself once the condition resolves.
@@ -2083,9 +2091,8 @@ raised and nothing is broken, the gate deliberately held, and no
 `TicketTask.gate_recipe_failed_at` latch is stamped. The ticket is left exactly
 as parked (`BLOCKED_ON_USER` / `finalize_gate_held`), is not reported as
 approved, and gets no audit comment. Forwarded to the operator-attention
-channel by default alongside `gate.auto_approved`, for the same reason: without
-it, `gate.auto_approved` would stand alone on that channel as an uncorrected
-"approved" signal.
+channel by default, for the same reason as `gate.auto_approve_failed`: the
+row needs a person.
 
 Note: a *persistently* armed hold (as opposed to one armed inside the
 detect→act race window) re-emits this pair on every reconcile tick — there is
@@ -2730,8 +2737,7 @@ of this bus — `task.transition` (only for terminal/attention-worthy
 `session.needs_attention`, all seven `pr.*` types (the five PR-lifecycle
 events plus `pr.action_taken`/`pr.action_failed`), `session.liveness_changed`
 (only at `new_bucket >= stale_30m`), `operator.escalation`,
-`gate.auto_approved`, `gate.auto_approve_failed`, and
-`gate.auto_approve_held` — onto a distinct
+`gate.auto_approve_failed`, and `gate.auto_approve_held` — onto a distinct
 `cw-operator` SSE topic on the existing `cw_queue_events_server`, consumed
 with cursor name `"operator-channel-bridge"`. `concierge.recovered`,
 `concierge.recovery_backoff_armed` and

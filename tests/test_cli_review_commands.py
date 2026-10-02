@@ -1139,17 +1139,31 @@ class TestReviewSettle:
     ) -> None:
         """Run every settle test from an interactive cw session worktree.
 
-        The guard fails CLOSED since #2210 round 4: the ONLY state it proceeds
-        from is a discovered ``.claude/cw-context.json`` whose ``headless`` is
-        the JSON boolean ``false``, which is what ``cw`` stamps for an
-        interactive session. The repo checkout this suite runs in carries a
-        real context of its own (``headless: true`` under dispatch), so every
-        case needs its own; writing one here rather than per test keeps the
-        cases about what they are testing.
+        The repo checkout this suite runs in carries a real context of its own
+        (``headless: true`` under dispatch), so every case writes its own
+        nearer one; writing it here rather than per test keeps the cases about
+        what they are testing. ``TMPDIR`` is cleared for the same reason: a
+        dispatch worker running this suite has it pointed into its own
+        headless worktree, which the guard reads as a worker.
         """
         _write_session_context(tmp_path, headless=False)
         monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("TMPDIR", raising=False)
         monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: _OPERATOR)
+
+    @staticmethod
+    def _require_no_ancestor_context(tmp_path: Path) -> None:
+        """Skip a no-context case when a cw context sits above ``tmp_path``.
+
+        Those cases remove ``tmp_path``'s own context to model an operator's
+        plain checkout. Under a dispatch worker, pytest's ``tmp_path`` lives
+        inside the worker's worktree, whose headless context the upward search
+        then finds — correctly refusing, and so not testing the case at all.
+        """
+        from cw.cli.review.commands import _nearest_context_root
+
+        if _nearest_context_root(tmp_path.parent) is not None:
+            pytest.skip("a cw context sits above tmp_path (suite runs in a worker)")
 
     def _invoke(self, runner: CliRunner, payload: dict[str, Any], *args: str) -> Result:
         extra = list(args)
@@ -1618,6 +1632,7 @@ class TestReviewSettle:
         (round 4's behavior) bounced every orchestrator-run settle back to the
         operator by hand, though no worker can be standing in this directory.
         """
+        self._require_no_ancestor_context(tmp_path)
         (tmp_path / HOOK_CONTEXT_RELATIVE_PATH).unlink()
 
         result = self._invoke(runner, _settle_payload())
@@ -1634,6 +1649,7 @@ class TestReviewSettle:
         make_git_repo: Callable[..., Path],
     ) -> None:
         """A plain main checkout carries no context file and is not a worker."""
+        self._require_no_ancestor_context(tmp_path)
         (tmp_path / HOOK_CONTEXT_RELATIVE_PATH).unlink()
         repo = make_git_repo("main-checkout")
         nested = repo / "src"
@@ -1658,6 +1674,7 @@ class TestReviewSettle:
         other linked worktree with no context, so the guard keeps round 4's
         fail-closed posture for exactly that shape.
         """
+        self._require_no_ancestor_context(tmp_path)
         (tmp_path / HOOK_CONTEXT_RELATIVE_PATH).unlink()
         repo = make_git_repo("main-checkout")
         worktree = tmp_path / "linked"
@@ -1673,6 +1690,50 @@ class TestReviewSettle:
         assert not out_path.exists()
         assert read_events() == []
 
+    def test_a_worker_tmpdir_refuses_even_after_changing_directory(
+        self,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A worker that ``cd``s to a plain directory is still a worker.
+
+        Every cw executor points a worker's ``TMPDIR`` into its own worktree,
+        and a ``cd`` does not move it, so the guard checks it ahead of cwd.
+        """
+        worker = tmp_path / "worker-wt"
+        _write_session_context(worker, headless=True)
+        scratch = worker / ".cw" / "tmp"
+        scratch.mkdir(parents=True)
+        monkeypatch.setenv("TMPDIR", str(scratch))
+        out_path = tmp_path / "settle.md"
+
+        result = self._invoke(runner, _settle_payload(), "--out", str(out_path))
+
+        assert result.exit_code != 0
+        assert "dispatch worker" in result.output
+        assert not out_path.exists()
+        assert read_events() == []
+
+    @pytest.mark.parametrize("headless", [False, None])
+    def test_a_non_worker_tmpdir_does_not_refuse(
+        self,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        headless: bool | None,
+    ) -> None:
+        """A TMPDIR whose nearest context is an interactive session's."""
+        scratch = tmp_path / "scratch"
+        if headless is not None:
+            _write_session_context(scratch, headless=headless)
+        scratch.mkdir(exist_ok=True)
+        monkeypatch.setenv("TMPDIR", str(scratch))
+
+        result = self._invoke(runner, _settle_payload())
+
+        assert result.exit_code == 0, result.output
+
     @pytest.mark.parametrize(
         "error",
         [OSError("git missing"), subprocess.TimeoutExpired(["git"], 10)],
@@ -1685,6 +1746,7 @@ class TestReviewSettle:
         error: Exception,
     ) -> None:
         """Every worker runs in a readable git worktree; one git cannot read is not."""
+        self._require_no_ancestor_context(tmp_path)
         (tmp_path / HOOK_CONTEXT_RELATIVE_PATH).unlink()
 
         def _raise(*_args: object, **_kwargs: object) -> None:

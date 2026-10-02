@@ -332,31 +332,33 @@ class OrchestratorEventType(StrEnum):
     # cw.reconcile.gate_recipes._act_auto_approve_review before the
     # auto-approve mutation when a review met the fixed clean-review predicate
     # (no MUST_FIX, no deferred, recommendation=PROCEED, no forbidden-area
-    # touch) and was approved with no human review. Unlike CONCIERGE_RECOVERED
-    # (audit-only), this IS forwarded to the operator channel by default — an
-    # auto-approve bypassing human review is attention-worthy.
+    # touch) and was approved with no human review. Like CONCIERGE_RECOVERED,
+    # audit-only by default since v1.63.0 (not forwarded to the operator
+    # channel): the recipes are on by default and release Large gates whose
+    # only reason was size, which is not worth paging anyone for.
     GATE_AUTO_APPROVED = "gate.auto_approved"
     # RFC 0009 P1+P2 (#1065) — companion to GATE_AUTO_APPROVED. Emitted when
     # the act-phase mutation raises after GATE_AUTO_APPROVED was already
     # recorded (e.g. a duplicate row, or the client's pipeline config changed
     # between detect and act) — so the durable event stream carries a
     # correction, not just a non-durable log line, for what would otherwise
-    # be a false "approved" signal on the operator channel. Forwarded by
-    # default alongside GATE_AUTO_APPROVED for the same reason.
+    # be a false "approved" record. Forwarded to the operator channel by
+    # default: the row stays parked with its page suppressed, so this is how
+    # the operator learns a person is needed.
     GATE_AUTO_APPROVE_FAILED = "gate.auto_approve_failed"
     # RFC 0011 A3 (#1160) — second companion to GATE_AUTO_APPROVED. Emitted when
     # the act-phase mutation *declines* to approve, after GATE_AUTO_APPROVED was
     # already recorded, because the row carries an armed proactive finalize hold
     # (``--hold-finalize`` / ``finalize_gate: manual``). Distinct from
     # GATE_AUTO_APPROVE_FAILED: nothing raised and nothing is broken — the gate
-    # deliberately held. Same correction rationale, so it is forwarded by
-    # default alongside GATE_AUTO_APPROVED for the same reason.
+    # deliberately held. Forwarded by default for the same reason as
+    # GATE_AUTO_APPROVE_FAILED: the row needs a person.
     GATE_AUTO_APPROVE_HELD = "gate.auto_approve_held"
     # RFC 0010 P2 (#1097) — review-recipe act phase. Emitted by
     # cw.reconcile.review_recipes._act_address_review BEFORE dispatching an
     # /address-review session in response to a PR whose review came back
-    # changes_requested. Like GATE_AUTO_APPROVED (contrast CONCIERGE_RECOVERED,
-    # audit-only), this IS forwarded to the operator channel by default — an
+    # changes_requested. Unlike CONCIERGE_RECOVERED (audit-only), this IS
+    # forwarded to the operator channel by default — an
     # automated PR action with no human in the loop is attention-worthy. Reused
     # by RFC 0010 P4's other review recipes with no new event types.
     PR_ACTION_TAKEN = "pr.action_taken"
@@ -396,7 +398,7 @@ class OrchestratorEventType(StrEnum):
     # _emit_ssh_key_bypass when the SSH-agent-key preflight probe (#927)
     # reports unavailable but the operator has set
     # OrchestratorConfig.ssh_key_gate_enabled=False, so the would-be skip is
-    # suppressed and the client dispatches anyway. Like GATE_AUTO_APPROVED, an
+    # suppressed and the client dispatches anyway. An
     # automated safety decision suppressing a gate with no human in the loop
     # is operator-attention-worthy — forwarded by default. No paired failure
     # event: emitting this has no mutation of its own that can fail.

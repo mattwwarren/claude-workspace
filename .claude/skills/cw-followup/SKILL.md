@@ -189,7 +189,7 @@ When `blocker.reason == "codex_must_fix_findings"` (issue #2210): `blocker.detai
 |---|---|---|
 | **Out of scope / already decided** | The finding asks for work the plan or ticket explicitly excludes, or contradicts a recorded operator decision (cite which). | Settle it `REJECTED`, with `--reason` quoting the source: "Plan §Scope excludes X (issue comment <url>)". |
 | **Not reproducible** | The finding is wrong against the code. Verify it yourself, citing `file:line`. | Settle it `REJECTED`, with the evidence as the reason. |
-| **Real, in-scope defect** | The finding is correct and fixing it stays inside the agreed scope. | Do **not** settle it. Requeue the ticket into the fix loop (`cw dev-queue requeue "$TICKET" -c <CLIENT> --stage impl`). Nothing to ask anyone. |
+| **Real, in-scope defect** | The finding is correct and fixing it stays inside the agreed scope. | Do **not** settle it. Requeue the ticket into the fix loop (`cw dev-queue requeue "$TICKET" -c <CLIENT> --stage impl --regress`; the park sits at REVIEW, and a backward move needs `--regress`). Nothing to ask anyone. |
 | **Product or scope question** | Fixing it needs behavior the sources of truth do not decide, or grows scope beyond the plan (new files, features or contracts the ticket never asked for). | Escalate to the operator: batch every such finding into one `AskUserQuestion`, each with a recommendation. This is the only bucket that reaches them. |
 
 Never settle a finding you cannot tie to a specific source or to code evidence. That one is a product or scope question, not a rejection.
@@ -206,7 +206,7 @@ When `blocker.reason` is anything else: read the Phase E retry fields the Blocke
 
 #### `plan_pending_approval`
 
-A Large plan (more than 10 files or 500 lines) parks here. Size alone is not a reason to involve the operator. The `auto_adopt_clean_plan` gate recipe (on by default) releases the park on the next reconcile tick unless the plan touches a forbidden area, the operator set `scope_hint: large`, or the draft is unbound or was already approved once. If it is still parked, decide it yourself against the ticket's sources of truth:
+A Large plan (more than 10 files or 500 lines) parks here. Size alone is not a reason to involve the operator. The `auto_adopt_clean_plan` gate recipe (on by default) releases the park on the next reconcile tick unless the plan touches a forbidden area, the operator set `scope_hint: large`, or the draft is unbound or was already approved once. If it is still parked and the row carries `scope_hint: large`, the operator asked to gate this ticket: surface the plan to them. Otherwise decide it yourself against the ticket's sources of truth:
 
 - **Plan stays within the ticket's agreed scope** (every file and behavior traces to the ticket, its pre-flight resolutions, or a recorded operator decision): approve it with `cw dev-queue approve "$TICKET" -c <CLIENT>`. Approval is the row path: it binds the draft's fingerprint, and the plan stage accepts it on re-dispatch. A prose comment such as "approved" is not evidence and the ticket would only re-park.
 - **Plan grows scope or touches a forbidden area**: that is a scope question. Put it to the operator in one batched `AskUserQuestion` with your recommendation (trim, split into a follow-up ticket, or approve the growth).
@@ -214,7 +214,7 @@ A Large plan (more than 10 files or 500 lines) parks here. Size alone is not a r
 
 #### `review_pending_approval`
 
-A Large review parks here after its fix loop. The `auto_approve_clean_review` gate recipe (on by default) releases it when health is PROCEED, no forbidden area was touched, and a reviewer ran. If it is still parked, read `health` and `review.*`. A degraded health or forbidden-area touch is the operator's call: surface it with a recommendation. Otherwise approve with `cw dev-queue approve "$TICKET" -c <CLIENT>`, or requeue the fix loop for an in-scope defect.
+A Large review parks here after its fix loop. The `auto_approve_clean_review` gate recipe (on by default) releases it when health is PROCEED, no forbidden area was touched, and a reviewer ran, unless the row carries the operator's `scope_hint: large`. If it is still parked, read `health` and `review.*`. A degraded health, a forbidden-area touch, or the operator's `scope_hint: large` is the operator's call: surface it with a recommendation. Otherwise approve with `cw dev-queue approve "$TICKET" -c <CLIENT>`, or requeue the fix loop for an in-scope defect.
 
 #### `scope_exceeded` / `forbidden_area`
 

@@ -43,6 +43,7 @@ ADR-0016.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -474,9 +475,9 @@ class _SettleInput(BaseModel):
 _SETTLE_IN_WORKER_MSG = (
     "Refusing to settle a review finding from inside a dispatch worker "
     "(.claude/cw-context.json reports headless). A ledger entry silently "
-    "suppresses every future re-raise of that finding, so it must be "
-    "minted by an operator on their own machine. Save the payload, and "
-    "run `cw review settle` there."
+    "suppresses every future re-raise of that finding, so the pipeline "
+    "must not mint one for its own reviewer. Save the payload, and run "
+    "`cw review settle` from the main checkout."
 )
 
 _SETTLE_CONTEXT_UNRESOLVED_MSG = (
@@ -526,15 +527,18 @@ def _in_linked_worktree(cwd: Path) -> bool:
 
     A linked worktree's ``--git-dir`` is ``<common>/worktrees/<name>`` while
     its ``--git-common-dir`` is the shared ``.git``; in a main checkout the
-    two are the same directory. Any failure (git missing, not a repository,
-    timeout) is "not a linked worktree": every dispatch worker runs in a
-    working git worktree, so a directory git cannot read is not one.
+    two are the same directory. Both are printed relative to *cwd* (or
+    absolute), so each is resolved against it; this avoids
+    ``--path-format=absolute``, which git older than 2.31 echoes back as an
+    extra output line instead of honouring. Any failure (git missing, not a
+    repository, timeout) is "not a linked worktree": every dispatch worker
+    runs in a working git worktree, so a directory git cannot read is not one.
     """
     from cw._git import run_git
 
     try:
         result = run_git(
-            ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+            ["rev-parse", "--git-dir", "--git-common-dir"],
             cwd=cwd,
             capture_output=True,
             timeout=10,
@@ -544,7 +548,28 @@ def _in_linked_worktree(cwd: Path) -> bool:
     lines = result.stdout.splitlines()
     if result.returncode != 0 or len(lines) != _GIT_DIR_PAIR_LINES:
         return False
-    return Path(lines[0]).resolve() != Path(lines[1]).resolve()
+    return (cwd / lines[0]).resolve() != (cwd / lines[1]).resolve()
+
+
+def _worker_tmpdir_is_headless() -> bool:
+    """True iff ``$TMPDIR`` points inside a headless dispatch worker's worktree.
+
+    Every cw executor points a worker's ``TMPDIR`` at its own worktree
+    (``apply_worker_tmpdir``, #2470). That survives a ``cd``, so it catches a
+    worker that changed directory to get past the cwd-keyed checks below,
+    which would otherwise see the operator's main checkout or ``/tmp``.
+    Interactive sessions carry ``headless: false`` and are not matched.
+    """
+    from cw.cli._hook_io import find_cw_context
+
+    tmpdir = os.environ.get("TMPDIR")
+    if not tmpdir:
+        return False
+    root = _nearest_context_root(Path(tmpdir))
+    if root is None:
+        return False
+    context = find_cw_context(root)
+    return context is not None and context.get("headless") is True
 
 
 def _refuse_settle_outside_an_interactive_session() -> None:
@@ -572,9 +597,15 @@ def _refuse_settle_outside_an_interactive_session() -> None:
       where an orchestrator session acting for the operator runs. Round 4
       refused this case too, which bounced every orchestrator-run settle back
       to the operator by hand even though no worker can be standing there.
+
+    Ahead of all of these, a ``$TMPDIR`` inside a headless worker's worktree
+    refuses (:func:`_worker_tmpdir_is_headless`): it is the worker signal a
+    ``cd`` does not change.
     """
     from cw.cli._hook_io import find_cw_context
 
+    if _worker_tmpdir_is_headless():
+        raise CwError(_SETTLE_IN_WORKER_MSG)
     cwd = Path.cwd()
     root = _nearest_context_root(cwd)
     if root is None:

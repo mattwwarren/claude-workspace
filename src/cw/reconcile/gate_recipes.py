@@ -23,8 +23,8 @@ recipe does not require the two signoff markers — a Large park runs its review
 stations in advisory mode and never writes them — so an unreviewed plan is
 released through ``_approve_ticket_locked``'s #968 same-stage requeue: the
 row-path approval stamped there lets the re-dispatched plan stage pass
-Checkpoint 1 and run the full ambiguity scan and quality review, which can
-still park for a genuine product or scope question. A reviewed plan advances
+Checkpoint 1 and run Plan Quality Review (the ambiguity scan already ran in
+the round that parked), which can still park the plan. A reviewed plan advances
 to IMPL directly, as before.
 
 The recipe follows the repo's detect/act split (see ``concierge.py`` for the
@@ -172,7 +172,7 @@ def resolve_gate_recipe_enabled(
     1. ``task.gate_recipes`` — ticket-level override wins when it names the
        recipe.
     2. ``LaneConfig.gate_recipes`` on the task's lane — the per-lane map.
-    3. ``_DEFAULT_GATE_RECIPE_ENABLED`` — the hardcoded default-off floor.
+    3. ``_DEFAULT_GATE_RECIPE_ENABLED`` — the hardcoded floor (both on).
 
     Robust to a missing client (absent from *clients*) or a missing lane
     (absent from the client's ``effective_lanes``): either falls straight
@@ -248,8 +248,8 @@ approved automatically (no human review) by RFC 0009 gate-recipe automation:
 - plan_draft_fingerprint: {plan_draft_fingerprint}
 - plan_reviewed: {plan_reviewed}
 
-An unreviewed plan returns to the plan stage, which runs the full ambiguity
-scan and quality review before implementation starts. See event
+An unreviewed plan returns to the plan stage, which runs Plan Quality Review
+before implementation starts. See event
 `GATE_AUTO_APPROVED` for the full audit trail.
 """
 
@@ -283,6 +283,25 @@ class GateRecipeCandidate:
     session_id: str
 
 
+def _finalize_hold_armed(
+    task: TicketTask,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
+) -> bool:
+    """True iff an RFC 0011 A3 proactive finalize hold is armed for *task*.
+
+    The review recipe's automatic approve always declines on a held row
+    (``_approve_ticket_locked`` returns ``finalize_held``), so such a row is
+    never "released": routing must page for it, and detect must not pick it up
+    every tick only to emit another ``GATE_AUTO_APPROVE_HELD``. Deferred import:
+    ``cw.dispatch`` reaches back into ``cw.dev_queue``, which this module
+    imports at top level.
+    """
+    from cw.dispatch.review_gates import resolve_hold_finalize
+
+    return resolve_hold_finalize(task, clients, config) is not None
+
+
 def gate_recipe_will_release(
     task: TicketTask,
     last_result: dict[str, object] | None,
@@ -310,6 +329,7 @@ def gate_recipe_will_release(
             and _row_eligible(task, Stage.REVIEW)
             and _predicate_holds(review_snapshot)
             and _recipe_gate_open(config, task, clients, RECIPE_AUTO_APPROVE_REVIEW)
+            and not _finalize_hold_armed(task, clients, config)
         )
     if status == _PLAN_PENDING_APPROVAL:
         plan_snapshot = _plan_gate_snapshot(last_result)
@@ -362,7 +382,7 @@ def _clean_plan_snapshot(
     The plan-of-record read decides only *how* the gate is released, recorded
     as ``plan_reviewed``: a plan whose body carries BOTH signoff markers
     advances to IMPL, and any other plan goes back to PLAN through the #968
-    same-stage requeue for its full quality review. Both markers are read from
+    same-stage requeue for Plan Quality Review. Both markers are read from
     the SAME body (R2 — there is exactly one ``body`` variable in scope, so
     same-source is structural); a union across tracker + `.cw/plan.md` is
     impossible by construction. The raw plan body is never placed in the
@@ -436,6 +456,8 @@ def _detect_auto_approve_review(
         if task.disposition == REVIEW_STALENESS_GATE_DISPOSITION:
             continue
         if not _row_eligible(task, Stage.REVIEW):
+            continue
+        if _finalize_hold_armed(task, clients, config):
             continue
         if task.session_id is None:
             continue
@@ -751,13 +773,8 @@ def _act_auto_approve_review(
     durable by then, so a ``GATE_AUTO_APPROVE_HELD`` correction is emitted and
     the ticket is neither reported approved nor commented on.
 
-    Known noise (deliberate, flagged for a follow-up ticket): a *persistently*
-    armed hold — as opposed to one armed in the detect→act race window — re-runs
-    this whole path on every reconcile tick, emitting a fresh
-    GATE_AUTO_APPROVED/GATE_AUTO_APPROVE_HELD pair each time. No anti-noise latch
-    is built here: reusing ``gate_recipe_failed_at`` would conflate a deliberate
-    hold with a broken mutation (and would be cleared by the same transitions),
-    and a second latch field is out of this ticket's scope.
+    Only a hold armed inside the detect→act race reaches this branch: detect
+    skips a row whose hold is already armed (:func:`_finalize_hold_armed`).
     """
     if not candidates:
         return []
@@ -924,7 +941,7 @@ def _act_auto_adopt_plan(
                 # (see _clean_plan_snapshot), so the act phase must not
                 # trigger a second live _plan_is_reviewed() fetch. True
                 # advances a reviewed plan to IMPL; False sends an unreviewed
-                # one back to PLAN for its full quality review.
+                # one back to PLAN for Plan Quality Review.
                 _approve_ticket_locked(
                     task.ticket_id,
                     task.client,
