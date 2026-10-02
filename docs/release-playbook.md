@@ -36,15 +36,24 @@ inert.
 The flag convention (mirror it for every new auto-actor):
 
 - A master opt-in on `OrchestratorConfig`, default `False` — e.g.
-  `concierge_enabled` (`models.py:868`), `gate_recipes_enabled`
-  (`models.py:882`), and `review_recipes_enabled` (RFC 0010). A `False` master
-  switch short-circuits the entire module.
+  `concierge_enabled` and `review_recipes_enabled` (RFC 0010). A `False`
+  master switch short-circuits the entire module.
+
+  **Exception — gate recipes.** `gate_recipes_enabled` shipped dark in
+  v1.18.0 and was armed by default in v1.63.0 on the operator's decision: a
+  ticket's size alone must never page the operator, who sets the plan before a
+  ticket enters the pipeline. Its predicates
+  (`cw.reconcile.gate_predicates`) still keep every forbidden-area touch,
+  operator `scope_hint: large` and degraded review in front of a person.
+  Arming any other auto-actor by default needs the same explicit operator
+  decision.
 - A **per-lane** `dict[str,bool] | None` map on `LaneConfig` (+ a `TicketTask`
   override) resolved most-specific-wins (ticket → lane → hardcoded-off floor),
   so risk is armed per lane, never globally by accident. See
-  `resolve_gate_recipe_enabled` for the shape.
+  `resolve_gate_recipe_enabled` for the shape (its floor is on — the
+  exception above).
 
-A fresh install therefore auto-does nothing. This is what lets the pipeline
+A fresh install therefore auto-does nothing new until it is armed. This is what lets the pipeline
 merge aggressively.
 
 ### 3. Merge waves (sequence by dependency, parallelise the rest)
@@ -82,7 +91,8 @@ classifier-gated to the operator — handed over as a `! <command>`, never
 written by an agent. This is the same posture RFC 0009 used: shipped v1.18.0
 dark, then dogfooded on the `dogfood` lane by opting the lane in and flipping
 `gate_recipes_enabled` via an operator `!` command; disarmed back to the
-shipped default afterwards.
+shipped default afterwards. (Gate recipes have since been armed by default;
+see the exception above.)
 
 Rollback is symmetric and instant: flip the lane map or the master switch back
 to `False` — it takes effect on the next reconcile tick, no redeploy.

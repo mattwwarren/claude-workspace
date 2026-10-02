@@ -35,7 +35,6 @@ operator_channel_forward:
     - pr.merged
     - session.liveness_changed
     - operator.escalation
-    - gate.auto_approved
     - ticket.approval_failed
     - gate.auto_approve_failed
     - pr.action_taken
@@ -68,7 +67,7 @@ in `orchestrator.yaml` unless you want to override it.
   more concerning window.
 - Every other admitted type (`task.deleted`, `session.needs_attention`, the
   five PR-lifecycle types `pr.registered`/`pr.ci_failed`/`pr.review_received`/
-  `pr.mergeable`/`pr.merged`, `operator.escalation`, `gate.auto_approved`,
+  `pr.mergeable`/`pr.merged`, `operator.escalation`,
   `gate.auto_approve_failed`, `pr.action_taken`, `pr.action_failed`) forwards
   unconditionally once present in `event_types` — there is no sub-condition
   for them.
@@ -89,6 +88,14 @@ failed-mutation companion so a lone "approved" never stands uncorrected) and
 dispatching an `/address-review` action, with the same failed-companion
 rationale). Each is operator-attention-worthy precisely because no human was
 in the loop when it fired.
+
+`gate.auto_approved` was removed from the default set in v1.63.0, when the
+gate recipes were armed by default. They now release every Large gate whose
+only reason was the ticket's size, and forwarding each release would page the
+operator for the noise the recipes exist to remove. It stays in the event log
+and in the ticket's audit comment; add it to `event_types` to be notified
+anyway. `gate.auto_approve_failed` and `gate.auto_approve_held` still forward:
+each marks a row a person must look at.
 
 **Fail-loud validation:** unlike `reap_policy` (which silently coerces an
 invalid value to its safe default per ADR-0006), an invalid

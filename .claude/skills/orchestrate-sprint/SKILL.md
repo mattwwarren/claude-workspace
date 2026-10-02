@@ -112,11 +112,22 @@ table it points at — the line between what you simply do and what you ask.
 - Parking a human-gated ticket and pulling it from the queue (rule 6).
 - Stopping a wedged session per the peek-stop ladder (`/cw-queue-peek`'s
   explicit STOP rows).
+- Approving a plan or review gate whose plan stays within the ticket's agreed
+  scope (`cw dev-queue approve`). A ticket's size is not a scope question:
+  the gate recipes already release most such parks without a page.
+- Adjudicating codex MUST_FIX findings against the ticket's sources of truth
+  (`/cw-followup`): settle an out-of-scope, already-decided or
+  non-reproducible finding with `cw review settle`, citing the source, and
+  requeue a real in-scope defect into the fix loop.
 
 **The operator decides:**
 
 - Genuine product/scope forks where either answer is defensible
-  (`/harden-ticket`'s escalation criteria).
+  (`/harden-ticket`'s escalation criteria), including a plan or review
+  finding that would grow scope beyond the ticket or needs behavior the
+  sources of truth do not decide.
+- Anything touching a forbidden area (migrations, auth/security core,
+  CI/CD pipeline logic, shared base classes).
 - Acceptance criteria that ask for data the system does not have.
 - Force-push or history-rewriting actions on shared branches (`cw-followup:106`
   — "Confirm with the user before force-push" — the existing precedent for
@@ -317,7 +328,10 @@ be read in light of that arithmetic — it is not evidence of "N real failures."
 
 - **Blocked on user / ambiguities / plan-approval** → resolve the technical
   parts, batch the real forks to the operator (rule 5). Often `/harden-ticket`
-  reactively, then re-dispatch.
+  reactively, then re-dispatch. A plan or review approval park whose plan
+  stays within the ticket's scope is yours to `cw dev-queue approve` (and
+  usually a gate recipe already released it); codex MUST_FIX findings are
+  yours to adjudicate via `/cw-followup`.
 
   **Human-gated parks are not retry-eligible without a tracker-state delta
   (#1653).** A ticket parked on `ambiguities_pending_resolution` /
@@ -331,7 +345,10 @@ be read in light of that arithmetic — it is not evidence of "N real failures."
   supply the delta (answer/harden/approve on the ticket) and THEN release —
   via `cw dev-queue requeue`/`approve`, never by `cw dev-queue add` (a
   re-add against a parked row is refused and would otherwise mint a
-  duplicate row that later surfaces as `terminal_sibling` noise).
+  duplicate row that later surfaces as `terminal_sibling` noise). For a
+  `plan_pending_approval` / `review_pending_approval` park, `cw dev-queue
+  approve` is itself the delta: it records the approval on the queue row,
+  which is the evidence the plan stage reads. A prose approval comment is not.
 - **Premise-pending-verification on an external unknown** → it's human-gated.
   Park it, write the gate down, tell the operator what un-gates it (rule 6).
 - **Stalled / retry-cap / reap_proposed** → a wedge. Stop the session

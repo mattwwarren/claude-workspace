@@ -383,7 +383,7 @@ class LaneConfig(BaseModel):
     # resolve_gate_recipe_enabled's 3-tier precedence: consulted when the ticket
     # carries no override for the recipe, and itself overridden by
     # TicketTask.gate_recipes. A recipe absent from this map (or None) defers to
-    # the hardcoded default-off. Recognised keys: "auto_approve_clean_review",
+    # the hardcoded floor (on). Recognised keys: "auto_approve_clean_review",
     # "auto_adopt_clean_plan".
     gate_recipes: dict[str, bool] | None = None
     # Lane-level review-recipe enablement map (RFC 0010 P3, #1098). Middle tier
@@ -511,24 +511,24 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # operator does not need paged for, recorded via record_event but
         # never added to this forward-set.
         OrchestratorEventType.OPERATOR_ESCALATION,
-        # RFC 0009 P1+P2 (#1065): a gate recipe auto-approving a review with no
-        # human in the loop is operator-attention-worthy — forwarded by default
-        # (contrast CONCIERGE_RECOVERED, excluded above as audit-only).
-        OrchestratorEventType.GATE_AUTO_APPROVED,
+        # GATE_AUTO_APPROVED is deliberately EXCLUDED (since v1.63.0), like
+        # CONCIERGE_RECOVERED above: the gate recipes are on by default and
+        # release Large gates whose only "reason" was size, so forwarding each
+        # release would page the operator for the very noise the recipes
+        # remove. It stays in the event log and the ticket's audit comment.
         # Forwarded alongside TICKET_APPROVED: without this correction, a
         # failed queue write/rollback could leave an approval event standing
         # alone as a false-positive operator signal (#2337).
         OrchestratorEventType.TICKET_APPROVAL_FAILED,
-        # Forwarded alongside GATE_AUTO_APPROVED: without this, a failed
-        # act-phase mutation would leave GATE_AUTO_APPROVED standing alone on
-        # the operator channel as an uncorrected false-positive "approved"
-        # signal.
+        # A failed act-phase mutation leaves the row parked with its page
+        # suppressed (dispatch Rule 1 skips SESSION_NEEDS_ATTENTION for a park
+        # a recipe will release), so this correction is how the operator
+        # learns a person is needed after all.
         OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
-        # RFC 0011 A3 (#1160): forwarded alongside GATE_AUTO_APPROVED for the
-        # same reason as GATE_AUTO_APPROVE_FAILED above -- an A3 force hold
-        # declining the mutation would otherwise leave GATE_AUTO_APPROVED
-        # standing alone on the operator channel as an uncorrected "approved"
-        # signal. Declined rather than raised, but the correction is identical.
+        # RFC 0011 A3 (#1160): an A3 force hold declining the automatic
+        # mutation leaves the row parked for a person, same as a failure.
+        # Declined rather than raised, but the operator needs to know either
+        # way.
         OrchestratorEventType.GATE_AUTO_APPROVE_HELD,
         # RFC 0010 P2 (#1097): a review recipe dispatching an /address-review
         # action with no human in the loop is operator-attention-worthy —
@@ -538,8 +538,7 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         OrchestratorEventType.PR_ACTION_TAKEN,
         OrchestratorEventType.PR_ACTION_FAILED,
         # GitHub #1437: the ssh_key_gate operator escape hatch suppressing an
-        # already-live safety probe is attention-worthy, same rationale as
-        # GATE_AUTO_APPROVED above.
+        # already-live safety probe is attention-worthy.
         OrchestratorEventType.SSH_KEY_GATE_BYPASSED,
         # GitHub #1887: the disk_pressure_gate operator escape hatch
         # suppressing an already-live safety probe is attention-worthy, same
@@ -548,11 +547,10 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # GitHub #1730: a review-stage requeue proceeding with no operator-visible
         # confirmation that the send-back comment actually reached the reviewer is
         # a no-human-in-the-loop decision -- operator-attention-worthy, forwarded
-        # by default, same rationale as GATE_AUTO_APPROVED above (contrast
-        # CONCIERGE_RECOVERED, excluded as audit-only). No companion "delivery
-        # succeeded" event exists to pair this with (see #1730 Decisions item 4)
-        # -- this event is self-contained, not a correction to another forwarded
-        # signal.
+        # by default (contrast CONCIERGE_RECOVERED, excluded as audit-only).
+        # No companion "delivery succeeded" event exists to pair this with
+        # (see #1730 Decisions item 4) -- this event is self-contained, not a
+        # correction to another forwarded signal.
         OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
     }
 )
@@ -860,15 +858,15 @@ class OrchestratorConfig(BaseModel):
     default_finalize_gate: Literal["auto", "manual"] = "auto"
     # Global default for the codex backend's autonomous MUST_FIX fix loop
     # (#1553), used when the ticket's lane (LaneConfig.codex_fix_loop_enabled)
-    # sets no override. Default False, mirroring gate_recipes_enabled's and
-    # concierge_enabled's fail-safe defaults: enabling `review: {backend:
+    # sets no override. Default False, mirroring concierge_enabled's
+    # fail-safe default: enabling `review: {backend:
     # codex}` must not implicitly enable autonomous fix commits. Superseded
     # the removed ClientConfig.codex_fix_loop_enabled (#1465) with a 2-tier
     # (lane -> global) resolver -- see
     # cw.codex_background._resolve_codex_fix_loop_enabled.
     default_codex_fix_loop_enabled: bool = False
     # #2210 — master opt-in for the codex review ledger's fuzzy claim-match
-    # suppression tier. Default False, mirroring gate_recipes_enabled's
+    # suppression tier. Default False, mirroring concierge_enabled's
     # fail-safe posture. BOTH this and the task's lane
     # (LaneConfig.codex_review_tiers["claim_suppression"]) must be true for the
     # tier to suppress anything; either one set False is a kill switch. While
@@ -966,22 +964,25 @@ class OrchestratorConfig(BaseModel):
     # "park_marker_poison_clear", "cancelled_row_restore".
     concierge_recoveries: dict[str, bool] = Field(default_factory=dict)
     # RFC 0009 P1+P2 (#1065) — gate-recipe automation master switch. Default
-    # False: the auto_approve_clean_review recipe in cw.reconcile.gate_recipes
-    # approves a review gate with NO human review, so nothing fires without an
-    # explicit operator opt-in — mirroring concierge_enabled's fail-safe
-    # default. Per-recipe / per-lane resolution (LaneConfig.gate_recipes,
-    # resolve_gate_recipe_enabled) is deferred to #1067.
-    gate_recipes_enabled: bool = False
+    # True: the operator is paged for a product or scope question, never for a
+    # ticket's size alone, so the two recipes in cw.reconcile.gate_recipes
+    # release a Large plan/review gate whose predicate finds no reason a person
+    # is needed (forbidden-area touch, operator scope_hint "large", degraded
+    # review health, unbound plan draft). Set False to restore manual approval
+    # of every Large gate; per-lane / per-ticket opt-out is
+    # LaneConfig.gate_recipes / TicketTask.gate_recipes (resolved by
+    # resolve_gate_recipe_enabled).
+    gate_recipes_enabled: bool = True
     # RFC 0010 P1 (#1096) — review-recipe automation master switch (detect
     # phase only in P1; no act phase exists yet, so True is inert by
     # construction until P2 ships). Default False, mirroring
-    # gate_recipes_enabled's fail-safe default.
+    # concierge_enabled's fail-safe default.
     review_recipes_enabled: bool = False
     # GitHub #2135 — master switch for the Stop-hook abandoned-exit park.
     # Default False: the park is a state-mutating auto-actor that moves a
     # dev-queue row RUNNING -> BLOCKED_ON_USER off the worker's recorded park
     # marker, so it ships dark and is armed per-lane by an operator —
-    # mirroring gate_recipes_enabled's fail-safe default and
+    # mirroring concierge_enabled's fail-safe default and
     # docs/release-playbook.md's default-off floor for this change class. With
     # this False the Stop hook defers on a sentinel-less exit exactly as it did
     # before #2135, without reading the marker. Per-lane / per-ticket
@@ -990,7 +991,7 @@ class OrchestratorConfig(BaseModel):
     park_on_abandoned_exit_enabled: bool = False
     # GitHub #1437 — operator escape hatch for the SSH-agent-key preflight
     # gate (#927). Default True (gate stays enforced): unlike
-    # concierge_enabled/gate_recipes_enabled above, this does NOT gate new
+    # concierge_enabled above, this does NOT gate new
     # automation -- it gates an already-live safety probe that holds the
     # fleet PENDING rather than risk a guaranteed-failing spawn. Setting this
     # False bypasses that skip fleet-wide when the probe reports unavailable;

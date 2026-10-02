@@ -91,6 +91,7 @@ from cw.dispatch.regress_repeat import (
 # routing/stage_walk.py's own deferred reach back into this module (#1728),
 # guarded by test_dispatch_package_submodules_import_without_cycle.
 from cw.dispatch.review_gates import (
+    _gate_recipe_will_release,
     _park_branch_staleness_gate,
     _park_empty_diff_gate,
     _park_finalize_hold,
@@ -552,6 +553,13 @@ def _route_scope_gated_approval(
     Extracted from ``_route_staged_decision`` to keep that function under the
     PLR0912 branch ceiling.
 
+    The large-tier park pages the operator (``SESSION_NEEDS_ATTENTION``) only
+    when no gate recipe will release it (``_gate_recipe_will_release``). A
+    ticket's size alone is not a reason to page anyone; the recipes in
+    ``cw.reconcile.gate_recipes`` clear such a park on the next reconcile
+    tick. The row still parks either way, because the recipes act only on
+    parked rows. An earlier-stage report always pages.
+
     Every call emits the #1617 scope-routing audit event
     (``_record_scope_routing_decision``) after the decision is made, whichever
     of the four arms below actually ran.
@@ -623,25 +631,28 @@ def _route_scope_gated_approval(
     tier = _resolve_scope_tier(last_result, task)
     earlier_stage_report = _is_earlier_stage_report(task, last_result, clients)
     if tier != SCOPE_TIER_SMALL or earlier_stage_report:
-        record_event(
-            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-            {
-                "session_id": task.session_id or "",
-                "session_name": "",
-                "client": task.client,
-                "ticket_id": task.ticket_id,
-                "claude_session_id": None,
-                "paused_status": (
-                    _EARLIER_STAGE_REPORT_REASON
-                    if earlier_stage_report
-                    else _APPROVAL_GATE_REASON
-                ),
-                "breadcrumbs": "",
-                "crashed": False,
-                "lane": task.lane,
-            },
-            correlation_id=task.ticket_id,
-        )
+        if earlier_stage_report or not _gate_recipe_will_release(
+            task, last_result, clients
+        ):
+            record_event(
+                OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+                {
+                    "session_id": task.session_id or "",
+                    "session_name": "",
+                    "client": task.client,
+                    "ticket_id": task.ticket_id,
+                    "claude_session_id": None,
+                    "paused_status": (
+                        _EARLIER_STAGE_REPORT_REASON
+                        if earlier_stage_report
+                        else _APPROVAL_GATE_REASON
+                    ),
+                    "breadcrumbs": "",
+                    "crashed": False,
+                    "lane": task.lane,
+                },
+                correlation_id=task.ticket_id,
+            )
         transition_task_status(
             task,
             QueueItemStatus.BLOCKED_ON_USER,

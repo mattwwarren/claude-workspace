@@ -11,7 +11,7 @@ classifier, and the shared act-phase helpers (``_find_review_task``,
 Recipe modules import from here; this module never imports from a recipe module,
 so the package's import graph stays acyclic.
 
-Like the gate recipes, this layer gates on its own opt-in master switch
+Like the gate recipes, this layer gates on its own master switch, opt-in here
 (``OrchestratorConfig.review_recipes_enabled``, default False), checked in BOTH
 ``run_review_recipes`` and ``_detect_by_attention_state`` (dual gating), mirroring
 ``gate_recipes._recipe_gate_open``'s rationale: a caller invoking a ``_detect_*``
@@ -97,7 +97,7 @@ _PAYLOAD_KEY_REPEAT_FIRE_WINDOW_MINUTES = "window_minutes"
 _REPEAT_FIRE_ATTENTION_REASON = "review_recipe_repeat_fire"
 
 # RFC 0010 P3 (#1098) — tier-3 hardcoded fallback for the per-lane resolver.
-# Default OFF (mirrors gate_recipes._DEFAULT_GATE_RECIPE_ENABLED): a review
+# Default OFF (the shape of gate_recipes._DEFAULT_GATE_RECIPE_ENABLED): a review
 # recipe dispatches an /address-review session with no human in the loop, so
 # nothing fires unless an operator opts a lane (or ticket) in. NOT a config
 # field — it is the floor the ticket/lane tiers fall through to. Only the P1

@@ -176,7 +176,7 @@ _ADJUDICATED_INSTRUCTIONS = (
     "disposition blocks are unsupported and are refused by the reader. Marker "
     "syntax inside a finding's summary, file, evidence or any other field is "
     "escaped on render and is never read back as a record. `cw review settle`, "
-    "run by an operator in their own interactive session, is the only "
+    "which refuses to run inside a dispatch worker, is the only "
     "supported producer, because it is the only path that records who settled "
     "the finding, when, and against what code."
 )

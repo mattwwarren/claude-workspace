@@ -187,7 +187,9 @@ GATE=$(cw dev-queue tasks --ticket <T> -c <CLIENT> --json \
 If `GATE` is one of `plan_pending_approval`, `review_pending_approval`,
 `ambiguities_pending_resolution`, `premises_pending_verification`:
 
-1. Run `/cw-followup --ticket-id <T>` inline so the operator resolves the gate.
+1. Run `/cw-followup --ticket-id <T>` inline. It resolves the gate against
+   the ticket's sources of truth and reaches the operator only for a genuine
+   product or scope question.
 2. Check if the operator removed the ticket from the queue (do this before any
    approve/requeue attempt to avoid spurious errors):
    ```bash
@@ -202,14 +204,16 @@ If `GATE` is one of `plan_pending_approval`, `review_pending_approval`,
      | jq -r '.[0].status')
    ```
 4. If `STATUS` is still `blocked_on_user`:
-   - `plan_pending_approval` → **do NOT use `cw dev-queue approve`** (#968:
-     its plan arm advances straight to impl, skipping Plan Quality Review, so
-     impl exits on an empty `.cw/plan.md`). Instead: post the approval as an
-     issue COMMENT, then `cw dev-queue requeue <T> -c <CLIENT>` at the plan
-     stage — Stage 1 sees the approval and proceeds to quality review. Before
-     approving a Large plan, grep its text for the literal strings the
+   - `plan_pending_approval` → `cw dev-queue approve <T> -c <CLIENT>` when
+     the plan stays within the ticket's agreed scope. Approve binds the
+     draft's fingerprint to the row. An unreviewed plan goes back to PLAN as
+     PENDING (#968 same-stage requeue) and runs Plan Quality Review
+     there; a reviewed one advances to impl. Do NOT post a prose approval
+     comment: it is not plan-approval evidence, and the ticket re-parks.
+     Before approving a Large plan, grep its text for the literal strings the
      resolutions mandated — a `[SATISFIED]` conformance row is a claim, not
      evidence (#929 round 1 shipped one with the mandated field list absent).
+     A plan that grows scope beyond the ticket goes to the operator instead.
    - `review_pending_approval` →
      `cw dev-queue approve <T> -c <CLIENT>` (this arm is sound: review →
      finalize; if session not found, fall back to
@@ -358,7 +362,11 @@ fanout: client=claude-workspace wave=[204,205,206] → all shipped; 0 need atten
 - **Approve-session-not-found** — `cw dev-queue approve <T>` raises
   `ApproveGateError` when the target session is no longer in the daemon roster
   (e.g. the session died before the approval). Fall back to
-  `cw dev-queue requeue <T>` to re-enter the ticket via a fresh session.
+  `cw dev-queue requeue <T>` to re-enter the ticket via a fresh session. On a
+  `plan_pending_approval` gate that requeue records no approval, so the plan
+  stage re-parks once; the `auto_adopt_clean_plan` gate recipe then releases
+  that fresh park on the next reconcile tick (unless it touches a forbidden
+  area or carries `scope_hint: large`, which is the operator's call anyway).
 - **`needs_attention` storm** — many tickets pause at once (often the same
   ambiguity across a batch). For known gate types, the inline loop calls
   `/cw-followup` per gate ticket in sequence — if multiple tickets share the
@@ -383,8 +391,11 @@ fanout: client=claude-workspace wave=[204,205,206] → all shipped; 0 need atten
 - `/cw-queue-peek` — in-flight WAIT/PEEK/STOP ladder (Step 4c).
 - `/cw-validate-result` — forensic read on a finished ticket (Step 5).
 - `/cw-followup` — act on a finished/blocked ticket's sentinel (Step 4b inline, Step 5).
-- `cw dev-queue approve` — approves a scope-gated ticket by posting the approval
-  sentinel and re-queuing; used as the primary fallback in Step 4b gate closure.
+- `cw dev-queue approve` — releases a scope-gated ticket (binding the plan
+  draft's fingerprint on a plan gate); used in Step 4b gate closure. The
+  `auto_adopt_clean_plan` / `auto_approve_clean_review` gate recipes do the
+  same automatically on the next reconcile tick for any Large park that
+  touches no forbidden area.
 - `cw dev-queue requeue` — re-enters a `blocked_on_user` ticket as `pending`;
   used for ambiguity/premises gates and as the approve-session-not-found fallback.
 - `cw event tail --type session.needs_attention --type session.timed_out` —

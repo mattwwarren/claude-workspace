@@ -16,7 +16,7 @@ A headless `/auto-dev` run ends in one of several sentinel shapes. Each shape ne
 | `merge_gate_blocked` | Rebase the feature branch onto current `origin/main`, force-push, open PR. |
 | `ambiguities_pending_resolution` / `premises_pending_verification` | Render a Decisions section, append to the ticket body, suggest re-dispatch. |
 | `blocked` (real) | Surface `blocker.reason` + `details`; suggest re-dispatch or escalate. |
-| `plan_pending_approval` / `review_pending_approval` | Print plan or review findings; offer to approve, fix-loop, or abandon. |
+| `plan_pending_approval` / `review_pending_approval` | Usually released by a gate recipe. If still parked, approve when within the ticket's agreed scope; escalate only scope growth or forbidden-area touches. |
 | `scope_exceeded` / `forbidden_area` | Surface and stop; ticket needs a human design decision. |
 | `BlockedResult` (parser couldn't validate) | Diagnose — show the validation error, transcript tail, and the raw payload. |
 
@@ -181,31 +181,40 @@ jq '.result.blocker' <<<"$RESULT"
 
 When `blocker.reason == "tool_denied"` (issue #182): re-dispatch is the typical recovery, but the classifier non-determinism flagged in #183 means a delay before retry is sensible. Recommend `cw dev-queue add <TICKET>` (optionally with `-c <CLIENT>`) with a 2-3 minute pause for the auto-mode classifier to settle; if the dispatch loop is idle, run `cw dev-queue run --once` after adding.
 
-When `blocker.reason == "codex_must_fix_findings"` (issue #2210): `blocker.details` is the rendered review comment, and it ends in a `### Settle a finding` section carrying one fenced `json` payload per blocking finding (capped at 10; any remainder is listed compactly below them). Those payloads exist so an operator decision can be recorded permanently instead of the same finding re-parking the next round. Take one **only after the user has explicitly rejected that specific finding** — never on a default, and never under `--auto-accept-defaults`, because a ledger entry silently suppresses every future re-raise of that finding. Then: save the payload with the **Write tool** to a scratch file, run `cw review settle <file> --reason "<the user's own words for why>" --ticket "$TICKET" --out <marker.md>`, and post it with `gh issue comment "$TICKET" --repo <REPO> --body-file <marker.md>`.
+When `blocker.reason == "codex_must_fix_findings"` (issue #2210): `blocker.details` is the rendered review comment, and it ends in a `### Settle a finding` section carrying one fenced `json` payload per blocking finding (capped at 10; any remainder is listed compactly below them). Those payloads exist so a decision can be recorded permanently instead of the same finding re-parking the next round.
 
-`--reason` is mandatory and must be non-blank; use what the user actually said, never a placeholder. The command records your resolved `gh` login as the settling actor and emits a `review.finding_settled` audit event per finding, so the record says who silenced the finding, when, and against which reviewed sha.
+**Adjudicate each finding yourself against the ticket's sources of truth; do not hand the list to the operator.** The operator set the plan before the ticket entered the pipeline. The ticket body, the approved plan-of-record, any `<!-- auto-dev-preflight-resolutions -->` comment, recorded operator decisions on the ticket, and linked RFCs and dependency tickets are the record of what was agreed. Read them, then put every finding in exactly one bucket:
 
-**It refuses to run anywhere it cannot prove is the operator's own interactive session**, because a worker settling findings raised by its own reviewer is the pipeline adjudicating itself. It reads the nearest `.claude/cw-context.json` and proceeds ONLY when that file reports `headless: false`; a `headless: true` worker refuses, and so does every indeterminate case — no context file in any parent directory, an unreadable or malformed one, no `headless` key, or a non-boolean `headless`. It exits non-zero and writes nothing (no marker, no `--out` file, no event). There is no bypass flag and you must not look for one: do not chdir looking for a directory that passes, do not write a context file, do not hand-author the `REVIEW-FINDING-DISPOSITIONS` marker. If you hit that refusal, stop: report the exact payload and the reason the user gave, and say plainly that `cw review settle` has to be run by the operator, from an interactive cw session worktree on their own machine — their plain checkout has no `.claude/cw-context.json` and will refuse too.
+| Bucket | When | Action |
+|---|---|---|
+| **Out of scope / already decided** | The finding asks for work the plan or ticket explicitly excludes, or contradicts a recorded operator decision (cite which). | Settle it `REJECTED`, with `--reason` quoting the source: "Plan §Scope excludes X (issue comment <url>)". |
+| **Not reproducible** | The finding is wrong against the code. Verify it yourself, citing `file:line`. | Settle it `REJECTED`, with the evidence as the reason. |
+| **Real, in-scope defect** | The finding is correct and fixing it stays inside the agreed scope. | Do **not** settle it. Requeue the ticket into the fix loop (`cw dev-queue requeue "$TICKET" -c <CLIENT> --stage impl --regress`; the park sits at REVIEW, and a backward move needs `--regress`). Nothing to ask anyone. |
+| **Product or scope question** | Fixing it needs behavior the sources of truth do not decide, or grows scope beyond the plan (new files, features or contracts the ticket never asked for). | Escalate to the operator: batch every such finding into one `AskUserQuestion`, each with a recommendation. This is the only bucket that reaches them. |
 
-Tell them to post the rendered marker **as its own comment, unedited**: the reader honours a disposition block only when it opens the comment body under its `## Review Finding Dispositions` title. A block pasted under a preamble is not a record and is not applied.
+Never settle a finding you cannot tie to a specific source or to code evidence. That one is a product or scope question, not a rejection.
 
-When `blocker.reason == "codex_must_fix_findings"` and the user decides to **ship the branch as-is** (issue #2205) — rather than suppress the finding in future rounds, which is what `cw review settle` does — the first-class path is `cw dev-queue approve "$TICKET" -c <CLIENT> --override-must-fix --reason "<the user's own words>"` followed by `cw dev-queue requeue "$TICKET" -c <CLIENT> --stage finalize`. A bare `requeue --stage finalize` is not enough: FINALIZE's MUST_FIX Override Verification step re-reads `.claude/review-verdict.json` and parks the row again. The override is bound to the verdict's reviewed SHA and exact MUST_FIX finding set, so a new review round or a new commit voids it. The same consent rule as settle applies: run it **only after the user has explicitly chosen to ship past those findings**, never on a default and never under `--auto-accept-defaults`, and use the user's actual reason, never a placeholder. The reason is recorded on the row and in the audit event, and it is rendered into the PR body's `## Operator override` section.
+To settle: save the payload with the **Write tool** to a scratch file, run `cw review settle <file> --reason "<the cited source or evidence>" --ticket "$TICKET" --out <marker.md>`, and post it with `gh issue comment "$TICKET" --repo <REPO> --body-file <marker.md>` **as its own comment, unedited**. The reader honours a disposition block only when it opens the comment body under its `## Review Finding Dispositions` title. A block pasted under a preamble is not a record and is not applied.
+
+`--reason` is mandatory and must be non-blank: the citation, never a placeholder. The command records your resolved `gh` login as the settling actor and emits a `review.finding_settled` audit event per finding, so the record says who silenced the finding, when, why, and against which reviewed sha. A settle can be withdrawn with `outcome: "REVERSED"` (see `cw review settle --help`).
+
+**Where it runs.** Run it from the operator's main checkout or an interactive cw session worktree, which is where you, the orchestrator, already are. It refuses inside a dispatch worker (`headless: true`), on an unreadable `.claude/cw-context.json`, and in a linked git worktree with no context file, because a worker settling its own reviewer's findings is the pipeline adjudicating itself. If it refuses, you are in the wrong directory: run it from the main checkout. Do not write a context file, and do not hand-author the `REVIEW-FINDING-DISPOSITIONS` marker. A worker never runs this command.
+
+When every finding is settled or fixed and the branch should ship as-is (issue #2205), the path is `cw dev-queue approve "$TICKET" -c <CLIENT> --override-must-fix --reason "<the same citations>"` followed by `cw dev-queue requeue "$TICKET" -c <CLIENT> --stage finalize`. A bare `requeue --stage finalize` is not enough: FINALIZE's MUST_FIX Override Verification step re-reads `.claude/review-verdict.json` and parks the row again. The override is bound to the verdict's reviewed SHA and exact MUST_FIX finding set, so a new review round or a new commit voids it. Use it only when every remaining MUST_FIX finding is in one of the two settle buckets above. The reason is recorded on the row and in the audit event, and it is rendered into the PR body's `## Operator override` section.
 
 When `blocker.reason` is anything else: read the Phase E retry fields the Blocker now carries (issue #174) — `retry_eligible`, `retry_delay_seconds`, and `recovery_hint`. When `retry_eligible` is true, recommend re-dispatch after `retry_delay_seconds` (surfacing `recovery_hint`); when it is false or absent, treat as human-escalation and surface verbatim.
 
 #### `plan_pending_approval`
 
-The plan stage finished with friction reports; the user gates whether to proceed. Print the friction highlights and the plan-stage review, then offer:
-- approve → re-dispatch with `--proceed-from-plan` or equivalent;
-- modify → edit the ticket body, re-dispatch from scratch;
-- abandon → close the ticket.
+A Large plan (more than 10 files or 500 lines) parks here. Size alone is not a reason to involve the operator. The `auto_adopt_clean_plan` gate recipe (on by default) releases the park on the next reconcile tick unless the plan touches a forbidden area, the operator set `scope_hint: large`, or the draft is unbound or was already approved once. If it is still parked and the row carries `scope_hint: large`, the operator asked to gate this ticket: surface the plan to them. Otherwise decide it yourself against the ticket's sources of truth:
+
+- **Plan stays within the ticket's agreed scope** (every file and behavior traces to the ticket, its pre-flight resolutions, or a recorded operator decision): approve it with `cw dev-queue approve "$TICKET" -c <CLIENT>`. Approval is the row path: it binds the draft's fingerprint, and the plan stage accepts it on re-dispatch. A prose comment such as "approved" is not evidence and the ticket would only re-park.
+- **Plan grows scope or touches a forbidden area**: that is a scope question. Put it to the operator in one batched `AskUserQuestion` with your recommendation (trim, split into a follow-up ticket, or approve the growth).
+- **Abandon**: only on the operator's word.
 
 #### `review_pending_approval`
 
-Stage 3 review wants the user's eyes. Print `review.should_fix` and `review.must_fix_initial`, plus any health concerns. Offer:
-- approve as-is and ship → invoke `/ship-it` in the worktree;
-- spawn a fix loop → re-dispatch;
-- abandon.
+A Large review parks here after its fix loop. The `auto_approve_clean_review` gate recipe (on by default) releases it when health is PROCEED, no forbidden area was touched, and a reviewer ran, unless the row carries the operator's `scope_hint: large`. If it is still parked, read `health` and `review.*`. A degraded health, a forbidden-area touch, or the operator's `scope_hint: large` is the operator's call: surface it with a recommendation. Otherwise approve with `cw dev-queue approve "$TICKET" -c <CLIENT>`, or requeue the fix loop for an in-scope defect.
 
 #### `scope_exceeded` / `forbidden_area`
 

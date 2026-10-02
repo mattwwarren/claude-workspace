@@ -330,8 +330,8 @@ def _should_gate_for_review_health(last_result: dict[str, object] | None) -> boo
     that shape (``PROCEED`` + ``agents_run: 0``) past this gate to the Stage 4
     approval prompt. ``gate_recipes.auto_approve_clean_review`` (#1194, contract
     Note A9) already treated ``agents_run > 0`` as part of a clean review, but
-    that recipe is opt-in and default-OFF; this *mandatory* gate had no such
-    check. Sharing ``review_health_gate``'s disposition/paused_status
+    that recipe was opt-in and default-OFF at the time; this *mandatory* gate
+    had no such check. Sharing ``review_health_gate``'s disposition/paused_status
     deliberately: both mean "the review did not vouch for this", which is one
     operator-facing class, not two.
 
@@ -417,6 +417,26 @@ def _should_gate_for_signoff(
     """
     config = load_effective_config()
     return resolve_signoff(task, clients, config) is not None
+
+
+def _gate_recipe_will_release(
+    task: TicketTask,
+    last_result: dict[str, object] | None,
+    clients: dict[str, ClientConfig],
+) -> bool:
+    """True iff a gate recipe will release *task*'s Large approval park.
+
+    Rule 1 still parks the row BLOCKED_ON_USER (the recipes act on parked
+    rows), but skips the SESSION_NEEDS_ATTENTION page when this holds: the
+    next reconcile tick clears the gate with no one involved, so paging the
+    operator for it is noise. Lazily loads ``OrchestratorConfig`` exactly as
+    :func:`_should_gate_for_signoff` does, and defers the
+    ``cw.reconcile.gate_recipes`` import because that module imports
+    ``cw.dev_queue``, which reaches back into this package.
+    """
+    from cw.reconcile.gate_recipes import gate_recipe_will_release
+
+    return gate_recipe_will_release(task, last_result, clients, load_effective_config())
 
 
 def resolve_hold_finalize(

@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.63.0] - 2026-10-02
+
+### Changed
+
+- **A ticket's size no longer pages the operator; only a forbidden-area touch, the operator's own `scope_hint: large`, or a degraded review does.** Plans over 10 files or 500 lines ("Large") parked at `plan_pending_approval` for a manual `cw dev-queue approve` even when they were exactly what the operator's ticket defined. Every plan amendment invalidated the approval and asked again. Large reviews parked a second time at `review_pending_approval` after a clean fix loop.
+  - Both gate recipes are now on by default: `gate_recipes_enabled` defaults to `true`, and both per-recipe floors are on.
+  - Their predicates moved to `cw.reconcile.gate_predicates`.
+  - `auto_adopt_clean_plan` releases a Large plan park unless it touches a forbidden area, the row carries operator `scope_hint: large`, the draft has no valid `plan_draft_fingerprint`, or the row already holds an approval for that exact draft (a loop guard). It no longer requires the two signoff markers, which a Large park never writes, so it can now fire on the gate it exists for. An unreviewed plan is released back to PLAN through the #968 same-stage requeue for Plan Quality Review (its ambiguity scan already ran in the round that parked); a reviewed one advances to IMPL. A row with an armed finalize hold is never auto-approved at review and still pages.
+  - `auto_approve_clean_review` no longer blocks on `must_fix_initial` (findings the fix loop already resolved) or `deferred` (recorded out-of-scope follow-ups). It still requires health `PROCEED`, no forbidden-area touch, and at least one reviewer run.
+  - Dispatch no longer emits `session.needs_attention` for a Large park that a recipe will release on the next reconcile tick.
+  - Each release still emits `gate.auto_approved` and posts an audit comment on the ticket. `gate.auto_approved` is no longer forwarded to the operator channel by default; add it to `operator_channel_forward.event_types` to be notified. `gate.auto_approve_failed` and `gate.auto_approve_held` still forward, because each marks a row a person must look at.
+  - Scope growth still parks for the operator through its own detectors: the plan stage's ambiguity scan and Product Manager Reviewer, `plan_scope_drift`, and the codex fix-loop fence.
+  - To restore manual approval of every Large gate, set `gate_recipes_enabled: false` in `orchestrator.yaml`. To do it for one lane or ticket, set `gate_recipes: {<recipe>: false}`.
+- **`cw review settle` runs from the operator's main checkout.** It refused every directory without a `.claude/cw-context.json` reporting `headless: false`, so an orchestrator session acting for the operator was rejected and every settle came back to the operator by hand. It still refuses a dispatch worker (`headless: true`), a context file that is unreadable or has no boolean `headless`, and a linked git worktree with no context file (where a worker whose context was lost could be standing). ADR-0016 invariant 8 is amended to match.
+- **The orchestrator skills decide in-scope gates themselves.**
+  - `/cw-followup` adjudicates codex MUST_FIX findings against the ticket's sources of truth: the ticket body, approved plan, pre-flight resolutions, recorded operator decisions and linked RFCs. It settles an out-of-scope, already-decided or non-reproducible finding with a cited `--reason`, and requeues a real in-scope defect into the fix loop. It escalates to the operator only a finding that raises a product question or would grow scope. Once every remaining MUST_FIX finding is settled on those grounds, it may also ship past them with `cw dev-queue approve --override-must-fix`, giving the same citations as the reason.
+  - `/cw-followup` and `/cw-fanout` approve an in-scope plan gate with `cw dev-queue approve`. This replaces the prose approval comment `/cw-fanout` prescribed, which is not plan-approval evidence and re-parked the ticket. It also replaces the `--proceed-from-plan` flag `/cw-followup` named, which does not exist.
+  - `/orchestrate-sprint`'s decision-ownership table is updated to match.
+
 ## [1.62.1] - 2026-10-01
 
 ### Fixed

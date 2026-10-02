@@ -354,7 +354,7 @@ def _plan_body_signoff_ok(body: str) -> bool:
     marker) over both markers rather than a bare ``marker in body`` substring
     check, which a merely-opened, never-closed marker comment would
     incorrectly satisfy (#1567). Shared by :func:`_plan_is_reviewed` here and
-    ``cw.reconcile.gate_recipes._clean_plan_snapshot``'s presence pre-check.
+    ``cw.reconcile.gate_recipes._clean_plan_snapshot``'s ``plan_reviewed`` read.
 
     Distinct from ``cw.gh._comment_has_marker``: that helper selects *which*
     GitHub comment on a ticket is the plan-of-record (matching a marker

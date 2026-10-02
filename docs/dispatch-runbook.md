@@ -485,8 +485,8 @@ directly (see §6 in [`session-disposition.md`](session-disposition.md)).
 | `no_op` | Done. Ticket already satisfied; close as completed. |
 | `ambiguities_pending_resolution` | Resolve the ambiguities (post a `Pre-flight Resolutions` comment on the issue), then re-dispatch (`cw dev-queue requeue`). |
 | `premises_pending_verification` | Verify the flagged premises, record results on the issue, re-dispatch. |
-| `plan_pending_approval` | Only parks for **large** (or unresolved) scope tier — a small-tier plan advances unattended. Read the plan comment, verify it is faithful to the ticket, then `cw dev-queue approve <T> -c <client>`. The approval is recorded on the dev-queue row (`plan_approved_at`) and reaches the re-dispatched plan stage via `queue_metadata` on every tracker; on GitHub you may additionally pass `--post-marker` to post an audit-only `<!-- auto-dev-plan-approved: <sha> -->` comment binding the approval to the approved draft's fingerprint (the unbound `<!-- auto-dev-plan-approved -->` when no valid fingerprint is recorded). Approving a changed draft posts a fresh marker; re-approving the same draft does not duplicate it. Nothing reads the marker back as approval evidence — the evidence is the row's `plan_approved_at` and `plan_approved_fingerprint`. The flag is a no-op on Linear, where `gh` cannot reach the ticket. Advances to impl only once the plan is quality-reviewed (both signoff markers present); otherwise `approve` re-queues at plan stage to run Plan Quality Review first (#968). |
-| `review_pending_approval` | Only parks for large (or unresolved) tier. Verify the pushed branch diff and gates, then `cw dev-queue approve` to advance to FINALIZE (which creates the PR) — or ship manually (PR + auto-merge) and cancel the task. With signoff configured, `approve` re-routes to `AWAITING_OPERATOR_SIGNOFF`; approve again (§2). |
+| `plan_pending_approval` | Usually released automatically by the `auto_adopt_clean_plan` gate recipe (on by default) unless it touches a forbidden area or carries `scope_hint: large`. If it stays parked: only parks for **large** (or unresolved) scope tier — a small-tier plan advances unattended. Read the plan comment, verify it is faithful to the ticket, then `cw dev-queue approve <T> -c <client>`. The approval is recorded on the dev-queue row (`plan_approved_at`) and reaches the re-dispatched plan stage via `queue_metadata` on every tracker; on GitHub you may additionally pass `--post-marker` to post an audit-only `<!-- auto-dev-plan-approved: <sha> -->` comment binding the approval to the approved draft's fingerprint (the unbound `<!-- auto-dev-plan-approved -->` when no valid fingerprint is recorded). Approving a changed draft posts a fresh marker; re-approving the same draft does not duplicate it. Nothing reads the marker back as approval evidence — the evidence is the row's `plan_approved_at` and `plan_approved_fingerprint`. The flag is a no-op on Linear, where `gh` cannot reach the ticket. Advances to impl only once the plan is quality-reviewed (both signoff markers present); otherwise `approve` re-queues at plan stage to run Plan Quality Review first (#968). |
+| `review_pending_approval` | Usually released automatically by the `auto_approve_clean_review` gate recipe (on by default) unless health is degraded, a forbidden area is touched, or it carries `scope_hint: large`. If it stays parked: only parks for large (or unresolved) tier. Verify the pushed branch diff and gates, then `cw dev-queue approve` to advance to FINALIZE (which creates the PR) — or ship manually (PR + auto-merge) and cancel the task. With signoff configured, `approve` re-routes to `AWAITING_OPERATOR_SIGNOFF`; approve again (§2). |
 | `merge_pending` | PR created but CI/merge gate not yet cleared (#899). Not a failure — the task parks with `pr_url` preserved; monitor/merge the PR. Do **not** re-dispatch. |
 | `scope_exceeded` | Scope rejection; close the ticket or relax the constraint, then re-dispatch. |
 | `forbidden_area` | Forbidden-area rejection; update constraints or reroute. |
@@ -820,8 +820,7 @@ is a deliberate non-goal here (follow-up F1).
 
 **Hand-authoring the marker is unsupported (#2210).** `cw review settle` is
 the only supported producer, because it is the only path that records
-provenance and refuses to run anywhere it cannot prove is an operator's own
-interactive session. The reader enforces
+provenance and refuses to run inside a dispatch worker. The reader enforces
 that: a disposition record is **applied only when it carries the full
 provenance set** — the finding's identity, an `actor`, a `recorded_at` that
 parses as a UTC instant, a `reviewed_sha`, and a non-empty rationale. A record
@@ -863,9 +862,9 @@ the `reviewed_sha` it was raised against, so nothing needs normalizing or
 editing:
 
 ```bash
-# Save the payload from the review comment to settle.json, then, ON YOUR OWN
-# MACHINE, from inside an interactive cw session worktree (the command refuses
-# anywhere it cannot read a `.claude/cw-context.json` reporting headless:false):
+# Save the payload from the review comment to settle.json, then run this from
+# your main checkout or an interactive cw session worktree (the command refuses
+# inside a dispatch worker; see below):
 uv run cw review settle settle.json \
   --reason "intentional tradeoff, see ADR-0012" \
   --ticket "$TICKET" --out marker.md
@@ -877,26 +876,39 @@ recorded rationale is the silent silencing this record exists to prevent. It
 applies to every entry; an entry's own `rationale` overrides it, so several
 findings can be settled for different reasons in one call.
 
-**`cw review settle` refuses to run anywhere it cannot prove is your own
-interactive session — run it from a `cw` session worktree.** A settled finding
-is never re-raised, so the pipeline must not be able to settle its own
+**`cw review settle` refuses to run inside a dispatch worker.** A settled
+finding is never re-raised, so the pipeline must not be able to settle its own
 reviewer's findings. The command looks for the nearest
-`.claude/cw-context.json` (searched upward from cwd) and **proceeds only when
-it finds one reporting `headless: false`**, which is what `cw` stamps for an
-interactive session. Everything else exits non-zero and writes nothing — no
-marker, no `--out` file, no event:
+`.claude/cw-context.json` (searched upward from cwd), which `cw` stamps for
+every session it spawns:
 
-- `headless: true` — a dispatch worker.
-- no `.claude/cw-context.json` in this directory or any parent, an unreadable
-  or malformed one, one with no `headless` key, or a `headless` that is not a
-  boolean — the context is *indeterminate*, and "I cannot tell" is not
-  evidence that you are at the keyboard.
+- `headless: false` — an interactive `cw` session: proceeds.
+- `headless: true` — a dispatch worker: refuses.
+- an unreadable or malformed file, one with no `headless` key, or a `headless`
+  that is not a boolean: refuses, because a dispatch context it cannot read
+  could be a worker's.
+- no context file at all, inside a linked git worktree: refuses. Workers run
+  in linked worktrees, so a worktree whose context is missing cannot be told
+  apart from a worker whose context was lost.
+- no context file at all, anywhere else (your main checkout, or a directory
+  outside any repository): proceeds. This is where you, or an orchestrator
+  session acting for you, run it.
 
-Practically: **your plain checkout of the repo has no `.claude/cw-context.json`,
-so `cw review settle` will refuse there.** Run it from an interactive `cw`
-session worktree (`cw start <client>` / `cw switch <client>` puts you in one),
-or any directory beneath one. There is no bypass flag. If a worker hands you a
-payload, run the command yourself.
+Ahead of those cwd checks, a `$TMPDIR` inside a headless worker's worktree
+refuses too: every cw executor points a worker's `TMPDIR` there, so a worker
+that changes directory is still recognized. A refusal exits non-zero and
+writes nothing — no marker, no `--out` file, no event. There is no bypass
+flag. If a worker hands you a payload, run the
+command yourself from your main checkout.
+
+**Who decides what to settle.** The orchestrator (`/cw-followup`) adjudicates
+each blocking finding against the ticket's sources of truth: the ticket body,
+the approved plan, pre-flight resolutions, recorded operator decisions and
+linked RFCs. It settles a finding that asks for out-of-scope or
+already-decided work, or that does not reproduce against the code, with
+`--reason` citing the source or `file:line`. It requeues a real in-scope
+defect into the fix loop, and escalates to you only a finding that raises a
+product question or would grow scope beyond the plan.
 
 **Post the marker as its own comment, unedited.** The reader recognises a
 disposition record by *position* as well as shape: the block must open the

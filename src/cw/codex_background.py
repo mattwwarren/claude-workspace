@@ -269,8 +269,8 @@ def _resolve_codex_fix_loop_enabled(
     return config.default_codex_fix_loop_enabled
 
 
-#: The hardcoded-off floor for the codex review tiers (#2210), mirroring
-#: ``reconcile.gate_recipes._DEFAULT_GATE_RECIPE_ENABLED``. A lane that names
+#: The hardcoded-off floor for the codex review tiers (#2210), the shape of
+#: ``reconcile.gate_recipes._DEFAULT_GATE_RECIPE_ENABLED`` but off. A lane that names
 #: no tier lands here, so a tier can never arm by accident or by omission.
 _DEFAULT_CODEX_REVIEW_TIER_ENABLED: dict[str, bool] = {
     CODEX_TIER_CLAIM_SUPPRESSION: False,
