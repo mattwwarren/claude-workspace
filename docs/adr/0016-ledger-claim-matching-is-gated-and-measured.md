@@ -66,21 +66,27 @@ not amended or superseded; the two seams stay independent.
    (`actor`, a CLI-stamped UTC `recorded_at`, the verbatim `summary`, the
    `reviewed_sha` the finding was raised against), emits one
    `review.finding_settled` event per settled finding, and **refuses to run
-   anywhere it cannot prove is an operator's own interactive session**. There
+   inside a dispatch worker, or anywhere a worker cannot be ruled out**. There
    is no bypass flag: a control an agent can switch off is not a control. The
-   refusal is checked before any output, any file write and any event, and it
-   **fails CLOSED** (round 4): the only state that proceeds is a discovered
-   nearest `.claude/cw-context.json` whose `headless` is the JSON boolean
-   `false`. A worker (`headless: true`) refuses, and so does every
-   indeterminate answer — no context file above cwd, an unreadable or
-   malformed one, one with no `headless` key, one whose `headless` is not a
-   bool. `find_cw_context` cannot distinguish "there is no dispatch context
-   here" from "the dispatch context could not be read", and the earlier
-   fail-open posture read that ambiguity as "operator's own machine", so a
-   worker with a missing or truncated context could settle its own reviewer's
-   findings. Operationally this means `cw review settle` must be run from an
-   interactive `cw` session worktree (or any directory beneath one); a plain
-   checkout of the repo carries no context file and is refused. This is the
+   refusal is checked before any output, any file write and any event. It
+   proceeds from a nearest `.claude/cw-context.json` reporting
+   `headless: false` (an interactive session), and from a directory with no
+   context file at all that is not a linked git worktree (the operator's main
+   checkout, or a directory outside any repository). It refuses a worker
+   (`headless: true`), a context file that exists but is unreadable,
+   malformed, has no `headless` key or a non-bool `headless`, and a linked
+   git worktree with no context file. Round 4 refused every directory with no
+   context file, because `find_cw_context` cannot distinguish "there is no
+   dispatch context here" from "the dispatch context could not be read", so
+   a worker with a missing or truncated context could have settled its own
+   reviewer's findings. The guard now tells those apart directly: a context
+   file that exists but cannot be read still refuses, and a missing one
+   refuses wherever a worker could be standing, which is a linked worktree.
+   Refusing the main checkout as well bought no safety and bounced every
+   orchestrator-run settle (the operator's delegate, adjudicating findings
+   against the ticket's sources of truth) back to the operator by hand. The
+   self-suppression risk this invariant exists for is a *worker* settling its
+   own reviewer's findings; that stays refused. This is the
    mirror of
    invariant 3: #2210 stops a settled finding being wrongly **re-raised**, and
    an unaudited settle path would let one be wrongly **silenced**, which is the

@@ -1026,17 +1026,19 @@ concierge_recoveries: {}
 #   cancelled_row_restore: true
 
 # Gate-recipe automation master switch (RFC 0009, GitHub #1065/#1067). Default
-# false, mirroring concierge_enabled's fail-safe posture: a gate recipe
-# auto-clears an approval gate with NO human review, so nothing fires without
-# an explicit operator opt-in. This is a hard top-level short-circuit -- when
-# false, the whole gate-recipes module is a no-op regardless of any per-lane
-# or per-ticket enablement. When true, each recipe is still gated per-lane /
-# per-ticket via the 3-tier resolution below (both recipes default OFF). See
-# Gate Recipe Enablement below.
-gate_recipes_enabled: false
+# true: a ticket's size alone (the Large tier, >10 files or >500 lines) never
+# pages the operator, so a Large plan/review approval park is released
+# automatically unless it touches a forbidden area, the operator set
+# scope_hint: large, or the review's health is not PROCEED. Set false to
+# restore manual approval of every Large gate -- a hard top-level
+# short-circuit, the whole gate-recipes module becomes a no-op regardless of
+# any per-lane or per-ticket enablement. When true, each recipe is still
+# resolved per-lane / per-ticket via the 3-tier resolution below (both recipes
+# default ON). See Gate Recipe Enablement below.
+gate_recipes_enabled: true
 
 # Review-recipe automation master switch (RFC 0010, GitHub #1096/#1097).
-# Default false, mirroring gate_recipes_enabled's fail-safe posture: when
+# Default false, mirroring concierge_enabled's fail-safe posture: when
 # true, enabled review recipes react to PR review/CI/merge feedback with NO
 # human in the loop (e.g. dispatching an /address-review session). Per-recipe
 # enablement is still resolved per-lane / per-ticket -- see Review Recipe
@@ -1044,7 +1046,7 @@ gate_recipes_enabled: false
 review_recipes_enabled: false
 
 # Stop-hook abandoned-exit park master switch (GitHub #2135). Default false,
-# mirroring gate_recipes_enabled's fail-safe posture: when true, `cw
+# mirroring concierge_enabled's fail-safe posture: when true, `cw
 # signal-stop` may move a dev-queue row RUNNING -> BLOCKED_ON_USER on the
 # worker's recorded park marker alone, with NO human in the loop. This is a
 # hard top-level short-circuit -- when false, a sentinel-less Stop defers
@@ -1054,7 +1056,7 @@ review_recipes_enabled: false
 park_on_abandoned_exit_enabled: false
 
 # Codex review claim-match suppression master switch (GitHub #2210). Default
-# false, mirroring gate_recipes_enabled's fail-safe posture. Must be paired
+# false, mirroring concierge_enabled's fail-safe posture. Must be paired
 # with `codex_review_tiers: {claim_suppression: true}` on the lane -- both, or
 # nothing suppresses. Unlike the flags above it does NOT make the feature
 # fully inert while off: for any ticket that has an adjudication ledger, the
@@ -1285,36 +1287,55 @@ cw dev-queue requeue GEN-123 --client my-project --stage impl --regress
 
 ## Gate Recipe Enablement (RFC 0009 Phase 4)
 
-Gate recipes (`cw.reconcile.gate_recipes`) auto-clear an approval gate with **no
-human review** when a fixed predicate holds — `auto_approve_clean_review`
-auto-approves a clean review, `auto_adopt_clean_plan` auto-adopts a
-double-signed plan. Whether a recipe fires for a given ticket is resolved with
-3-tier precedence, highest first:
+Gate recipes (`cw.reconcile.gate_recipes`) clear a Large-tier approval gate
+with **no human review** unless a predicate names a reason a person is needed.
+A ticket's size alone (more than 10 files or more than 500 lines) is not one:
+the ticket the operator wrote is what authorizes the work.
+
+- `auto_approve_clean_review` releases `review_pending_approval` when the
+  review's health recommendation is `PROCEED`, no forbidden area was touched,
+  and at least one reviewer ran. MUST_FIX findings the fix loop already
+  resolved, and deferred findings, do not block it.
+- `auto_adopt_clean_plan` releases `plan_pending_approval` when no forbidden
+  area is touched, the draft carries a valid `plan_draft_fingerprint` the
+  approval binds to, and the row does not already hold an approval for that
+  exact draft (the loop guard). A reviewed plan advances to IMPL; an
+  unreviewed one goes back to PLAN for its full ambiguity scan and quality
+  review, which can still park for a real product or scope question.
+
+Neither recipe releases a row whose operator `scope_hint` is `large` ("gate
+this ticket"), or a row that is not at the gate's own stage. Dispatch does not
+page (`session.needs_attention`) for a Large park a recipe will release on the
+next reconcile tick. Each release emits `gate.auto_approved` and posts an
+audit comment on the ticket.
+
+Whether a recipe fires for a given ticket is resolved with 3-tier precedence,
+highest first:
 
 1. **Per-ticket** — a `gate_recipes` map on the `TicketTask` (e.g.
-   `{auto_approve_clean_review: true}`). There is **no CLI flag** for this tier
-   yet; it is a data-model surface only.
+   `{auto_approve_clean_review: false}`). There is **no CLI flag** for this
+   tier yet; it is a data-model surface only.
 2. **Per-lane** — a `gate_recipes` map on a `LaneConfig` entry (see the `lanes`
    field above).
-3. **Hardcoded default** — both recipes default **OFF**. A recipe absent from
-   the ticket map and the lane map is disabled.
+3. **Hardcoded default** — both recipes default **ON**. A recipe absent from
+   the ticket map and the lane map is enabled.
 
 Independently, the module-wide master switch `gate_recipes_enabled` (in
-`orchestrator.yaml`, default `false`) is a hard top-level short-circuit: when
-`false`, **no** recipe fires regardless of any per-lane or per-ticket setting.
-The per-lane resolution above only matters once the master switch is `true`.
+`orchestrator.yaml`, default `true`) is a hard top-level short-circuit: when
+`false`, **no** recipe fires regardless of any per-lane or per-ticket setting,
+and every Large gate pages for a manual `cw dev-queue approve`.
 
 ```yaml
-# clients.yaml — enable auto-approve on one lane, leave the other off
+# clients.yaml — keep manual Large-gate approval on one lane only
 clients:
   my-project:
     workspace_path: /path/to/repo
     lanes:
-      - name: fastlane
+      - name: supervised
         gate_recipes:
-          auto_approve_clean_review: true
-          auto_adopt_clean_plan: true
-      - name: default   # both recipes stay off (hardcoded default)
+          auto_approve_clean_review: false
+          auto_adopt_clean_plan: false
+      - name: default   # both recipes on (hardcoded default)
 ```
 
 Unrecognized recipe keys fail loud at config-load time (a typo like

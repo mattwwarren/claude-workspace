@@ -2059,9 +2059,12 @@ class TestRenderSettlePayloads:
             _extract_settle_payloads(comment)[0]["entries"][0]["reviewed_sha"] == "sha"
         )
 
-    def test_settle_section_states_operator_machine_only(self) -> None:
+    def test_settle_section_states_where_it_runs_and_the_worker_refusal(
+        self,
+    ) -> None:
         comment = self._comment(_make_finding(severity="MUST_FIX"))
-        assert "own machine" in comment
+        assert "main checkout" in comment
+        assert "refuses to run inside a dispatch worker" in comment
         assert "--reason" in comment
 
 

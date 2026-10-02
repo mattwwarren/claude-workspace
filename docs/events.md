@@ -2436,11 +2436,10 @@ opposite ordering to #1617's save-then-emit rule, which governs a *state
 mutation* whose event must not claim something that did not land; here the
 event **is** the safety mechanism.
 
-`cw review settle` refuses to run anywhere it cannot prove is an operator's
-own interactive session — a dispatch worker, or a directory whose
-`.claude/cw-context.json` cannot be resolved at all (see ADR-0016 invariant 8,
-which fails CLOSED as of #2210 round 4) — so no event of this type can
-originate from one. A refused run — blank `--reason`, unresolvable gh
+`cw review settle` refuses to run inside a dispatch worker, or anywhere a
+worker cannot be ruled out — an unreadable `.claude/cw-context.json`, or a
+linked git worktree with none (see ADR-0016 invariant 8) — so no event of this
+type can originate from one. A refused run — blank `--reason`, unresolvable gh
 identity, an entry with no reviewed sha, the session refusal, or a failed
 audit emit — emits no marker and writes nothing.
 
