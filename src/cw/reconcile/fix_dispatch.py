@@ -40,8 +40,11 @@ that has not opted in. Invoked unconditionally as a post-pass from
 unlike its siblings called from inside ``core._run_terminal_backstops_and_sweeps``
 (which run under that lock), this module's ``dispatch_fix_agent`` call reaches
 ``spawn_create_impl``'s own ``sessions_lock()`` acquisition, which cannot nest.
-The detect/act/deferred-post-lock-dispatch *shape* is still borrowed from
-``review_recipes.address_review``; only the gating and lock placement differ.
+The detect/act/deferred-post-lock-dispatch *shape* is borrowed from
+``review_recipes.address_review``, whose dispatch jobs are likewise executed
+post-``sessions_lock`` since #1229 (via the caller-owned ``DeferredReviewDispatch``
+sink ``reconcile()`` drains from a ``finally``); only the gating and where the
+detect/act runs differ.
 
 The #2064 hoist also runs this module one step later, per tick, relative to
 ``cw.reconcile.escalation.run_escalation_sweep`` (previously before it inside
@@ -738,9 +741,10 @@ def _act_on_pending_fix_dispatches(
     - ``sessions_lock()`` is NOT nested only because the call site
       (``core.reconcile()``) invokes ``run_fix_dispatch`` after its own
       ``sessions_lock()`` releases (#2064) — that guarantee lives at the call
-      site, not in this function. ``address_review._dispatch_address_review``'s
-      otherwise-similar claim does NOT hold for ``sessions_lock``; see that
-      module's docstring.
+      site, not in this function. ``address_review._dispatch_address_review``
+      has the same call-site guarantee since #1229
+      (``review_recipes.core.dispatch_deferred_review_jobs``, run from
+      ``core.reconcile()`` after the lock releases).
 
     ``dispatch_fix_agent`` itself defers the ``cw.spawn`` import, so this module
     needs no function-local import of its own.
