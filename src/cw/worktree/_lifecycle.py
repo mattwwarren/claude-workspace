@@ -40,9 +40,13 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 
-# Pattern appended to $GIT_COMMON_DIR/info/exclude so ephemeral per-session
-# .cw/ artifacts are invisible to git status without touching .gitignore.
-_CW_EXCLUDE_PATTERN = ".cw/"
+# Patterns appended to $GIT_COMMON_DIR/info/exclude so cw runtime artifacts are
+# invisible to git status and to ``git add -A`` without touching .gitignore:
+# the ephemeral per-session ``.cw/`` directory and the dispatch-written
+# ``.claude/cw-context.json`` plus its ``.lock`` sibling (#2447). The embedded
+# slash anchors the second pattern to the worktree root, and the trailing ``*``
+# covers the lock file.
+_CW_EXCLUDE_PATTERNS = (".cw/", ".claude/cw-context.json*")
 # Matches git's "fatal: '<branch>' is already used by worktree at '<path>'"
 # line so create_worktree can name the colliding worktree in a targeted error
 # (#2034) instead of surfacing git's bare stderr.
@@ -50,7 +54,11 @@ _WORKTREE_HELD_BY_RE = re.compile(r"already used by worktree at '([^']+)'")
 
 
 def _register_cw_exclude(git_cwd: Path) -> None:
-    """Idempotently append .cw/ to $GIT_COMMON_DIR/info/exclude.
+    """Idempotently append the cw exclude patterns to $GIT_COMMON_DIR/info/exclude.
+
+    Registers every pattern in :data:`_CW_EXCLUDE_PATTERNS`, appending only
+    those not already present, so a repo whose exclude file predates a newly
+    added pattern is topped up rather than skipped.
 
     Uses git rev-parse --git-common-dir so the write targets the shared
     object-store directory even when called from within a worktree. Never
@@ -74,11 +82,13 @@ def _register_cw_exclude(git_cwd: Path) -> None:
         exclude_path = common_dir / "info" / "exclude"
         exclude_path.parent.mkdir(parents=True, exist_ok=True)
         existing = exclude_path.read_text() if exclude_path.exists() else ""
-        if _CW_EXCLUDE_PATTERN in existing.splitlines():
+        present = set(existing.splitlines())
+        missing = [p for p in _CW_EXCLUDE_PATTERNS if p not in present]
+        if not missing:
             return
         separator = "" if not existing or existing.endswith("\n") else "\n"
         with exclude_path.open("a") as fh:
-            fh.write(f"{separator}{_CW_EXCLUDE_PATTERN}\n")
+            fh.write(separator + "".join(f"{p}\n" for p in missing))
     except (WorktreeError, OSError) as exc:
         _log.warning("_register_cw_exclude: failed for %s: %s", git_cwd, exc)
 
