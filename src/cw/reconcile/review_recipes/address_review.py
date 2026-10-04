@@ -11,9 +11,10 @@ whose review came back ``changes_requested`` by dispatching an
 
 **P2 (GitHub #1097):** the act phase. ``_act_address_review`` re-validates each
 candidate under ``dev_queue_lock()``, emits ``PR_ACTION_TAKEN`` (durably, BEFORE
-the spawn), and then — strictly after the lock releases — dispatches an
-``/address-review`` session via ``spawn_create_impl``. A dispatch ``CwError`` or
-a precondition anomaly (unparseable PR url, unresolvable client, missing
+the spawn), and returns a deferred :class:`_DispatchJob`; ``reconcile()`` then —
+strictly after BOTH ``dev_queue_lock`` and ``sessions_lock`` release (#1229) —
+dispatches an ``/address-review`` session via ``spawn_create_impl``. A dispatch
+``CwError`` or a precondition anomaly (unparseable PR url, unresolvable client, missing
 worktree) emits ``PR_ACTION_FAILED`` instead. Emit-before-dispatch is
 structural: the event fires inside the lock, every spawn strictly afterward.
 GitHub #1206 adds a one-shot ``address_review_fired_at`` latch, stamped inside
@@ -207,20 +208,14 @@ def _dispatch_address_review(job: _DispatchJob) -> str | None:
     ``PR_ACTION_FAILED`` correction and returns ``None`` — one candidate's
     failure never aborts the loop.
 
-    That "never nests the flock" guarantee covers ``dev_queue_lock`` only.
-    ``sessions_lock`` is a separate, NOT-covered lock: this spawn runs from
-    inside ``run_review_recipes``, which still executes under
-    ``_run_terminal_backstops_and_sweeps``'s ``sessions_lock()`` hold
-    (unhoisted, unlike ``fix_dispatch.run_fix_dispatch`` post-#2064). Every
-    call here therefore reenters ``sessions_lock()`` inside
-    ``spawn_create_impl`` and is silently absorbed by the broad ``except
-    CwError`` below — see ``sessions_lock()``'s own docstring
-    (``config.py:284-304``) for "the guard documents tolerance of this
-    caller," and ``SessionsLockReentryError``'s class docstring
-    (``exceptions.py:375-390``) for "this is a ``CwError`` subclass, which is
-    why ``except CwError`` swallows it." #2064 is where the sibling bug in
-    ``fix_dispatch`` was first diagnosed and fixed; this module's own
-    reentry is unchanged — no behavior change here, docstring only.
+    ``sessions_lock`` is a separate lock from ``dev_queue_lock``, and
+    ``spawn_create_impl`` acquires it. Since #1229 this function is called only
+    from ``review_recipes.core.dispatch_deferred_review_jobs``, which
+    ``cw.reconcile.core.reconcile()`` invokes AFTER its own ``sessions_lock()``
+    hold releases (the same hoist ``fix_dispatch.run_fix_dispatch`` got in
+    #2064) — so the spawn no longer trips ``SessionsLockReentryError``. Do not
+    call it from inside a ``sessions_lock()`` hold: the guard would raise and
+    the ``except CwError`` below would silently swallow it.
     """
     from cw.spawn import spawn_create_impl
 
@@ -259,8 +254,8 @@ def _act_address_review(
     now: datetime | None = None,
     config: OrchestratorConfig | None = None,
     repeat_fire_counts: dict[tuple[str, str, str], int] | None = None,
-) -> list[str]:
-    """Act phase: re-validate under lock, emit PR_ACTION_TAKEN, then dispatch.
+) -> list[_DispatchJob]:
+    """Act phase: re-validate under lock, emit PR_ACTION_TAKEN, defer dispatch.
 
     Mirrors ``gate_recipes._act_auto_approve_review``'s shape (lock / re-load /
     re-check / emit-before-action / deferred side-effect after lock release).
@@ -279,7 +274,9 @@ def _act_address_review(
     perform this same kind of write). Every ``spawn_create_impl`` runs strictly
     after the lock releases, so the dispatch never nests the flock
     (guaranteeing no self-deadlock) and ``PR_ACTION_TAKEN`` is always durable
-    before its spawn.
+    before its spawn. "After the lock releases" means BOTH locks since #1229:
+    ``dev_queue_lock`` here, and ``sessions_lock`` via the caller deferral
+    below.
 
     ``clients`` is the caller's snapshot (mirrors ``run_gate_recipes`` loading
     ``load_effective_clients()`` once and threading it down) rather than a
@@ -287,8 +284,13 @@ def _act_address_review(
     has no locking relationship to the dev-queue store, so re-reading it there
     only extends the flock's hold time for no consistency benefit.
 
-    Returns the acted ticket_ids (those whose ``/address-review`` dispatch
-    succeeded).
+    This function does NOT dispatch (#1229): it returns the deferred jobs and
+    ``reconcile()`` runs them via ``_dispatch_address_review`` after
+    ``sessions_lock`` releases, because ``spawn_create_impl`` re-acquires that
+    lock and would otherwise raise ``SessionsLockReentryError``.
+
+    Returns the deferred dispatch jobs (one per candidate that passed
+    re-validation); the caller owns executing them.
     """
     resolved_now = now if now is not None else datetime.now(UTC)
     # Keyed on (ticket_id, client): ticket_id alone is a per-repo GitHub issue
@@ -320,9 +322,4 @@ def _act_address_review(
                 changed = True
         if changed:
             save_dev_queue(store)
-    acted: list[str] = []
-    for job in dispatch_jobs:
-        ticket_id = _dispatch_address_review(job)
-        if ticket_id is not None:
-            acted.append(ticket_id)
-    return acted
+    return dispatch_jobs

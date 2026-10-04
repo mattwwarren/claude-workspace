@@ -68,9 +68,8 @@ from cw.reconcile.review_recipes import (
     RECIPE_ESCALATE_MERGE_BLOCK,
     RECIPE_FIRED_AT_GETTERS,
     RECIPE_REQUEST_REVIEWER,
+    DeferredReviewDispatch,
     ReviewRecipeCandidate,
-    _act_address_review,
-    _act_auto_fix_ci,
     _act_escalate_merge_block,
     _act_request_reviewer,
     _detect_address_review,
@@ -80,12 +79,21 @@ from cw.reconcile.review_recipes import (
     _detect_request_reviewer,
     _record_pr_action_taken,
     _shared,
+    dispatch_deferred_review_jobs,
     resolve_outbound_consent_allowed,
     resolve_review_recipe_enabled,
-    run_review_recipes,
+)
+from cw.reconcile.review_recipes import (
+    _act_address_review as _prepare_address_review_jobs,
+)
+from cw.reconcile.review_recipes import (
+    _act_auto_fix_ci as _prepare_auto_fix_ci_jobs,
 )
 from cw.reconcile.review_recipes import (
     _detect_repeat_fire_counts as _real_detect_repeat_fire_counts,
+)
+from cw.reconcile.review_recipes import (
+    run_review_recipes as _run_review_recipes_deferred,
 )
 from cw.review_strategy import ReviewStrategy
 from cw.worktree import FetchOutcome, FetchResult, create_worktree, worktree_path_for
@@ -147,6 +155,47 @@ def _enabling_clients() -> dict[str, ClientConfig]:
             LaneConfig(name="default", review_recipes={RECIPE_ADDRESS_REVIEW: True})
         )
     }
+
+
+def _act_address_review(
+    candidates: list[ReviewRecipeCandidate], **kwargs: Any
+) -> list[str]:
+    """Act phase + immediate dispatch of the returned jobs; the acted ticket_ids.
+
+    Since #1229 the real ``_act_address_review`` only prepares jobs
+    (``list[_DispatchJob]``); ``reconcile()`` executes them after
+    ``sessions_lock`` releases. This file-local wrapper shadows the real name
+    for the tests that exercise act-phase + dispatch behavior end to end
+    (emit-before-dispatch, latch, failure trail) without a full ``reconcile()``
+    -- it runs the SAME ``dispatch_deferred_review_jobs`` code ``reconcile()``
+    does. The real act-phase return shape is pinned directly by the
+    ``_prepare_address_review_jobs`` tests below.
+    """
+    jobs = _prepare_address_review_jobs(candidates, **kwargs)
+    return dispatch_deferred_review_jobs(
+        DeferredReviewDispatch(address_review=tuple(jobs))
+    )
+
+
+def _act_auto_fix_ci(
+    candidates: list[ReviewRecipeCandidate], **kwargs: Any
+) -> list[str]:
+    """auto_fix_ci twin of :func:`_act_address_review` (see its docstring)."""
+    jobs = _prepare_auto_fix_ci_jobs(candidates, **kwargs)
+    return dispatch_deferred_review_jobs(
+        DeferredReviewDispatch(auto_fix_ci=tuple(jobs))
+    )
+
+
+def run_review_recipes(*, config: OrchestratorConfig) -> list[str]:
+    """``run_review_recipes`` + immediate dispatch; the full acted ticket_ids.
+
+    Same shadowing rationale as :func:`_act_address_review`: the real function
+    returns ``(acted, deferred)`` since #1229. Order matches the pre-#1229
+    return (address_review, auto_fix_ci, then the inline recipes).
+    """
+    acted, deferred = _run_review_recipes_deferred(config=config)
+    return dispatch_deferred_review_jobs(deferred) + acted
 
 
 @pytest.mark.parametrize(
@@ -253,6 +302,103 @@ def test_run_review_recipes_loads_from_dev_queue(
     after_task = load_dev_queue().tasks[0]
     assert after_task.address_review_fired_at is not None
     assert after_task.model_copy(update={"address_review_fired_at": None}) == task
+
+
+def test_run_review_recipes_master_switch_off_defers_nothing() -> None:
+    """The real (unwrapped) entry point's switch-off return shape (#1229)."""
+    assert _run_review_recipes_deferred(config=OrchestratorConfig()) == (
+        [],
+        DeferredReviewDispatch(),
+    )
+
+
+def test_act_phases_return_jobs_and_dispatch_nothing(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1229: the two act phases prepare (PR_ACTION_TAKEN + latch) and hand the
+    dispatch back as jobs -- no spawn, no dispatch tick, until the caller runs
+    them via dispatch_deferred_review_jobs."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    ticks: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "cw.dispatch.run_dispatch_loop", lambda **kwargs: ticks.append(kwargs)
+    )
+    ar_task = _cr_task(
+        ticket_id="GEN-1",
+        review_recipes={RECIPE_ADDRESS_REVIEW: True},
+        worktree_path=make_git_repo("deferred-ar"),
+    )
+    ci_task = _cr_task(
+        ticket_id="GEN-2",
+        review_recipes={RECIPE_AUTO_FIX_CI: True},
+        pr_state=_pr_state(
+            state="OPEN", attention_state="ci_failing", failing_checks=["lint"]
+        ),
+    )
+    save_dev_queue(DevQueueStore(tasks=[ar_task, ci_task]))
+
+    acted, deferred = _run_review_recipes_deferred(config=_config())
+
+    assert acted == []
+    assert [j.ticket_id for j in deferred.address_review] == ["GEN-1"]
+    assert [j.ticket_id for j in deferred.auto_fix_ci] == ["GEN-2"]
+    assert stub_spawn.calls == []
+    assert ticks == []
+    taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+    assert {e.correlation_id for e in taken} == {"GEN-1", "GEN-2"}
+    tasks = {t.ticket_id: t for t in load_dev_queue().tasks}
+    assert tasks["GEN-1"].address_review_fired_at is not None
+    assert tasks["GEN-2"].auto_fix_ci_fired_at is not None
+
+    # Executing the jobs is what spawns / ticks, in address_review -> auto_fix_ci order.
+    assert dispatch_deferred_review_jobs(deferred) == ["GEN-1", "GEN-2"]
+    assert [c["prompt"] for c in stub_spawn.calls] == ["/address-review 42"]
+    assert ticks == [{"once": True, "client": "acme", "emit": None}]
+
+
+def test_dispatch_deferred_review_jobs_isolates_a_failing_job(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A job whose dispatch raises is logged + PR_ACTION_FAILED'd and skipped;
+    its sibling still dispatches and only the success is reported acted."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    tasks = [
+        _cr_task(
+            ticket_id=ticket_id,
+            pr_url=f"https://github.com/acme/widgets/pull/{number}",
+            review_recipes={RECIPE_ADDRESS_REVIEW: True},
+            worktree_path=make_git_repo(f"iso-{ticket_id}"),
+        )
+        for ticket_id, number in (("GEN-1", 41), ("GEN-2", 42))
+    ]
+    save_dev_queue(DevQueueStore(tasks=tasks))
+    jobs = _prepare_address_review_jobs(
+        [_candidate_for(t) for t in tasks], clients=load_effective_clients()
+    )
+
+    def _fail_first(**kwargs: Any) -> None:
+        if kwargs["prompt"].endswith(" 41"):
+            msg = "spawn refused"
+            raise CwError(msg)
+
+    stub_spawn.side_effect = _fail_first
+
+    with caplog.at_level("WARNING", logger="cw.reconcile.review_recipes"):
+        acted = dispatch_deferred_review_jobs(
+            DeferredReviewDispatch(address_review=tuple(jobs))
+        )
+
+    assert acted == ["GEN-2"]
+    assert len(stub_spawn.calls) == 2
+    assert "review_recipe_dispatch_failed ticket=GEN-1" in caplog.text
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert [e.correlation_id for e in failed] == ["GEN-1"]
 
 
 def test_draft_pr_never_a_candidate() -> None:
@@ -673,9 +819,14 @@ def test_reconcile_reentry_guard_fires_and_is_swallowed(
     make_git_repo: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RFC 0010 P4's act phase re-entering reconcile() raises, not hangs.
+    """RFC 0010 P4's dispatch re-entering reconcile() raises, not hangs.
 
-    Stands in for the real chain (GitHub #1228): reconcile() holds
+    Pins the #1228 guard's tolerance, which still backstops the #1229
+    deferral: dispatching under a held lock (which reconcile() no longer does
+    -- see tests/test_reconcile_core.py::TestReviewRecipeDispatchRunsPostLock)
+    must stay a caught, logged failure rather than a hang.
+
+    Stands in for the pre-#1229 chain (GitHub #1228): reconcile() holds
     sessions_lock() -> ... -> run_review_recipes -> _act_auto_fix_ci ->
     _dispatch_auto_fix_ci -> run_dispatch_loop -> a nested reconcile() /
     sessions_lock() acquisition on the same thread. The outer

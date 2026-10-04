@@ -274,7 +274,11 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
 
     Runs strictly AFTER ``dev_queue_lock()`` releases: ``requeue_ticket``'s own
     internal lock IS ``dev_queue_lock`` (aliased in cw.dev_queue), so calling it
-    under our lock would self-deadlock. The function-local imports break the
+    under our lock would self-deadlock. Since #1229 it also runs strictly AFTER
+    ``reconcile()``'s ``sessions_lock()`` releases (called from
+    ``review_recipes.core.dispatch_deferred_review_jobs``), so the tick below
+    can re-enter ``reconcile()`` without ``SessionsLockReentryError``. The
+    function-local imports break the
     ``review_recipes`` -> ``dev_queue``/``dispatch`` import cycle.
 
     GitHub #2100: never mints a sibling row. ``job.existing_status`` (captured
@@ -324,10 +328,12 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
     lock-contention failure on the tick alone costs only the "trigger a tick
     right now" nicety, not the fix itself: whichever loop actually holds the
     lock will pick the row up on its own next regular tick (default 30s,
-    ``tick_interval_seconds`` in ``config.py``) — same accepted-degradation
-    posture already used for ``SessionsLockReentryError`` on this identical
-    call site (GitHub #1228), just with a message that says so explicitly
-    instead of a bare exception string.
+    ``tick_interval_seconds`` in ``config.py``) — the accepted-degradation
+    posture, with a message that says so explicitly instead of a bare
+    exception string. (Before #1229 this call site ran under
+    ``reconcile()``'s ``sessions_lock`` and its tick always died on
+    ``SessionsLockReentryError`` (GitHub #1228); the post-lock deferral
+    removed that failure, leaving lock contention as the residual case.)
     """
     from cw.dispatch import run_dispatch_loop
 
@@ -424,8 +430,8 @@ def _act_auto_fix_ci(
     now: datetime | None = None,
     config: OrchestratorConfig | None = None,
     repeat_fire_counts: dict[tuple[str, str, str], int] | None = None,
-) -> list[str]:
-    """Act phase for auto_fix_ci: re-validate under lock, emit, then re-dispatch.
+) -> list[_RedispatchJob]:
+    """Act phase for auto_fix_ci: re-validate under lock, emit, defer re-dispatch.
 
     Mirrors ``_act_request_reviewer``'s shape. Under one ``dev_queue_lock()``:
 
@@ -444,8 +450,14 @@ def _act_auto_fix_ci(
     field, not a status transition; none remain read-only), saved before the
     lock releases. The re-dispatch + dispatch tick runs strictly after the
     lock releases (``requeue_ticket`` re-acquires ``dev_queue_lock``, so
-    nesting would self-deadlock). Returns the ticket_ids whose re-dispatch
-    succeeded.
+    nesting would self-deadlock).
+
+    This function does NOT dispatch (#1229): it returns the deferred jobs and
+    ``reconcile()`` runs them via ``_dispatch_auto_fix_ci`` after
+    ``sessions_lock`` releases, so the dispatch tick's own ``sessions_lock``
+    acquisition (via ``dispatch_tick`` -> ``reconcile``) no longer raises
+    ``SessionsLockReentryError``. Returns the deferred re-dispatch jobs; the
+    caller owns executing them.
     """
     resolved_now = now if now is not None else datetime.now(UTC)
     by_key = {(c.ticket_id, c.client): c for c in candidates}
@@ -475,9 +487,4 @@ def _act_auto_fix_ci(
                 changed = True
         if changed:
             save_dev_queue(store)
-    acted: list[str] = []
-    for job in jobs:
-        ticket_id = _dispatch_auto_fix_ci(job)
-        if ticket_id is not None:
-            acted.append(ticket_id)
-    return acted
+    return jobs

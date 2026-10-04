@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from pydantic import ValidationError
 
@@ -40,10 +40,14 @@ from cw.reconcile.review_recipes._shared import (
 from cw.reconcile.review_recipes.address_review import (
     _act_address_review,
     _detect_address_review,
+    _dispatch_address_review,
+    _DispatchJob,
 )
 from cw.reconcile.review_recipes.auto_fix_ci import (
     _act_auto_fix_ci,
     _detect_auto_fix_ci,
+    _dispatch_auto_fix_ci,
+    _RedispatchJob,
 )
 from cw.reconcile.review_recipes.escalate_merge_block import (
     _act_escalate_merge_block,
@@ -105,11 +109,52 @@ def _detect_repeat_fire_counts(
     return counts
 
 
-def run_review_recipes(*, config: OrchestratorConfig) -> list[str]:
+class DeferredReviewDispatch(NamedTuple):
+    """Review-recipe dispatch jobs built under the locks, run after ``sessions_lock``.
+
+    ``address_review`` and ``auto_fix_ci`` each end in a call that re-acquires
+    ``sessions_lock`` (``spawn_create_impl`` / a dispatch tick's ``reconcile``),
+    so neither can run while ``reconcile()`` holds it (#1229). The act phases
+    hand their jobs back here instead; ``reconcile()`` passes the whole value to
+    :func:`dispatch_deferred_review_jobs` once its lock has released.
+    Tuples, not lists, so the empty default is safe to share.
+    """
+
+    address_review: tuple[_DispatchJob, ...] = ()
+    auto_fix_ci: tuple[_RedispatchJob, ...] = ()
+
+
+def dispatch_deferred_review_jobs(deferred: DeferredReviewDispatch) -> list[str]:
+    """Execute the deferred review-recipe jobs; return the acted ticket_ids.
+
+    Must be called with NO ``sessions_lock`` held (#1229) — see
+    :class:`DeferredReviewDispatch`. Each job's own dispatch helper already
+    absorbs a ``CwError`` (logged + a durable ``PR_ACTION_FAILED`` correction,
+    the same trail the pre-deferral inline path produced) and returns ``None``,
+    so one job's failure never aborts its siblings or the reconcile pass.
+    Address-review jobs run first, then auto_fix_ci, matching the order
+    ``run_review_recipes`` fires the two recipes in.
+    """
+    acted: list[str] = []
+    for address_job in deferred.address_review:
+        ticket_id = _dispatch_address_review(address_job)
+        if ticket_id is not None:
+            acted.append(ticket_id)
+    for redispatch_job in deferred.auto_fix_ci:
+        ticket_id = _dispatch_auto_fix_ci(redispatch_job)
+        if ticket_id is not None:
+            acted.append(ticket_id)
+    return acted
+
+
+def run_review_recipes(
+    *, config: OrchestratorConfig
+) -> tuple[list[str], DeferredReviewDispatch]:
     """Run all enabled review recipes for one reconcile tick (P2: detect → act).
 
-    No-op (returns ``[]`` immediately) unless ``config.review_recipes_enabled``
-    is True. Loads a fresh dev-queue snapshot itself rather than accepting one
+    No-op (returns ``([], DeferredReviewDispatch())`` immediately) unless
+    ``config.review_recipes_enabled`` is True. Loads a fresh dev-queue snapshot
+    itself rather than accepting one
     from the caller — by the wiring point in ``_reconcile_locked`` several prior
     sweeps have already mutated and saved the queue, so a caller-supplied
     snapshot would be stale (mirrors ``run_gate_recipes``). No ``load_state()``
@@ -133,11 +178,19 @@ def run_review_recipes(*, config: OrchestratorConfig) -> list[str]:
     ``auto_fix_ci``, and (GitHub #1206) ``address_review`` act phases each
     perform a small latch write (all four act phases now write a one-shot
     latch field, not a status transition — none remain purely read-only under
-    their lock). Returns the concatenated ticket_ids each recipe reports as
-    acted.
+    their lock).
+
+    Returns ``(acted, deferred)`` (#1229). ``acted`` is the concatenated
+    ticket_ids the ``request_reviewer`` and ``escalate_merge_block`` recipes
+    report as acted — both finish their action inline, with no
+    ``sessions_lock`` re-entry. The ``address_review`` and ``auto_fix_ci``
+    recipes only *prepare* here (emit ``PR_ACTION_TAKEN``, stamp the latch) and
+    hand back ``deferred``: their dispatch re-acquires ``sessions_lock``, which
+    ``reconcile()`` still holds when this runs, so the caller must pass
+    ``deferred`` to :func:`dispatch_deferred_review_jobs` after releasing it.
     """
     if not config.review_recipes_enabled:
-        return []
+        return [], DeferredReviewDispatch()
     tasks = load_dev_queue().tasks
     clients = load_effective_clients()
     # Compute the repeat-fire burst counts ONCE per tick (#1201), outside every
@@ -145,13 +198,13 @@ def run_review_recipes(*, config: OrchestratorConfig) -> list[str]:
     # phases, mirroring how clients/tasks are loaded once and shared.
     repeat_fire_counts = _detect_repeat_fire_counts(config=config)
     acted: list[str] = []
-    acted += _act_address_review(
+    address_review_jobs = _act_address_review(
         _detect_address_review(tasks, clients=clients, config=config),
         clients=clients,
         config=config,
         repeat_fire_counts=repeat_fire_counts,
     )
-    acted += _act_auto_fix_ci(
+    auto_fix_ci_jobs = _act_auto_fix_ci(
         _detect_auto_fix_ci(tasks, clients=clients, config=config),
         clients=clients,
         config=config,
@@ -168,4 +221,7 @@ def run_review_recipes(*, config: OrchestratorConfig) -> list[str]:
         config=config,
         repeat_fire_counts=repeat_fire_counts,
     )
-    return acted
+    return acted, DeferredReviewDispatch(
+        address_review=tuple(address_review_jobs),
+        auto_fix_ci=tuple(auto_fix_ci_jobs),
+    )

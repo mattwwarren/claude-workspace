@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `address_review` review recipe now actually spawns its `/address-review` session (#1229):** when a PR came back `changes_requested`, the recipe emitted `pr.action_taken` and stamped its once-per-episode latch, but its spawn ran while `reconcile()` still held the sessions lock. The spawn's own lock acquisition raised `SessionsLockReentryError` (#1228), which the recipe swallowed into a `pr.action_failed` event, so no worker ever started and the latch stayed stamped for the episode. `auto_fix_ci`'s immediate "run a dispatch tick now" call failed the same way and fell back to the next independent tick. Both recipes now return their dispatch as a deferred job that `reconcile()` runs after the sessions lock releases, the same hoist `run_fix_dispatch` got in #2064. A job that fails still logs and emits `pr.action_failed`, and no longer aborts the reconcile pass.
+
 ## [1.63.0] - 2026-10-02
 
 ### Changed
