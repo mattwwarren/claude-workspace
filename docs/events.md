@@ -1004,13 +1004,22 @@ open enum; consumers MUST tolerate unknown values. Known values:
   guard refused it with `sentinel.stage_mismatch`. The process is dead, so no
   matching-stage result will ever follow: the worker's real outcome (e.g. a
   `blocked` finalize sentinel) was **not** applied and the row is unchanged,
-  still `RUNNING`. Fires **once** per session: the refusal is latched on
-  `session.last_result` (the same `sentinel_stage_mismatch_refused` /
-  `sentinel_advance_refused` markers the idle/phantom sweeps use), and the
-  harvest sweep no longer re-offers a latched session. `breadcrumbs` names the
-  backend, the status, stage and blocker reason the dead worker reported, and
-  the row's stage. Signal-only on the session: the operator inspects the
-  worktree log (`.cw/opencode.log`) and requeues or closes the row.
+  still `RUNNING`. Fires once per session in the normal case, **at-least-once**
+  in general: the page is emitted first, and only after that write succeeds is
+  the refusal latched on `session.last_result` (the same
+  `sentinel_stage_mismatch_refused` / `sentinel_advance_refused` markers the
+  phantom/stalled sweeps use). A failed page write leaves the session
+  un-latched, so the next tick re-offers it and pages again; a crash between the
+  page and the state save does the same. The harvest sweep skips a latched
+  session only while its row is still bound to it (same session id, an
+  occupied status); once the row moved on (requeued, cancelled, session id
+  cleared) the dead session is offered again and completes normally.
+  `breadcrumbs` names the backend, the status, stage, blocker reason and
+  recovery hint the dead worker reported, the row's **live** stage (read under
+  the queue lock when the guard refused), and the recovery command
+  `cw spawn close --confirmed-dead --requeue <session-id>` (the close cancels the
+  `RUNNING` row, `--requeue` puts it back to `PENDING` at its current stage).
+  The operator can inspect the worktree log (`.cw/opencode.log`) first.
 - `"merge_gate_blocked"` — Rule 5: the merge/CI gate rejected the PR
   (optionally `blocker.reason` in `breadcrumbs`, e.g.
   `"prior_pipeline_pr_open"` per issue #777; empty otherwise). See #1117.
@@ -1685,10 +1694,11 @@ entirely. The row stays in whatever status it holds (`RUNNING`,
 the next legitimate sentinel or operator action.
 
 When the refused sentinel came from the local dead-process harvest (#2490),
-the session is provably dead, so no later sentinel can arrive. The refusal is
-latched on the session (it no longer repeats this event every tick) and a
-single `session.needs_attention` with
-`paused_status=sentinel_stage_mismatch_dead_session` follows.
+the session is provably dead, so no later sentinel can arrive. A single
+`session.needs_attention` with
+`paused_status=sentinel_stage_mismatch_dead_session` is emitted, and only after
+it the refusal is latched on the session (so this event no longer repeats every
+tick); a failed page write leaves the session un-latched and it is retried.
 
 `correlation_id` is the `ticket_id`.
 

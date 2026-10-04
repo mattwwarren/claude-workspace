@@ -31,7 +31,11 @@ from cw.auto_dev_result import (
     Review,
     Scope,
     StageReached,
+    has_open_marker,
+    has_unclosed_frame,
     parse_last_block,
+    parse_last_loose_block,
+    unclosed_frame_blocked,
 )
 from cw.executor_diagnostics import (
     append_diagnostics_pointer,
@@ -684,32 +688,73 @@ def extract_text_from_jsonl(log_content: str) -> str:
     return "".join(_iter_text_events(log_content))
 
 
-def parse_last_sentinel(log_content: str) -> AutoDevResult | BlockedResult | None:
-    """Return the LAST real ``AUTO_DEV_RESULT`` in an opencode JSONL log (#2490).
+def _resolve_open_frame(
+    tail_events: list[str], ticket_id: str | None
+) -> AutoDevResult | BlockedResult | None:
+    """Settle the final, not-yet-closed frame by joining its event onward.
 
-    Scans the ``text`` events one at a time, newest last, so an earlier event
-    that quotes another stage's sentinel (or the skill's worked example) can
-    neither shadow nor poison the final one -- the shape that made a
-    well-formed ``stage4b_pr_create`` blocked result read as
-    ``opencode_no_output`` (concatenated, the two blocks tripped
-    ``multiple_result_blocks``). Per-event, an unresolved doc-example
-    placeholder or the documented ``PROJ-1234`` example is skipped and, if one
-    event carries several blocks, its last wins (§3.1).
-
-    The last block decides even when it is unusable (the returned
-    ``BlockedResult``): falling back to an earlier, valid block would resurrect
-    a stale stage's result in place of the worker's actual final word. Only
-    when no event carries a block does the concatenated text get one more try,
-    for a block split across two events. ``None`` means no real block anywhere.
+    *tail_events* starts at the last event holding the open marker. Joined, the
+    frame either closes (a block split across events: the real last block, or
+    ``None`` when it turns out to be a placeholder/foreign block, so the caller
+    falls back to its own pick) or stays open: a truncated final frame, which is
+    the unusable ``BlockedResult`` -- never an earlier block in its place.
     """
+    joined = "".join(tail_events)
+    if has_unclosed_frame(joined):
+        return unclosed_frame_blocked(joined)
+    return parse_last_block(joined, ticket_id=ticket_id)
+
+
+def parse_last_sentinel(
+    log_content: str, *, ticket_id: str
+) -> AutoDevResult | BlockedResult | None:
+    """Return the last real ``AUTO_DEV_RESULT`` for *ticket_id* in an opencode log.
+
+    Guarantee (#2490): the last COMPLETE frame wins. The ``text`` events are
+    scanned one at a time, newest last, so an earlier event that quotes another
+    stage's sentinel (or the skill's worked example) can neither shadow nor
+    poison the final one -- the shape that made a well-formed
+    ``stage4b_pr_create`` blocked result read as ``opencode_no_output``
+    (concatenated, the two blocks tripped ``multiple_result_blocks``). Within an
+    event, the last real block wins (§3.1) and an unresolved doc-example
+    placeholder or the documented ``PROJ-1234`` example is skipped.
+
+    Ticket identity: a block whose ``ticket_id`` differs from *ticket_id* is
+    ignored entirely -- a sibling ticket's result the worker read, or an earlier
+    ticket's block it quoted, must never be applied to this ticket's row. Ids
+    compare by exact string equality, as everywhere else in cw (the worker is
+    handed the id verbatim and echoes it). A block whose ticket cannot be read
+    (malformed JSON) counts as this ticket's. An empty *ticket_id* (a session
+    with no associated ticket) disables the check.
+
+    A real last block that is unusable comes back as the ``BlockedResult``
+    describing why: an earlier valid block must not resurrect a stale stage's
+    result in place of the worker's actual final word. The same holds for a
+    TRUNCATED final frame (an open marker with no close): the last event holding
+    the marker is joined with the events after it (a frame split across events
+    completes), and if it still has no close the result is the unusable
+    ``BlockedResult`` -- never an earlier complete block.
+
+    With no framed block anywhere, the joined text gets one last try through the
+    loose bare-fenced-JSON path :func:`~cw.auto_dev_result.parse_stdout`
+    tolerates (GitHub #337). ``None`` means no real block anywhere.
+    """
+    scope = ticket_id or None
+    events = list(_iter_text_events(log_content))
     last: AutoDevResult | BlockedResult | None = None
-    for text in _iter_text_events(log_content):
-        parsed = parse_last_block(text)
+    last_open: int | None = None
+    for index, text in enumerate(events):
+        if has_open_marker(text):
+            last_open = index
+        parsed = parse_last_block(text, ticket_id=scope)
         if parsed is not None:
             last = parsed
+    if last_open is not None and has_unclosed_frame(events[last_open]):
+        resolved = _resolve_open_frame(events[last_open:], scope)
+        return resolved if resolved is not None else last
     if last is not None:
         return last
-    return parse_last_block(extract_text_from_jsonl(log_content))
+    return parse_last_loose_block("".join(events), ticket_id=scope)
 
 
 def _persist_opencode_no_output_diagnostics(*, session_id: str, log_tail: str) -> None:
@@ -747,7 +792,8 @@ def synthesize_opencode_result(
     extraction.
 
     - sentinel found in text → the parsed ``AutoDevResult`` of the LAST block in
-      the log (:func:`parse_last_sentinel`, #2490)
+      the log that is for ``task.ticket_id`` (:func:`parse_last_sentinel`,
+      #2490); a block quoted for another ticket is never applied
     - no sentinel / empty log / unparseable → ``OPENCODE_NO_OUTPUT`` (blocked,
       ``retry_eligible``, details from the log tail when readable). The
       synthesized blocker carries ``task.stage``'s own entry marker so a
@@ -764,7 +810,7 @@ def synthesize_opencode_result(
         log_content = log_path.read_text(encoding="utf-8", errors="replace")
 
     if log_content:
-        result = parse_last_sentinel(log_content)
+        result = parse_last_sentinel(log_content, ticket_id=task.ticket_id)
         if isinstance(result, AutoDevResult):
             return result
 

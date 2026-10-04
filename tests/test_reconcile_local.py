@@ -51,6 +51,11 @@ from cw.reconcile import (
     _detect_local_harvest_candidates,
     reconcile,
 )
+from tests._opencode_helpers import (
+    earlier_stage_then_final_log,
+    framed,
+    write_opencode_log,
+)
 from tests._reconcile_helpers import (
     _write_staged_clients_yaml,
 )
@@ -997,8 +1002,10 @@ def test_local_harvest_opencode_sentinel_found(
     worktree = make_git_repo("wt-opencode-harvest-sentinel")
     _write_staged_clients_yaml(tmp_config_dir, "client-a")
 
+    # The session name carries the ticket id the harvest compares the sentinel
+    # against (#2490): a real worker echoes the id it was handed.
     blocked = make_opencode_blocked(
-        ticket_id="T-OC-1", worktree=worktree, reason="test-sentinel"
+        ticket_id="ses-oc-sentinel", worktree=worktree, reason="test-sentinel"
     )
     sentinel_json = blocked.model_dump_json()
     sentinel_text = f"<<<AUTO_DEV_RESULT\n{sentinel_json}\nAUTO_DEV_RESULT>>>"
@@ -1168,15 +1175,9 @@ def test_local_harvest_aider_backend_ignores_stray_opencode_log(
 # ---------------------------------------------------------------------------
 # #2490 -- last AUTO_DEV_RESULT wins; a refused dead-session harvest pages once
 #
-# Fixture provenance: no real capture of the failing opencode log exists, so
-# the log is composed from the ``step_start``/``text``/``step_finish`` event
-# shapes the rest of this file and test_opencode_runner.py already use, with a
-# stderr line and a null ``part`` mixed in as a real log carries them.
+# Fixture provenance (composed arrangement, HYPOTHESIZED robustness lines, no
+# capture of the failing session): see tests/_opencode_helpers.py.
 # ---------------------------------------------------------------------------
-
-
-def _framed(result: AutoDevResult) -> str:
-    return f"<<<AUTO_DEV_RESULT\n{result.model_dump_json()}\nAUTO_DEV_RESULT>>>"
 
 
 def _save_dead_opencode_finalize(
@@ -1244,21 +1245,7 @@ def test_local_harvest_opencode_finalize_keeps_final_blocked_sentinel(
         retry_eligible=True,
         stage_reached="stage4a_merge_gate",
     ).model_copy(update={"status": "merge_gate_blocked"})
-    log_path = worktree / OPENCODE_LOG_RELATIVE_PATH
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    lines: list[dict[str, object] | str] = [
-        {"type": "step_start", "part": {"type": "step-start"}},
-        {"type": "text", "part": {"text": f"prior leg:\n{_framed(earlier)}"}},
-        {"type": "step_finish", "part": {"reason": "tool-calls"}},
-        "warn: stderr line merged into the json stream",
-        {"type": "text", "part": None},
-        {"type": "text", "part": {"text": _framed(final)}},
-        {"type": "step_finish", "part": {"reason": "stop"}},
-    ]
-    log_path.write_text(
-        "\n".join(ln if isinstance(ln, str) else json.dumps(ln) for ln in lines),
-        encoding="utf-8",
-    )
+    write_opencode_log(worktree, earlier_stage_then_final_log(earlier, final))
     task_by_ticket = _save_dead_opencode_finalize(worktree, "T-OC-F", Stage.FINALIZE)
     state = load_state()
     candidates = _detect_local_harvest_candidates(state, task_by_ticket)
@@ -1441,17 +1428,27 @@ def test_local_harvest_stage_mismatch_latch_merges_into_existing_last_result(
     assert len(_attention_events("test-harvest-merge", "harv-merge")) == 1
 
 
+def _with_recovery_hint(result: AutoDevResult, hint: str) -> AutoDevResult:
+    """*result* with its blocker's ``recovery_hint`` set."""
+    assert result.blocker is not None
+    blocker = result.blocker.model_copy(update={"recovery_hint": hint})
+    return result.model_copy(update={"blocker": blocker})
+
+
 def test_stage_mismatch_attention_payload_names_the_blocker_reason(
     tmp_path: Path,
 ) -> None:
     """A refused ``blocked`` result's breadcrumbs carry its blocker reason."""
     from cw.reconcile.local import _stage_mismatch_attention_payload
 
-    sentinel = make_opencode_blocked(
-        ticket_id="T-1",
-        worktree=tmp_path,
-        reason="merge_conflict_post_push",
-        stage_reached="stage4b_pr_create",
+    sentinel = _with_recovery_hint(
+        make_opencode_blocked(
+            ticket_id="T-1",
+            worktree=tmp_path,
+            reason="merge_conflict_post_push",
+            stage_reached="stage4b_pr_create",
+        ),
+        "rebase onto main then requeue",
     )
     session = _mk_local_session(
         "ses-payload",
@@ -1460,10 +1457,320 @@ def test_stage_mismatch_attention_payload_names_the_blocker_reason(
     )
     task = TicketTask(ticket_id="T-1", client="client-a", stage=Stage.IMPL)
 
-    payload = _stage_mismatch_attention_payload(session, task, sentinel, "opencode")
+    payload = _stage_mismatch_attention_payload(
+        session, task, sentinel, "opencode", Stage.FINALIZE
+    )
 
     breadcrumbs = str(payload["breadcrumbs"])
-    assert "blocked at stage4b_pr_create (merge_conflict_post_push)" in breadcrumbs
+    assert "blocked at stage4b_pr_create (merge_conflict_post_push" in breadcrumbs
+    assert "rebase onto main then requeue" in breadcrumbs
     assert "dead opencode process" in breadcrumbs
+    # The live row stage passed in, not the (stale) snapshot's IMPL.
+    assert "the row is at stage finalize" in breadcrumbs
+    assert "cw spawn close --confirmed-dead --requeue ses-payload" in breadcrumbs
     assert payload["ticket_id"] == "T-1"
     assert payload["claude_session_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# #2490 review fixes -- page-before-latch, latch scope, end-to-end opencode
+# ---------------------------------------------------------------------------
+
+_NOW = datetime(2026, 1, 2, tzinfo=UTC)
+
+
+def _save_refusal_scenario(
+    make_git_repo: Callable[[str], Path],
+    tmp_config_dir: Path,
+    rows: dict[str, Stage],
+) -> dict[str, TicketTask]:
+    """Dead aider sessions (id == ticket id) + RUNNING rows at the given stages.
+
+    A row at FINALIZE refuses the git-synthesized ``stage_complete`` at
+    ``stage2_impl`` (stale advance claim); a row at IMPL accepts it.
+    """
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=123)
+    sessions = []
+    tasks = []
+    for ticket, stage in rows.items():
+        worktree = _local_git_worktree(make_git_repo, f"wt-{ticket}", with_commit=True)
+        sessions.append(_mk_local_session(ticket, worktree, liveness))
+        tasks.append(
+            TicketTask(
+                ticket_id=ticket,
+                client="client-a",
+                status=QueueItemStatus.RUNNING,
+                session_id=ticket,
+                stage=stage,
+            )
+        )
+    save_state(CwState(sessions=sessions))
+    save_dev_queue(DevQueueStore(tasks=tasks))
+    return {t.ticket_id: t for t in load_dev_queue().tasks}
+
+
+def _harvest_tick(task_by_ticket: dict[str, TicketTask]) -> list[str]:
+    """One detect + act pass over the persisted state."""
+    state = load_state()
+    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    return _act_on_local_harvest_candidates(
+        state, candidates, now=_NOW, task_by_ticket=task_by_ticket
+    )
+
+
+def _failing_record_event(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    event_type: OrchestratorEventType,
+    fail_for: Callable[[dict[str, object]], bool],
+) -> list[int]:
+    """Make ``cw.reconcile.local.record_event`` raise OSError on matching calls.
+
+    Returns a one-element-per-failure list so a test can count the failures.
+    """
+    from cw.events import record_event as real_record_event
+
+    failures: list[int] = []
+
+    def flaky(
+        etype: OrchestratorEventType,
+        payload: dict[str, object] | None = None,
+        *,
+        correlation_id: str | None = None,
+    ) -> object:
+        if etype is event_type and fail_for(payload or {}):
+            failures.append(1)
+            msg = "disk full"
+            raise OSError(msg)
+        return real_record_event(etype, payload, correlation_id=correlation_id)
+
+    monkeypatch.setattr("cw.reconcile.local.record_event", flaky)
+    return failures
+
+
+def _session(sid: str) -> Session:
+    return next(s for s in load_state().sessions if s.id == sid)
+
+
+def test_failed_page_leaves_the_session_unlatched_and_repages_next_tick(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never latch a session whose page was not emitted (#2490 review).
+
+    Latch-before-page left a session skipped forever with no page when the page
+    write failed. The page is emitted first; the latch follows only on success.
+    """
+    tbt = _save_refusal_scenario(
+        make_git_repo, tmp_config_dir, {"pg-fail": Stage.FINALIZE}
+    )
+    writes_fail = {"on": True}
+    failures = _failing_record_event(
+        monkeypatch,
+        event_type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        fail_for=lambda _payload: writes_fail["on"],
+    )
+
+    _harvest_tick(tbt)
+
+    assert failures == [1]
+    assert _attention_events("test-pg-fail-a", "pg-fail") == []
+    assert _session("pg-fail").last_result is None
+    assert len(_detect_local_harvest_candidates(load_state(), tbt)) == 1
+
+    writes_fail["on"] = False
+    _harvest_tick(tbt)
+    _harvest_tick(tbt)
+
+    assert len(_attention_events("test-pg-fail-b", "pg-fail")) == 1
+    assert _session("pg-fail").last_result == {
+        "paused_status": "sentinel_stage_mismatch_refused"
+    }
+    assert _detect_local_harvest_candidates(load_state(), tbt) == []
+
+
+def test_one_failing_page_does_not_cancel_another_sessions_page(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tbt = _save_refusal_scenario(
+        make_git_repo,
+        tmp_config_dir,
+        {"pg-one": Stage.FINALIZE, "pg-two": Stage.FINALIZE},
+    )
+    _failing_record_event(
+        monkeypatch,
+        event_type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        fail_for=lambda payload: payload.get("ticket_id") == "pg-one",
+    )
+
+    _harvest_tick(tbt)
+
+    assert _attention_events("test-pg-multi", "pg-one") == []
+    assert len(_attention_events("test-pg-multi", "pg-two")) == 1
+    assert _session("pg-one").last_result is None
+    assert _session("pg-two").last_result == {
+        "paused_status": "sentinel_stage_mismatch_refused"
+    }
+
+
+def test_failing_session_completed_write_does_not_suppress_another_sessions_page(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The page goes out before any SESSION_COMPLETED write can abort the pass."""
+    tbt = _save_refusal_scenario(
+        make_git_repo,
+        tmp_config_dir,
+        {"pg-done": Stage.IMPL, "pg-refused": Stage.FINALIZE},
+    )
+    failures = _failing_record_event(
+        monkeypatch,
+        event_type=OrchestratorEventType.SESSION_COMPLETED,
+        fail_for=lambda _payload: True,
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        _harvest_tick(tbt)
+
+    assert failures == [1]
+    assert len(_attention_events("test-pg-completed", "pg-refused")) == 1
+    assert _session("pg-refused").last_result == {
+        "paused_status": "sentinel_stage_mismatch_refused"
+    }
+    assert _session("pg-done").status == SessionStatus.COMPLETED
+
+
+def test_latched_session_whose_row_moved_on_is_reoffered_and_completes(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A latch is honored only while the row is still bound to the session (#2490)."""
+    tbt = _save_refusal_scenario(
+        make_git_repo, tmp_config_dir, {"lt-moved": Stage.FINALIZE}
+    )
+    _harvest_tick(tbt)
+    assert _detect_local_harvest_candidates(load_state(), tbt) == []
+
+    # The operator requeued the row: PENDING, session id cleared.
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="lt-moved",
+                    client="client-a",
+                    status=QueueItemStatus.PENDING,
+                    stage=Stage.FINALIZE,
+                )
+            ]
+        )
+    )
+    moved = {t.ticket_id: t for t in load_dev_queue().tasks}
+    assert len(_detect_local_harvest_candidates(load_state(), moved)) == 1
+
+    _harvest_tick(moved)
+
+    assert _session("lt-moved").status == SessionStatus.COMPLETED
+    assert len(_attention_events("test-lt-moved", "lt-moved")) == 1
+
+
+def test_latch_is_honored_while_a_parked_row_is_still_bound_to_the_session(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A parked row still holding the session id keeps the latch (no re-page)."""
+    tbt = _save_refusal_scenario(
+        make_git_repo, tmp_config_dir, {"lt-parked": Stage.FINALIZE}
+    )
+    _harvest_tick(tbt)
+    parked = tbt["lt-parked"].model_copy(
+        update={"status": QueueItemStatus.BLOCKED_ON_USER}
+    )
+
+    assert _detect_local_harvest_candidates(load_state(), {"lt-parked": parked}) == []
+
+
+def test_old_sessions_latch_does_not_affect_a_new_session_for_the_same_ticket(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Two dead sessions for one ticket: only the un-latched one is offered."""
+    tbt = _save_refusal_scenario(
+        make_git_repo, tmp_config_dir, {"lt-same": Stage.FINALIZE}
+    )
+    old = _session("lt-same")
+    old.last_result = {"paused_status": "sentinel_stage_mismatch_refused"}
+    assert old.worktree_path is not None
+    assert old.local_liveness is not None
+    fresh = _mk_local_session("lt-same-new", old.worktree_path, old.local_liveness)
+    fresh.name = old.name
+    save_state(CwState(sessions=[old, fresh]))
+
+    candidates = _detect_local_harvest_candidates(load_state(), tbt)
+
+    assert [c.session_id for c in candidates] == ["lt-same-new"]
+
+
+def test_local_harvest_opencode_refused_result_pages_with_blocker_and_recovery(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """End to end: a refused opencode ``blocked`` result pages once, losing nothing.
+
+    The dead opencode worker's log ends in a ``blocked`` sentinel the shared guard
+    refuses (the row's client is not configured, so the stage position is
+    unresolvable and every non-matching stage refuses). The page must carry what
+    the worker reported (status, stage, blocker reason, its recovery hint), the
+    row's LIVE stage -- the per-pass snapshot handed in is deliberately stale --
+    and the exact recovery command.
+    """
+    worktree = make_git_repo("wt-oc-refused")
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    reported = _with_recovery_hint(
+        make_opencode_blocked(
+            ticket_id="oc-refused",
+            worktree=worktree,
+            reason="merge_conflict_post_push",
+            stage_reached="stage2_impl",
+        ),
+        "rebase onto main then requeue",
+    )
+    write_opencode_log(worktree, [{"type": "text", "part": {"text": framed(reported)}}])
+    dead = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=1, backend="opencode")
+    save_state(CwState(sessions=[_mk_local_session("oc-refused", worktree, dead)]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="oc-refused",
+                    client="client-unconfigured",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="oc-refused",
+                    stage=Stage.FINALIZE,
+                )
+            ]
+        )
+    )
+    stale = {
+        t.ticket_id: t.model_copy(update={"stage": Stage.IMPL})
+        for t in load_dev_queue().tasks
+    }
+
+    _harvest_tick(stale)
+    _harvest_tick(stale)
+
+    pages = _attention_events("test-oc-refused", "oc-refused")
+    assert len(pages) == 1
+    assert pages[0]["paused_status"] == "sentinel_stage_mismatch_dead_session"
+    breadcrumbs = str(pages[0]["breadcrumbs"])
+    assert "blocked at stage2_impl (merge_conflict_post_push" in breadcrumbs
+    assert "rebase onto main then requeue" in breadcrumbs
+    assert "the row is at stage finalize" in breadcrumbs
+    assert "cw spawn close --confirmed-dead --requeue oc-refused" in breadcrumbs
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "oc-refused")
+    assert task.status == QueueItemStatus.RUNNING
+    assert _session("oc-refused").status == SessionStatus.ACTIVE

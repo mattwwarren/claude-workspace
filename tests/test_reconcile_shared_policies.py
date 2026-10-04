@@ -1967,6 +1967,7 @@ class TestApplySentinelToTaskStagedAdvance:
 
         assert outcome.routed is True
         assert outcome.stage_refused is False
+        assert outcome.refused_stage is None
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
         assert t.blocked_reason == "plan_missing"
@@ -2708,6 +2709,7 @@ class TestApplySentinelToTaskLateRescue:
         assert outcome.rescued is False
         assert outcome.routed is False
         assert outcome.stage_refused is True
+        assert outcome.refused_stage == Stage.REVIEW
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
         assert t.stage == Stage.REVIEW
@@ -2740,6 +2742,7 @@ class TestApplySentinelToTaskLateRescue:
         assert outcome.rescued is False
         assert outcome.routed is False
         assert outcome.stage_refused is True
+        assert outcome.refused_stage == Stage.REVIEW
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.RUNNING
         assert t.stage == Stage.REVIEW
@@ -3787,6 +3790,58 @@ def test_validation_failed_cap_still_reads_raw_attempts_not_unproductive(
     t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
     assert t.status == QueueItemStatus.FAILED
     assert t.disposition == "abandoned"
+
+
+class TestStageRefusalLatch:
+    """The one shared stage-refusal latch (#1149, #2490): read side and write side."""
+
+    def test_unlatched_session_reads_false(self) -> None:
+        from cw.reconcile._shared import stage_refusal_latched
+
+        assert stage_refusal_latched(_make_daemon_session()) is False
+
+    def test_non_dict_last_result_reads_false(self) -> None:
+        from cw.reconcile._shared import stage_refusal_latched
+
+        sess = _make_daemon_session()
+        sess.last_result = None
+
+        assert stage_refusal_latched(sess) is False
+
+    def test_stamp_on_empty_last_result_is_the_single_key_marker(self) -> None:
+        from cw.reconcile._shared import stage_refusal_latched, stamp_stage_refusal
+
+        sess = _make_daemon_session()
+
+        stamp_stage_refusal(sess)
+
+        assert sess.last_result == {
+            "paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+        }
+        assert stage_refusal_latched(sess) is True
+
+    def test_stamp_merges_into_an_existing_dict_without_clobbering_it(self) -> None:
+        from cw.reconcile._shared import stage_refusal_latched, stamp_stage_refusal
+
+        sess = _make_daemon_session()
+        sess.last_result = {"paused_status": "silently_idle", "status": "blocked"}
+
+        stamp_stage_refusal(sess)
+
+        assert sess.last_result == {
+            "paused_status": "silently_idle",
+            "status": "blocked",
+            "sentinel_advance_refused": True,
+        }
+        assert stage_refusal_latched(sess) is True
+
+    def test_another_sweeps_park_marker_alone_is_not_a_latch(self) -> None:
+        from cw.reconcile._shared import stage_refusal_latched
+
+        sess = _make_daemon_session()
+        sess.last_result = {"paused_status": "silently_idle"}
+
+        assert stage_refusal_latched(sess) is False
 
 
 class TestFindLiveSessionsForTicket:

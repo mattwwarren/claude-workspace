@@ -52,6 +52,22 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "reads the new flag to answer False, closing both the Stop-hook "
             "re-fire and idle-sweep re-arm double-route paths"
         ),
+        "session.last_result = {**existing, _SENTINEL_ADVANCE_REFUSED_KEY: True}": (
+            "_shared.py (stamp_stage_refusal) — the ONE shared stage-mismatch "
+            "refusal latch the local-harvest, phantom and stalled sweeps all "
+            "stamp (#1149, #2490); merge branch: preserves the caller's "
+            "existing dict (another sweep's paused_status park marker, or the "
+            "pre-existing terminal sentinel); no 'status' key added"
+        ),
+        (
+            "session.last_result = {\n"
+            "_PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON\n"
+            "}"
+        ): (
+            "_shared.py (stamp_stage_refusal) — fresh branch of the same shared "
+            "latch: no pre-existing dict to merge into; no 'status' key so "
+            "has_terminal_result() stays False"
+        ),
     },
     "reconcile/idle/_mutations.py": {
         (
@@ -65,26 +81,6 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
         ),
     },
     "reconcile/phantom/_mutations.py": {
-        (
-            "session.last_result = {\n"
-            "**existing,\n"
-            "_SENTINEL_ADVANCE_REFUSED_KEY: True,\n"
-            "}"
-        ): (
-            "phantom/_mutations.py (_apply_phantom_routed_mutations) — park "
-            "marker, stage-mismatch-refused (merge branch: preserves the "
-            "caller's existing paused_status under its own key); no 'status' "
-            "key added"
-        ),
-        (
-            "session.last_result = {\n"
-            "_PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON\n"
-            "}"
-        ): (
-            "phantom/_mutations.py (_apply_phantom_routed_mutations) — park "
-            "marker, stage-mismatch-refused (fresh branch: no pre-existing "
-            "dict to merge into); no 'status' key"
-        ),
         "session.last_result = routed_payload": (
             "phantom/_mutations.py (_apply_phantom_routed_mutations) — "
             "routed-sentinel advance; audit is appended immediately before "
@@ -92,44 +88,7 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "via _apply_sentinel_to_task carries 'status'"
         ),
     },
-    "reconcile/local.py": {
-        "session.last_result = {**existing, _SENTINEL_ADVANCE_REFUSED_KEY: True}": (
-            "local.py (_stamp_stage_mismatch_refusal) — #2490 park marker, "
-            "stage-mismatch-refused for a dead LOCAL process's harvested "
-            "result (merge branch: preserves the caller's existing dict); "
-            "no 'status' key added"
-        ),
-        (
-            "session.last_result = {\n"
-            "_PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON\n"
-            "}"
-        ): (
-            "local.py (_stamp_stage_mismatch_refusal) — #2490 park marker, "
-            "stage-mismatch-refused (fresh branch: no pre-existing dict to "
-            "merge into); no 'status' key so has_terminal_result() stays False"
-        ),
-    },
     "reconcile/stalled/_mutations.py": {
-        (
-            "session.last_result = {\n"
-            "**existing,\n"
-            "_SENTINEL_ADVANCE_REFUSED_KEY: True,\n"
-            "}"
-        ): (
-            "stalled/_mutations.py (_apply_stalled_routed_mutations) — park "
-            "marker, stage-mismatch-refused (merge branch: preserves the "
-            "pre-existing terminal sentinel dict already in last_result); "
-            "no 'status' key added"
-        ),
-        (
-            "session.last_result = {\n"
-            "_PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON\n"
-            "}"
-        ): (
-            "stalled/_mutations.py (_apply_stalled_routed_mutations) — park "
-            "marker, stage-mismatch-refused (fresh branch: existing "
-            "last_result was not a dict); no 'status' key"
-        ),
         "session.last_result = routed_payload": (
             "stalled/_mutations.py (_apply_stalled_routed_mutations) — "
             "routed-sentinel advance; audit is appended immediately before "

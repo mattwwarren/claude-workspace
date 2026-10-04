@@ -44,11 +44,15 @@ from cw.auto_dev_result import (
     Status,
     _is_placeholder_sentinel_text,
     extract_block,
+    has_open_marker,
+    has_unclosed_frame,
     is_documented_example,
     is_known_blocker_reason,
     parse_last_block,
+    parse_last_loose_block,
     parse_stdout,
     queue_status_for_terminal_sentinel,
+    unclosed_frame_blocked,
 )
 from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED, FIX_LOOP_DIVERGING
 from cw.models import QueueItemStatus
@@ -5318,3 +5322,134 @@ def test_parse_last_block_returns_blocked_result_for_unusable_last_block() -> No
 
     assert isinstance(result, BlockedResult)
     assert result.blocker.reason == BLOCKER_REASON_NO_RESULT_EMITTED
+
+
+def _placeholder_payload() -> dict[str, Any]:
+    payload = _blocked_payload()
+    payload["ticket_id"] = "<ticket-id>"
+    payload["status"] = "<stage_complete | blocked>"
+    return payload
+
+
+def test_parse_last_block_real_block_followed_by_template_in_one_text() -> None:
+    """[real][quoted template] in ONE text: the real result is not lost (#2490)."""
+    text = _wrap_sentinel(_merge_gate_payload()) + _wrap_sentinel(
+        _placeholder_payload()
+    )
+
+    result = parse_last_block(text)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "merge_gate_blocked"
+
+
+def test_parse_last_block_real_block_followed_by_documented_example() -> None:
+    text = _wrap_sentinel(_merge_gate_payload()) + _wrap_sentinel(
+        _documented_example_payload()
+    )
+
+    result = parse_last_block(text)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.ticket_id == "GEN-4"
+
+
+def test_parse_last_block_real_status_with_angle_ticket_id_is_parsed() -> None:
+    """Only a payload with BOTH fields templated is a placeholder."""
+    payload = _blocked_payload()
+    payload["ticket_id"] = "<x>"
+
+    result = parse_last_block(_wrap_sentinel(payload))
+
+    assert isinstance(result, AutoDevResult)
+    assert result.ticket_id == "<x>"
+
+
+def test_parse_last_block_templated_status_with_real_ticket_is_reported() -> None:
+    """The reverse: a real ticket with a templated status is a parse failure."""
+    payload = _blocked_payload()
+    payload["status"] = "<stage_complete | blocked>"
+
+    result = parse_last_block(_wrap_sentinel(payload))
+
+    assert isinstance(result, BlockedResult)
+    assert result.blocker.reason == BLOCKER_REASON_STATUS_UNKNOWN
+
+
+def test_parse_last_block_ticket_filter_skips_other_tickets_blocks() -> None:
+    """With *ticket_id*, a block claiming another ticket is skipped entirely."""
+    text = _wrap_sentinel(_blocked_payload()) + _wrap_sentinel(_merge_gate_payload())
+
+    result = parse_last_block(text, ticket_id="GEN-7")
+
+    assert isinstance(result, AutoDevResult)
+    assert result.ticket_id == "GEN-7"
+    assert parse_last_block(text, ticket_id="GEN-404") is None
+
+
+def test_parse_last_block_ticket_filter_ignores_a_foreign_malformed_block() -> None:
+    foreign_broken = _merge_gate_payload()
+    foreign_broken["status"] = "no_such_status"
+    text = _wrap_sentinel(_blocked_payload()) + _wrap_sentinel(foreign_broken)
+
+    result = parse_last_block(text, ticket_id="GEN-7")
+
+    assert isinstance(result, AutoDevResult)
+    assert result.ticket_id == "GEN-7"
+
+
+def test_parse_last_block_unreadable_ticket_counts_as_the_callers() -> None:
+    """A block whose ticket cannot be read cannot be shown foreign: fail safe."""
+    text = (
+        _wrap_sentinel(_blocked_payload())
+        + "\n<<<AUTO_DEV_RESULT\n{oops\nAUTO_DEV_RESULT>>>"
+    )
+
+    result = parse_last_block(text, ticket_id="GEN-7")
+
+    assert isinstance(result, BlockedResult)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("no marker at all", False),
+        ("<<<AUTO_DEV_RESULT\n{}\nAUTO_DEV_RESULT>>>", False),
+        ('<<<AUTO_DEV_RESULT\n{"a": 1', True),
+        ("<<<AUTO_DEV_RESULT\n{}\nAUTO_DEV_RESULT>>>\n<<<AUTO_DEV_RESULT\n{", True),
+        ("<<<AUTO_DEV_RESULT\n{}\nAUTO_DEV_RESULT>>>\ntrailing narrative", False),
+    ],
+)
+def test_has_unclosed_frame(text: str, expected: bool) -> None:
+    assert has_unclosed_frame(text) is expected
+
+
+def test_has_open_marker_and_unclosed_frame_blocked() -> None:
+    assert has_open_marker("x <<<AUTO_DEV_RESULT y") is True
+    assert has_open_marker("nothing") is False
+    blocked = unclosed_frame_blocked("<<<AUTO_DEV_RESULT\n{")
+    assert blocked.blocker.reason == BLOCKER_REASON_NO_RESULT_EMITTED
+
+
+def test_parse_last_loose_block_matches_parse_stdout_for_a_fenced_payload() -> None:
+    """Parity with ``parse_stdout``'s #337 loose-fence fallback."""
+    fenced = f"narrative\n```json\n{json.dumps(_blocked_payload())}\n```\n"
+
+    via_stdout = parse_stdout(fenced)
+    via_last = parse_last_loose_block(fenced)
+
+    assert isinstance(via_stdout, AutoDevResult)
+    assert via_last == via_stdout
+
+
+def test_parse_last_loose_block_none_without_a_qualifying_fence() -> None:
+    assert parse_last_loose_block("no fence") is None
+    assert parse_last_loose_block('```json\n{"unrelated": 1}\n```') is None
+
+
+def test_parse_last_loose_block_skips_example_and_other_tickets() -> None:
+    example = f"```json\n{json.dumps(_documented_example_payload())}\n```"
+    foreign = f"```json\n{json.dumps(_merge_gate_payload())}\n```"
+
+    assert parse_last_loose_block(example) is None
+    assert parse_last_loose_block(foreign, ticket_id="GEN-7") is None

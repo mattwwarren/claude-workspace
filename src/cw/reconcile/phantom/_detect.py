@@ -17,14 +17,12 @@ from cw.exceptions import CwError
 from cw.models import DEFAULT_LANE, OrchestratorConfig, SessionOrigin
 from cw.reconcile import _shared
 from cw.reconcile._shared import (
-    _PAUSED_STATUS_KEY,
-    _SENTINEL_ADVANCE_REFUSED_KEY,
-    _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     ProposedAction,
     ReapCandidate,
     _has_terminal_sentinel,
     _parse_any_sentinel_from_transcript,
     _transcript_age_seconds,
+    stage_refusal_latched,
     ticket_id_for_session,
 )
 from cw.result import reconstruct_staged_sentinel
@@ -209,11 +207,7 @@ def _detect_phantom_candidates(
         # reconstructed and re-refused on every tick, forever. Unlike idle.py,
         # phantom.py's detect phase has no `last_result is None` precondition,
         # so the apply-phase stamp alone would be inert here.
-        already_refused = isinstance(session.last_result, dict) and (
-            session.last_result.get(_PAUSED_STATUS_KEY)
-            == _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
-            or session.last_result.get(_SENTINEL_ADVANCE_REFUSED_KEY) is True
-        )
+        already_refused = stage_refusal_latched(session)
         # Issue #536 as narrowed by #1762: a session that already pushed a
         # terminal result (last_result carries a "status") is authoritative and
         # must never be re-salvaged or re-crashed *over* -- but #536 enforced

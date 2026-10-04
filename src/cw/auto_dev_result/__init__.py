@@ -14,6 +14,12 @@ failure modes).
 
 from __future__ import annotations
 
+from cw.auto_dev_result._last_block import (
+    has_open_marker,
+    has_unclosed_frame,
+    parse_last_block,
+    parse_last_loose_block,
+)
 from cw.auto_dev_result._premises_resolution import (
     _downgrade_exempt_premises,
 )
@@ -65,8 +71,8 @@ from cw.auto_dev_result.parse import (
     _tail,
     extract_block,
     is_documented_example,
-    parse_last_block,
     parse_stdout,
+    unclosed_frame_blocked,
 )
 from cw.auto_dev_result.schema import (
     _MIN_V2_SCHEMA_VERSION,
@@ -221,9 +227,13 @@ __all__ = [
     "_strip_code_fence",
     "_tail",
     "extract_block",
+    "has_open_marker",
+    "has_unclosed_frame",
     "is_documented_example",
     "is_known_blocker_reason",
     "parse_last_block",
+    "parse_last_loose_block",
     "parse_stdout",
     "queue_status_for_terminal_sentinel",
+    "unclosed_frame_blocked",
 ]

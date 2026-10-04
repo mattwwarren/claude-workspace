@@ -27,12 +27,10 @@ from cw.models import (
     SessionStatus,
 )
 from cw.reconcile._shared import (
-    _PAUSED_STATUS_KEY,
-    _SENTINEL_ADVANCE_REFUSED_KEY,
-    _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     _apply_sentinel_to_task_audited,
     _foreign_result_target_queue_status,
     _resolve_routed_sentinel,
+    stamp_stage_refusal,
 )
 
 if TYPE_CHECKING:
@@ -123,20 +121,10 @@ def _apply_stalled_routed_mutations(
         if not routed and not task_already_terminal:
             # #1149-shape stage-mismatch refusal: leave the task untouched and
             # merge (never clobber) the refusal flag into the pre-existing
-            # last_result dict, matching phantom's merge-safe convention --
-            # stalled's precondition guarantees last_result is always already
-            # a dict here (it is the terminal sentinel that made this a
-            # candidate in the first place).
-            existing = session.last_result
-            if isinstance(existing, dict):
-                session.last_result = {
-                    **existing,
-                    _SENTINEL_ADVANCE_REFUSED_KEY: True,
-                }
-            else:
-                session.last_result = {
-                    _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
-                }
+            # last_result dict -- stalled's precondition guarantees it is
+            # always already a dict here (it is the terminal sentinel that made
+            # this a candidate in the first place).
+            stamp_stage_refusal(session)
             continue
         # Shared completion path for the ordinary routed=True success arm and
         # the #2140-shape task_already_terminal race (another authority

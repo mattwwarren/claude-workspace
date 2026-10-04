@@ -30,14 +30,12 @@ from cw.models import (
 from cw.reconcile._shared import (
     _DIRTY_WORKTREE_REASON,
     _GH_CHECK_BLOCKED_REASON,
-    _PAUSED_STATUS_KEY,
-    _SENTINEL_ADVANCE_REFUSED_KEY,
-    _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     _UNRESOLVED_SUBAGENT_SPAWN_REASON,
     _apply_salvaged_completion,
     _apply_sentinel_to_task_audited,
     _queue_status_for_salvaged,
     _resolve_routed_sentinel,
+    stamp_stage_refusal,
 )
 from cw.result import reconstruct_staged_sentinel
 
@@ -326,33 +324,11 @@ def _apply_phantom_routed_mutations(
             # _detect_phantom_candidates stops re-offering this same doomed
             # candidate to _phantom_advance_sentinel_candidate.
             #
-            # Unlike idle.py (whose detect phase only builds a candidate when
-            # last_result is already None, so an unconditional overwrite can
-            # never clobber anything), phantom.py's detect phase has no such
-            # precondition -- a session already legitimately parked by another
-            # sweep (idle.py's _SILENTLY_IDLE_REASON, salvage.py's
-            # _NEEDS_SALVAGE_REASON) can reach here with last_result already
-            # set. Overwriting it wholesale would destroy that marker and
-            # defeat stalled.py's SKIP_PARKED check, which reads
-            # last_result.get("paused_status") for exactly those two reasons --
-            # silently un-parking a session another sweep correctly parked.
-            # But merely skipping the stamp in that case (rather than merging
-            # it in) would re-open the very refusal-loop this stamp exists to
-            # close for that overlap: already_refused would never become True,
-            # so the doomed candidate re-offers forever. So: start from a
-            # pre-existing dict and merge the refusal flag in under its own
-            # key (never touching the caller's own paused_status value);
-            # only a None last_result gets the original single-key stamp.
-            existing = session.last_result
-            if isinstance(existing, dict):
-                session.last_result = {
-                    **existing,
-                    _SENTINEL_ADVANCE_REFUSED_KEY: True,
-                }
-            else:
-                session.last_result = {
-                    _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
-                }
+            # Unlike idle.py, phantom's detect phase has no `last_result is
+            # None` precondition: a session already parked by another sweep
+            # can reach here, so the shared stamp merges rather than
+            # overwrites (see stamp_stage_refusal).
+            stamp_stage_refusal(session)
             continue
         session.status = SessionStatus.COMPLETED
         session.completed_at = now

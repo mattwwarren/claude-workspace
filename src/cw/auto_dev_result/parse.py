@@ -46,7 +46,7 @@ from cw.auto_dev_result.schema import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 _log = logging.getLogger("cw.auto_dev_result")
 
@@ -177,14 +177,12 @@ def _strip_code_fence(raw: str) -> str:
     return raw
 
 
-def _extract_loose_sentinel_json(text: str) -> str | None:
-    """Scan for the last code-fenced block that parses as an auto-dev payload.
+def _iter_loose_sentinel_json(text: str) -> Iterator[str]:
+    """Yield code-fenced auto-dev payloads in *text*, last first.
 
-    Used as a fallback when ``parse_stdout`` finds no AUTO_DEV_RESULT markers
-    (GitHub #337 — producer occasionally emits the payload in a code fence
-    without the sentinel framing). Accepts only blocks whose inner JSON is a
-    dict containing both ``schema_version`` and ``status`` keys, distinguishing
-    an auto-dev result from unrelated code blocks in the output.
+    Accepts only blocks whose inner JSON is a dict containing both
+    ``schema_version`` and ``status`` keys, distinguishing an auto-dev result
+    from unrelated code blocks in the output.
     """
     for m in reversed(list(_LOOSE_FENCE_RE.finditer(text))):
         candidate = m.group(1).strip()
@@ -193,8 +191,17 @@ def _extract_loose_sentinel_json(text: str) -> str | None:
         except json.JSONDecodeError:
             continue
         if isinstance(obj, dict) and "schema_version" in obj and "status" in obj:
-            return candidate
-    return None
+            yield candidate
+
+
+def _extract_loose_sentinel_json(text: str) -> str | None:
+    """Scan for the last code-fenced block that parses as an auto-dev payload.
+
+    Used as a fallback when ``parse_stdout`` finds no AUTO_DEV_RESULT markers
+    (GitHub #337 — producer occasionally emits the payload in a code fence
+    without the sentinel framing).
+    """
+    return next(_iter_loose_sentinel_json(text), None)
 
 
 def extract_block(text: str) -> str | None:
@@ -210,26 +217,15 @@ def extract_block(text: str) -> str | None:
     return matches[-1].group(1)
 
 
-def parse_last_block(text: str) -> AutoDevResult | BlockedResult | None:
-    """Parse the LAST real sentinel block in *text*, tolerating earlier ones.
-
-    :func:`parse_stdout` rejects a text carrying more than one complete block
-    (§6 (6) ``multiple_result_blocks``). A caller that scans a stream whose
-    chunks can legitimately quote an earlier block -- an opencode text event
-    that echoes a prior stage's result or the skill's worked example -- needs
-    §3.1's "the LAST block wins" instead (#2490). Returns ``None`` when *text*
-    has no complete block, or its last one is an unresolved doc-example
-    placeholder or the documented ``PROJ-1234`` example; otherwise the parse
-    of that last block alone (an :class:`AutoDevResult`, or the
-    :class:`BlockedResult` describing why its payload was unusable).
-    """
-    block = extract_block(text)
-    if block is None or _is_placeholder_sentinel_text(block):
-        return None
-    result = parse_stdout(f"{_OPEN_SENTINEL}\n{block}\n{_CLOSE_SENTINEL}")
-    if isinstance(result, AutoDevResult) and is_documented_example(result):
-        return None
-    return result
+def unclosed_frame_blocked(text: str) -> BlockedResult:
+    """§6 (2): opening sentinel present, close missing -- skill crashed mid-emit."""
+    return BlockedResult(
+        blocker=Blocker(
+            stage="unknown",
+            reason=BLOCKER_REASON_NO_RESULT_EMITTED,
+            details=f"opening sentinel present, close missing; tail:\n{_tail(text)}",
+        ),
+    )
 
 
 # Derived from schema.Status so this pre-Pydantic gate cannot drift from the
@@ -276,16 +272,7 @@ def _locate_raw_block(
         return _strip_code_fence(matches[0].group(1))
 
     if _OPEN_SENTINEL in text:
-        # §6 (2) opening sentinel present, close missing — skill crashed mid-emit
-        return BlockedResult(
-            blocker=Blocker(
-                stage="unknown",
-                reason=BLOCKER_REASON_NO_RESULT_EMITTED,
-                details=(
-                    f"opening sentinel present, close missing; tail:\n{_tail(text)}"
-                ),
-            ),
-        )
+        return unclosed_frame_blocked(text)
 
     # §6 (1) No AUTO_DEV_RESULT markers. Tolerate bare code-fenced JSON:
     # the producer occasionally emits the payload in a ``` block without

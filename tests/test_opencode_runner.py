@@ -10,7 +10,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from cw.auto_dev_result import AutoDevResult, BlockedResult, StageReached
+from cw.auto_dev_result import (
+    BLOCKER_REASON_NO_RESULT_EMITTED,
+    BLOCKER_REASON_STATUS_UNKNOWN,
+    AutoDevResult,
+    BlockedResult,
+    StageReached,
+    parse_stdout,
+)
 from cw.models import Stage
 from cw.opencode_runner import (
     OPENCODE_LOG_RELATIVE_PATH,
@@ -31,9 +38,16 @@ from cw.opencode_runner import (
     synthesize_opencode_result,
 )
 from cw.worktree import resolve_worker_tmpdir
+from tests._opencode_helpers import (
+    earlier_stage_then_final_log,
+    framed,
+    log_content,
+    text_event,
+    write_opencode_log,
+)
 
 if TYPE_CHECKING:
-    pass
+    from tests._opencode_helpers import LogLine
 
 
 def _make_task(ticket_id: str = "T-1", stage: Stage = Stage.FINALIZE) -> MagicMock:
@@ -337,34 +351,17 @@ def test_synthesize_opencode_result_no_output_carries_task_stage(
 # ---------------------------------------------------------------------------
 # Last-sentinel selection (#2490)
 #
-# Fixture provenance: no real capture of the failing session log exists in the
-# repo or on this machine. The event shapes below are the ones this suite's
-# other opencode tests already use (``step_start`` / ``text`` / ``step_finish``,
-# each carrying a ``part``), plus the ugly mixed lines a real log carries
-# (stderr merged into stdout, a null ``part``). Only the arrangement -- an
-# earlier stage's sentinel quoted before the final one -- is composed.
+# Fixture provenance (composed arrangement, HYPOTHESIZED robustness lines, no
+# capture of the failing session): see tests/_opencode_helpers.py.
 # ---------------------------------------------------------------------------
 
 
-def _text_event(text: str) -> dict[str, object]:
-    return {"type": "text", "part": {"text": text}}
-
-
-def _framed(result: AutoDevResult) -> str:
-    return f"<<<AUTO_DEV_RESULT\n{result.model_dump_json()}\nAUTO_DEV_RESULT>>>"
-
-
-def _write_oc_log(worktree: Path, lines: list[dict[str, object] | str]) -> None:
-    log_path = worktree / OPENCODE_LOG_RELATIVE_PATH
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text(
-        "\n".join(ln if isinstance(ln, str) else json.dumps(ln) for ln in lines) + "\n",
-        encoding="utf-8",
-    )
-
-
 def _finalize_blocked(
-    worktree: Path, *, reason: str, stage: StageReached = "stage4a_merge_gate"
+    worktree: Path,
+    *,
+    reason: str,
+    stage: StageReached = "stage4a_merge_gate",
+    ticket_id: str = "T-1",
 ) -> AutoDevResult:
     """A finalize-stage ``blocked`` sentinel shaped like the #2490 variant.
 
@@ -373,7 +370,7 @@ def _finalize_blocked(
     ``retry_eligible: true``.
     """
     base = make_blocked(
-        ticket_id="T-1",
+        ticket_id=ticket_id,
         worktree=worktree,
         reason=reason,
         details="blocked by PR #2468 which is still open",
@@ -387,32 +384,34 @@ def _finalize_blocked(
     return base.model_copy(update={"blocker": blocker})
 
 
-def _stage_walk_log(worktree: Path) -> list[dict[str, object] | str]:
+def _stage_walk_log(worktree: Path) -> list[LogLine]:
     """A finalize session log: an earlier stage's sentinel quoted, then the final."""
     earlier = make_blocked(
         ticket_id="T-1", worktree=worktree, reason="impl_failed"
     )  # stage2_impl
     final = _finalize_blocked(worktree, reason="prior_pipeline_pr_open")
-    return [
-        {"type": "step_start", "part": {"type": "step-start"}},
-        _text_event(f"Prior impl leg reported:\n{_framed(earlier)}\nNow finalizing."),
-        {"type": "step_finish", "part": {"reason": "tool-calls"}},
-        "warn: stderr line merged into the json stream",
-        {"type": "text", "part": None},
-        {"type": "step_start", "part": {"type": "step-start"}},
-        _text_event(_framed(final)),
-        {"type": "step_finish", "part": {"reason": "stop"}},
-    ]
+    return earlier_stage_then_final_log(earlier, final)
+
+
+def _events_log(*texts: str) -> str:
+    """JSONL log with one ``text`` event per *texts* entry."""
+    return log_content([text_event(t) for t in texts])
+
+
+def _assert_reason(result: AutoDevResult | BlockedResult | None, reason: str) -> None:
+    """*result* is a block whose ``blocker.reason`` is *reason*."""
+    assert result is not None
+    assert result.blocker is not None
+    assert result.blocker.reason == reason
 
 
 def test_parse_last_sentinel_takes_final_block_over_earlier_stage(
     tmp_path: Path,
 ) -> None:
     """An earlier stage's quoted sentinel neither shadows nor poisons the last."""
-    _write_oc_log(tmp_path, _stage_walk_log(tmp_path))
-    log_content = (tmp_path / OPENCODE_LOG_RELATIVE_PATH).read_text(encoding="utf-8")
+    log = log_content(_stage_walk_log(tmp_path))
 
-    result = parse_last_sentinel(log_content)
+    result = parse_last_sentinel(log, ticket_id="T-1")
 
     assert isinstance(result, AutoDevResult)
     assert result.stage_reached == "stage4a_merge_gate"
@@ -429,7 +428,7 @@ def test_synthesize_opencode_result_keeps_final_blocked_sentinel_after_earlier_o
     ``multiple_result_blocks``, so the real result became ``opencode_no_output``
     and its ``prior_pipeline_pr_open`` reason / ``recovery_hint`` were lost.
     """
-    _write_oc_log(tmp_path, _stage_walk_log(tmp_path))
+    write_opencode_log(tmp_path, _stage_walk_log(tmp_path))
 
     result = synthesize_opencode_result(
         task=_make_task(), worktree=tmp_path, session_id=None
@@ -448,33 +447,57 @@ def test_parse_last_sentinel_last_block_wins_within_one_event(
 ) -> None:
     earlier = make_blocked(ticket_id="T-1", worktree=tmp_path, reason="impl_failed")
     final = _finalize_blocked(tmp_path, reason="merge_conflict_post_push")
-    log = json.dumps(_text_event(f"{_framed(earlier)}\n\n{_framed(final)}"))
+    log = _events_log(f"{framed(earlier)}\n\n{framed(final)}")
 
-    result = parse_last_sentinel(log)
+    result = parse_last_sentinel(log, ticket_id="T-1")
 
     assert isinstance(result, AutoDevResult)
-    assert result.blocker is not None
-    assert result.blocker.reason == "merge_conflict_post_push"
+    _assert_reason(result, "merge_conflict_post_push")
+
+
+_TEMPLATE_BLOCK = (
+    '<<<AUTO_DEV_RESULT\n{"schema_version": 4, "ticket_id": "<ticket-id>", '
+    '"status": "<stage_complete | blocked>"}\nAUTO_DEV_RESULT>>>'
+)
 
 
 def test_parse_last_sentinel_skips_placeholder_template_block(
     tmp_path: Path,
 ) -> None:
     """The command file's worked example (``<ticket-id>``) is never a result."""
-    template = (
-        '<<<AUTO_DEV_RESULT\n{"schema_version": 4, "ticket_id": "<ticket-id>", '
-        '"status": "<stage_complete | blocked>"}\nAUTO_DEV_RESULT>>>'
-    )
     final = _finalize_blocked(tmp_path, reason="prior_pipeline_pr_open")
-    log = "\n".join(
-        json.dumps(_text_event(t)) for t in (template, _framed(final), template)
-    )
+    log = _events_log(_TEMPLATE_BLOCK, framed(final), _TEMPLATE_BLOCK)
 
-    result = parse_last_sentinel(log)
+    result = parse_last_sentinel(log, ticket_id="T-1")
 
     assert isinstance(result, AutoDevResult)
-    assert result.blocker is not None
-    assert result.blocker.reason == "prior_pipeline_pr_open"
+    _assert_reason(result, "prior_pipeline_pr_open")
+
+
+def test_parse_last_sentinel_real_block_after_a_placeholder_event(
+    tmp_path: Path,
+) -> None:
+    """A real result in an event AFTER a placeholder event is still returned."""
+    final = _finalize_blocked(tmp_path, reason="prior_pipeline_pr_open")
+    log = _events_log(_TEMPLATE_BLOCK, framed(final))
+
+    result = parse_last_sentinel(log, ticket_id="T-1")
+
+    assert isinstance(result, AutoDevResult)
+    _assert_reason(result, "prior_pipeline_pr_open")
+
+
+def test_parse_last_sentinel_real_status_with_angle_ticket_id_is_not_a_placeholder(
+    tmp_path: Path,
+) -> None:
+    """The placeholder gate needs BOTH fields templated: a real status survives."""
+    odd = _finalize_blocked(tmp_path, reason="prior_pipeline_pr_open", ticket_id="<x>")
+    log = _events_log(framed(odd))
+
+    result = parse_last_sentinel(log, ticket_id="<x>")
+
+    assert isinstance(result, AutoDevResult)
+    assert result.ticket_id == "<x>"
 
 
 def test_parse_last_sentinel_unusable_last_block_is_not_replaced_by_earlier(
@@ -483,32 +506,279 @@ def test_parse_last_sentinel_unusable_last_block_is_not_replaced_by_earlier(
     """A malformed final block must not resurrect the earlier stage's result."""
     earlier = make_blocked(ticket_id="T-1", worktree=tmp_path, reason="impl_failed")
     broken = "<<<AUTO_DEV_RESULT\n{not json\nAUTO_DEV_RESULT>>>"
-    log = "\n".join(json.dumps(_text_event(t)) for t in (_framed(earlier), broken))
 
-    assert isinstance(parse_last_sentinel(log), BlockedResult)
-    _write_oc_log(tmp_path, [_text_event(_framed(earlier)), _text_event(broken)])
+    result = parse_last_sentinel(_events_log(framed(earlier), broken), ticket_id="T-1")
+
+    assert isinstance(result, BlockedResult)
+    _assert_reason(result, BLOCKER_REASON_NO_RESULT_EMITTED)
+
+
+def test_synthesize_unusable_last_block_is_opencode_no_output(
+    tmp_path: Path,
+) -> None:
+    """The harvest of that log is the retry-eligible ``opencode_no_output``."""
+    earlier = make_blocked(ticket_id="T-1", worktree=tmp_path, reason="impl_failed")
+    broken = "<<<AUTO_DEV_RESULT\n{not json\nAUTO_DEV_RESULT>>>"
+    write_opencode_log(tmp_path, [text_event(framed(earlier)), text_event(broken)])
+
     result = synthesize_opencode_result(
         task=_make_task(), worktree=tmp_path, session_id=None
     )
+
+    _assert_reason(result, OPENCODE_NO_OUTPUT)
     assert result.blocker is not None
-    assert result.blocker.reason == OPENCODE_NO_OUTPUT
+    assert result.blocker.retry_eligible is True
 
 
 def test_parse_last_sentinel_joins_a_block_split_across_events(
     tmp_path: Path,
 ) -> None:
     final = _finalize_blocked(tmp_path, reason="prior_pipeline_pr_open")
-    framed = _framed(final)
-    cut = len(framed) // 2
-    log = "\n".join(
-        json.dumps(_text_event(chunk)) for chunk in (framed[:cut], framed[cut:])
-    )
+    text = framed(final)
+    cut = len(text) // 2
 
-    result = parse_last_sentinel(log)
+    result = parse_last_sentinel(_events_log(text[:cut], text[cut:]), ticket_id="T-1")
 
     assert isinstance(result, AutoDevResult)
-    assert result.blocker is not None
-    assert result.blocker.reason == "prior_pipeline_pr_open"
+    _assert_reason(result, "prior_pipeline_pr_open")
+
+
+def test_parse_last_sentinel_split_final_block_is_not_shadowed_by_earlier(
+    tmp_path: Path,
+) -> None:
+    """A complete earlier block must not win over a final block split in two."""
+    earlier = make_blocked(ticket_id="T-1", worktree=tmp_path, reason="impl_failed")
+    final = _finalize_blocked(tmp_path, reason="prior_pipeline_pr_open")
+    text = framed(final)
+    cut = len(text) // 2
+
+    result = parse_last_sentinel(
+        _events_log(framed(earlier), text[:cut], text[cut:]), ticket_id="T-1"
+    )
+
+    assert isinstance(result, AutoDevResult)
+    assert result.stage_reached == "stage4a_merge_gate"
+    _assert_reason(result, "prior_pipeline_pr_open")
+
+
+def test_parse_last_sentinel_truncated_final_frame_is_unusable(
+    tmp_path: Path,
+) -> None:
+    """An open marker with no close is the unusable result, never the earlier block."""
+    earlier = make_blocked(ticket_id="T-1", worktree=tmp_path, reason="impl_failed")
+    final = _finalize_blocked(tmp_path, reason="prior_pipeline_pr_open")
+    truncated = framed(final)[: len(framed(final)) // 2]
+
+    result = parse_last_sentinel(
+        _events_log(framed(earlier), truncated), ticket_id="T-1"
+    )
+
+    assert isinstance(result, BlockedResult)
+    _assert_reason(result, BLOCKER_REASON_NO_RESULT_EMITTED)
+
+
+def test_parse_last_sentinel_truncated_frame_after_complete_one_in_same_event(
+    tmp_path: Path,
+) -> None:
+    """[complete][open, no close] in ONE event: the truncated tail still decides."""
+    earlier = make_blocked(ticket_id="T-1", worktree=tmp_path, reason="impl_failed")
+    log = _events_log(f'{framed(earlier)}\n<<<AUTO_DEV_RESULT\n{{"schema_version": 4')
+
+    result = parse_last_sentinel(log, ticket_id="T-1")
+
+    assert isinstance(result, BlockedResult)
+
+
+def test_parse_last_sentinel_ignores_foreign_block_quoted_after_the_real_one(
+    tmp_path: Path,
+) -> None:
+    """A sibling ticket's result quoted AFTER this ticket's must not be applied."""
+    real = _finalize_blocked(tmp_path, reason="prior_pipeline_pr_open")
+    foreign = _finalize_blocked(
+        tmp_path, reason="merge_conflict_post_push", ticket_id="T-2"
+    )
+    log = _events_log(framed(real), f"the sibling reported:\n{framed(foreign)}")
+
+    result = parse_last_sentinel(log, ticket_id="T-1")
+
+    assert isinstance(result, AutoDevResult)
+    assert result.ticket_id == "T-1"
+    _assert_reason(result, "prior_pipeline_pr_open")
+
+
+def test_parse_last_sentinel_ignores_foreign_block_quoted_before_the_real_one(
+    tmp_path: Path,
+) -> None:
+    real = _finalize_blocked(tmp_path, reason="prior_pipeline_pr_open")
+    foreign = _finalize_blocked(
+        tmp_path, reason="merge_conflict_post_push", ticket_id="T-2"
+    )
+    log = _events_log(framed(foreign), framed(real))
+
+    result = parse_last_sentinel(log, ticket_id="T-1")
+
+    assert isinstance(result, AutoDevResult)
+    assert result.ticket_id == "T-1"
+
+
+def test_parse_last_sentinel_foreign_block_in_the_same_event_as_the_real_one(
+    tmp_path: Path,
+) -> None:
+    real = _finalize_blocked(tmp_path, reason="prior_pipeline_pr_open")
+    foreign = _finalize_blocked(
+        tmp_path, reason="merge_conflict_post_push", ticket_id="T-2"
+    )
+
+    result = parse_last_sentinel(
+        _events_log(f"{framed(real)}\n{framed(foreign)}"), ticket_id="T-1"
+    )
+
+    assert isinstance(result, AutoDevResult)
+    assert result.ticket_id == "T-1"
+
+
+def test_parse_last_sentinel_foreign_blocks_only_is_none(tmp_path: Path) -> None:
+    foreign = _finalize_blocked(
+        tmp_path, reason="merge_conflict_post_push", ticket_id="T-2"
+    )
+
+    assert parse_last_sentinel(_events_log(framed(foreign)), ticket_id="T-1") is None
+
+
+def test_parse_last_sentinel_malformed_block_of_another_ticket_is_ignored(
+    tmp_path: Path,
+) -> None:
+    """A block claiming a different ticket is dropped even when it is malformed."""
+    real = _finalize_blocked(tmp_path, reason="prior_pipeline_pr_open")
+    foreign_broken = (
+        '<<<AUTO_DEV_RESULT\n{"schema_version": 4, "ticket_id": "T-2",'
+        ' "status": "no_such_status"}\nAUTO_DEV_RESULT>>>'
+    )
+
+    result = parse_last_sentinel(
+        _events_log(framed(real), foreign_broken), ticket_id="T-1"
+    )
+
+    assert isinstance(result, AutoDevResult)
+    _assert_reason(result, "prior_pipeline_pr_open")
+
+
+def test_parse_last_sentinel_malformed_block_for_this_ticket_is_not_replaced(
+    tmp_path: Path,
+) -> None:
+    """A malformed LAST block for THIS ticket stays the final word (the rule)."""
+    real = _finalize_blocked(tmp_path, reason="prior_pipeline_pr_open")
+    own_broken = (
+        '<<<AUTO_DEV_RESULT\n{"schema_version": 4, "ticket_id": "T-1",'
+        ' "status": "no_such_status"}\nAUTO_DEV_RESULT>>>'
+    )
+
+    result = parse_last_sentinel(_events_log(framed(real), own_broken), ticket_id="T-1")
+
+    assert isinstance(result, BlockedResult)
+    _assert_reason(result, BLOCKER_REASON_STATUS_UNKNOWN)
+
+
+def test_parse_last_sentinel_empty_ticket_id_disables_the_identity_check(
+    tmp_path: Path,
+) -> None:
+    """A session with no associated ticket (``""``) has nothing to compare."""
+    other = _finalize_blocked(
+        tmp_path, reason="prior_pipeline_pr_open", ticket_id="T-9"
+    )
+
+    result = parse_last_sentinel(_events_log(framed(other)), ticket_id="")
+
+    assert isinstance(result, AutoDevResult)
+    assert result.ticket_id == "T-9"
+
+
+def test_synthesize_never_applies_a_foreign_ticket_block_quoted_last(
+    tmp_path: Path,
+) -> None:
+    """#2490 review: harvest keeps this ticket's result over a later foreign quote."""
+    real = _finalize_blocked(tmp_path, reason="prior_pipeline_pr_open")
+    foreign = _finalize_blocked(
+        tmp_path, reason="merge_conflict_post_push", ticket_id="T-2"
+    )
+    write_opencode_log(
+        tmp_path, [text_event(framed(real)), text_event(framed(foreign))]
+    )
+
+    result = synthesize_opencode_result(
+        task=_make_task("T-1"), worktree=tmp_path, session_id=None
+    )
+
+    assert result.ticket_id == "T-1"
+    _assert_reason(result, "prior_pipeline_pr_open")
+
+
+def test_synthesize_with_only_a_foreign_block_is_opencode_no_output(
+    tmp_path: Path,
+) -> None:
+    """No block for this ticket -> the retry-eligible requeue, not a foreign result."""
+    foreign = _finalize_blocked(
+        tmp_path, reason="prior_pipeline_pr_open", ticket_id="T-2"
+    )
+    write_opencode_log(tmp_path, [text_event(framed(foreign))])
+
+    result = synthesize_opencode_result(
+        task=_make_task("T-1"), worktree=tmp_path, session_id=None
+    )
+
+    _assert_reason(result, OPENCODE_NO_OUTPUT)
+    assert result.ticket_id == "T-1"
+
+
+def _loose_fenced(result: AutoDevResult) -> str:
+    """*result* as bare ```json fenced JSON with no AUTO_DEV_RESULT markers (#337)."""
+    return f"```json\n{result.model_dump_json()}\n```"
+
+
+def test_loose_fenced_result_parses_the_same_via_parse_stdout_and_last_sentinel(
+    tmp_path: Path,
+) -> None:
+    """Parity (#337): a marker-less fenced result is not lost to ``no_output``."""
+    final = _finalize_blocked(tmp_path, reason="prior_pipeline_pr_open")
+    fenced = _loose_fenced(final)
+
+    via_stdout = parse_stdout(fenced)
+    via_log = parse_last_sentinel(_events_log(fenced), ticket_id="T-1")
+
+    assert isinstance(via_stdout, AutoDevResult)
+    assert via_log == via_stdout
+
+
+def test_synthesize_returns_a_loose_fenced_result(tmp_path: Path) -> None:
+    final = _finalize_blocked(tmp_path, reason="prior_pipeline_pr_open")
+    write_opencode_log(tmp_path, [text_event(f"Done.\n{_loose_fenced(final)}")])
+
+    result = synthesize_opencode_result(
+        task=_make_task(), worktree=tmp_path, session_id=None
+    )
+
+    _assert_reason(result, "prior_pipeline_pr_open")
+    assert result.stage_reached == "stage4a_merge_gate"
+
+
+def test_loose_fenced_result_for_another_ticket_is_ignored(tmp_path: Path) -> None:
+    foreign = _finalize_blocked(
+        tmp_path, reason="prior_pipeline_pr_open", ticket_id="T-2"
+    )
+
+    assert (
+        parse_last_sentinel(_events_log(_loose_fenced(foreign)), ticket_id="T-1")
+        is None
+    )
+
+
+def test_loose_fenced_placeholder_is_never_a_result() -> None:
+    placeholder = (
+        '```json\n{"schema_version": 4, "ticket_id": "<ticket-id>",'
+        ' "status": "<stage_complete | blocked>"}\n```'
+    )
+
+    assert parse_last_sentinel(_events_log(placeholder), ticket_id="T-1") is None
 
 
 @pytest.mark.parametrize(
@@ -517,11 +787,11 @@ def test_parse_last_sentinel_joins_a_block_split_across_events(
         "",
         "not json at all",
         json.dumps({"type": "step_finish", "part": {"reason": "stop"}}),
-        json.dumps(_text_event("narrative with no sentinel")),
+        json.dumps(text_event("narrative with no sentinel")),
     ],
 )
 def test_parse_last_sentinel_none_when_no_block(log: str) -> None:
-    assert parse_last_sentinel(log) is None
+    assert parse_last_sentinel(log, ticket_id="T-1") is None
 
 
 # ---------------------------------------------------------------------------

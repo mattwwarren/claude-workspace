@@ -12,6 +12,12 @@ import pytest
 
 from cw import queue_peek
 from cw.models import DEFAULT_STAGE, QueueItemStatus, Stage, TicketTask
+from tests._opencode_helpers import (
+    earlier_stage_then_final_log,
+    framed,
+    text_event,
+    write_opencode_log,
+)
 from tests.conftest import _make_ticket_task as _cw_make_ticket_task
 
 # ---------------------------------------------------------------------------
@@ -2947,7 +2953,7 @@ def test_parse_opencode_transcript_sentinel_found(tmp_path: Path) -> None:
         ],
     )
 
-    result = queue_peek.parse_opencode_transcript(log_path)
+    result = queue_peek.parse_opencode_transcript(log_path, "T-1")
     assert result["last_sentinel_status"] == "blocked"
     assert result["last_sentinel_stage"] == "stage2_impl"
     assert result["first_user_ts"] is None
@@ -2960,9 +2966,8 @@ def test_parse_opencode_transcript_takes_last_sentinel_over_earlier_stage(
 ) -> None:
     """#2490: peek agrees with harvest -- the final sentinel wins over an earlier one.
 
-    Composed from the same ``step_start``/``text``/``step_finish`` shapes the
-    other opencode peek tests use; only the earlier-then-final arrangement is
-    new.
+    Fixture provenance (composed arrangement, no capture): see
+    ``tests/_opencode_helpers.py``.
     """
     from cw.opencode_runner import make_blocked
 
@@ -2973,25 +2978,41 @@ def test_parse_opencode_transcript_takes_last_sentinel_over_earlier_stage(
         reason="merge_conflict_post_push",
         stage_reached="stage4b_pr_create",
     )
-
-    def frame(r: Any) -> str:
-        return f"<<<AUTO_DEV_RESULT\n{r.model_dump_json()}\nAUTO_DEV_RESULT>>>"
-
-    log_path = _write_opencode_log(
-        tmp_path,
-        [
-            {"type": "step_start", "part": {"type": "step-start"}},
-            {"type": "text", "part": {"text": frame(earlier)}},
-            {"type": "step_finish", "part": {"reason": "tool-calls"}},
-            {"type": "text", "part": {"text": frame(final)}},
-            {"type": "step_finish", "part": {"reason": "stop"}},
-        ],
+    log_path = write_opencode_log(
+        tmp_path, earlier_stage_then_final_log(earlier, final)
     )
 
-    result = queue_peek.parse_opencode_transcript(log_path)
+    result = queue_peek.parse_opencode_transcript(log_path, "T-1")
 
     assert result["last_sentinel_status"] == "blocked"
     assert result["last_sentinel_stage"] == "stage4b_pr_create"
+
+
+def test_parse_opencode_transcript_ignores_a_foreign_ticket_quoted_last(
+    tmp_path: Path,
+) -> None:
+    """#2490: peek reports THIS ticket's last sentinel, not a quoted sibling's."""
+    from cw.opencode_runner import make_blocked
+
+    real = make_blocked(
+        ticket_id="T-1",
+        worktree=tmp_path,
+        reason="prior_pipeline_pr_open",
+        stage_reached="stage4a_merge_gate",
+    )
+    foreign = make_blocked(
+        ticket_id="T-2",
+        worktree=tmp_path,
+        reason="merge_conflict_post_push",
+        stage_reached="stage4b_pr_create",
+    )
+    log_path = write_opencode_log(
+        tmp_path, [text_event(framed(real)), text_event(framed(foreign))]
+    )
+
+    result = queue_peek.parse_opencode_transcript(log_path, "T-1")
+
+    assert result["last_sentinel_stage"] == "stage4a_merge_gate"
 
 
 def test_parse_opencode_transcript_no_sentinel(tmp_path: Path) -> None:
@@ -3004,7 +3025,7 @@ def test_parse_opencode_transcript_no_sentinel(tmp_path: Path) -> None:
         ],
     )
 
-    result = queue_peek.parse_opencode_transcript(log_path)
+    result = queue_peek.parse_opencode_transcript(log_path, "T-1")
     assert result["last_sentinel_status"] is None
     assert result["last_sentinel_stage"] is None
     assert result["last_asst_ts"] is not None
@@ -3012,7 +3033,7 @@ def test_parse_opencode_transcript_no_sentinel(tmp_path: Path) -> None:
 
 def test_parse_opencode_transcript_missing_file(tmp_path: Path) -> None:
     """Missing log file → all fields None/False."""
-    result = queue_peek.parse_opencode_transcript(tmp_path / "nonexistent.log")
+    result = queue_peek.parse_opencode_transcript(tmp_path / "nonexistent.log", "T-1")
     assert result["last_sentinel_status"] is None
     assert result["last_asst_ts"] is None
     assert result["usage_limit_detected"] is False
@@ -3026,7 +3047,7 @@ def test_parse_opencode_transcript_stat_oserror(tmp_path: Path) -> None:
         tmp_path, [{"type": "text", "part": {"text": "no sentinel"}}]
     )
     with patch.object(Path, "stat", side_effect=OSError("denied")):
-        result = queue_peek.parse_opencode_transcript(log_path)
+        result = queue_peek.parse_opencode_transcript(log_path, "T-1")
     assert result["last_sentinel_status"] is None
     assert result["last_asst_ts"] is None
 
