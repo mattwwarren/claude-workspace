@@ -1011,9 +1011,12 @@ open enum; consumers MUST tolerate unknown values. Known values:
   phantom/stalled sweeps use). A failed page write leaves the session
   un-latched, so the next tick re-offers it and pages again; a crash between the
   page and the state save does the same. The harvest sweep skips a latched
-  session only while its row is still bound to it (same session id, an
-  occupied status); once the row moved on (requeued, cancelled, session id
-  cleared) the dead session is offered again and completes normally.
+  session only while its row is still bound to it: any dev-queue row with the
+  session's ticket id and the same session id in an occupied status (the
+  router's own match, so a duplicate row for the ticket id is not mistaken for
+  the session's row); once the row moved on (requeued, cancelled, session id
+  cleared or replaced by a newer session) the dead session is offered again and
+  completes normally.
   `breadcrumbs` names the backend, the status, stage, blocker reason and
   recovery hint the dead worker reported, the row's **live** stage (read under
   the queue lock when the guard refused), and the recovery command

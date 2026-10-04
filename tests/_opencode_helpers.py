@@ -4,13 +4,18 @@ FIXTURE PROVENANCE -- read before trusting any log built here.
 
 opencode's ``--format json`` log is an external system's output, so a fixture
 for it should be a redacted capture, not an invention. No capture of the failing
-session exists. What IS observed, and pinned nightly by
-``tests/test_opencode_contract_live.py`` (``INTEGRATION_OPENCODE_LIVE``): the
-``step_start`` / ``text`` / ``step_finish`` event types, each carrying a
-``part``, with ``step_finish`` carrying ``reason: "stop"``.
+session exists. What IS observed is only what
+``tests/test_opencode_contract_live.py`` (``INTEGRATION_OPENCODE_LIVE``, nightly)
+asserts against a real run: that some event has ``type == "step_finish"``, and
+that the ``text`` events' ``part.text`` strings concatenate (via
+``extract_text_from_jsonl``) to non-empty text.
 
-Everything else here is COMPOSED, not observed:
+Everything else here is COMPOSED, not observed -- hand-written, or inherited
+from earlier tests that were themselves hand-written:
 
+* the ``part`` object on every event, the ``step_start`` event and its
+  ``{"type": "step-start"}`` part, and the ``step_finish`` ``reason`` values
+  (``"stop"``): nothing pins their presence or spelling;
 * the arrangement -- an earlier stage's sentinel quoted in one ``text`` event,
   the final sentinel in a later one;
 * a bare stderr line merged into the stream and a ``text`` event whose ``part``

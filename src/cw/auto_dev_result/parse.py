@@ -18,6 +18,10 @@ Public surface:
   payload was unusable. Never raises on malformed input.
 - :func:`extract_block` — low-level helper that locates the LAST sentinel
   pair and returns the inner JSON text (no parsing).
+
+The last-block-over-a-stream rules (several blocks tolerated, ticket identity,
+truncated/split final frame) live in :mod:`cw.auto_dev_result._last_block`,
+built on this module's primitives (#2490).
 """
 
 from __future__ import annotations

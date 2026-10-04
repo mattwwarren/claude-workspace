@@ -44,15 +44,12 @@ from cw.auto_dev_result import (
     Status,
     _is_placeholder_sentinel_text,
     extract_block,
-    has_open_marker,
-    has_unclosed_frame,
     is_documented_example,
     is_known_blocker_reason,
     parse_last_block,
-    parse_last_loose_block,
+    parse_last_block_in_chunks,
     parse_stdout,
     queue_status_for_terminal_sentinel,
-    unclosed_frame_blocked,
 )
 from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED, FIX_LOOP_DIVERGING
 from cw.models import QueueItemStatus
@@ -5384,7 +5381,72 @@ def test_parse_last_block_ticket_filter_skips_other_tickets_blocks() -> None:
 
     assert isinstance(result, AutoDevResult)
     assert result.ticket_id == "GEN-7"
+
+
+def test_parse_last_block_ticket_filter_is_none_when_every_block_is_foreign() -> None:
+    text = _wrap_sentinel(_blocked_payload()) + _wrap_sentinel(_merge_gate_payload())
+
     assert parse_last_block(text, ticket_id="GEN-404") is None
+
+
+def _blocked_payload_for(ticket_id: str) -> dict[str, Any]:
+    payload = _blocked_payload()
+    payload["ticket_id"] = ticket_id
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("claimed", "task_id", "accepted"),
+    [
+        ("940", "940", True),
+        ("#940", "940", True),
+        ("GH-940", "940", True),
+        ("gh-940", "940", True),
+        ("941", "940", False),
+        ("0940", "940", False),
+        ("##940", "940", False),
+        ("GH-941", "940", False),
+        ("GEN-7", "GEN-7", True),
+        ("#GEN-7", "GEN-7", False),
+        ("gen-7", "GEN-7", False),
+        ("GH-GEN-7", "GEN-7", False),
+        ("GH-940", "GH-940", True),
+        ("940", "GH-940", False),
+    ],
+)
+def test_parse_last_block_ticket_identity_form_rule(
+    claimed: str, task_id: str, accepted: bool
+) -> None:
+    """Exact equality; a bare numeric task id also accepts ``#N`` / ``GH-N`` claims."""
+    result = parse_last_block(
+        _wrap_sentinel(_blocked_payload_for(claimed)), ticket_id=task_id
+    )
+
+    assert (result is not None) is accepted
+
+
+def test_parse_last_block_logs_a_block_discarded_for_a_ticket_mismatch(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    text = _wrap_sentinel(_blocked_payload_for("941"))
+
+    with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+        parse_last_block(text, ticket_id="940")
+
+    [record] = caplog.records
+    assert "'941'" in record.getMessage()
+    assert "'940'" in record.getMessage()
+
+
+def test_parse_last_block_does_not_log_for_a_matching_ticket(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    text = _wrap_sentinel(_blocked_payload_for("#940"))
+
+    with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+        parse_last_block(text, ticket_id="940")
+
+    assert caplog.records == []
 
 
 def test_parse_last_block_ticket_filter_ignores_a_foreign_malformed_block() -> None:
@@ -5398,7 +5460,7 @@ def test_parse_last_block_ticket_filter_ignores_a_foreign_malformed_block() -> N
     assert result.ticket_id == "GEN-7"
 
 
-def test_parse_last_block_unreadable_ticket_counts_as_the_callers() -> None:
+def test_parse_last_block_with_no_readable_ticket_counts_as_the_callers() -> None:
     """A block whose ticket cannot be read cannot be shown foreign: fail safe."""
     text = (
         _wrap_sentinel(_blocked_payload())
@@ -5410,46 +5472,172 @@ def test_parse_last_block_unreadable_ticket_counts_as_the_callers() -> None:
     assert isinstance(result, BlockedResult)
 
 
+def _elided_block(ticket_id: str) -> str:
+    """A quoted block with a ``...`` elision: undecodable, but it names its ticket."""
+    return (
+        '<<<AUTO_DEV_RESULT\n{"schema_version": 4, "ticket_id": "'
+        f'{ticket_id}", "status": "blocked", ...}}\nAUTO_DEV_RESULT>>>'
+    )
+
+
+def test_parse_last_block_undecodable_sibling_block_is_skipped_by_its_claim() -> None:
+    """A quoted sibling block that does not decode is still another ticket's."""
+    text = _wrap_sentinel(_blocked_payload()) + _elided_block("GEN-4")
+
+    result = parse_last_block(text, ticket_id="GEN-7")
+
+    assert isinstance(result, AutoDevResult)
+    assert result.ticket_id == "GEN-7"
+
+
+def test_parse_last_block_undecodable_block_for_this_ticket_stays_the_final_word() -> (
+    None
+):
+    text = _wrap_sentinel(_merge_gate_payload()) + _elided_block("GEN-7")
+
+    result = parse_last_block(text, ticket_id="GEN-7")
+
+    assert isinstance(result, BlockedResult)
+    assert result.blocker.reason == BLOCKER_REASON_NO_RESULT_EMITTED
+
+
+# ---------------------------------------------------------------------------
+# parse_last_block_in_chunks -- the rules over a stream of chunks (GitHub #2490)
+# ---------------------------------------------------------------------------
+
+_PROSE_MARKER_MENTION = "I emitted the <<<AUTO_DEV_RESULT>>> sentinel above."
+
+
+def _real_block() -> str:
+    return _wrap_sentinel(_blocked_payload())
+
+
 @pytest.mark.parametrize(
-    ("text", "expected"),
+    "later_chunk",
     [
-        ("no marker at all", False),
-        ("<<<AUTO_DEV_RESULT\n{}\nAUTO_DEV_RESULT>>>", False),
-        ('<<<AUTO_DEV_RESULT\n{"a": 1', True),
-        ("<<<AUTO_DEV_RESULT\n{}\nAUTO_DEV_RESULT>>>\n<<<AUTO_DEV_RESULT\n{", True),
-        ("<<<AUTO_DEV_RESULT\n{}\nAUTO_DEV_RESULT>>>\ntrailing narrative", False),
+        _PROSE_MARKER_MENTION,
+        "ended with a bare marker <<<AUTO_DEV_RESULT>>>",
+        "trailing <<<AUTO_DEV_RESULT",
+        "<<<AUTO_DEV_RESULT\n",
     ],
+    ids=["prose", "bare-close-marker", "nothing-after-marker", "marker-then-newline"],
 )
-def test_has_unclosed_frame(text: str, expected: bool) -> None:
-    assert has_unclosed_frame(text) is expected
+def test_chunks_a_later_marker_mention_does_not_replace_the_real_block(
+    later_chunk: str,
+) -> None:
+    """A marker that does not start a payload is a mention, not a truncated frame."""
+    result = parse_last_block_in_chunks([_real_block(), later_chunk], ticket_id="GEN-7")
+
+    assert isinstance(result, AutoDevResult)
+    assert result.ticket_id == "GEN-7"
 
 
-def test_has_open_marker_and_unclosed_frame_blocked() -> None:
-    assert has_open_marker("x <<<AUTO_DEV_RESULT y") is True
-    assert has_open_marker("nothing") is False
-    blocked = unclosed_frame_blocked("<<<AUTO_DEV_RESULT\n{")
-    assert blocked.blocker.reason == BLOCKER_REASON_NO_RESULT_EMITTED
+def test_chunks_a_marker_mention_in_the_same_chunk_as_the_block_changes_nothing() -> (
+    None
+):
+    chunk = _real_block() + _PROSE_MARKER_MENTION
+
+    result = parse_last_block_in_chunks([chunk], ticket_id="GEN-7")
+
+    assert isinstance(result, AutoDevResult)
 
 
-def test_parse_last_loose_block_matches_parse_stdout_for_a_fenced_payload() -> None:
+@pytest.mark.parametrize(
+    "truncated",
+    [
+        '<<<AUTO_DEV_RESULT\n{"schema_version": 4, "tick',
+        '<<<AUTO_DEV_RESULT>>>\n{"schema_version": 4, "tick',
+        '<<<AUTO_DEV_RESULT\n```json\n{"schema_version": 4',
+    ],
+    ids=["plain", "close-marker-spelling", "fenced"],
+)
+def test_chunks_a_truncated_final_frame_is_unusable_not_the_earlier_block(
+    truncated: str,
+) -> None:
+    result = parse_last_block_in_chunks([_real_block(), truncated], ticket_id="GEN-7")
+
+    assert isinstance(result, BlockedResult)
+    assert result.blocker.reason == BLOCKER_REASON_NO_RESULT_EMITTED
+
+
+def test_chunks_a_truncated_frame_followed_by_a_marker_mention_is_still_unusable() -> (
+    None
+):
+    chunks = [
+        _real_block(),
+        '<<<AUTO_DEV_RESULT\n{"schema_version": 4, "tick',
+        _PROSE_MARKER_MENTION,
+    ]
+
+    result = parse_last_block_in_chunks(chunks, ticket_id="GEN-7")
+
+    assert isinstance(result, BlockedResult)
+    assert result.blocker.reason == BLOCKER_REASON_NO_RESULT_EMITTED
+
+
+def test_chunks_a_frame_split_at_the_marker_line_is_joined() -> None:
+    body = json.dumps(_merge_gate_payload())
+    chunks = ["narrative\n<<<AUTO_DEV_RESULT\n", f"{body}\nAUTO_DEV_RESULT>>>\n"]
+
+    result = parse_last_block_in_chunks(chunks, ticket_id="GEN-4")
+
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "merge_gate_blocked"
+
+
+def test_chunks_a_foreign_block_split_across_chunks_falls_back_to_the_real_one() -> (
+    None
+):
+    """The joined frame is another ticket's: the chunk scan's pick stands."""
+    foreign = _wrap_sentinel(_merge_gate_payload())
+    cut = len(foreign) // 2
+
+    result = parse_last_block_in_chunks(
+        [_real_block(), foreign[:cut], foreign[cut:]], ticket_id="GEN-7"
+    )
+
+    assert isinstance(result, AutoDevResult)
+    assert result.ticket_id == "GEN-7"
+
+
+def test_chunks_none_for_ticket_id_disables_the_identity_check() -> None:
+    result = parse_last_block_in_chunks([_real_block()], ticket_id=None)
+
+    assert isinstance(result, AutoDevResult)
+
+
+def _fenced(payload: dict[str, Any]) -> str:
+    return f"```json\n{json.dumps(payload)}\n```"
+
+
+def test_chunks_loose_fenced_payload_matches_parse_stdout() -> None:
     """Parity with ``parse_stdout``'s #337 loose-fence fallback."""
-    fenced = f"narrative\n```json\n{json.dumps(_blocked_payload())}\n```\n"
+    fenced = f"narrative\n{_fenced(_blocked_payload())}\n"
 
     via_stdout = parse_stdout(fenced)
-    via_last = parse_last_loose_block(fenced)
+    via_chunks = parse_last_block_in_chunks([fenced], ticket_id=None)
 
     assert isinstance(via_stdout, AutoDevResult)
-    assert via_last == via_stdout
+    assert via_chunks == via_stdout
 
 
-def test_parse_last_loose_block_none_without_a_qualifying_fence() -> None:
-    assert parse_last_loose_block("no fence") is None
-    assert parse_last_loose_block('```json\n{"unrelated": 1}\n```') is None
+def test_chunks_loose_fence_without_status_and_schema_is_not_a_result() -> None:
+    chunks = ['```json\n{"unrelated": 1}\n```']
+
+    assert parse_last_block_in_chunks(chunks, ticket_id=None) is None
 
 
-def test_parse_last_loose_block_skips_example_and_other_tickets() -> None:
-    example = f"```json\n{json.dumps(_documented_example_payload())}\n```"
-    foreign = f"```json\n{json.dumps(_merge_gate_payload())}\n```"
+def test_chunks_text_with_no_block_or_fence_is_none() -> None:
+    assert parse_last_block_in_chunks(["no fence"], ticket_id=None) is None
 
-    assert parse_last_loose_block(example) is None
-    assert parse_last_loose_block(foreign, ticket_id="GEN-7") is None
+
+def test_chunks_loose_fenced_documented_example_is_skipped() -> None:
+    chunks = [_fenced(_documented_example_payload())]
+
+    assert parse_last_block_in_chunks(chunks, ticket_id=None) is None
+
+
+def test_chunks_loose_fenced_block_for_another_ticket_is_skipped() -> None:
+    chunks = [_fenced(_merge_gate_payload())]
+
+    assert parse_last_block_in_chunks(chunks, ticket_id="GEN-7") is None

@@ -127,7 +127,7 @@ def _harvest(config: OrchestratorConfig | None) -> list[str]:
     """Run one detect+act sweep, as ``reconcile()`` does."""
     state = load_state()
     task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
-    candidates = _detect_local_harvest_candidates(state, task_by_ticket=task_by_ticket)
+    candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
     if config is None:
         return _act_on_local_harvest_candidates(
             state, candidates, now=_NOW, task_by_ticket=task_by_ticket

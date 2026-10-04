@@ -148,7 +148,7 @@ def test_local_harvest_dead_process_completes_and_advances(
     )
     task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
 
-    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
     assert len(candidates) == 1
     assert candidates[0].proposed_action == ProposedAction.HARVEST_LOCAL_COMPLETE
     assert candidates[0].session_id == "harv-1"
@@ -208,7 +208,7 @@ def test_local_harvest_stamps_git_synthesis_source(
         )
     )
     task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
-    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
 
     harvested = _act_on_local_harvest_candidates(
         state,
@@ -255,7 +255,7 @@ def test_local_harvest_refused_by_door_leaves_session_and_task_untouched(
         )
     )
     task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
-    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
 
     harvested = _act_on_local_harvest_candidates(
         state,
@@ -316,7 +316,9 @@ def test_local_harvest_queue_save_failure_keeps_audit_event(
         )
     )
     task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
-    candidates = _detect_local_harvest_candidates(load_state(), task_by_ticket)
+    candidates = _detect_local_harvest_candidates(
+        load_state(), list(task_by_ticket.values())
+    )
 
     def _raise_save(_store: DevQueueStore) -> None:
         msg = "queue file unwritable"
@@ -375,7 +377,7 @@ def test_act_on_local_harvest_candidates_completes_on_task_already_terminal(
     )
     task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
 
-    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
     assert len(candidates) == 1
 
     harvested = _act_on_local_harvest_candidates(
@@ -436,7 +438,7 @@ def test_local_harvest_stage_mismatch_does_not_orphan_task_or_complete_session(
     )
     task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
 
-    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
     assert len(candidates) == 1
     assert candidates[0].proposed_action == ProposedAction.HARVEST_LOCAL_COMPLETE
 
@@ -479,7 +481,7 @@ def test_local_harvest_live_process_not_harvested(
         sess = _mk_local_session("harv-live", worktree, liveness)
         state = CwState(sessions=[sess])
 
-        candidates = _detect_local_harvest_candidates(state, {})
+        candidates = _detect_local_harvest_candidates(state)
 
         assert candidates == []
     finally:
@@ -515,7 +517,7 @@ def test_local_harvest_recycled_pid_start_time_mismatch_is_dead(
         sess = _mk_local_session("harv-recycled", worktree, liveness)
         state = CwState(sessions=[sess])
 
-        candidates = _detect_local_harvest_candidates(state, {})
+        candidates = _detect_local_harvest_candidates(state)
 
         assert len(candidates) == 1
         assert candidates[0].session_id == "harv-recycled"
@@ -550,7 +552,7 @@ def test_local_harvest_no_commits_synthesizes_aider_no_output(
     )
     task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
 
-    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
     assert len(candidates) == 1
 
     _act_on_local_harvest_candidates(
@@ -596,7 +598,7 @@ def test_act_on_local_harvest_candidates_passes_session_id_to_synthesize_git_res
         )
     )
     task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
-    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
     assert len(candidates) == 1
 
     captured: dict[str, object] = {}
@@ -630,7 +632,7 @@ def test_local_harvest_skips_session_with_surface_ref(
     sess.surface_ref = "some-ref"
     state = CwState(sessions=[sess])
 
-    assert _detect_local_harvest_candidates(state, {}) == []
+    assert _detect_local_harvest_candidates(state) == []
 
 
 def test_local_harvest_act_handles_missing_task_and_no_worktree(
@@ -648,7 +650,7 @@ def test_local_harvest_act_handles_missing_task_and_no_worktree(
     save_state(state)
 
     # No dev-queue task for either ticket → act builds a synthetic TicketTask.
-    candidates = _detect_local_harvest_candidates(state, {})
+    candidates = _detect_local_harvest_candidates(state)
     _act_on_local_harvest_candidates(
         state, candidates, now=datetime(2026, 1, 2, tzinfo=UTC), task_by_ticket={}
     )
@@ -1002,8 +1004,12 @@ def test_local_harvest_opencode_sentinel_found(
     worktree = make_git_repo("wt-opencode-harvest-sentinel")
     _write_staged_clients_yaml(tmp_config_dir, "client-a")
 
-    # The session name carries the ticket id the harvest compares the sentinel
-    # against (#2490): a real worker echoes the id it was handed.
+    # The harvest compares the sentinel's ticket_id against the id in the
+    # session name, which the executor builds as
+    # ``{client}/{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}``
+    # (src/cw/executor/core.py:386). The fixture's sentinel claims that same id,
+    # and the queued row below carries it; what a real worker echoes back is
+    # not established by this test (#2490, see ``_ticket_ids_match``).
     blocked = make_opencode_blocked(
         ticket_id="ses-oc-sentinel", worktree=worktree, reason="test-sentinel"
     )
@@ -1021,16 +1027,18 @@ def test_local_harvest_opencode_sentinel_found(
         DevQueueStore(
             tasks=[
                 TicketTask(
-                    ticket_id="T-OC-1",
+                    ticket_id="ses-oc-sentinel",
                     client="client-a",
                     stage=Stage.IMPL,
                     status=QueueItemStatus.RUNNING,
+                    session_id="ses-oc-sentinel",
                 )
             ]
         )
     )
+    tasks = load_dev_queue().tasks
 
-    candidates = _detect_local_harvest_candidates(load_state())
+    candidates = _detect_local_harvest_candidates(load_state(), tasks)
     assert len(candidates) == 1
 
     with freezegun.freeze_time("2026-01-01 12:00:00"):
@@ -1038,6 +1046,7 @@ def test_local_harvest_opencode_sentinel_found(
             load_state(),
             candidates,
             now=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
+            task_by_ticket={t.ticket_id: t for t in tasks},
         )
 
     state = load_state()
@@ -1123,7 +1132,7 @@ def _harvest_single(sid: str, ticket_id: str, worktree: Path, backend: str) -> S
     )
     task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
     state = load_state()
-    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
     assert len(candidates) == 1
     _act_on_local_harvest_candidates(
         state,
@@ -1248,7 +1257,7 @@ def test_local_harvest_opencode_finalize_keeps_final_blocked_sentinel(
     write_opencode_log(worktree, earlier_stage_then_final_log(earlier, final))
     task_by_ticket = _save_dead_opencode_finalize(worktree, "T-OC-F", Stage.FINALIZE)
     state = load_state()
-    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
 
     _act_on_local_harvest_candidates(
         state,
@@ -1302,7 +1311,9 @@ def test_local_harvest_stage_mismatch_pages_once_and_stops_reoffering(
 
     for _tick in range(3):
         state = load_state()
-        candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+        candidates = _detect_local_harvest_candidates(
+            state, list(task_by_ticket.values())
+        )
         _act_on_local_harvest_candidates(
             state, candidates, now=now, task_by_ticket=task_by_ticket
         )
@@ -1331,7 +1342,10 @@ def test_local_harvest_stage_mismatch_pages_once_and_stops_reoffering(
     session = next(s for s in load_state().sessions if s.id == "harv-page")
     assert session.status == SessionStatus.ACTIVE
     assert session.last_result == {"paused_status": "sentinel_stage_mismatch_refused"}
-    assert _detect_local_harvest_candidates(load_state(), task_by_ticket) == []
+    assert (
+        _detect_local_harvest_candidates(load_state(), list(task_by_ticket.values()))
+        == []
+    )
 
 
 def test_local_harvest_non_stage_refusal_neither_pages_nor_latches(
@@ -1365,7 +1379,7 @@ def test_local_harvest_non_stage_refusal_neither_pages_nor_latches(
     )
     task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
     state = load_state()
-    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
     assert len(candidates) == 1
 
     harvested = _act_on_local_harvest_candidates(
@@ -1408,7 +1422,7 @@ def test_local_harvest_stage_mismatch_latch_merges_into_existing_last_result(
     )
     task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
     state = load_state()
-    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
     assert len(candidates) == 1
 
     _act_on_local_harvest_candidates(
@@ -1424,7 +1438,10 @@ def test_local_harvest_stage_mismatch_latch_merges_into_existing_last_result(
         "note": None,
         "sentinel_advance_refused": True,
     }
-    assert _detect_local_harvest_candidates(load_state(), task_by_ticket) == []
+    assert (
+        _detect_local_harvest_candidates(load_state(), list(task_by_ticket.values()))
+        == []
+    )
     assert len(_attention_events("test-harvest-merge", "harv-merge")) == 1
 
 
@@ -1513,7 +1530,7 @@ def _save_refusal_scenario(
 def _harvest_tick(task_by_ticket: dict[str, TicketTask]) -> list[str]:
     """One detect + act pass over the persisted state."""
     state = load_state()
-    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
     return _act_on_local_harvest_candidates(
         state, candidates, now=_NOW, task_by_ticket=task_by_ticket
     )
@@ -1578,7 +1595,7 @@ def test_failed_page_leaves_the_session_unlatched_and_repages_next_tick(
     assert failures == [1]
     assert _attention_events("test-pg-fail-a", "pg-fail") == []
     assert _session("pg-fail").last_result is None
-    assert len(_detect_local_harvest_candidates(load_state(), tbt)) == 1
+    assert len(_detect_local_harvest_candidates(load_state(), list(tbt.values()))) == 1
 
     writes_fail["on"] = False
     _harvest_tick(tbt)
@@ -1588,7 +1605,7 @@ def test_failed_page_leaves_the_session_unlatched_and_repages_next_tick(
     assert _session("pg-fail").last_result == {
         "paused_status": "sentinel_stage_mismatch_refused"
     }
-    assert _detect_local_harvest_candidates(load_state(), tbt) == []
+    assert _detect_local_harvest_candidates(load_state(), list(tbt.values())) == []
 
 
 def test_one_failing_page_does_not_cancel_another_sessions_page(
@@ -1654,7 +1671,7 @@ def test_latched_session_whose_row_moved_on_is_reoffered_and_completes(
         make_git_repo, tmp_config_dir, {"lt-moved": Stage.FINALIZE}
     )
     _harvest_tick(tbt)
-    assert _detect_local_harvest_candidates(load_state(), tbt) == []
+    assert _detect_local_harvest_candidates(load_state(), list(tbt.values())) == []
 
     # The operator requeued the row: PENDING, session id cleared.
     save_dev_queue(
@@ -1670,7 +1687,9 @@ def test_latched_session_whose_row_moved_on_is_reoffered_and_completes(
         )
     )
     moved = {t.ticket_id: t for t in load_dev_queue().tasks}
-    assert len(_detect_local_harvest_candidates(load_state(), moved)) == 1
+    assert (
+        len(_detect_local_harvest_candidates(load_state(), list(moved.values()))) == 1
+    )
 
     _harvest_tick(moved)
 
@@ -1691,7 +1710,7 @@ def test_latch_is_honored_while_a_parked_row_is_still_bound_to_the_session(
         update={"status": QueueItemStatus.BLOCKED_ON_USER}
     )
 
-    assert _detect_local_harvest_candidates(load_state(), {"lt-parked": parked}) == []
+    assert _detect_local_harvest_candidates(load_state(), [parked]) == []
 
 
 def test_old_sessions_latch_does_not_affect_a_new_session_for_the_same_ticket(
@@ -1710,7 +1729,7 @@ def test_old_sessions_latch_does_not_affect_a_new_session_for_the_same_ticket(
     fresh.name = old.name
     save_state(CwState(sessions=[old, fresh]))
 
-    candidates = _detect_local_harvest_candidates(load_state(), tbt)
+    candidates = _detect_local_harvest_candidates(load_state(), list(tbt.values()))
 
     assert [c.session_id for c in candidates] == ["lt-same-new"]
 
@@ -1774,3 +1793,60 @@ def test_local_harvest_opencode_refused_result_pages_with_blocker_and_recovery(
     task = next(t for t in load_dev_queue().tasks if t.ticket_id == "oc-refused")
     assert task.status == QueueItemStatus.RUNNING
     assert _session("oc-refused").status == SessionStatus.ACTIVE
+
+
+def _latched_session_and_its_row(
+    make_git_repo: Callable[[str], Path],
+    tmp_config_dir: Path,
+    ticket: str,
+) -> TicketTask:
+    """Latch a refused dead session (id == *ticket*); return its RUNNING row."""
+    tbt = _save_refusal_scenario(
+        make_git_repo, tmp_config_dir, {ticket: Stage.FINALIZE}
+    )
+    _harvest_tick(tbt)
+    assert _session(ticket).last_result == {
+        "paused_status": "sentinel_stage_mismatch_refused"
+    }
+    return tbt[ticket]
+
+
+def test_latch_is_honored_when_the_occupied_row_is_not_the_last_for_the_ticket(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Duplicate rows for one ticket id: the router's match decides, not row order.
+
+    ``add`` after a terminal row leaves two rows for one ``(client, ticket_id)``.
+    A ticket-id-keyed dict keeps only the LAST, which here is not the row that
+    owns the session: the latch would be ignored, the session re-offered, and the
+    router would re-refuse and re-page it every tick.
+    """
+    owning = _latched_session_and_its_row(make_git_repo, tmp_config_dir, "lt-dup")
+    later_duplicate = TicketTask(
+        ticket_id="lt-dup", client="client-a", status=QueueItemStatus.PENDING
+    )
+
+    candidates = _detect_local_harvest_candidates(
+        load_state(), [owning, later_duplicate]
+    )
+
+    assert candidates == []
+
+
+def test_latch_is_dropped_when_the_row_is_bound_to_a_newer_session(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """An old latched dead session whose row now belongs to another session is offered.
+
+    The row is RUNNING (occupied) but bound to a different, newer session id: the
+    refusal the latch recorded no longer describes this session's row, so the
+    session must complete the ordinary way instead of lingering ACTIVE.
+    """
+    owning = _latched_session_and_its_row(make_git_repo, tmp_config_dir, "lt-newer")
+    rebound = owning.model_copy(update={"session_id": "lt-newer-session-2"})
+
+    candidates = _detect_local_harvest_candidates(load_state(), [rebound])
+
+    assert [c.session_id for c in candidates] == ["lt-newer"]

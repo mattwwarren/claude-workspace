@@ -88,7 +88,7 @@ from cw.reconcile.codex_boot import (
 from cw.reconcile.tasks import _resolve_task_policy
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from datetime import datetime
     from pathlib import Path
 
@@ -128,24 +128,30 @@ SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON = "sentinel_stage_mismatch_dead_sess
 def _refusal_latch_binds(
     session: Session,
     ticket_id: str | None,
-    task_by_ticket: dict[str, TicketTask],
+    tasks: Sequence[TicketTask],
 ) -> bool:
     """True while *session*'s latched refusal is still its row's live disposition.
 
     A latch stops the harvest re-refusing the same dead result every tick, but
     only while the row it refused is still bound to this session in an occupied
-    status -- the same match the router itself makes. Once the row moved on
-    (requeued, cancelled, session id cleared or replaced, ticket gone) nothing
-    else completes the dead session -- idle/phantom/stalled skip the same
-    markers -- so honoring the latch would leave a stale ACTIVE record behind
-    that makes name lookups ambiguous (#2490). Not-bound means: re-offer it, and
-    the harvest completes it the ordinary way.
+    status. "Bound" is decided exactly like the router's
+    ``_lookup_matching_task``: ANY row in *tasks* with this ticket id AND this
+    session id in an occupied status. A ticket-id-keyed dict cannot answer that:
+    duplicate ``(client, ticket_id)`` rows exist (add-after-terminal), the dict
+    keeps one of them, and when it keeps another row than the one owning this
+    session the latch would be ignored, the session re-offered, and the router
+    would re-refuse and re-page every tick. Once the row moved on (requeued,
+    cancelled, session id cleared or replaced, ticket gone) nothing else
+    completes the dead session -- idle/phantom/stalled skip the same markers --
+    so honoring the latch would leave a stale ACTIVE record behind that makes
+    name lookups ambiguous (#2490). Not-bound means: re-offer it, and the
+    harvest completes it the ordinary way.
     """
-    task = task_by_ticket.get(ticket_id) if ticket_id else None
-    return (
-        task is not None
+    return bool(ticket_id) and any(
+        task.ticket_id == ticket_id
         and task.session_id == session.id
         and task.status in OCCUPIED_LANE_STATUSES
+        for task in tasks
     )
 
 
@@ -277,21 +283,22 @@ def _local_process_alive(handle: LocalLivenessHandle) -> bool:
 
 def _detect_local_harvest_candidates(
     state: CwState,
-    task_by_ticket: dict[str, TicketTask] | None = None,
+    tasks: Sequence[TicketTask] = (),
 ) -> list[ReapCandidate]:
     """Pure classification phase for dead-process LOCAL harvest candidates.
 
     A candidate is any ACTIVE, DAEMON-origin session that carries a
     ``local_liveness`` handle, has no ``surface_ref`` (LOCAL sessions never do),
-    and whose process is no longer alive. Makes zero writes. ``task_by_ticket``
-    stamps ``candidate.lane`` from the owning task; missing tasks default to
-    ``DEFAULT_LANE``.
+    and whose process is no longer alive. Makes zero writes. *tasks* is the full
+    dev-queue row list: it stamps ``candidate.lane`` from the row for the
+    session's ticket id (the last such row; missing rows default to
+    ``DEFAULT_LANE``) and decides whether a latch still binds.
 
     A session carrying a stage-refusal latch (#2490) is skipped only while its
     row is still bound to it (:func:`_refusal_latch_binds`); once the row moved
     on, the session is offered again so it completes normally.
     """
-    _task_by_ticket = task_by_ticket or {}
+    _task_by_ticket = {t.ticket_id: t for t in tasks}
     candidates: list[ReapCandidate] = []
     for session in state.sessions:
         if session.status is not SessionStatus.ACTIVE:
@@ -304,7 +311,7 @@ def _detect_local_harvest_candidates(
             continue
         ticket_id = ticket_id_for_session(session.name)
         if stage_refusal_latched(session) and _refusal_latch_binds(
-            session, ticket_id, _task_by_ticket
+            session, ticket_id, tasks
         ):
             continue
         if _local_process_alive(session.local_liveness):
