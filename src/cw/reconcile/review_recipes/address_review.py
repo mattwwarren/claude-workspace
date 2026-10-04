@@ -213,7 +213,9 @@ def _dispatch_address_review(job: _DispatchJob) -> str | None:
     from ``review_recipes.core.dispatch_deferred_review_jobs``, which
     ``cw.reconcile.core.reconcile()`` invokes AFTER its own ``sessions_lock()``
     hold releases (the same hoist ``fix_dispatch.run_fix_dispatch`` got in
-    #2064) — so the spawn no longer trips ``SessionsLockReentryError``. Do not
+    #2064) — so the spawn no longer trips ``SessionsLockReentryError``. Any
+    exception other than ``CwError`` is not handled here; the dispatcher
+    isolates it per job. Do not
     call it from inside a ``sessions_lock()`` hold: the guard would raise and
     the ``except CwError`` below would silently swallow it.
     """
@@ -288,6 +290,10 @@ def _act_address_review(
     ``reconcile()`` runs them via ``_dispatch_address_review`` after
     ``sessions_lock`` releases, because ``spawn_create_impl`` re-acquires that
     lock and would otherwise raise ``SessionsLockReentryError``.
+    ``run_review_recipes`` calls it only for the live dispatch loop's
+    ``reconcile()`` (the one caller that drains the jobs); for any other caller
+    it is not run, so the latch stamped here is never burned for a spawn nobody
+    performs.
 
     Returns the deferred dispatch jobs (one per candidate that passed
     re-validation); the caller owns executing them.

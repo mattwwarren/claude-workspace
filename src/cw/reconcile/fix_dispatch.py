@@ -42,9 +42,9 @@ unlike its siblings called from inside ``core._run_terminal_backstops_and_sweeps
 ``spawn_create_impl``'s own ``sessions_lock()`` acquisition, which cannot nest.
 The detect/act/deferred-post-lock-dispatch *shape* is borrowed from
 ``review_recipes.address_review``, whose dispatch jobs are likewise executed
-post-``sessions_lock`` since #1229 (via ``DeferredReviewDispatch`` returned up
-through ``_reconcile_locked``); only the gating and where the detect/act runs
-differ.
+post-``sessions_lock`` since #1229 (via the caller-owned ``DeferredReviewDispatch``
+sink ``reconcile()`` drains from a ``finally``); only the gating and where the
+detect/act runs differ.
 
 The #2064 hoist also runs this module one step later, per tick, relative to
 ``cw.reconcile.escalation.run_escalation_sweep`` (previously before it inside

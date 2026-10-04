@@ -1270,13 +1270,17 @@ class TestReviewRecipeDispatchRunsPostLock:
         return task
 
     @staticmethod
-    def _seed_auto_fix_ci_row(tmp_config_dir: Path) -> TicketTask:
+    def _seed_auto_fix_ci_row(
+        tmp_config_dir: Path, status: QueueItemStatus | None = None
+    ) -> TicketTask:
         _write_acme_clients_yaml(tmp_config_dir)
+        extra: dict[str, Any] = {} if status is None else {"status": status}
         task = _cr_task(
             review_recipes={RECIPE_AUTO_FIX_CI: True},
             pr_state=_pr_state(
                 state="OPEN", attention_state="ci_failing", failing_checks=["lint"]
             ),
+            **extra,
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
         return task
@@ -1298,7 +1302,7 @@ class TestReviewRecipeDispatchRunsPostLock:
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
 
-        reconcile()
+        reconcile(dispatch_review_jobs=True)
 
         assert [prompt for _cwd, prompt in daemon.spawn_calls] == ["/address-review 42"]
         sessions = load_state().sessions
@@ -1316,8 +1320,8 @@ class TestReviewRecipeDispatchRunsPostLock:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A phantom session routes through the tail of _reconcile_locked, the
-        other _run_terminal_backstops_and_sweeps call site: the deferred jobs
-        must be threaded out of that branch as well."""
+        other _run_terminal_backstops_and_sweeps call site: the sink must be
+        threaded into that branch as well."""
         self._seed_address_review_row(tmp_config_dir, make_git_repo("ar-phantom"))
         self._enable_recipes(monkeypatch)
         save_state(CwState(sessions=[_mk_session("phantom-1", "missing-ref")]))
@@ -1328,7 +1332,7 @@ class TestReviewRecipeDispatchRunsPostLock:
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
 
-        report = reconcile()
+        report = reconcile(dispatch_review_jobs=True)
 
         assert report.phantom_session_ids == ["phantom-1"]
         assert [prompt for _cwd, prompt in daemon.spawn_calls] == ["/address-review 42"]
@@ -1348,8 +1352,8 @@ class TestReviewRecipeDispatchRunsPostLock:
         held_at_spawn: list[bool] = []
         real_prepare = reconcile_core.run_review_recipes
 
-        def _prepare_spy(*, config: OrchestratorConfig) -> Any:
-            result = real_prepare(config=config)
+        def _prepare_spy(*, config: OrchestratorConfig, deferred: Any) -> Any:
+            result = real_prepare(config=config, deferred=deferred)
             held_at_prepare.append(_sessions_lock_held())
             return result
 
@@ -1360,34 +1364,37 @@ class TestReviewRecipeDispatchRunsPostLock:
         monkeypatch.setattr("cw.reconcile.core.run_review_recipes", _prepare_spy)
         monkeypatch.setattr("cw.spawn.spawn_create_impl", _spawn_spy)
 
-        reconcile()
+        reconcile(dispatch_review_jobs=True)
 
         assert held_at_prepare == [True]
         assert held_at_spawn == [False]
 
-    def test_auto_fix_ci_tick_runs_post_lock_and_may_reenter_reconcile(
+    def test_auto_fix_ci_requeues_the_row_without_a_nested_dispatch_tick(
         self,
         tmp_config_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """auto_fix_ci's "trigger a tick now" call succeeds: the dispatch loop
-        runs with the lock released, and a nested reconcile() (what
-        dispatch_tick does) no longer raises SessionsLockReentryError."""
-        self._seed_auto_fix_ci_row(tmp_config_dir)
+        """#1229: the auto_fix_ci job requeues its terminal row in place and
+        stops. The live loop's reconcile() already holds dispatch_loop_lock, so a
+        nested run_dispatch_loop(once=True) could only raise
+        DispatchLoopLockedError and misreport the requeue as a failure; the loop
+        picks the row up on its own next tick."""
+        self._seed_auto_fix_ci_row(tmp_config_dir, status=QueueItemStatus.COMPLETED)
         self._enable_recipes(monkeypatch)
-        ticks: list[dict[str, Any]] = []
 
-        def _fake_dispatch_loop(**kwargs: Any) -> None:
-            ticks.append({**kwargs, "held": _sessions_lock_held()})
-            reconcile()  # raised SessionsLockReentryError before #1229
+        def _no_tick(**_kwargs: Any) -> None:
+            pytest.fail("auto_fix_ci must not run a nested dispatch tick")
 
-        monkeypatch.setattr("cw.dispatch.run_dispatch_loop", _fake_dispatch_loop)
+        monkeypatch.setattr("cw.dispatch.run_dispatch_loop", _no_tick)
 
-        reconcile()
+        reconcile(dispatch_review_jobs=True)
 
-        assert ticks == [{"once": True, "client": "acme", "emit": None, "held": False}]
+        row = load_dev_queue().tasks[0]
+        assert row.status is QueueItemStatus.PENDING
+        assert row.auto_fix_ci_fired_at is not None
         assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
-        assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is not None
+        taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        assert [e.correlation_id for e in taken] == ["GEN-1"]
 
     def test_failing_job_is_logged_and_does_not_break_the_pass(
         self,
@@ -1411,7 +1418,7 @@ class TestReviewRecipeDispatchRunsPostLock:
         monkeypatch.setattr("cw.reconcile.core.run_fix_dispatch", fix_dispatch_mock)
 
         with caplog.at_level("WARNING", logger="cw.reconcile.review_recipes"):
-            report = reconcile()
+            report = reconcile(dispatch_review_jobs=True)
 
         assert isinstance(report, ReconcileReport)
         fix_dispatch_mock.assert_called_once()
@@ -1420,33 +1427,44 @@ class TestReviewRecipeDispatchRunsPostLock:
         assert [e.correlation_id for e in failed] == ["GEN-1"]
         assert "daemon refused the spawn" in json.dumps(failed[0].payload)
 
-    def test_review_dispatch_precedes_the_completed_ticket_ids_return(
+    @pytest.mark.parametrize("completions", [[], ["GEN-9"]], ids=["none", "some"])
+    def test_review_dispatch_runs_before_the_other_post_lock_steps(
         self,
         tmp_config_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
+        completions: list[str],
     ) -> None:
-        """The deferred dispatch must run even on a tick whose post-pass finds
-        merged-timed-out completions (the early-return-shaped branch)."""
-        calls: list[object] = []
+        """The review dispatch is the FIRST post-lock step: it runs before
+        complete_timed_out_merged_tasks and run_fix_dispatch, whether or not the
+        post-pass finds merged-timed-out completions. Its latch is already
+        stamped, so a job lost to an exception in a later step would never retry
+        this episode (run_fix_dispatch, by contrast, re-detects every tick)."""
+        order: list[str] = []
         monkeypatch.setattr(
-            "cw.reconcile.core.dispatch_deferred_review_jobs", calls.append
+            "cw.reconcile.core.dispatch_deferred_review_jobs",
+            lambda _sink: order.append("review_dispatch"),
         )
         monkeypatch.setattr(
-            "cw.reconcile.core.complete_timed_out_merged_tasks", lambda: ["GEN-9"]
+            "cw.reconcile.core.complete_timed_out_merged_tasks",
+            lambda: order.append("complete_merged") or completions,
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.core.run_fix_dispatch",
+            lambda **_kw: order.append("fix_dispatch") or [],
         )
 
-        report = reconcile()
+        report = reconcile(dispatch_review_jobs=True)
 
-        assert report.completed_ticket_ids == ["GEN-9"]
-        assert len(calls) == 1
+        assert order == ["review_dispatch", "complete_merged", "fix_dispatch"]
+        assert report.completed_ticket_ids == completions
 
     def test_daemon_outage_early_return_defers_nothing(
         self,
         tmp_config_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The outage guard returns before the recipes run: an empty deferred
-        value (not a missing one) reaches the post-lock dispatch."""
+        """The outage guard returns before the recipes run: the sink reaches the
+        post-lock dispatch empty."""
         monkeypatch.setattr(
             "cw.reconcile.core._looks_like_daemon_outage", lambda *_a, **_k: True
         )
@@ -1455,9 +1473,273 @@ class TestReviewRecipeDispatchRunsPostLock:
             "cw.reconcile.core.dispatch_deferred_review_jobs", calls.append
         )
 
-        reconcile()
+        reconcile(dispatch_review_jobs=True)
 
         assert calls == [DeferredReviewDispatch()]
+
+    def test_the_sink_is_not_created_or_dispatched_without_the_flag(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[Any] = []
+        monkeypatch.setattr(
+            "cw.reconcile.core.dispatch_deferred_review_jobs", calls.append
+        )
+
+        reconcile()
+
+        assert calls == []
+
+    # --- two-pass latch semantics at reconcile() level -------------------
+
+    def test_second_pass_after_a_successful_spawn_does_nothing_more(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The one-shot latch holds across real reconcile() passes: the second
+        pass spawns nothing and emits no second PR_ACTION_TAKEN."""
+        self._seed_address_review_row(tmp_config_dir, make_git_repo("ar-two-pass"))
+        self._enable_recipes(monkeypatch)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
+
+        reconcile(dispatch_review_jobs=True)
+        reconcile(dispatch_review_jobs=True)
+
+        assert [prompt for _cwd, prompt in daemon.spawn_calls] == ["/address-review 42"]
+        taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        assert [e.correlation_id for e in taken] == ["GEN-1"]
+        assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+    def test_second_pass_after_a_failing_job_does_not_retry(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed job leaves the latch stamped (PR_ACTION_FAILED is the visible
+        signal); the next real pass neither retries the spawn nor re-emits."""
+        self._seed_address_review_row(tmp_config_dir, make_git_repo("ar-fail-twice"))
+        self._enable_recipes(monkeypatch)
+        attempts: list[str] = []
+
+        def _boom(**kwargs: Any) -> str:
+            attempts.append(kwargs["prompt"])
+            msg = "daemon refused the spawn"
+            raise CwError(msg)
+
+        monkeypatch.setattr("cw.spawn.spawn_create_impl", _boom)
+
+        reconcile(dispatch_review_jobs=True)
+        assert load_dev_queue().tasks[0].address_review_fired_at is not None
+        reconcile(dispatch_review_jobs=True)
+
+        assert attempts == ["/address-review 42"]
+        taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        assert [e.correlation_id for e in taken] == ["GEN-1"]
+        failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+        assert [e.correlation_id for e in failed] == ["GEN-1"]
+
+    # --- item 1: the caller-owned sink survives a later in-lock failure ---
+
+    @pytest.mark.parametrize(
+        "failing_step",
+        [
+            "cw.reconcile.review_recipes.core._act_auto_fix_ci",
+            "cw.reconcile.review_recipes.core._act_request_reviewer",
+            "cw.reconcile.review_recipes.core._act_escalate_merge_block",
+            "cw.reconcile.core.run_escalation_sweep",
+        ],
+        ids=["next_recipe", "request_reviewer", "escalate_merge_block", "sweep"],
+    )
+    def test_job_is_dispatched_even_when_a_later_in_lock_step_raises(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        failing_step: str,
+    ) -> None:
+        """address_review's job is prepared (latch stamped, PR_ACTION_TAKEN
+        emitted) before a later step raises inside the lock. The job lives in the
+        caller-owned sink, so it is STILL dispatched from reconcile()'s finally
+        -- and the original exception still propagates."""
+        self._seed_address_review_row(tmp_config_dir, make_git_repo("ar-lost-job"))
+        self._enable_recipes(monkeypatch)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
+
+        def _boom(*_args: object, **_kwargs: object) -> list[str]:
+            msg = "later in-lock step exploded"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(failing_step, _boom)
+
+        with pytest.raises(RuntimeError, match="later in-lock step exploded"):
+            reconcile(dispatch_review_jobs=True)
+
+        assert [prompt for _cwd, prompt in daemon.spawn_calls] == ["/address-review 42"]
+        assert [s.name for s in load_state().sessions] == ["acme/address-review-42"]
+        assert load_dev_queue().tasks[0].address_review_fired_at is not None
+        assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+    def test_a_dispatch_failure_in_the_finally_does_not_mask_the_original_error(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The locked body raises AND the deferred job's spawn raises a non-CwError:
+        the caller sees the LOCKED BODY's exception (per-job isolation keeps the
+        finally from replacing it), and the job's failure is still recorded."""
+        self._seed_address_review_row(tmp_config_dir, make_git_repo("ar-mask"))
+        self._enable_recipes(monkeypatch)
+
+        def _spawn_oserror(**_kwargs: Any) -> str:
+            msg = "disk on fire"
+            raise OSError(msg)
+
+        def _sweep_boom(**_kwargs: Any) -> None:
+            msg = "original in-flight failure"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("cw.spawn.spawn_create_impl", _spawn_oserror)
+        monkeypatch.setattr("cw.reconcile.core.run_escalation_sweep", _sweep_boom)
+
+        with pytest.raises(RuntimeError, match="original in-flight failure"):
+            reconcile(dispatch_review_jobs=True)
+
+        failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+        assert [e.correlation_id for e in failed] == ["GEN-1"]
+        assert "OSError: disk on fire" in json.dumps(failed[0].payload)
+
+    # --- item 2: per-job isolation of ANY exception ----------------------
+
+    def test_non_cwerror_job_failure_is_isolated_and_recorded(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A job raising a non-CwError (OSError) is logged with its traceback and
+        recorded as PR_ACTION_FAILED; the sibling job still dispatches, and
+        complete_timed_out_merged_tasks / run_fix_dispatch still run."""
+        _write_acme_clients_yaml(tmp_config_dir)
+        tasks = [
+            _cr_task(
+                ticket_id=ticket_id,
+                pr_url=f"https://github.com/acme/widgets/pull/{number}",
+                review_recipes={RECIPE_ADDRESS_REVIEW: True},
+                worktree_path=make_git_repo(f"iso-{ticket_id}"),
+            )
+            for ticket_id, number in (("GEN-1", 41), ("GEN-2", 42))
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        self._enable_recipes(monkeypatch)
+        spawned: list[str] = []
+
+        def _spawn(**kwargs: Any) -> str:
+            if kwargs["prompt"].endswith(" 41"):
+                msg = "no space left on device"
+                raise OSError(msg)
+            spawned.append(kwargs["prompt"])
+            return "spawned-session-id"
+
+        monkeypatch.setattr("cw.spawn.spawn_create_impl", _spawn)
+        completed_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "cw.reconcile.core.complete_timed_out_merged_tasks", completed_mock
+        )
+        fix_dispatch_mock = MagicMock(return_value=[])
+        monkeypatch.setattr("cw.reconcile.core.run_fix_dispatch", fix_dispatch_mock)
+
+        with caplog.at_level("ERROR", logger="cw.reconcile.review_recipes"):
+            report = reconcile(dispatch_review_jobs=True)
+
+        assert isinstance(report, ReconcileReport)
+        assert spawned == ["/address-review 42"]
+        assert "review_recipe_dispatch_crashed ticket=GEN-1" in caplog.text
+        assert "no space left on device" in caplog.text
+        failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+        assert [e.correlation_id for e in failed] == ["GEN-1"]
+        assert "OSError: no space left on device" in json.dumps(failed[0].payload)
+        completed_mock.assert_called_once()
+        fix_dispatch_mock.assert_called_once()
+
+    # --- item 3: only the live dispatch loop dispatches ------------------
+
+    def test_reconcile_without_the_flag_neither_stamps_nor_emits_nor_spawns(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The cw status/list/start/doctor path (no flag): address_review and
+        auto_fix_ci do not run at all -- no latch, no PR_ACTION_TAKEN, no spawn,
+        no requeue -- while request_reviewer and escalate_merge_block do."""
+        _write_acme_clients_yaml(tmp_config_dir)
+        ar_task = _cr_task(
+            ticket_id="GEN-1",
+            review_recipes={RECIPE_ADDRESS_REVIEW: True},
+            worktree_path=make_git_repo("ar-no-flag"),
+        )
+        ci_task = _cr_task(
+            ticket_id="GEN-2",
+            review_recipes={RECIPE_AUTO_FIX_CI: True},
+            status=QueueItemStatus.COMPLETED,
+            pr_state=_pr_state(
+                state="OPEN", attention_state="ci_failing", failing_checks=["lint"]
+            ),
+        )
+        save_dev_queue(DevQueueStore(tasks=[ar_task, ci_task]))
+        self._enable_recipes(monkeypatch)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
+        request_reviewer_mock = MagicMock(return_value=[])
+        escalate_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "cw.reconcile.review_recipes.core._act_request_reviewer",
+            request_reviewer_mock,
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.review_recipes.core._act_escalate_merge_block", escalate_mock
+        )
+
+        reconcile()
+
+        assert daemon.spawn_calls == []
+        assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+        assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+        rows = {t.ticket_id: t for t in load_dev_queue().tasks}
+        assert rows["GEN-1"].address_review_fired_at is None
+        assert rows["GEN-2"].auto_fix_ci_fired_at is None
+        assert rows["GEN-2"].status is QueueItemStatus.COMPLETED
+        request_reviewer_mock.assert_called_once()
+        escalate_mock.assert_called_once()
+
+    def test_the_latch_survives_a_read_only_pass_for_the_loop_to_fire_later(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The point of not burning the latch: an operator's ``cw status`` pass
+        (no flag) leaves the recipe armed, and the next dispatch-loop pass fires
+        it exactly once."""
+        self._seed_address_review_row(tmp_config_dir, make_git_repo("ar-armed"))
+        self._enable_recipes(monkeypatch)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
+
+        reconcile()  # cw status / cw list / cw start / cw doctor
+        assert daemon.spawn_calls == []
+
+        reconcile(dispatch_review_jobs=True)  # the dispatch loop's tick
+
+        assert [prompt for _cwd, prompt in daemon.spawn_calls] == ["/address-review 42"]
 
 
 # --- GitHub #1762: session-id-namespace advisory sweep ------------------------

@@ -11,9 +11,10 @@ call, a dispatch tick that re-enters ``reconcile()``) must NOT run inside
 raises ``SessionsLockReentryError`` (#1228), which the callers' ``except
 CwError`` would silently swallow. Such work is hoisted to ``reconcile()``'s
 post-lock section — ``run_fix_dispatch`` (#2064) is sited there directly, and
-the review recipes' ``address_review``/``auto_fix_ci`` dispatches (#1229) are
-prepared under the lock, returned as a ``DeferredReviewDispatch`` up through
-``_reconcile_locked``, and executed after the lock releases.
+the review recipes' ``address_review`` dispatch (#1229) is prepared under the
+lock into a caller-owned ``DeferredReviewDispatch`` sink that ``reconcile()``
+creates, hands down through ``_reconcile_locked``, and drains from a ``finally``
+once the lock has released.
 """
 
 from __future__ import annotations
@@ -102,7 +103,8 @@ def _run_terminal_backstops_and_sweeps(
     native_live: set[str],
     config: OrchestratorConfig,
     clients: dict[str, ClientConfig],
-) -> tuple[list[str], list[str], DeferredReviewDispatch]:
+    deferred: DeferredReviewDispatch | None,
+) -> tuple[list[str], list[str]]:
     """Run the post-detect TicketTask backstops + RFC 0008 capstone sweeps.
 
     Both branches of ``_reconcile_locked`` (the no-phantoms early return and
@@ -121,12 +123,13 @@ def _run_terminal_backstops_and_sweeps(
     branch) to keep ``_reconcile_locked``'s statement count under the
     PLR0915 limit.
 
-    Returns (timed_out_ticket_ids, completed_silent_ticket_ids,
-    deferred_review_dispatch). The last is the review-recipe dispatch work
-    (``address_review`` spawn, ``auto_fix_ci`` re-dispatch tick) that
-    ``run_review_recipes`` could only prepare here: both end in a call that
-    re-acquires ``sessions_lock`` (#1229), so ``reconcile()`` executes it
-    after its own hold releases.
+    *deferred* is ``reconcile()``'s review-recipe dispatch sink (#1229) or
+    ``None``; it is forwarded to ``run_review_recipes``, which appends the
+    jobs it prepares to the sink as it goes (the jobs are NOT returned, so a
+    later step raising cannot lose them) and skips the dispatching recipes
+    entirely when it is ``None``.
+
+    Returns (timed_out_ticket_ids, completed_silent_ticket_ids).
     """
     timed_out_ticket_ids = revert_timed_out_tasks()
     completed_silent_ticket_ids = revert_completed_silent_tasks()
@@ -137,9 +140,9 @@ def _run_terminal_backstops_and_sweeps(
     # but scoped to this tick's clients: never another client's session.
     run_codex_live_writer_reparks(now=now, config=config, clients=clients)
     run_gate_recipes(now=now, config=config)
-    _acted, deferred_review = run_review_recipes(config=config)
+    run_review_recipes(config=config, deferred=deferred)
     run_escalation_sweep(now=now)
-    return timed_out_ticket_ids, completed_silent_ticket_ids, deferred_review
+    return timed_out_ticket_ids, completed_silent_ticket_ids
 
 
 def _without_acts_in_flight(session_ids: list[str]) -> list[str]:
@@ -201,7 +204,7 @@ def _verify_supervisor_session_id(state: CwState) -> int:
     return cleared
 
 
-def reconcile() -> ReconcileReport:
+def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     """Apply drift reconciliation against the persisted state.
 
     Flips phantom ACTIVE/IDLE sessions to COMPLETED with
@@ -213,6 +216,22 @@ def reconcile() -> ReconcileReport:
     Returns an empty report without mutating state when
     :func:`_looks_like_daemon_outage` matches — a transient daemon hiccup
     must not trigger mass-reaping.
+
+    *dispatch_review_jobs* (#1229) says whether THIS call may act on the
+    ``address_review`` and ``auto_fix_ci`` review recipes. Only the live
+    dispatch loop passes True (``dispatch.gating._reconcile_usage_limited``).
+    Every other caller — ``cw status``/``cw list`` (via
+    ``_check_and_mark_dead_sessions``), ``cw start``, ``cw doctor`` — is a
+    read-or-housekeeping command that must not, as a side effect, spawn a
+    headless ``/address-review`` worker that pushes to a PR branch or burn the
+    recipe's one-shot latch. With the default False those two acts are not run
+    at all (no latch stamp, no ``PR_ACTION_TAKEN``); ``request_reviewer`` and
+    ``escalate_merge_block`` run regardless. With True, a sink is created here,
+    filled as the recipes prepare their jobs inside the lock, and drained from
+    a ``finally`` after the lock releases — so a job whose latch is already
+    stamped is dispatched even if a later in-lock step raises (that exception
+    still propagates; per-job failures are isolated and recorded, never raised
+    from the ``finally``).
 
     Write-ordering: the phantom-reconcile path (phantom.py) writes the
     dev-queue first (task → PENDING) then sessions (session → COMPLETED),
@@ -287,24 +306,31 @@ def reconcile() -> ReconcileReport:
     merged_ticket_ids = frozenset(tid for _client, tid in _merged_client_tids)
     gh_blocked_ticket_ids = frozenset(_gh_blocked_tids)
 
-    with sessions_lock():
-        locked_report, deferred_review = _reconcile_locked(
-            merged_ticket_ids=merged_ticket_ids,
-            gh_blocked_ticket_ids=gh_blocked_ticket_ids,
-            clients=_clients,
-        )
-
-    # Review-recipe dispatch (#1229): the address_review spawn and the
-    # auto_fix_ci re-dispatch tick both re-acquire sessions_lock() (via
-    # spawn_create_impl / a nested reconcile()), so they were prepared inside
-    # _reconcile_locked (PR_ACTION_TAKEN emitted, one-shot latch stamped) and
-    # only execute here, with the lock released. Sited FIRST in the post-lock
-    # section: the latch is already stamped, so a job lost to an exception in
-    # a later post-pass step would never be retried this episode, whereas
-    # run_fix_dispatch below re-detects its work every tick. Each job absorbs
-    # its own CwError into a PR_ACTION_FAILED trail, so this cannot abort the
-    # rest of the pass.
-    dispatch_deferred_review_jobs(deferred_review)
+    review_sink = DeferredReviewDispatch() if dispatch_review_jobs else None
+    try:
+        with sessions_lock():
+            locked_report = _reconcile_locked(
+                merged_ticket_ids=merged_ticket_ids,
+                gh_blocked_ticket_ids=gh_blocked_ticket_ids,
+                clients=_clients,
+                deferred=review_sink,
+            )
+    finally:
+        # Review-recipe dispatch (#1229): the address_review spawn calls
+        # spawn_create_impl, which re-acquires sessions_lock(), so the job was
+        # only PREPARED inside _reconcile_locked (PR_ACTION_TAKEN emitted,
+        # one-shot latch stamped, job appended to review_sink) and runs here,
+        # after the with-block above has released the lock. A ``finally``
+        # because the latch is already stamped: were a later in-lock step
+        # (another recipe, run_escalation_sweep, save_state) to raise, the job
+        # would otherwise be lost for the episode with no PR_ACTION_FAILED.
+        # dispatch_deferred_review_jobs isolates each job (log + PR_ACTION_FAILED
+        # on any Exception, then the next job), so it does not raise for an
+        # ordinary failure and cannot replace an in-flight exception from the
+        # locked body. It runs before the post-pass steps below, which are not
+        # protected the same way.
+        if review_sink is not None:
+            dispatch_deferred_review_jobs(review_sink)
 
     # Post-pass: runs AFTER sessions_lock releases so no gh subprocess
     # executes under the session lock (liveness — #485 SHOULD_FIX 4).
@@ -351,17 +377,20 @@ def _reconcile_locked(
     merged_ticket_ids: frozenset[str] = frozenset(),
     gh_blocked_ticket_ids: frozenset[str] = frozenset(),
     clients: dict[str, ClientConfig] | None = None,
-) -> tuple[ReconcileReport, DeferredReviewDispatch]:
+    deferred: DeferredReviewDispatch | None = None,
+) -> ReconcileReport:
     """Body of reconcile(), called while sessions_lock is held.
 
     Separated so reconcile() holds exactly one lock acquisition and the
     sweep helpers can save_state directly without re-acquiring the lock.
 
-    Returns ``(report, deferred_review)``. ``deferred_review`` is the
-    review-recipe dispatch work prepared under the lock but NOT run here
-    (it re-acquires ``sessions_lock``, #1229); the caller executes it after
-    releasing. Empty on the daemon-outage early return, which never reaches
-    the recipes.
+    *deferred* is the caller-owned review-recipe dispatch sink (#1229),
+    forwarded to ``_run_terminal_backstops_and_sweeps``: the recipes append
+    the jobs they prepare under the lock, the caller dispatches them after
+    releasing it. ``None`` (the default) means this call may not dispatch, so
+    the ``address_review``/``auto_fix_ci`` recipes are skipped. Nothing is
+    appended on the daemon-outage early return, which never reaches the
+    recipes.
 
     merged_ticket_ids / gh_blocked_ticket_ids come from a lockless pre-pass in
     reconcile() (GitHub #637); no gh subprocess executes under sessions_lock.
@@ -461,11 +490,8 @@ def _reconcile_locked(
         surface_to_full = {}
         daemon_errored = True
     if _looks_like_daemon_outage(state, daemon_errored, native_live):
-        return (
-            ReconcileReport(
-                completed_ticket_ids=list(dict.fromkeys(local_harvested)),
-            ),
-            DeferredReviewDispatch(),
+        return ReconcileReport(
+            completed_ticket_ids=list(dict.fromkeys(local_harvested)),
         )
     _backfill_claude_session_ids(state, surface_to_full)
     _verify_supervisor_session_id(state)
@@ -521,12 +547,13 @@ def _reconcile_locked(
         # COMPLETED-silent, and terminal-sibling sweeps so any tasks whose
         # sessions completed or timed out without reverting their queue task
         # are recovered, and stale PENDING rows with terminal siblings are parked.
-        timed_out_ticket_ids, completed_silent_ticket_ids, deferred_review = (
+        timed_out_ticket_ids, completed_silent_ticket_ids = (
             _run_terminal_backstops_and_sweeps(
                 now=now,
                 native_live=native_live,
                 config=orchestrator_config,
                 clients=clients,
+                deferred=deferred,
             )
         )
         all_reverted = list(
@@ -536,12 +563,9 @@ def _reconcile_locked(
                 + completed_silent_ticket_ids
             )
         )
-        return (
-            ReconcileReport(
-                reverted_ticket_ids=all_reverted,
-                completed_ticket_ids=list(dict.fromkeys(local_harvested)),
-            ),
-            deferred_review,
+        return ReconcileReport(
+            reverted_ticket_ids=all_reverted,
+            completed_ticket_ids=list(dict.fromkeys(local_harvested)),
         )
 
     phantom_set = set(phantom_session_ids)
@@ -577,12 +601,13 @@ def _reconcile_locked(
     # reap_reason stamp inside revert_timed_out_tasks /
     # revert_completed_silent_tasks (in-place + save_state, serialized by
     # the sessions_lock this function runs under).
-    timed_out_ticket_ids, completed_silent_ticket_ids, deferred_review = (
+    timed_out_ticket_ids, completed_silent_ticket_ids = (
         _run_terminal_backstops_and_sweeps(
             now=now,
             native_live=native_live,
             config=orchestrator_config,
             clients=clients,
+            deferred=deferred,
         )
     )
     all_reverted = list(
@@ -595,13 +620,10 @@ def _reconcile_locked(
     )
 
     all_merged_completed = list(dict.fromkeys(merged_from_phantom + local_harvested))
-    return (
-        ReconcileReport(
-            phantom_session_ids=phantom_session_ids,
-            phantom_session_names=phantom_names,
-            reverted_ticket_ids=all_reverted,
-            completed_ticket_ids=all_merged_completed,
-            usage_limited=phantom_usage_limited,
-        ),
-        deferred_review,
+    return ReconcileReport(
+        phantom_session_ids=phantom_session_ids,
+        phantom_session_names=phantom_names,
+        reverted_ticket_ids=all_reverted,
+        completed_ticket_ids=all_merged_completed,
+        usage_limited=phantom_usage_limited,
     )
