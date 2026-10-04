@@ -398,7 +398,7 @@ def _harvest_last_result_through_door(
         )
     except OSError as exc:
         logger.warning(
-            "stop-hook harvest state write failed for session %s; "
+            "stop-hook harvest state read/write failed for session %s; "
             "allowing the Stop hook to exit: %s",
             session_id,
             exc,

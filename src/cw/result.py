@@ -407,35 +407,37 @@ def _record_result_emitted_audit(
     # inline import is the sanctioned mechanism (PLC0415), not a workaround.
     from cw.reconcile._shared import ticket_id_for_session
 
+    ticket_id = ticket_id_for_session(session.name)
+    payload_digest = hashlib.sha256(
+        json.dumps(payload_for_digest, sort_keys=True).encode()
+    ).hexdigest()
+    audit_payload = {
+        "session_id": session.id,
+        "ticket_id": ticket_id,
+        "client": session.client,
+        "lane": session.lane,
+        "stage": session.stage.value if session.stage else None,
+        "last_result_source": source.value,
+        "status": status,
+        "payload_digest": payload_digest,
+        "recorded_at": datetime.now(UTC).isoformat(),
+    }
     try:
-        ticket_id = ticket_id_for_session(session.name)
-        payload_digest = hashlib.sha256(
-            json.dumps(payload_for_digest, sort_keys=True).encode()
-        ).hexdigest()
-        audit_payload = {
-            "session_id": session.id,
-            "ticket_id": ticket_id,
-            "client": session.client,
-            "lane": session.lane,
-            "stage": session.stage.value if session.stage else None,
-            "last_result_source": source.value,
-            "status": status,
-            "payload_digest": payload_digest,
-            "actor": getpass.getuser(),
-            "recorded_at": datetime.now(UTC).isoformat(),
-        }
+        actor = getpass.getuser()
         record_event(
             OrchestratorEventType.SESSION_RESULT_EMITTED,
-            audit_payload,
+            {**audit_payload, "actor": actor},
             correlation_id=ticket_id,
         )
     except OSError as exc:
         logger.warning(
             "session.result_emitted audit append failed for session=%s "
-            "source=%s status=%s; the accepted result is still persisted: %s",
+            "source=%s status=%s payload_digest=%s; continuing without the "
+            "audit record: %s",
             session.id,
             source.value,
             status,
+            payload_digest,
             exc,
         )
 

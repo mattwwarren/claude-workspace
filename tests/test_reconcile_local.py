@@ -53,6 +53,7 @@ from cw.reconcile import (
     reconcile,
 )
 from tests._reconcile_helpers import (
+    _stage_complete_payload,
     _write_staged_clients_yaml,
 )
 from tests.conftest import (
@@ -258,7 +259,7 @@ def test_local_harvest_audit_append_failure_still_persists_result_and_routes(
     )
     task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
     candidates = _detect_local_harvest_candidates(load_state(), task_by_ticket)
-    _fail_audit_append(monkeypatch)
+    attempts = _fail_audit_append(monkeypatch)
 
     with caplog.at_level(logging.WARNING, logger="cw.result"):
         harvested = _act_on_local_harvest_candidates(
@@ -277,17 +278,89 @@ def test_local_harvest_audit_append_failure_still_persists_result_and_routes(
     task = load_dev_queue().tasks[0]
     assert task.stage == Stage.REVIEW
     assert task.status == QueueItemStatus.PENDING
-    assert _audit_failure_logged(caplog, session_id=session_id)
-    assert not read_events(event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED])
+    assert _audit_failure_logged(
+        caplog,
+        session_id=session_id,
+        source="git_synthesis",
+        status="stage_complete",
+    )
+    assert attempts == [OrchestratorEventType.SESSION_RESULT_EMITTED]
+
+
+def test_audit_existing_result_route_audit_failure_still_routes_task(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The second reconcile route into the audit helper (#2465): an
+    ``audit_existing_result=True`` write (stalled sweep; conditionally idle and
+    phantom) calls ``_record_result_emitted_audit`` directly, not through
+    ``emit_result_on_audited``. A broken audit inbox is logged and the queue
+    route proceeds exactly as with a healthy inbox."""
+    from cw.reconcile._shared import _apply_sentinel_to_task_audited
+
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    session_id = "audit-existing"
+    payload = {**_stage_complete_payload(), "ticket_id": session_id}
+    sentinel = AutoDevResult.model_validate(payload)
+    sess = _make_daemon_session(
+        id=session_id,
+        name=f"client-a/auto-dev/{session_id}",
+        stage=Stage.IMPL,
+        last_result=payload,
+        last_result_source=LastResultSource.SALVAGE_TRANSCRIPT,
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=session_id,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session_id,
+                    stage=Stage.IMPL,
+                )
+            ]
+        )
+    )
+    attempts = _fail_audit_append(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="cw.result"):
+        audited = _apply_sentinel_to_task_audited(
+            session_id,
+            sess,
+            sentinel,
+            source=LastResultSource.SALVAGE_TRANSCRIPT,
+            audit_existing_result=True,
+        )
+
+    assert audited.route is not None
+    assert audited.route.routed is True
+    assert audited.emit is None
+    task = load_dev_queue().tasks[0]
+    assert task.stage == Stage.REVIEW
+    assert task.status == QueueItemStatus.PENDING
+    assert sess.last_result == payload
+    assert sess.last_result_source == LastResultSource.SALVAGE_TRANSCRIPT
+    assert attempts == [OrchestratorEventType.SESSION_RESULT_EMITTED]
+    assert _audit_failure_logged(
+        caplog,
+        session_id=session_id,
+        source="salvage_transcript",
+        status="stage_complete",
+    )
 
 
 def test_local_harvest_refused_by_door_leaves_session_and_task_untouched(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """RFC 0012 A3 (#1459): when the door refuses (a foreign terminal result is
     already recorded), the session-completion write is suppressed and no
-    SESSION_COMPLETED or result-emitted audit event fires for the candidate."""
+    SESSION_COMPLETED or result-emitted audit event fires for the candidate,
+    even with a broken audit inbox (#2465)."""
     worktree = _local_git_worktree(
         make_git_repo, "wt-harvest-refused", with_commit=True
     )
@@ -314,6 +387,7 @@ def test_local_harvest_refused_by_door_leaves_session_and_task_untouched(
     )
     task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
     candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    attempts = _fail_audit_append(monkeypatch)
 
     harvested = _act_on_local_harvest_candidates(
         state,
@@ -340,7 +414,8 @@ def test_local_harvest_refused_by_door_leaves_session_and_task_untouched(
         event_types=[OrchestratorEventType.SESSION_COMPLETED],
     )
     assert not any(e.payload.get("session_id") == "harv-refused" for e in events)
-    assert not read_events(event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED])
+    # A refusal never reaches the audit append, even with a broken inbox.
+    assert attempts == []
 
 
 def test_local_harvest_queue_save_failure_keeps_audit_event(

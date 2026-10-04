@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+import hashlib
 import json
 import logging
 import re
@@ -566,7 +567,7 @@ class TestEmitResultLocked:
         """Fail open (#2465): an audit-inbox failure is logged, not raised, and
         the accepted result still reaches ``save_state``."""
         _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
-        _fail_audit_append(monkeypatch)
+        attempts = _fail_audit_append(monkeypatch)
 
         with caplog.at_level(logging.WARNING, logger="cw.result"), sessions_lock():
             outcome = emit_result_locked(
@@ -580,9 +581,16 @@ class TestEmitResultLocked:
         assert sess.last_result["status"] == "shipped"
         assert sess.last_result_source == LastResultSource.EMIT_CLI
         assert sess.status.value == "active"
-        assert _audit_failure_logged(caplog, session_id="test1234")
-        assert not read_events(
-            event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED]
+        assert attempts == [OrchestratorEventType.SESSION_RESULT_EMITTED]
+        digest = hashlib.sha256(
+            json.dumps(outcome.result.model_dump(mode="json"), sort_keys=True).encode()
+        ).hexdigest()
+        assert _audit_failure_logged(
+            caplog,
+            session_id="test1234",
+            source="emit_cli",
+            status="shipped",
+            payload_digest=digest,
         )
 
     def test_emit_result_locked_refusal_with_failing_audit_mutates_nothing(
@@ -614,9 +622,6 @@ class TestEmitResultLocked:
         assert attempts == []
         assert load_state().model_dump(mode="json") == before
         assert not _audit_failure_logged(caplog, session_id="test1234")
-        assert not read_events(
-            event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED]
-        )
 
     def test_emit_result_locked_state_save_failure_not_swallowed_by_fail_open(
         self,

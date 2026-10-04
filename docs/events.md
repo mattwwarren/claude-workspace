@@ -1156,9 +1156,10 @@ arbitration, an `OSError` from the event inbox is logged
 (`session.result_emitted audit append failed for session=...`) and the
 normalized `last_result` is still saved -- in `cw result emit`, the Stop-hook
 harvest, executor-direct writes, and the reconcile result-write paths alike.
-The consequence is a missing audit record, never a missing result. Failing to
-persist session (or queue) state itself is a separate failure and still
-propagates; fail-open covers only the audit append.
+The consequence is a missing audit record, never a missing result. A failure
+to persist session (or queue) state itself is a separate failure and is never
+swallowed by the audit fail-open (the Stop-hook harvest still logs it as a
+state read/write failure and exits); fail-open covers only the audit append.
 
 `payload_digest` is a sha256 hex digest of the normalized sentinel actually
 written to `session.last_result` (`result_obj.model_dump(mode="json")`), not

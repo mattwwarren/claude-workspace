@@ -7,6 +7,7 @@ import errno
 import fcntl
 import importlib.util
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -655,13 +656,46 @@ def _fail_audit_append(monkeypatch: pytest.MonkeyPatch) -> list[OrchestratorEven
     return attempts
 
 
-def _audit_failure_logged(caplog: pytest.LogCaptureFixture, *, session_id: str) -> bool:
-    """True when the fail-open audit-append warning for SESSION_ID was logged."""
-    return any(
-        "audit append failed" in record.getMessage()
-        and f"session={session_id}" in record.getMessage()
-        for record in caplog.records
+def _audit_failure_logged(
+    caplog: pytest.LogCaptureFixture,
+    *,
+    session_id: str,
+    source: str | None = None,
+    status: str | None = None,
+    payload_digest: str | None = None,
+) -> logging.LogRecord | None:
+    """Return the fail-open audit-append WARNING for SESSION_ID, else ``None``.
+
+    Only a ``cw.result`` WARNING record counts. ``session=<id> `` is matched
+    with its trailing space so ``test1234`` never matches ``test12345``. When
+    SOURCE, STATUS or PAYLOAD_DIGEST are given the found record must carry
+    them, so a log that drops those fields fails the calling test.
+    """
+    record = next(
+        (
+            r
+            for r in caplog.records
+            if r.name == "cw.result"
+            and r.levelno == logging.WARNING
+            and "audit append failed" in r.getMessage()
+            and f"session={session_id} " in r.getMessage()
+        ),
+        None,
     )
+    if record is None:
+        return None
+    message = record.getMessage()
+    expected = {
+        "source": source,
+        "status": status,
+        "payload_digest": payload_digest,
+    }
+    for field, value in expected.items():
+        if value is not None:
+            assert f"{field}={value}" in message, (
+                f"audit-failure log is missing {field}={value}: {message}"
+            )
+    return record
 
 
 def _seed_daemon_session(

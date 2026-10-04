@@ -5910,7 +5910,39 @@ class TestHarvestLastResultThroughDoor:
         with caplog.at_level("WARNING"):
             _harvest_last_result_through_door("sess-state-error", sentinel)
 
-        assert any("state write failed" in r.getMessage() for r in caplog.records)
+        assert any("state read/write failed" in r.getMessage() for r in caplog.records)
+
+    def test_real_door_state_save_failure_with_broken_audit_is_logged_not_raised(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Through the REAL door (#2465): with the audit inbox broken, a
+        ``save_state`` failure is not swallowed by the audit fail-open; the
+        hook's handler logs it as a state read/write failure and exits."""
+        from cw.auto_dev_result import AutoDevResult
+        from cw.cli.stop_hook import _harvest_last_result_through_door
+
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="harvest02")
+        attempts = _fail_audit_append(monkeypatch)
+
+        def _raise_save(*_args: object, **_kwargs: object) -> None:
+            message = "state file unwritable"
+            raise OSError(message)
+
+        monkeypatch.setattr("cw.result.save_state", _raise_save)
+        sentinel = AutoDevResult.model_validate(_valid_payload())
+
+        with caplog.at_level("WARNING"):
+            _harvest_last_result_through_door("harvest02", sentinel)
+
+        assert attempts == [OrchestratorEventType.SESSION_RESULT_EMITTED]
+        assert any("state read/write failed" in r.getMessage() for r in caplog.records)
+        assert any("state file unwritable" in r.getMessage() for r in caplog.records)
+        sess = next(s for s in load_state().sessions if s.id == "harvest02")
+        assert sess.last_result is None
 
     def test_audit_append_failure_still_persists_harvested_result(
         self,
@@ -5926,7 +5958,7 @@ class TestHarvestLastResultThroughDoor:
         from cw.cli.stop_hook import _harvest_last_result_through_door
 
         _seed_daemon_session(tmp_path, tmp_config_dir, session_id="harvest01")
-        _fail_audit_append(monkeypatch)
+        attempts = _fail_audit_append(monkeypatch)
         sentinel = AutoDevResult.model_validate(_valid_payload())
 
         with caplog.at_level("WARNING"):
@@ -5936,8 +5968,16 @@ class TestHarvestLastResultThroughDoor:
         assert sess.last_result is not None
         assert sess.last_result["status"] == "shipped"
         assert sess.last_result_source == LastResultSource.STOP_HOOK_HARVEST
-        assert _audit_failure_logged(caplog, session_id="harvest01")
-        assert not any("state write failed" in r.getMessage() for r in caplog.records)
+        assert attempts == [OrchestratorEventType.SESSION_RESULT_EMITTED]
+        assert _audit_failure_logged(
+            caplog,
+            session_id="harvest01",
+            source="stop_hook_harvest",
+            status="shipped",
+        )
+        assert not any(
+            "state read/write failed" in r.getMessage() for r in caplog.records
+        )
 
 
 class TestSentinelPresentInTranscript:
