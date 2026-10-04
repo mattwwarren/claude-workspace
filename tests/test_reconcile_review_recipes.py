@@ -57,7 +57,6 @@ from cw.models import (
     TicketTask,
 )
 from cw.pr_hydrate import PrAttentionState
-from cw.reconcile import reconcile
 from cw.reconcile.review_recipes import (
     _REPEAT_FIRE_ATTENTION_REASON as _REPEAT_FIRE_REASON,
 )
@@ -68,6 +67,7 @@ from cw.reconcile.review_recipes import (
     RECIPE_ESCALATE_MERGE_BLOCK,
     RECIPE_FIRED_AT_GETTERS,
     RECIPE_REQUEST_REVIEWER,
+    DeferredReviewDispatch,
     ReviewRecipeCandidate,
     _act_address_review,
     _act_auto_fix_ci,
@@ -80,6 +80,7 @@ from cw.reconcile.review_recipes import (
     _detect_request_reviewer,
     _record_pr_action_taken,
     _shared,
+    dispatch_deferred_review_jobs,
     resolve_outbound_consent_allowed,
     resolve_review_recipe_enabled,
     run_review_recipes,
@@ -149,6 +150,45 @@ def _enabling_clients() -> dict[str, ClientConfig]:
     }
 
 
+def _act_and_dispatch_address_review(
+    candidates: list[ReviewRecipeCandidate], **kwargs: Any
+) -> list[str]:
+    """Act phase + immediate dispatch of the returned jobs; the acted ticket_ids.
+
+    Since #1229 the real ``_act_address_review`` only prepares jobs
+    (``list[_DispatchJob]``); ``reconcile()`` executes them after
+    ``sessions_lock`` releases. This file-local helper (deliberately NOT named
+    like the production function) serves the tests that exercise act-phase +
+    dispatch behavior end to end (emit-before-dispatch, latch, failure trail)
+    without a full ``reconcile()`` -- it runs the SAME
+    ``dispatch_deferred_review_jobs`` code ``reconcile()`` does. The real
+    act-phase return shape is pinned directly by tests that call
+    ``_act_address_review`` itself.
+    """
+    jobs = _act_address_review(candidates, **kwargs)
+    return dispatch_deferred_review_jobs(DeferredReviewDispatch(address_review=jobs))
+
+
+def _act_and_dispatch_auto_fix_ci(
+    candidates: list[ReviewRecipeCandidate], **kwargs: Any
+) -> list[str]:
+    """auto_fix_ci twin of :func:`_act_and_dispatch_address_review`."""
+    jobs = _act_auto_fix_ci(candidates, **kwargs)
+    return dispatch_deferred_review_jobs(DeferredReviewDispatch(auto_fix_ci=jobs))
+
+
+def _run_review_recipes_and_dispatch(*, config: OrchestratorConfig) -> list[str]:
+    """``run_review_recipes`` with a sink, then dispatch it; the full acted ids.
+
+    Mirrors what a dispatch-loop ``reconcile()`` does: hand the real
+    ``run_review_recipes`` a sink, then drain it. Order matches the pre-#1229
+    return (address_review, auto_fix_ci, then the inline recipes).
+    """
+    sink = DeferredReviewDispatch()
+    acted = run_review_recipes(config=config, deferred=sink)
+    return dispatch_deferred_review_jobs(sink) + acted
+
+
 @pytest.mark.parametrize(
     "attention_state",
     ["ci_failing", "merge_blocked", "no_reviewer", "ready_to_approve", None],
@@ -216,7 +256,7 @@ def test_detect_address_review_pr_state_none_guard() -> None:
 def test_run_review_recipes_master_switch_off_is_noop() -> None:
     config = OrchestratorConfig()  # review_recipes_enabled defaults False
     assert config.review_recipes_enabled is False
-    assert run_review_recipes(config=config) == []
+    assert _run_review_recipes_and_dispatch(config=config) == []
     # Dual gating: _detect_address_review gates on the switch itself too, so a
     # direct call with the switch off returns [] even given a live candidate.
     assert (
@@ -241,7 +281,7 @@ def test_run_review_recipes_loads_from_dev_queue(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    acted = run_review_recipes(config=_config())
+    acted = _run_review_recipes_and_dispatch(config=_config())
 
     # P2 now acts: run_review_recipes returns the acted ticket_ids.
     assert acted == [task.ticket_id]
@@ -253,6 +293,177 @@ def test_run_review_recipes_loads_from_dev_queue(
     after_task = load_dev_queue().tasks[0]
     assert after_task.address_review_fired_at is not None
     assert after_task.model_copy(update={"address_review_fired_at": None}) == task
+
+
+def test_run_review_recipes_master_switch_off_defers_nothing() -> None:
+    """The real entry point with the switch off acts on nothing and leaves the
+    caller's sink empty (#1229)."""
+    sink = DeferredReviewDispatch()
+
+    assert run_review_recipes(config=OrchestratorConfig(), deferred=sink) == []
+    assert sink == DeferredReviewDispatch()
+
+
+def test_act_phases_return_jobs_and_dispatch_nothing(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1229: the two act phases prepare (PR_ACTION_TAKEN + latch) and hand the
+    dispatch back as jobs in the caller's sink -- no spawn, no requeue, until
+    the caller runs them via dispatch_deferred_review_jobs. The auto_fix_ci job
+    runs no dispatch tick of its own."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    ticks: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "cw.dispatch.run_dispatch_loop", lambda **kwargs: ticks.append(kwargs)
+    )
+    ar_task = _cr_task(
+        ticket_id="GEN-1",
+        review_recipes={RECIPE_ADDRESS_REVIEW: True},
+        worktree_path=make_git_repo("deferred-ar"),
+    )
+    ci_task = _cr_task(
+        ticket_id="GEN-2",
+        review_recipes={RECIPE_AUTO_FIX_CI: True},
+        pr_state=_pr_state(
+            state="OPEN", attention_state="ci_failing", failing_checks=["lint"]
+        ),
+    )
+    save_dev_queue(DevQueueStore(tasks=[ar_task, ci_task]))
+
+    deferred = DeferredReviewDispatch()
+    acted = run_review_recipes(config=_config(), deferred=deferred)
+
+    assert acted == []
+    assert [j.ticket_id for j in deferred.address_review] == ["GEN-1"]
+    assert [j.ticket_id for j in deferred.auto_fix_ci] == ["GEN-2"]
+    assert stub_spawn.calls == []
+    assert ticks == []
+    taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+    assert {e.correlation_id for e in taken} == {"GEN-1", "GEN-2"}
+    tasks = {t.ticket_id: t for t in load_dev_queue().tasks}
+    assert tasks["GEN-1"].address_review_fired_at is not None
+    assert tasks["GEN-2"].auto_fix_ci_fired_at is not None
+
+    # Executing the jobs is what spawns, in address_review -> auto_fix_ci order.
+    assert dispatch_deferred_review_jobs(deferred) == ["GEN-1", "GEN-2"]
+    assert [c["prompt"] for c in stub_spawn.calls] == ["/address-review 42"]
+    assert ticks == []
+
+
+def test_run_review_recipes_without_a_sink_skips_the_dispatching_recipes(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """#1229: ``deferred=None`` (a reconcile() call that will not drain a sink)
+    runs neither address_review nor auto_fix_ci -- no latch stamped, no
+    PR_ACTION_TAKEN -- while the inline recipes (request_reviewer,
+    escalate_merge_block) still run."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    ar_task = _cr_task(
+        ticket_id="GEN-1",
+        review_recipes={RECIPE_ADDRESS_REVIEW: True},
+        worktree_path=make_git_repo("nosink-ar"),
+    )
+    ci_task = _cr_task(
+        ticket_id="GEN-2",
+        review_recipes={RECIPE_AUTO_FIX_CI: True},
+        pr_state=_pr_state(
+            state="OPEN", attention_state="ci_failing", failing_checks=["lint"]
+        ),
+    )
+    mb_task = _cr_task(
+        ticket_id="GEN-3",
+        review_recipes={RECIPE_ESCALATE_MERGE_BLOCK: True},
+        pr_state=_pr_state(state="OPEN", attention_state="merge_blocked"),
+    )
+    save_dev_queue(DevQueueStore(tasks=[ar_task, ci_task, mb_task]))
+
+    acted = run_review_recipes(config=_config(), deferred=None)
+
+    assert acted == ["GEN-3"]
+    assert stub_spawn.calls == []
+    taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+    assert [e.correlation_id for e in taken] == ["GEN-3"]
+    tasks = {t.ticket_id: t for t in load_dev_queue().tasks}
+    assert tasks["GEN-1"].address_review_fired_at is None
+    assert tasks["GEN-2"].auto_fix_ci_fired_at is None
+    assert tasks["GEN-3"].escalate_merge_block_fired_at is not None
+
+
+def test_run_review_recipes_appends_each_recipes_jobs_before_the_next_runs(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1229: a recipe's jobs reach the sink the moment its act returns, so an
+    exception in a LATER recipe leaves the earlier job (latch already stamped)
+    in the caller's hands, and the exception still propagates."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    ar_task = _cr_task(
+        ticket_id="GEN-1",
+        review_recipes={RECIPE_ADDRESS_REVIEW: True},
+        worktree_path=make_git_repo("sink-early"),
+    )
+    save_dev_queue(DevQueueStore(tasks=[ar_task]))
+
+    def _boom(*_args: object, **_kwargs: object) -> list[str]:
+        msg = "later recipe exploded"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("cw.reconcile.review_recipes.core._act_auto_fix_ci", _boom)
+    sink = DeferredReviewDispatch()
+
+    with pytest.raises(RuntimeError, match="later recipe exploded"):
+        run_review_recipes(config=_config(), deferred=sink)
+
+    assert [j.ticket_id for j in sink.address_review] == ["GEN-1"]
+    assert load_dev_queue().tasks[0].address_review_fired_at is not None
+
+
+def test_dispatch_deferred_review_jobs_isolates_a_failing_job(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A job whose dispatch raises is logged + PR_ACTION_FAILED'd and skipped;
+    its sibling still dispatches and only the success is reported acted."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    tasks = [
+        _cr_task(
+            ticket_id=ticket_id,
+            pr_url=f"https://github.com/acme/widgets/pull/{number}",
+            review_recipes={RECIPE_ADDRESS_REVIEW: True},
+            worktree_path=make_git_repo(f"iso-{ticket_id}"),
+        )
+        for ticket_id, number in (("GEN-1", 41), ("GEN-2", 42))
+    ]
+    save_dev_queue(DevQueueStore(tasks=tasks))
+    jobs = _act_address_review(
+        [_candidate_for(t) for t in tasks], clients=load_effective_clients()
+    )
+
+    def _fail_first(**kwargs: Any) -> None:
+        if kwargs["prompt"].endswith(" 41"):
+            msg = "spawn refused"
+            raise CwError(msg)
+
+    stub_spawn.side_effect = _fail_first
+
+    with caplog.at_level("WARNING", logger="cw.reconcile.review_recipes"):
+        acted = dispatch_deferred_review_jobs(
+            DeferredReviewDispatch(address_review=jobs)
+        )
+
+    assert acted == ["GEN-2"]
+    assert len(stub_spawn.calls) == 2
+    assert "review_recipe_dispatch_failed ticket=GEN-1" in caplog.text
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert [e.correlation_id for e in failed] == ["GEN-1"]
 
 
 def test_draft_pr_never_a_candidate() -> None:
@@ -508,7 +719,7 @@ def test_pr_action_taken_emitted_before_mutation(
 
     stub_spawn.side_effect = _assert_taken_recorded
 
-    acted = _act_address_review(
+    acted = _act_and_dispatch_address_review(
         [_candidate_for(task)], clients=load_effective_clients()
     )
 
@@ -569,7 +780,7 @@ def test_lane_in_needs_attention_payload_matches_task_lane(
         review_recipe_repeat_fire_window_minutes=20,
     )
 
-    acted = _act_address_review(
+    acted = _act_and_dispatch_address_review(
         [_candidate_for(task)],
         clients=load_effective_clients(),
         config=cfg,
@@ -621,7 +832,10 @@ def test_stale_attention_state_skips_silently(
         session_id=task.session_id,
     )
 
-    assert _act_address_review([candidate], clients=load_effective_clients()) == []
+    assert (
+        _act_and_dispatch_address_review([candidate], clients=load_effective_clients())
+        == []
+    )
     assert stub_spawn.calls == []
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
@@ -663,7 +877,7 @@ def test_no_self_deadlock_under_dev_queue_lock(
 
     stub_spawn.side_effect = _probe_lock_released
 
-    assert _act_address_review(
+    assert _act_and_dispatch_address_review(
         [_candidate_for(task)], clients=load_effective_clients()
     ) == [task.ticket_id]
 
@@ -673,31 +887,34 @@ def test_reconcile_reentry_guard_fires_and_is_swallowed(
     make_git_repo: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RFC 0010 P4's act phase re-entering reconcile() raises, not hangs.
+    """Dispatching a review-recipe spawn under a held sessions_lock raises, not hangs.
 
-    Stands in for the real chain (GitHub #1228): reconcile() holds
-    sessions_lock() -> ... -> run_review_recipes -> _act_auto_fix_ci ->
-    _dispatch_auto_fix_ci -> run_dispatch_loop -> a nested reconcile() /
-    sessions_lock() acquisition on the same thread. The outer
-    ``with sessions_lock():`` below stands in for reconcile()'s own lock
-    hold. Before the #1228 fix this scenario hangs forever in flock(); after
-    the fix, SessionsLockReentryError propagates out of the inner
-    reconcile() call, into _dispatch_auto_fix_ci's ``except CwError``, and is
-    converted to a logged PR_ACTION_FAILED correction instead of a call-site
-    change.
+    Pins the #1228 guard's tolerance, which still backstops the #1229
+    deferral: dispatching under a held lock (which reconcile() no longer does
+    -- see tests/test_reconcile_core.py::TestReviewRecipeDispatchRunsPostLock)
+    must stay a caught, logged failure rather than a hang.
+
+    Stands in for the pre-#1229 chain (GitHub #1228): reconcile() holds
+    sessions_lock() -> ... -> run_review_recipes -> _act_address_review ->
+    _dispatch_address_review -> spawn_create_impl -> a nested sessions_lock()
+    acquisition on the same thread. The outer ``with sessions_lock():`` below
+    stands in for reconcile()'s own lock hold. Before the #1228 fix this
+    scenario hangs forever in flock(); after the fix, SessionsLockReentryError
+    propagates out of the nested acquisition, into _dispatch_address_review's
+    ``except CwError``, and is converted to a logged PR_ACTION_FAILED
+    correction instead of a call-site change.
     """
     _write_acme_clients_yaml(tmp_config_dir)
     task = _cr_task(
-        pr_state=_pr_state(
-            state="OPEN", attention_state="ci_failing", failing_checks=["lint"]
-        )
+        review_recipes={RECIPE_ADDRESS_REVIEW: True},
+        worktree_path=make_git_repo("reentry"),
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     probed = {"lock_held": False}
     captured: list[BaseException] = []
 
-    def _fake_dispatch_loop(**_kwargs: Any) -> None:
+    def _spawn_reentering_the_lock(**_kwargs: Any) -> None:
         # Non-blocking probe proves the outer sessions_lock() is genuinely
         # held (not just assumed) before exercising the real reentry path.
         fd = sessions_lock_file().open("w")
@@ -708,20 +925,21 @@ def test_reconcile_reentry_guard_fires_and_is_swallowed(
         finally:
             fd.close()
         try:
-            reconcile()
+            with sessions_lock():
+                pass
         except SessionsLockReentryError as exc:
             # Record the exact exception raised (not just "some CwError")
-            # before letting it propagate into _dispatch_auto_fix_ci's
+            # before letting it propagate into _dispatch_address_review's
             # `except CwError` handler, so the outer assertions below can
             # confirm the guard — not some other failure — fired.
             captured.append(exc)
             raise
 
-    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", _fake_dispatch_loop)
+    monkeypatch.setattr("cw.spawn.spawn_create_impl", _spawn_reentering_the_lock)
 
     with sessions_lock():
-        acted = _act_auto_fix_ci(
-            [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        acted = _act_and_dispatch_address_review(
+            [_candidate(task, RECIPE_ADDRESS_REVIEW, "changes_requested")],
             clients=load_effective_clients(),
         )
 
@@ -770,7 +988,7 @@ def test_action_failure_emits_pr_action_failed(
     stub_spawn.side_effect = _raise_for_gen1
 
     with caplog.at_level("WARNING"):
-        acted = _act_address_review(
+        acted = _act_and_dispatch_address_review(
             [_candidate_for(task1), _candidate_for(task2)],
             clients=load_effective_clients(),
         )
@@ -814,7 +1032,7 @@ def test_unparseable_pr_url_emits_pr_action_failed(
 
     with caplog.at_level("WARNING"):
         assert (
-            _act_address_review(
+            _act_and_dispatch_address_review(
                 [_candidate_for(task)], clients=load_effective_clients()
             )
             == []
@@ -843,7 +1061,7 @@ def test_missing_client_emits_pr_action_failed(
 
     with caplog.at_level("WARNING"):
         assert (
-            _act_address_review(
+            _act_and_dispatch_address_review(
                 [_candidate_for(task)], clients=load_effective_clients()
             )
             == []
@@ -870,7 +1088,7 @@ def test_missing_worktree_emits_pr_action_failed(
 
     with caplog.at_level("WARNING"):
         assert (
-            _act_address_review(
+            _act_and_dispatch_address_review(
                 [_candidate_for(task)], clients=load_effective_clients()
             )
             == []
@@ -896,7 +1114,9 @@ def test_address_review_fires_once_per_episode(
     save_dev_queue(DevQueueStore(tasks=[task]))
     candidate = _candidate_for(task)
 
-    acted1 = _act_address_review([candidate], clients=load_effective_clients())
+    acted1 = _act_and_dispatch_address_review(
+        [candidate], clients=load_effective_clients()
+    )
     assert acted1 == [task.ticket_id]
     assert load_dev_queue().tasks[0].address_review_fired_at is not None
 
@@ -904,7 +1124,9 @@ def test_address_review_fires_once_per_episode(
     # (simulating hydration lag): detect still yields a candidate every tick,
     # but the latch blocks a re-fire.
     for _ in range(5):
-        acted_n = _act_address_review([candidate], clients=load_effective_clients())
+        acted_n = _act_and_dispatch_address_review(
+            [candidate], clients=load_effective_clients()
+        )
         assert acted_n == []
     taken = [
         e
@@ -928,9 +1150,9 @@ def test_address_review_latch_clears_on_episode_end(
     save_dev_queue(DevQueueStore(tasks=[task]))
     candidate = _candidate_for(task)
 
-    assert _act_address_review([candidate], clients=load_effective_clients()) == [
-        task.ticket_id
-    ]
+    assert _act_and_dispatch_address_review(
+        [candidate], clients=load_effective_clients()
+    ) == [task.ticket_id]
 
     # Episode ends: hydration moves the PR off changes_requested.
     store = load_dev_queue()
@@ -938,7 +1160,7 @@ def test_address_review_latch_clears_on_episode_end(
     save_dev_queue(store)
 
     # Clear pass runs even with zero candidates.
-    assert _act_address_review([], clients=load_effective_clients()) == []
+    assert _act_and_dispatch_address_review([], clients=load_effective_clients()) == []
     assert load_dev_queue().tasks[0].address_review_fired_at is None
 
     # Genuine re-entry into changes_requested fires again (episode semantics).
@@ -947,9 +1169,9 @@ def test_address_review_latch_clears_on_episode_end(
         state="OPEN", attention_state="changes_requested"
     )
     save_dev_queue(store)
-    assert _act_address_review([candidate], clients=load_effective_clients()) == [
-        task.ticket_id
-    ]
+    assert _act_and_dispatch_address_review(
+        [candidate], clients=load_effective_clients()
+    ) == [task.ticket_id]
 
 
 # --- cross-repo dispatch guard, address_review (GitHub #1198) ---------------
@@ -976,7 +1198,7 @@ def test_repo_mismatch_emits_pr_action_failed(
     task = _cr_task(worktree_path=worktree)  # pr_url -> acme/widgets
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    acted = _act_address_review(
+    acted = _act_and_dispatch_address_review(
         [_candidate_for(task)], clients=load_effective_clients()
     )
 
@@ -1000,7 +1222,7 @@ def test_repo_match_dispatches_normally(
     task = _cr_task(worktree_path=worktree)
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    acted = _act_address_review(
+    acted = _act_and_dispatch_address_review(
         [_candidate_for(task)], clients=load_effective_clients()
     )
 
@@ -1020,7 +1242,7 @@ def test_repo_unresolvable_dispatches_normally(
     task = _cr_task(worktree_path=worktree)
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    acted = _act_address_review(
+    acted = _act_and_dispatch_address_review(
         [_candidate_for(task)], clients=load_effective_clients()
     )
 
@@ -1043,7 +1265,7 @@ def test_repo_mismatch_override_dispatches_and_logs(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     with caplog.at_level("WARNING"):
-        acted = _act_address_review(
+        acted = _act_and_dispatch_address_review(
             [_candidate_for(task)], clients=load_effective_clients()
         )
 
@@ -1111,7 +1333,24 @@ def test_detect_auto_fix_ci_master_switch_off_returns_empty() -> None:
     )
 
 
-def test_act_auto_fix_ci_requeues_completed_row_and_dispatches_once(
+@pytest.fixture(autouse=True)
+def _forbid_nested_dispatch_tick(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The auto_fix_ci job requeues the row and nothing more (#1229).
+
+    Review recipes only dispatch from inside the live dispatch loop's own tick,
+    which already holds ``dispatch_loop_lock``; a nested
+    ``run_dispatch_loop(once=True)`` could only raise ``DispatchLoopLockedError``
+    and misreport a successful requeue as a failure. Every test in this module
+    therefore runs with that entry point booby-trapped.
+    """
+
+    def _fail(**_kwargs: object) -> None:
+        pytest.fail("auto_fix_ci must not run a nested dispatch tick")
+
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", _fail)
+
+
+def test_act_auto_fix_ci_requeues_completed_row_in_place(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """GitHub #2100: a COMPLETED row is requeued in place, never a sibling add.
@@ -1120,8 +1359,11 @@ def test_act_auto_fix_ci_requeues_completed_row_and_dispatches_once(
     whose real dev-queue row already reached COMPLETED goes ci_failing again
     (a post-merge PR, or hydration lag). The fix must mutate that same row
     (status -> PENDING, stage unchanged) rather than mint a second, PLAN-stage
-    row alongside it.
+    row alongside it. No dispatch tick runs (#1229): the loop picks the
+    requeued row up on its next tick.
     """
+    from cw.dev_queue import requeue_ticket as real_requeue_ticket
+
     _write_acme_clients_yaml(tmp_config_dir)
     task = _make_task(
         status=QueueItemStatus.COMPLETED,
@@ -1131,24 +1373,21 @@ def test_act_auto_fix_ci_requeues_completed_row_and_dispatches_once(
         ),
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
-    dispatched: list[dict[str, Any]] = []
 
-    def _fake_dispatch(**kwargs: Any) -> None:
-        # emit-before-dispatch: PR_ACTION_TAKEN is durable before the requeue
-        # + tick run.
+    def _requeue_after_event_is_durable(*args: Any, **kwargs: Any) -> Any:
+        # emit-before-dispatch: PR_ACTION_TAKEN is durable before the requeue runs.
         taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
         assert any(e.correlation_id == task.ticket_id for e in taken)
-        dispatched.append(kwargs)
+        return real_requeue_ticket(*args, **kwargs)
 
-    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", _fake_dispatch)
+    monkeypatch.setattr("cw.dev_queue.requeue_ticket", _requeue_after_event_is_durable)
 
-    acted = _act_auto_fix_ci(
+    acted = _act_and_dispatch_auto_fix_ci(
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
 
     assert acted == [task.ticket_id]
-    assert dispatched == [{"once": True, "client": task.client, "emit": None}]
     # Never mints a sibling row (#2100) -- exactly one row survives, requeued
     # in place at its original stage.
     store_after = load_dev_queue()
@@ -1169,14 +1408,14 @@ def test_act_auto_fix_ci_requeues_completed_row_and_dispatches_once(
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
 
 
-def test_act_auto_fix_ci_existing_blocked_row_noop_dispatches_once(
-    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+def test_act_auto_fix_ci_existing_blocked_row_is_left_alone(
+    tmp_config_dir: Path,
 ) -> None:
     """GitHub #2100: a row that already owns the ticket is left alone.
 
     BLOCKED_ON_USER (like PENDING/RUNNING/AWAITING_OPERATOR_SIGNOFF) already
-    occupies the ticket -- auto_fix_ci must not add a sibling OR requeue it;
-    only the follow-up dispatch tick runs.
+    occupies the ticket -- auto_fix_ci must not add a sibling OR requeue it,
+    and (#1229) runs no dispatch tick either.
     """
     _write_acme_clients_yaml(tmp_config_dir)
     task = _make_task(
@@ -1185,18 +1424,13 @@ def test_act_auto_fix_ci_existing_blocked_row_noop_dispatches_once(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
     store_before = load_dev_queue()
-    dispatched: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        "cw.dispatch.run_dispatch_loop", lambda **kw: dispatched.append(kw)
-    )
 
-    acted = _act_auto_fix_ci(
+    acted = _act_and_dispatch_auto_fix_ci(
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
 
     assert acted == [task.ticket_id]
-    assert dispatched == [{"once": True, "client": task.client, "emit": None}]
     taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
     assert taken[-1].payload["queue_row_status"] == "blocked_on_user"
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
@@ -1211,22 +1445,19 @@ def test_act_auto_fix_ci_existing_blocked_row_noop_dispatches_once(
     )
 
 
-def test_act_auto_fix_ci_dispatch_loop_locked_elsewhere_fails_open(
+def test_act_auto_fix_ci_succeeds_while_the_dispatch_loop_lock_is_held(
     tmp_config_dir: Path,
 ) -> None:
-    """A genuinely EXTERNAL dispatch-loop lock holder degrades gracefully (#1362).
+    """The requeue succeeds, silently, while the dispatch-loop lock is held (#1229).
 
-    Uses the REAL ``dispatch_loop_lock`` file, held via a raw fd exactly as a
-    second ``cw`` process would (fcntl.flock is per-open-file-description, so
-    this denies acquisition even from this same test process). Proves
-    ``_dispatch_auto_fix_ci`` does NOT bypass a genuinely-held external lock
-    (there is no ``force=True`` at this call site) -- it fails open via a
-    ``DispatchLoopLockedError``-specific ``PR_ACTION_FAILED`` (GitHub #2100),
-    a sibling posture to the ``except CwError`` path already used for the
-    analogous ``SessionsLockReentryError`` case (GitHub #1228). The row was
-    already requeued in place (``requeue_ticket`` ran, for real, before the
-    tick); only the "trigger a tick right now" nicety is lost, deferred to
-    whichever process holds the lock on its own next regular tick.
+    Uses the REAL ``dispatch_loop_lock`` file, held via a raw fd exactly as the
+    live loop holds it while its tick calls ``reconcile()`` (fcntl.flock is
+    per-open-file-description, so this denies a second acquisition even from
+    this same test process). Before the nested tick was dropped, this exact
+    situation made ``_dispatch_auto_fix_ci`` report a successful requeue as a
+    lock-contention ``PR_ACTION_FAILED`` (#2100). Now no tick is attempted, so
+    the job reports success and the held loop picks the row up on its own next
+    tick.
     """
     _write_acme_clients_yaml(tmp_config_dir)
     task = _make_task(
@@ -1242,7 +1473,7 @@ def test_act_auto_fix_ci_dispatch_loop_locked_elsewhere_fails_open(
     fd = lock_path.open("r+")
     fcntl.flock(fd, fcntl.LOCK_EX)
     try:
-        acted = _act_auto_fix_ci(
+        acted = _act_and_dispatch_auto_fix_ci(
             [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
             clients=load_effective_clients(),
         )
@@ -1250,26 +1481,13 @@ def test_act_auto_fix_ci_dispatch_loop_locked_elsewhere_fails_open(
         fcntl.flock(fd, fcntl.LOCK_UN)
         fd.close()
 
-    assert acted == []
-    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
-    matching = [e for e in failed if e.correlation_id == task.ticket_id]
-    assert len(matching) == 1
-    # Pin the failure to the lock-contention path specifically -- not just
-    # "some CwError" -- mirroring test_reconcile_reentry_guard_fires_and_is_swallowed's
-    # exact-exception check for the analogous #1228 SessionsLockReentryError case.
-    # The message explicitly says the row is already requeued/current (#2100)
-    # rather than the stale "already re-enqueued" claim.
-    error_text = matching[0].payload["error"]
-    assert "dispatch loop already running" in error_text
-    assert "already requeued/current" in error_text
-    # The row itself WAS requeued to PENDING despite the tick failing -- the
-    # mutation and the tick are independent failure domains (#2100). Never
-    # mints a sibling: exactly one row survives.
+    assert acted == [task.ticket_id]
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+    # The row was requeued to PENDING in place; never mints a sibling.
     store_after = load_dev_queue()
     assert len(store_after.tasks) == 1
     after_task = store_after.tasks[0]
     assert after_task.status == QueueItemStatus.PENDING
-    # Latch stays stamped even on dispatch failure (no retry storm).
     assert after_task.auto_fix_ci_fired_at is not None
 
 
@@ -1284,9 +1502,8 @@ def test_act_auto_fix_ci_stale_row_silent_skip(
     save_dev_queue(DevQueueStore(tasks=[task]))
     called: list[Any] = []
     monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: called.append(t) or True)
-    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: called.append(1))
 
-    acted = _act_auto_fix_ci(
+    acted = _act_and_dispatch_auto_fix_ci(
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1323,13 +1540,9 @@ def test_act_auto_fix_ci_requeue_raises_emits_pr_action_failed(
         raise RequeueStateError(row_gone_msg)
 
     monkeypatch.setattr("cw.dev_queue.requeue_ticket", _boom)
-    monkeypatch.setattr(
-        "cw.dispatch.run_dispatch_loop",
-        lambda **_kw: pytest.fail("dispatch must not run when requeue_ticket raises"),
-    )
 
     with caplog.at_level("WARNING"):
-        acted = _act_auto_fix_ci(
+        acted = _act_and_dispatch_auto_fix_ci(
             [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
             clients=load_effective_clients(),
         )
@@ -1375,12 +1588,8 @@ def test_auto_fix_ci_live_session_refusal_clears_latch(
     rolled back and PR_ACTION_FAILED carries a distinguishable reason."""
     task = _seed_ci_failing_completed_row(tmp_config_dir)
     monkeypatch.setattr("cw.dev_queue.requeue_ticket", _raise_live_session)
-    monkeypatch.setattr(
-        "cw.dispatch.run_dispatch_loop",
-        lambda **_kw: pytest.fail("dispatch must not run when requeue is refused"),
-    )
 
-    acted = _act_auto_fix_ci(
+    acted = _act_and_dispatch_auto_fix_ci(
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1406,12 +1615,8 @@ def test_auto_fix_ci_roster_unreadable_refusal_clears_latch(
     roster = FakeNativeDaemonClient()
     roster.roster_unreadable = True
     monkeypatch.setattr("cw.dev_queue.requeue.get_native_daemon_client", lambda: roster)
-    monkeypatch.setattr(
-        "cw.dispatch.run_dispatch_loop",
-        lambda **_kw: pytest.fail("dispatch must not run when requeue is refused"),
-    )
 
-    acted = _act_auto_fix_ci(
+    acted = _act_and_dispatch_auto_fix_ci(
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1447,9 +1652,8 @@ def test_auto_fix_ci_live_session_refusal_keeps_concurrently_changed_latch(
         return _raise_live_session(*args, **kwargs)
 
     monkeypatch.setattr("cw.dev_queue.requeue_ticket", _race_then_refuse)
-    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
 
-    _act_auto_fix_ci(
+    _act_and_dispatch_auto_fix_ci(
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1471,9 +1675,8 @@ def test_auto_fix_ci_live_session_refusal_row_vanished_is_noop(
         return _raise_live_session(*args, **kwargs)
 
     monkeypatch.setattr("cw.dev_queue.requeue_ticket", _remove_then_refuse)
-    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
 
-    acted = _act_auto_fix_ci(
+    acted = _act_and_dispatch_auto_fix_ci(
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1491,9 +1694,8 @@ def test_auto_fix_ci_fires_again_after_live_session_latch_cleared(
     task = _seed_ci_failing_completed_row(tmp_config_dir)
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
     monkeypatch.setattr("cw.dev_queue.requeue_ticket", _raise_live_session)
-    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
 
-    first = _act_auto_fix_ci([candidate], clients=load_effective_clients())
+    first = _act_and_dispatch_auto_fix_ci([candidate], clients=load_effective_clients())
     assert first == []
 
     requeued: list[str] = []
@@ -1504,7 +1706,9 @@ def test_auto_fix_ci_fires_again_after_live_session_latch_cleared(
 
     monkeypatch.setattr("cw.dev_queue.requeue_ticket", _requeue_ok)
 
-    second = _act_auto_fix_ci([candidate], clients=load_effective_clients())
+    second = _act_and_dispatch_auto_fix_ci(
+        [candidate], clients=load_effective_clients()
+    )
 
     assert second == [task.ticket_id]
     assert requeued == [task.ticket_id]
@@ -1524,9 +1728,8 @@ def test_auto_fix_ci_non_live_session_cwerror_still_latches(
         raise RequeueStateError(row_gone_msg)
 
     monkeypatch.setattr("cw.dev_queue.requeue_ticket", _boom)
-    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
 
-    acted = _act_auto_fix_ci(
+    acted = _act_and_dispatch_auto_fix_ci(
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1545,10 +1748,11 @@ def test_auto_fix_ci_fires_once_per_episode(
     _write_acme_clients_yaml(tmp_config_dir)
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
     save_dev_queue(DevQueueStore(tasks=[task]))
-    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
 
-    acted1 = _act_auto_fix_ci([candidate], clients=load_effective_clients())
+    acted1 = _act_and_dispatch_auto_fix_ci(
+        [candidate], clients=load_effective_clients()
+    )
     assert acted1 == [task.ticket_id]
     assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is not None
 
@@ -1556,7 +1760,9 @@ def test_auto_fix_ci_fires_once_per_episode(
     # hydration lag, per the ticket's acceptance criterion): detect still
     # yields a candidate every tick, but the latch blocks a re-fire.
     for _ in range(5):
-        acted_n = _act_auto_fix_ci([candidate], clients=load_effective_clients())
+        acted_n = _act_and_dispatch_auto_fix_ci(
+            [candidate], clients=load_effective_clients()
+        )
         assert acted_n == []
     taken = [
         e
@@ -1572,12 +1778,11 @@ def test_auto_fix_ci_latch_clears_on_episode_end(
     _write_acme_clients_yaml(tmp_config_dir)
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
     save_dev_queue(DevQueueStore(tasks=[task]))
-    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
 
-    assert _act_auto_fix_ci([candidate], clients=load_effective_clients()) == [
-        task.ticket_id
-    ]
+    assert _act_and_dispatch_auto_fix_ci(
+        [candidate], clients=load_effective_clients()
+    ) == [task.ticket_id]
 
     # Episode ends: hydration moves the PR off ci_failing.
     store = load_dev_queue()
@@ -1585,16 +1790,16 @@ def test_auto_fix_ci_latch_clears_on_episode_end(
     save_dev_queue(store)
 
     # Clear pass runs even with zero candidates.
-    assert _act_auto_fix_ci([], clients=load_effective_clients()) == []
+    assert _act_and_dispatch_auto_fix_ci([], clients=load_effective_clients()) == []
     assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is None
 
     # Genuine re-entry into ci_failing fires again (episode semantics).
     store = load_dev_queue()
     store.tasks[0].pr_state = _pr_state(attention_state="ci_failing")
     save_dev_queue(store)
-    assert _act_auto_fix_ci([candidate], clients=load_effective_clients()) == [
-        task.ticket_id
-    ]
+    assert _act_and_dispatch_auto_fix_ci(
+        [candidate], clients=load_effective_clients()
+    ) == [task.ticket_id]
 
 
 # --- cross-repo dispatch guard, auto_fix_ci (GitHub #1198) ------------------
@@ -1632,12 +1837,8 @@ def test_auto_fix_ci_repo_mismatch_emits_pr_action_failed(
         "cw.dev_queue.add_ticket",
         lambda _t: pytest.fail("no re-dispatch on repo mismatch"),
     )
-    monkeypatch.setattr(
-        "cw.dispatch.run_dispatch_loop",
-        lambda **_kw: pytest.fail("no dispatch on repo mismatch"),
-    )
 
-    acted = _act_auto_fix_ci(
+    acted = _act_and_dispatch_auto_fix_ci(
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1650,7 +1851,7 @@ def test_auto_fix_ci_repo_mismatch_emits_pr_action_failed(
 
 
 def test_auto_fix_ci_repo_match_dispatches_normally(
-    tmp_config_dir: Path, make_git_repo: Any, monkeypatch: pytest.MonkeyPatch
+    tmp_config_dir: Path, make_git_repo: Any
 ) -> None:
     """Client workspace repo == PR repo -> re-dispatch proceeds as today."""
     _write_acme_clients_yaml_with_repo(
@@ -1661,28 +1862,22 @@ def test_auto_fix_ci_repo_match_dispatches_normally(
         pr_state=_pr_state(attention_state="ci_failing", failing_checks=["lint"]),
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
-    dispatched: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        "cw.dispatch.run_dispatch_loop", lambda **kw: dispatched.append(kw)
-    )
 
-    acted = _act_auto_fix_ci(
+    acted = _act_and_dispatch_auto_fix_ci(
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
 
     assert acted == [task.ticket_id]
-    assert len(dispatched) == 1
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
     # No sibling minted (#2100) -- the (default BLOCKED_ON_USER) row already
-    # owns the ticket, so the guard's success path is a no-op beyond the tick.
+    # owns the ticket, so the guard's success path leaves it alone.
     assert len(load_dev_queue().tasks) == 1
 
 
 def test_auto_fix_ci_repo_mismatch_override_dispatches_and_logs(
     tmp_config_dir: Path,
     make_git_repo: Any,
-    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """cross_repo_override=True re-dispatches despite the mismatch and logs WARN."""
@@ -1695,19 +1890,14 @@ def test_auto_fix_ci_repo_mismatch_override_dispatches_and_logs(
         cross_repo_override=True,
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
-    dispatched: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        "cw.dispatch.run_dispatch_loop", lambda **kw: dispatched.append(kw)
-    )
 
     with caplog.at_level("WARNING"):
-        acted = _act_auto_fix_ci(
+        acted = _act_and_dispatch_auto_fix_ci(
             [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
             clients=load_effective_clients(),
         )
 
     assert acted == [task.ticket_id]
-    assert len(dispatched) == 1
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
     assert "review_recipe_repo_mismatch_override" in caplog.text
     assert task.ticket_id in caplog.text
@@ -1716,7 +1906,7 @@ def test_auto_fix_ci_repo_mismatch_override_dispatches_and_logs(
 
 
 def test_auto_fix_ci_unparseable_pr_url_fails_open(
-    tmp_config_dir: Path, make_git_repo: Any, monkeypatch: pytest.MonkeyPatch
+    tmp_config_dir: Path, make_git_repo: Any
 ) -> None:
     """An unparseable pr_url fails open (no mismatch) -> re-dispatch proceeds."""
     _write_acme_clients_yaml_with_repo(
@@ -1727,40 +1917,28 @@ def test_auto_fix_ci_unparseable_pr_url_fails_open(
         pr_state=_pr_state(attention_state="ci_failing"),
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
-    dispatched: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        "cw.dispatch.run_dispatch_loop", lambda **kw: dispatched.append(kw)
-    )
 
-    acted = _act_auto_fix_ci(
+    acted = _act_and_dispatch_auto_fix_ci(
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
 
     assert acted == [task.ticket_id]
-    assert len(dispatched) == 1
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
 
 
-def test_auto_fix_ci_unresolvable_client_fails_open(
-    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_auto_fix_ci_unresolvable_client_fails_open(tmp_config_dir: Path) -> None:
     """A client absent from the clients dict fails open -> re-dispatch proceeds."""
     _write_acme_clients_yaml(tmp_config_dir)
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
     save_dev_queue(DevQueueStore(tasks=[task]))
-    dispatched: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        "cw.dispatch.run_dispatch_loop", lambda **kw: dispatched.append(kw)
-    )
 
     # clients={} -> client_cfg is None -> guard fails open, dispatch proceeds.
-    acted = _act_auto_fix_ci(
+    acted = _act_and_dispatch_auto_fix_ci(
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")], clients={}
     )
 
     assert acted == [task.ticket_id]
-    assert len(dispatched) == 1
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
 
 
@@ -2180,7 +2358,7 @@ def test_run_review_recipes_wires_escalate_merge_block(tmp_config_dir: Path) -> 
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    acted = run_review_recipes(config=_config())
+    acted = _run_review_recipes_and_dispatch(config=_config())
 
     assert task.ticket_id in acted
     assert load_dev_queue().tasks[0].escalate_merge_block_fired_at is not None
@@ -2214,7 +2392,7 @@ def test_act_auto_fix_ci_vanished_row_silent_skip(
         "cw.dev_queue.add_ticket", lambda _t: pytest.fail("no dispatch for a gone row")
     )
     assert (
-        _act_auto_fix_ci(
+        _act_and_dispatch_auto_fix_ci(
             [_orphan_candidate(RECIPE_AUTO_FIX_CI, "ci_failing")], clients={}
         )
         == []
@@ -2721,7 +2899,7 @@ class TestRunReviewRecipesRepeatFire:
         for i in range(5):
             with freeze_time(base + timedelta(minutes=i)):
                 self._rearm_latch()
-                run_review_recipes(config=_config())
+                _run_review_recipes_and_dispatch(config=_config())
         taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
         assert len(taken) == 5
         attn = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
@@ -2738,7 +2916,7 @@ class TestRunReviewRecipesRepeatFire:
         for i in range(2):
             with freeze_time(base + timedelta(minutes=i)):
                 self._rearm_latch()
-                run_review_recipes(
+                _run_review_recipes_and_dispatch(
                     config=_config(review_recipe_repeat_fire_threshold=2)
                 )
         attn = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
@@ -2763,7 +2941,7 @@ class TestRunReviewRecipesRepeatFire:
         monkeypatch.setattr(
             "cw.reconcile.review_recipes.core._detect_repeat_fire_counts", _spy
         )
-        run_review_recipes(config=_config())
+        _run_review_recipes_and_dispatch(config=_config())
         # One detector call per tick — NOT once per recipe (four recipes run).
         assert len(calls) == 1
 
@@ -2780,7 +2958,7 @@ class TestRunReviewRecipesRepeatFire:
             for _ in range(4):
                 _record_taken(task.ticket_id, RECIPE_AUTO_FIX_CI)
         with freeze_time(base + timedelta(minutes=1)):
-            run_review_recipes(config=_config())
+            _run_review_recipes_and_dispatch(config=_config())
         attn = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
         # Only address_review crossed its threshold; auto_fix_ci counts don't
         # leak into the address_review key.

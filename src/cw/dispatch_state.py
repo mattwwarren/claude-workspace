@@ -184,11 +184,13 @@ def dispatch_state_lock() -> Iterator[None]:
     inside ``reconcile/core.py``'s ``with sessions_lock():`` block through
     ``_act_on_main_drift_candidates`` (``main_drift.py:162``). The reverse
     ordering is forbidden and never occurs in the current call graph. The one
-    pathological cross-lock path (#1228, the RFC 0010 P4 review-recipe act
-    phase re-entering ``reconcile()`` from inside ``sessions_lock()``) fails
-    first at its own ``reconcile()`` call (``dispatch.py:1491``) with
-    ``SessionsLockReentryError``, before it can reach any
-    ``dispatch_state_lock()`` acquisition.
+    historical cross-lock path (the RFC 0010 P4 review-recipe act phase
+    re-entering ``reconcile()`` from inside ``sessions_lock()``) was fixed by
+    #1229: review-recipe dispatches now run post-lock, after ``reconcile()``
+    releases ``sessions_lock``. The ``SessionsLockReentryError`` guard (#1228)
+    remains as a backstop, so a regression of that shape fails at its own
+    ``reconcile()`` call, before it can reach any ``dispatch_state_lock()``
+    acquisition.
     """
     state_dir().mkdir(parents=True, exist_ok=True)
     lock_path = dispatch_state_lock_file()
