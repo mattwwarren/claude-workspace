@@ -2115,7 +2115,7 @@ conflate a deliberate hold with a broken mutation.
 
 ### `pr.action_taken`
 
-**Emitter:** `_act_address_review` (`cw.reconcile.review_recipes`, dispatched by `run_review_recipes`)
+**Emitter:** `_act_address_review` (`cw.reconcile.review_recipes`, dispatched by `run_review_recipes`, which runs it only for the dispatch loop's `reconcile()` — operator commands that call `reconcile()` do not fire this recipe)
 **Payload:**
 ```json
 {
@@ -2147,7 +2147,7 @@ licensed the `changes_requested` classification.
 
 ### `pr.action_failed`
 
-**Emitter:** `_act_address_review` (`cw.reconcile.review_recipes`, dispatched by `run_review_recipes`)
+**Emitter:** `_act_address_review` (`cw.reconcile.review_recipes`) for the precondition anomalies; `_dispatch_address_review` / `_dispatch_auto_fix_ci`, run by `dispatch_deferred_review_jobs` after `reconcile()` releases `sessions_lock`, for dispatch failures
 **Payload:** same keys as `pr.action_taken`, plus:
 ```json
 {
@@ -2155,11 +2155,15 @@ licensed the `changes_requested` classification.
 }
 ```
 **Semantics:** RFC 0010 P2 (#1097). Companion correction to `pr.action_taken`.
-Emitted in two cases: (1) the `spawn_create_impl` dispatch raises `CwError`
-after `pr.action_taken` was already recorded; or (2) a precondition anomaly
+Emitted in three cases: (1) the `spawn_create_impl` dispatch raises `CwError`
+after `pr.action_taken` was already recorded; (2) a precondition anomaly
 blocks the action before dispatch — an unparseable/missing `pr_url`, an
 unresolvable client, or a missing/absent worktree (in the anomaly case no
-`pr.action_taken` precedes it). Either way the durable event stream carries a
+`pr.action_taken` precedes it); or (3) (#1229) a deferred dispatch job raises
+any other exception (an `OSError`, a state-store error, a daemon error) — then
+`error` is `"<ExceptionType>: <message>"` and the traceback is logged. Each job
+is isolated: a failing job never stops its sibling jobs or the rest of the
+reconcile pass. Either way the durable event stream carries a
 correction, not just a non-durable log line. Forwarded to the
 operator-attention channel by default alongside `pr.action_taken`. Unlike the
 gate-recipe failure path, this emits no latch and performs no mutation.

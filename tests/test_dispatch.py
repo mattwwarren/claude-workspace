@@ -5086,6 +5086,29 @@ class TestDispatchTickReconcileErrors:
             if record.name == "cw.dispatch" and record.levelno >= logging.ERROR
         ), "expected ERROR log from cw.dispatch mentioning 'reconcile failed'"
 
+    @pytest.mark.parametrize("usage_limited", [True, False])
+    def test_dispatch_loop_reconcile_opts_in_to_review_job_dispatch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        usage_limited: bool,
+    ) -> None:
+        """#1229: the live dispatch loop's reconcile preamble is the ONE caller
+        that lets reconcile() fire the address_review / auto_fix_ci recipes
+        (cw status / list / start / doctor call it with the False default)."""
+        from cw.dispatch.gating import _reconcile_usage_limited
+        from cw.reconcile import ReconcileReport
+
+        seen: list[dict[str, object]] = []
+
+        def _record_reconcile(**kwargs: object) -> ReconcileReport:
+            seen.append(kwargs)
+            return ReconcileReport(usage_limited=usage_limited)
+
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", _record_reconcile)
+
+        assert _reconcile_usage_limited() is usage_limited
+        assert seen == [{"dispatch_review_jobs": True}]
+
 
 class TestDispatchTickSessionsLockTimeout:
     """A held ``.sessions.lock`` skips the tick; it never crashes serve (#2491)."""
@@ -6334,7 +6357,7 @@ class TestRunDispatchLoopVerbose:
             "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
 
         lines: list[str] = []
         run_dispatch_loop(
@@ -6364,7 +6387,7 @@ class TestRunDispatchLoopVerbose:
             "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
 
         lines: list[str] = []
         run_dispatch_loop(
@@ -6394,7 +6417,7 @@ class TestRunDispatchLoopVerbose:
             "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
 
         tick_count = 0
 
@@ -6468,7 +6491,7 @@ class TestRunDispatchLoopVerbose:
             "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
 
         daemon = FakeNativeDaemonClient()
         lines: list[str] = []
@@ -6497,7 +6520,7 @@ class TestRunDispatchLoopVerbose:
             "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
 
         daemon = FakeNativeDaemonClient()
         lines: list[str] = []
@@ -6525,7 +6548,7 @@ class TestRunDispatchLoopVerbose:
             "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
 
         # Should not raise; output is silently discarded
         run_dispatch_loop(once=True, emit=None)
@@ -17654,7 +17677,7 @@ class TestWaveCollisionDetection:
             "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
 
         run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
 
@@ -17705,7 +17728,7 @@ class TestWaveCollisionDetection:
             "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
 
         warned: set[frozenset[str]] = set()
         dispatch_tick(
@@ -18832,7 +18855,7 @@ class TestRunDispatchLoopHydrationHook:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         calls: list[object] = []
 
         def _record(cfg: object) -> None:
@@ -18849,7 +18872,7 @@ class TestRunDispatchLoopHydrationHook:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
 
         def _boom(_cfg: object) -> None:
             msg = "hydration boom"
@@ -18888,7 +18911,7 @@ class TestRunDispatchLoopHydrationHook:
             "    default_branch: main\n"
             f"    worktree_base: {tmp_path / 'worktrees-b'}\n"
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         calls: list[object] = []
 
         def _record(cfg: object) -> None:
@@ -18910,7 +18933,7 @@ class TestRunDispatchLoopStaleGateHook:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         calls: list[object] = []
 
         def _record() -> list[str]:
@@ -18928,7 +18951,7 @@ class TestRunDispatchLoopStaleGateHook:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
 
         def _boom() -> list[str]:
             msg = "stale-gate boom"
@@ -18952,7 +18975,7 @@ class TestRunDispatchLoopStaleDispatchWatchHook:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         calls: list[object] = []
 
         def _record() -> list[str]:
@@ -18974,7 +18997,7 @@ class TestRunDispatchLoopStaleDispatchWatchHook:
         """Ordering is load-bearing: a watch registered after hydration would
         sit un-hydrated until the NEXT tick, delaying every release by one."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         order: list[str] = []
 
         monkeypatch.setattr(
@@ -18999,7 +19022,7 @@ class TestRunDispatchLoopStaleDispatchWatchHook:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
 
         def _boom() -> list[str]:
             msg = "stale-dispatch-watch boom"
@@ -19415,7 +19438,7 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         calls: list[object] = []
         monkeypatch.setattr(
             "cw.dispatch.loop._notify_stale_clients_with_pending",
@@ -19442,7 +19465,7 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
         guarded pre-tick passes + spawn work), routinely aging past
         TICK_STALE_SECONDS and false-paging the operator."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         order: list[str] = []
         monkeypatch.setattr(
             "cw.dispatch.loop.dispatch_tick",
@@ -19463,7 +19486,7 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
     ) -> None:
         """Two back-to-back ticks produce exactly one inbox scan."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
         calls: list[object] = []
         monkeypatch.setattr(
@@ -19485,7 +19508,7 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
         from freezegun import freeze_time
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         calls: list[object] = []
         monkeypatch.setattr(
             "cw.dispatch.loop._notify_stale_clients_with_pending",
@@ -19517,7 +19540,7 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
         from freezegun import freeze_time
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
 
         def _boom(**_kwargs: object) -> None:
             msg = "stale-client watchdog boom"
@@ -19568,7 +19591,7 @@ class TestWarnIfScopedServeStarvesSiblings:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         self._stub_ticks(
             monkeypatch,
             {
@@ -19595,7 +19618,7 @@ class TestWarnIfScopedServeStarvesSiblings:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         self._stub_ticks(monkeypatch, {"review-bingo": _make_tick_summary(pending=3)})
         caplog.set_level(logging.WARNING, logger="cw.dispatch")
         run_dispatch_loop(once=True, emit=None)
@@ -19609,7 +19632,7 @@ class TestWarnIfScopedServeStarvesSiblings:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         self._stub_ticks(
             monkeypatch,
             {
@@ -19630,7 +19653,7 @@ class TestWarnIfScopedServeStarvesSiblings:
     ) -> None:
         """The scoped client's own pending work is being dispatched, not starved."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         self._stub_ticks(
             monkeypatch,
             {

@@ -1352,8 +1352,9 @@ than one recipe. Recognized recipe keys (RFC 0010 P4, #1099):
   review OR a plain issue/PR comment carrying cw's own blocking-review
   vocabulary, #1195); dispatch an `/address-review` session to mechanically
   work the requested changes.
-- `auto_fix_ci` — PR CI is failing (`ci_failing`); re-enqueue the ticket and run
-  a dispatch tick to re-enter auto-dev (coarse re-dispatch, not a scoped fix).
+- `auto_fix_ci` — PR CI is failing (`ci_failing`); re-enqueue the ticket so the
+  dispatch loop's next tick re-enters auto-dev (coarse re-dispatch, not a scoped
+  fix).
 - `request_reviewer` — PR needs a reviewer (`no_reviewer`); request one per the
   repo's [Review Strategy Config](#review-strategy-config-rfc-0010-phase-4)
   (a `ci`-mode repo silent-skips — it relies on CI, requesting no reviewer).
@@ -1379,6 +1380,12 @@ Independently, the module-wide master switch `review_recipes_enabled` (in
 `false`, **no** review recipe fires regardless of any per-lane or per-ticket
 setting. The per-lane resolution above only matters once the master switch is
 `true`.
+
+`address_review` and `auto_fix_ci` additionally act **only from the running
+dispatch loop** (a dispatch tick). Operator commands that also reconcile — `cw
+status`, `cw list`, `cw start`, `cw doctor` — never fire them, so a read command
+cannot spawn an `/address-review` worker or consume the recipe's one-shot latch.
+`request_reviewer` and `escalate_merge_block` run from every reconcile.
 
 ```yaml
 # clients.yaml — enable review recipes on one lane, leave the other off

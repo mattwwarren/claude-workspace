@@ -11,8 +11,10 @@ module is now a package of six focused modules:
 * ``request_reviewer`` — the ``request_reviewer`` recipe (no_reviewer gh call).
 * ``escalate_merge_block`` — the ``escalate_merge_block`` recipe (merge_blocked
   one-shot escalation).
-* ``core`` — the ``run_review_recipes`` per-tick detect->act entry point plus the
-  stateless ``_detect_repeat_fire_counts`` burst counter.
+* ``core`` — the ``run_review_recipes`` per-tick detect->act entry point, the
+  ``DeferredReviewDispatch`` / ``dispatch_deferred_review_jobs`` post-lock
+  dispatch pair (#1229), plus the stateless ``_detect_repeat_fire_counts`` burst
+  counter.
 
 This ``__init__`` re-exports the full historical public + private surface so every
 ``from cw.reconcile.review_recipes import X`` import site and downstream call path
@@ -43,7 +45,9 @@ from cw.reconcile.review_recipes.auto_fix_ci import (
     _detect_auto_fix_ci,
 )
 from cw.reconcile.review_recipes.core import (
+    DeferredReviewDispatch,
     _detect_repeat_fire_counts,
+    dispatch_deferred_review_jobs,
     run_review_recipes,
 )
 from cw.reconcile.review_recipes.escalate_merge_block import (
@@ -63,6 +67,7 @@ __all__ = [
     "RECIPE_FIRED_AT_GETTERS",
     "RECIPE_REQUEST_REVIEWER",
     "_REPEAT_FIRE_ATTENTION_REASON",
+    "DeferredReviewDispatch",
     "ReviewRecipeCandidate",
     "_act_address_review",
     "_act_auto_fix_ci",
@@ -74,6 +79,7 @@ __all__ = [
     "_detect_repeat_fire_counts",
     "_detect_request_reviewer",
     "_record_pr_action_taken",
+    "dispatch_deferred_review_jobs",
     "resolve_outbound_consent_allowed",
     "resolve_review_recipe_enabled",
     "run_review_recipes",

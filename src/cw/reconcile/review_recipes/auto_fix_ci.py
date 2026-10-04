@@ -2,18 +2,18 @@
 
 Package split (#1315, part 2 of 2). This module owns the ``auto_fix_ci`` recipe —
 it reacts to a PR whose ``pr_state`` carries ``attention_state == "ci_failing"``
-by re-dispatching the ticket's own dev-queue row and running one dispatch tick
-(a coarse re-entry into auto-dev, RFC 0010 OQ2), rather than spawning a scoped
-``/address-review``.
+by re-dispatching the ticket's own dev-queue row so the running dispatch loop
+picks it up on its next tick (a coarse re-entry into auto-dev, RFC 0010 OQ2),
+rather than spawning a scoped ``/address-review``.
 
 ``_detect_auto_fix_ci`` produces a :class:`ReviewRecipeCandidate` per ci_failing
 row (write-free). ``_act_auto_fix_ci`` re-validates each candidate under
 ``dev_queue_lock()``, emits ``PR_ACTION_TAKEN`` (durably, BEFORE the dispatch),
 stamps the one-shot ``auto_fix_ci_fired_at`` latch (GitHub #1206), and — strictly
-after the lock releases — re-dispatches + ticks. GitHub #2100: re-dispatch never
+after the lock releases — re-dispatches. GitHub #2100: re-dispatch never
 mints a sibling row via ``add_ticket`` — it requeues the ticket's own row in
 place (``requeue_ticket(..., from_completed=...)``) when that row is terminal,
-or does nothing but the tick when it is already active/parked. Minting a fresh
+or leaves it alone when it is already active/parked. Minting a fresh
 PLAN-stage row past a COMPLETED/CANCELLED/FAILED row at a later stage was
 exactly what produced the permanent ``terminal_sibling`` park this closes. A
 dispatch ``CwError`` or a cross-repo precondition anomaly (GitHub #1198) emits
@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
-from cw.exceptions import CwError, DispatchLoopLockedError, RequeueLiveSessionError
+from cw.exceptions import CwError, RequeueLiveSessionError
 from cw.models import TERMINAL_QUEUE_STATUSES, QueueItemStatus
 from cw.pr_hydrate import _parse_pr_url, _repo_slug_mismatch
 from cw.reconcile.review_recipes._shared import (
@@ -74,7 +74,7 @@ _PAYLOAD_KEY_LIVE_SESSION_IDS = "live_session_ids"
 # path admits via its from_completed/from_cancelled/from_failed escape
 # hatches. Every other QueueItemStatus member (PENDING/RUNNING, or already
 # parked BLOCKED_ON_USER/AWAITING_OPERATOR_SIGNOFF) already owns the ticket,
-# so no action beyond the follow-up tick is needed -- see
+# so no action beyond the loop's own next tick is needed -- see
 # _redispatch_existing_row. Review round 2 (#1692): this was an
 # independently-defined literal identical to
 # cw.reconcile._shared._GENUINELY_TERMINAL_QUEUE_STATUSES -- both now alias
@@ -105,9 +105,9 @@ class _RedispatchJob(NamedTuple):
     """Deferred auto_fix_ci re-dispatch built under the lock, run after release.
 
     Unlike ``_DispatchJob`` this carries no worktree/PR number — the auto_fix_ci
-    recipe re-dispatches the ticket's own row and runs a dispatch tick (coarse
-    re-entry into auto-dev, RFC 0010 OQ2), it does not spawn a scoped
-    ``/address-review``.
+    recipe re-dispatches the ticket's own row for the dispatch loop's next
+    tick to pick up (coarse re-entry into auto-dev, RFC 0010 OQ2), it does not
+    spawn a scoped ``/address-review``.
 
     ``existing_status`` (GitHub #2100) is ``task.status`` as observed under the
     lock at prepare time -- the single fact ``_dispatch_auto_fix_ci`` needs to
@@ -270,12 +270,23 @@ def _requeue_existing_row(job: _RedispatchJob) -> None:
 
 
 def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
-    """Re-dispatch the ticket's own row, then run one dispatch tick; id or None.
+    """Re-dispatch the ticket's own row for the loop's next tick; id or None.
 
     Runs strictly AFTER ``dev_queue_lock()`` releases: ``requeue_ticket``'s own
     internal lock IS ``dev_queue_lock`` (aliased in cw.dev_queue), so calling it
-    under our lock would self-deadlock. The function-local imports break the
-    ``review_recipes`` -> ``dev_queue``/``dispatch`` import cycle.
+    under our lock would self-deadlock. Since #1229 it also runs strictly AFTER
+    ``reconcile()``'s ``sessions_lock()`` releases (called from
+    ``review_recipes.core.dispatch_deferred_review_jobs``). The function-local
+    import breaks the ``review_recipes`` -> ``dev_queue`` import cycle.
+
+    This function does NOT run a dispatch tick of its own (#1229). Review
+    recipes only dispatch from inside the live dispatch loop's own tick (see
+    ``reconcile(dispatch_review_jobs=...)``), which already holds
+    ``dispatch_loop_lock()`` on another fd of the same process, so a nested
+    ``run_dispatch_loop(once=True)`` could only ever raise
+    ``DispatchLoopLockedError`` and misreport a successful requeue as a
+    ``PR_ACTION_FAILED``. The requeued row is picked up by that loop's next
+    regular tick (default 30s, ``tick_interval_seconds`` in ``config.py``).
 
     GitHub #2100: never mints a sibling row. ``job.existing_status`` (captured
     at prepare time, under the lock) decides the action:
@@ -285,7 +296,7 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
       stage.
     * Anything else (PENDING/RUNNING, or already parked BLOCKED_ON_USER /
       AWAITING_OPERATOR_SIGNOFF) — the row already owns the ticket; nothing to
-      do beyond the tick below.
+      do (the loop's next tick handles it as it would any such row).
 
     A row can only reach this function via ``_prepare_auto_fix_ci_job``, which
     requires an already-resolved ``task`` (``_find_review_task`` returning
@@ -308,35 +319,17 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
     live session cannot be ruled out) takes the same rollback, tagged
     ``skipped_roster_unreadable`` with an empty id list.
 
-    Why NOT ``force=True`` for the tick (#1362): this call can run either (a)
-    nested inside a live loop's own tick (``dispatch_tick`` ->
-    ``_reconcile_usage_limited`` -> ``reconcile`` -> this recipe, same process
-    already holding ``dispatch_loop_lock()``) or (b) standalone from ``cw
-    status``/``cw start``/``cw doctor``, which call ``reconcile()`` directly
-    with no lock held at all. ``force=True`` cannot distinguish these -- it
-    would unconditionally bypass the lock in case (b) too, silently
-    permitting a genuinely concurrent second dispatch tick against whatever
-    OTHER process actually holds the lock elsewhere, reintroducing the exact
-    per-process state divergence #1362 exists to prevent. Left unforced, a
-    ``DispatchLoopLockedError`` here is caught below and reported distinctly
-    from every other ``CwError`` (GitHub #2100) — the row mutation above
-    already durably requeued (or left alone) the ticket's own row, so a
-    lock-contention failure on the tick alone costs only the "trigger a tick
-    right now" nicety, not the fix itself: whichever loop actually holds the
-    lock will pick the row up on its own next regular tick (default 30s,
-    ``tick_interval_seconds`` in ``config.py``) — same accepted-degradation
-    posture already used for ``SessionsLockReentryError`` on this identical
-    call site (GitHub #1228), just with a message that says so explicitly
-    instead of a bare exception string.
+    (Before #1229 this call site ran under ``reconcile()``'s ``sessions_lock``
+    and its immediate tick always died on ``SessionsLockReentryError``
+    (GitHub #1228). Merely moving the call post-lock would have left that tick
+    always dying on ``DispatchLoopLockedError`` instead, so the tick was
+    dropped and only the requeue remains.)
     """
-    from cw.dispatch import run_dispatch_loop
-
     try:
         if job.existing_status in _REQUEUE_ELIGIBLE_STATUSES:
             _requeue_existing_row(job)
         else:
             job.payload_base[_PAYLOAD_KEY_REDISPATCH_MODE] = "noop_existing_row"
-        run_dispatch_loop(once=True, client=job.client, emit=None)
     except RequeueLiveSessionError as exc:
         from cw.dev_queue import classify_requeue_live_session_error
 
@@ -351,22 +344,6 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
             message,
         )
         _emit_pr_action_failed(job.payload_base, error=message, ticket_id=job.ticket_id)
-        return None
-    except DispatchLoopLockedError as exc:
-        _log.info(
-            "review_recipe_redispatch_tick_skipped ticket=%s: %s",
-            job.ticket_id,
-            exc,
-        )
-        _emit_pr_action_failed(
-            job.payload_base,
-            error=(
-                f"dispatch tick skipped (lock contended): {exc}. The"
-                " ticket's row is already requeued/current; the running"
-                " dispatch loop will pick it up on its next tick."
-            ),
-            ticket_id=job.ticket_id,
-        )
         return None
     except CwError as exc:
         _log.warning(
@@ -424,8 +401,8 @@ def _act_auto_fix_ci(
     now: datetime | None = None,
     config: OrchestratorConfig | None = None,
     repeat_fire_counts: dict[tuple[str, str, str], int] | None = None,
-) -> list[str]:
-    """Act phase for auto_fix_ci: re-validate under lock, emit, then re-dispatch.
+) -> list[_RedispatchJob]:
+    """Act phase for auto_fix_ci: re-validate under lock, emit, defer re-dispatch.
 
     Mirrors ``_act_request_reviewer``'s shape. Under one ``dev_queue_lock()``:
 
@@ -442,10 +419,16 @@ def _act_auto_fix_ci(
     Stamping/clearing the latch IS a dev-queue write (GitHub #1206: all four
     review-recipe act phases now perform this same kind of write — a latch
     field, not a status transition; none remain read-only), saved before the
-    lock releases. The re-dispatch + dispatch tick runs strictly after the
-    lock releases (``requeue_ticket`` re-acquires ``dev_queue_lock``, so
-    nesting would self-deadlock). Returns the ticket_ids whose re-dispatch
-    succeeded.
+    lock releases. The re-dispatch runs strictly after the lock releases
+    (``requeue_ticket`` re-acquires ``dev_queue_lock``, so nesting would
+    self-deadlock).
+
+    This function does NOT dispatch (#1229): it returns the deferred jobs and
+    the caller owns executing them via ``_dispatch_auto_fix_ci``
+    (``dispatch_deferred_review_jobs``, after ``sessions_lock`` releases).
+    ``run_review_recipes`` calls it only when the reconcile call is the live
+    dispatch loop's (it has a sink to drain); otherwise it is not run, so the
+    latch stamped here is never burned for a dispatch nobody performs.
     """
     resolved_now = now if now is not None else datetime.now(UTC)
     by_key = {(c.ticket_id, c.client): c for c in candidates}
@@ -475,9 +458,4 @@ def _act_auto_fix_ci(
                 changed = True
         if changed:
             save_dev_queue(store)
-    acted: list[str] = []
-    for job in jobs:
-        ticket_id = _dispatch_auto_fix_ci(job)
-        if ticket_id is not None:
-            acted.append(ticket_id)
-    return acted
+    return jobs
