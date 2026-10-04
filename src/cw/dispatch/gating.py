@@ -30,6 +30,7 @@ from cw.dispatch_state import (
 from cw.events import record_event
 from cw.exceptions import (
     MissingWorkspaceError,
+    SessionsLockTimeoutError,
     WorktreeError,
 )
 from cw.executor import resolve_executor_config
@@ -1013,10 +1014,18 @@ def _reconcile_usage_limited() -> bool:
     Returns True if reconcile reported a usage limit; False on success without
     a limit or when reconcile raised (logged and swallowed so a transient
     failure never kills the tick — phantoms are reaped next tick).
+
+    :class:`~cw.exceptions.SessionsLockTimeoutError` is the one exception NOT
+    swallowed here (#2491): it means another process is holding
+    ``.sessions.lock``, which every later step of the tick (claim, spawn) would
+    also wait on. It propagates so :func:`~cw.dispatch.tick.dispatch_tick` can
+    skip the whole tick instead of burning one full lock timeout per step.
     """
     reconcile_report = None
     try:
         reconcile_report = reconcile()
+    except SessionsLockTimeoutError:
+        raise
     except Exception:  # noqa: BLE001
         # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331 (4-part justification):
         # 1. reconcile() calls ``claude agents --json`` and native-daemon roster

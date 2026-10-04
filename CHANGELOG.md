@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A held `.sessions.lock` no longer hangs `cw list`, `cw status` and `cw spawn close` forever (#2491).** `sessions_lock()` blocked indefinitely when `cw dev-queue serve` held the lock, which also blocked the documented dead-session recovery. It now polls for up to 60 seconds and then fails with an error naming the lock path, the wait, and the likely holder. Set `CW_SESSIONS_LOCK_TIMEOUT_S` to change the wait: `0` makes a single attempt, and an invalid value falls back to the default with a warning. `cw dev-queue serve` skips a tick whose reconcile cannot take the lock and retries on the next one.
+
 ## [1.63.0] - 2026-10-02
 
 ### Changed

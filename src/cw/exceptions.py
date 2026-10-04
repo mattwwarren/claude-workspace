@@ -788,6 +788,26 @@ class SessionsLockReentryError(CwError):
     __slots__ = ()
 
 
+class SessionsLockTimeoutError(CwError):
+    """Raised when ``sessions_lock()`` cannot acquire ``.sessions.lock`` in time.
+
+    Another process (typically ``cw dev-queue serve``, mid-reconcile) held the
+    advisory flock past the configured wait bound (GitHub #2491). Before the
+    bound existed the blocked caller hung indefinitely, which also blocked the
+    documented recovery commands (``cw list``, ``cw spawn close``). The message
+    is operator-facing and already names the lock path, the wait and the knob;
+    the lock file records no holder PID, so none is reported. Carries
+    ``lock_path`` and ``waited_s`` for callers that log structured fields.
+    """
+
+    __slots__ = ("lock_path", "waited_s")
+
+    def __init__(self, message: str, *, lock_path: Path, waited_s: float) -> None:
+        super().__init__(message)
+        self.lock_path = lock_path
+        self.waited_s = waited_s
+
+
 class ClaimTierArmingError(CwError):
     """Raised when the ledger's claim tier is armed with drift-checking off.
 

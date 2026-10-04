@@ -21,6 +21,7 @@ from cw.dev_queue import (
     load_dev_queue,
     load_plan,
 )
+from cw.exceptions import SessionsLockTimeoutError
 from cw.executor_diagnostics import cleanup_expired_diagnostics
 from cw.models import (
     DEFAULT_DISK_PRESSURE_MIN_FREE_GB,
@@ -557,7 +558,18 @@ def dispatch_tick(
         ``usage_limit_detected`` flag.
     """
     resolved_native_daemon = native_daemon or get_native_daemon_client()
-    any_usage_limit_detected = _reconcile_usage_limited()
+    try:
+        any_usage_limit_detected = _reconcile_usage_limited()
+    except SessionsLockTimeoutError as exc:
+        # Another process holds .sessions.lock (#2491). Claiming and spawning
+        # would each wait on the same lock, so skip the whole tick (no event:
+        # the stale-loop watchdog sees the gap) and let the next one retry.
+        _log.warning(
+            "dispatch_tick: skipping tick, sessions lock is held by another"
+            " process (%s); will retry next tick",
+            exc,
+        )
+        return DispatchTickResult(spawned=0)
     usage_limit_clients: dict[str, datetime | None] = {}
     windows = usage_limited_until or {}
     _sweep_expired_diagnostics(config)

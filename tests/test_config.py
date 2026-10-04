@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import errno
+import fcntl
+import logging
 import os
+import subprocess
+import sys
+import textwrap
+import threading
+import time
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -13,6 +21,8 @@ from cw._config_migrate import migrate_cw_state
 from cw.config import (
     _REAL_CONFIG_DIR,
     _REAL_STATE_DIR,
+    DEFAULT_SESSIONS_LOCK_TIMEOUT_S,
+    SESSIONS_LOCK_TIMEOUT_ENV,
     _backup_state_file,
     _under_pytest,
     ensure_config,
@@ -24,9 +34,15 @@ from cw.config import (
     refuse_real_state_write,
     save_state,
     sessions_lock,
+    sessions_lock_file,
+    sessions_lock_timeout_seconds,
     show_config,
 )
-from cw.exceptions import CwError, SessionsLockReentryError
+from cw.exceptions import (
+    CwError,
+    SessionsLockReentryError,
+    SessionsLockTimeoutError,
+)
 from cw.models import (
     CW_STATE_SCHEMA_VERSION,
     DEFAULT_AUTO_PURPOSES,
@@ -38,7 +54,7 @@ from cw.models import (
 from tests.conftest import _make_daemon_session, _write_clients_yaml
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from datetime import datetime
     from pathlib import Path
 
@@ -1948,6 +1964,228 @@ class TestSessionsLockReentrancy:
         # A second call must succeed — no stuck "held" flag from the raise.
         with sessions_lock():
             pass
+
+
+# ---------------------------------------------------------------------------
+# TestSessionsLockTimeout
+# ---------------------------------------------------------------------------
+
+_TINY_TIMEOUT_S = "0.2"
+
+
+@pytest.fixture
+def foreign_lock_holder(tmp_config_dir: Path) -> Iterator[None]:
+    """Hold ``.sessions.lock`` on a SEPARATE open file description.
+
+    flock locks belong to the open file description, so a second ``open()`` in
+    this same process contends exactly like another cw process would.
+    """
+    path = sessions_lock_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    holder = path.open("w")
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        holder.close()
+
+
+class TestSessionsLockTimeout:
+    """sessions_lock() bounded acquisition (GitHub #2491)."""
+
+    def test_acquires_when_free(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, _TINY_TIMEOUT_S)
+        entered = False
+        with sessions_lock():
+            entered = True
+        assert entered
+
+    @pytest.mark.usefixtures("foreign_lock_holder")
+    def test_times_out_when_another_fd_holds_lock(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, _TINY_TIMEOUT_S)
+        caplog.set_level(logging.WARNING, logger="cw.config")
+
+        with pytest.raises(SessionsLockTimeoutError) as exc_info, sessions_lock():
+            pytest.fail("must not reach body")
+
+        err = exc_info.value
+        assert isinstance(err, CwError)
+        assert err.lock_path == sessions_lock_file()
+        assert err.waited_s >= float(_TINY_TIMEOUT_S)
+        message = str(err)
+        assert str(sessions_lock_file()) in message
+        assert "cw dev-queue serve" in message
+        assert SESSIONS_LOCK_TIMEOUT_ENV in message
+        assert any(
+            record.levelno == logging.WARNING and "Timed out" in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_timeout_leaves_lock_and_guard_usable(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A timed-out acquire must not leave the held flag or an fd behind."""
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, _TINY_TIMEOUT_S)
+        path = sessions_lock_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        holder = path.open("w")
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        try:
+            with pytest.raises(SessionsLockTimeoutError), sessions_lock():
+                pass
+        finally:
+            fcntl.flock(holder, fcntl.LOCK_UN)
+            holder.close()
+
+        # Guard flag was never set by the failed attempt, and the lock is free.
+        with sessions_lock():
+            pass
+
+    def test_times_out_when_another_process_holds_lock(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, _TINY_TIMEOUT_S)
+        path = sessions_lock_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        script = textwrap.dedent(
+            """
+            import fcntl, sys
+            fd = open(sys.argv[1], "w")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            print("locked", flush=True)
+            sys.stdin.read()
+            """
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script, str(path)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert proc.stdout is not None
+            assert proc.stdout.readline().strip() == "locked"
+            with pytest.raises(SessionsLockTimeoutError), sessions_lock():
+                pass
+        finally:
+            assert proc.stdin is not None
+            proc.stdin.close()
+            proc.wait(timeout=10)
+            assert proc.stdout is not None
+            proc.stdout.close()
+
+        # Holder exited -> lock released -> acquisition succeeds again.
+        with sessions_lock():
+            pass
+
+    def test_acquires_when_holder_releases_before_deadline(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "30")
+        path = sessions_lock_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        holder = path.open("w")
+        fcntl.flock(holder, fcntl.LOCK_EX)
+
+        def release_soon() -> None:
+            time.sleep(0.1)
+            fcntl.flock(holder, fcntl.LOCK_UN)
+            holder.close()
+
+        releaser = threading.Thread(target=release_soon)
+        releaser.start()
+        entered = False
+        try:
+            with sessions_lock():
+                entered = True
+        finally:
+            releaser.join()
+        assert entered
+
+    @pytest.mark.usefixtures("foreign_lock_holder")
+    def test_zero_timeout_fails_immediately_when_held(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0")
+        with pytest.raises(SessionsLockTimeoutError) as exc_info, sessions_lock():
+            pytest.fail("must not reach body")
+        assert exc_info.value.waited_s < 0.2
+
+    def test_zero_timeout_acquires_when_free(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0")
+        with sessions_lock():
+            pass
+
+    def test_reentry_guard_still_raises_reentry_not_timeout(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "30")
+        started = time.monotonic()
+        with sessions_lock(), pytest.raises(SessionsLockReentryError), sessions_lock():
+            pytest.fail("must not reach body")
+        assert time.monotonic() - started < 5
+
+    def test_non_contention_oserror_propagates_and_guard_stays_clear(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise OSError(errno.EIO, "disk on fire")
+
+        with monkeypatch.context() as patch_ctx:
+            patch_ctx.setattr("cw.config.fcntl.flock", _boom)
+            with pytest.raises(OSError, match="disk on fire"), sessions_lock():
+                pass
+
+        # The failed attempt never set the held flag: a real acquisition is
+        # not mistaken for re-entry.
+        with sessions_lock():
+            pass
+
+
+class TestSessionsLockTimeoutSeconds:
+    """Env parsing for CW_SESSIONS_LOCK_TIMEOUT_S."""
+
+    def test_unset_uses_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(SESSIONS_LOCK_TIMEOUT_ENV, raising=False)
+        assert sessions_lock_timeout_seconds() == DEFAULT_SESSIONS_LOCK_TIMEOUT_S
+
+    def test_blank_uses_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "  ")
+        assert sessions_lock_timeout_seconds() == DEFAULT_SESSIONS_LOCK_TIMEOUT_S
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [("5", 5.0), ("0.25", 0.25), (" 12 ", 12.0), ("0", 0.0)],
+    )
+    def test_valid_values(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str, expected: float
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, raw)
+        assert sessions_lock_timeout_seconds() == expected
+
+    @pytest.mark.parametrize("raw", ["abc", "-1", "nan", "inf", "-inf", "1,5"])
+    def test_invalid_values_fall_back_with_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        raw: str,
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, raw)
+        caplog.set_level(logging.WARNING, logger="cw.config")
+        assert sessions_lock_timeout_seconds() == DEFAULT_SESSIONS_LOCK_TIMEOUT_S
+        assert any(
+            SESSIONS_LOCK_TIMEOUT_ENV in record.getMessage()
+            for record in caplog.records
+        )
 
 
 # ---------------------------------------------------------------------------

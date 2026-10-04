@@ -5,12 +5,15 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import logging
+import math
 import os
 import re
 import shlex
 import shutil
 import sys
 import threading
+import time
 from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -29,6 +32,7 @@ from cw.exceptions import (
     CwError,
     DispatchLoopLockedError,
     SessionsLockReentryError,
+    SessionsLockTimeoutError,
 )
 from cw.models import (
     CW_STATE_SCHEMA_VERSION,
@@ -43,6 +47,7 @@ from cw.models import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+    from typing import IO
 
 # Client names appear unquoted in shell commands (env var prefixes),
 # filesystem paths (queue dirs, history dirs), and multiplexer workspace
@@ -293,6 +298,84 @@ def concurrency_override_lock() -> Iterator[None]:
 
 _sessions_lock_state = threading.local()
 
+_log = logging.getLogger(__name__)
+
+# Env var bounding how long ``sessions_lock()`` waits for another cw process
+# to release ``.sessions.lock`` (GitHub #2491). Read per acquisition, in
+# seconds; ``0`` means a single non-blocking attempt (fail at once if held).
+SESSIONS_LOCK_TIMEOUT_ENV = "CW_SESSIONS_LOCK_TIMEOUT_S"
+
+# Default wait: long enough to ride out the legitimate holders (a reconcile
+# sweep or a spawn is seconds, a slow one tens of seconds), short enough that
+# a wedged ``cw dev-queue serve`` surfaces as a clear error within a minute
+# instead of the 72-minute silent hang that motivated #2491.
+DEFAULT_SESSIONS_LOCK_TIMEOUT_S = 60.0
+
+# Poll cadence for the non-blocking flock retry loop. Short enough that a
+# promptly released lock is picked up with negligible added latency, long
+# enough that waiting costs no measurable CPU.
+_SESSIONS_LOCK_POLL_INTERVAL_S = 0.02
+
+
+def sessions_lock_timeout_seconds() -> float:
+    """Resolve the ``sessions_lock()`` wait bound from the environment.
+
+    Unset or empty -> :data:`DEFAULT_SESSIONS_LOCK_TIMEOUT_S`. ``0`` is valid
+    and means "try once, never wait". A value that is not a finite,
+    non-negative number is ignored with a warning and the default applies:
+    this runs on hot paths (hooks, every dispatch tick), where raising over a
+    typo'd knob would be worse than the default bound.
+    """
+    raw = os.environ.get(SESSIONS_LOCK_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_SESSIONS_LOCK_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value) or value < 0:
+        _log.warning(
+            "ignoring invalid %s=%r (expected a non-negative number of seconds);"
+            " using the default of %ss",
+            SESSIONS_LOCK_TIMEOUT_ENV,
+            raw,
+            DEFAULT_SESSIONS_LOCK_TIMEOUT_S,
+        )
+        return DEFAULT_SESSIONS_LOCK_TIMEOUT_S
+    return value
+
+
+def _acquire_sessions_flock(fd: IO[str], lock_path: Path, timeout_s: float) -> None:
+    """Take ``LOCK_EX`` on *fd*, polling non-blockingly for up to *timeout_s*.
+
+    Raises :class:`~cw.exceptions.SessionsLockTimeoutError` (after logging a
+    warning) when another open file description still holds the lock at the
+    deadline. The first attempt is immediate, so a free lock costs no wait.
+    Any ``OSError`` other than "would block" propagates unchanged.
+    """
+    start = time.monotonic()
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            waited = time.monotonic() - start
+            remaining = timeout_s - waited
+            if remaining <= 0:
+                msg = (
+                    f"Timed out after {waited:.1f}s waiting for the sessions lock"
+                    f" {lock_path}. Another cw process (typically `cw dev-queue"
+                    " serve`) is holding it. Retry shortly, or raise the wait with"
+                    f" {SESSIONS_LOCK_TIMEOUT_ENV} (seconds; currently"
+                    f" {timeout_s:g})."
+                )
+                _log.warning(msg)
+                raise SessionsLockTimeoutError(
+                    msg, lock_path=lock_path, waited_s=waited
+                ) from None
+            time.sleep(min(_SESSIONS_LOCK_POLL_INTERVAL_S, remaining))
+        else:
+            return
+
 
 @contextlib.contextmanager
 def sessions_lock() -> Iterator[None]:
@@ -314,6 +397,12 @@ def sessions_lock() -> Iterator[None]:
     ``reconcile()``) must already tolerate a ``CwError``-shaped failure on
     this path; see the callers of ``_dispatch_auto_fix_ci`` /
     ``_dispatch_address_review`` / ``_reconcile_usage_limited``.
+
+    Bounded wait (GitHub #2491): when another process holds the lock, this
+    polls for up to :func:`sessions_lock_timeout_seconds` (default 60s,
+    ``CW_SESSIONS_LOCK_TIMEOUT_S``) and then raises
+    :class:`~cw.exceptions.SessionsLockTimeoutError` rather than hanging
+    forever. A free or promptly released lock behaves as before.
     """
     if getattr(_sessions_lock_state, "held", False):
         msg = (
@@ -321,12 +410,17 @@ def sessions_lock() -> Iterator[None]:
             "held; this would deadlock in flock() (GitHub #1228)"
         )
         raise SessionsLockReentryError(msg)
+    timeout_s = sessions_lock_timeout_seconds()
     state_dir().mkdir(parents=True, exist_ok=True)
     lock_path = sessions_lock_file()
     fd = lock_path.open("w")
+    try:
+        _acquire_sessions_flock(fd, lock_path, timeout_s)
+    except BaseException:
+        fd.close()
+        raise
     _sessions_lock_state.held = True
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
         _sessions_lock_state.held = False

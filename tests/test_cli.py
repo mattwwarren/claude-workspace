@@ -40,11 +40,13 @@ from cw.cli._base import print_fixed_width_table
 from cw.cli._sentinels import _sentinel_frame_after
 from cw.cli.sprint import _resolve_version
 from cw.config import (
+    SESSIONS_LOCK_TIMEOUT_ENV,
     clients_file,
     load_clients,
     load_state,
     orchestrator_config_file,
     save_state,
+    sessions_lock_file,
 )
 from cw.events import read_events
 from cw.exceptions import CwError, SprintApplyError
@@ -8485,6 +8487,64 @@ class TestSpawnCloseTaskCancellation:
         state = load_state()
         updated = next(s for s in state.sessions if s.id == sess.id)
         assert updated.status == SessionStatus.COMPLETED
+
+
+class TestSessionsLockTimeoutCli:
+    """A held ``.sessions.lock`` surfaces as a clean Click error, not a hang (#2491)."""
+
+    @pytest.fixture
+    def held_sessions_lock(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> Iterator[Path]:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.2")
+        lock_path = sessions_lock_file()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        holder = lock_path.open("w")
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        try:
+            yield lock_path
+        finally:
+            fcntl.flock(holder, fcntl.LOCK_UN)
+            holder.close()
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["list"],
+            ["status"],
+            ["spawn", "close", "--confirmed-dead", "close-sess-1"],
+        ],
+        ids=["list", "status", "spawn-close"],
+    )
+    def test_command_exits_nonzero_with_actionable_error(
+        self, held_sessions_lock: Path, tmp_path: Path, argv: list[str]
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        save_state(
+            CwState(
+                sessions=[
+                    _make_daemon_session(
+                        id="close-sess-1",
+                        name="test-client/auto-dev/close-sess-1",
+                        client="test-client",
+                        workspace_path=workspace,
+                        surface_ref="fake-ref",
+                        worktree_path=None,
+                        started_at=datetime.now(UTC),
+                    )
+                ]
+            )
+        )
+
+        result = CliRunner().invoke(main, argv)
+
+        assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit)  # ClickException, no traceback
+        assert "Timed out" in result.output
+        assert str(held_sessions_lock) in result.output
+        assert "cw dev-queue serve" in result.output
+        assert SESSIONS_LOCK_TIMEOUT_ENV in result.output
 
 
 class TestPeek:
