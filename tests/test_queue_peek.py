@@ -2955,6 +2955,45 @@ def test_parse_opencode_transcript_sentinel_found(tmp_path: Path) -> None:
     assert result["usage_limit_detected"] is False
 
 
+def test_parse_opencode_transcript_takes_last_sentinel_over_earlier_stage(
+    tmp_path: Path,
+) -> None:
+    """#2490: peek agrees with harvest -- the final sentinel wins over an earlier one.
+
+    Composed from the same ``step_start``/``text``/``step_finish`` shapes the
+    other opencode peek tests use; only the earlier-then-final arrangement is
+    new.
+    """
+    from cw.opencode_runner import make_blocked
+
+    earlier = make_blocked(ticket_id="T-1", worktree=tmp_path, reason="impl_failed")
+    final = make_blocked(
+        ticket_id="T-1",
+        worktree=tmp_path,
+        reason="merge_conflict_post_push",
+        stage_reached="stage4b_pr_create",
+    )
+
+    def frame(r: Any) -> str:
+        return f"<<<AUTO_DEV_RESULT\n{r.model_dump_json()}\nAUTO_DEV_RESULT>>>"
+
+    log_path = _write_opencode_log(
+        tmp_path,
+        [
+            {"type": "step_start", "part": {"type": "step-start"}},
+            {"type": "text", "part": {"text": frame(earlier)}},
+            {"type": "step_finish", "part": {"reason": "tool-calls"}},
+            {"type": "text", "part": {"text": frame(final)}},
+            {"type": "step_finish", "part": {"reason": "stop"}},
+        ],
+    )
+
+    result = queue_peek.parse_opencode_transcript(log_path)
+
+    assert result["last_sentinel_status"] == "blocked"
+    assert result["last_sentinel_stage"] == "stage4b_pr_create"
+
+
 def test_parse_opencode_transcript_no_sentinel(tmp_path: Path) -> None:
     """No sentinel in text events → None status."""
     log_path = _write_opencode_log(

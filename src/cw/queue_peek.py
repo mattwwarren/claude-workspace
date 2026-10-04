@@ -44,7 +44,7 @@ from cw.gh import _fetch_pr_state
 from cw.models import QueueItemStatus, Stage, TicketTask
 from cw.opencode_runner import (
     OPENCODE_LOG_RELATIVE_PATH,
-    extract_text_from_jsonl,
+    parse_last_sentinel,
 )
 from cw.pr_hydrate import _PR_URL_RE
 
@@ -522,9 +522,9 @@ def parse_opencode_transcript(path: Path) -> dict[str, Any]:
 
     opencode's ``--format json`` output has a different shape than claude-jsonl
     (event types: ``step_start``/``step_finish``/``text``; no user/assistant
-    distinction; no timestamps in events). This reader reuses
-    ``extract_text_from_jsonl`` to concatenate text event payloads, then
-    ``parse_stdout`` for sentinel extraction.
+    distinction; no timestamps in events). This reader shares
+    ``parse_last_sentinel`` with the harvest path so peek and harvest always
+    agree on which sentinel a log carries (#2490).
 
     Since opencode events carry no timestamps, the file's mtime serves as the
     last-activity proxy (``last_asst_ts``). ``first_user_ts`` is None —
@@ -544,11 +544,9 @@ def parse_opencode_transcript(path: Path) -> dict[str, Any]:
         }
 
     if log_content:
-        text = extract_text_from_jsonl(log_content)
-        if text:
-            result = parse_stdout(text)
-            if isinstance(result, AutoDevResult) and not is_documented_example(result):
-                last_sentinel = result
+        result = parse_last_sentinel(log_content)
+        if isinstance(result, AutoDevResult):
+            last_sentinel = result
 
     last_asst_ts: str | None = None
     try:

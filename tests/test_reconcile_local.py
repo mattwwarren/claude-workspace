@@ -1163,3 +1163,307 @@ def test_local_harvest_aider_backend_ignores_stray_opencode_log(
     result = AutoDevResult.model_validate(session.last_result)
     assert result.blocker is not None
     assert result.blocker.reason == "aider_no_output"
+
+
+# ---------------------------------------------------------------------------
+# #2490 -- last AUTO_DEV_RESULT wins; a refused dead-session harvest pages once
+#
+# Fixture provenance: no real capture of the failing opencode log exists, so
+# the log is composed from the ``step_start``/``text``/``step_finish`` event
+# shapes the rest of this file and test_opencode_runner.py already use, with a
+# stderr line and a null ``part`` mixed in as a real log carries them.
+# ---------------------------------------------------------------------------
+
+
+def _framed(result: AutoDevResult) -> str:
+    return f"<<<AUTO_DEV_RESULT\n{result.model_dump_json()}\nAUTO_DEV_RESULT>>>"
+
+
+def _save_dead_opencode_finalize(
+    worktree: Path, ticket_id: str, stage: Stage
+) -> dict[str, TicketTask]:
+    """Save a dead opencode session + RUNNING row at *stage*; session id == ticket id.
+
+    The session name is what ties a harvest candidate to its row
+    (``ticket_id_for_session``), so the two ids must match.
+    """
+    sid = ticket_id
+    dead_handle = LocalLivenessHandle(
+        pid=2_000_000_000, start_time_ns=1, backend="opencode"
+    )
+    sess = _mk_local_session(sid, worktree, dead_handle)
+    sess.stage = stage
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=ticket_id,
+                    client="client-a",
+                    stage=stage,
+                    status=QueueItemStatus.RUNNING,
+                    session_id=sid,
+                )
+            ]
+        )
+    )
+    return {t.ticket_id: t for t in load_dev_queue().tasks}
+
+
+def _attention_events(consumer: str, ticket_id: str) -> list[dict[str, object]]:
+    return [
+        e.payload
+        for e in read_events(
+            consumer=consumer,
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        if e.payload.get("ticket_id") == ticket_id
+    ]
+
+
+def test_local_harvest_opencode_finalize_keeps_final_blocked_sentinel(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A finalize log quoting an earlier stage's sentinel still parks on the last.
+
+    Before the fix the two blocks read as ``multiple_result_blocks``, the
+    harvest result became ``opencode_no_output``, and the real disposition
+    (``merge_gate_blocked``) and ``blocked_on_pr`` were lost (#2490 variant 2).
+    """
+    worktree = make_git_repo("wt-oc-final-wins")
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    earlier = make_opencode_blocked(
+        ticket_id="T-OC-F", worktree=worktree, reason="impl_failed"
+    )
+    final = make_opencode_blocked(
+        ticket_id="T-OC-F",
+        worktree=worktree,
+        reason="prior_pipeline_pr_open",
+        details="blocked by PR #2468 which is still open",
+        retry_eligible=True,
+        stage_reached="stage4a_merge_gate",
+    ).model_copy(update={"status": "merge_gate_blocked"})
+    log_path = worktree / OPENCODE_LOG_RELATIVE_PATH
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[dict[str, object] | str] = [
+        {"type": "step_start", "part": {"type": "step-start"}},
+        {"type": "text", "part": {"text": f"prior leg:\n{_framed(earlier)}"}},
+        {"type": "step_finish", "part": {"reason": "tool-calls"}},
+        "warn: stderr line merged into the json stream",
+        {"type": "text", "part": None},
+        {"type": "text", "part": {"text": _framed(final)}},
+        {"type": "step_finish", "part": {"reason": "stop"}},
+    ]
+    log_path.write_text(
+        "\n".join(ln if isinstance(ln, str) else json.dumps(ln) for ln in lines),
+        encoding="utf-8",
+    )
+    task_by_ticket = _save_dead_opencode_finalize(worktree, "T-OC-F", Stage.FINALIZE)
+    state = load_state()
+    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+
+    _act_on_local_harvest_candidates(
+        state,
+        candidates,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+        task_by_ticket=task_by_ticket,
+    )
+
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "T-OC-F")
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER
+    assert task.disposition == "merge_gate_blocked"
+    assert task.blocked_on_pr == 2468
+    session = next(s for s in load_state().sessions if s.id == "T-OC-F")
+    assert session.status == SessionStatus.COMPLETED
+    assert session.last_result is not None
+    assert session.last_result["blocker"]["reason"] == "prior_pipeline_pr_open"
+    attention = _attention_events("test-oc-final-wins", "T-OC-F")
+    assert [a["paused_status"] for a in attention] == ["merge_gate_blocked"]
+
+
+def test_local_harvest_stage_mismatch_pages_once_and_stops_reoffering(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2490: a refused dead-process harvest latches and pages exactly once.
+
+    Same stale-sentinel shape as the #1031 test above: git synthesis reports
+    ``stage2_impl`` while the row sits at FINALIZE. Before the fix the refusal
+    was silent and the dead candidate was re-offered (and re-refused, emitting
+    another ``sentinel.stage_mismatch``) on every tick.
+    """
+    worktree = _local_git_worktree(make_git_repo, "wt-harvest-page", with_commit=True)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=123)
+    save_state(CwState(sessions=[_mk_local_session("harv-page", worktree, liveness)]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="harv-page",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="harv-page",
+                    stage=Stage.FINALIZE,
+                )
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    now = datetime(2026, 1, 2, tzinfo=UTC)
+
+    for _tick in range(3):
+        state = load_state()
+        candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+        _act_on_local_harvest_candidates(
+            state, candidates, now=now, task_by_ticket=task_by_ticket
+        )
+
+    attention = _attention_events("test-harvest-page", "harv-page")
+    assert len(attention) == 1
+    page = attention[0]
+    assert page["paused_status"] == "sentinel_stage_mismatch_dead_session"
+    assert page["session_id"] == "harv-page"
+    assert page["client"] == "client-a"
+    assert page["crashed"] is False
+    assert page["lane"] == task_by_ticket["harv-page"].lane
+    assert "stage_complete at stage2_impl" in str(page["breadcrumbs"])
+    assert "finalize" in str(page["breadcrumbs"])
+    mismatches = [
+        e
+        for e in read_events(
+            consumer="test-harvest-page",
+            event_types=[OrchestratorEventType.SENTINEL_STAGE_MISMATCH],
+        )
+        if e.payload.get("ticket_id") == "harv-page"
+    ]
+    assert len(mismatches) == 1
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "harv-page")
+    assert task.status == QueueItemStatus.RUNNING
+    session = next(s for s in load_state().sessions if s.id == "harv-page")
+    assert session.status == SessionStatus.ACTIVE
+    assert session.last_result == {"paused_status": "sentinel_stage_mismatch_refused"}
+    assert _detect_local_harvest_candidates(load_state(), task_by_ticket) == []
+
+
+def test_local_harvest_non_stage_refusal_neither_pages_nor_latches(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A ``routed=False`` that is not a stage mismatch is left as it was (#2490).
+
+    The row was requeued to PENDING while still carrying this session id: the
+    lookup matches an excluded, non-terminal row, so ``routed`` is False for a
+    reason the page and the latch must not claim is a stage mismatch.
+    """
+    worktree = _local_git_worktree(
+        make_git_repo, "wt-harvest-pending", with_commit=True
+    )
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=123)
+    save_state(CwState(sessions=[_mk_local_session("harv-pend", worktree, liveness)]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="harv-pend",
+                    client="client-a",
+                    status=QueueItemStatus.PENDING,
+                    session_id="harv-pend",
+                    stage=Stage.IMPL,
+                )
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    state = load_state()
+    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    assert len(candidates) == 1
+
+    harvested = _act_on_local_harvest_candidates(
+        state,
+        candidates,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+        task_by_ticket=task_by_ticket,
+    )
+
+    assert harvested == []
+    assert _attention_events("test-harvest-pending", "harv-pend") == []
+    session = next(s for s in load_state().sessions if s.id == "harv-pend")
+    assert session.status == SessionStatus.ACTIVE
+    assert session.last_result is None
+
+
+def test_local_harvest_stage_mismatch_latch_merges_into_existing_last_result(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """An existing ``last_result`` dict keeps its own marker; the flag merges in."""
+    worktree = _local_git_worktree(make_git_repo, "wt-harvest-merge", with_commit=True)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=123)
+    sess = _mk_local_session("harv-merge", worktree, liveness)
+    sess.last_result = {"paused_status": "silently_idle", "note": None}
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="harv-merge",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="harv-merge",
+                    stage=Stage.REVIEW,
+                )
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    state = load_state()
+    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    assert len(candidates) == 1
+
+    _act_on_local_harvest_candidates(
+        state,
+        candidates,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+        task_by_ticket=task_by_ticket,
+    )
+
+    session = next(s for s in load_state().sessions if s.id == "harv-merge")
+    assert session.last_result == {
+        "paused_status": "silently_idle",
+        "note": None,
+        "sentinel_advance_refused": True,
+    }
+    assert _detect_local_harvest_candidates(load_state(), task_by_ticket) == []
+    assert len(_attention_events("test-harvest-merge", "harv-merge")) == 1
+
+
+def test_stage_mismatch_attention_payload_names_the_blocker_reason(
+    tmp_path: Path,
+) -> None:
+    """A refused ``blocked`` result's breadcrumbs carry its blocker reason."""
+    from cw.reconcile.local import _stage_mismatch_attention_payload
+
+    sentinel = make_opencode_blocked(
+        ticket_id="T-1",
+        worktree=tmp_path,
+        reason="merge_conflict_post_push",
+        stage_reached="stage4b_pr_create",
+    )
+    session = _mk_local_session(
+        "ses-payload",
+        tmp_path,
+        LocalLivenessHandle(pid=1, start_time_ns=1, backend="opencode"),
+    )
+    task = TicketTask(ticket_id="T-1", client="client-a", stage=Stage.IMPL)
+
+    payload = _stage_mismatch_attention_payload(session, task, sentinel, "opencode")
+
+    breadcrumbs = str(payload["breadcrumbs"])
+    assert "blocked at stage4b_pr_create (merge_conflict_post_push)" in breadcrumbs
+    assert "dead opencode process" in breadcrumbs
+    assert payload["ticket_id"] == "T-1"
+    assert payload["claude_session_id"] is None

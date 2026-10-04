@@ -210,6 +210,28 @@ def extract_block(text: str) -> str | None:
     return matches[-1].group(1)
 
 
+def parse_last_block(text: str) -> AutoDevResult | BlockedResult | None:
+    """Parse the LAST real sentinel block in *text*, tolerating earlier ones.
+
+    :func:`parse_stdout` rejects a text carrying more than one complete block
+    (§6 (6) ``multiple_result_blocks``). A caller that scans a stream whose
+    chunks can legitimately quote an earlier block -- an opencode text event
+    that echoes a prior stage's result or the skill's worked example -- needs
+    §3.1's "the LAST block wins" instead (#2490). Returns ``None`` when *text*
+    has no complete block, or its last one is an unresolved doc-example
+    placeholder or the documented ``PROJ-1234`` example; otherwise the parse
+    of that last block alone (an :class:`AutoDevResult`, or the
+    :class:`BlockedResult` describing why its payload was unusable).
+    """
+    block = extract_block(text)
+    if block is None or _is_placeholder_sentinel_text(block):
+        return None
+    result = parse_stdout(f"{_OPEN_SENTINEL}\n{block}\n{_CLOSE_SENTINEL}")
+    if isinstance(result, AutoDevResult) and is_documented_example(result):
+        return None
+    return result
+
+
 # Derived from schema.Status so this pre-Pydantic gate cannot drift from the
 # model's Literal (#1535 drift class): a hand-typed copy here would silently
 # short-circuit a schema-valid status into BlockedResult before the model

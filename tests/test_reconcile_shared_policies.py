@@ -1966,6 +1966,7 @@ class TestApplySentinelToTaskStagedAdvance:
         outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         assert outcome.routed is True
+        assert outcome.stage_refused is False
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
         assert t.blocked_reason == "plan_missing"
@@ -2706,6 +2707,7 @@ class TestApplySentinelToTaskLateRescue:
 
         assert outcome.rescued is False
         assert outcome.routed is False
+        assert outcome.stage_refused is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
         assert t.stage == Stage.REVIEW
@@ -2737,6 +2739,7 @@ class TestApplySentinelToTaskLateRescue:
 
         assert outcome.rescued is False
         assert outcome.routed is False
+        assert outcome.stage_refused is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.RUNNING
         assert t.stage == Stage.REVIEW

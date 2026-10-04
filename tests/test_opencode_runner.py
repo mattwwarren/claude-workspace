@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from cw.auto_dev_result import AutoDevResult
+from cw.auto_dev_result import AutoDevResult, BlockedResult, StageReached
 from cw.models import Stage
 from cw.opencode_runner import (
     OPENCODE_LOG_RELATIVE_PATH,
@@ -25,6 +25,7 @@ from cw.opencode_runner import (
     extract_text_from_jsonl,
     make_blocked,
     opencode_available,
+    parse_last_sentinel,
     resolve_finalize_command_file,
     stage_entry_marker,
     synthesize_opencode_result,
@@ -331,6 +332,196 @@ def test_synthesize_opencode_result_no_output_carries_task_stage(
     assert result.blocker.reason == OPENCODE_NO_OUTPUT
     assert result.stage_reached == expected_marker
     assert result.blocker.stage == expected_marker
+
+
+# ---------------------------------------------------------------------------
+# Last-sentinel selection (#2490)
+#
+# Fixture provenance: no real capture of the failing session log exists in the
+# repo or on this machine. The event shapes below are the ones this suite's
+# other opencode tests already use (``step_start`` / ``text`` / ``step_finish``,
+# each carrying a ``part``), plus the ugly mixed lines a real log carries
+# (stderr merged into stdout, a null ``part``). Only the arrangement -- an
+# earlier stage's sentinel quoted before the final one -- is composed.
+# ---------------------------------------------------------------------------
+
+
+def _text_event(text: str) -> dict[str, object]:
+    return {"type": "text", "part": {"text": text}}
+
+
+def _framed(result: AutoDevResult) -> str:
+    return f"<<<AUTO_DEV_RESULT\n{result.model_dump_json()}\nAUTO_DEV_RESULT>>>"
+
+
+def _write_oc_log(worktree: Path, lines: list[dict[str, object] | str]) -> None:
+    log_path = worktree / OPENCODE_LOG_RELATIVE_PATH
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        "\n".join(ln if isinstance(ln, str) else json.dumps(ln) for ln in lines) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _finalize_blocked(
+    worktree: Path, *, reason: str, stage: StageReached = "stage4a_merge_gate"
+) -> AutoDevResult:
+    """A finalize-stage ``blocked`` sentinel shaped like the #2490 variant.
+
+    Mirrors the ticket's second report: ``blocker.stage: stage4a_merge_gate``,
+    ``reason: prior_pipeline_pr_open``, a ``recovery_hint`` and
+    ``retry_eligible: true``.
+    """
+    base = make_blocked(
+        ticket_id="T-1",
+        worktree=worktree,
+        reason=reason,
+        details="blocked by PR #2468 which is still open",
+        retry_eligible=True,
+        stage_reached=stage,
+    )
+    assert base.blocker is not None
+    blocker = base.blocker.model_copy(
+        update={"recovery_hint": "merge PR #2468 then requeue"}
+    )
+    return base.model_copy(update={"blocker": blocker})
+
+
+def _stage_walk_log(worktree: Path) -> list[dict[str, object] | str]:
+    """A finalize session log: an earlier stage's sentinel quoted, then the final."""
+    earlier = make_blocked(
+        ticket_id="T-1", worktree=worktree, reason="impl_failed"
+    )  # stage2_impl
+    final = _finalize_blocked(worktree, reason="prior_pipeline_pr_open")
+    return [
+        {"type": "step_start", "part": {"type": "step-start"}},
+        _text_event(f"Prior impl leg reported:\n{_framed(earlier)}\nNow finalizing."),
+        {"type": "step_finish", "part": {"reason": "tool-calls"}},
+        "warn: stderr line merged into the json stream",
+        {"type": "text", "part": None},
+        {"type": "step_start", "part": {"type": "step-start"}},
+        _text_event(_framed(final)),
+        {"type": "step_finish", "part": {"reason": "stop"}},
+    ]
+
+
+def test_parse_last_sentinel_takes_final_block_over_earlier_stage(
+    tmp_path: Path,
+) -> None:
+    """An earlier stage's quoted sentinel neither shadows nor poisons the last."""
+    _write_oc_log(tmp_path, _stage_walk_log(tmp_path))
+    log_content = (tmp_path / OPENCODE_LOG_RELATIVE_PATH).read_text(encoding="utf-8")
+
+    result = parse_last_sentinel(log_content)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.stage_reached == "stage4a_merge_gate"
+    assert result.blocker is not None
+    assert result.blocker.reason == "prior_pipeline_pr_open"
+
+
+def test_synthesize_opencode_result_keeps_final_blocked_sentinel_after_earlier_one(
+    tmp_path: Path,
+) -> None:
+    """#2490: the final finalize ``blocked`` result survives an earlier sentinel.
+
+    Before the fix the two blocks were concatenated and read as
+    ``multiple_result_blocks``, so the real result became ``opencode_no_output``
+    and its ``prior_pipeline_pr_open`` reason / ``recovery_hint`` were lost.
+    """
+    _write_oc_log(tmp_path, _stage_walk_log(tmp_path))
+
+    result = synthesize_opencode_result(
+        task=_make_task(), worktree=tmp_path, session_id=None
+    )
+
+    assert result.status == "blocked"
+    assert result.stage_reached == "stage4a_merge_gate"
+    assert result.blocker is not None
+    assert result.blocker.reason == "prior_pipeline_pr_open"
+    assert result.blocker.recovery_hint == "merge PR #2468 then requeue"
+    assert result.blocker.retry_eligible is True
+
+
+def test_parse_last_sentinel_last_block_wins_within_one_event(
+    tmp_path: Path,
+) -> None:
+    earlier = make_blocked(ticket_id="T-1", worktree=tmp_path, reason="impl_failed")
+    final = _finalize_blocked(tmp_path, reason="merge_conflict_post_push")
+    log = json.dumps(_text_event(f"{_framed(earlier)}\n\n{_framed(final)}"))
+
+    result = parse_last_sentinel(log)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.blocker is not None
+    assert result.blocker.reason == "merge_conflict_post_push"
+
+
+def test_parse_last_sentinel_skips_placeholder_template_block(
+    tmp_path: Path,
+) -> None:
+    """The command file's worked example (``<ticket-id>``) is never a result."""
+    template = (
+        '<<<AUTO_DEV_RESULT\n{"schema_version": 4, "ticket_id": "<ticket-id>", '
+        '"status": "<stage_complete | blocked>"}\nAUTO_DEV_RESULT>>>'
+    )
+    final = _finalize_blocked(tmp_path, reason="prior_pipeline_pr_open")
+    log = "\n".join(
+        json.dumps(_text_event(t)) for t in (template, _framed(final), template)
+    )
+
+    result = parse_last_sentinel(log)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.blocker is not None
+    assert result.blocker.reason == "prior_pipeline_pr_open"
+
+
+def test_parse_last_sentinel_unusable_last_block_is_not_replaced_by_earlier(
+    tmp_path: Path,
+) -> None:
+    """A malformed final block must not resurrect the earlier stage's result."""
+    earlier = make_blocked(ticket_id="T-1", worktree=tmp_path, reason="impl_failed")
+    broken = "<<<AUTO_DEV_RESULT\n{not json\nAUTO_DEV_RESULT>>>"
+    log = "\n".join(json.dumps(_text_event(t)) for t in (_framed(earlier), broken))
+
+    assert isinstance(parse_last_sentinel(log), BlockedResult)
+    _write_oc_log(tmp_path, [_text_event(_framed(earlier)), _text_event(broken)])
+    result = synthesize_opencode_result(
+        task=_make_task(), worktree=tmp_path, session_id=None
+    )
+    assert result.blocker is not None
+    assert result.blocker.reason == OPENCODE_NO_OUTPUT
+
+
+def test_parse_last_sentinel_joins_a_block_split_across_events(
+    tmp_path: Path,
+) -> None:
+    final = _finalize_blocked(tmp_path, reason="prior_pipeline_pr_open")
+    framed = _framed(final)
+    cut = len(framed) // 2
+    log = "\n".join(
+        json.dumps(_text_event(chunk)) for chunk in (framed[:cut], framed[cut:])
+    )
+
+    result = parse_last_sentinel(log)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.blocker is not None
+    assert result.blocker.reason == "prior_pipeline_pr_open"
+
+
+@pytest.mark.parametrize(
+    "log",
+    [
+        "",
+        "not json at all",
+        json.dumps({"type": "step_finish", "part": {"reason": "stop"}}),
+        json.dumps(_text_event("narrative with no sentinel")),
+    ],
+)
+def test_parse_last_sentinel_none_when_no_block(log: str) -> None:
+    assert parse_last_sentinel(log) is None
 
 
 # ---------------------------------------------------------------------------

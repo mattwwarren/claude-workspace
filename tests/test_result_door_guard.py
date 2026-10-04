@@ -92,6 +92,23 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "via _apply_sentinel_to_task carries 'status'"
         ),
     },
+    "reconcile/local.py": {
+        "session.last_result = {**existing, _SENTINEL_ADVANCE_REFUSED_KEY: True}": (
+            "local.py (_stamp_stage_mismatch_refusal) — #2490 park marker, "
+            "stage-mismatch-refused for a dead LOCAL process's harvested "
+            "result (merge branch: preserves the caller's existing dict); "
+            "no 'status' key added"
+        ),
+        (
+            "session.last_result = {\n"
+            "_PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON\n"
+            "}"
+        ): (
+            "local.py (_stamp_stage_mismatch_refusal) — #2490 park marker, "
+            "stage-mismatch-refused (fresh branch: no pre-existing dict to "
+            "merge into); no 'status' key so has_terminal_result() stays False"
+        ),
+    },
     "reconcile/stalled/_mutations.py": {
         (
             "session.last_result = {\n"

@@ -65,6 +65,7 @@ from cw.auto_dev_result.parse import (
     _tail,
     extract_block,
     is_documented_example,
+    parse_last_block,
     parse_stdout,
 )
 from cw.auto_dev_result.schema import (
@@ -222,6 +223,7 @@ __all__ = [
     "extract_block",
     "is_documented_example",
     "is_known_blocker_reason",
+    "parse_last_block",
     "parse_stdout",
     "queue_status_for_terminal_sentinel",
 ]

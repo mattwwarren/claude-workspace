@@ -1486,12 +1486,19 @@ class SentinelRouteOutcome(NamedTuple):
     a caller (``signal_stop``) can safely complete the now-leaked session on
     this sub-cause -- unlike a stage-mismatch refusal, where a still-advancing
     worker may legitimately produce a later, matching-stage sentinel.
+
+    ``stage_refused`` (GitHub #2490) is True only when cause (a) above fired:
+    the shared staged-advance guard refused the sentinel's stage position
+    (``sentinel.stage_mismatch`` was emitted). It lets a caller whose session
+    is provably dead tell that permanent refusal apart from the other
+    ``routed=False`` causes, which are not stage mismatches.
     """
 
     rescued: bool
     routed: bool
     landed_terminal: bool
     task_already_terminal: bool = False
+    stage_refused: bool = False
 
 
 class _TaskLookupResult(NamedTuple):
@@ -1792,6 +1799,7 @@ def _apply_sentinel_to_task(
         rescued = False
         routed = True
         landed_terminal = False
+        stage_refused = False
         mutated = True
         if isinstance(sentinel, AutoDevResult):
             # Delegate to the shared B2 staged advance decision so both the
@@ -1819,6 +1827,7 @@ def _apply_sentinel_to_task(
             # #1019: a stage-mismatch refusal is a true no-op -- the routing
             # core already left `target` untouched, but skip the write too.
             mutated = routed
+            stage_refused = not routed
         elif target_status == QueueItemStatus.RUNNING:
             # BlockedResult on a live RUNNING task. A parked task falls through
             # to an implicit no-op — a BlockedResult carries no success signal,
@@ -1845,7 +1854,10 @@ def _apply_sentinel_to_task(
         if mutated:
             save_dev_queue(store)
         return SentinelRouteOutcome(
-            rescued=rescued, routed=routed, landed_terminal=landed_terminal
+            rescued=rescued,
+            routed=routed,
+            landed_terminal=landed_terminal,
+            stage_refused=stage_refused,
         )
 
 

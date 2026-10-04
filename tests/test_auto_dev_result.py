@@ -46,6 +46,7 @@ from cw.auto_dev_result import (
     extract_block,
     is_documented_example,
     is_known_blocker_reason,
+    parse_last_block,
     parse_stdout,
     queue_status_for_terminal_sentinel,
 )
@@ -5260,3 +5261,60 @@ class TestWarnedBlocksDedup:
         assert len(matching) == 2
         assert any("commits" in rec.message for rec in matching)
         assert any("friction_highlights" in rec.message for rec in matching)
+
+
+# ---------------------------------------------------------------------------
+# parse_last_block -- last block wins, earlier blocks tolerated (GitHub #2490)
+# ---------------------------------------------------------------------------
+
+
+def _wrap_two(first: dict[str, Any], second: dict[str, Any]) -> str:
+    return _wrap_sentinel(first) + "\nand then, finally:\n" + _wrap_sentinel(second)
+
+
+def test_parse_last_block_takes_last_of_several_complete_blocks() -> None:
+    """parse_stdout refuses two blocks; parse_last_block takes the last (#2490)."""
+    text = _wrap_two(_blocked_payload("earlier_stage"), _merge_gate_payload())
+
+    assert isinstance(parse_stdout(text), BlockedResult)
+    result = parse_last_block(text)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "merge_gate_blocked"
+    assert result.stage_reached == "stage4a_merge_gate"
+
+
+def test_parse_last_block_single_block_matches_parse_stdout() -> None:
+    text = _wrap_sentinel(_blocked_payload())
+
+    assert parse_last_block(text) == parse_stdout(text)
+
+
+def test_parse_last_block_returns_none_without_a_complete_block() -> None:
+    assert parse_last_block("no sentinel here") is None
+    assert parse_last_block('<<<AUTO_DEV_RESULT\n{"status": "blocked"}') is None
+
+
+def test_parse_last_block_skips_unresolved_placeholder_block() -> None:
+    placeholder = _blocked_payload()
+    placeholder["ticket_id"] = "<ticket-id>"
+    placeholder["status"] = "<stage_complete | blocked>"
+
+    assert parse_last_block(_wrap_sentinel(placeholder)) is None
+
+
+def test_parse_last_block_skips_documented_example() -> None:
+    assert parse_last_block(_wrap_sentinel(_documented_example_payload())) is None
+
+
+def test_parse_last_block_returns_blocked_result_for_unusable_last_block() -> None:
+    """An unusable LAST block is reported, never replaced by an earlier valid one."""
+    text = (
+        _wrap_sentinel(_blocked_payload())
+        + "\n<<<AUTO_DEV_RESULT\n{oops\nAUTO_DEV_RESULT>>>"
+    )
+
+    result = parse_last_block(text)
+
+    assert isinstance(result, BlockedResult)
+    assert result.blocker.reason == BLOCKER_REASON_NO_RESULT_EMITTED

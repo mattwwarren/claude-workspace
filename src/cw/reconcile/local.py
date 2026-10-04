@@ -66,6 +66,9 @@ from cw.models import (
 from cw.opencode_runner import synthesize_opencode_result
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
+    _PAUSED_STATUS_KEY,
+    _SENTINEL_ADVANCE_REFUSED_KEY,
+    _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     ProposedAction,
     ReapCandidate,
     _apply_sentinel_to_task_audited,
@@ -98,6 +101,7 @@ if TYPE_CHECKING:
         OrchestratorConfig,
         Session,
     )
+    from cw.reconcile._shared import SentinelRouteOutcome
 
 _log = logging.getLogger(__name__)
 
@@ -115,6 +119,99 @@ _CODEX_HARVEST_BREADCRUMBS = (
     " (crash or kill), found by the local harvest sweep — inspect the worktree"
     " for a partial commit or orphaned scratch dir before reclaiming."
 )
+
+# SESSION_NEEDS_ATTENTION ``paused_status`` for a dead LOCAL process whose
+# harvested sentinel the shared staged-advance guard refused (#2490).
+SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON = "sentinel_stage_mismatch_dead_session"
+
+
+def _stage_mismatch_refusal_latched(session: Session) -> bool:
+    """True once a stage-mismatch refusal was stamped on *session* (#2490).
+
+    Same two markers the idle/phantom/stalled sweeps latch on (#1149): the
+    single-key ``paused_status`` stamp, or the merged-in flag when
+    ``last_result`` already held a dict.
+    """
+    last_result = session.last_result
+    return isinstance(last_result, dict) and (
+        last_result.get(_PAUSED_STATUS_KEY) == _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+        or last_result.get(_SENTINEL_ADVANCE_REFUSED_KEY) is True
+    )
+
+
+def _stamp_stage_mismatch_refusal(session: Session) -> None:
+    """Latch a stage-mismatch refusal on *session* so harvest stops re-offering it.
+
+    A refused harvest leaves the task row and the session ACTIVE, so without a
+    latch every tick re-detects the same dead PID, re-synthesizes the same
+    sentinel and re-refuses it forever (#2490). An existing ``last_result`` dict
+    is merged into, never overwritten -- it may carry another sweep's own
+    ``paused_status`` (see ``phantom._mutations``).
+    """
+    existing = session.last_result
+    if isinstance(existing, dict):
+        session.last_result = {**existing, _SENTINEL_ADVANCE_REFUSED_KEY: True}
+    else:
+        session.last_result = {
+            _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+        }
+
+
+def _latch_and_page_stage_refusal(
+    session: Session,
+    task: TicketTask,
+    sentinel: AutoDevResult,
+    backend: LocalLivenessBackend,
+    outcome: SentinelRouteOutcome | None,
+    pending_attention: list[dict[str, object]],
+) -> None:
+    """On a stage-guard refusal of a dead session's result, latch it and queue a page.
+
+    The process is provably dead, so nothing will ever produce a matching-stage
+    result: latch the refusal (else every tick re-synthesizes and re-refuses
+    it) and queue one ``session.needs_attention`` -- the worker's real result,
+    e.g. a blocked finalize sentinel, was otherwise dropped silently (#2490).
+    Any other ``routed=False`` cause is not a stage mismatch and is left alone.
+    """
+    if outcome is None or not outcome.stage_refused:
+        return
+    _stamp_stage_mismatch_refusal(session)
+    pending_attention.append(
+        _stage_mismatch_attention_payload(session, task, sentinel, backend)
+    )
+
+
+def _stage_mismatch_attention_payload(
+    session: Session,
+    task: TicketTask,
+    sentinel: AutoDevResult,
+    backend: LocalLivenessBackend,
+) -> dict[str, object]:
+    """Canonical 9-field SESSION_NEEDS_ATTENTION payload for a refused harvest.
+
+    ``breadcrumbs`` names what the dead worker actually reported and the row
+    stage that refused it, so the operator can tell a dropped terminal result
+    (e.g. a ``blocked`` finalize sentinel) from a stale replay without opening
+    the log.
+    """
+    reported = f"{sentinel.status} at {sentinel.stage_reached}"
+    if sentinel.blocker is not None:
+        reported += f" ({sentinel.blocker.reason})"
+    return {
+        "session_id": session.id,
+        "session_name": session.name,
+        "client": session.client,
+        "ticket_id": task.ticket_id,
+        "claude_session_id": session.claude_session_id,
+        "paused_status": SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON,
+        "breadcrumbs": (
+            f"dead {backend} process reported {reported}, refused by the"
+            f" staged-advance guard: the row is at stage {task.stage}."
+            " The result was NOT applied; the row is unchanged."
+        ),
+        "crashed": False,
+        "lane": task.lane,
+    }
 
 
 def _local_process_alive(handle: LocalLivenessHandle) -> bool:
@@ -151,6 +248,8 @@ def _detect_local_harvest_candidates(
         if session.local_liveness is None:
             continue
         if session.surface_ref is not None:
+            continue
+        if _stage_mismatch_refusal_latched(session):
             continue
         if _local_process_alive(session.local_liveness):
             continue
@@ -552,6 +651,13 @@ def _act_on_local_harvest_candidates(
     completed and its ticket_id must NOT be counted as harvested -- the task
     row was left untouched, so completing the session here would orphan it.
 
+    GitHub #2490: that refusal is permanent -- the process is dead, so no
+    matching sentinel will follow -- and used to repeat silently every tick
+    (one ``sentinel.stage_mismatch`` event per tick, the worker's real result
+    never applied, nobody paged). It now latches the refusal on the session
+    (detection skips it from then on) and emits one ``session.needs_attention``
+    (``paused_status=sentinel_stage_mismatch_dead_session``) after the write.
+
     GitHub #2140: a ``not routed`` outcome can also mean
     ``task_already_terminal`` -- the dev-queue task was raced to a genuinely
     terminal status by a concurrent caller before this lookup ran, not a
@@ -570,6 +676,7 @@ def _act_on_local_harvest_candidates(
     clients = _deps.load_effective_clients()
     harvested_ticket_ids: list[str] = []
     pending_events: list[dict[str, object]] = []
+    pending_attention: list[dict[str, object]] = []
 
     for candidate in candidates:
         session = session_by_id[candidate.session_id]
@@ -633,6 +740,14 @@ def _act_on_local_harvest_candidates(
             routed = outcome.routed
             task_already_terminal = outcome.task_already_terminal
         if not routed and not task_already_terminal:
+            _latch_and_page_stage_refusal(
+                session,
+                task,
+                sentinel,
+                session.local_liveness.backend,
+                outcome,
+                pending_attention,
+            )
             continue
         # RFC 0012 A3 (#1459): route the git-synthesized completion through the
         # door (source=GIT_SYNTHESIS) instead of writing session.last_result
@@ -660,5 +775,14 @@ def _act_on_local_harvest_candidates(
 
     for payload in pending_events:
         record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
+
+    # After save_state: the latch is durable before the page goes out, so a
+    # failed write re-pages next tick rather than losing the page.
+    for attention in pending_attention:
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            attention,
+            correlation_id=str(attention["ticket_id"]),
+        )
 
     return harvested_ticket_ids
