@@ -8493,7 +8493,8 @@ class TestSessionsLockTimeoutCli:
 
     Every command here reaches a ``bounded=True`` site: ``list``/``status`` via
     ``reconcile()``, ``spawn close``/``spawn complete`` via ``cli/spawn.py``,
-    ``done`` via ``session.done_session``.
+    ``done`` via ``session.done_session``, ``doctor --reap <SESSION>`` via
+    ``_reap_session_by_selector(bounded=True)``.
     """
 
     @pytest.mark.parametrize(
@@ -8504,8 +8505,9 @@ class TestSessionsLockTimeoutCli:
             ["spawn", "close", "--confirmed-dead", "close-sess-1"],
             ["spawn", "complete", "close-sess-1", "--status", "shipped"],
             ["done", "close-sess-1"],
+            ["doctor", "--reap", "close-sess-1"],
         ],
-        ids=["list", "status", "spawn-close", "spawn-complete", "done"],
+        ids=["list", "status", "spawn-close", "spawn-complete", "done", "doctor-reap"],
     )
     def test_command_exits_nonzero_with_actionable_error(
         self,

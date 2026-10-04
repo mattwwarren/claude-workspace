@@ -2507,6 +2507,37 @@ def test_orchestrate_run_drain_authorizes_revert_task(
     assert reap_calls == ["s1"]
 
 
+def test_orchestrate_run_drain_reap_stays_unbounded(
+    run_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unattended poll loop must NOT opt in to the bounded sessions lock (#2491).
+
+    A ``SessionsLockTimeoutError`` there would end the lane's reap-authorization
+    consumer for good, so the drain calls the reap helper without ``bounded``
+    (default: wait the lock out).
+    """
+    from cw.cli import _drain_reap_proposals
+    from cw.config import load_state, save_state
+
+    reap_kwargs: list[dict[str, object]] = []
+
+    def fake_reap(selector: str, **kwargs: object) -> bool:
+        reap_kwargs.append(kwargs)
+        return True
+
+    monkeypatch.setattr("cw.cli.orchestrate._reap_session_by_selector", fake_reap)
+    state = load_state()
+    state.sessions.append(_mk_impl_session("s1", lane="default"))
+    save_state(state)
+    _emit_reap_event("s1", "default", ProposedAction.REVERT_TASK)
+
+    assert _drain_reap_proposals("client-a", "default") == 1
+
+    assert len(reap_kwargs) == 1
+    assert "bounded" not in reap_kwargs[0]
+
+
 def test_orchestrate_run_drain_authorizes_crash_complete(
     run_env: Path,
     monkeypatch: pytest.MonkeyPatch,

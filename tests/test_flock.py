@@ -7,10 +7,8 @@ pinned without wall-clock thresholds.
 
 from __future__ import annotations
 
-import errno
 import fcntl
 import logging
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -26,39 +24,21 @@ from cw._flock import (
     try_flock_until,
 )
 from cw.exceptions import SessionsLockTimeoutError
-from tests.conftest import _hold_flock
+from tests.conftest import (
+    _assert_lock_held,
+    _fake_fcntl,
+    _FakeClock,
+    _hold_flock,
+    _raise_eio,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
-# Dyadic fractions: the fake clock below accumulates them with no float error,
+# Dyadic fractions: the shared ``_FakeClock`` accumulates them with no float error,
 # so ``remaining`` hits exactly 0.0 and the clamp assertion can be exact.
 _POLL_S = 0.5
 _TIMEOUT_S = 0.75
-
-
-class _FakeClock:
-    """Deterministic stand-in for the ``time`` module as ``cw._flock`` sees it.
-
-    ``sleep`` records its argument and advances ``monotonic`` by exactly that
-    amount, so a poll loop's behaviour is a pure function of its arguments.
-    ``on_sleep`` lets a test act mid-wait (release the lock, raise).
-    """
-
-    def __init__(self, on_sleep: Callable[[int], None] | None = None) -> None:
-        self.now = 0.0
-        self.sleeps: list[float] = []
-        self._on_sleep = on_sleep
-
-    def monotonic(self) -> float:
-        return self.now
-
-    def sleep(self, seconds: float) -> None:
-        self.sleeps.append(seconds)
-        self.now += seconds
-        if self._on_sleep is not None:
-            self._on_sleep(len(self.sleeps))
 
 
 @pytest.fixture(autouse=True)
@@ -87,8 +67,7 @@ class TestTryFlockUntil:
 
             assert acquired is True
             assert clock.sleeps == []
-            with lock.open("w") as other, pytest.raises(BlockingIOError):
-                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _assert_lock_held(lock)
 
     def test_zero_timeout_held_fails_with_zero_sleeps(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -152,13 +131,7 @@ class TestTryFlockUntil:
     def test_non_contention_oserror_propagates(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def _boom(*_args: object, **_kwargs: object) -> None:
-            raise OSError(errno.EIO, "disk on fire")
-
-        fake_fcntl = SimpleNamespace(
-            flock=_boom, LOCK_EX=fcntl.LOCK_EX, LOCK_NB=fcntl.LOCK_NB
-        )
-        monkeypatch.setattr(_flock, "fcntl", fake_fcntl)
+        monkeypatch.setattr(_flock, "fcntl", _fake_fcntl(_raise_eio))
         clock = _FakeClock()
         _install_clock(monkeypatch, clock)
 
@@ -268,13 +241,7 @@ class TestAcquireSessionsFlock:
         def _record(_fd: object, operation: int) -> None:
             calls.append(operation)
 
-        monkeypatch.setattr(
-            _flock,
-            "fcntl",
-            SimpleNamespace(
-                flock=_record, LOCK_EX=fcntl.LOCK_EX, LOCK_NB=fcntl.LOCK_NB
-            ),
-        )
+        monkeypatch.setattr(_flock, "fcntl", _fake_fcntl(_record))
         monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0")
         lock = tmp_path / "lock"
 

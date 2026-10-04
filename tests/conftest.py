@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import importlib.util
 import json
@@ -13,7 +14,8 @@ import sys
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, NoReturn, TypedDict, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -1047,6 +1049,55 @@ def _hold_flock(path: Path) -> Iterator[Callable[[], None]]:
             yield release
         finally:
             release()
+
+
+def _assert_lock_held(path: Path) -> None:
+    """Assert *path* is flocked: a second open file description cannot take it.
+
+    The probe counterpart of :func:`_hold_flock`; every "is the lock held in
+    here?" check (``sessions_lock`` body, ``cw._flock`` helpers) shares it.
+    """
+    with path.open("w") as probe, pytest.raises(BlockingIOError):
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+class _FakeClock:
+    """Deterministic stand-in for the ``time`` module as ``cw._flock`` sees it.
+
+    ``sleep`` records its argument and advances ``monotonic`` by exactly that
+    amount, so a poll loop's behaviour is a pure function of its arguments and
+    no test depends on the wall clock. ``on_sleep`` receives the 1-based sleep
+    count and lets a test act mid-wait (release the lock, raise).
+    """
+
+    def __init__(self, on_sleep: Callable[[int], None] | None = None) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+        self._on_sleep = on_sleep
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+        if self._on_sleep is not None:
+            self._on_sleep(len(self.sleeps))
+
+
+def _fake_fcntl(flock_fn: Callable[..., object]) -> SimpleNamespace:
+    """A ``fcntl`` stand-in whose ``flock`` is *flock_fn*, constants real."""
+    return SimpleNamespace(
+        flock=flock_fn,
+        LOCK_EX=fcntl.LOCK_EX,
+        LOCK_NB=fcntl.LOCK_NB,
+        LOCK_UN=fcntl.LOCK_UN,
+    )
+
+
+def _raise_eio(*_args: object, **_kwargs: object) -> NoReturn:
+    """A ``flock`` replacement that fails with a non-contention ``OSError``."""
+    raise OSError(errno.EIO, "disk on fire")
 
 
 @contextlib.contextmanager

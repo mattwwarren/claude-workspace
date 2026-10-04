@@ -5149,11 +5149,17 @@ class TestDispatchTickSessionsLockTimeout:
                 msg, lock_path=sessions_lock_file(), waited_s=60.0
             )
 
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", _timeout)
-
-        dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+        with monkeypatch.context() as patch_ctx:
+            patch_ctx.setattr("cw.dispatch.gating.reconcile", _timeout)
+            dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
 
         assert read_events(event_types=[OrchestratorEventType.DISPATCH_TICK]) == []
+
+        # Positive control: with reconcile working again the same tick records
+        # exactly one event (one client), so the empty list above is not vacuous.
+        dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+
+        assert len(read_events(event_types=[OrchestratorEventType.DISPATCH_TICK])) == 1
 
     def test_real_contention_skips_tick_then_next_tick_proceeds(
         self,
@@ -5183,6 +5189,9 @@ class TestDispatchTickSessionsLockTimeout:
         retried = dispatch_tick(simple_config, native_daemon=daemon)
 
         assert retried.spawned == 1
+        # Positive control: the very same setup DOES record a tick once it
+        # proceeds (one per client), so the empty list above is not vacuous.
+        assert len(read_events(event_types=[OrchestratorEventType.DISPATCH_TICK])) == 1
 
     def test_other_reconcile_errors_still_swallowed(
         self,

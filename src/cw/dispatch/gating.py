@@ -1015,21 +1015,9 @@ def _reconcile_usage_limited() -> bool:
     a limit or when reconcile raised (logged and swallowed so a transient
     failure never kills the tick — phantoms are reaped next tick).
 
-    :class:`~cw.exceptions.SessionsLockTimeoutError` is the one exception NOT
-    swallowed here (#2491). ``reconcile()`` takes ``.sessions.lock`` with
-    ``bounded=True``, so the error means another process is holding it and has
-    been for the whole bounded wait. It propagates so
-    :func:`~cw.dispatch.tick.dispatch_tick` can skip the tick instead of
-    letting claim/spawn (which take the lock unbounded, after side effects)
-    block behind it. A skipped tick records no ``dispatch.tick`` event, which
-    is what the watchdogs observe: the external ``cw watchdog tick``
-    (``_check_dispatch_loop_liveness``, newest tick older than
-    ``max(4 * tick_interval_seconds, 600s)``) catches a wedged-but-alive loop
-    unconditionally; the in-loop ``dispatch_loop_stale`` page
-    (``_stale_pending_clients``) fires only for a client whose last tick is
-    older than ``TICK_STALE_SECONDS`` (90s), left pending work behind
-    (``pending - claimed > 0``) and is not executor-blocked, so it does not
-    fire if that last tick was idle.
+    :class:`~cw.exceptions.SessionsLockTimeoutError` (#2491) is the one
+    exception NOT swallowed: it propagates so ``dispatch_tick`` skips the tick
+    (see ``dispatch/tick.py`` for the watchdog semantics of a skipped tick).
     """
     reconcile_report = None
     try:

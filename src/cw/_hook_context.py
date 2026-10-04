@@ -47,11 +47,13 @@ def _context_lock(context_path: Path) -> Iterator[bool]:
     process-wide ``dev_queue_lock`` — the contention this serialises is
     between hooks of the same worker, and nothing else should ever wait on it.
 
-    Yields ``False`` (rather than raising) when the retry budget expires, so
-    the caller's fail-open path is an ordinary branch, not exception handling.
-    Only genuine contention exhausts the budget (:func:`cw._flock.try_flock_until`);
-    any other ``OSError`` from ``flock`` propagates to the caller, which
-    :func:`_write_cw_context_locked` already treats as fail-open.
+    Yields ``False`` (rather than raising) only when genuine lock contention
+    (:func:`cw._flock.try_flock_until`) outlasts the retry budget, so that
+    fail-open path is an ordinary branch, not exception handling. Any other
+    ``OSError`` (from opening the lock file or from ``flock``) is NOT retried:
+    it propagates out of this context manager immediately, with the lock file
+    handle closed. :func:`_write_cw_context_locked` catches it in its broad
+    ``except`` and fails open, so its callers still never see it.
     """
     lock_path = context_path.with_name(context_path.name + _LOCK_SUFFIX)
     with lock_path.open("w") as handle:

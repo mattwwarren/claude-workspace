@@ -287,6 +287,7 @@ def _reap_session_by_selector(
     lane: str | None = None,
     proposed_action: str | None = None,
     correlation_id: str | None = None,
+    bounded: bool = False,
 ) -> bool:
     """Reap a single session by exact short id or exact session name.
 
@@ -298,10 +299,19 @@ def _reap_session_by_selector(
 
     Returns True when the session was found (even if already terminal).
     Returns False when no session matches *selector*.
+
+    *bounded* is forwarded to :func:`~cw.config.sessions_lock`: ``True`` makes
+    a contended lock raise ``SessionsLockTimeoutError`` after the configured
+    wait instead of blocking indefinitely. Default ``False`` (wait as before).
     """
-    # bounded=True (#2491): operator/doctor reap; the lock is the first action
-    # here, so a timeout leaves the session untouched and retryable.
-    with sessions_lock(bounded=True):
+    # Why (#2491): *bounded* is the caller's choice. The operator entry points
+    # (`cw doctor --reap <SESSION>` in cli/maintenance.py and
+    # doctor/wedge.py::_reap_wedge_findings) pass bounded=True so a wedged
+    # holder surfaces as an error instead of a hang. The `cw orchestrate run
+    # --lane` poll loop (cli/orchestrate.py::_drain_reap_proposals) keeps the
+    # default: it is unattended, a timeout would end its reap-authorization
+    # consumer and nothing restarts it, so it must wait the lock out.
+    with sessions_lock(bounded=bounded):
         state = load_state()
         target = next(
             (s for s in state.sessions if selector in (s.id, s.name)),

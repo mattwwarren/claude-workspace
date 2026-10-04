@@ -2303,6 +2303,94 @@ class TestWedgeReapRecipes:
         t = next(t for t in store.tasks if t.ticket_id == "TST-C2")
         assert t.status == QueueItemStatus.PENDING
 
+    def test_daemon_reaps_are_bounded_and_a_timeout_leaves_documented_partial_state(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        """Operator `doctor --reap` bounds each reap; a timeout aborts the rest (#2491).
+
+        Queue changes are saved BEFORE the per-session reaps, so on a lock
+        timeout the class-2 revert persists, the remaining reaps and the
+        leaked-worker sweep do not run, and the next `cw doctor --reap`
+        re-detects them idempotently.
+        """
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.doctor import WedgeFinding, _reap_wedge_findings
+        from cw.doctor.wedge import (
+            _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
+            _WEDGE_LEAKED_DAEMON_WORKER,
+        )
+        from cw.exceptions import SessionsLockTimeoutError
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="TST-C2",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id=None,
+                    )
+                ]
+            )
+        )
+        reap_calls: list[tuple[str, dict[str, object]]] = []
+
+        def _timeout_reap(selector: str, **kwargs: object) -> bool:
+            reap_calls.append((selector, kwargs))
+            msg = "sessions lock held"
+            raise SessionsLockTimeoutError(
+                msg, lock_path=tmp_config_dir / ".sessions.lock", waited_s=60.0
+            )
+
+        sweeps: list[object] = []
+        monkeypatch.setattr("cw.doctor.wedge._reap_session_by_selector", _timeout_reap)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.sweep_leaked_daemon_workers",
+            lambda *_a, **_k: sweeps.append(1),
+        )
+        findings = [
+            WedgeFinding(
+                wedge_class="wedge/task-running-no-session",
+                session_id=None,
+                ticket_id="TST-C2",
+                recipe="fix",
+                state_file="",
+            ),
+            *(
+                WedgeFinding(
+                    wedge_class=_WEDGE_ACTIVE_NO_DAEMON_ENTRY,
+                    session_id=sid,
+                    ticket_id=None,
+                    recipe="fix",
+                    state_file="",
+                )
+                for sid in ("phantom-1", "phantom-2")
+            ),
+            WedgeFinding(
+                wedge_class=_WEDGE_LEAKED_DAEMON_WORKER,
+                session_id=None,
+                ticket_id=None,
+                recipe="fix",
+                state_file="",
+            ),
+        ]
+
+        with pytest.raises(SessionsLockTimeoutError):
+            _reap_wedge_findings(findings)
+
+        assert reap_calls == [
+            (
+                "phantom-1",
+                {"proposed_action": _WEDGE_ACTIVE_NO_DAEMON_ENTRY, "bounded": True},
+            )
+        ]
+        assert sweeps == []
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "TST-C2")
+        assert task.status == QueueItemStatus.PENDING
+
     def test_class3_reap_reverts_queue_only(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -3910,6 +3998,50 @@ class TestCheckCwDeps:
 
 class TestReapSessionBySelector:
     """_reap_session_by_selector reaps a single session by exact id or exact name."""
+
+    def test_bounded_flag_is_forwarded_to_sessions_lock(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Default waits the lock out (bounded=False); bounded=True opts in (#2491)."""
+        import contextlib
+        from collections.abc import Iterator
+
+        from cw.doctor import _reap_session_by_selector, loop_health
+
+        seen: list[bool] = []
+        real_sessions_lock = loop_health.sessions_lock
+
+        @contextlib.contextmanager
+        def _spy(*, bounded: bool = False) -> Iterator[None]:
+            seen.append(bounded)
+            with real_sessions_lock(bounded=bounded):
+                yield
+
+        monkeypatch.setattr(loop_health, "sessions_lock", _spy)
+
+        assert _reap_session_by_selector("no-such-session") is False
+        assert _reap_session_by_selector("no-such-session", bounded=True) is False
+
+        assert seen == [False, True]
+
+    def test_bounded_reap_times_out_on_a_held_lock(
+        self,
+        held_sessions_lock: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """bounded=True raises on contention without touching state (#2491)."""
+        from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
+        from cw.doctor import _reap_session_by_selector
+        from cw.exceptions import SessionsLockTimeoutError
+
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.05")
+
+        with pytest.raises(SessionsLockTimeoutError) as exc_info:
+            _reap_session_by_selector("any-session", bounded=True)
+
+        assert exc_info.value.lock_path == held_sessions_lock
 
     def test_reap_session_by_id_active(
         self,

@@ -10,8 +10,10 @@ first rather than in whichever consumer happens to cover the affected branch.
 
 from __future__ import annotations
 
+import errno
 import json
 from pathlib import Path
+from typing import IO, NoReturn
 
 import pytest
 
@@ -22,7 +24,13 @@ from cw._hook_context import (
     _write_cw_context_locked,
 )
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
-from tests.conftest import _hold_context_lock, _write_hook_context_file
+from tests.conftest import (
+    _fake_fcntl,
+    _FakeClock,
+    _hold_context_lock,
+    _raise_eio,
+    _write_hook_context_file,
+)
 
 
 def _seeded_worktree(tmp_path: Path, name: str = "wt") -> Path:
@@ -48,11 +56,13 @@ def test_context_lock_acquires_when_uncontended(tmp_path: Path) -> None:
 def test_context_lock_yields_false_when_budget_exhausted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A held lock exhausts the bounded retry budget and yields False.
+    """Genuine contention that outlasts the retry budget yields False.
 
-    Never raises: the caller's fail-open path must be an ordinary branch,
-    not exception handling -- the hook consumers run synchronously inside
-    the live worker's own turn, where blocking would hang the worker itself.
+    Contention does not raise: the caller's fail-open path is an ordinary
+    branch, not exception handling -- the hook consumers run synchronously
+    inside the live worker's own turn, where blocking would hang the worker
+    itself. (A NON-contention ``OSError`` is different: it propagates, see
+    ``test_context_lock_propagates_non_contention_oserror_and_closes_handle``.)
     """
     monkeypatch.setattr(
         "cw._hook_context._LOCK_TIMEOUT_SECS_DEFAULT", 0.05, raising=True
@@ -62,6 +72,58 @@ def test_context_lock_yields_false_when_budget_exhausted(
 
     with _hold_context_lock(worktree), _context_lock(context_path) as acquired:
         assert acquired is False
+
+
+def test_context_lock_propagates_non_contention_oserror_and_closes_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-contention ``OSError`` is not retried: it propagates immediately.
+
+    This is the contract change from sharing ``cw._flock.try_flock_until``: the
+    old loop retried any ``OSError`` until the 0.5s budget expired and then
+    yielded False. The lock file handle must still be closed on the way out.
+    """
+    worktree = _seeded_worktree(tmp_path)
+    context_path = worktree / HOOK_CONTEXT_RELATIVE_PATH
+    seen_handles: list[IO[str]] = []
+
+    def _flock_eio(handle: IO[str], _operation: int) -> NoReturn:
+        seen_handles.append(handle)
+        _raise_eio()
+
+    clock = _FakeClock()
+    monkeypatch.setattr("cw._flock.fcntl", _fake_fcntl(_flock_eio))
+    monkeypatch.setattr("cw._flock.time", clock)
+
+    with (
+        pytest.raises(OSError, match="disk on fire") as exc_info,
+        _context_lock(context_path),
+    ):
+        pytest.fail("must not reach body")
+
+    assert exc_info.value.errno == errno.EIO
+    assert len(seen_handles) == 1
+    assert seen_handles[0].closed
+    assert clock.sleeps == []  # failed on the first attempt, never retried
+
+
+def test_write_cw_context_locked_fails_open_on_non_contention_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fail-open contract holds through ``_write_cw_context_locked``'s except."""
+    worktree = _seeded_worktree(tmp_path)
+    before = (worktree / HOOK_CONTEXT_RELATIVE_PATH).read_text(encoding="utf-8")
+    monkeypatch.setattr("cw._flock.fcntl", _fake_fcntl(_raise_eio))
+    calls: list[object] = []
+
+    def _mutate(context: dict[str, object]) -> dict[str, object]:
+        calls.append(context)
+        return context
+
+    assert _write_cw_context_locked(str(worktree), _mutate) is False
+
+    assert calls == []
+    assert (worktree / HOOK_CONTEXT_RELATIVE_PATH).read_text(encoding="utf-8") == before
 
 
 def test_write_cw_context_locked_applies_mutation(tmp_path: Path) -> None:
