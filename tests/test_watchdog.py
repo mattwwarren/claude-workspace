@@ -5,14 +5,15 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
 
 from cw.config import save_state, state_dir
 from cw.dev_queue import save_dev_queue
-from cw.events import record_event
-from cw.exceptions import CwError
+from cw.events import read_events, record_event
+from cw.exceptions import CwError, SessionsLockTimeoutError
 from cw.models import (
     CwState,
     DevQueueStore,
@@ -22,6 +23,7 @@ from cw.models import (
     Session,
     TicketTask,
 )
+from cw.native_daemon import FakeNativeDaemonClient
 from cw.watchdog import (
     WatchdogStatus,
     _resolve_cw_executable_path,
@@ -37,6 +39,9 @@ from cw.watchdog import (
     uninstall,
 )
 from tests.conftest import _make_daemon_session, _make_ticket_task
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _NOW = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
 
@@ -173,6 +178,133 @@ class TestDispatchLivenessCheck:
         )
 
         assert result.dispatch_loop_dead is False
+
+
+@pytest.fixture
+def dispatching_config(
+    tmp_config_dir: Path, make_git_repo: Callable[..., Path]
+) -> OrchestratorConfig:
+    """An ``OrchestratorConfig`` whose one real client makes ``dispatch_tick`` emit.
+
+    A bare ``OrchestratorConfig()`` has no clients, so even a tick that PROCEEDS
+    records no ``dispatch.tick`` event and a "skipped ticks record none"
+    assertion would pass vacuously. With this client every non-skipped tick
+    records exactly one (see ``test_a_proceeding_tick_records_one_dispatch_tick``).
+    """
+    workspace = make_git_repo("workspace/acme")
+    clients_path = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+    clients_path.parent.mkdir(parents=True, exist_ok=True)
+    clients_path.write_text(
+        f"clients:\n  acme:\n    workspace_path: {workspace}\n"
+        "    default_branch: main\n"
+    )
+    return OrchestratorConfig(per_client_max_parallel={"acme": 1})
+
+
+def _tick_at(tick_time: datetime, config: OrchestratorConfig) -> None:
+    """Run one ``dispatch_tick`` with the clock frozen at *tick_time*."""
+    import freezegun
+
+    from cw.dispatch import dispatch_tick
+
+    with freezegun.freeze_time(tick_time):
+        dispatch_tick(config, native_daemon=FakeNativeDaemonClient())
+
+
+def _hold_sessions_lock_via_reconcile_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Make every tick's reconcile raise ``SessionsLockTimeoutError`` (#2491).
+
+    Mirrors a wedged ``cw dev-queue serve`` holding ``.sessions.lock``: each
+    tick is skipped, so none of them records a ``dispatch.tick`` event.
+    """
+
+    def _timeout(*_args: object, **_kwargs: object) -> None:
+        msg = "sessions lock held"
+        raise SessionsLockTimeoutError(
+            msg, lock_path=state_dir() / ".sessions.lock", waited_s=60.0
+        )
+
+    monkeypatch.setattr("cw.dispatch.gating.reconcile", _timeout)
+
+
+def _dispatch_tick_events() -> list[object]:
+    return list(read_events(event_types=[OrchestratorEventType.DISPATCH_TICK]))
+
+
+def test_a_proceeding_tick_records_one_dispatch_tick(
+    dispatching_config: OrchestratorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Positive control: the fixture client makes a non-skipped tick emit.
+
+    Without it the skipped-tick assertions below could pass for the wrong reason
+    (a client-less tick never emits). A skipped tick then adds none.
+    """
+    _tick_at(_NOW - timedelta(minutes=2), dispatching_config)
+    assert len(_dispatch_tick_events()) == 1
+
+    _hold_sessions_lock_via_reconcile_timeout(monkeypatch)
+    _tick_at(_NOW, dispatching_config)
+
+    assert len(_dispatch_tick_events()) == 1
+
+
+class TestDispatchLivenessCoversSkippedTicks:
+    """The external watchdog is what notices ticks skipped on a held lock (#2491).
+
+    A skipped tick records no ``dispatch.tick`` event, so the only signal is the
+    age of the newest one: ``cw watchdog tick`` alarms past
+    ``max(4 * tick_interval_seconds, 600s)`` whether or not work is pending.
+    """
+
+    def test_only_skipped_ticks_past_threshold_alarm(
+        self,
+        tmp_config_dir: Path,
+        mock_desktop_notification: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        dispatching_config: OrchestratorConfig,
+    ) -> None:
+        # One real, proceeding tick an hour ago: the last event before the wedge.
+        _tick_at(_NOW - timedelta(hours=1), dispatching_config)
+        assert len(_dispatch_tick_events()) == 1
+        save_dev_queue(DevQueueStore(tasks=[]))
+        save_state(CwState(sessions=[]))
+        _hold_sessions_lock_via_reconcile_timeout(monkeypatch)
+        for minutes_ago in (40, 20, 0):
+            _tick_at(_NOW - timedelta(minutes=minutes_ago), dispatching_config)
+
+        result = run_tick(now=_NOW)
+
+        # The pre-wedge tick only: three skipped ticks (each of which WOULD have
+        # emitted, per the control above) added none.
+        assert len(_dispatch_tick_events()) == 1
+        assert result.dispatch_loop_dead is True
+        assert mock_desktop_notification.call_count == 1
+        lines = (state_dir() / "watchdog.log").read_text().splitlines()
+        assert any(json.loads(line)["check"] == "dispatch_liveness" for line in lines)
+
+    def test_skipped_ticks_within_threshold_do_not_alarm_yet(
+        self,
+        tmp_config_dir: Path,
+        mock_desktop_notification: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        dispatching_config: OrchestratorConfig,
+    ) -> None:
+        # Default tick_interval_seconds=30 -> threshold = max(120, 600) = 600s.
+        _tick_at(_NOW - timedelta(minutes=5), dispatching_config)
+        assert len(_dispatch_tick_events()) == 1
+        save_dev_queue(DevQueueStore(tasks=[]))
+        save_state(CwState(sessions=[]))
+        _hold_sessions_lock_via_reconcile_timeout(monkeypatch)
+        for minutes_ago in (2, 0):
+            _tick_at(_NOW - timedelta(minutes=minutes_ago), dispatching_config)
+        assert len(_dispatch_tick_events()) == 1
+
+        result = run_tick(now=_NOW)
+
+        assert result.dispatch_loop_dead is False
+        mock_desktop_notification.assert_not_called()
 
 
 class TestParkedMarkerSessionLeftAlone:

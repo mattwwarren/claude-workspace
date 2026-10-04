@@ -268,7 +268,11 @@ def reconcile() -> ReconcileReport:
     merged_ticket_ids = frozenset(tid for _client, tid in _merged_client_tids)
     gh_blocked_ticket_ids = frozenset(_gh_blocked_tids)
 
-    with sessions_lock():
+    # bounded=True (#2491): everything before this point is read-only, so a
+    # timeout loses nothing. It lets `cw list`/`cw status`/`cw start` fail with
+    # an actionable error behind a wedged serve instead of hanging, and lets
+    # dispatch_tick skip the tick (_reconcile_usage_limited re-raises it).
+    with sessions_lock(bounded=True):
         locked_report = _reconcile_locked(
             merged_ticket_ids=merged_ticket_ids,
             gh_blocked_ticket_ids=gh_blocked_ticket_ids,

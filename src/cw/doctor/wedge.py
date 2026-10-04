@@ -1007,8 +1007,13 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
     # _reap_session_by_selector acquires sessions_lock and dev_queue_lock
     # internally (sequential, no deadlock risk since we already released
     # dev_queue_lock above).
+    # Why (#2491): operator `cw doctor --reap`, so bounded=True. Partial-state
+    # window: the queue changes above are already saved, so a
+    # SessionsLockTimeoutError here aborts the remaining reaps and the
+    # leaked-worker sweep below. The findings are re-detected idempotently on
+    # the next `cw doctor --reap`.
     for session_id, wedge_class in daemon_reap_findings:
-        _reap_session_by_selector(session_id, proposed_action=wedge_class)
+        _reap_session_by_selector(session_id, proposed_action=wedge_class, bounded=True)
 
     # Class-10 (#2480): re-detect fresh (state may have changed since the
     # findings were collected) and stop every leaked worker still leaked,

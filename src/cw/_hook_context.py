@@ -18,10 +18,10 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cw._flock import try_flock_until
 from cw.atomic import atomic_write_text
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
 
@@ -47,23 +47,21 @@ def _context_lock(context_path: Path) -> Iterator[bool]:
     process-wide ``dev_queue_lock`` — the contention this serialises is
     between hooks of the same worker, and nothing else should ever wait on it.
 
-    Yields ``False`` (rather than raising) when the retry budget expires, so
-    the caller's fail-open path is an ordinary branch, not exception handling.
+    Yields ``False`` (rather than raising) only when genuine lock contention
+    (:func:`cw._flock.try_flock_until`) outlasts the retry budget, so that
+    fail-open path is an ordinary branch, not exception handling. Any other
+    ``OSError`` (from opening the lock file or from ``flock``) is NOT retried:
+    it propagates out of this context manager immediately, with the lock file
+    handle closed. :func:`_write_cw_context_locked` catches it in its broad
+    ``except`` and fails open, so its callers still never see it.
     """
     lock_path = context_path.with_name(context_path.name + _LOCK_SUFFIX)
-    deadline = time.monotonic() + _LOCK_TIMEOUT_SECS_DEFAULT
     with lock_path.open("w") as handle:
-        acquired = False
-        while True:
-            try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(_LOCK_RETRY_INTERVAL_SECS)
-                continue
-            acquired = True
-            break
+        acquired = try_flock_until(
+            handle,
+            timeout_s=_LOCK_TIMEOUT_SECS_DEFAULT,
+            poll_interval_s=_LOCK_RETRY_INTERVAL_SECS,
+        )
         try:
             yield acquired
         finally:

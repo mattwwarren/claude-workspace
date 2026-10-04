@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import importlib.util
 import json
@@ -13,13 +14,14 @@ import sys
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, NoReturn, TypedDict, cast
 from unittest.mock import MagicMock
 
 import pytest
 import yaml
 
-from cw.config import load_state, save_state
+from cw.config import load_state, save_state, sessions_lock_file
 from cw.disk import DiskUsage, InodeUsage
 from cw.models import (
     AGENT_SPAWN_STAMP_KEY,
@@ -1020,6 +1022,104 @@ def _write_global_toggle(tmp_config_dir: Path, toggle: str, value: str) -> None:
 
 
 @contextlib.contextmanager
+def _hold_flock(path: Path) -> Iterator[Callable[[], None]]:
+    """Hold an exclusive ``flock`` on *path* from a SEPARATE open file description.
+
+    flock locks belong to the open file description, so a second ``open()`` in
+    this same process contends exactly like another cw process would. The one
+    lock-holder technique every contention test shares (the sessions lock and
+    the context-file lock): create the parent dir, open, ``LOCK_EX``, release in
+    ``finally``.
+
+    Yields an idempotent ``release()`` for tests that must free the lock
+    mid-wait (e.g. from a patched ``sleep``); the context exit releases too.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if not released:
+                released = True
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+        try:
+            yield release
+        finally:
+            release()
+
+
+def _assert_lock_held(path: Path) -> None:
+    """Assert *path* is flocked: a second open file description cannot take it.
+
+    The probe counterpart of :func:`_hold_flock`; every "is the lock held in
+    here?" check (``sessions_lock`` body, ``cw._flock`` helpers) shares it.
+    """
+    with path.open("w") as probe, pytest.raises(BlockingIOError):
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+class _FakeClock:
+    """Deterministic stand-in for the ``time`` module as ``cw._flock`` sees it.
+
+    ``sleep`` records its argument and advances ``monotonic`` by exactly that
+    amount, so a poll loop's behaviour is a pure function of its arguments and
+    no test depends on the wall clock. ``on_sleep`` receives the 1-based sleep
+    count and lets a test act mid-wait (release the lock, raise).
+    """
+
+    def __init__(self, on_sleep: Callable[[int], None] | None = None) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+        self._on_sleep = on_sleep
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+        if self._on_sleep is not None:
+            self._on_sleep(len(self.sleeps))
+
+
+def _fake_fcntl(flock_fn: Callable[..., object]) -> SimpleNamespace:
+    """A ``fcntl`` stand-in whose ``flock`` is *flock_fn*, constants real."""
+    return SimpleNamespace(
+        flock=flock_fn,
+        LOCK_EX=fcntl.LOCK_EX,
+        LOCK_NB=fcntl.LOCK_NB,
+        LOCK_UN=fcntl.LOCK_UN,
+    )
+
+
+def _raise_eio(*_args: object, **_kwargs: object) -> NoReturn:
+    """A ``flock`` replacement that fails with a non-contention ``OSError``."""
+    raise OSError(errno.EIO, "disk on fire")
+
+
+@contextlib.contextmanager
+def _hold_sessions_lock() -> Iterator[Path]:
+    """Hold ``.sessions.lock`` exclusively on a second fd; yield its path (#2491).
+
+    Resolves the path at call time via ``cw.config.sessions_lock_file()`` so it
+    follows the autouse ``tmp_config_dir`` redirect.
+    """
+    lock_path = sessions_lock_file()
+    with _hold_flock(lock_path):
+        yield lock_path
+
+
+@pytest.fixture
+def held_sessions_lock() -> Iterator[Path]:
+    """Fixture form of :func:`_hold_sessions_lock` for whole-test contention."""
+    with _hold_sessions_lock() as lock_path:
+        yield lock_path
+
+
+@contextlib.contextmanager
 def _hold_context_lock(worktree: Path) -> Iterator[None]:
     """Hold ``<worktree>/.claude/cw-context.json.lock`` exclusively (#1946).
 
@@ -1035,14 +1135,8 @@ def _hold_context_lock(worktree: Path) -> Iterator[None]:
     (patched where it is *defined*, never on a re-exporting module) so the
     bounded retry budget expires quickly.
     """
-    lock_path = worktree / ".claude" / "cw-context.json.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+    with _hold_flock(worktree / ".claude" / "cw-context.json.lock"):
+        yield
 
 
 def _invoke_hook_command(command: str, payload: dict[str, object]) -> Any:

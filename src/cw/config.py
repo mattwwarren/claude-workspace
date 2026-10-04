@@ -22,6 +22,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
 from cw import _config_migrate
+from cw._flock import acquire_sessions_flock
 from cw._git import run_git
 from cw.atomic import atomic_write_text
 from cw.exceptions import (
@@ -295,7 +296,7 @@ _sessions_lock_state = threading.local()
 
 
 @contextlib.contextmanager
-def sessions_lock() -> Iterator[None]:
+def sessions_lock(*, bounded: bool = False) -> Iterator[None]:
     """Acquire an exclusive file lock over the sessions.json write window.
 
     Mirror of ``_queue_lock`` in ``cw.queue``. Hold this across every
@@ -314,6 +315,22 @@ def sessions_lock() -> Iterator[None]:
     ``reconcile()``) must already tolerate a ``CwError``-shaped failure on
     this path; see the callers of ``_dispatch_auto_fix_ci`` /
     ``_dispatch_address_review`` / ``_reconcile_usage_limited``.
+
+    Unbounded by default, bounded by opt-in (GitHub #2491). The default
+    (``bounded=False``) blocks until the lock is free and never raises
+    :class:`~cw.exceptions.SessionsLockTimeoutError`. That is deliberate: many
+    callers take this lock AFTER an irreversible side effect to persist the
+    record of it (a worker spawned, a result emitted, a review finished). A
+    timeout there would orphan the live worker or drop the result, and the
+    caller's broad ``except`` would revert the task to PENDING so the next tick
+    spawns a duplicate. Those callers must wait. ``bounded=True`` is for
+    observe/operator callers with no side effect before the lock (``cw list``,
+    ``cw spawn close``, the reconcile pass): it polls for up to
+    :func:`~cw._flock.sessions_lock_timeout_seconds` (default 60s,
+    ``CW_SESSIONS_LOCK_TIMEOUT_S``) and then raises the timeout error rather
+    than hanging behind a wedged ``cw dev-queue serve``. The env var applies to
+    ``bounded=True`` callers only. Which files may opt in is pinned by an
+    allowlist test (``tests/test_config.py``).
     """
     if getattr(_sessions_lock_state, "held", False):
         msg = (
@@ -324,9 +341,13 @@ def sessions_lock() -> Iterator[None]:
     state_dir().mkdir(parents=True, exist_ok=True)
     lock_path = sessions_lock_file()
     fd = lock_path.open("w")
+    try:
+        acquire_sessions_flock(fd, lock_path, bounded=bounded)
+    except BaseException:
+        fd.close()
+        raise
     _sessions_lock_state.held = True
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
         _sessions_lock_state.held = False
@@ -334,8 +355,12 @@ def sessions_lock() -> Iterator[None]:
         fd.close()
 
 
-def mutate_state(fn: Callable[[CwState], None]) -> CwState:
+def mutate_state(fn: Callable[[CwState], None], *, bounded: bool = False) -> CwState:
     """Load state, apply fn in place under sessions_lock, save and return.
+
+    *bounded* is forwarded to :func:`sessions_lock`: leave it ``False`` (the
+    default) unless the caller has no irreversible side effect before this
+    call.
 
     Not reentrant: calling this while the caller already holds
     ``sessions_lock`` raises :class:`~cw.exceptions.SessionsLockReentryError`
@@ -352,7 +377,7 @@ def mutate_state(fn: Callable[[CwState], None]) -> CwState:
     the disqualifying condition (subprocess inside lock, dual-lock, or
     network call).
     """
-    with sessions_lock():
+    with sessions_lock(bounded=bounded):
         state = load_state()
         fn(state)
         save_state(state)

@@ -123,7 +123,9 @@ def _spawn_close_impl(
     """
     # Why not mutate_state: daemon.stop() network call inside the lock window
     # (criterion 1: no subprocess/network in lock).
-    with sessions_lock():
+    # bounded=True (#2491): operator recovery command with no side effect
+    # before the lock, so a held lock must fail fast, not hang the recovery.
+    with sessions_lock(bounded=True):
         state = load_state()
         sess = state.find_by_name_or_id(session_id)
         if sess is None:
@@ -408,7 +410,9 @@ def _spawn_complete_impl(
     """
     # Why not mutate_state: dev_queue_lock nested inside the sessions_lock
     # window (criterion 2: no dual-lock).
-    with sessions_lock():
+    # bounded=True (#2491): operator recovery command; the lock is taken before
+    # any event is recorded or queue write, so a timeout is a clean retry.
+    with sessions_lock(bounded=True):
         state = load_state()
         sess = state.find_by_name_or_id(session_id)
         if sess is None:
