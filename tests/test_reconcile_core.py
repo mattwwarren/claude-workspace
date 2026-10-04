@@ -1615,6 +1615,62 @@ class TestReviewRecipeDispatchRunsPostLock:
         assert [e.correlation_id for e in failed] == ["GEN-1"]
         assert "OSError: disk on fire" in json.dumps(failed[0].payload)
 
+    def test_an_unwritable_failure_record_neither_skips_siblings_nor_masks_the_error(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The job's PR_ACTION_FAILED record is itself an inbox write that can fail
+        with the same fault (disk full). That second failure is logged, not raised:
+        the sibling job still dispatches and the locked body's original exception
+        is the one the caller sees."""
+        _write_acme_clients_yaml(tmp_config_dir)
+        tasks = [
+            _cr_task(
+                ticket_id=ticket_id,
+                pr_url=f"https://github.com/acme/widgets/pull/{number}",
+                review_recipes={RECIPE_ADDRESS_REVIEW: True},
+                worktree_path=make_git_repo(f"emit-{ticket_id}"),
+            )
+            for ticket_id, number in (("GEN-1", 41), ("GEN-2", 42))
+        ]
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        self._enable_recipes(monkeypatch)
+        spawned: list[str] = []
+
+        def _spawn(**kwargs: Any) -> str:
+            if kwargs["prompt"].endswith(" 41"):
+                msg = "no space left on device"
+                raise OSError(msg)
+            spawned.append(kwargs["prompt"])
+            return "spawned-session-id"
+
+        def _emit_boom(*_args: object, **_kwargs: object) -> None:
+            msg = "inbox unwritable"
+            raise OSError(msg)
+
+        def _sweep_boom(**_kwargs: Any) -> None:
+            msg = "original in-flight failure"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("cw.spawn.spawn_create_impl", _spawn)
+        monkeypatch.setattr(
+            "cw.reconcile.review_recipes.core._emit_pr_action_failed", _emit_boom
+        )
+        monkeypatch.setattr("cw.reconcile.core.run_escalation_sweep", _sweep_boom)
+
+        with (
+            caplog.at_level("ERROR", logger="cw.reconcile.review_recipes"),
+            pytest.raises(RuntimeError, match="original in-flight failure"),
+        ):
+            reconcile(dispatch_review_jobs=True)
+
+        assert spawned == ["/address-review 42"]
+        assert "review_recipe_dispatch_crashed ticket=GEN-1" in caplog.text
+        assert "review_recipe_pr_action_failed_emit_crashed ticket=GEN-1" in caplog.text
+
     # --- item 2: per-job isolation of ANY exception ----------------------
 
     def test_non_cwerror_job_failure_is_isolated_and_recorded(

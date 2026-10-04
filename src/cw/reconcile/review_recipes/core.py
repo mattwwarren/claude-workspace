@@ -38,6 +38,7 @@ from pydantic import ValidationError
 from cw.config import load_effective_clients
 from cw.dev_queue import load_dev_queue
 from cw.events import read_events
+from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
 from cw.reconcile.review_recipes._shared import (
     _PAYLOAD_KEY_CLIENT,
@@ -179,11 +180,21 @@ def _run_isolated(
         # 4. Paired test: tests/test_reconcile_core.py
         #    test_non_cwerror_job_failure_is_isolated_and_recorded.
         _log.exception("review_recipe_dispatch_crashed ticket=%s", ticket_id)
-        _emit_pr_action_failed(
-            payload_base,
-            error=f"{type(exc).__name__}: {exc}",
-            ticket_id=ticket_id,
-        )
+        try:
+            _emit_pr_action_failed(
+                payload_base,
+                error=f"{type(exc).__name__}: {exc}",
+                ticket_id=ticket_id,
+            )
+        except (OSError, CwError):
+            # The failure record is itself an inbox write: a fault that made the
+            # job fail (disk full, inbox lock) can fail it too. Letting that
+            # escape would skip every sibling job (latches already burned) and,
+            # from reconcile()'s ``finally``, replace an in-flight exception, so
+            # log it and move on.
+            _log.exception(
+                "review_recipe_pr_action_failed_emit_crashed ticket=%s", ticket_id
+            )
         return None
 
 
@@ -195,10 +206,12 @@ def dispatch_deferred_review_jobs(deferred: DeferredReviewDispatch) -> list[str]
     then auto_fix_ci jobs (the order ``run_review_recipes`` fires the recipes
     in); a job that fails for ANY reason is logged and recorded as
     ``PR_ACTION_FAILED`` and the next job still runs, so this function does not
-    raise for an ordinary ``Exception`` from a job (a ``BaseException`` such as
-    ``KeyboardInterrupt`` still propagates). That non-raising property is what
-    lets ``reconcile()`` call it from a ``finally`` without masking an
-    in-flight exception from the locked body.
+    raise for an ordinary ``Exception`` from a job, nor when the failure record
+    itself cannot be written (``OSError``/``CwError`` from the inbox are logged);
+    a ``BaseException`` such as ``KeyboardInterrupt`` still propagates and
+    abandons the undispatched jobs. That non-raising property is what lets
+    ``reconcile()`` call it from a ``finally`` without masking an in-flight
+    exception from the locked body.
     """
     acted: list[str] = []
     for address_job in deferred.address_review:
