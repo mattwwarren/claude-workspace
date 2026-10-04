@@ -205,6 +205,10 @@ recorded status, and a payload digest -- never the sentinel payload itself.
   record is a narrow, deliberately out-of-band exception -- observability on
   the door's own write, not a second completion signal competing with the
   hook.
+- **The audit append is best-effort (#2465).** A failure to append the event
+  is logged and the accepted result is still persisted; the audit record is
+  never a precondition for `last_result`. Only the append fails open -- a
+  state-save failure still raises.
 
 ## Alternatives considered
 

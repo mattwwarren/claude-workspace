@@ -38,7 +38,13 @@ from cw.result import (
     has_terminal_result,
     validate_payload,
 )
-from tests.conftest import _REPO_ROOT, _plan_pending_payload, _seed_daemon_session
+from tests.conftest import (
+    _REPO_ROOT,
+    _audit_failure_logged,
+    _fail_audit_append,
+    _plan_pending_payload,
+    _seed_daemon_session,
+)
 
 _PAYLOAD_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -550,32 +556,119 @@ class TestEmitResultLocked:
         events = read_events(event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED])
         assert events == []
 
-    def test_emit_result_locked_audit_append_failure_leaves_last_result_unchanged(
+    def test_emit_result_locked_audit_append_failure_still_persists_result(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Fail open (#2465): an audit-inbox failure is logged, not raised, and
+        the accepted result still reaches ``save_state``."""
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        _fail_audit_append(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger="cw.result"), sessions_lock():
+            outcome = emit_result_locked(
+                _valid_payload(), "test1234", source=LastResultSource.EMIT_CLI
+            )
+
+        assert outcome.refused is False
+        assert outcome.result is not None
+        sess = next(s for s in load_state().sessions if s.id == "test1234")
+        assert sess.last_result is not None
+        assert sess.last_result["status"] == "shipped"
+        assert sess.last_result_source == LastResultSource.EMIT_CLI
+        assert sess.status.value == "active"
+        assert _audit_failure_logged(caplog, session_id="test1234")
+        assert not read_events(
+            event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED]
+        )
+
+    def test_emit_result_locked_refusal_with_failing_audit_mutates_nothing(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A first-writer-wins refusal never reaches the audit append (#2465):
+        no event, no mutation, and no audit-failure log even when the inbox is
+        broken."""
+        _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="test1234",
+            last_result={"status": "shipped"},
+            last_result_source=LastResultSource.STOP_HOOK_HARVEST,
+        )
+        before = load_state().model_dump(mode="json")
+        attempts = _fail_audit_append(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger="cw.result"), sessions_lock():
+            outcome = emit_result_locked(
+                _valid_payload(), "test1234", source=LastResultSource.EMIT_CLI
+            )
+
+        assert outcome.refused is True
+        assert attempts == []
+        assert load_state().model_dump(mode="json") == before
+        assert not _audit_failure_logged(caplog, session_id="test1234")
+        assert not read_events(
+            event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED]
+        )
+
+    def test_emit_result_locked_state_save_failure_not_swallowed_by_fail_open(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A failed audit append propagates and leaves state untouched
-        (event-first ordering, mirrors test_revoke_plan_approval_event_failure_
-        raises_without_mutation)."""
+        """Fail-open covers ONLY the audit append (#2465): with the audit inbox
+        broken, a later ``save_state`` failure still surfaces as the
+        state-write failure and nothing is persisted."""
         import cw.result as result_mod
 
         _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
         before = load_state().model_dump(mode="json")
+        _fail_audit_append(monkeypatch)
 
-        def _raise_event(*_args: object, **_kwargs: object) -> None:
-            msg = "event inbox unavailable"
+        def _raise_save(*_args: object, **_kwargs: object) -> None:
+            msg = "state file unwritable"
             raise OSError(msg)
 
-        monkeypatch.setattr(result_mod, "record_event", _raise_event)
+        monkeypatch.setattr(result_mod, "save_state", _raise_save)
 
-        with sessions_lock(), pytest.raises(OSError, match="event inbox unavailable"):
+        with sessions_lock(), pytest.raises(OSError, match="state file unwritable"):
             emit_result_locked(
                 _valid_payload(), "test1234", source=LastResultSource.EMIT_CLI
             )
 
         assert load_state().model_dump(mode="json") == before
+
+    def test_emit_result_on_audited_audit_failure_still_mutates_session(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The in-memory seam the reconcile result-write paths use (#2465): a
+        failing audit append is logged and the accepted mutation stands, for
+        the caller's own trailing ``save_state`` to flush."""
+        from cw.result import emit_result_on_audited
+
+        session = _in_memory_session()
+        _fail_audit_append(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger="cw.result"):
+            outcome = emit_result_on_audited(
+                session, _valid_payload(), source=LastResultSource.GIT_SYNTHESIS
+            )
+
+        assert outcome.refused is False
+        assert session.last_result is not None
+        assert session.last_result["status"] == "shipped"
+        assert session.last_result_source == LastResultSource.GIT_SYNTHESIS
+        assert _audit_failure_logged(caplog, session_id="sess1234")
 
     def test_emit_result_locked_save_state_failure_raises_with_audit_event_recorded(
         self,
@@ -763,6 +856,33 @@ class TestResultEmit:
         assert sess.last_result["status"] == "shipped"
         # Write-only: emit records the result but does NOT complete the session.
         assert sess.status.value == "active"
+
+    def test_audit_append_failure_still_records_result(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Direct ``cw result emit`` fails open (#2465): a broken audit inbox
+        is logged, the result persists, and the command exits 0 as usual."""
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        _fail_audit_append(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger="cw.result"):
+            result = CliRunner().invoke(
+                main,
+                ["result", "emit", "-", "--session-id", "test1234"],
+                input=json.dumps(_valid_payload()),
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Recorded result for session test1234: status=shipped" in result.output
+        sess = next(s for s in load_state().sessions if s.id == "test1234")
+        assert sess.last_result is not None
+        assert sess.last_result["status"] == "shipped"
+        assert sess.last_result_source == LastResultSource.EMIT_CLI
+        assert _audit_failure_logged(caplog, session_id="test1234")
 
     def test_validation_failure_no_mutation(
         self, tmp_config_dir: Path, tmp_path: Path

@@ -8,6 +8,7 @@ and park_terminal_sibling_tasks policy branches.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -54,7 +55,11 @@ from cw.reconcile import (
 from tests._reconcile_helpers import (
     _write_staged_clients_yaml,
 )
-from tests.conftest import _make_daemon_session
+from tests.conftest import (
+    _audit_failure_logged,
+    _fail_audit_append,
+    _make_daemon_session,
+)
 
 
 def _local_git_worktree(
@@ -216,6 +221,64 @@ def test_local_harvest_stamps_git_synthesis_source(
     reloaded = next(s for s in load_state().sessions if s.id == "harv-gitsrc")
     assert reloaded.status == SessionStatus.COMPLETED
     assert reloaded.last_result_source == LastResultSource.GIT_SYNTHESIS
+
+
+def test_local_harvest_audit_append_failure_still_persists_result_and_routes(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Reconcile result-write path fails open (#2465): a broken audit inbox is
+    logged, the synthesized result persists, and the task is routed exactly as
+    it would be with a healthy inbox (the audit event changes no routing)."""
+    worktree = _local_git_worktree(
+        make_git_repo, "wt-harvest-audit-failure", with_commit=True
+    )
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    session_id = "harv-audit-failure"
+    sess = _mk_local_session(
+        session_id,
+        worktree,
+        LocalLivenessHandle(pid=2_000_000_000, start_time_ns=11),
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=session_id,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session_id,
+                    stage=Stage.IMPL,
+                )
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    candidates = _detect_local_harvest_candidates(load_state(), task_by_ticket)
+    _fail_audit_append(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="cw.result"):
+        harvested = _act_on_local_harvest_candidates(
+            load_state(),
+            candidates,
+            now=datetime(2026, 1, 2, tzinfo=UTC),
+            task_by_ticket=task_by_ticket,
+        )
+
+    assert harvested == [session_id]
+    reloaded = next(s for s in load_state().sessions if s.id == session_id)
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.last_result is not None
+    assert reloaded.last_result["status"] == "stage_complete"
+    assert reloaded.last_result_source == LastResultSource.GIT_SYNTHESIS
+    task = load_dev_queue().tasks[0]
+    assert task.stage == Stage.REVIEW
+    assert task.status == QueueItemStatus.PENDING
+    assert _audit_failure_logged(caplog, session_id=session_id)
+    assert not read_events(event_types=[OrchestratorEventType.SESSION_RESULT_EMITTED])
 
 
 def test_local_harvest_refused_by_door_leaves_session_and_task_untouched(

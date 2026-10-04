@@ -1149,6 +1149,17 @@ result-mutation seams
 reconcile harvest) -- GitHub #2439. Does not fire on a first-writer-wins
 refusal (RFC 0012 S2): a refused write mutates nothing, so there is nothing to
 audit.
+
+**Best-effort, fail open (#2465):** the audit append never decides whether a
+result persists. Once a result validates and wins first-writer-wins
+arbitration, an `OSError` from the event inbox is logged
+(`session.result_emitted audit append failed for session=...`) and the
+normalized `last_result` is still saved -- in `cw result emit`, the Stop-hook
+harvest, executor-direct writes, and the reconcile result-write paths alike.
+The consequence is a missing audit record, never a missing result. Failing to
+persist session (or queue) state itself is a separate failure and still
+propagates; fail-open covers only the audit append.
+
 `payload_digest` is a sha256 hex digest of the normalized sentinel actually
 written to `session.last_result` (`result_obj.model_dump(mode="json")`), not
 the raw incoming payload. `actor` is the local OS username, audit-only --

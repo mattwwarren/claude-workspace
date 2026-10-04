@@ -75,8 +75,11 @@ from tests._reconcile_helpers import (
     _write_transcript_records,
 )
 from tests.conftest import (
+    _audit_failure_logged,
+    _fail_audit_append,
     _make_daemon_session,
     _make_tick_summary,
+    _seed_daemon_session,
     _write_project_config_yaml,
     _write_stop_hook_transcript,
     stub_fetch_plan,
@@ -5885,28 +5888,56 @@ class TestHarvestLastResultThroughDoor:
 
         assert any("rejected by door" in r.getMessage() for r in caplog.records)
 
-    def test_swallows_audit_append_oserror(
+    def test_swallows_state_write_oserror(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
+        """The door's own state read/write ``OSError`` must not block the exit."""
         from cw.auto_dev_result import AutoDevResult
         from cw.cli.stop_hook import _harvest_last_result_through_door
 
         sentinel = AutoDevResult.model_validate(_valid_payload())
 
         def _raise(*_args: object, **_kwargs: object) -> None:
-            message = "inbox unavailable"
+            message = "state file unwritable"
             raise OSError(message)
 
         monkeypatch.setattr("cw.cli.stop_hook.emit_result_locked", _raise)
 
         with caplog.at_level("WARNING"):
-            _harvest_last_result_through_door("sess-audit-error", sentinel)
+            _harvest_last_result_through_door("sess-state-error", sentinel)
 
-        assert any("audit append failed" in r.getMessage() for r in caplog.records)
+        assert any("state write failed" in r.getMessage() for r in caplog.records)
+
+    def test_audit_append_failure_still_persists_harvested_result(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Through the real door (#2465): a broken audit inbox is logged by the
+        door, not the hook's state-write handler, and the harvested result is
+        still persisted."""
+        from cw.auto_dev_result import AutoDevResult
+        from cw.cli.stop_hook import _harvest_last_result_through_door
+
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="harvest01")
+        _fail_audit_append(monkeypatch)
+        sentinel = AutoDevResult.model_validate(_valid_payload())
+
+        with caplog.at_level("WARNING"):
+            _harvest_last_result_through_door("harvest01", sentinel)
+
+        sess = next(s for s in load_state().sessions if s.id == "harvest01")
+        assert sess.last_result is not None
+        assert sess.last_result["status"] == "shipped"
+        assert sess.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+        assert _audit_failure_logged(caplog, session_id="harvest01")
+        assert not any("state write failed" in r.getMessage() for r in caplog.records)
 
 
 class TestSentinelPresentInTranscript:

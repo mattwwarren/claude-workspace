@@ -633,6 +633,37 @@ def _plan_pending_payload(**overrides: object) -> dict[str, Any]:
     return payload
 
 
+def _fail_audit_append(monkeypatch: pytest.MonkeyPatch) -> list[OrchestratorEventType]:
+    """Make every ``session.result_emitted`` audit append raise ``OSError`` (#2465).
+
+    Patches ``cw.result.record_event`` -- the one chokepoint behind
+    ``_record_result_emitted_audit``, which every result-write path (direct
+    CLI, Stop-hook harvest, executor-direct, reconcile) funnels through.
+    Returns the list of attempted event types so a test can assert the append
+    was (or, for a refused write, was not) tried.
+    """
+    attempts: list[OrchestratorEventType] = []
+
+    def _raise_event(
+        event_type: OrchestratorEventType, *_a: object, **_k: object
+    ) -> None:
+        attempts.append(event_type)
+        msg = "event inbox unavailable"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.result.record_event", _raise_event)
+    return attempts
+
+
+def _audit_failure_logged(caplog: pytest.LogCaptureFixture, *, session_id: str) -> bool:
+    """True when the fail-open audit-append warning for SESSION_ID was logged."""
+    return any(
+        "audit append failed" in record.getMessage()
+        and f"session={session_id}" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def _seed_daemon_session(
     tmp_path: Path,
     tmp_config_dir: Path,
