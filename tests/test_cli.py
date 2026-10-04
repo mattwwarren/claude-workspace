@@ -21,6 +21,7 @@ import pytest
 from click.testing import CliRunner, Result
 from freezegun import freeze_time
 
+from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
 from cw._util import claude_project_dir
 from cw.auto_dev_result import (
     _CLOSE_SENTINEL,
@@ -8485,6 +8486,67 @@ class TestSpawnCloseTaskCancellation:
         state = load_state()
         updated = next(s for s in state.sessions if s.id == sess.id)
         assert updated.status == SessionStatus.COMPLETED
+
+
+class TestSessionsLockTimeoutCli:
+    """A held ``.sessions.lock`` surfaces as a clean Click error, not a hang (#2491).
+
+    Every command here reaches a ``bounded=True`` site: ``list``/``status`` via
+    ``reconcile()``, ``spawn close``/``spawn complete`` via ``cli/spawn.py``,
+    ``done`` via ``session.done_session``, ``doctor --reap <SESSION>`` via
+    ``_reap_session_by_selector(bounded=True)``.
+    """
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["list"],
+            ["status"],
+            ["spawn", "close", "--confirmed-dead", "close-sess-1"],
+            ["spawn", "complete", "close-sess-1", "--status", "shipped"],
+            ["done", "close-sess-1"],
+            ["doctor", "--reap", "close-sess-1"],
+        ],
+        ids=["list", "status", "spawn-close", "spawn-complete", "done", "doctor-reap"],
+    )
+    def test_command_exits_nonzero_with_actionable_error(
+        self,
+        held_sessions_lock: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        argv: list[str],
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.2")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        save_state(
+            CwState(
+                sessions=[
+                    _make_daemon_session(
+                        id="close-sess-1",
+                        name="test-client/auto-dev/close-sess-1",
+                        client="test-client",
+                        workspace_path=workspace,
+                        surface_ref="fake-ref",
+                        worktree_path=None,
+                        started_at=datetime.now(UTC),
+                    )
+                ]
+            )
+        )
+
+        result = CliRunner().invoke(main, argv)
+
+        assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit)  # ClickException, no traceback
+        assert "Traceback" not in result.output
+        assert "Timed out" in result.output
+        assert str(held_sessions_lock) in result.output
+        assert f"lsof {held_sessions_lock}" in result.output
+        assert "cw dev-queue serve" in result.output
+        assert SESSIONS_LOCK_TIMEOUT_ENV in result.output
+        # One message, not the same text twice (log-and-raise duplication).
+        assert result.output.count("Timed out") == 1
 
 
 class TestPeek:

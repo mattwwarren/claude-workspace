@@ -427,6 +427,9 @@ def _drain_reap_proposals(client: str, lane: str) -> int:
             # is NOT reentrant. Safe here because orchestrate run is a standalone
             # command, NOT inside reconcile's held sessions_lock/_reconcile_locked
             # window. Never invoke this from inside a held lock (cf. #387/#563).
+            # Why (#2491): deliberately NOT bounded. This runs in the unattended
+            # poll loop; a SessionsLockTimeoutError would end the lane's
+            # reap-authorization consumer for good, so it waits the lock out.
             # Why: under reap_policy=auto, sessions are already terminal when this
             # consumer reads the event; the status guard above makes it a no-op.
             _reap_session_by_selector(

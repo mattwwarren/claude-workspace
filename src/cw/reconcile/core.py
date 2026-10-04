@@ -308,7 +308,13 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
 
     review_sink = DeferredReviewDispatch() if dispatch_review_jobs else None
     try:
-        with sessions_lock():
+        # bounded=True (#2491): everything before this point is read-only, so a
+        # timeout loses nothing. It lets `cw list`/`cw status`/`cw start` fail
+        # with an actionable error behind a wedged serve instead of hanging, and
+        # lets dispatch_tick skip the tick (_reconcile_usage_limited re-raises
+        # it). A timeout means the lock was never acquired, so review_sink is
+        # still empty and the drain in the `finally` below is a no-op.
+        with sessions_lock(bounded=True):
             locked_report = _reconcile_locked(
                 merged_ticket_ids=merged_ticket_ids,
                 gh_blocked_ticket_ids=gh_blocked_ticket_ids,

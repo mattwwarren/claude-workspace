@@ -85,7 +85,7 @@ def doctor(reap: bool, session: str | None, as_json: bool) -> None:
     to PENDING.
     """
     if reap and session:
-        ok = _reap_session_by_selector(session)
+        ok = _reap_session_by_selector(session, bounded=True)
         if not ok:
             click.echo(f"No session found matching {session!r}", err=True)
             raise click.exceptions.Exit(1)

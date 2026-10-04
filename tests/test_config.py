@@ -2,14 +2,27 @@
 
 from __future__ import annotations
 
+import ast
+import fcntl
+import logging
 import os
-from typing import TYPE_CHECKING
+import select
+import subprocess
+import sys
+import textwrap
+import threading
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import TYPE_CHECKING, NamedTuple
 from unittest.mock import MagicMock
 
 import pytest
 
 import cw.config
+from cw import _flock
 from cw._config_migrate import migrate_cw_state
+from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
 from cw.config import (
     _REAL_CONFIG_DIR,
     _REAL_STATE_DIR,
@@ -24,9 +37,14 @@ from cw.config import (
     refuse_real_state_write,
     save_state,
     sessions_lock,
+    sessions_lock_file,
     show_config,
 )
-from cw.exceptions import CwError, SessionsLockReentryError
+from cw.exceptions import (
+    CwError,
+    SessionsLockReentryError,
+    SessionsLockTimeoutError,
+)
 from cw.models import (
     CW_STATE_SCHEMA_VERSION,
     DEFAULT_AUTO_PURPOSES,
@@ -35,12 +53,21 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
 )
-from tests.conftest import _make_daemon_session, _write_clients_yaml
+from tests.conftest import (
+    _assert_lock_held,
+    _fake_fcntl,
+    _FakeClock,
+    _hold_flock,
+    _hold_sessions_lock,
+    _make_daemon_session,
+    _raise_eio,
+    _write_clients_yaml,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from datetime import datetime
-    from pathlib import Path
+    from typing import IO
 
     from cw.dispatch_state import ExecutorBlockedMarker
 
@@ -1948,6 +1975,578 @@ class TestSessionsLockReentrancy:
         # A second call must succeed — no stuck "held" flag from the raise.
         with sessions_lock():
             pass
+
+
+# ---------------------------------------------------------------------------
+# TestSessionsLockAcquire / TestSessionsLockBounded / allowlist guard (#2491)
+# ---------------------------------------------------------------------------
+
+_TINY_TIMEOUT_S = "0.05"
+_CHILD_READY_TIMEOUT_S = 10.0
+
+# Call sites allowed to pass a literal ``bounded=True``, keyed by (path relative
+# to ``src/``, enclosing function qualname) with the exact number of calls.
+# Bounded is safe ONLY for observe/operator callers with no irreversible side
+# effect before the lock: a timeout after a side effect orphans a live worker
+# or loses a result, and the caller's broad ``except`` then reverts the task to
+# PENDING so the next tick spawns a duplicate. Per-FUNCTION granularity matters:
+# a file-level allowlist would let a second bounded call (or a flipped
+# post-``spawn_bg`` one) slip into an already-allowlisted file. Adding an entry
+# is a conscious call: verify nothing irreversible happens before the lock, that
+# no unattended loop reaches the site, and that, if it is reachable inside
+# ``dispatch_tick``, SessionsLockTimeoutError is handled.
+_BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
+    ("cw/cli/maintenance.py", "doctor"): 1,  # `cw doctor --reap <SESSION>`
+    ("cw/cli/spawn.py", "_spawn_close_impl"): 1,  # `cw spawn close`
+    ("cw/cli/spawn.py", "_spawn_complete_impl"): 1,  # `cw spawn complete`
+    ("cw/dev_queue/requeue.py", "unblock_ticket"): 1,  # `cw dev-queue unblock`
+    ("cw/doctor/wedge.py", "_reap_wedge_findings"): 1,  # `cw doctor --reap`
+    ("cw/orchestrate.py", "retire_merged_prs"): 1,  # `cw orchestrate retire`
+    ("cw/reconcile/core.py", "reconcile"): 1,  # list/status/start + tick pre-pass
+    ("cw/session.py", "background_session"): 1,  # `cw bg`
+    ("cw/session.py", "resume_session"): 1,  # live-surface `_update_live` only
+    ("cw/session.py", "done_session"): 1,  # `cw done`
+    ("cw/session_retention.py", "prune_sessions"): 1,  # session prune
+}
+# Call sites that pass a non-literal ``bounded=<name>``: they only forward their
+# caller's choice. Anything else computing ``bounded`` at runtime defeats the
+# audit above, so the set is exact.
+_BOUNDED_FORWARDERS_ALLOWLIST: dict[tuple[str, str], int] = {
+    # mutate_state() forwards its own ``bounded`` parameter to sessions_lock().
+    ("cw/config.py", "mutate_state"): 1,
+    # The reap helper forwards its caller's choice: the operator callers above
+    # pass True, the unattended `cw orchestrate run --lane` poll loop keeps the
+    # unbounded default (a timeout would end that consumer for good).
+    ("cw/doctor/loop_health.py", "_reap_session_by_selector"): 1,
+}
+# Callables whose ``bounded=`` argument the scan audits.
+_LOCK_ENTRY_POINTS = frozenset(
+    {"sessions_lock", "mutate_state", "_reap_session_by_selector"}
+)
+
+
+class _BoundedScan(NamedTuple):
+    """Result of :func:`_scan_bounded_calls`; every key is (rel path, qualname)."""
+
+    literal_true: Counter[tuple[str, str]]
+    non_literal: Counter[tuple[str, str]]
+    true_targets: dict[tuple[str, str], list[str]]
+    violations: list[str]
+
+
+class _BoundedCallVisitor(ast.NodeVisitor):
+    """Collect ``bounded=`` usage per enclosing function qualname.
+
+    Nested defs and classes extend the qualname (``Outer.inner``). Forms the
+    scan cannot attribute reliably are reported as ``violations`` rather than
+    silently ignored: aliased imports of the entry points, a bare reference
+    that is not a call (``x = sessions_lock``), and ``**kwargs`` calls.
+    """
+
+    def __init__(self, rel: str) -> None:
+        self.rel = rel
+        self.scope: list[str] = []
+        self.literal_true: Counter[tuple[str, str]] = Counter()
+        self.non_literal: Counter[tuple[str, str]] = Counter()
+        self.true_targets: dict[tuple[str, str], list[str]] = {}
+        self.violations: list[str] = []
+        self._call_funcs: set[int] = set()
+
+    def _where(self) -> tuple[str, str]:
+        return (self.rel, ".".join(self.scope) or "<module>")
+
+    def _visit_scope(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+    ) -> None:
+        self.scope.append(node.name)
+        self.generic_visit(node)
+        self.scope.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_scope(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_scope(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._visit_scope(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            if alias.name in _LOCK_ENTRY_POINTS and alias.asname not in (
+                None,
+                alias.name,
+            ):
+                self.violations.append(
+                    f"{self.rel}:{node.lineno}: {alias.name} imported as"
+                    f" {alias.asname}; the scan cannot follow aliases"
+                )
+
+    def visit_Name(self, node: ast.Name) -> None:
+        self._check_bare_reference(node, node.id)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        self._check_bare_reference(node, node.attr)
+        self.generic_visit(node)
+
+    def _check_bare_reference(self, node: ast.Name | ast.Attribute, name: str) -> None:
+        if name in _LOCK_ENTRY_POINTS and id(node) not in self._call_funcs:
+            self.violations.append(
+                f"{self.rel}:{node.lineno}: {name} referenced without being"
+                " called; the scan cannot follow it"
+            )
+
+    def visit_Call(self, node: ast.Call) -> None:
+        self._call_funcs.add(id(node.func))
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+        if name in _LOCK_ENTRY_POINTS:
+            self._record(node, name)
+        self.generic_visit(node)
+
+    def _record(self, node: ast.Call, name: str) -> None:
+        where = self._where()
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                self.violations.append(
+                    f"{self.rel}:{node.lineno}: **kwargs call to {name};"
+                    " bounded= cannot be audited"
+                )
+            elif keyword.arg == "bounded":
+                value = keyword.value
+                if isinstance(value, ast.Constant) and value.value is True:
+                    self.literal_true[where] += 1
+                    target = ast.unparse(node.args[0]) if node.args else ""
+                    self.true_targets.setdefault(where, []).append(target)
+                elif not (isinstance(value, ast.Constant) and value.value is False):
+                    self.non_literal[where] += 1
+
+
+def _scan_bounded_calls(src_root: Path) -> _BoundedScan:
+    """Scan every ``*.py`` under *src_root* for audited ``bounded=`` calls."""
+    scan = _BoundedScan(Counter(), Counter(), {}, [])
+    for path in sorted(src_root.rglob("*.py")):
+        visitor = _BoundedCallVisitor(path.relative_to(src_root).as_posix())
+        visitor.visit(ast.parse(path.read_text(encoding="utf-8")))
+        scan.literal_true.update(visitor.literal_true)
+        scan.non_literal.update(visitor.non_literal)
+        scan.true_targets.update(visitor.true_targets)
+        scan.violations.extend(visitor.violations)
+    return scan
+
+
+class _RecordingLockPath:
+    """Duck-typed lock path that remembers every handle ``sessions_lock`` opens."""
+
+    def __init__(self, real: Path) -> None:
+        self._real = real
+        self.handles: list[IO[str]] = []
+
+    def open(self, mode: str) -> IO[str]:
+        handle = self._real.open(mode)
+        self.handles.append(handle)
+        return handle
+
+    def __str__(self) -> str:
+        return str(self._real)
+
+
+@pytest.fixture
+def recording_lock_path(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> _RecordingLockPath:
+    recorder = _RecordingLockPath(sessions_lock_file())
+    monkeypatch.setattr("cw.config.sessions_lock_file", lambda: recorder)
+    return recorder
+
+
+class TestSessionsLockAcquire:
+    """Acquisition basics, identical for the default and the bounded mode."""
+
+    @pytest.mark.parametrize("bounded", [False, True], ids=["default", "bounded"])
+    def test_holds_the_lock_inside_the_body_and_releases_after(
+        self, tmp_config_dir: Path, bounded: bool
+    ) -> None:
+        lock_path = sessions_lock_file()
+
+        with sessions_lock(bounded=bounded):
+            _assert_lock_held(lock_path)
+
+        with lock_path.open("w") as probe:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    @pytest.mark.parametrize("bounded", [False, True], ids=["default", "bounded"])
+    def test_reentry_still_raises_reentry_not_timeout_or_hang(
+        self, tmp_config_dir: Path, bounded: bool
+    ) -> None:
+        with (
+            sessions_lock(),
+            pytest.raises(SessionsLockReentryError),
+            sessions_lock(bounded=bounded),
+        ):
+            pytest.fail("must not reach body")
+
+
+class TestSessionsLockBounded:
+    """``sessions_lock(bounded=True)`` and its opt-in contract (GitHub #2491)."""
+
+    def test_times_out_with_actionable_message_when_another_fd_holds_lock(
+        self,
+        held_sessions_lock: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, _TINY_TIMEOUT_S)
+        caplog.set_level(logging.DEBUG)
+
+        with (
+            pytest.raises(SessionsLockTimeoutError) as exc_info,
+            sessions_lock(bounded=True),
+        ):
+            pytest.fail("must not reach body")
+
+        err = exc_info.value
+        assert isinstance(err, CwError)
+        assert err.lock_path == held_sessions_lock
+        assert err.waited_s >= float(_TINY_TIMEOUT_S)
+        message = str(err)
+        assert str(held_sessions_lock) in message
+        assert f"lsof {held_sessions_lock}" in message
+        assert "cw dev-queue serve" in message
+        assert "dispatch.tick" in message
+        assert "restart" in message
+        assert f"{SESSIONS_LOCK_TIMEOUT_ENV} (seconds; currently 0.05)" in message
+        # The raiser does not also log the message (log-and-raise duplication).
+        assert not [r for r in caplog.records if "Timed out" in r.getMessage()]
+
+    def test_zero_timeout_fails_with_zero_sleeps_when_held(
+        self,
+        held_sessions_lock: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0")
+        clock = _FakeClock()
+        monkeypatch.setattr(_flock, "time", clock)
+
+        with pytest.raises(SessionsLockTimeoutError), sessions_lock(bounded=True):
+            pytest.fail("must not reach body")
+
+        assert clock.sleeps == []
+
+    def test_zero_timeout_acquires_when_free(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0")
+
+        with sessions_lock(bounded=True):
+            _assert_lock_held(sessions_lock_file())
+
+    def test_timeout_closes_fd_and_leaves_lock_and_guard_usable(
+        self,
+        recording_lock_path: _RecordingLockPath,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, _TINY_TIMEOUT_S)
+
+        with (
+            _hold_sessions_lock(),
+            pytest.raises(SessionsLockTimeoutError),
+            sessions_lock(bounded=True),
+        ):
+            pytest.fail("must not reach body")
+
+        assert [h.closed for h in recording_lock_path.handles] == [True]
+        # Held flag was never set: a real acquisition is not mistaken for re-entry.
+        with sessions_lock(bounded=True):
+            pass
+
+    @pytest.mark.parametrize("bounded", [False, True], ids=["default", "bounded"])
+    def test_non_contention_oserror_propagates_and_closes_fd(
+        self,
+        recording_lock_path: _RecordingLockPath,
+        monkeypatch: pytest.MonkeyPatch,
+        bounded: bool,
+    ) -> None:
+        with monkeypatch.context() as patch_ctx:
+            patch_ctx.setattr(_flock, "fcntl", _fake_fcntl(_raise_eio))
+            with (
+                pytest.raises(OSError, match="disk on fire"),
+                sessions_lock(bounded=bounded),
+            ):
+                pytest.fail("must not reach body")
+
+        assert [h.closed for h in recording_lock_path.handles] == [True]
+        with sessions_lock(bounded=bounded):
+            pass
+
+    def test_keyboard_interrupt_while_waiting_closes_fd_and_clears_guard(
+        self,
+        recording_lock_path: _RecordingLockPath,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "30")
+
+        def _interrupt(_sleep_count: int) -> None:
+            raise KeyboardInterrupt
+
+        with _hold_sessions_lock(), monkeypatch.context() as patch_ctx:
+            patch_ctx.setattr(_flock, "time", _FakeClock(on_sleep=_interrupt))
+            with pytest.raises(KeyboardInterrupt), sessions_lock(bounded=True):
+                pytest.fail("must not reach body")
+
+        assert [h.closed for h in recording_lock_path.handles] == [True]
+        with sessions_lock(bounded=True):
+            pass
+
+    def test_acquires_when_holder_releases_before_deadline(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "30")
+        entered = False
+
+        with _hold_flock(sessions_lock_file()) as release:
+            # First poll finds the lock held; the holder frees it during the
+            # sleep, so the second poll acquires. No wall-clock waiting.
+            clock = _FakeClock(on_sleep=lambda _n: release())
+            monkeypatch.setattr(_flock, "time", clock)
+            with sessions_lock(bounded=True):
+                entered = True
+
+        assert entered
+        assert len(clock.sleeps) == 1
+
+    def test_default_is_unbounded_while_bounded_times_out(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same held lock, same tiny env bound: only ``bounded=True`` times out.
+
+        Plain ``sessions_lock()`` must wait the holder out however short the
+        env timeout is, because commit-after-side-effect callers rely on it.
+        """
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, _TINY_TIMEOUT_S)
+        held = threading.Event()
+        release = threading.Event()
+
+        def _holder() -> None:
+            with _hold_sessions_lock():
+                held.set()
+                release.wait(timeout=10)
+
+        releaser = threading.Timer(0.3, release.set)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            holder = pool.submit(_holder)
+            try:
+                assert held.wait(timeout=5)
+                with (
+                    pytest.raises(SessionsLockTimeoutError),
+                    sessions_lock(bounded=True),
+                ):
+                    pytest.fail("must not reach body")
+
+                releaser.start()
+                with sessions_lock():
+                    holder_released_before_entry = release.is_set()
+            finally:
+                releaser.cancel()
+                release.set()
+            holder.result(timeout=10)  # re-raises anything the holder thread hit
+
+        assert holder_released_before_entry
+
+    def test_mutate_state_forwards_bounded(
+        self, held_sessions_lock: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, _TINY_TIMEOUT_S)
+
+        with pytest.raises(SessionsLockTimeoutError):
+            mutate_state(lambda _state: None, bounded=True)
+
+    def test_times_out_when_another_process_holds_lock(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.2")
+        path = sessions_lock_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        script = textwrap.dedent(
+            """
+            import fcntl, sys
+            fd = open(sys.argv[1], "w")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            print("locked", flush=True)
+            sys.stdin.read()
+            """
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script, str(path)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert proc.stdout is not None
+            ready, _, _ = select.select([proc.stdout], [], [], _CHILD_READY_TIMEOUT_S)
+            assert ready, "child never reported that it holds the lock"
+            assert proc.stdout.readline().strip() == "locked"
+
+            with pytest.raises(SessionsLockTimeoutError), sessions_lock(bounded=True):
+                pytest.fail("must not reach body")
+        finally:
+            proc.kill()
+            proc.wait(timeout=10)
+            for pipe in (proc.stdin, proc.stdout):
+                if pipe is not None:
+                    pipe.close()
+
+        # Holder is dead -> its fd is gone -> the lock is free again.
+        with sessions_lock(bounded=True):
+            pass
+
+
+class TestBoundedSessionsLockAllowlist:
+    """Guard: ``bounded=True`` may only appear in the audited files (#2491)."""
+
+    @pytest.fixture(scope="class")
+    def src_scan(self) -> _BoundedScan:
+        return _scan_bounded_calls(Path(_flock.__file__).resolve().parent.parent)
+
+    def test_bounded_true_call_sites_match_the_allowlist(
+        self, src_scan: _BoundedScan
+    ) -> None:
+        assert dict(src_scan.literal_true) == _BOUNDED_TRUE_ALLOWLIST, (
+            "bounded=True call sites changed. A bounded acquisition that runs"
+            " AFTER an irreversible side effect (spawn, launch, result emit)"
+            " orphans work when it times out. If the new site has no prior side"
+            " effect and no unattended loop reaches it, add (file, function) to"
+            " _BOUNDED_TRUE_ALLOWLIST; if it is reachable from dispatch_tick,"
+            " also handle SessionsLockTimeoutError there."
+        )
+
+    def test_non_literal_bounded_is_only_forwarded_by_the_audited_helpers(
+        self, src_scan: _BoundedScan
+    ) -> None:
+        assert dict(src_scan.non_literal) == _BOUNDED_FORWARDERS_ALLOWLIST
+
+    def test_scan_finds_no_alias_bare_reference_or_kwargs_forms(
+        self, src_scan: _BoundedScan
+    ) -> None:
+        assert src_scan.violations == []
+
+    def test_session_py_bounds_only_the_pre_side_effect_paths(
+        self, src_scan: _BoundedScan
+    ) -> None:
+        session_py = {
+            qualname: count
+            for (rel, qualname), count in src_scan.literal_true.items()
+            if rel == "cw/session.py"
+        }
+
+        assert session_py == {
+            "background_session": 1,
+            "resume_session": 1,
+            "done_session": 1,
+        }
+        # start_session spawns the daemon worker and records it afterwards:
+        # a timeout there would orphan the worker, so it must stay unbounded.
+        assert ("cw/session.py", "start_session") not in src_scan.literal_true
+        assert ("cw/session.py", "start_session") not in src_scan.non_literal
+        # In resume_session only the live-surface path may be bounded. The
+        # dead-surface `_update_dead` runs AFTER spawn_bg re-spawned the worker.
+        targets = src_scan.true_targets[("cw/session.py", "resume_session")]
+        assert targets == ["_update_live"]
+
+    def test_the_unattended_reap_consumer_stays_unbounded(
+        self, src_scan: _BoundedScan
+    ) -> None:
+        """`cw orchestrate run --lane` polls forever; a timeout would end it."""
+        key = ("cw/cli/orchestrate.py", "_drain_reap_proposals")
+
+        assert key not in src_scan.literal_true
+        assert key not in src_scan.non_literal
+
+    def test_scanner_tracks_enclosing_function_qualnames(self, tmp_path: Path) -> None:
+        (tmp_path / "a.py").write_text(
+            "def top():\n"
+            "    with sessions_lock(bounded=True):\n"
+            "        pass\n"
+            "    def inner():\n"
+            "        config.mutate_state(fn, bounded=True)\n"
+            "        config.mutate_state(fn, bounded=True)\n"
+            "class K:\n"
+            "    def method(self):\n"
+            "        sessions_lock(bounded=True)\n"
+            "sessions_lock(bounded=True)\n"
+        )
+        (tmp_path / "b.py").write_text(
+            "def f():\n    with sessions_lock(bounded=flag):\n        pass\n"
+        )
+        (tmp_path / "c.py").write_text(
+            "def f():\n    with sessions_lock(bounded=False):\n        pass\n"
+            "    with sessions_lock():\n        pass\n"
+        )
+
+        scan = _scan_bounded_calls(tmp_path)
+
+        assert dict(scan.literal_true) == {
+            ("a.py", "top"): 1,
+            ("a.py", "top.inner"): 2,
+            ("a.py", "K.method"): 1,
+            ("a.py", "<module>"): 1,
+        }
+        assert scan.true_targets[("a.py", "top.inner")] == ["fn", "fn"]
+        assert dict(scan.non_literal) == {("b.py", "f"): 1}
+        assert scan.violations == []
+
+    def test_scanner_distinguishes_functions_within_one_file(
+        self, tmp_path: Path
+    ) -> None:
+        """The regression the per-file allowlist missed (flipped `_update_dead`)."""
+        (tmp_path / "s.py").write_text(
+            "def resume():\n"
+            "    mutate_state(_update_live, bounded=True)\n"
+            "    mutate_state(_update_dead, bounded=True)\n"
+        )
+
+        scan = _scan_bounded_calls(tmp_path)
+
+        assert scan.literal_true == {("s.py", "resume"): 2}
+        assert scan.true_targets[("s.py", "resume")] == ["_update_live", "_update_dead"]
+
+    @pytest.mark.parametrize(
+        ("source", "needle"),
+        [
+            ("from cw.config import sessions_lock as lock\n", "imported as lock"),
+            ("from cw.config import mutate_state as ms\n", "imported as ms"),
+            ("lock = sessions_lock\n", "referenced without being called"),
+            ("lock = config.mutate_state\n", "referenced without being called"),
+            ("sessions_lock(**opts)\n", "**kwargs call to sessions_lock"),
+            ("cfg.mutate_state(fn, **opts)\n", "**kwargs call to mutate_state"),
+        ],
+    )
+    def test_scanner_reports_forms_it_cannot_follow(
+        self, tmp_path: Path, source: str, needle: str
+    ) -> None:
+        (tmp_path / "x.py").write_text(source)
+
+        scan = _scan_bounded_calls(tmp_path)
+
+        assert len(scan.violations) == 1
+        assert needle in scan.violations[0]
+
+    def test_scanner_accepts_unaliased_import_and_plain_calls(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "ok.py").write_text(
+            "from cw.config import sessions_lock, mutate_state\n"
+            "from cw.config import sessions_lock as sessions_lock\n"
+            "with sessions_lock():\n    pass\n"
+            "mutate_state(fn)\n"
+        )
+
+        scan = _scan_bounded_calls(tmp_path)
+
+        assert scan.violations == []
+        assert not scan.literal_true
+        assert not scan.non_literal
 
 
 # ---------------------------------------------------------------------------
