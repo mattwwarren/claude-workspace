@@ -725,7 +725,9 @@ def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
     # Why: sessions_lock outer, dev_queue_lock inner — canonical dual-lock ordering.
     # Both saves happen under the outer lock so sessions.json is never written unless
     # dev_queue.json succeeds first (safe-fail direction for partial-commit scenarios).
-    with sessions_lock():
+    # bounded=True (#2491): operator `cw dev-queue unblock`; only a read-only
+    # pre-check precedes the lock, so a timeout is a clean retry.
+    with sessions_lock(bounded=True):
         state = load_state()
         session = None
         if session_id is not None:

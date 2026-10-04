@@ -21,6 +21,7 @@ import pytest
 from click.testing import CliRunner, Result
 from freezegun import freeze_time
 
+from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
 from cw._util import claude_project_dir
 from cw.auto_dev_result import (
     _CLOSE_SENTINEL,
@@ -40,13 +41,11 @@ from cw.cli._base import print_fixed_width_table
 from cw.cli._sentinels import _sentinel_frame_after
 from cw.cli.sprint import _resolve_version
 from cw.config import (
-    SESSIONS_LOCK_TIMEOUT_ENV,
     clients_file,
     load_clients,
     load_state,
     orchestrator_config_file,
     save_state,
-    sessions_lock_file,
 )
 from cw.events import read_events
 from cw.exceptions import CwError, SprintApplyError
@@ -8490,22 +8489,12 @@ class TestSpawnCloseTaskCancellation:
 
 
 class TestSessionsLockTimeoutCli:
-    """A held ``.sessions.lock`` surfaces as a clean Click error, not a hang (#2491)."""
+    """A held ``.sessions.lock`` surfaces as a clean Click error, not a hang (#2491).
 
-    @pytest.fixture
-    def held_sessions_lock(
-        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> Iterator[Path]:
-        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.2")
-        lock_path = sessions_lock_file()
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        holder = lock_path.open("w")
-        fcntl.flock(holder, fcntl.LOCK_EX)
-        try:
-            yield lock_path
-        finally:
-            fcntl.flock(holder, fcntl.LOCK_UN)
-            holder.close()
+    Every command here reaches a ``bounded=True`` site: ``list``/``status`` via
+    ``reconcile()``, ``spawn close``/``spawn complete`` via ``cli/spawn.py``,
+    ``done`` via ``session.done_session``.
+    """
 
     @pytest.mark.parametrize(
         "argv",
@@ -8513,12 +8502,19 @@ class TestSessionsLockTimeoutCli:
             ["list"],
             ["status"],
             ["spawn", "close", "--confirmed-dead", "close-sess-1"],
+            ["spawn", "complete", "close-sess-1", "--status", "shipped"],
+            ["done", "close-sess-1"],
         ],
-        ids=["list", "status", "spawn-close"],
+        ids=["list", "status", "spawn-close", "spawn-complete", "done"],
     )
     def test_command_exits_nonzero_with_actionable_error(
-        self, held_sessions_lock: Path, tmp_path: Path, argv: list[str]
+        self,
+        held_sessions_lock: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        argv: list[str],
     ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.2")
         workspace = tmp_path / "workspace"
         workspace.mkdir(parents=True, exist_ok=True)
         save_state(
@@ -8541,10 +8537,14 @@ class TestSessionsLockTimeoutCli:
 
         assert result.exit_code == 1
         assert isinstance(result.exception, SystemExit)  # ClickException, no traceback
+        assert "Traceback" not in result.output
         assert "Timed out" in result.output
         assert str(held_sessions_lock) in result.output
+        assert f"lsof {held_sessions_lock}" in result.output
         assert "cw dev-queue serve" in result.output
         assert SESSIONS_LOCK_TIMEOUT_ENV in result.output
+        # One message, not the same text twice (log-and-raise duplication).
+        assert result.output.count("Timed out") == 1
 
 
 class TestPeek:

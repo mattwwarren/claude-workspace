@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import logging
 import subprocess
@@ -15,10 +14,10 @@ from typing import TYPE_CHECKING
 import pytest
 import yaml
 
+from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
 from cw.auto_dev_result import IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
 from cw.codex_background import _default_background, join_outstanding_codex_threads
 from cw.config import (
-    SESSIONS_LOCK_TIMEOUT_ENV,
     _load_concurrency_overrides,
     _save_concurrency_overrides,
     dispatch_loop_lock,
@@ -109,6 +108,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from tests.conftest import (
+    _hold_sessions_lock,
     _make_daemon_session,
     _make_tick_summary,
     _make_ticket_task,
@@ -5119,40 +5119,69 @@ class TestDispatchTickSessionsLockTimeout:
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == "GEN-2491")
         assert task.status == QueueItemStatus.PENDING  # not claimed this tick
-        assert any(
-            record.name == "cw.dispatch"
-            and record.levelno == logging.WARNING
-            and "skipping tick" in record.getMessage()
+        skip_warnings = [
+            record
             for record in caplog.records
-        )
+            if record.name == "cw.dispatch" and "skipping tick" in record.getMessage()
+        ]
+        assert len(skip_warnings) == 1  # logged once, with the exception text
+        assert skip_warnings[0].levelno == logging.WARNING
+        assert "lock held" in skip_warnings[0].getMessage()
 
-    def test_next_tick_proceeds_once_lock_is_free(
+    def test_skipped_tick_records_no_dispatch_tick_event(
         self,
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """DISPATCH_TICK is written after claim/spawn, so a skipped tick has none.
+
+        This is the premise of the watchdog claim in ``tick.py``: the gap is
+        visible only through the watchdogs that read ``dispatch.tick`` age.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-2493", client="test-client"))
+
+        def _timeout(*_args: object, **_kwargs: object) -> None:
+            msg = "lock held"
+            raise SessionsLockTimeoutError(
+                msg, lock_path=sessions_lock_file(), waited_s=60.0
+            )
+
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", _timeout)
+
+        dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+
+        assert read_events(event_types=[OrchestratorEventType.DISPATCH_TICK]) == []
+
+    def test_real_contention_skips_tick_then_next_tick_proceeds(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
         """Real contention end to end: held lock -> skipped tick; released -> spawn."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-2492", client="test-client"))
         monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.2")
+        caplog.set_level(logging.WARNING, logger="cw.dispatch")
         daemon = FakeNativeDaemonClient()
 
-        lock_path = sessions_lock_file()
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        holder = lock_path.open("w")
-        fcntl.flock(holder, fcntl.LOCK_EX)
-        try:
+        with _hold_sessions_lock():
             skipped = dispatch_tick(simple_config, native_daemon=daemon)
-        finally:
-            fcntl.flock(holder, fcntl.LOCK_UN)
-            holder.close()
 
         assert skipped.spawned == 0
         assert daemon.spawn_calls == []
+        assert any("skipping tick" in record.getMessage() for record in caplog.records)
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-2492")
+        assert task.status == QueueItemStatus.PENDING  # nothing claimed or spawned
+        assert read_events(event_types=[OrchestratorEventType.DISPATCH_TICK]) == []
 
         retried = dispatch_tick(simple_config, native_daemon=daemon)
+
         assert retried.spawned == 1
 
     def test_other_reconcile_errors_still_swallowed(

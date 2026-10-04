@@ -18,10 +18,10 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cw._flock import try_flock_until
 from cw.atomic import atomic_write_text
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
 
@@ -49,21 +49,17 @@ def _context_lock(context_path: Path) -> Iterator[bool]:
 
     Yields ``False`` (rather than raising) when the retry budget expires, so
     the caller's fail-open path is an ordinary branch, not exception handling.
+    Only genuine contention exhausts the budget (:func:`cw._flock.try_flock_until`);
+    any other ``OSError`` from ``flock`` propagates to the caller, which
+    :func:`_write_cw_context_locked` already treats as fail-open.
     """
     lock_path = context_path.with_name(context_path.name + _LOCK_SUFFIX)
-    deadline = time.monotonic() + _LOCK_TIMEOUT_SECS_DEFAULT
     with lock_path.open("w") as handle:
-        acquired = False
-        while True:
-            try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(_LOCK_RETRY_INTERVAL_SECS)
-                continue
-            acquired = True
-            break
+        acquired = try_flock_until(
+            handle,
+            timeout_s=_LOCK_TIMEOUT_SECS_DEFAULT,
+            poll_interval_s=_LOCK_RETRY_INTERVAL_SECS,
+        )
         try:
             yield acquired
         finally:

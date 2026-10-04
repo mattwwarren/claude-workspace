@@ -789,15 +789,18 @@ class SessionsLockReentryError(CwError):
 
 
 class SessionsLockTimeoutError(CwError):
-    """Raised when ``sessions_lock()`` cannot acquire ``.sessions.lock`` in time.
+    """Raised when a bounded ``sessions_lock`` cannot acquire the lock in time.
 
+    Only ``sessions_lock(bounded=True)`` (and ``mutate_state(..., bounded=True)``)
+    raise this; the default unbounded acquisition blocks and never raises it.
     Another process (typically ``cw dev-queue serve``, mid-reconcile) held the
-    advisory flock past the configured wait bound (GitHub #2491). Before the
-    bound existed the blocked caller hung indefinitely, which also blocked the
-    documented recovery commands (``cw list``, ``cw spawn close``). The message
-    is operator-facing and already names the lock path, the wait and the knob;
-    the lock file records no holder PID, so none is reported. Carries
-    ``lock_path`` and ``waited_s`` for callers that log structured fields.
+    advisory flock past the ``CW_SESSIONS_LOCK_TIMEOUT_S`` wait (GitHub #2491).
+    Before the bound existed the blocked caller hung indefinitely, which also
+    blocked the documented recovery commands (``cw list``, ``cw spawn close``).
+    The message is operator-facing: it names the lock path and the wait, says
+    how to find the holder (``lsof``; the lock file records no PID), and what
+    to do if the holder is wedged or merely slow. Carries ``lock_path`` and
+    ``waited_s`` for callers that log structured fields.
     """
 
     __slots__ = ("lock_path", "waited_s")

@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-from cw.config import load_state, save_state
+from cw.config import load_state, save_state, sessions_lock_file
 from cw.disk import DiskUsage, InodeUsage
 from cw.models import (
     AGENT_SPAWN_STAMP_KEY,
@@ -1020,6 +1020,55 @@ def _write_global_toggle(tmp_config_dir: Path, toggle: str, value: str) -> None:
 
 
 @contextlib.contextmanager
+def _hold_flock(path: Path) -> Iterator[Callable[[], None]]:
+    """Hold an exclusive ``flock`` on *path* from a SEPARATE open file description.
+
+    flock locks belong to the open file description, so a second ``open()`` in
+    this same process contends exactly like another cw process would. The one
+    lock-holder technique every contention test shares (the sessions lock and
+    the context-file lock): create the parent dir, open, ``LOCK_EX``, release in
+    ``finally``.
+
+    Yields an idempotent ``release()`` for tests that must free the lock
+    mid-wait (e.g. from a patched ``sleep``); the context exit releases too.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if not released:
+                released = True
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+        try:
+            yield release
+        finally:
+            release()
+
+
+@contextlib.contextmanager
+def _hold_sessions_lock() -> Iterator[Path]:
+    """Hold ``.sessions.lock`` exclusively on a second fd; yield its path (#2491).
+
+    Resolves the path at call time via ``cw.config.sessions_lock_file()`` so it
+    follows the autouse ``tmp_config_dir`` redirect.
+    """
+    lock_path = sessions_lock_file()
+    with _hold_flock(lock_path):
+        yield lock_path
+
+
+@pytest.fixture
+def held_sessions_lock() -> Iterator[Path]:
+    """Fixture form of :func:`_hold_sessions_lock` for whole-test contention."""
+    with _hold_sessions_lock() as lock_path:
+        yield lock_path
+
+
+@contextlib.contextmanager
 def _hold_context_lock(worktree: Path) -> Iterator[None]:
     """Hold ``<worktree>/.claude/cw-context.json.lock`` exclusively (#1946).
 
@@ -1035,14 +1084,8 @@ def _hold_context_lock(worktree: Path) -> Iterator[None]:
     (patched where it is *defined*, never on a re-exporting module) so the
     bounded retry budget expires quickly.
     """
-    lock_path = worktree / ".claude" / "cw-context.json.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+    with _hold_flock(worktree / ".claude" / "cw-context.json.lock"):
+        yield
 
 
 def _invoke_hook_command(command: str, payload: dict[str, object]) -> Any:

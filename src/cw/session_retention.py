@@ -139,7 +139,9 @@ def prune_sessions(
     # (archive write + result counts) and must consult the dev-queue
     # mid-mutation; mutate_state's callback-only Callable[[CwState], None]
     # signature can do neither.
-    with sessions_lock():
+    # bounded=True (#2491): operator-invoked session prune; nothing has
+    # happened before the lock, so a timeout is a clean retry.
+    with sessions_lock(bounded=True):
         state = load_state()
         queue = load_dev_queue()
         live_keys = {(t.client, t.ticket_id) for t in queue.tasks}

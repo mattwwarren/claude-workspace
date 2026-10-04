@@ -325,7 +325,9 @@ def background_session(
             s.auto_backgrounded = True
         captured.append(s)
 
-    mutate_state(_bg)
+    # bounded=True (#2491): `cw bg` has no side effect before the lock, so a
+    # held lock must fail fast rather than hang the operator.
+    mutate_state(_bg, bounded=True)
     session = captured[0]
     record_event(
         session.client,
@@ -481,7 +483,11 @@ def resume_session(
                 live.status = SessionStatus.ACTIVE
                 live.resumed_at = datetime.now(UTC)
 
-        mutate_state(_update_live)
+        # bounded=True (#2491): the daemon surface is already live (read-only
+        # roster check above); nothing irreversible precedes this write.
+        # Contrast _update_dead below, which follows daemon.spawn_bg and must
+        # wait for the lock.
+        mutate_state(_update_live, bounded=True)
         record_event(
             session.client,
             HistoryEvent(
@@ -566,7 +572,9 @@ def done_session(
     """
     # Why not mutate_state: remove_worktree (git subprocess) runs inside the
     # lock window on the --cleanup path (criterion 1: no subprocess in lock).
-    with sessions_lock():
+    # bounded=True (#2491): `cw done` takes the lock before any side effect
+    # (worktree removal happens inside it), so a timeout is a clean retry.
+    with sessions_lock(bounded=True):
         state = load_state()
         session = _resolve_session(state, session_name)
         already_completed = session.status == SessionStatus.COMPLETED

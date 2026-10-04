@@ -11,8 +11,8 @@ import pytest
 
 from cw.config import save_state, state_dir
 from cw.dev_queue import save_dev_queue
-from cw.events import record_event
-from cw.exceptions import CwError
+from cw.events import read_events, record_event
+from cw.exceptions import CwError, SessionsLockTimeoutError
 from cw.models import (
     CwState,
     DevQueueStore,
@@ -22,6 +22,7 @@ from cw.models import (
     Session,
     TicketTask,
 )
+from cw.native_daemon import FakeNativeDaemonClient
 from cw.watchdog import (
     WatchdogStatus,
     _resolve_cw_executable_path,
@@ -173,6 +174,91 @@ class TestDispatchLivenessCheck:
         )
 
         assert result.dispatch_loop_dead is False
+
+
+def _skip_ticks_on_held_sessions_lock(
+    monkeypatch: pytest.MonkeyPatch, tick_times: list[datetime]
+) -> None:
+    """Run ``dispatch_tick`` at each of *tick_times* with reconcile timing out.
+
+    Mirrors a wedged ``cw dev-queue serve`` holding ``.sessions.lock``: every
+    tick's reconcile raises ``SessionsLockTimeoutError`` and the tick is skipped
+    (#2491), so none of them records a ``dispatch.tick`` event.
+    """
+    import freezegun
+
+    from cw.dispatch import dispatch_tick
+
+    def _timeout(*_args: object, **_kwargs: object) -> None:
+        msg = "sessions lock held"
+        raise SessionsLockTimeoutError(
+            msg, lock_path=state_dir() / ".sessions.lock", waited_s=60.0
+        )
+
+    monkeypatch.setattr("cw.dispatch.gating.reconcile", _timeout)
+    for tick_time in tick_times:
+        with freezegun.freeze_time(tick_time):
+            result = dispatch_tick(
+                OrchestratorConfig(), native_daemon=FakeNativeDaemonClient()
+            )
+        assert result.spawned == 0
+
+
+class TestDispatchLivenessCoversSkippedTicks:
+    """The external watchdog is what notices ticks skipped on a held lock (#2491).
+
+    A skipped tick records no ``dispatch.tick`` event, so the only signal is the
+    age of the newest one: ``cw watchdog tick`` alarms past
+    ``max(4 * tick_interval_seconds, 600s)`` whether or not work is pending.
+    """
+
+    def test_only_skipped_ticks_past_threshold_alarm(
+        self,
+        tmp_config_dir: Path,
+        mock_desktop_notification: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import freezegun
+
+        with freezegun.freeze_time(_NOW - timedelta(hours=1)):
+            record_event(OrchestratorEventType.DISPATCH_TICK, {})
+        save_dev_queue(DevQueueStore(tasks=[]))
+        save_state(CwState(sessions=[]))
+        _skip_ticks_on_held_sessions_lock(
+            monkeypatch,
+            [_NOW - timedelta(minutes=40), _NOW - timedelta(minutes=20), _NOW],
+        )
+
+        ticks = read_events(event_types=[OrchestratorEventType.DISPATCH_TICK])
+        result = run_tick(now=_NOW)
+
+        assert len(ticks) == 1  # the pre-wedge tick only; skipped ticks add none
+        assert result.dispatch_loop_dead is True
+        assert mock_desktop_notification.call_count == 1
+        lines = (state_dir() / "watchdog.log").read_text().splitlines()
+        assert any(json.loads(line)["check"] == "dispatch_liveness" for line in lines)
+
+    def test_skipped_ticks_within_threshold_do_not_alarm_yet(
+        self,
+        tmp_config_dir: Path,
+        mock_desktop_notification: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import freezegun
+
+        # Default tick_interval_seconds=30 -> threshold = max(120, 600) = 600s.
+        with freezegun.freeze_time(_NOW - timedelta(minutes=5)):
+            record_event(OrchestratorEventType.DISPATCH_TICK, {})
+        save_dev_queue(DevQueueStore(tasks=[]))
+        save_state(CwState(sessions=[]))
+        _skip_ticks_on_held_sessions_lock(
+            monkeypatch, [_NOW - timedelta(minutes=2), _NOW]
+        )
+
+        result = run_tick(now=_NOW)
+
+        assert result.dispatch_loop_dead is False
+        mock_desktop_notification.assert_not_called()
 
 
 class TestParkedMarkerSessionLeftAlone:

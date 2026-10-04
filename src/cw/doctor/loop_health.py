@@ -299,7 +299,9 @@ def _reap_session_by_selector(
     Returns True when the session was found (even if already terminal).
     Returns False when no session matches *selector*.
     """
-    with sessions_lock():
+    # bounded=True (#2491): operator/doctor reap; the lock is the first action
+    # here, so a timeout leaves the session untouched and retryable.
+    with sessions_lock(bounded=True):
         state = load_state()
         target = next(
             (s for s in state.sessions if selector in (s.id, s.name)),

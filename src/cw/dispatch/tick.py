@@ -562,8 +562,19 @@ def dispatch_tick(
         any_usage_limit_detected = _reconcile_usage_limited()
     except SessionsLockTimeoutError as exc:
         # Another process holds .sessions.lock (#2491). Claiming and spawning
-        # would each wait on the same lock, so skip the whole tick (no event:
-        # the stale-loop watchdog sees the gap) and let the next one retry.
+        # would each wait on the same lock, so skip the whole tick and let the
+        # next one retry. A skipped tick records NO dispatch.tick event (that
+        # event is written once per client at the end of the claim/spawn pass,
+        # dispatch/lanes.py), so two watchdogs can notice the gap:
+        # - External: `cw watchdog tick` (watchdog._check_dispatch_loop_liveness)
+        #   alarms when the newest dispatch.tick is older than
+        #   max(4 * tick_interval_seconds, 600s). That covers a wedged-but-alive
+        #   loop and needs no pending work.
+        # - In-loop: `dispatch_loop_stale` (loop._run_stale_client_watchdog_guarded
+        #   -> lanes._stale_pending_clients) pages only for a client whose last
+        #   tick is older than TICK_STALE_SECONDS (90s) AND left pending work
+        #   behind (pending - claimed > 0) AND is not executor-blocked. It does
+        #   NOT fire when the last recorded tick was idle.
         _log.warning(
             "dispatch_tick: skipping tick, sessions lock is held by another"
             " process (%s); will retry next tick",
