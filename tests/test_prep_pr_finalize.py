@@ -610,3 +610,26 @@ def test_resolve_project_config_auto_merge_pyyaml_unavailable_shape_differs_no_c
     config_path.write_text("pr:\n  auto_merge: false\n", encoding="utf-8")
     monkeypatch.setattr(_mod, "yaml", None)
     assert _mod.resolve_project_config_auto_merge(config_path) is None
+
+
+def test_pr_state_merged_matches_cw_gh_constant() -> None:
+    """The script keeps its own MERGED literal; pin it to the cw.gh source."""
+    from cw.gh import _GH_PR_STATE_MERGED
+
+    assert _mod.PR_STATE_MERGED == _GH_PR_STATE_MERGED
+
+
+def test_script_runs_without_cw_importable() -> None:
+    """The script is exec'd via its shebang interpreter, where `cw` is absent.
+
+    `-S` skips site processing (so the editable `.pth` does not expose `cw`)
+    on the SAME interpreter, keeping compiled deps loadable.
+    """
+    result = subprocess.run(
+        [sys.executable, "-S", str(_SCRIPT), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "verify" in result.stdout

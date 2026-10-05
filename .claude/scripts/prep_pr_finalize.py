@@ -60,8 +60,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.runtime_paths import review_monitor_script_path
 
-from cw.gh import _GH_PR_STATE_MERGED
-
 try:
     yaml: ModuleType | None = import_module("yaml")
 except ImportError:  # pragma: no cover - downstream repo without PyYAML
@@ -96,6 +94,10 @@ logger = logging.getLogger(__name__)
 PROTECTED_BRANCHES = {"main", "master"}
 MONITOR_SCRIPT = review_monitor_script_path()
 PROJECT_CONFIG_PATH = Path(".claude") / "project-config.yaml"
+# gh `state` of a merged PR. Kept local (not imported from cw.gh) because this
+# script runs under the shebang interpreter, where `cw` is not importable; a
+# test pins it to cw.gh._GH_PR_STATE_MERGED so the two cannot drift.
+PR_STATE_MERGED = "MERGED"
 
 
 # --- Data Models ---
@@ -345,7 +347,7 @@ def check_automerge(summary: ShipSummary, required: bool) -> CheckResult:
             detail=summary.automerge_method or "enabled",
             required=required,
         )
-    if summary.pr_state == _GH_PR_STATE_MERGED:
+    if summary.pr_state == PR_STATE_MERGED:
         return CheckResult(
             name="automerge-enabled",
             passed=True,
@@ -488,7 +490,7 @@ def render_markdown(summary: ShipSummary) -> str:
         )
     if summary.automerge_enabled:
         auto_merge_text = f"enabled ({summary.automerge_method})"
-    elif summary.pr_state == _GH_PR_STATE_MERGED:
+    elif summary.pr_state == PR_STATE_MERGED:
         auto_merge_text = "n/a (PR already merged)"
     else:
         auto_merge_text = "disabled"
