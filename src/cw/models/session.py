@@ -170,3 +170,21 @@ class Session(BaseModel):
     # door on every successful write; None = pre-migration (no writer has
     # stamped a source yet). See GitHub #1456.
     last_result_source: LastResultSource | None = None
+
+
+def counts_toward_client_ceiling(session: Session, client_name: str) -> bool:
+    """True when *session* occupies one of *client_name*'s dispatch-ceiling slots.
+
+    The one definition of the per-client ceiling count (#2524): a DAEMON
+    session of that client that is ACTIVE or IDLE. Session-based by design --
+    a pre-existing DAEMON session is real host load whether or not a queue row
+    tracks it -- so ``cw dev-queue status`` can name the sessions no occupied
+    row owns. Shared by ``cw.dispatch.tick._client_tick_snapshot``,
+    ``cw.dispatch.gating._emit_usage_limit_skip_events`` and that status
+    annotation, so the three counts cannot drift.
+    """
+    return (
+        session.client == client_name
+        and session.origin == SessionOrigin.DAEMON
+        and session.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
+    )

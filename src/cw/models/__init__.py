@@ -108,6 +108,7 @@ from cw.models.session import (
     LocalLivenessBackend,
     LocalLivenessHandle,
     Session,
+    counts_toward_client_ceiling,
 )
 from cw.models.session_inbox import SessionInboxMessage
 from cw.models.state import CW_STATE_SCHEMA_VERSION, CwState
@@ -224,6 +225,7 @@ __all__ = [
     "WatchedPr",
     "_validate_gate_recipe_keys",
     "_validate_review_recipe_keys",
+    "counts_toward_client_ceiling",
     "extract_unresolved_spawn_count",
     "occupies_lane_slot",
     "read_park_comment_marker",
