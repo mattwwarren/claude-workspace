@@ -230,7 +230,9 @@ def doctor(
             for finding in report.wedge_findings
             if finding.wedge_class == WEDGE_ROUTED_RESULT_STRANDED
         ]
-        if routed:
+        # An explicit routed-session scope must never fall through to the
+        # unscoped doctor reaper when the finding has already disappeared.
+        if routed or routed_session_ids:
             report = _reap_routed_report(
                 report,
                 as_json=as_json,
