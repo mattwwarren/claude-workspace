@@ -6,6 +6,9 @@ BLOCKED_ON_USER dead-session, ACTIVE-no-daemon-entry, ACTIVE-daemon-stale,
 ACTIVE-null-liveness-orphan) plus the reap that acts
 on actionable findings (:func:`_reap_wedge_findings`) and the
 BLOCKED_ON_USER collapse helper (:func:`_collapse_blocked_on_user_tasks`).
+The class-11 stranded-routed-result detector and its operator close live in
+``cw.doctor.routed_result_wedge`` (#2524); this module only wires its close
+into the reap tail.
 
 ``_reap_wedge_findings`` mutates state directly (``save_dev_queue``) outside
 ``mutate_state()`` by design — kept colocated here rather than extracted into a
@@ -36,6 +39,10 @@ from cw.dispatch.claim import _find_running_row
 from cw.doctor import _deps
 from cw.doctor._shared import WedgeFinding
 from cw.doctor.loop_health import _gh_pr_states, _reap_session_by_selector
+from cw.doctor.routed_result_wedge import (
+    WEDGE_ROUTED_RESULT_STRANDED,
+    reap_routed_result_findings,
+)
 from cw.exceptions import CwError
 from cw.executor import resolve_executor_config
 from cw.models import (
@@ -926,6 +933,14 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         the running_ticket_ids exclusion set: its remedy is a daemon stop, not
         a queue-task revert (a RUNNING task whose session already completed is
         class-3's job, not this class's).
+    Class-11 (active-routed-result-stranded, #2524): operator-only close via
+        ``cw.doctor.routed_result_wedge.reap_routed_result_findings``, which
+        re-detects fresh, flips only the session, stops its worker and owns
+        its own bounded ``sessions_lock``. It never reverts a row (the row
+        already advanced past this session), so it is listed in the
+        running_ticket_ids exclusion set -- left out, the default-inclusive
+        set would revert a RUNNING row of the same ticket claimed by a new
+        session.
 
     The former class-1 (pane-idle-but-active) wedge was removed with the
     multiplexer substrate — under the native daemon there are no panes to
@@ -944,6 +959,7 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
             _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL,
             _WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN,
             _WEDGE_LEAKED_DAEMON_WORKER,
+            WEDGE_ROUTED_RESULT_STRANDED,
         }
     }
     blocked_ticket_ids: set[str] = {
@@ -971,6 +987,11 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
     has_leaked_worker_findings = any(
         f.wedge_class == _WEDGE_LEAKED_DAEMON_WORKER for f in findings
     )
+    routed_result_findings = [
+        f
+        for f in findings
+        if f.session_id and f.wedge_class == WEDGE_ROUTED_RESULT_STRANDED
+    ]
 
     if not (
         running_ticket_ids
@@ -978,6 +999,7 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         or terminal_sibling_ticket_ids
         or daemon_reap_findings
         or has_leaked_worker_findings
+        or routed_result_findings
     ):
         return
 
@@ -1014,6 +1036,10 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
     # the next `cw doctor --reap`.
     for session_id, wedge_class in daemon_reap_findings:
         _reap_session_by_selector(session_id, proposed_action=wedge_class, bounded=True)
+
+    # Class-11 (#2524): session-only close; takes its own bounded lock.
+    if routed_result_findings:
+        reap_routed_result_findings(routed_result_findings)
 
     # Class-10 (#2480): re-detect fresh (state may have changed since the
     # findings were collected) and stop every leaked worker still leaked,

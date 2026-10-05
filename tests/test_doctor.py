@@ -21,12 +21,17 @@ from cw.doctor import (
     format_report,
     run_doctor,
 )
+from tests._reconcile_helpers import (
+    _install_fake_daemon_roster,
+    _stamp_transcript_age,
+    _write_agent_spawn_stamp,
+    _write_fake_roster,
+)
 from tests.conftest import (
     _make_daemon_session,
     _make_tick_summary,
     _make_ticket_task,
     _write_backend_clients_yaml,
-    _write_idle_transcript,
 )
 
 if TYPE_CHECKING:
@@ -6605,12 +6610,7 @@ class TestWedgeActiveDaemonStaleNoSentinel:
     _SURFACE_REF = "fake-short-id"
 
     def _write_roster(self, tmp_path: Path, *, supervisor_pid: int = 12345) -> Path:
-        roster_path = tmp_path / "roster.json"
-        roster_path.write_text(
-            json.dumps({"supervisorPid": supervisor_pid, "workers": {}}),
-            encoding="utf-8",
-        )
-        return roster_path
+        return _write_fake_roster(tmp_path, supervisor_pid=supervisor_pid)
 
     def _make_session(
         self,
@@ -6639,17 +6639,8 @@ class TestWedgeActiveDaemonStaleNoSentinel:
     def _write_spawn_stamp(
         self, worktree: Path, *, unresolved_count: int, stamped_at: datetime
     ) -> None:
-        from cw.models import HOOK_CONTEXT_RELATIVE_PATH
-
-        (worktree / ".claude").mkdir(parents=True, exist_ok=True)
-        payload = {
-            "agent_spawn_stamp": {
-                "unresolved_count": unresolved_count,
-                "last_stamped_at": stamped_at.isoformat(),
-            }
-        }
-        (worktree / HOOK_CONTEXT_RELATIVE_PATH).write_text(
-            json.dumps(payload), encoding="utf-8"
+        _write_agent_spawn_stamp(
+            worktree, unresolved_count=unresolved_count, stamped_at=stamped_at
         )
 
     def _setup_common(
@@ -6657,35 +6648,14 @@ class TestWedgeActiveDaemonStaleNoSentinel:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> tuple[Path, FakeNativeDaemonClient]:
-        from cw.native_daemon import FakeNativeDaemonClient
-
-        self._write_roster(tmp_path)
-        roster_path = tmp_path / "roster.json"
-        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
-        monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
-
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
-
-        daemon = FakeNativeDaemonClient()
-        daemon._live.add(self._SURFACE_REF)
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
-        monkeypatch.setattr(
-            "cw.doctor.loop_health.get_native_daemon_client", lambda: daemon
+        return _install_fake_daemon_roster(
+            tmp_path, monkeypatch, surface_ref=self._SURFACE_REF
         )
-        return home, daemon
 
     def _stamp_transcript(
         self, home: Path, worktree: Path, *, stale_minutes: float
     ) -> Path:
-        import os
-        from datetime import timedelta
-
-        transcript = _write_idle_transcript(home, worktree)
-        ts = (datetime.now(UTC) - timedelta(minutes=stale_minutes)).timestamp()
-        os.utime(str(transcript), (ts, ts))
-        return transcript
+        return _stamp_transcript_age(home, worktree, stale_minutes=stale_minutes)
 
     def test_stuck_session_detected_and_reaped(
         self,
@@ -6746,8 +6716,15 @@ class TestWedgeActiveDaemonStaleNoSentinel:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A real terminal sentinel (#1692 boundary) suppresses the finding."""
+        """A real terminal sentinel (#1692 boundary) suppresses the finding.
+
+        Also pins the #2524 R2 boundary: a bare terminal-shaped result with no
+        ``sentinel_partial_route_consumed`` marker is NOT the stranded
+        routed-result class either, so ``--reap`` closes it under neither
+        class and the session stays ACTIVE.
+        """
         from cw.config import load_state, save_state
+        from cw.doctor.routed_result_wedge import WEDGE_ROUTED_RESULT_STRANDED
         from cw.models import CwState, SessionStatus
 
         home, _daemon = self._setup_common(tmp_path, monkeypatch)
@@ -6766,6 +6743,7 @@ class TestWedgeActiveDaemonStaleNoSentinel:
 
         classes = [f.wedge_class for f in report.wedge_findings]
         assert "wedge/active-daemon-stale-no-sentinel" not in classes
+        assert WEDGE_ROUTED_RESULT_STRANDED not in classes
 
         state = load_state()
         updated = next(s for s in state.sessions if s.id == "sentinel-sess-1")

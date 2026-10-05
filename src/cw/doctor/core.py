@@ -44,6 +44,7 @@ from cw.doctor.loop_health import (
     _check_loop_liveness,
     _check_timed_out_merged,
 )
+from cw.doctor.routed_result_wedge import _check_wedge_routed_result_session
 from cw.doctor.skills_drift import _check_skills_commands_drift
 from cw.doctor.user_level_hooks import _check_user_level_stop_hook
 from cw.doctor.versions import (
@@ -94,6 +95,7 @@ def _collect_wedge_findings(
     findings.extend(_check_wedge_active_daemon_stale_no_sentinel(link_state, queue))
     findings.extend(_check_wedge_active_null_liveness_orphan(link_state, queue))
     findings.extend(_check_wedge_leaked_daemon_worker(link_state))
+    findings.extend(_check_wedge_routed_result_session(link_state, queue))
     return findings
 
 

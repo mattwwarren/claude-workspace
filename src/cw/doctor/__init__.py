@@ -19,6 +19,8 @@ re-exports. Submodules:
 - ``config_checks`` — config-file / project-config / review-recipe checks.
 - ``linkage`` — session-state linkage, workspace, worktree, reconcile checks.
 - ``wedge`` — wedge-condition detection and reap.
+- ``routed_result_wedge`` — the stranded routed-result session class (#2524)
+  and its operator-only ``--reap`` close.
 - ``loop_health`` — dispatch loop health/liveness, TIMED_OUT-merged detection,
   and targeted single-session reap.
 - ``versions`` — claude/cw version + dependency checks, bypass disclaimer,
