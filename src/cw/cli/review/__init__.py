@@ -1,7 +1,7 @@
 """The ``cw review`` CLI group (GitHub #1154, RFC 0011 S2; #1241).
 
 Package split (#2048) of the historical flat ``cw.cli.review`` module, which had
-grown to 951 lines. Four focused modules:
+grown to 951 lines, into focused submodules:
 
 - ``_group`` — the ``review`` click group object plus the payload helpers
   (``_build_captured_diff``, ``_parse_payload_or_exit``) every command shares.
@@ -10,12 +10,16 @@ grown to 951 lines. Four focused modules:
   them.
 - ``consolidate`` — the ``cw review consolidate`` command and its
   ``--documents-from`` loading helpers.
-- ``commands`` — ``register``, ``adjudicate``, ``check-voided``, ``settle``
-  (#2210, plus #2232's ``REVERSED`` rollback outcome), and ``verify-fixes``.
+- ``commands`` — ``register``, ``adjudicate``, ``settle`` (#2210, plus
+  #2232's ``REVERSED`` rollback outcome), and ``verify-fixes``, plus the
+  ``check-voided`` request/response envelopes.
 - ``dispositions`` — the read-only ``cw review dispositions`` ledger
   inspection view (#2232). Its own submodule rather than a fifth command in
   ``commands``: everything there parses an operator-supplied payload and
   writes something, while this one only reads the dev-queue row.
+- ``voided`` — the ``cw review check-voided`` command (#1814) and its
+  unmatched-new-entry check (#2319). Split out of ``commands`` once that check
+  would have pushed it past the module-size ceiling.
 
 The per-command behavioral prose the flat module's docstring carried now lives
 on the submodule that owns that command. Importing the command submodules below
@@ -30,6 +34,7 @@ from cw.cli.review import (  # noqa: F401  (command registration side effects)
     commands,
     consolidate,
     dispositions,
+    voided,
 )
 from cw.cli.review._group import _build_captured_diff
 
