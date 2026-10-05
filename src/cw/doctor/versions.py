@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import re
+import shlex
 import subprocess as _sp
 import tomllib
 import urllib.parse
+from dataclasses import dataclass
 from pathlib import Path
 
 from cw.doctor._shared import CheckResult, SettingsReadFailure, _read_settings
@@ -40,16 +43,22 @@ _CW_VERSION_CHECK_NAME = "cw-version"
 # Check name for the declared-vs-installed dependency drift detector.
 _CW_DEPS_CHECK_NAME = "cw-deps"
 
+# Check name for the optional-extra installed-vs-uv.lock drift detector (#2124).
+_CW_DEPS_DRIFT_CHECK_NAME = "cw-deps-drift"
+
+# Suffix on every drift-check skip detail (lock/pyproject unreadable, source gone).
+_DRIFT_SKIP_SUFFIX = "skipping extras drift check"
+
 # Reinstall command surfaced in warnings when the installed cw is stale.
 _CW_REINSTALL_CMD = "uv tool install --reinstall claude-workspace"
 
 # Package name used for importlib.metadata lookups.
 _CW_PACKAGE_NAME = "claude-workspace"
 
-# Separator characters that terminate a PEP 508 dependency name (version
-# specifiers, environment markers, whitespace) — mirrors _parse_version's
-# lightweight, no-`packaging`-dependency parsing style.
-_DEP_NAME_SEPARATORS = "<>=!~; "
+# Separator characters that terminate a PEP 508 dependency name (extras
+# bracket, version specifiers, environment markers, whitespace) — mirrors
+# _parse_version's lightweight, no-`packaging`-dependency parsing style.
+_DEP_NAME_SEPARATORS = "[<>=!~; "
 
 
 def _check_bypass_disclaimer() -> CheckResult:
@@ -97,9 +106,11 @@ def _parse_version(v: str) -> tuple[int, ...]:
 def _dep_distribution_name(entry: str) -> str:
     """Extract the leading distribution name from a PEP 508 dependency entry.
 
-    Scans for the first separator character (version specifier, environment
-    marker, or whitespace) and returns the prefix, stripped. E.g.
-    ``"psutil>=6.0"`` → ``"psutil"``, ``"foo; sys_platform=='win32'"`` → ``"foo"``.
+    Scans for the first separator character (extras bracket, version
+    specifier, environment marker, or whitespace) and returns the prefix,
+    stripped. E.g. ``"psutil>=6.0"`` → ``"psutil"``,
+    ``"mcp[cli]>=2.1.1,<3"`` → ``"mcp"``,
+    ``"foo; sys_platform=='win32'"`` → ``"foo"``.
     """
     for i, ch in enumerate(entry):
         if ch in _DEP_NAME_SEPARATORS:
@@ -390,6 +401,231 @@ def _check_cw_deps() -> CheckResult:
         warn=False,
         detail=f"{len(dependencies)} declared dependencies all installed",
     )
+
+
+def _normalize_dist_name(name: str) -> str:
+    """PEP 503 normalization: runs of ``-``/``_``/``.`` collapse to ``-``, lowercased.
+
+    ``uv.lock`` records ``ruamel-yaml`` where ``pyproject.toml`` says
+    ``ruamel.yaml``; ``packaging`` is deliberately not a dependency.
+    """
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+@dataclass(frozen=True, order=True)
+class _ExtraDrift:
+    """One optional-extra package whose installed version is outside the lock.
+
+    *locked* is every locked version joined by ``/`` (a lock can hold several
+    ``[[package]]`` entries per name when resolution forks).
+    """
+
+    package: str
+    extra: str
+    installed: str
+    locked: str
+
+
+@dataclass(frozen=True)
+class _ExtrasScan:
+    """Outcome of comparing installed optional-extra packages with the lock.
+
+    *installed_extras* is every declared extra with at least one installed
+    package — the set a reinstall must keep (``uv tool install --reinstall -e``
+    replaces the whole tool environment).
+    """
+
+    matched: int
+    not_installed: tuple[str, ...]
+    not_locked: tuple[str, ...]
+    drifted: tuple[_ExtraDrift, ...]
+    installed_extras: tuple[str, ...]
+
+
+def _load_toml(path: Path) -> dict[str, object] | str:
+    """Parse *path* as TOML, or return a short failure-reason label.
+
+    Reasons are class labels, never raw exception text. ``UnicodeDecodeError``
+    (a ``ValueError``) is caught explicitly: ``tomllib.load`` raises it on
+    non-UTF-8 bytes (precedent: ``_shared._read_settings``, #2226).
+    """
+    try:
+        with path.open("rb") as fh:
+            return tomllib.load(fh)
+    except FileNotFoundError:
+        return "not found"
+    except tomllib.TOMLDecodeError:
+        return "malformed: TOMLDecodeError"
+    except (OSError, UnicodeDecodeError) as exc:
+        return f"unreadable: {type(exc).__name__}"
+
+
+def _read_lock_versions(lock_path: Path) -> dict[str, frozenset[str]] | str:
+    """Map each normalized package name in ``uv.lock`` to its locked versions.
+
+    Returns a failure-reason string (see :func:`_load_toml`) when the lock is
+    missing, unreadable, malformed, or has no ``[[package]]`` array.
+    Individual entries lacking a string ``name``/``version`` are ignored.
+    """
+    lock = _load_toml(lock_path)
+    if isinstance(lock, str):
+        return lock
+    packages = lock.get("package")
+    if not isinstance(packages, list):
+        return "malformed: no [[package]] array"
+    versions: dict[str, set[str]] = {}
+    for entry in packages:
+        if not isinstance(entry, dict):
+            continue
+        name, version = entry.get("name"), entry.get("version")
+        if isinstance(name, str) and isinstance(version, str):
+            versions.setdefault(_normalize_dist_name(name), set()).add(version)
+    return {name: frozenset(found) for name, found in versions.items()}
+
+
+def _read_optional_extras(pyproject_path: Path) -> dict[str, list[str]] | str:
+    """Read ``[project.optional-dependencies]`` as ``{extra: [entry, ...]}``.
+
+    An absent table is an empty mapping (no extras declared). Returns a
+    failure-reason string when the file cannot be read or parsed, or when the
+    table is not a table. Non-list extras and non-string entries are dropped.
+    """
+    pyproject = _load_toml(pyproject_path)
+    if isinstance(pyproject, str):
+        return pyproject
+    project = pyproject.get("project")
+    optional = (
+        project.get("optional-dependencies") if isinstance(project, dict) else None
+    )
+    if optional is None:
+        return {}
+    if not isinstance(optional, dict):
+        return "malformed: optional-dependencies is not a table"
+    return {
+        extra: [entry for entry in entries if isinstance(entry, str)]
+        for extra, entries in optional.items()
+        if isinstance(entries, list)
+    }
+
+
+def _scan_extras(
+    extras: dict[str, list[str]], lock: dict[str, frozenset[str]]
+) -> _ExtrasScan:
+    """Compare each declared optional-extra package's installed version to *lock*.
+
+    Not installed and installed-but-not-locked are quiet skips, never drift.
+    Only direct declarations are checked, not their transitive dependencies.
+    """
+    matched = 0
+    not_installed: set[str] = set()
+    not_locked: set[str] = set()
+    drifted: list[_ExtraDrift] = []
+    installed_extras: set[str] = set()
+    for extra, entries in extras.items():
+        for entry in entries:
+            package = _dep_distribution_name(entry)
+            if not package:
+                continue
+            try:
+                installed = importlib.metadata.version(package)
+            except importlib.metadata.PackageNotFoundError:
+                not_installed.add(package)
+                continue
+            installed_extras.add(extra)
+            locked = lock.get(_normalize_dist_name(package))
+            if locked is None:
+                not_locked.add(package)
+            elif installed in locked:
+                matched += 1
+            else:
+                drifted.append(
+                    _ExtraDrift(package, extra, installed, "/".join(sorted(locked)))
+                )
+    return _ExtrasScan(
+        matched=matched,
+        not_installed=tuple(sorted(not_installed)),
+        not_locked=tuple(sorted(not_locked)),
+        drifted=tuple(sorted(drifted)),
+        installed_extras=tuple(sorted(installed_extras)),
+    )
+
+
+def _drift_skip(detail: str) -> CheckResult:
+    """A quiet (ok, no warn) ``cw-deps-drift`` result."""
+    return CheckResult(_CW_DEPS_DRIFT_CHECK_NAME, ok=True, warn=False, detail=detail)
+
+
+def _drift_result(source_path: Path, scan: _ExtrasScan) -> CheckResult:
+    """Build the ``cw-deps-drift`` result from a completed scan.
+
+    Only drift warns. Not-installed / not-in-lock packages are appended as
+    ``; not installed: ...`` / ``; not in uv.lock: ...`` notes either way. The
+    remediation lists every extra that has an installed package, because
+    ``uv tool install --reinstall -e`` replaces the tool environment and would
+    otherwise drop the extras that are still in use. It deliberately does not
+    reuse ``_CW_REINSTALL_CMD``, which installs from the registry sans extras.
+    """
+    notes: list[str] = []
+    if scan.not_installed:
+        notes.append(f"not installed: {', '.join(scan.not_installed)}")
+    if scan.not_locked:
+        notes.append(f"not in uv.lock: {', '.join(scan.not_locked)}")
+    if not scan.drifted:
+        summary = f"{scan.matched} optional-extra package(s) match uv.lock"
+        return _drift_skip("; ".join([summary, *notes]))
+    entries = "; ".join(
+        f"{d.package} {d.installed} installed != {d.locked} locked (extra {d.extra})"
+        for d in scan.drifted
+    )
+    target = shlex.quote(f"{source_path}[{','.join(scan.installed_extras)}]")
+    return CheckResult(
+        _CW_DEPS_DRIFT_CHECK_NAME,
+        ok=True,
+        warn=True,
+        detail=(
+            "; ".join([entries, *notes])
+            + f" — run `uv tool install --reinstall -e {target}`"
+        ),
+    )
+
+
+def _check_cw_deps_drift() -> CheckResult:
+    """Check installed optional-extra versions against the source ``uv.lock`` (#2124).
+
+    Catches the stale-extra class behind the ``mcp 1.27.1`` installed vs
+    ``2.1.1`` locked incident: ``cw-deps`` only proves declared dependencies
+    are *present*, not that they match the lock. Sibling of
+    :func:`_check_cw_deps` (separate outcome, separate input file). Skips
+    quietly (ok=True, warn=False) for registry installs, a vanished source
+    path (``cw-version``/``cw-deps`` already warn on it), and any unreadable
+    pyproject/lock. Only confirmed drift warns.
+    """
+    source_path = _resolve_cw_source_path()
+    if isinstance(source_path, CheckResult):
+        return CheckResult(
+            _CW_DEPS_DRIFT_CHECK_NAME,
+            ok=source_path.ok,
+            warn=source_path.warn,
+            detail=source_path.detail,
+        )
+    if not source_path.exists():
+        return _drift_skip(
+            f"source path {source_path} no longer exists; {_DRIFT_SKIP_SUFFIX}"
+        )
+    pyproject_path = source_path / "pyproject.toml"
+    extras = _read_optional_extras(pyproject_path)
+    if isinstance(extras, str):
+        return _drift_skip(
+            f"could not read optional extras from {pyproject_path}"
+            f" ({extras}); {_DRIFT_SKIP_SUFFIX}"
+        )
+    if not extras:
+        return _drift_skip(f"no optional extras declared in {pyproject_path}")
+    lock_path = source_path / "uv.lock"
+    lock = _read_lock_versions(lock_path)
+    if isinstance(lock, str):
+        return _drift_skip(f"could not read {lock_path} ({lock}); {_DRIFT_SKIP_SUFFIX}")
+    return _drift_result(source_path, _scan_extras(extras, lock))
 
 
 def _check_daemon_reachable() -> CheckResult:

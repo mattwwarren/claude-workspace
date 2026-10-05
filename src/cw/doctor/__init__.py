@@ -69,12 +69,14 @@ from cw.doctor.skills_drift import _check_skills_commands_drift
 from cw.doctor.user_level_hooks import _check_user_level_stop_hook
 from cw.doctor.versions import (
     _CW_DEPS_CHECK_NAME,
+    _CW_DEPS_DRIFT_CHECK_NAME,
     _CW_PACKAGE_NAME,
     _CW_REINSTALL_CMD,
     _CW_VERSION_CHECK_NAME,
     _check_claude_version,
     _check_codex_capability,
     _check_cw_deps,
+    _check_cw_deps_drift,
     _check_cw_version,
     _check_ssh_key_loaded,
     _dep_distribution_name,
@@ -88,6 +90,7 @@ from cw.doctor.wedge import (
 
 __all__ = [
     "_CW_DEPS_CHECK_NAME",
+    "_CW_DEPS_DRIFT_CHECK_NAME",
     "_CW_PACKAGE_NAME",
     "_CW_REINSTALL_CMD",
     "_CW_VERSION_CHECK_NAME",
@@ -101,6 +104,7 @@ __all__ = [
     "_check_config_file",
     "_check_cross_repo_rows",
     "_check_cw_deps",
+    "_check_cw_deps_drift",
     "_check_cw_version",
     "_check_dev_queue",
     "_check_dispatch_repo_head",

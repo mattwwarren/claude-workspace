@@ -56,6 +56,7 @@ Expected output for a healthy setup:
 - `[OK] claude-version` — `claude` binary found and responsive.
 - `[WARN] daemon-reachable` — the Claude native daemon has not been started yet; this resolves automatically when `cw` first spawns a worker session.
 - `[OK/WARN] skills-commands-drift` — repo-tracked `.claude/skills`/`.claude/commands`/`.claude/scripts` files compared against `~/.claude`; `[WARN]` means at least one tracked file is missing, content differs, or its `~/.claude` counterpart is a symlink pointing somewhere other than this checkout. A `differ` on `.claude/scripts/prep_pr_state.py` is the #2090 shape: a stale copy of a cw-owned script at `~/.claude/scripts/` — re-run `scripts/install-skills.sh`.
+- `[OK/WARN] cw-deps-drift` — for an editable install, compares the installed version of each package declared in `[project.optional-dependencies]` (`mcp`, `starlette`, `uvicorn`) against the pin in the source tree's `uv.lock`. `[WARN]` names each package that differs (`mcp 1.27.1 installed != 2.1.1 locked (extra mcp)`) and the fix, `uv tool install --reinstall -e '<source path>[mcp]'` (the command lists every extra still in use, since the reinstall replaces the tool environment). An extra whose packages are not installed is skipped, as is a registry install or an unreadable `pyproject.toml`/`uv.lock`; only drift warns.
 - `[OK/WARN] agent-spec-drift/<client>` — per-client reviewer agent-spec resolution (repo-local / global fallback / absent); `[WARN]` names any reviewer role with no usable spec.
 - `[OK/WARN] stop-hook-scope` — looks for a `cw signal-stop` Stop hook in `~/.claude/settings.json` or `~/.claude/settings.local.json`; `[WARN]` names the file, the `hooks.Stop` coordinates and the exact line to delete, or names a settings file it could not read or parse (invalid UTF-8, malformed JSON, not a JSON object, an unreadable path). `bypass-disclaimer` reads the same `~/.claude/settings.json` through the same defensive reader, so a broken settings file surfaces as two `[WARN]` lines naming it rather than a crash, and every other check still reports.
 
@@ -290,7 +291,9 @@ uv tool install --reinstall claude-workspace
 
 `cw doctor` flags this drift (`cw-deps` check) by comparing declared
 dependencies in `pyproject.toml` against installed distributions, before it
-manifests as a crash.
+manifests as a crash. The sibling `cw-deps-drift` check covers the optional
+extras, where a package is present but at a version outside the `uv.lock` pin
+(for example `mcp` 1.x after the lock moved to 2.x).
 
 ### `Python 3.13 required`
 

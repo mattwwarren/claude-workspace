@@ -51,6 +51,7 @@ from cw.doctor.versions import (
     _check_claude_version,
     _check_codex_capability,
     _check_cw_deps,
+    _check_cw_deps_drift,
     _check_cw_version,
     _check_daemon_reachable,
     _check_ssh_key_loaded,
@@ -136,6 +137,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_claude_version())
     report.checks.append(_check_cw_version())
     report.checks.append(_check_cw_deps())
+    report.checks.append(_check_cw_deps_drift())
     report.checks.append(_check_skills_commands_drift())
     report.checks.append(_check_user_level_stop_hook())
     report.checks.append(_check_codex_capability())
