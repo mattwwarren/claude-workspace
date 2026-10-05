@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -26,7 +27,13 @@ from cw.doctor import format_report_json, run_doctor
 from cw.doctor._shared import WedgeFinding
 from cw.doctor.routed_result_wedge import (
     WEDGE_ROUTED_RESULT_STRANDED,
+    _audit_outbox_path,
     _check_wedge_routed_result_session,
+    _emit_audit_record,
+    _finalize_audit_intent,
+    _read_audit_outbox,
+    _retry_pending_audits,
+    has_pending_routed_result_audits,
     reap_routed_result_findings,
 )
 from cw.doctor.wedge import _reap_wedge_findings
@@ -436,3 +443,228 @@ def test_json_report_includes_wedge_class(
 
     classes = [f["wedge_class"] for f in payload["wedge_findings"]]
     assert WEDGE_ROUTED_RESULT_STRANDED in classes
+
+
+# ---------------------------------------------------------------------------
+# Durable close-audit outbox (codex fix cycles 1-3)
+# ---------------------------------------------------------------------------
+
+
+def _outbox_record(
+    *,
+    status: str = "pending_stop",
+    session_id: str = _SID,
+    stop_succeeded: bool | None = None,
+) -> dict[str, Any]:
+    return {
+        "session_id": session_id,
+        "surface_ref": _REF,
+        "status": status,
+        "correlation_id": session_id,
+        "payload": {
+            "session_id": session_id,
+            "authority": "operator",
+            "proposed_action": "close_routed_result_session",
+            "mutations": ["session_status_completed"],
+            "daemon_stop_succeeded": stop_succeeded,
+        },
+    }
+
+
+def _write_outbox(records: object) -> None:
+    path = _audit_outbox_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(records), encoding="utf-8")
+
+
+def _complete_seeded_session(session: Session) -> None:
+    session.status = SessionStatus.COMPLETED
+    save_state(CwState(sessions=[session]))
+
+
+def test_no_outbox_means_no_pending_audits() -> None:
+    assert has_pending_routed_result_audits() is False
+    assert _read_audit_outbox() == []
+
+
+def test_pending_record_is_reported_as_pending() -> None:
+    _write_outbox([_outbox_record()])
+
+    assert has_pending_routed_result_audits() is True
+
+
+@pytest.mark.parametrize("raw", ["not json", '{"a": 1}', "[1, 2]"])
+def test_malformed_outbox_fails_closed(raw: str) -> None:
+    path = _audit_outbox_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(raw, encoding="utf-8")
+
+    assert has_pending_routed_result_audits() is True
+    with pytest.raises(ValueError, match=r"audit outbox|Expecting value"):
+        _read_audit_outbox()
+
+
+def test_reap_leaves_outbox_empty_after_audit_lands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, _daemon = _install_fake_daemon_roster(tmp_path, monkeypatch)
+    _seed(tmp_path, home)
+
+    assert reap_routed_result_findings(_routed_findings()) == [_SID]
+
+    assert _read_audit_outbox() == []
+    assert len(_events(OrchestratorEventType.SESSION_REAP_AUTHORIZED)) == 1
+
+
+def test_reap_reuses_a_preexisting_audit_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record left by an earlier interrupted close is not duplicated."""
+    home, _daemon = _install_fake_daemon_roster(tmp_path, monkeypatch)
+    _seed(tmp_path, home)
+    _write_outbox([_outbox_record()])
+
+    assert reap_routed_result_findings(_routed_findings()) == [_SID]
+
+    assert _read_audit_outbox() == []
+    assert len(_events(OrchestratorEventType.SESSION_REAP_AUTHORIZED)) == 1
+
+
+def test_retry_completes_a_pending_stop_for_a_closed_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, daemon = _install_fake_daemon_roster(tmp_path, monkeypatch)
+    _complete_seeded_session(_seed(tmp_path, home))
+    _write_outbox([_outbox_record()])
+
+    _retry_pending_audits(daemon)
+
+    assert daemon.stop_calls == [_REF]
+    (event,) = _events(OrchestratorEventType.SESSION_REAP_AUTHORIZED)
+    assert event["daemon_stop_succeeded"] is True
+    assert event["mutations"] == ["session_status_completed", "daemon_stopped"]
+    assert _read_audit_outbox() == []
+
+
+def test_retry_records_a_failed_stop_in_the_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, _daemon = _install_fake_daemon_roster(tmp_path, monkeypatch)
+    _complete_seeded_session(_seed(tmp_path, home))
+    _write_outbox([_outbox_record()])
+
+    class _FailingStopDaemon(FakeNativeDaemonClient):
+        def stop(self, short_id: str) -> None:
+            msg = f"stop {short_id} failed"
+            raise RuntimeError(msg)
+
+    _retry_pending_audits(_FailingStopDaemon())
+
+    (event,) = _events(OrchestratorEventType.SESSION_REAP_AUTHORIZED)
+    assert event["daemon_stop_succeeded"] is False
+    assert event["daemon_stop_error"] == "daemon stop failed"
+    assert event["mutations"] == ["session_status_completed"]
+
+
+def test_retry_leaves_intent_pending_while_session_is_still_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, daemon = _install_fake_daemon_roster(tmp_path, monkeypatch)
+    _seed(tmp_path, home)
+    _write_outbox([_outbox_record(), _outbox_record(session_id="ghost")])
+
+    _retry_pending_audits(daemon)
+
+    assert daemon.stop_calls == []
+    assert [r["session_id"] for r in _read_audit_outbox()] == [_SID, "ghost"]
+    assert _events(OrchestratorEventType.SESSION_REAP_AUTHORIZED) == []
+
+
+def test_retry_skips_a_record_whose_state_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _home, daemon = _install_fake_daemon_roster(tmp_path, monkeypatch)
+    _write_outbox([_outbox_record()])
+
+    def _boom() -> CwState:
+        msg = "state unreadable"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.doctor.routed_result_wedge.load_state", _boom)
+
+    _retry_pending_audits(daemon)
+
+    assert daemon.stop_calls == []
+    assert len(_read_audit_outbox()) == 1
+
+
+def test_retry_emits_a_pending_event_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _home, _daemon = _install_fake_daemon_roster(tmp_path, monkeypatch)
+    _write_outbox([_outbox_record(status="pending_event", stop_succeeded=True)])
+
+    assert reap_routed_result_findings([]) == []
+
+    (event,) = _events(OrchestratorEventType.SESSION_REAP_AUTHORIZED)
+    assert event["daemon_stop_succeeded"] is True
+    assert _read_audit_outbox() == []
+
+
+def test_retry_with_unreadable_outbox_does_not_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _home, daemon = _install_fake_daemon_roster(tmp_path, monkeypatch)
+    path = _audit_outbox_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not json", encoding="utf-8")
+
+    _retry_pending_audits(daemon)
+
+    assert daemon.stop_calls == []
+
+
+def test_finalize_without_a_durable_intent_returns_none() -> None:
+    assert (
+        _finalize_audit_intent(
+            "no-such-session",
+            mutations=["session_status_completed"],
+            stop_succeeded=True,
+            stop_error=None,
+        )
+        is None
+    )
+
+
+def test_emit_failure_keeps_the_record_in_the_outbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _outbox_record(status="pending_event")
+    _write_outbox([record])
+
+    def _inbox_down(*_args: object, **_kwargs: object) -> None:
+        msg = "event inbox unavailable"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.doctor.routed_result_wedge.record_event", _inbox_down)
+
+    assert _emit_audit_record(record) is False
+    assert len(_read_audit_outbox()) == 1
+
+
+def test_outbox_cleanup_failure_after_emit_still_reports_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _outbox_record(status="pending_event")
+    _write_outbox([record])
+
+    def _write_fails(_records: object) -> None:
+        msg = "disk full"
+        raise OSError(msg)
+
+    monkeypatch.setattr(
+        "cw.doctor.routed_result_wedge._write_audit_outbox", _write_fails
+    )
+
+    assert _emit_audit_record(record) is True
+    assert len(_events(OrchestratorEventType.SESSION_REAP_AUTHORIZED)) == 1
