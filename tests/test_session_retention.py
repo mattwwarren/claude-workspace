@@ -11,16 +11,16 @@ from click.testing import CliRunner
 from freezegun import freeze_time
 
 from cw.cli import main
-from cw.config import load_state, save_state, sessions_lock, state_dir
+from cw.config import load_state, sessions_lock, state_dir
 from cw.dev_queue import save_dev_queue
 from cw.exceptions import SessionsLockReentryError
-from cw.models import CwState, DevQueueStore, Session, SessionStatus
+from cw.models import CwState, DevQueueStore, SessionStatus
 from cw.session_retention import (
     _SESSION_RETENTION_DAYS,
     find_session_by_id,
     prune_sessions,
 )
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests.conftest import _make_daemon_session, _make_ticket_task, _seed_sessions
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -28,13 +28,6 @@ if TYPE_CHECKING:
 _NOW = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 _OLD = _NOW - timedelta(days=_SESSION_RETENTION_DAYS + 10)
 _RECENT = _NOW - timedelta(days=1)
-
-
-def _seed_sessions(*sessions: Session) -> None:
-    """Persist *sessions* into sessions.json in a single save_state call."""
-    state = load_state()
-    state.sessions.extend(sessions)
-    save_state(state)
 
 
 def _archive_files() -> list[Path]:
