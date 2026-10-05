@@ -1643,10 +1643,23 @@ supersedes it by id. Any successful spawn also wipes the recorded id.
   "lane": "<str>",
   "stage": "harden | plan | impl | review | finalize",
   "parked_at": "<ISO 8601 timestamp>",
-  "elapsed_minutes": "<float>"
+  "elapsed_minutes": "<float>",
+  "trigger": "timer"
 }
 ```
-**Semantics:** RFC 0008 capstone (#1015). Fires exactly once per parked
+**Semantics:** This event is a synthetic timer. It does **not** mean a worker
+requested help: it fires purely because `ESCALATION_PARK_MINUTES` (45)
+elapsed since the ticket entered the escalation-eligible set, with no
+worker-side signal of any kind. Read it as "this parked row has gone
+unattended for 45 minutes", not "an agent is asking for a human".
+
+`trigger` (#1680) records why the event fired. Currently the only value
+emitted is `timer` (the flat 45-minute clock elapsed). A worker-initiated
+value is not implemented and is not named here; consumers must tolerate
+additional values appearing in future. The field is additive and the event
+name is unchanged.
+
+RFC 0008 capstone (#1015). Fires exactly once per parked
 episode: a task entering the escalation-eligible set gets
 `TicketTask.escalation_parked_at` stamped (no event yet); once
 `now - escalation_parked_at >= 45` minutes (`ESCALATION_PARK_MINUTES`, a flat
@@ -1669,7 +1682,8 @@ Runs **unconditionally** every reconcile tick (not gated by
 even when the dispatch loop itself is down.
 
 Added to the operator-channel's default forward set (unlike
-`concierge.recovered` above) — this IS the operator-facing signal.
+`concierge.recovered` above) — this is the operator-facing "parked row has
+gone unattended" signal, derived from the timer alone.
 
 `correlation_id` is the `ticket_id`.
 

@@ -13,7 +13,9 @@ paged exactly once — not on every reconcile tick, and not silently forever.
    :class:`~cw.models.OrchestratorEventType.OPERATOR_ESCALATION` event and
    stamp ``escalation_fired_at`` — the latch, so re-running this sweep every
    tick never re-fires for the same parked episode (mirrors the #996
-   counter-shape precedent for "fire once, not once per tick").
+   counter-shape precedent for "fire once, not once per tick"). The event is a
+   timer-derived signal (its payload carries ``trigger: "timer"``), not a
+   worker-initiated help request.
 
 Both fields are cleared together when the row leaves the parked state — that
 clear-site lives in ``cw.dev_queue.transition_task_status`` (the single
@@ -57,6 +59,12 @@ from cw.reconcile._shared import (
 # _classify_liveness_bucket floor) — the two checks answer different
 # questions and must not be conflated.
 ESCALATION_PARK_MINUTES = 45
+
+# Value of the ``trigger`` key in the OPERATOR_ESCALATION payload (#1680).
+# ``"timer"`` means the flat ESCALATION_PARK_MINUTES clock elapsed -- the only
+# value emitted today. A worker-initiated value is reserved but deliberately
+# NOT implemented: this event is never a worker's request for help.
+ESCALATION_TRIGGER_TIMER = "timer"
 
 # Disposition branch: BLOCKED_ON_USER rows whose disposition is one of these
 # gates. Built from the same source constants dev_queue.py/concierge.py
@@ -204,6 +212,7 @@ def run_escalation_sweep(*, now: datetime | None = None) -> list[str]:
                     "stage": task.stage,
                     "parked_at": task.escalation_parked_at.isoformat(),
                     "elapsed_minutes": elapsed_minutes,
+                    "trigger": ESCALATION_TRIGGER_TIMER,
                 },
                 correlation_id=task.ticket_id,
             )

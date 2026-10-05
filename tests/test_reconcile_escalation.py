@@ -18,7 +18,11 @@ from cw.models import (
     QueueItemStatus,
     TicketTask,
 )
-from cw.reconcile.escalation import ESCALATION_PARK_MINUTES, run_escalation_sweep
+from cw.reconcile.escalation import (
+    ESCALATION_PARK_MINUTES,
+    ESCALATION_TRIGGER_TIMER,
+    run_escalation_sweep,
+)
 from tests.conftest import _make_ticket_task
 
 _NOW = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
@@ -293,7 +297,42 @@ class TestEventPayload:
         assert len(events) == 1
         assert events[0].payload["ticket_id"] == "GEN-1"
         assert events[0].payload["client"] == "acme"
+        # #1680: literal pins the wire value independently of the constant.
+        assert events[0].payload["trigger"] == "timer"
+        assert ESCALATION_TRIGGER_TIMER == "timer"
+        assert set(events[0].payload) == {
+            "ticket_id",
+            "client",
+            "status",
+            "disposition",
+            "lane",
+            "stage",
+            "parked_at",
+            "elapsed_minutes",
+            "trigger",
+        }
         assert events[0].correlation_id == "GEN-1"
+
+    @pytest.mark.parametrize(("status", "disposition"), _ELIGIBLE_COMBOS)
+    def test_trigger_is_timer_on_every_eligible_branch(
+        self,
+        tmp_config_dir: Path,
+        status: QueueItemStatus,
+        disposition: str | None,
+    ) -> None:
+        """#1680: the only emission path is the flat timer, so every eligible
+        (status, disposition) combo stamps ``trigger == "timer"``."""
+        task = _make_task(status=status, disposition=disposition)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        run_escalation_sweep(now=_NOW)
+        run_escalation_sweep(now=_NOW + timedelta(minutes=ESCALATION_PARK_MINUTES))
+
+        events = read_events(
+            consumer=f"test-escalation-trigger-{status.value}-{disposition}",
+            event_types=[OrchestratorEventType.OPERATOR_ESCALATION],
+        )
+        assert len(events) == 1
+        assert events[0].payload["trigger"] == "timer"
 
 
 class TestClearOnExit:
