@@ -167,9 +167,7 @@ def _read_audit_outbox() -> list[dict[str, Any]]:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return []
-        if not isinstance(raw, list) or not all(
-            isinstance(item, dict) for item in raw
-        ):
+        if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
             msg = f"invalid routed-result audit outbox: {path}"
             raise ValueError(msg)
         return raw
@@ -275,9 +273,7 @@ def _emit_audit_record(record: dict[str, Any]) -> bool:
     # outbox cleanup. Holding the outbox lock across the check, append and
     # cleanup also prevents two doctor processes from delivering the same
     # authorization concurrently.
-    audit_event_id = (
-        f"routed-result-session-reap:{record.get('session_id')}"
-    )
+    audit_event_id = f"routed-result-session-reap:{record.get('session_id')}"
     with _audit_outbox_lock():
         try:
             already_delivered = any(

@@ -237,9 +237,7 @@ def find_stranded_routed_sessions(
     return hits
 
 
-def rollback_routed_result_latches(
-    state: CwState, session_ids: Iterable[str]
-) -> int:
+def rollback_routed_result_latches(state: CwState, session_ids: Iterable[str]) -> int:
     """Clear page-once latches for an explicit rollout rollback.
 
     The caller must hold the existing ``sessions_lock`` and persist *state*
