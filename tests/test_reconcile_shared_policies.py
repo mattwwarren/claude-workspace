@@ -443,7 +443,6 @@ class TestEmitReapProposed:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """evidence.transcript_age_seconds reflects content-entry staleness, not
         raw mtime, when a trailing metadata-only record (queue-operation/
@@ -452,9 +451,7 @@ class TestEmitReapProposed:
         """
         from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
 
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        home = Path.home()
 
         worktree = tmp_path / "wt-prop-content-age"
         started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -537,7 +534,6 @@ class TestEmitReapProposed:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When a transcript has only content-bearing entries (mtime == last
         content timestamp), transcript_age_seconds and
@@ -545,9 +541,7 @@ class TestEmitReapProposed:
         construction bug in the new field (#1427)."""
         from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
 
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        home = Path.home()
 
         worktree = tmp_path / "wt-prop-no-divergence"
         started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -882,13 +876,10 @@ class TestRouteEmittedSentinel:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Sentinel present + last_result None + elapsed >= 300 s
         → ROUTE_EMITTED_SENTINEL, task COMPLETED, session COMPLETED."""
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        home = Path.home()
         worktree = tmp_path / "wt-578-detect"
         # 305 s elapsed — past the 300-s unrouted-sentinel check delay.
         started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -945,13 +936,10 @@ class TestRouteEmittedSentinel:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """elapsed < sentinel_unrouted_check_seconds → no ROUTE_EMITTED_SENTINEL
         candidate, sentinel left in transcript for next tick."""
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        home = Path.home()
         worktree = tmp_path / "wt-578-under"
         started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
         now = datetime(2026, 1, 1, 0, 4, 0, tzinfo=UTC)  # 240 s < 300 s threshold
@@ -995,13 +983,10 @@ class TestRouteEmittedSentinel:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """session.last_result already set → ROUTE_EMITTED_SENTINEL skipped
         (signal_stop already ran; prevents double-routing)."""
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        home = Path.home()
         worktree = tmp_path / "wt-578-dbl"
         started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
         now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
@@ -1045,13 +1030,10 @@ class TestRouteEmittedSentinel:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Live-roster session + sentinel → ROUTE_EMITTED_SENTINEL, NOT a crash path.
         Session ends COMPLETED/NORMAL (not TIMED_OUT)."""
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        home = Path.home()
         worktree = tmp_path / "wt-578-live"
         started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
         now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
@@ -1100,15 +1082,12 @@ class TestRouteEmittedSentinel:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Sentinel status=blocked + blocker.reason=provider_overload → task
         reverts to PENDING, same stage (#1948). retry_eligible=False is set
         deliberately -- proves routing keys off blocker.reason alone, not
         retry_eligible, even when the latter is present-and-false."""
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        home = Path.home()
         worktree = tmp_path / "wt-578-retry"
         started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
         now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
@@ -1193,13 +1172,10 @@ class TestRouteEmittedSentinel:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """signal_only policy does NOT block ROUTE_EMITTED_SENTINEL — routing an
         emitted sentinel is constructive, not a destructive reap."""
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        home = Path.home()
         worktree = tmp_path / "wt-578-sigonly"
         started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
         now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
@@ -1250,12 +1226,9 @@ class TestRouteEmittedSentinel:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """ROUTE_EMITTED_SENTINEL emits a SESSION_COMPLETED event."""
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        home = Path.home()
         worktree = tmp_path / "wt-578-event"
         started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
         now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
@@ -1310,14 +1283,11 @@ class TestRouteEmittedSentinel:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Regression: review_pending_approval-shaped sentinel emitted without
         signal_stop routes task to BLOCKED_ON_USER (PAUSED_FOR_USER_INPUT path),
         not stuck as RUNNING indefinitely. See #633."""
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        home = Path.home()
         worktree = tmp_path / "wt-578-rpa"
         started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
         now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
@@ -1372,7 +1342,6 @@ class TestRouteEmittedSentinel:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """GitHub #1149: a stage-mismatch refusal stamps a paused_status-only
         marker on session.last_result AND persists it, so the doomed candidate
@@ -1392,9 +1361,7 @@ class TestRouteEmittedSentinel:
         """
         from cw.reconcile import ProposedAction, _detect_idle_candidates
 
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        home = Path.home()
         worktree = tmp_path / "wt-1149-refusal"
         started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
         now = started_at + timedelta(seconds=400)
@@ -1465,7 +1432,6 @@ class TestRouteEmittedSentinel:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The #1149 refusal marker carries no "status" key, so
         _has_terminal_sentinel stays False -- the session is not mistaken for
@@ -1473,9 +1439,7 @@ class TestRouteEmittedSentinel:
         from cw.reconcile import _detect_idle_candidates
         from cw.reconcile.idle import _apply_idle_routed_mutations
 
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        home = Path.home()
         worktree = tmp_path / "wt-1149-not-terminal"
         started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
         now = started_at + timedelta(seconds=400)
@@ -1517,7 +1481,6 @@ class TestRouteEmittedSentinel:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """GitHub #1149 R1, idle.py wiring: a later-stage sentinel (a legitimate
         self-escalation the row hasn't caught up to) routes forward via the
@@ -1529,9 +1492,7 @@ class TestRouteEmittedSentinel:
         test_phantom_later_stage_sentinel_routes_forward_instead_of_looping's
         coverage for the idle-sweep call path, which was previously untested.
         """
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        home = Path.home()
         worktree = tmp_path / "wt-1149-idle-later"
         started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
         now = started_at + timedelta(seconds=400)
@@ -3523,7 +3484,6 @@ class TestRouteBlockedResultCatchAllAttemptCap:
     def _session_with_transcript_age(
         self,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
         *,
         session_id: str,
         age_seconds: float | None,
@@ -3540,9 +3500,7 @@ class TestRouteBlockedResultCatchAllAttemptCap:
         """
         if age_seconds is None:
             return _make_daemon_session(id=session_id, worktree_path=None)
-        home = tmp_path / "home"
-        home.mkdir(exist_ok=True)
-        monkeypatch.setenv("HOME", str(home))
+        home = Path.home()
         worktree = tmp_path / f"wt-{session_id}"
         now = datetime.now(UTC)
         transcript = _write_salvage_transcript(
@@ -3590,14 +3548,13 @@ class TestRouteBlockedResultCatchAllAttemptCap:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
         age_seconds: float | None,
         attempts: int,
     ) -> None:
         """Under the cap → PENDING via the shared helper, for every age."""
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         session = self._session_with_transcript_age(
-            tmp_path, monkeypatch, session_id="sess-2405-under", age_seconds=age_seconds
+            tmp_path, session_id="sess-2405-under", age_seconds=age_seconds
         )
         target = self._running_target(session, attempts=attempts)
         sentinel = self._catch_all_sentinel()
@@ -3639,7 +3596,6 @@ class TestRouteBlockedResultCatchAllAttemptCap:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
         age_seconds: float | None,
         attempts: int,
     ) -> None:
@@ -3651,7 +3607,6 @@ class TestRouteBlockedResultCatchAllAttemptCap:
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         session = self._session_with_transcript_age(
             tmp_path,
-            monkeypatch,
             session_id="sess-2405-at-cap",
             age_seconds=age_seconds,
         )
@@ -3704,7 +3659,6 @@ class TestRouteBlockedResultCatchAllAttemptCap:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
         attempts: int,
         expect_status: QueueItemStatus,
     ) -> None:
@@ -3719,7 +3673,7 @@ class TestRouteBlockedResultCatchAllAttemptCap:
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         session = self._session_with_transcript_age(
-            tmp_path, monkeypatch, session_id="sess-2405-apply", age_seconds=30
+            tmp_path, session_id="sess-2405-apply", age_seconds=30
         )
         ticket_id = "GH-2405-apply"
         save_dev_queue(

@@ -109,11 +109,8 @@ def test_stop_hook_no_sentinel_always_defers() -> None:
 
 
 @pytest.fixture
-def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    h = tmp_path / "home"
-    h.mkdir()
-    monkeypatch.setenv("HOME", str(h))
-    return h
+def home() -> Path:
+    return Path.home()
 
 
 @pytest.fixture

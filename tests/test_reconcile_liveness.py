@@ -84,12 +84,9 @@ def _stamp_transcript_stale_minutes(
 
 
 @pytest.fixture
-def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect HOME so transcript lookup finds our written .jsonl files."""
-    h = tmp_path / "home"
-    h.mkdir()
-    monkeypatch.setenv("HOME", str(h))
-    return h
+def home() -> Path:
+    """The per-test HOME (``_isolate_home``) transcript lookup searches."""
+    return Path.home()
 
 
 # ---------------------------------------------------------------------------

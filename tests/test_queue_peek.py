@@ -27,19 +27,14 @@ from tests.conftest import _make_ticket_task as _cw_make_ticket_task
 
 @pytest.fixture
 def patched_peek(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Redirect CLAUDE_PROJECTS, CW_STATE, and Path.home() to tmp_path.
+    """Redirect CLAUDE_PROJECTS and CW_STATE to tmp_path.
 
     find_transcript_for_ticket's worktree_path branch resolves the project
     dir via cw._util.claude_project_dir(), which calls Path.home() directly
-    rather than reading CLAUDE_PROJECTS -- so redirecting only the two
-    module constants below leaves that branch writing into the real
-    ~/.claude/projects/ (GH #1736). Patching HOME is the seam: every
-    module's own Path.home() binding reads it, so it protects
-    claude_project_dir today and any future caller reached the same way.
+    rather than reading CLAUDE_PROJECTS (GH #1736). That branch needs no
+    patch here: the autouse ``_isolate_home`` fixture already points HOME at
+    a per-test directory for every test (#1756).
     """
-    fake_home = tmp_path / "home"
-    fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
     projects_dir = tmp_path / "projects"
     projects_dir.mkdir()
     state_file = tmp_path / "sessions.json"
