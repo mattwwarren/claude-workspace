@@ -28,6 +28,7 @@ from cw.doctor.config_checks import (
     _check_project_configs,
     _check_review_recipe_liveness,
     _check_review_strategy,
+    _check_sessions_size,
     _check_state_file,
     _check_worker_tmp_pressure,
 )
@@ -156,6 +157,7 @@ def run_doctor(
     report.checks.extend(_check_loop_health())
     report.checks.extend(_check_loop_liveness())
     report.checks.append(_check_inbox_size())
+    report.checks.append(_check_sessions_size())
     report.checks.extend(_check_worker_tmp_pressure(_clients))
     report.checks.extend(_check_workspace_paths())
     report.checks.extend(_check_dispatch_repo_head(_clients))

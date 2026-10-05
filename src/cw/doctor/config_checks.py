@@ -3,8 +3,8 @@
 Covers clients.yaml / orchestrator.yaml / sessions.json / dev_queue.json
 parseability, per-client ``.claude/project-config.yaml`` tracker and
 review-strategy validation, the #1201 review-recipe liveness / attention-state
-census anomaly layer, the events inbox size warning, and the #2470 per-client
-worker-tmp free-space/free-inode check.
+census anomaly layer, the events inbox and sessions.json size warnings, and
+the #2470 per-client worker-tmp free-space/free-inode check.
 """
 
 from __future__ import annotations
@@ -453,6 +453,35 @@ def _check_inbox_size() -> CheckResult:
     return CheckResult(
         "inbox-size", ok=True, detail=f"{size_bytes}B, {line_count} lines"
     )
+
+
+def _check_sessions_size() -> CheckResult:
+    """Nudge toward ``cw session prune`` when sessions.json grows large.
+
+    Advisory only: over the threshold returns ``ok=True, warn=True`` so doctor's
+    exit code is unchanged (perf hygiene, not a fault). Read-only and stat-only:
+    it never parses sessions.json (no second ``load_state()`` beyond the one
+    ``_check_state_file`` already does) and never prunes. An absent file is
+    healthy. See GitHub #1999 (retention from #1983).
+    """
+    path = state_file()
+    try:
+        size_bytes = path.stat().st_size
+    except FileNotFoundError:
+        return CheckResult("sessions-size", ok=True, detail="no sessions file")
+    except OSError as exc:
+        stat_failed = f"could not stat {path}: {type(exc).__name__}"
+        return CheckResult("sessions-size", ok=True, warn=True, detail=stat_failed)
+
+    config = _orchestrator_config_or_default()
+    if size_bytes > config.sessions_size_warn_bytes:
+        too_big = (
+            f"size {size_bytes}B exceeds sessions_size_warn_bytes"
+            f" ({config.sessions_size_warn_bytes}B) — run `cw session prune`"
+        )
+        return CheckResult("sessions-size", ok=True, warn=True, detail=too_big)
+
+    return CheckResult("sessions-size", ok=True, detail=f"{size_bytes}B")
 
 
 def _inode_shortfall(
