@@ -615,6 +615,11 @@ class TestFormatAge:
 
         assert _format_age(NOW, NOW - timedelta(days=2)) == "2d"
 
+    def test_future_anchor_clamps_to_zero(self) -> None:
+        from cw.board import _format_age
+
+        assert _format_age(NOW, NOW + timedelta(minutes=5)) == "0m"
+
 
 class TestSessionAgeRender:
     def test_running_task_age_from_session(self) -> None:

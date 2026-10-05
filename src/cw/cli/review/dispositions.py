@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 import click
 
 from cw._git import capture_head_sha
+from cw._util import format_compact_age
 from cw.cli._base import handle_errors, print_fixed_width_table
 from cw.config import load_effective_config
 from cw.dev_queue import load_dev_queue
@@ -68,10 +69,6 @@ _HEADERS = [
     "STALE",
 ]
 _COL_WIDTHS = [30, 36, 8, 16, 24, 20, 5, 10, 5]
-
-_SECONDS_PER_MINUTE = 60
-_SECONDS_PER_HOUR = 3600
-_SECONDS_PER_DAY = 86400
 
 
 def _head_sha(worktree: Path) -> str:
@@ -130,12 +127,7 @@ def _age_cell(recorded_at: str) -> str:
         return _UNKNOWN
     if stamped.tzinfo is None:
         stamped = stamped.replace(tzinfo=UTC)
-    seconds = max((datetime.now(UTC) - stamped).total_seconds(), 0.0)
-    if seconds < _SECONDS_PER_HOUR:
-        return f"{int(seconds // _SECONDS_PER_MINUTE)}m"
-    if seconds < _SECONDS_PER_DAY:
-        return f"{int(seconds // _SECONDS_PER_HOUR)}h"
-    return f"{int(seconds // _SECONDS_PER_DAY)}d"
+    return format_compact_age(datetime.now(UTC) - stamped)
 
 
 def _stale_cell(
