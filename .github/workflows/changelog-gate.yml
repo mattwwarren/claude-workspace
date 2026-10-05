@@ -31,6 +31,8 @@ on:
 jobs:
   gate-changelog:
     runs-on: ubuntu-latest
+    # Observed green runs: 7-12 s (#1937)
+    timeout-minutes: 5
     permissions:
       pull-requests: read
       issues: write # labels are issue-scoped; needed by the self-heal step

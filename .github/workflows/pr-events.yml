@@ -36,6 +36,8 @@ on:
 jobs:
   push-pr-event:
     runs-on: ubuntu-latest
+    # Observed green runs: 7-12 s (#1937)
+    timeout-minutes: 5
     if: vars.CW_PR_EVENTS_RELAY_URL != ''
     permissions:
       pull-requests: read
