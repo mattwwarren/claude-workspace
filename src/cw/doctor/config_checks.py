@@ -55,6 +55,7 @@ if TYPE_CHECKING:
 # is a config error: the headless worker would silently fall back to its
 # built-in default (Linear MCP) and stall on OAuth (see #675 / project-config).
 _RECOGNIZED_TRACKERS: frozenset[str] = frozenset({"github-issues", "linear"})
+_SESSIONS_SIZE_CHECK_NAME = "sessions-size"
 
 
 def _gh_on_path() -> bool:
@@ -468,10 +469,14 @@ def _check_sessions_size() -> CheckResult:
     try:
         size_bytes = path.stat().st_size
     except FileNotFoundError:
-        return CheckResult("sessions-size", ok=True, detail="no sessions file")
+        return CheckResult(
+            _SESSIONS_SIZE_CHECK_NAME, ok=True, detail="no sessions file"
+        )
     except OSError as exc:
         stat_failed = f"could not stat {path}: {type(exc).__name__}"
-        return CheckResult("sessions-size", ok=True, warn=True, detail=stat_failed)
+        return CheckResult(
+            _SESSIONS_SIZE_CHECK_NAME, ok=True, warn=True, detail=stat_failed
+        )
 
     config = _orchestrator_config_or_default()
     if size_bytes > config.sessions_size_warn_bytes:
@@ -479,9 +484,13 @@ def _check_sessions_size() -> CheckResult:
             f"size {size_bytes}B exceeds sessions_size_warn_bytes"
             f" ({config.sessions_size_warn_bytes}B) — run `cw session prune`"
         )
-        return CheckResult("sessions-size", ok=True, warn=True, detail=too_big)
+        return CheckResult(
+            _SESSIONS_SIZE_CHECK_NAME, ok=True, warn=True, detail=too_big
+        )
 
-    return CheckResult("sessions-size", ok=True, detail=f"{size_bytes}B")
+    return CheckResult(
+        _SESSIONS_SIZE_CHECK_NAME, ok=True, detail=f"{size_bytes}B"
+    )
 
 
 def _inode_shortfall(
