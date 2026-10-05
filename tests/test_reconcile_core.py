@@ -61,6 +61,7 @@ from tests._reconcile_helpers import (
     _stamp_transcript_age,
     _ul_record,
     _write_idle_transcript_with_text,
+    _write_staged_clients_yaml,
     _write_transcript_records,
 )
 from tests.conftest import _make_daemon_session, _make_ticket_task
@@ -2267,7 +2268,13 @@ def _seed_routed_session(
     *,
     row: TicketTask | None = None,
 ) -> None:
-    """Persist an ACTIVE routed session (31m stale) + its advanced row."""
+    """Persist an ACTIVE routed session (31m stale) + its advanced row.
+
+    Also writes a ``client-a`` clients.yaml entry: reconcile hands the sweep
+    its configured-client rollout gate, so an unconfigured client is never
+    paged (``tmp_path`` is the redirected config dir ``tmp_config_dir``).
+    """
+    _write_staged_clients_yaml(tmp_path, "client-a")
     home = Path.home()
     worktree = tmp_path / "wt-routed"
     _stamp_transcript_age(home, worktree, stale_minutes=31, surface_ref=_ROUTED_REF)
@@ -2343,6 +2350,19 @@ def test_reconcile_skips_sweep_on_daemon_outage_guard_return(
 ) -> None:
     _seed_routed_session(tmp_path, monkeypatch)
     monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+
+    reconcile()
+
+    assert _routed_pages() == []
+    assert load_state().sessions[0].reap_proposed_at is None
+
+
+def test_reconcile_skips_sweep_for_unconfigured_client(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_routed_session(tmp_path, monkeypatch)
+    _roster_has_routed_ref(monkeypatch)
+    (tmp_path / ".config" / "cw" / "clients.yaml").unlink()
 
     reconcile()
 
