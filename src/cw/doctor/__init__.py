@@ -49,6 +49,7 @@ from cw.doctor.config_checks import (
     _check_project_configs,
     _check_review_recipe_liveness,
     _check_review_strategy,
+    _check_sessions_size,
     _gh_on_path,
     _tracker_system,
 )
@@ -118,6 +119,7 @@ __all__ = [
     "_check_project_configs",
     "_check_review_recipe_liveness",
     "_check_review_strategy",
+    "_check_sessions_size",
     "_check_skills_commands_drift",
     "_check_ssh_key_loaded",
     "_check_timed_out_merged",

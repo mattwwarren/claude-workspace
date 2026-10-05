@@ -28,7 +28,12 @@ from tests._reconcile_helpers import (
     _write_agent_spawn_stamp,
     _write_fake_roster,
 )
-from tests.conftest import _make_daemon_session, _make_tick_summary, _make_ticket_task
+from tests.conftest import (
+    _make_daemon_session,
+    _make_tick_summary,
+    _make_ticket_task,
+    _seed_sessions,
+)
 
 if TYPE_CHECKING:
     from cw.models import (
@@ -7671,6 +7676,179 @@ class TestCheckInboxSize:
         result = _check_inbox_size()
         assert isinstance(result, CheckResult)
         assert result.ok is True
+
+
+# ---------------------------------------------------------------------------
+# TestCheckSessionsSize (issue #1999)
+# ---------------------------------------------------------------------------
+
+
+def _patch_sessions_threshold(monkeypatch: pytest.MonkeyPatch, warn_bytes: int) -> None:
+    """Point config_checks.load_orchestrator_config at a given sessions threshold."""
+    from cw.models import OrchestratorConfig
+
+    cfg = OrchestratorConfig(sessions_size_warn_bytes=warn_bytes)
+    monkeypatch.setattr("cw.doctor.config_checks.load_orchestrator_config", lambda: cfg)
+
+
+class _UnstatablePath:
+    """Stand-in for state_file()'s Path whose stat() raises PermissionError.
+
+    Patching ``Path.stat`` globally would break ``exists()`` and every other
+    caller, so the check gets this narrow stub through ``state_file`` instead.
+    """
+
+    def stat(self) -> object:
+        message = "simulated permission denied"
+        raise PermissionError(message)
+
+    def __str__(self) -> str:
+        return "/unstatable/sessions.json"
+
+
+class TestCheckSessionsSize:
+    """Tests for _check_sessions_size — nudges toward `cw session prune` (#1999)."""
+
+    def test_sessions_file_absent_ok(self, tmp_config_dir: Path) -> None:
+        """No sessions.json → ok=True, no warn, nothing to nudge about."""
+        from cw.doctor import _check_sessions_size
+
+        result = _check_sessions_size()
+        assert result.name == "sessions-size"
+        assert result.ok is True
+        assert result.warn is False
+        assert "no sessions" in result.detail
+
+    def test_under_threshold_ok(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """File under the threshold → ok=True, warn=False, detail has the size."""
+        from cw.config import state_file
+        from cw.doctor import _check_sessions_size
+
+        state_file().write_text('{"sessions": []}')
+        size_bytes = state_file().stat().st_size
+        _patch_sessions_threshold(monkeypatch, 1_000_000)
+
+        result = _check_sessions_size()
+        assert result.ok is True
+        assert result.warn is False
+        assert str(size_bytes) in result.detail
+
+    def test_over_threshold_warns(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Over threshold → advisory WARN (ok=True), names field and prune."""
+        from cw.config import state_file
+        from cw.doctor import _check_sessions_size
+
+        state_file().write_text('{"sessions": []}')
+        _patch_sessions_threshold(monkeypatch, 1)
+
+        result = _check_sessions_size()
+        assert result.ok is True
+        assert result.warn is True
+        assert "sessions_size_warn_bytes" in result.detail
+        assert "cw session prune" in result.detail
+
+    def test_exactly_at_threshold_ok(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Size equal to the threshold does not warn (strict >)."""
+        from cw.config import state_file
+        from cw.doctor import _check_sessions_size
+
+        state_file().write_text('{"sessions": []}')
+        _patch_sessions_threshold(monkeypatch, state_file().stat().st_size)
+
+        result = _check_sessions_size()
+        assert result.ok is True
+        assert result.warn is False
+
+    def test_read_only_does_not_load_or_mutate_state(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stat-only: no load_state() parse, no rewrite, no archive/backup file."""
+        from cw.config import state_dir, state_file
+        from cw.doctor import _check_sessions_size
+
+        state_file().write_text('{"sessions": []}' + " " * 100)
+        before = state_file().read_bytes()
+        _patch_sessions_threshold(monkeypatch, 1)
+
+        error_msg = "load_state must not be called by the sessions-size check"
+
+        def fail_load_state() -> object:
+            raise AssertionError(error_msg)
+
+        monkeypatch.setattr("cw.doctor.config_checks.load_state", fail_load_state)
+
+        result = _check_sessions_size()
+        assert result.warn is True
+        assert state_file().read_bytes() == before
+        assert list(state_dir().glob("sessions.*.json")) == []
+
+    def test_bad_orchestrator_config_degrades_instead_of_raising(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A bad orchestrator.yaml degrades to defaults rather than raising (#1200)."""
+        from cw.config import state_file
+        from cw.doctor import _check_sessions_size
+        from cw.exceptions import ConfigValidationError
+
+        state_file().write_text("{}")
+        error_msg = "simulated bad orchestrator.yaml"
+
+        def fake_load_orchestrator_config() -> object:
+            raise ConfigValidationError(error_msg)
+
+        monkeypatch.setattr(
+            "cw.doctor.config_checks.load_orchestrator_config",
+            fake_load_orchestrator_config,
+        )
+        result = _check_sessions_size()
+        assert isinstance(result, CheckResult)
+        assert result.ok is True
+        assert result.warn is False
+
+    def test_stat_oserror_degrades_to_warn(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stat failure other than 'absent' warns instead of crashing doctor."""
+        from cw.doctor import _check_sessions_size
+
+        monkeypatch.setattr("cw.doctor.config_checks.state_file", _UnstatablePath)
+
+        result = _check_sessions_size()
+        assert result.ok is True
+        assert result.warn is True
+        assert "PermissionError" in result.detail
+
+    def test_sessions_size_check_registered_in_run_doctor(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """run_doctor() includes the sessions-size check."""
+        _stub_claude_version_ok(monkeypatch)
+        report = run_doctor()
+        assert "sessions-size" in {c.name for c in report.checks}
+
+    def test_sessions_size_warn_in_json_report_exit_zero(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WARN never fails doctor's exit code — the check is perf hygiene."""
+        from cw.models import SessionStatus
+
+        _stub_claude_version_ok(monkeypatch)
+        _seed_sessions(_make_daemon_session(status=SessionStatus.COMPLETED))
+        _patch_sessions_threshold(monkeypatch, 1)
+
+        result = CliRunner().invoke(main, ["doctor", "--json"])
+
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        entry = next(c for c in payload["checks"] if c["name"] == "sessions-size")
+        assert entry["warn"] is True
+        assert entry["ok"] is True
 
 
 # ---------------------------------------------------------------------------

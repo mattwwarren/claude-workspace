@@ -892,6 +892,26 @@ def _seed_completed_session(
     return sess
 
 
+def _seed_sessions(*sessions: Session) -> None:
+    """Append pre-built *sessions* to sessions.json in a single ``save_state``.
+
+    Appends to (does not replace) whatever is already persisted. Pairs with the
+    non-persisting ``_make_daemon_session`` builder. Hoisted from
+    ``tests/test_session_retention.py`` and ``tests/test_session_inspect.py``
+    (#1999), following the #1308/#2438 hoist precedent.
+
+    Why ``_seed_daemon_session`` does not fit: it REPLACES the whole state with
+    a single freshly built session (``CwState(sessions=[sess])``) and builds its
+    own ``tmp_path/workspace/<client>`` directory, so it cannot take pre-built
+    Sessions or controlled ``started_at``/``completed_at`` for N sessions in one
+    save. Changing it to append is rejected: it has ~90 call sites across 5
+    files that may rely on the replace semantics.
+    """
+    state = load_state()
+    state.sessions.extend(sessions)
+    save_state(state)
+
+
 def find_completed_session(state: CwState) -> Session:
     """Return the sole session carrying a terminal last_result.
 
