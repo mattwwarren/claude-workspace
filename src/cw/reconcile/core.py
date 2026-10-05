@@ -541,6 +541,7 @@ def _reconcile_locked(
         native_live=native_live,
         config=orchestrator_config,
         tasks=shared_tasks,
+        enabled_clients=clients.keys(),
     )
 
     # Mid-turn usage-limit sweep (#2324): a roster-present worker whose

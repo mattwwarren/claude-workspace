@@ -117,6 +117,18 @@ def _reap_routed_report(
     return report
 
 
+def _run_general_reap_before_routed_close(
+    report: DoctorReport,
+    *,
+    session: str | None,
+    routed_session_ids: tuple[str, ...],
+) -> DoctorReport:
+    """Run ordinary repairs before an unscoped class-11 confirmation."""
+    if session is None and not routed_session_ids:
+        return run_doctor(reap=True, reap_routed_result=False)
+    return report
+
+
 @main.command()
 @click.option(
     "--reap",
@@ -233,6 +245,11 @@ def doctor(
         # An explicit routed-session scope must never fall through to the
         # unscoped doctor reaper when the finding has already disappeared.
         if routed or routed_session_ids:
+            # Preserve ordinary --reap repairs before the confirmed class-11
+            # close; the general pass does not handle class 11.
+            report = _run_general_reap_before_routed_close(
+                report, session=session, routed_session_ids=routed_session_ids
+            )
             report = _reap_routed_report(
                 report,
                 as_json=as_json,
@@ -240,7 +257,7 @@ def doctor(
                 routed_session_ids=routed_session_ids,
             )
         else:
-            report = run_doctor(reap=True)
+            report = run_doctor(reap=True, reap_routed_result=False)
     else:
         report = run_doctor(reap=False)
     report = report or run_doctor(reap=False)

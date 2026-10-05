@@ -26,6 +26,13 @@ subprocess, or calls ``gh``; the only state written is the existing
 emitter. An automatic close under ``reap_policy: auto`` is deliberately not
 built here: it is deferred to a separate ticket that starts with a
 superseding-ADR decision.
+
+The reconcile caller passes the already-loaded client set as a per-client
+rollout gate. Sessions for an unconfigured client remain fail-open and are
+left for the operator's doctor view; removing a client from that existing
+configuration rolls back new pages. Existing page latches can be cleared
+explicitly with :func:`rollback_routed_result_latches` while holding the
+normal sessions lock.
 """
 
 from __future__ import annotations
@@ -194,10 +201,13 @@ def find_stranded_routed_sessions(
     now: datetime,
     native_live: set[str],
     config: OrchestratorConfig,
+    enabled_clients: Iterable[str] | None = None,
 ) -> list[StrandedRoutedSession]:
     """Return every live session stranded after its result was routed (#2524).
 
-    Pure: no writes, no events, no daemon call, no subprocess. The one
+    Pure: no writes, no events, no daemon call, no subprocess. When supplied,
+    ``enabled_clients`` is the reconcile caller's per-client rollout gate.
+    The one
     detector both the reconcile page (:func:`sweep_routed_result_sessions`)
     and the doctor class (``cw.doctor.routed_result_wedge``) consult, so the
     two can never disagree about what is stranded. The ``(client, ticket_id)``
@@ -205,9 +215,15 @@ def find_stranded_routed_sessions(
     ``shared_task_by_ticket``.
     """
     task_list = list(tasks)
+    # An empty client map is the test/first-run bootstrap shape; preserve the
+    # existing fail-open behavior there and gate only when configuration has
+    # an explicit client set.
+    client_gate = set(enabled_clients) if enabled_clients else None
     task_by_key = {(task.client, task.ticket_id): task for task in task_list}
     hits: list[StrandedRoutedSession] = []
     for session in state.sessions:
+        if client_gate is not None and session.client not in client_gate:
+            continue
         surface_ref = _live_routed_surface_ref(session, native_live)
         if surface_ref is None:
             continue
@@ -222,6 +238,25 @@ def find_stranded_routed_sessions(
         if hit is not None:
             hits.append(hit)
     return hits
+
+
+def rollback_routed_result_latches(
+    state: CwState, session_ids: Iterable[str]
+) -> int:
+    """Clear page-once latches for an explicit rollout rollback.
+
+    The caller must hold the existing ``sessions_lock`` and persist *state*
+    after this function returns. This deliberately does not broaden the
+    reconcile sweep: rollback is an explicit operator/control-plane action,
+    and clearing a latch only permits a later signal to be emitted again.
+    """
+    target_ids = set(session_ids)
+    cleared = 0
+    for session in state.sessions:
+        if session.id in target_ids and session.reap_proposed_at is not None:
+            session.reap_proposed_at = None
+            cleared += 1
+    return cleared
 
 
 def _page_breadcrumbs(hit: StrandedRoutedSession) -> str:
@@ -303,13 +338,16 @@ def sweep_routed_result_sessions(
     native_live: set[str],
     config: OrchestratorConfig,
     tasks: Iterable[TicketTask],
+    enabled_clients: Iterable[str] | None = None,
 ) -> list[StrandedRoutedSession]:
     """Page every newly stranded routed session once; return those paged.
 
     Runs inside ``_reconcile_locked``'s existing ``sessions_lock`` hold and
     takes no lock of its own. Policy-independent: under every ``reap_policy``
     it only detects, pages and proposes -- it never reads clients or
-    ``reap_policy`` and never closes anything (ADR-0014). Sessions already
+    ``reap_policy`` and never closes anything (ADR-0014). The reconcile caller
+    supplies its configured-client rollout gate through ``enabled_clients``.
+    Sessions already
     carrying ``reap_proposed_at`` are skipped (the page-once latch). The page
     is emitted before the latch is stamped, so a failed page write leaves the
     session unstamped for the next tick. A failure writing the proposal
@@ -318,7 +356,12 @@ def sweep_routed_result_sessions(
     hits = [
         hit
         for hit in find_stranded_routed_sessions(
-            state, tasks, now=now, native_live=native_live, config=config
+            state,
+            tasks,
+            now=now,
+            native_live=native_live,
+            config=config,
+            enabled_clients=enabled_clients,
         )
         if hit.session.reap_proposed_at is None
     ]

@@ -60,7 +60,9 @@ class _Harness:
             "cw.cli.maintenance._reap_session_by_selector", self._selector
         )
 
-    def _run_doctor(self, *, reap: bool = False) -> DoctorReport:
+    def _run_doctor(
+        self, *, reap: bool = False, reap_routed_result: bool = True, **_: object
+    ) -> DoctorReport:
         self.run_doctor_calls.append(reap)
         return self.report
 

@@ -41,6 +41,7 @@ from cw.reconcile.routed_result_sessions import (
     ROUTED_RESULT_STRANDED_REASON,
     StrandedRoutedSession,
     find_stranded_routed_sessions,
+    rollback_routed_result_latches,
     session_pins_occupied_row,
     stranded_close_command,
     sweep_routed_result_sessions,
@@ -146,6 +147,33 @@ def _events(event_type: OrchestratorEventType) -> list[dict[str, object]]:
 
 
 class TestFindStrandedRoutedSessions:
+    def test_reconcile_client_gate_skips_unconfigured_client(
+        self, tmp_path: Path, home: Path
+    ) -> None:
+        state, tasks, now = _world(tmp_path, home)
+
+        assert (
+            find_stranded_routed_sessions(
+                state,
+                tasks,
+                now=now,
+                native_live=_LIVE,
+                config=OrchestratorConfig(),
+                enabled_clients={"different-client"},
+            )
+            == []
+        )
+
+    def test_roll_back_page_latch_is_explicit_and_idempotent(
+        self, tmp_path: Path, home: Path
+    ) -> None:
+        state, _tasks, now = _world(tmp_path, home)
+        state.sessions[0].reap_proposed_at = now
+
+        assert rollback_routed_result_latches(state, [_SID]) == 1
+        assert state.sessions[0].reap_proposed_at is None
+        assert rollback_routed_result_latches(state, [_SID]) == 0
+
     def test_partial_route_consumed_row_pending_stale_30m_is_found(
         self, tmp_path: Path, home: Path
     ) -> None:
