@@ -11,6 +11,8 @@ on:
 jobs:
   check-drift:
     runs-on: ubuntu-latest
+    # Observed green runs: 7-12 s (#1937)
+    timeout-minutes: 5
     permissions:
       issues: write
       contents: read
