@@ -164,6 +164,23 @@ class TestFindStrandedRoutedSessions:
             == []
         )
 
+    def test_reconcile_client_gate_empty_set_skips_all_clients(
+        self, tmp_path: Path, home: Path
+    ) -> None:
+        state, tasks, now = _world(tmp_path, home)
+
+        assert (
+            find_stranded_routed_sessions(
+                state,
+                tasks,
+                now=now,
+                native_live=_LIVE,
+                config=OrchestratorConfig(),
+                enabled_clients=set(),
+            )
+            == []
+        )
+
     def test_roll_back_page_latch_is_explicit_and_idempotent(
         self, tmp_path: Path, home: Path
     ) -> None:

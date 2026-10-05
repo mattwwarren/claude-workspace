@@ -215,10 +215,7 @@ def find_stranded_routed_sessions(
     ``shared_task_by_ticket``.
     """
     task_list = list(tasks)
-    # An empty client map is the test/first-run bootstrap shape; preserve the
-    # existing fail-open behavior there and gate only when configuration has
-    # an explicit client set.
-    client_gate = set(enabled_clients) if enabled_clients else None
+    client_gate = set(enabled_clients) if enabled_clients is not None else None
     task_by_key = {(task.client, task.ticket_id): task for task in task_list}
     hits: list[StrandedRoutedSession] = []
     for session in state.sessions:
