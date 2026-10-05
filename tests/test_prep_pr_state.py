@@ -872,6 +872,36 @@ class TestRealClaudeMdGates:
                 f"({sync_command!r}) does not. " + _PIN_GUIDANCE
             )
 
+    def test_install_md_dev_setup_uses_sync_gate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # INSTALL.md's contributor setup must run the exact CLAUDE.md gate-2
+        # command: a bare `uv sync` is exact and removes the mcp extra, so a
+        # venv predating an `mcp` bump then fails mypy with `[arg-type]` (#2242).
+        sync_command = _real_repo_gates(monkeypatch)["gates"][_SYNC_GATE_INDEX][
+            "command"
+        ]
+        install_md = (_REPO_ROOT / "docs" / "INSTALL.md").read_text(encoding="utf-8")
+        fences = _bash_fences(install_md)
+        dev_fences = [fence for fence in fences if "uv run cw --help" in fence]
+        assert len(dev_fences) == 1, (
+            "expected exactly one INSTALL.md bash fence containing "
+            f"`uv run cw --help` (the dev setup), got {len(dev_fences)}"
+        )
+        dev_lines = [
+            line.split("#", 1)[0].strip() for line in dev_fences[0].splitlines()
+        ]
+        assert sync_command in dev_lines, (
+            f"INSTALL.md dev setup must run the CLAUDE.md sync gate {sync_command!r}"
+        )
+        bare_sync = [
+            line
+            for fence in fences
+            for line in (raw.split("#", 1)[0].strip() for raw in fence.splitlines())
+            if line == "uv sync"
+        ]
+        assert not bare_sync, "INSTALL.md has a bare `uv sync` in a bash fence"
+
     def test_gate_number_prose_matches_block(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
