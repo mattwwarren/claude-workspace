@@ -39,6 +39,7 @@ from cw.result import (
     has_terminal_result,
     validate_payload,
 )
+from tests._clients_yaml import staged_client, write_clients_yaml
 from tests.conftest import (
     _REPO_ROOT,
     _audit_failure_logged,
@@ -1268,10 +1269,9 @@ class TestResultEmit:
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus, Stage, TicketTask
         from cw.native_daemon import FakeNativeDaemonClient
-        from tests.test_cli import _write_staged_clients_yaml_for_test
 
         ticket_id = "GEN-2458-emit-stop"
-        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        write_clients_yaml(staged_client("test-client", "/tmp/ws-test"))
         worktree = _worktree_with_context(tmp_path, session_id="test1234")
         _seed_daemon_session(
             tmp_path,

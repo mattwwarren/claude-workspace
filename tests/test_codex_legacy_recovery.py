@@ -76,6 +76,7 @@ from cw.reconcile.local import (
     CODEX_HARVEST_CLEAN_REQUEUE_REASON,
     CODEX_HARVEST_ORPHANED_DISPOSITION,
 )
+from tests._clients_yaml import review_backend_clients, write_clients_yaml
 from tests._codex_recovery_helpers import (
     _STARTED_AT,
     _attention_events,
@@ -85,12 +86,7 @@ from tests._codex_recovery_helpers import (
     _use_auto_reap_policy,
 )
 from tests._reconcile_helpers import _mk_headless_daemon_session
-from tests.conftest import (
-    _make_daemon_session,
-    _write_backend_clients_yaml,
-    commit_tracked_file,
-    git_in,
-)
+from tests.conftest import _make_daemon_session, commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -117,7 +113,7 @@ def codex_clients(tmp_config_dir: Path, tmp_path: Path) -> Path:
     """clients.yaml whose client-a runs its review stage on codex."""
     workspace = tmp_path / "ws"
     workspace.mkdir(exist_ok=True)
-    _write_backend_clients_yaml(tmp_config_dir, workspace, "codex")
+    write_clients_yaml(*review_backend_clients(workspace, "codex"))
     return workspace
 
 
@@ -851,7 +847,7 @@ def test_non_codex_backend_is_not_scanned(
 ) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    _write_backend_clients_yaml(tmp_config_dir, workspace, CLAUDE_NATIVE_BACKEND)
+    write_clients_yaml(*review_backend_clients(workspace, CLAUDE_NATIVE_BACKEND))
     _use_legacy_config(monkeypatch)
     _forbid_scan(monkeypatch)
     _seed_legacy(make_git_repo, "T-claude")
@@ -940,7 +936,7 @@ def test_unresolved_session_no_longer_on_codex_at_retry_is_already_handled(
     session = _seed_legacy(make_git_repo, "T-live")
     _writers_in(monkeypatch, session.worktree_path)
     run_codex_legacy_recovery(now=_NOW)
-    _write_backend_clients_yaml(tmp_config_dir, codex_clients, CLAUDE_NATIVE_BACKEND)
+    write_clients_yaml(*review_backend_clients(codex_clients, CLAUDE_NATIVE_BACKEND))
 
     report = run_codex_legacy_recovery(now=_LATER)
 

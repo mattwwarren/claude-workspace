@@ -62,6 +62,7 @@ from cw.reconcile._shared import (
     TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
     _route_blocked_result_to_task,
 )
+from tests._clients_yaml import staged_client, write_clients_yaml
 from tests._reconcile_helpers import (
     _auto_config,
     _client_with_lane,
@@ -73,7 +74,6 @@ from tests._reconcile_helpers import (
     _stage_complete_payload,
     _state_queue_snapshot,
     _write_salvage_transcript,
-    _write_staged_clients_yaml,
     _write_transcript_records,
 )
 from tests.conftest import _make_daemon_session, _make_ticket_task
@@ -894,7 +894,7 @@ class TestRouteEmittedSentinel:
         save_state(CwState(sessions=[sess]))
         # B2: apply_staged_decision needs a pipeline to decide COMPLETED vs advance.
         # Ship at FINALIZE (terminal) → COMPLETED; must have clients.yaml on disk.
-        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -1188,7 +1188,7 @@ class TestRouteEmittedSentinel:
         save_state(CwState(sessions=[sess]))
         # B2: apply_staged_decision needs a pipeline to decide COMPLETED vs advance.
         # Ship at FINALIZE (terminal) → COMPLETED; must have clients.yaml on disk.
-        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -1373,7 +1373,7 @@ class TestRouteEmittedSentinel:
         _write_salvage_transcript(home, worktree, "claude-1149-refusal", payload)
         state = CwState(sessions=[sess])
         save_state(state)
-        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
         task = TicketTask(
             ticket_id="1149-refusal",
             client="client-a",
@@ -1451,7 +1451,7 @@ class TestRouteEmittedSentinel:
         _write_salvage_transcript(home, worktree, "claude-1149-nt", payload)
         state = CwState(sessions=[sess])
         save_state(state)
-        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
         task = TicketTask(
             ticket_id="1149-not-terminal",
             client="client-a",
@@ -1513,7 +1513,7 @@ class TestRouteEmittedSentinel:
         _write_salvage_transcript(home, worktree, "claude-1149-idle-later", payload)
         state = CwState(sessions=[sess])
         save_state(state)
-        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
         task = TicketTask(
             ticket_id="1149-idle-later",
             client="client-a",
@@ -1577,7 +1577,7 @@ class TestRouteEmittedSentinel:
         sess.last_result = None  # sentinel NOT yet consumed
         state = CwState(sessions=[sess])
         save_state(state)
-        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
         task = TicketTask(
             ticket_id="2140-idle-terminal",
             client="client-a",
@@ -1646,7 +1646,7 @@ class TestRouteEmittedSentinel:
         sess.last_result_source = LastResultSource.STOP_HOOK_HARVEST
         state = CwState(sessions=[sess])
         save_state(state)
-        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
         task = TicketTask(
             ticket_id="2140-idle-terminal-refused",
             client="client-a",
@@ -1744,7 +1744,7 @@ class TestApplySentinelToTaskStagedAdvance:
         routed this sentinel to BLOCKED_ON_USER; the staged path auto-advances.
         """
         client_name = "staged-client"
-        _write_staged_clients_yaml(tmp_config_dir, client_name)
+        write_clients_yaml(staged_client(client_name, sentinel_mismatch_veto=True))
 
         ticket_id = "GH-698-small"
         session_id = "sess-698-small"
@@ -1786,7 +1786,7 @@ class TestApplySentinelToTaskStagedAdvance:
         catch-all shares the attempt cap, so FAILED is pinned at the cap.
         """
         client_name = "staged-client"
-        _write_staged_clients_yaml(tmp_config_dir, client_name)
+        write_clients_yaml(staged_client(client_name, sentinel_mismatch_veto=True))
         ticket_id = "GH-750"
         session_id = "sess-750"
         session = _make_daemon_session(id=session_id, worktree_path=None)
@@ -1827,7 +1827,7 @@ class TestApplySentinelToTaskStagedAdvance:
         reach production via the reconcile path, not just the consume path.
         """
         client_name = "staged-client"
-        _write_staged_clients_yaml(tmp_config_dir, client_name)
+        write_clients_yaml(staged_client(client_name, sentinel_mismatch_veto=True))
 
         ticket_id = "GH-698-null-tier"
         session_id = "sess-698-null-tier"
@@ -1857,7 +1857,7 @@ class TestApplySentinelToTaskStagedAdvance:
     ) -> None:
         """plan_pending_approval + scope.tier='large' → BLOCKED_ON_USER (gate)."""
         client_name = "staged-client"
-        _write_staged_clients_yaml(tmp_config_dir, client_name)
+        write_clients_yaml(staged_client(client_name, sentinel_mismatch_veto=True))
 
         ticket_id = "GH-698-large"
         session_id = "sess-698-large"
@@ -1894,7 +1894,7 @@ class TestApplySentinelToTaskStagedAdvance:
         is not in STAGE_SUCCESS_STATUSES.
         """
         client_name = "staged-client"
-        _write_staged_clients_yaml(tmp_config_dir, client_name)
+        write_clients_yaml(staged_client(client_name, sentinel_mismatch_veto=True))
 
         ticket_id = "GH-1676-earlier-blocked"
         session_id = "sess-1676-earlier-blocked"
@@ -2304,7 +2304,7 @@ class TestApplySentinelToTaskLateRescue:
         scope_hint: str = "small",
         status: QueueItemStatus = QueueItemStatus.BLOCKED_ON_USER,
     ) -> None:
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         task = TicketTask(
             ticket_id=ticket_id,
             client="staged-client",
@@ -2442,7 +2442,7 @@ class TestApplySentinelToTaskLateRescue:
         Only a parked (BLOCKED_ON_USER) rescue reports True; the live RUNNING
         path returns False even though it advances.
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         ticket_id, session_id = "GH-918-run", "sess-918-run"
         session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
@@ -2469,7 +2469,7 @@ class TestApplySentinelToTaskLateRescue:
         Regression guard on the widened lookup: the BlockedResult arms must run
         only for RUNNING and behave exactly as before (PENDING + clear session).
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         ticket_id, session_id = "GH-918-runblk", "sess-918-runblk"
         session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
@@ -2525,7 +2525,7 @@ class TestApplySentinelToTaskLateRescue:
         Regression guard on the extracted _route_blocked_result_to_task helper:
         the transient parse-failure branch must still re-queue a RUNNING task.
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         ticket_id, session_id = "GH-918-transient", "sess-918-transient"
         session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
@@ -2555,7 +2555,7 @@ class TestApplySentinelToTaskLateRescue:
         """A signoff-parked (AWAITING_OPERATOR_SIGNOFF) task is rescued by a late
         sentinel the same way a BLOCKED_ON_USER task is (#990).
 
-        No signoff is configured on `_write_staged_clients_yaml`'s client, so
+        No signoff is configured on the ``staged_client`` written here, so
         this exercises only the widened membership lookup (touch-point #30)
         -- not the signoff gate re-firing.
         """
@@ -2684,7 +2684,7 @@ class TestApplySentinelToTaskLateRescue:
         The task stays RUNNING (no status transition, no disposition stamp) --
         a true no-op on the mismatch path, mirroring the parked-task refusal.
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         ticket_id, session_id = "GH-1019-mismatch-running", "sess-1019-mismatch-running"
         session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
@@ -2719,7 +2719,7 @@ class TestApplySentinelToTaskLateRescue:
         phantom sweep, #1019) must still complete the session in this case,
         matching pre-#1019 behavior for an unmatched ticket_id/session_id pair.
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         sentinel = AutoDevResult.model_validate(_stage_complete_payload())
 
         outcome = _apply_sentinel_to_task(
@@ -2758,7 +2758,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         ``_VALIDATION_FAILED_MAX_ATTEMPTS`` with the validation_failed branch
         (see the below-cap sibling test), landing FAILED only at the cap.
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         ticket_id, session_id = "GH-1189-schema", "sess-1189-schema"
         session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
@@ -2804,7 +2804,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         check, unlike the catch-all's #1406 liveness veto (ADR-0014 Plan
         Soundness resolution R1/R3).
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         ticket_id, session_id = "GH-2401-schema-under-cap", "sess-2401-schema"
         session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
@@ -2937,7 +2937,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         self, tmp_config_dir: Path
     ) -> None:
         """RUNNING + validation_failed at the attempt cap → routed=False, FAILED."""
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         ticket_id, session_id = "GH-1189-vfcap", "sess-1189-vfcap"
         session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
@@ -2980,7 +2980,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         ``SENTINEL_BLOCKED_RESULT_REQUEUED`` here too, previously only
         exercised by the deterministic-parse branch's own sibling test.
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         ticket_id, session_id = "GH-2401-vf-under-cap", "sess-2401-vf-under-cap"
         session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
@@ -3032,7 +3032,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         #2405: the catch-all shares the attempt cap, so the FAILED landing is
         pinned at ``_VALIDATION_FAILED_MAX_ATTEMPTS``.
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         ticket_id, session_id = "GH-1189-unknown", "sess-1189-unknown"
         session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
@@ -3079,7 +3079,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         #2405: the catch-all shares the attempt cap, so the FAILED landing is
         pinned at ``_VALIDATION_FAILED_MAX_ATTEMPTS``.
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         target = TicketTask(
             ticket_id="GH-1266-catchall",
             client="staged-client",
@@ -3119,7 +3119,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         landing FAILED just before this caller's own lookup runs. The task row
         must be left byte-for-byte unchanged -- this call has nothing to route.
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         ticket_id, session_id = "GH-1189-race", "sess-1189-race"
         session = _make_daemon_session(id=session_id, worktree_path=None)
         completed_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -3159,7 +3159,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         eligible, not terminal (#1692) -- unlike the FAILED/COMPLETED/
         CANCELLED case above, this must NOT be classified as safe-to-complete.
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         ticket_id, session_id = "GH-1692-race-pending", "sess-1692-race-pending"
         session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
@@ -3201,7 +3201,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         """
         import logging
 
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         ticket_id, session_id = "GH-1189-race-log", "sess-1189-race-log"
         session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
@@ -3246,7 +3246,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         non-empty-store, no-match variant, proving the loop doesn't
         false-positive the race flag on an unrelated row.
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         other_task = TicketTask(
             ticket_id="GH-1189-other",
             client="staged-client",
@@ -3278,7 +3278,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         row -- and asserts the loop keeps scanning and routes to the occupied
         match rather than reporting routed=False on the first (excluded) hit.
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         ticket_id, session_id = "GH-1189-order", "sess-1189-order"
         session = _make_daemon_session(id=session_id, worktree_path=None)
         excluded_row = TicketTask(
@@ -3327,7 +3327,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         session_id=None, the lookup must fall through to the truly-absent
         (routed=True) case, not the excluded-status-match (routed=False) case.
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         ticket_id, session_id = "GH-1189-cleared", "sess-1189-cleared"
         session = _make_daemon_session(id=session_id, worktree_path=None)
         stale_row = TicketTask(
@@ -3360,7 +3360,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         must yield the identical result: the live/redispatch-eligible
         (PENDING) row vetoes the terminal classification either way.
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         ticket_id, session_id = "GH-1692-r3-mixed", "sess-1692-r3-mixed"
         session = _make_daemon_session(id=session_id, worktree_path=None)
         terminal_row = TicketTask(
@@ -3411,7 +3411,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         across duplicate rows didn't accidentally make the terminal case
         harder to satisfy when every excluded match is genuinely terminal.
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         ticket_id, session_id = "GH-1692-r3-all-terminal", "sess-1692-r3-all-terminal"
         session = _make_daemon_session(id=session_id, worktree_path=None)
         failed_row = TicketTask(
@@ -3552,7 +3552,7 @@ class TestRouteBlockedResultCatchAllAttemptCap:
         attempts: int,
     ) -> None:
         """Under the cap → PENDING via the shared helper, for every age."""
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         session = self._session_with_transcript_age(
             tmp_path, session_id="sess-2405-under", age_seconds=age_seconds
         )
@@ -3604,7 +3604,7 @@ class TestRouteBlockedResultCatchAllAttemptCap:
         A fresh transcript no longer vetoes the terminal landing (#2405): the
         cap is the only evidence that decides it.
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         session = self._session_with_transcript_age(
             tmp_path,
             session_id="sess-2405-at-cap",
@@ -3630,7 +3630,7 @@ class TestRouteBlockedResultCatchAllAttemptCap:
         self, tmp_config_dir: Path, reason: str
     ) -> None:
         """Every catch-all reason carries its own reason on the shared event."""
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         session = _make_daemon_session(id="sess-2405-reasons", worktree_path=None)
         target = self._running_target(session, attempts=1)
 
@@ -3671,7 +3671,7 @@ class TestRouteBlockedResultCatchAllAttemptCap:
         ``dev_queue_lock()`` -- record_event nests _inbox_lock inside it, the
         established safe order (RFC 0008 W1, #978).
         """
-        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
         session = self._session_with_transcript_age(
             tmp_path, session_id="sess-2405-apply", age_seconds=30
         )
@@ -3717,7 +3717,7 @@ def test_validation_failed_cap_still_reads_raw_attempts_not_unproductive(
     been moved to unproductive_attempts alongside the global ceiling, that
     worker would retry forever. It must still trip off raw ``attempts``.
     """
-    _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+    write_clients_yaml(staged_client("staged-client", sentinel_mismatch_veto=True))
     ticket_id, session_id = "GH-1750-vfcap", "sess-1750-vfcap"
     session = _make_daemon_session(id=session_id, worktree_path=None)
     task = TicketTask(

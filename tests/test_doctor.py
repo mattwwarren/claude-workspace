@@ -21,6 +21,7 @@ from cw.doctor import (
     format_report,
     run_doctor,
 )
+from tests._clients_yaml import review_backend_clients, write_clients_yaml
 from tests._reconcile_helpers import (
     _install_fake_daemon_roster,
     _stamp_transcript_age,
@@ -32,7 +33,6 @@ from tests.conftest import (
     _make_tick_summary,
     _make_ticket_task,
     _seed_sessions,
-    _write_backend_clients_yaml,
 )
 
 if TYPE_CHECKING:
@@ -7112,7 +7112,7 @@ class TestWedgeActiveNullLivenessOrphan:
         if backend is not None:
             workspace = tmp_path / "ws"
             workspace.mkdir(exist_ok=True)
-            _write_backend_clients_yaml(tmp_config_dir, workspace, backend)
+            write_clients_yaml(*review_backend_clients(workspace, backend))
         state = CwState(sessions=sessions)
         queue = DevQueueStore(tasks=tasks)
         save_state(state)

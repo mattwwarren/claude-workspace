@@ -53,6 +53,7 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
 )
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import (
     _assert_lock_held,
     _fake_fcntl,
@@ -61,7 +62,6 @@ from tests.conftest import (
     _hold_sessions_lock,
     _make_daemon_session,
     _raise_eio,
-    _write_clients_yaml,
 )
 
 if TYPE_CHECKING:
@@ -2690,20 +2690,15 @@ class TestLoadEffectiveConfig:
 # TestLoadEffectiveClients
 # ---------------------------------------------------------------------------
 
+# Lanes declared by the 'acme' client in the effective-clients tests below.
+_ACME_LANES = [
+    {"name": "default", "max_parallel": 1},
+    {"name": "fast", "max_parallel": 2},
+]
+
 
 class TestLoadEffectiveClients:
     """Tests for load_effective_clients() — lane pause override propagation."""
-
-    def _write_clients_yaml(self, tmp_config_dir: Path, tmp_path: Path) -> None:
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        ws = tmp_path / "ws"
-        ws.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            f"clients:\n  acme:\n    workspace_path: {ws}\n"
-            f"    lanes:\n      - name: default\n        max_parallel: 1\n"
-            f"      - name: fast\n        max_parallel: 2\n"
-        )
 
     def test_no_overrides_returns_declared(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -2711,7 +2706,10 @@ class TestLoadEffectiveClients:
         """No override file → effective clients equal declared clients."""
         from cw.config import load_effective_clients
 
-        self._write_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path / "ws", lanes=_ACME_LANES),
+            ensure_workspaces=True,
+        )
         clients = load_effective_clients()
         assert "acme" in clients
         lane_names = [ln.name for ln in clients["acme"].effective_lanes]
@@ -2730,7 +2728,10 @@ class TestLoadEffectiveClients:
         )
         from cw.models import ConcurrencyOverrides, LaneConcurrencyOverride
 
-        self._write_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path / "ws", lanes=_ACME_LANES),
+            ensure_workspaces=True,
+        )
         concurrency_override_file().parent.mkdir(parents=True, exist_ok=True)
         overrides = ConcurrencyOverrides(
             lanes={"acme/fast": LaneConcurrencyOverride(paused=True)}
@@ -2780,7 +2781,10 @@ class TestLoadEffectiveClients:
         """No lane overrides → load_effective_clients returns load_clients result."""
         from cw.config import load_clients, load_effective_clients
 
-        self._write_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path / "ws", lanes=_ACME_LANES),
+            ensure_workspaces=True,
+        )
         assert load_effective_clients() == load_clients()
 
 
@@ -2792,24 +2796,16 @@ class TestLoadEffectiveClients:
 class TestGetEffectiveClient:
     """Tests for get_effective_client() — single-client effective lookup (#875)."""
 
-    def _write_clients_yaml(self, tmp_config_dir: Path, tmp_path: Path) -> None:
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        ws = tmp_path / "ws"
-        ws.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            f"clients:\n  acme:\n    workspace_path: {ws}\n"
-            f"    lanes:\n      - name: default\n        max_parallel: 1\n"
-            f"      - name: fast\n        max_parallel: 2\n"
-        )
-
     def test_returns_declared_when_no_override(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """No override → the effective client's lanes match the declared state."""
         from cw.config import get_effective_client
 
-        self._write_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path / "ws", lanes=_ACME_LANES),
+            ensure_workspaces=True,
+        )
         client = get_effective_client("acme")
         lane_map = {ln.name: ln for ln in client.effective_lanes}
         assert lane_map["fast"].paused is False
@@ -2825,7 +2821,10 @@ class TestGetEffectiveClient:
         )
         from cw.models import ConcurrencyOverrides, LaneConcurrencyOverride
 
-        self._write_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path / "ws", lanes=_ACME_LANES),
+            ensure_workspaces=True,
+        )
         concurrency_override_file().parent.mkdir(parents=True, exist_ok=True)
         _save_concurrency_overrides(
             ConcurrencyOverrides(
@@ -2841,7 +2840,10 @@ class TestGetEffectiveClient:
         """An unknown client name raises CwError with the available-clients hint."""
         from cw.config import get_effective_client
 
-        self._write_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path / "ws", lanes=_ACME_LANES),
+            ensure_workspaces=True,
+        )
         with pytest.raises(CwError, match="Unknown client 'nope'"):
             get_effective_client("nope")
 
@@ -3107,7 +3109,14 @@ class TestBackgroundToolGuardConfig:
         self, tmp_config_dir: Path
     ) -> None:
         """A lane block in clients.yaml loads the override independently."""
-        _write_clients_yaml(tmp_config_dir, "false", "background_tool_guard_enabled")
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_config_dir / "ws",
+                lanes=[{"name": "fast", "background_tool_guard_enabled": False}],
+            ),
+            ensure_workspaces=True,
+        )
 
         lane = load_clients()["acme"].lanes[0]
 

@@ -58,6 +58,7 @@ from cw.reconcile._shared import _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+from tests._clients_yaml import staged_client, write_clients_yaml
 from tests._reconcile_helpers import (
     PROVIDER_OVERLOAD_TEXT,
     SCOPE_GUARD_FILES,
@@ -79,7 +80,6 @@ from tests._reconcile_helpers import (
     _ul_record,
     _write_idle_transcript_with_text,
     _write_salvage_transcript,
-    _write_staged_clients_yaml,
     _write_transcript_records,
 )
 
@@ -177,7 +177,7 @@ def test_reconcile_phantom_routes_stage_complete_advance_sentinel(
     alive = _mk_session("alive", surface_ref="live-ref")
     save_state(CwState(sessions=[sess, alive]))
     # apply_staged_decision needs a pipeline to advance IMPL→REVIEW.
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     save_dev_queue(
         DevQueueStore(
             tasks=[
@@ -246,7 +246,7 @@ def test_reconcile_phantom_routes_tool_result_emitted_sentinel(
     )
     alive = _mk_session("alive", surface_ref="live-ref")
     save_state(CwState(sessions=[sess, alive]))
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     save_dev_queue(
         DevQueueStore(
             tasks=[
@@ -310,7 +310,7 @@ def test_reconcile_phantom_non_advance_sentinel_not_routed(
     )
     alive = _mk_session("alive", surface_ref="live-ref")
     save_state(CwState(sessions=[sess, alive]))
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     save_dev_queue(
         DevQueueStore(
             tasks=[
@@ -370,7 +370,7 @@ def test_reconcile_phantom_stage_mismatch_does_not_orphan_task_or_complete_sessi
     )
     alive = _mk_session("alive", surface_ref="live-ref")
     save_state(CwState(sessions=[sess, alive]))
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     save_dev_queue(
         DevQueueStore(
             tasks=[
@@ -450,7 +450,7 @@ def test_reconcile_phantom_race_already_failed_task_completes_session_via_door(
     )
     alive = _mk_session("alive", surface_ref="live-ref")
     save_state(CwState(sessions=[sess, alive]))
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     save_dev_queue(
         DevQueueStore(
             tasks=[
@@ -1494,7 +1494,7 @@ def test_phantom_sentinel_mismatch_veto_fires_when_transcript_stale(
     """
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
 
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     home = Path.home()
     worktree = tmp_path / "wt-sentinel-veto-stale"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -1540,7 +1540,7 @@ def test_phantom_sentinel_mismatch_veto_fires_when_no_transcript(
     """
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
 
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     sess = _mk_phantom_daemon_session("phantom-veto-notranscript-1", started_at)
     sess.last_result = {"paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON}
@@ -1623,7 +1623,7 @@ def test_phantom_sentinel_mismatch_veto_end_to_end_ignores_transcript_age(
     ``session.sentinel_stage_mismatch_vetoed`` is a diagnostic: populated when
     the transcript is locatable, None otherwise.
     """
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     monkeypatch.setattr(
         "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
     )
@@ -1801,7 +1801,7 @@ def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
     _write_salvage_transcript(home, worktree, "csid-phantom-refusal", payload)
     state = CwState(sessions=[sess])
     save_state(state)
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     task = TicketTask(
         ticket_id="phantom-refusal-1",
         client="client-a",
@@ -1884,7 +1884,7 @@ def test_phantom_route_emitted_sentinel_refusal_marker_is_not_terminal_sentinel(
     _write_salvage_transcript(home, worktree, "csid-phantom-nt", payload)
     state = CwState(sessions=[sess])
     save_state(state)
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     task = TicketTask(
         ticket_id="phantom-nt-1",
         client="client-a",
@@ -1943,7 +1943,7 @@ def test_phantom_routed_mutations_completes_on_task_already_terminal(
     _write_salvage_transcript(home, worktree, "csid-2140-phantom-terminal", payload)
     state = CwState(sessions=[sess])
     save_state(state)
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     task = TicketTask(
         ticket_id="2140-phantom-terminal",
         client="client-a",
@@ -2018,7 +2018,7 @@ def test_phantom_routed_mutations_terminal_refusal_preserves_existing_result(
     )
     state = CwState(sessions=[sess])
     save_state(state)
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     task = TicketTask(
         ticket_id="2140-phantom-terminal-refused",
         client="client-a",
@@ -2099,7 +2099,7 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     _write_salvage_transcript(home, worktree, "csid-phantom-preserve", payload)
     state = CwState(sessions=[sess])
     save_state(state)
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     task = TicketTask(
         ticket_id="phantom-preserve-1",
         client="client-a",
@@ -2183,7 +2183,7 @@ def test_phantom_later_stage_sentinel_routes_forward_instead_of_looping(
     _write_salvage_transcript(home, worktree, "csid-phantom-later", payload)
     state = CwState(sessions=[sess])
     save_state(state)
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     task = TicketTask(
         ticket_id="phantom-later-1",
         client="client-a",
@@ -4786,7 +4786,7 @@ def _non_headless_terminal_phantom_fixture(
     # The staged authority resolves the sentinel's stage_reached against the
     # client's declared pipeline; without one every sentinel is unresolvable and
     # refused, which is not the condition under test.
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     # A second, genuinely-live session keeps the daemon roster non-empty so the
     # transient-outage guard does not abort the sweep.
     alive = _mk_session("alive", surface_ref="live-ref")

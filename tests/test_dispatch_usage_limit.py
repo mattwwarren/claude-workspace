@@ -44,6 +44,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from tests._clients_yaml import write_clients_yaml
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -81,20 +82,6 @@ def fleet_config() -> OrchestratorConfig:
     )
 
 
-def _make_clients_yaml(tmp_path: Path, *clients: ClientConfig) -> None:
-    """Write a minimal clients.yaml for the given clients."""
-    config_dir = tmp_path / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    lines = ["clients:\n"]
-    for client in clients:
-        lines.append(f"  {client.name}:\n")
-        lines.append(f"    workspace_path: {client.workspace_path}\n")
-        lines.append(f"    default_branch: {client.default_branch}\n")
-        if client.worktree_base is not None:
-            lines.append(f"    worktree_base: {client.worktree_base}\n")
-    (config_dir / "clients.yaml").write_text("".join(lines))
-
-
 def _usage_limited_skips() -> set[str]:
     """Client names that got a ``skip_reason=usage_limited`` tick event."""
     return {
@@ -113,7 +100,7 @@ class TestPerClientGate:
         fleet: dict[str, ClientConfig],
         fleet_config: OrchestratorConfig,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, *fleet.values())
+        write_clients_yaml(*fleet.values())
         for name in _CLIENTS:
             add_ticket(TicketTask(ticket_id=f"GEN-{name}", client=name))
         future = datetime.now(UTC) + timedelta(hours=4)
@@ -133,7 +120,7 @@ class TestPerClientGate:
         fleet: dict[str, ClientConfig],
         fleet_config: OrchestratorConfig,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, *fleet.values())
+        write_clients_yaml(*fleet.values())
         add_ticket(TicketTask(ticket_id="GEN-lapsed", client="client-a"))
         past = datetime.now(UTC) - timedelta(seconds=1)
 
@@ -157,7 +144,7 @@ class TestPerClientGate:
         ``usage_limit_detected`` stays False so the loop does not re-arm (and
         thereby extend) a window that is merely still open.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, *fleet.values())
+        write_clients_yaml(*fleet.values())
         for name in _CLIENTS:
             add_ticket(TicketTask(ticket_id=f"GEN-all-{name}", client=name))
         future = datetime.now(UTC) + timedelta(hours=4)
@@ -179,7 +166,7 @@ class TestPerClientGate:
         fleet: dict[str, ClientConfig],
         fleet_config: OrchestratorConfig,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, *fleet.values())
+        write_clients_yaml(*fleet.values())
         add_ticket(TicketTask(ticket_id="GEN-detect", client="client-b"))
         reset_at = datetime.now(UTC) + timedelta(hours=3)
         daemon = FakeNativeDaemonClient()
@@ -204,7 +191,7 @@ class TestPerClientGate:
         flat ``usage_limit_backoff_seconds``, which is what the pre-#1409
         single scalar did on this path.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, *fleet.values())
+        write_clients_yaml(*fleet.values())
         add_ticket(TicketTask(ticket_id="GEN-reconcile", client="client-a"))
         monkeypatch.setattr("cw.dispatch.tick._reconcile_usage_limited", lambda: True)
 
@@ -440,7 +427,7 @@ class TestConcurrentWriterSurvivesTheSave:
         fleet_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, *fleet.values())
+        write_clients_yaml(*fleet.values())
         add_ticket(TicketTask(ticket_id="GEN-race", client="client-a"))
 
         daemon = FakeNativeDaemonClient()

@@ -34,8 +34,9 @@ from cw.models import (
     TicketTask,
 )
 from cw.reconcile import codex_boot
+from tests._clients_yaml import review_backend_clients, write_clients_yaml
 from tests._reconcile_helpers import _mk_headless_daemon_session
-from tests.conftest import _write_backend_clients_yaml, commit_tracked_file, git_in
+from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -186,7 +187,7 @@ def _seed_clean_codex_orphan(
     repo = make_git_repo("wt")
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    _write_backend_clients_yaml(tmp_config_dir, workspace, "codex")
+    write_clients_yaml(*review_backend_clients(workspace, "codex"))
     sess = _mk_headless_daemon_session(ticket_id, repo, _STARTED_AT)
     # Why: intentionally overwrites the session_id key _mk_headless_daemon_session
     # just wrote, to establish a clean committed baseline — a real review-orphan

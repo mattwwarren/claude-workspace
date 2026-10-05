@@ -42,6 +42,7 @@ from cw.reconcile.gate_recipes import (
     RECIPE_AUTO_ADOPT_PLAN,
     RECIPE_AUTO_APPROVE_REVIEW,
 )
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._reconcile_helpers import (
     _auto_config,
     _mk_headless_daemon_session,
@@ -53,10 +54,10 @@ from tests.conftest import (
     stub_fetch_plan,
 )
 from tests.test_reconcile_gate_recipes import (
+    _GATE_LANES,
     _clean_result,
     _make_session,
     _plan_result,
-    _write_acme_clients_yaml,
 )
 
 
@@ -712,7 +713,9 @@ class TestReconcileGateRecipeIntegration:
     def test_clean_review_auto_approved_advances_to_finalize(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         _write_gate_orchestrator_yaml(gate_recipes_enabled=True)
         _stub_gate_comment(monkeypatch)
         save_dev_queue(DevQueueStore(tasks=[self._blocked_task(Stage.REVIEW)]))
@@ -732,7 +735,9 @@ class TestReconcileGateRecipeIntegration:
     def test_clean_plan_auto_adopted_advances_to_impl(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         _write_gate_orchestrator_yaml(gate_recipes_enabled=True)
         _stub_gate_comment(monkeypatch)
         stub_fetch_plan(monkeypatch, plan_body())
@@ -753,7 +758,9 @@ class TestReconcileGateRecipeIntegration:
     def test_master_switch_off_leaves_task_blocked(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         _write_gate_orchestrator_yaml(gate_recipes_enabled=False)
         _stub_gate_comment(monkeypatch)
         save_dev_queue(DevQueueStore(tasks=[self._blocked_task(Stage.REVIEW)]))

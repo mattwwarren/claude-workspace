@@ -27,9 +27,9 @@ from cw.cli._hook_io import (
     resolve_guard_enabled,
 )
 from cw.models import LaneConfig, OrchestratorConfig
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import (
     _headless_worktree,
-    _write_clients_yaml,
     _write_global_toggle,
     _write_hook_context_file,
 )
@@ -221,7 +221,12 @@ class TestResolveGuardEnabled:
     def test_lane_override_disables_against_enabled_global(
         self, toggle: GuardToggle, tmp_config_dir: Path
     ) -> None:
-        _write_clients_yaml(tmp_config_dir, lane_value="false", field_name=toggle)
+        write_clients_yaml(
+            ClientSpec(
+                "acme", tmp_config_dir / "ws", lanes=[{"name": "fast", toggle: False}]
+            ),
+            ensure_workspaces=True,
+        )
 
         assert resolve_guard_enabled("acme", "fast", toggle) is False
 
@@ -230,21 +235,36 @@ class TestResolveGuardEnabled:
     ) -> None:
         """The override is bidirectional — a lane can turn the guard back ON."""
         _write_global_toggle(tmp_config_dir, toggle, "false")
-        _write_clients_yaml(tmp_config_dir, lane_value="true", field_name=toggle)
+        write_clients_yaml(
+            ClientSpec(
+                "acme", tmp_config_dir / "ws", lanes=[{"name": "fast", toggle: True}]
+            ),
+            ensure_workspaces=True,
+        )
 
         assert resolve_guard_enabled("acme", "fast", toggle) is True
 
     def test_unknown_client_falls_through_to_global(
         self, toggle: GuardToggle, tmp_config_dir: Path
     ) -> None:
-        _write_clients_yaml(tmp_config_dir, lane_value="false", field_name=toggle)
+        write_clients_yaml(
+            ClientSpec(
+                "acme", tmp_config_dir / "ws", lanes=[{"name": "fast", toggle: False}]
+            ),
+            ensure_workspaces=True,
+        )
 
         assert resolve_guard_enabled("not-a-client", "fast", toggle) is True
 
     def test_unknown_lane_falls_through_to_global(
         self, toggle: GuardToggle, tmp_config_dir: Path
     ) -> None:
-        _write_clients_yaml(tmp_config_dir, lane_value="false", field_name=toggle)
+        write_clients_yaml(
+            ClientSpec(
+                "acme", tmp_config_dir / "ws", lanes=[{"name": "fast", toggle: False}]
+            ),
+            ensure_workspaces=True,
+        )
 
         assert resolve_guard_enabled("acme", "not-a-lane", toggle) is True
 
@@ -253,7 +273,12 @@ class TestResolveGuardEnabled:
     ) -> None:
         """Each guard reads its own field, never a sibling guard's."""
         other = next(name for name in _GUARD_TOGGLES if name != toggle)
-        _write_clients_yaml(tmp_config_dir, lane_value="false", field_name=other)
+        write_clients_yaml(
+            ClientSpec(
+                "acme", tmp_config_dir / "ws", lanes=[{"name": "fast", other: False}]
+            ),
+            ensure_workspaces=True,
+        )
 
         assert resolve_guard_enabled("acme", "fast", toggle) is True
 
@@ -262,7 +287,14 @@ class TestFindLaneConfig:
     """The declared-lane lookup every lane-overridable hook guard shares."""
 
     def test_returns_the_declared_lane(self, tmp_config_dir: Path) -> None:
-        _write_clients_yaml(tmp_config_dir, lane_value="false")
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_config_dir / "ws",
+                lanes=[{"name": "fast", "subagent_spawn_guard_enabled": False}],
+            ),
+            ensure_workspaces=True,
+        )
 
         lane_cfg = find_lane_config("acme", "fast")
 
@@ -277,16 +309,37 @@ class TestFindLaneConfig:
     def test_missing_client_or_lane_yields_none(
         self, tmp_config_dir: Path, client: str | None, lane: str | None
     ) -> None:
-        _write_clients_yaml(tmp_config_dir, lane_value="false")
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_config_dir / "ws",
+                lanes=[{"name": "fast", "subagent_spawn_guard_enabled": False}],
+            ),
+            ensure_workspaces=True,
+        )
 
         assert find_lane_config(client, lane) is None
 
     def test_unknown_client_yields_none(self, tmp_config_dir: Path) -> None:
-        _write_clients_yaml(tmp_config_dir, lane_value="false")
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_config_dir / "ws",
+                lanes=[{"name": "fast", "subagent_spawn_guard_enabled": False}],
+            ),
+            ensure_workspaces=True,
+        )
 
         assert find_lane_config("not-a-client", "fast") is None
 
     def test_undeclared_lane_yields_none(self, tmp_config_dir: Path) -> None:
-        _write_clients_yaml(tmp_config_dir, lane_value="false")
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_config_dir / "ws",
+                lanes=[{"name": "fast", "subagent_spawn_guard_enabled": False}],
+            ),
+            ensure_workspaces=True,
+        )
 
         assert find_lane_config("acme", "not-a-lane") is None

@@ -31,7 +31,6 @@ from cw.config import load_state, save_state, sessions_lock_file
 from cw.disk import DiskUsage, InodeUsage
 from cw.models import (
     AGENT_SPAWN_STAMP_KEY,
-    DEFAULT_LANE,
     HOOK_CONTEXT_RELATIVE_PATH,
     ClientConfig,
     CwState,
@@ -58,7 +57,6 @@ if TYPE_CHECKING:
     import types
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
-    from cw.models import ReapPolicy
 
 # A captured record_event invocation: (event_type, payload, correlation_id).
 CapturedEvent = tuple[OrchestratorEventType, dict[str, Any], str | None]
@@ -1077,78 +1075,13 @@ def _symlink_loop(base: Path, name: str = "loop") -> Path:
     return first
 
 
-def _write_clients_yaml(
-    tmp_config_dir: Path,
-    lane_value: str,
-    field_name: str = "subagent_spawn_guard_enabled",
-) -> None:
-    """Write a one-client, one-lane clients.yaml carrying a lane override.
-
-    Writes client ``acme`` with lane ``fast`` whose *field_name* is set to
-    *lane_value*. Hoisted from ``test_cli_subagent_policy.py`` (#2303) once
-    ``test_cli_background_tool_guard.py`` needed the same shape for its own
-    guard's kill switch; *field_name* selects which guard's override to write.
-    """
-    ws_dir = tmp_config_dir / "ws"
-    ws_dir.mkdir(exist_ok=True)
-    clients_path = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-    clients_path.parent.mkdir(parents=True, exist_ok=True)
-    clients_path.write_text(
-        "clients:\n"
-        "  acme:\n"
-        f"    workspace_path: {ws_dir}\n"
-        "    lanes:\n"
-        "      - name: fast\n"
-        f"        {field_name}: {lane_value}\n"
-    )
-
-
-def _write_backend_clients_yaml(
-    tmp_config_dir: Path,
-    workspace: Path,
-    backend: str,
-    *,
-    names: tuple[str, ...] = ("client-a",),
-    lane_reap_policies: dict[str, ReapPolicy] | None = None,
-) -> None:
-    """Write a clients.yaml whose clients run the review stage on *backend*.
-
-    Every client in *names* gets ``pipeline.executors.review.backend:
-    <backend>``. *lane_reap_policies* maps a client name to the
-    ``reap_policy`` its default lane declares; a client absent from it
-    declares no lanes. Hoisted from ``test_reconcile_codex_boot.py`` (#2237)
-    once ``test_doctor.py``'s class-9 wedge tests needed the same
-    backend-resolution shape; named apart from :func:`_write_clients_yaml`
-    above, an unrelated lane-guard-override helper.
-    """
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    policies = lane_reap_policies or {}
-    body = "".join(
-        f"  {name}:\n"
-        f"    workspace_path: {workspace}\n"
-        "    default_branch: main\n"
-        "    pipeline:\n"
-        "      executors:\n"
-        "        review:\n"
-        f"          backend: {backend}\n"
-        + (
-            "    lanes:\n"
-            f"      - name: {DEFAULT_LANE}\n"
-            f"        reap_policy: {policies[name]}\n"
-            if name in policies
-            else ""
-        )
-        for name in names
-    )
-    (config_dir / "clients.yaml").write_text(f"clients:\n{body}")
-
-
 def _write_global_toggle(tmp_config_dir: Path, toggle: str, value: str) -> None:
     """Write an orchestrator.yaml setting one guard's global *toggle* to *value*.
 
-    The global half of :func:`_write_clients_yaml`'s lane override: the shared
-    guard-toggle resolver's tests and both guards' kill-switch tests need it.
+    The global half of a per-lane guard override (a lane mapping such as
+    ``{"name": "fast", toggle: False}`` written with
+    :func:`tests._clients_yaml.write_clients_yaml`): the shared guard-toggle
+    resolver's tests and both guards' kill-switch tests need it.
     """
     orchestrator_path = tmp_config_dir / ".claude-workspace" / "orchestrator.yaml"
     orchestrator_path.parent.mkdir(parents=True, exist_ok=True)

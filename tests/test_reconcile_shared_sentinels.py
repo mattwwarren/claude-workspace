@@ -54,6 +54,7 @@ from cw.reconcile import (
     revert_completed_silent_tasks,
     revert_timed_out_tasks,
 )
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._reconcile_helpers import (
     PROVIDER_OVERLOAD_TEXT,
     SCOPE_GUARD_FILES,
@@ -3939,19 +3940,6 @@ class TestSalvageTerminalResultTwoLayerFallback:
 # ---------------------------------------------------------------------------
 
 
-def _write_scope_guard_clients_yaml(
-    tmp_config_dir: Path, *, default_branch: str
-) -> None:
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "clients.yaml").write_text(
-        "clients:\n"
-        "  client-a:\n"
-        "    workspace_path: /tmp/ws-scope-guard\n"
-        f"    default_branch: {default_branch}\n"
-    )
-
-
 def _parse_scope_guard_sentinel(
     home: Path, worktree: Path, payload: dict[str, Any]
 ) -> AutoDevResult:
@@ -3999,7 +3987,9 @@ def test_salvaged_sentinel_scope_honours_client_default_branch(
     worktree = _make_stale_base_repo(
         make_git_repo, "wt-scope-trunk", default_branch="trunk"
     )
-    _write_scope_guard_clients_yaml(tmp_config_dir, default_branch="trunk")
+    write_clients_yaml(
+        ClientSpec("client-a", "/tmp/ws-scope-guard", default_branch="trunk")
+    )
 
     result = _parse_scope_guard_sentinel(
         home, worktree, _inflate_scope(_stage_complete_payload())

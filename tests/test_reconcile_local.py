@@ -52,15 +52,13 @@ from cw.reconcile import (
     _detect_local_harvest_candidates,
     reconcile,
 )
+from tests._clients_yaml import staged_client, write_clients_yaml
 from tests._opencode_helpers import (
     earlier_stage_then_final_log,
     framed,
     write_opencode_log,
 )
-from tests._reconcile_helpers import (
-    _stage_complete_payload,
-    _write_staged_clients_yaml,
-)
+from tests._reconcile_helpers import _stage_complete_payload
 from tests.conftest import (
     _audit_failure_logged,
     _fail_audit_append,
@@ -132,7 +130,7 @@ def test_local_harvest_dead_process_completes_and_advances(
     from cw.reconcile import ProposedAction
 
     worktree = _local_git_worktree(make_git_repo, "wt-harvest-dead", with_commit=True)
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     # A PID this high has no /proc entry → read_process_start_time_ns returns
     # None → the process reads as dead.
     liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=123)
@@ -195,7 +193,7 @@ def test_local_harvest_stamps_git_synthesis_source(
     """RFC 0012 A3 (#1459): a successful git-synthesis harvest routes through
     the door and stamps ``last_result_source == GIT_SYNTHESIS``."""
     worktree = _local_git_worktree(make_git_repo, "wt-harvest-gitsrc", with_commit=True)
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=5)
     sess = _mk_local_session("harv-gitsrc", worktree, liveness)
     state = CwState(sessions=[sess])
@@ -241,7 +239,7 @@ def test_local_harvest_audit_append_failure_still_persists_result_and_routes(
     worktree = _local_git_worktree(
         make_git_repo, "wt-harvest-audit-failure", with_commit=True
     )
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     session_id = "harv-audit-failure"
     sess = _mk_local_session(
         session_id,
@@ -306,7 +304,7 @@ def test_audit_existing_result_route_audit_failure_still_routes_task(
     route proceeds exactly as with a healthy inbox."""
     from cw.reconcile._shared import _apply_sentinel_to_task_audited
 
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     session_id = "audit-existing"
     payload = {**_stage_complete_payload(), "ticket_id": session_id}
     sentinel = AutoDevResult.model_validate(payload)
@@ -371,7 +369,7 @@ def test_local_harvest_refused_by_door_leaves_session_and_task_untouched(
     worktree = _local_git_worktree(
         make_git_repo, "wt-harvest-refused", with_commit=True
     )
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=9)
     sess = _mk_local_session("harv-refused", worktree, liveness)
     foreign = {"status": "shipped", "foreign_authority": True}
@@ -434,7 +432,7 @@ def test_local_harvest_queue_save_failure_keeps_audit_event(
     worktree = _local_git_worktree(
         make_git_repo, "wt-harvest-save-failure", with_commit=True
     )
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     session_id = "harv-save-failure"
     sess = _mk_local_session(
         session_id,
@@ -497,7 +495,7 @@ def test_act_on_local_harvest_candidates_completes_on_task_already_terminal(
     worktree = _local_git_worktree(
         make_git_repo, "wt-2140-harvest-terminal", with_commit=True
     )
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=42)
     sess = _mk_local_session("2140-harv-terminal", worktree, liveness)
     state = CwState(sessions=[sess])
@@ -556,7 +554,7 @@ def test_local_harvest_stage_mismatch_does_not_orphan_task_or_complete_session(
     worktree = _local_git_worktree(
         make_git_repo, "wt-harvest-mismatch", with_commit=True
     )
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=123)
     sess = _mk_local_session("harv-mismatch", worktree, liveness)
     state = CwState(sessions=[sess])
@@ -672,7 +670,7 @@ def test_local_harvest_no_commits_synthesizes_aider_no_output(
 ) -> None:
     """Dead PID + no commits → git synthesis yields blocked/aider_no_output."""
     worktree = _local_git_worktree(make_git_repo, "wt-harvest-noout", with_commit=False)
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=1)
     sess = _mk_local_session("harv-noout", worktree, liveness)
     state = CwState(sessions=[sess])
@@ -719,7 +717,7 @@ def test_act_on_local_harvest_candidates_passes_session_id_to_synthesize_git_res
     from cw.local_runner import synthesize_git_result as _real_synth
 
     worktree = _local_git_worktree(make_git_repo, "wt-harvest-sidspy", with_commit=True)
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=7)
     sess = _mk_local_session("harv-sidspy", worktree, liveness)
     state = CwState(sessions=[sess])
@@ -781,7 +779,7 @@ def test_local_harvest_act_handles_missing_task_and_no_worktree(
 ) -> None:
     """Act falls back to a synthetic task when none is queued; skips no-worktree."""
     worktree = _local_git_worktree(make_git_repo, "wt-harvest-notask", with_commit=True)
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=1)
     sess = _mk_local_session("harv-notask", worktree, liveness)
     sess2 = _mk_local_session("harv-noworktree", worktree, liveness)
@@ -814,7 +812,7 @@ def test_local_harvest_fires_when_daemon_query_errors(
     LOCAL session is still completed even in a daemon outage. See GitHub #888.
     """
     worktree = _local_git_worktree(make_git_repo, "wt-harvest-outage", with_commit=True)
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
     liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=1)
     sess = _mk_local_session(
@@ -1142,7 +1140,7 @@ def test_local_harvest_opencode_sentinel_found(
 ) -> None:
     """Dead opencode process with sentinel in log → completed with parsed result."""
     worktree = make_git_repo("wt-opencode-harvest-sentinel")
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
 
     # The harvest compares the sentinel's ticket_id against the id in the
     # session name, which the executor builds as
@@ -1204,7 +1202,7 @@ def test_local_harvest_opencode_no_output(
 ) -> None:
     """Dead opencode process with no sentinel in log → OPENCODE_NO_OUTPUT."""
     worktree = make_git_repo("wt-opencode-harvest-no-output")
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
 
     log_content = json.dumps({"type": "text", "part": {"text": "no sentinel here"}})
     log_path = worktree / OPENCODE_LOG_RELATIVE_PATH
@@ -1290,7 +1288,7 @@ def test_local_harvest_opencode_backend_without_log_routes_to_opencode(
     """backend=opencode with NO .cw/opencode.log still routes through opencode
     synthesis (OPENCODE_NO_OUTPUT), never silently misroutes to git/aider."""
     worktree = _local_git_worktree(make_git_repo, "wt-oc-no-log", with_commit=False)
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     assert not (worktree / OPENCODE_LOG_RELATIVE_PATH).exists()
 
     session = _harvest_single("ses-oc-no-log", "T-oc-no-log", worktree, "opencode")
@@ -1308,7 +1306,7 @@ def test_local_harvest_aider_backend_ignores_stray_opencode_log(
     """backend=aider with a stray .cw/opencode.log still routes through git
     synthesis — the file's presence no longer drives dispatch."""
     worktree = _local_git_worktree(make_git_repo, "wt-aider-stray", with_commit=False)
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     log_path = worktree / OPENCODE_LOG_RELATIVE_PATH
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text("stale opencode output\n", encoding="utf-8")
@@ -1382,7 +1380,7 @@ def test_local_harvest_opencode_finalize_keeps_final_blocked_sentinel(
     (``merge_gate_blocked``) and ``blocked_on_pr`` were lost (#2490 variant 2).
     """
     worktree = make_git_repo("wt-oc-final-wins")
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     earlier = make_opencode_blocked(
         ticket_id="T-OC-F", worktree=worktree, reason="impl_failed"
     )
@@ -1430,7 +1428,7 @@ def test_local_harvest_stage_mismatch_pages_once_and_stops_reoffering(
     another ``sentinel.stage_mismatch``) on every tick.
     """
     worktree = _local_git_worktree(make_git_repo, "wt-harvest-page", with_commit=True)
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=123)
     save_state(CwState(sessions=[_mk_local_session("harv-page", worktree, liveness)]))
     save_dev_queue(
@@ -1501,7 +1499,7 @@ def test_local_harvest_non_stage_refusal_neither_pages_nor_latches(
     worktree = _local_git_worktree(
         make_git_repo, "wt-harvest-pending", with_commit=True
     )
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=123)
     save_state(CwState(sessions=[_mk_local_session("harv-pend", worktree, liveness)]))
     save_dev_queue(
@@ -1542,7 +1540,7 @@ def test_local_harvest_stage_mismatch_latch_merges_into_existing_last_result(
 ) -> None:
     """An existing ``last_result`` dict keeps its own marker; the flag merges in."""
     worktree = _local_git_worktree(make_git_repo, "wt-harvest-merge", with_commit=True)
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=123)
     sess = _mk_local_session("harv-merge", worktree, liveness)
     sess.last_result = {"paused_status": "silently_idle", "note": None}
@@ -1646,7 +1644,7 @@ def _save_refusal_scenario(
     A row at FINALIZE refuses the git-synthesized ``stage_complete`` at
     ``stage2_impl`` (stale advance claim); a row at IMPL accepts it.
     """
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=123)
     sessions = []
     tasks = []
@@ -1888,7 +1886,7 @@ def test_local_harvest_opencode_refused_result_pages_with_blocker_and_recovery(
     and the exact recovery command.
     """
     worktree = make_git_repo("wt-oc-refused")
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     reported = _with_recovery_hint(
         make_opencode_blocked(
             ticket_id="oc-refused",

@@ -26,6 +26,7 @@ from cw.session_resume_trigger import (
     ResumeTriggerResult,
     get_resume_trigger_adapter,
 )
+from tests._clients_yaml import write_clients_yaml
 from tests.conftest import _make_daemon_session, _make_ticket_task
 
 if TYPE_CHECKING:
@@ -39,15 +40,6 @@ _MESSAGE = SessionInboxMessage(
     author="matt",
     body="Yes, go ahead and use the second approach.",
 )
-
-
-def _write_clients_file(tmp_config_dir: Path, sample_client: ClientConfig) -> None:
-    clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-    clients_file.write_text(
-        "clients:\n"
-        "  test-client:\n"
-        f"    workspace_path: {sample_client.workspace_path}\n"
-    )
 
 
 def _persist(session: Session) -> None:
@@ -120,7 +112,7 @@ class TestGate:
         sample_client: ClientConfig,
         mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client, status=SessionStatus.ACTIVE)
         _persist(session)
         task = _make_ticket_task(
@@ -150,7 +142,7 @@ class TestGate:
         """_route_stopped_without_sentinel never touches Session.status, so a
         parked row's session can still read ACTIVE — the two signals are OR'd.
         """
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client, status=SessionStatus.ACTIVE)
         _persist(session)
         task = _make_ticket_task(
@@ -173,7 +165,7 @@ class TestGate:
         sample_client: ClientConfig,
         mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client, status=SessionStatus.IDLE)
         _persist(session)
         adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
@@ -190,7 +182,7 @@ class TestGate:
         sample_client: ClientConfig,
         mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client, status=SessionStatus.ACTIVE)
         _persist(session)
         other = _make_ticket_task(
@@ -221,7 +213,7 @@ class TestNativeDaemonResumeTriggerAdapter:
         daemon: FakeNativeDaemonClient,
         session: Session,
     ) -> ResumeTriggerResult:
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         _persist(session)
         adapter = NativeDaemonResumeTriggerAdapter(native_daemon=daemon)
         with patch("cw.session_resume_trigger.list_tickets", return_value=[]):
@@ -276,7 +268,7 @@ class TestNativeDaemonResumeTriggerAdapter:
         mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
         session = _eligible_session(sample_client)
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         _persist(session)
         adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
         with (
@@ -313,7 +305,7 @@ class TestNativeDaemonResumeTriggerAdapter:
         mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
         session = _eligible_session(sample_client)
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         _persist(session)
         adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
         with (
@@ -373,7 +365,7 @@ class TestNativeDaemonResumeTriggerAdapter:
         sample_client: ClientConfig,
         mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client)
         _persist(session)
         adapter = NativeDaemonResumeTriggerAdapter()
@@ -430,7 +422,7 @@ class TestMailboxReaderWiring:
         """
         from cw import session_inbox
 
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client)
         _persist(session)
         queued = session_inbox.append_message(
@@ -455,7 +447,7 @@ class TestMailboxReaderWiring:
         """A message queued before the session became eligible is not lost."""
         from cw import session_inbox
 
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client)
         _persist(session)
         session_inbox.append_message(session.id, author="matt", body="first answer")
@@ -492,7 +484,7 @@ class TestMailboxReaderWiring:
         daemon: FakeNativeDaemonClient,
         session: Session,
     ) -> ResumeTriggerResult:
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         _persist(session)
         adapter = NativeDaemonResumeTriggerAdapter(native_daemon=daemon)
         with patch("cw.session_resume_trigger.list_tickets", return_value=[]):
@@ -516,7 +508,7 @@ class TestConcurrentSendGuard:
         """The outer session object was resolved before the lock; if it is
         gone from state by the time _respawn reloads it fresh, decline
         rather than spawning against stale data."""
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client)
         # Deliberately not persisted: `load_state()` inside `_respawn`
         # therefore finds no matching session.
@@ -534,7 +526,7 @@ class TestConcurrentSendGuard:
         sample_client: ClientConfig,
         mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client)
         _persist(_eligible_session(sample_client, claude_session_id=None))
         adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
@@ -554,7 +546,7 @@ class TestConcurrentSendGuard:
         """Simulates the race: a concurrent trigger already resumed this
         session (its new surface is live in the daemon) by the time this
         call reaches the per-session lock."""
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client, surface_ref="alreadylive")
         _persist(session)
         mock_native_daemon._live.add("alreadylive")
@@ -577,7 +569,7 @@ class TestConcurrentSendGuard:
         both see BLOCKED_ON_USER -- a task that moved on between them (e.g.
         an operator requeue racing a send) must not let a stale outer pass
         smuggle a respawn through (#2212 review round 2, finding 1/2)."""
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client, status=SessionStatus.ACTIVE)
         _persist(session)
         blocked_task = _make_ticket_task(
@@ -613,7 +605,7 @@ class TestConcurrentSendGuard:
         """spawn_bg succeeds but the worker never registers -- the orphan
         must be stopped, not left running with delivered=False and no
         indication anything was ever spawned (#2212 review finding 3)."""
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client)
         _persist(session)
         mock_native_daemon.raise_unregistered = True
@@ -641,7 +633,7 @@ class TestConcurrentSendGuard:
         """An OSError from the roster poll (e.g. an unreadable roster file)
         gets the same orphan-stop compensation as a CwError (#2212 review
         round 6)."""
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client)
         _persist(session)
         adapter = NativeDaemonResumeTriggerAdapter(
@@ -682,7 +674,7 @@ class TestPostSpawnCompensation:
     ) -> None:
         """mutate_state failing means nothing committed -- the same
         orphan-stop compensation as a roster-verify failure applies."""
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client)
         _persist(session)
         adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
@@ -713,7 +705,7 @@ class TestPostSpawnCompensation:
         failure recording SESSION_RESUMED or advancing the cursor must not
         stop it (that would manufacture a phantom): accept it, log it, and
         surface it in the reason, but still report delivered=True."""
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client)
         _persist(session)
         adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
@@ -743,7 +735,7 @@ class TestPostSpawnCompensation:
         """Same as the history-event case, but the failure is in the
         mailbox cursor write instead -- both live in the same try block and
         must both be tolerated post-commit."""
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client)
         _persist(session)
         adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
@@ -783,7 +775,7 @@ class TestCommitPrecondition:
         """The session disappears from state between the roster-verify poll
         and the commit -- _update's precondition must catch the no-op write
         instead of mutate_state returning normally being read as success."""
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client)
         _persist(session)
         adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
@@ -813,7 +805,7 @@ class TestCommitPrecondition:
     ) -> None:
         """The session independently completes during the spawn/roster-verify
         window -- the commit must not set it back to ACTIVE."""
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client)
         _persist(session)
         adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
@@ -848,7 +840,7 @@ class TestCommitPrecondition:
         """A failed daemon.stop() during pre-commit compensation must not
         vanish silently -- it leaks an untracked process with nothing
         recording it (#2212 review round 4, finding 2)."""
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _eligible_session(sample_client)
         _persist(session)
         mock_native_daemon.raise_unregistered = True

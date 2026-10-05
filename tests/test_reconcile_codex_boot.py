@@ -65,6 +65,7 @@ from cw.reconcile.codex_boot import (
     reap_orphaned_codex_sessions_at_boot,
 )
 from cw.spawn import _write_hook_context
+from tests._clients_yaml import review_backend_clients, write_clients_yaml
 from tests._codex_recovery_helpers import (
     _STARTED_AT,
     _assert_session_closed,
@@ -82,7 +83,7 @@ from tests._codex_recovery_helpers import (
     _use_auto_reap_policy,
 )
 from tests._reconcile_helpers import _mk_headless_daemon_session
-from tests.conftest import _write_backend_clients_yaml, commit_tracked_file, git_in
+from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -99,7 +100,7 @@ def _seed(
     """Write clients.yaml, one ACTIVE codex session, and its RUNNING task."""
     workspace = tmp_path / "ws"
     workspace.mkdir(parents=True, exist_ok=True)
-    _write_backend_clients_yaml(tmp_config_dir, workspace, backend)
+    write_clients_yaml(*review_backend_clients(workspace, backend))
     sess = session or _mk_headless_daemon_session(
         ticket_id, tmp_path / "wt", _STARTED_AT
     )
@@ -851,7 +852,7 @@ def test_unestablishable_baseline_is_parked_without_fetching(
 def _clients(tmp_config_dir: Path, tmp_path: Path) -> dict[str, ClientConfig]:
     workspace = tmp_path / "ws"
     workspace.mkdir(exist_ok=True)
-    _write_backend_clients_yaml(tmp_config_dir, workspace, "codex")
+    write_clients_yaml(*review_backend_clients(workspace, "codex"))
     return load_clients()
 
 
@@ -1268,7 +1269,7 @@ def test_session_without_a_matching_task_is_skipped_without_raising(
     """No dev-queue row to park → skip quietly; never raise on a boot path."""
     workspace = tmp_path / "ws"
     workspace.mkdir(parents=True, exist_ok=True)
-    _write_backend_clients_yaml(tmp_config_dir, workspace, "codex")
+    write_clients_yaml(*review_backend_clients(workspace, "codex"))
     save_state(
         CwState(
             sessions=[
@@ -1305,8 +1306,8 @@ def test_same_ticket_id_on_two_clients_does_not_collide(
     """
     workspace = tmp_path / "ws"
     workspace.mkdir(parents=True, exist_ok=True)
-    _write_backend_clients_yaml(
-        tmp_config_dir, workspace, "codex", names=("client-a", "client-b")
+    write_clients_yaml(
+        *review_backend_clients(workspace, "codex", names=("client-a", "client-b"))
     )
 
     orphan = _mk_headless_daemon_session("21", tmp_path / "wt-b", _STARTED_AT)
@@ -1361,7 +1362,7 @@ def test_zombie_session_does_not_park_a_newer_sessions_task(
     """
     workspace = tmp_path / "ws"
     workspace.mkdir(parents=True, exist_ok=True)
-    _write_backend_clients_yaml(tmp_config_dir, workspace, "codex")
+    write_clients_yaml(*review_backend_clients(workspace, "codex"))
 
     zombie = _mk_headless_daemon_session("T-orphan", tmp_path / "wt", _STARTED_AT)
     save_state(CwState(sessions=[zombie]))
