@@ -192,6 +192,7 @@ def test_reap_audit_event_payload(
         "authority": "operator",
         "proposed_action": "close_routed_result_session",
         "mutations": ["session_status_completed", "daemon_stopped"],
+        "daemon_stop_succeeded": True,
     }
 
 
@@ -347,7 +348,10 @@ def test_daemon_stop_failure_leaves_session_completed(
 
     assert reap_routed_result_findings(_routed_findings()) == [_SID]
     assert _session().status is SessionStatus.COMPLETED
-    assert len(_events(OrchestratorEventType.SESSION_REAP_AUTHORIZED)) == 1
+    events = _events(OrchestratorEventType.SESSION_REAP_AUTHORIZED)
+    assert len(events) == 1
+    assert events[0]["daemon_stop_succeeded"] is False
+    assert "daemon_stopped" not in events[0]["mutations"]
 
     next_tick = FakeNativeDaemonClient()
     next_tick._live.add(_REF)

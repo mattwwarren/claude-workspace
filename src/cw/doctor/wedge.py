@@ -41,6 +41,7 @@ from cw.doctor._shared import WedgeFinding
 from cw.doctor.loop_health import _gh_pr_states, _reap_session_by_selector
 from cw.doctor.routed_result_wedge import (
     WEDGE_ROUTED_RESULT_STRANDED,
+    has_pending_routed_result_audits,
     reap_routed_result_findings,
 )
 from cw.exceptions import CwError
@@ -892,7 +893,11 @@ def _cancel_terminal_sibling_parks(queue: DevQueueStore, ticket_ids: set[str]) -
     return changed
 
 
-def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
+def _reap_wedge_findings(
+    findings: list[WedgeFinding],
+    *,
+    routed_result_session_ids: set[str] | None = None,
+) -> None:
     """Apply mutations for actionable wedge classes.
 
     Class-2 (task-running-no-session): revert queue task to PENDING.
@@ -987,10 +992,16 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
     has_leaked_worker_findings = any(
         f.wedge_class == _WEDGE_LEAKED_DAEMON_WORKER for f in findings
     )
+    pending_routed_result_audits = has_pending_routed_result_audits()
     routed_result_findings = [
         f
         for f in findings
-        if f.session_id and f.wedge_class == WEDGE_ROUTED_RESULT_STRANDED
+        if f.session_id
+        and f.wedge_class == WEDGE_ROUTED_RESULT_STRANDED
+        and (
+            routed_result_session_ids is None
+            or f.session_id in routed_result_session_ids
+        )
     ]
 
     if not (
@@ -1000,6 +1011,7 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         or daemon_reap_findings
         or has_leaked_worker_findings
         or routed_result_findings
+        or pending_routed_result_audits
     ):
         return
 
@@ -1038,7 +1050,7 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         _reap_session_by_selector(session_id, proposed_action=wedge_class, bounded=True)
 
     # Class-11 (#2524): session-only close; takes its own bounded lock.
-    if routed_result_findings:
+    if routed_result_findings or pending_routed_result_audits:
         reap_routed_result_findings(routed_result_findings)
 
     # Class-10 (#2480): re-detect fresh (state may have changed since the

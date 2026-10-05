@@ -99,7 +99,9 @@ def _collect_wedge_findings(
     return findings
 
 
-def run_doctor(*, reap: bool = False) -> DoctorReport:
+def run_doctor(
+    *, reap: bool = False, routed_result_session_ids: set[str] | None = None
+) -> DoctorReport:
     """Run every preflight check and return a populated report.
 
     When *reap* is True, also run state reconciliation and append a
@@ -160,7 +162,10 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
         queue = _deps.load_dev_queue()
         report.wedge_findings.extend(_collect_wedge_findings(link_state, queue))
         if reap and report.wedge_findings:
-            _reap_wedge_findings(report.wedge_findings)
+            _reap_wedge_findings(
+                report.wedge_findings,
+                routed_result_session_ids=routed_result_session_ids,
+            )
 
     if reap:
         report.checks.append(_check_reconcile())

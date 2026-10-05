@@ -17,6 +17,7 @@ from cw.doctor import (
     format_report_json,
     run_doctor,
 )
+from cw.doctor.routed_result_wedge import WEDGE_ROUTED_RESULT_STRANDED
 from cw.exceptions import CwError
 from cw.executor import ClaudeNativeExecutor
 from cw.models import Stage, StageExecutorConfig
@@ -86,8 +87,9 @@ def doctor(reap: bool, session: str | None, as_json: bool) -> None:
       advanced) but which never completed: no occupied row binds it, its
       transcript is stale, and it still holds a ceiling slot and worktree.
       Reported by every cw doctor run; nothing closes it automatically.
-      Action (--reap only): mark EVERY session of this class COMPLETED and
-      stop its daemon worker; never touches a queue row.
+      Action (--reap only, after an explicit batch confirmation): mark every
+      confirmed session of this class COMPLETED and stop its daemon worker;
+      never touches a queue row.
       Recipe: cw doctor --reap, or cw spawn close --confirmed-dead <id>
 
     ``--reap`` also reconciles session state against the native daemon
@@ -102,7 +104,45 @@ def doctor(reap: bool, session: str | None, as_json: bool) -> None:
         return
     if session and not reap:
         click.echo("SESSION argument has no effect without --reap", err=True)
-    report = run_doctor(reap=reap)
+    if reap:
+        # Class-11 is a bulk operation. Display the complete target set and
+        # require an explicit confirmation before the mutating doctor pass.
+        report = run_doctor(reap=False)
+        routed = [
+            finding
+            for finding in report.wedge_findings
+            if finding.wedge_class == WEDGE_ROUTED_RESULT_STRANDED
+        ]
+        if routed:
+            output_file = click.get_text_stream("stderr" if as_json else "stdout")
+            click.echo(
+                "cw doctor --reap will close these routed-result sessions:",
+                file=output_file,
+            )
+            for finding in routed:
+                click.echo(
+                    f"  session={finding.session_id} ticket={finding.ticket_id}",
+                    file=output_file,
+                )
+            if not click.confirm(
+                "Proceed with this complete batch?", default=False, err=as_json
+            ):
+                # The report is still useful to the operator, but no reap has
+                # occurred. A later invocation can confirm the same set.
+                pass
+            else:
+                report = run_doctor(
+                    reap=True,
+                    routed_result_session_ids={
+                        finding.session_id
+                        for finding in routed
+                        if finding.session_id is not None
+                    },
+                )
+        else:
+            report = run_doctor(reap=True)
+    else:
+        report = run_doctor(reap=False)
     if as_json:
         click.echo(format_report_json(report))
         raise click.exceptions.Exit(0 if report.ok else 1)

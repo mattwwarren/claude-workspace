@@ -25,11 +25,14 @@ under ``sessions_lock``, release, stop the daemon, then emit the audit event.
 
 from __future__ import annotations
 
-import contextlib
+import json
+import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from cw.atomic import atomic_write_text
 from cw.config import (
+    events_dir,
     load_orchestrator_config,
     load_state,
     save_state,
@@ -54,13 +57,16 @@ from cw.reconcile.routed_result_sessions import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from cw.models import CwState, DevQueueStore
     from cw.native_daemon import NativeDaemonClient
     from cw.reconcile.routed_result_sessions import StrandedRoutedSession
 
 WEDGE_ROUTED_RESULT_STRANDED = "wedge/active-routed-result-stranded"
 
-_CLOSE_MUTATIONS: tuple[str, ...] = ("session_status_completed", "daemon_stopped")
+_AUDIT_OUTBOX_NAME = "routed_result_reap_audit.json"
+_logger = logging.getLogger(__name__)
 
 
 def _routed_result_recipe(hit: StrandedRoutedSession) -> str:
@@ -112,6 +118,174 @@ def _check_wedge_routed_result_session(
     ]
 
 
+def _audit_outbox_path() -> Path:
+    """Return the durable outbox path for class-11 close audits."""
+    return events_dir() / _AUDIT_OUTBOX_NAME
+
+
+def _read_audit_outbox() -> list[dict[str, Any]]:
+    """Read the close-audit outbox, failing closed on malformed durable data."""
+    path = _audit_outbox_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        msg = f"invalid routed-result audit outbox: {path}"
+        raise ValueError(msg)
+    return raw
+
+
+def _write_audit_outbox(records: list[dict[str, Any]]) -> None:
+    """Atomically persist close-audit records before a session close commits."""
+    path = _audit_outbox_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(records, indent=2, sort_keys=True) + "\n")
+
+
+def has_pending_routed_result_audits() -> bool:
+    """Whether a prior class-11 close still needs audit delivery."""
+    try:
+        return bool(_read_audit_outbox())
+    except (OSError, ValueError):
+        _logger.exception("cannot inspect routed-result audit outbox")
+        return True
+
+
+def _queue_audit_intents(hits: list[StrandedRoutedSession]) -> None:
+    """Write pending audit intents before their corresponding state save."""
+    records = _read_audit_outbox()
+    known = {record.get("session_id") for record in records}
+    for hit in hits:
+        if hit.session.id in known:
+            continue
+        records.append(
+            {
+                "session_id": hit.session.id,
+                "surface_ref": hit.session.surface_ref,
+                "status": "pending_stop",
+                "payload": {
+                    "session_id": hit.session.id,
+                    "session_name": hit.session.name,
+                    "client": hit.session.client,
+                    "ticket_id": hit.ticket_id,
+                    "lane": hit.lane,
+                    "authority": "operator",
+                    "proposed_action": ProposedAction.CLOSE_ROUTED_RESULT_SESSION.value,
+                    "mutations": ["session_status_completed"],
+                    "daemon_stop_succeeded": None,
+                },
+                "correlation_id": hit.ticket_id or hit.session.id,
+            }
+        )
+    _write_audit_outbox(records)
+
+
+def _finalize_audit_intent(
+    session_id: str,
+    *,
+    mutations: list[str],
+    stop_succeeded: bool,
+    stop_error: str | None,
+) -> dict[str, Any] | None:
+    """Persist the actual stop result and return the resulting event record."""
+    records = _read_audit_outbox()
+    for record in records:
+        if record.get("session_id") != session_id:
+            continue
+        payload = record["payload"]
+        payload["mutations"] = mutations
+        payload["daemon_stop_succeeded"] = stop_succeeded
+        if stop_error is not None:
+            payload["daemon_stop_error"] = stop_error
+        record["status"] = "pending_event"
+        _write_audit_outbox(records)
+        return record
+    _logger.error(
+        "missing durable audit intent for routed-result session %s", session_id
+    )
+    return None
+
+
+def _emit_audit_record(record: dict[str, Any]) -> bool:
+    """Emit one outbox record, retaining it when the event inbox is unavailable."""
+    try:
+        record_event(
+            OrchestratorEventType.SESSION_REAP_AUTHORIZED,
+            payload=record["payload"],
+            correlation_id=record["correlation_id"],
+        )
+    except Exception:
+        _logger.exception(
+            "routed-result close audit is pending in %s",
+            _audit_outbox_path(),
+        )
+        return False
+    try:
+        records = [
+            item
+            for item in _read_audit_outbox()
+            if item.get("session_id") != record.get("session_id")
+        ]
+        _write_audit_outbox(records)
+    except Exception:
+        _logger.exception(
+            "routed-result audit recorded but outbox cleanup failed for %s",
+            record.get("session_id"),
+        )
+    return True
+
+
+def _retry_pending_audits(daemon: NativeDaemonClient) -> None:
+    """Retry durable audits left by an earlier close or inbox failure."""
+    try:
+        records = _read_audit_outbox()
+    except (OSError, ValueError):
+        _logger.exception("cannot read routed-result audit outbox")
+        return
+    for record in records:
+        if record.get("status") == "pending_stop":
+            try:
+                state = load_state()
+                session = next(
+                    (
+                        s
+                        for s in state.sessions
+                        if s.id == record.get("session_id")
+                    ),
+                    None,
+                )
+            except (OSError, ValueError):
+                _logger.exception("cannot inspect pending routed-result audit")
+                continue
+            if session is None or session.status is not SessionStatus.COMPLETED:
+                _logger.warning(
+                    "routed-result audit intent remains pending for open session %s",
+                    record.get("session_id"),
+                )
+                continue
+            try:
+                daemon.stop(record["surface_ref"])
+            except Exception as exc:  # noqa: BLE001 - daemon stop is best-effort
+                finalized = _finalize_audit_intent(
+                    str(record["session_id"]),
+                    mutations=["session_status_completed"],
+                    stop_succeeded=False,
+                    stop_error=f"{type(exc).__name__}: {exc}",
+                )
+            else:
+                finalized = _finalize_audit_intent(
+                    str(record["session_id"]),
+                    mutations=["session_status_completed", "daemon_stopped"],
+                    stop_succeeded=True,
+                    stop_error=None,
+                )
+            if finalized is not None:
+                _emit_audit_record(finalized)
+        elif record.get("status") == "pending_event":
+            _emit_audit_record(record)
+
+
 def _stop_and_audit(hit: StrandedRoutedSession, daemon: NativeDaemonClient) -> None:
     """Stop *hit*'s worker, then emit its ``session.reap_authorized`` audit event.
 
@@ -119,23 +293,25 @@ def _stop_and_audit(hit: StrandedRoutedSession, daemon: NativeDaemonClient) -> N
     ``_reap_session_by_selector``: the session is already COMPLETED, so the
     #2481 leaked-worker sweep stops the worker on the next reconcile tick.
     """
-    with contextlib.suppress(Exception):
+    stop_succeeded = True
+    stop_error: str | None = None
+    try:
         daemon.stop(hit.surface_ref)
-    session = hit.session
-    record_event(
-        OrchestratorEventType.SESSION_REAP_AUTHORIZED,
-        payload={
-            "session_id": session.id,
-            "session_name": session.name,
-            "client": session.client,
-            "ticket_id": hit.ticket_id,
-            "lane": hit.lane,
-            "authority": "operator",
-            "proposed_action": ProposedAction.CLOSE_ROUTED_RESULT_SESSION.value,
-            "mutations": list(_CLOSE_MUTATIONS),
-        },
-        correlation_id=hit.ticket_id or session.id,
+    except Exception as exc:
+        stop_succeeded = False
+        stop_error = f"{type(exc).__name__}: {exc}"
+        _logger.exception("failed to stop routed-result worker %s", hit.session.id)
+    mutations = ["session_status_completed"]
+    if stop_succeeded:
+        mutations.append("daemon_stopped")
+    record = _finalize_audit_intent(
+        hit.session.id,
+        mutations=mutations,
+        stop_succeeded=stop_succeeded,
+        stop_error=stop_error,
     )
+    if record is not None:
+        _emit_audit_record(record)
 
 
 def reap_routed_result_findings(findings: list[WedgeFinding]) -> list[str]:
@@ -155,9 +331,10 @@ def reap_routed_result_findings(findings: list[WedgeFinding]) -> list[str]:
         for f in findings
         if f.session_id and f.wedge_class == WEDGE_ROUTED_RESULT_STRANDED
     }
+    daemon = get_native_daemon_client()
+    _retry_pending_audits(daemon)
     if not target_ids:
         return []
-    daemon = get_native_daemon_client()
     native_live = daemon.list_live_session_short_ids()
     config = load_orchestrator_config()
     with dev_queue_lock():
@@ -185,6 +362,7 @@ def reap_routed_result_findings(findings: list[WedgeFinding]) -> list[str]:
             hit.session.completed_reason = CompletionReason.USER
             hit.session.reap_reason = ReapReason.ROUTED_RESULT_STRANDED
         if closed:
+            _queue_audit_intents(closed)
             save_state(state)
     for hit in closed:
         _stop_and_audit(hit, daemon)
