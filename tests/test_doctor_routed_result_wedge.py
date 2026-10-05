@@ -668,3 +668,21 @@ def test_outbox_cleanup_failure_after_emit_still_reports_delivery(
 
     assert _emit_audit_record(record) is True
     assert len(_events(OrchestratorEventType.SESSION_REAP_AUTHORIZED)) == 1
+
+
+def test_finalize_skips_records_for_other_sessions() -> None:
+    _write_outbox([_outbox_record(session_id="other"), _outbox_record()])
+
+    record = _finalize_audit_intent(
+        _SID,
+        mutations=["session_status_completed", "daemon_stopped"],
+        stop_succeeded=True,
+        stop_error=None,
+    )
+
+    assert record is not None
+    assert record["session_id"] == _SID
+    assert record["status"] == "pending_event"
+    by_id = {r["session_id"]: r for r in _read_audit_outbox()}
+    assert by_id["other"]["status"] == "pending_stop"
+    assert by_id[_SID]["status"] == "pending_event"
