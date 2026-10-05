@@ -22,6 +22,11 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
+# Must run before the first ``cw`` import: it redirects HOME/XDG so every
+# import-time ``Path.home()`` constant in src/ binds to a throwaway home
+# (#1756). isort keeps a plain ``import`` ahead of the ``from cw ...`` lines;
+# tests/test_conftest.py::TestHomeRedirectByConstruction pins the ordering.
+import tests._session_home
 from cw.config import load_state, save_state, sessions_lock_file
 from cw.disk import DiskUsage, InodeUsage
 from cw.models import (
@@ -1603,7 +1608,9 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # real ~/.claude, so `cw doctor` tests see a clean host regardless of what
     # the machine running them has installed. (The sibling
     # doctor.versions._CLAUDE_SETTINGS_PATH and doctor.skills_drift._CLAUDE_HOME
-    # seams are NOT patched here — a pre-existing gap, out of scope for #2226.)
+    # seams are not patched here: they bind at import time under the session
+    # HOME set by tests/_session_home.py, so they miss the real ~/.claude by
+    # construction (#1756).)
     monkeypatch.setattr("cw.doctor.user_level_hooks._CLAUDE_HOME", tmp_path / ".claude")
 
     # Stub _claude_agents_json so tests don't invoke the real ``claude``
@@ -1807,6 +1814,28 @@ def _isolate_global_agents_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
 
 
 @pytest.fixture(autouse=True)
+def _isolate_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Give every test its own ``HOME`` at ``tmp_path / "_home"`` (#1756).
+
+    ``tests/_session_home.py`` already moved ``HOME`` off the operator's real
+    home at import time; this narrows it per test, so call-time
+    ``Path.home()`` readers (``claude_project_dir``, the ``~/.cw/wt/<hash>``
+    worktree base behind #2460) never see another test's files. The
+    directory is ``_home``, not ``home``: many tests build their own
+    ``tmp_path / "home"`` with a bare ``mkdir()``.
+
+    No-op when the session opted out of the redirect (``CW_TEST_REAL_HOME`` or
+    an ``INTEGRATION_*`` live gate), since live runs need the real home.
+    """
+    if tests._session_home.SESSION_HOME is None:
+        return
+    home = tmp_path / "_home"
+    home.mkdir()
+    tests._session_home.write_minimal_gitconfig(home)
+    monkeypatch.setenv("HOME", str(home))
+
+
+@pytest.fixture(autouse=True)
 def _hide_optional_binaries(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1864,13 +1893,16 @@ def _guard_no_real_claude_projects_writes() -> Iterator[None]:
     ``patched_peek`` did before this guard existed) leaves that call path
     writing into the real ``~/.claude/projects/`` (GH #1736).
 
-    This fixture is a safety net, not the fix: setup/teardown here run outside
-    any individual test's ``monkeypatch`` context, so ``Path.home()`` is still
-    the real, unpatched home. It snapshots the real directory's entries at
+    The fix is the suite-wide ``HOME`` redirect (``tests/_session_home.py``
+    plus the autouse ``_isolate_home``, #1756), which makes this leak class
+    impossible by construction. This fixture stays as the backstop behind it:
+    it watches the real home captured before the redirect
+    (``tests._session_home.REAL_HOME``), not ``Path.home()``, which now points
+    at the throwaway home. It snapshots the real directory's entries at
     session start and again at session end, then splits any new entries by
     whether their name matches the ``tmp-pytest``/``pytest-of`` signature this
-    bug class produces (``tmp_path``-rooted worktrees run through the
-    unpatched ``claude_project_dir``):
+    bug class produces (``tmp_path``-rooted worktrees run through
+    ``claude_project_dir`` against the real home):
 
     - Entries matching the signature fail the suite — this is the regression
       guard for #1736.
@@ -1879,12 +1911,9 @@ def _guard_no_real_claude_projects_writes() -> Iterator[None]:
       and failing on that would make suite exit status depend on unrelated
       activity outside this repo.
 
-    Nothing is deleted here (out of scope). A structurally stronger fix —
-    redirecting ``HOME`` for the entire suite by construction, so this class
-    of leak becomes impossible rather than caught after the fact — is tracked
-    as a follow-up: GH #1756.
+    Nothing is deleted here (out of scope).
     """
-    real_projects = Path.home() / ".claude" / "projects"
+    real_projects = tests._session_home.REAL_HOME / ".claude" / "projects"
     before = (
         {p.name for p in real_projects.iterdir()} if real_projects.exists() else set()
     )
@@ -1905,10 +1934,10 @@ def _guard_no_real_claude_projects_writes() -> Iterator[None]:
         )
     assert not suspect, (
         f"Test suite leaked directories into the REAL {real_projects} "
-        f"(GH #1736): {sorted(suspect)}. A test resolved "
-        "cw._util.claude_project_dir() without redirecting Path.home() via "
-        "the HOME env var -- see the patched_peek fixture in "
-        "tests/test_queue_peek.py for the pattern."
+        f"(GH #1736): {sorted(suspect)}. A test reached the real home "
+        "despite the suite-wide HOME redirect (#1756) -- check for a test "
+        "that restores the real HOME or reads tests._session_home.REAL_HOME, "
+        "and for an import that ran before tests/_session_home.py."
     )
 
 
