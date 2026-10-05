@@ -6,6 +6,7 @@ RFC 0005 A2 / E1 / E2.
 from __future__ import annotations
 
 import contextlib
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -55,7 +56,11 @@ from cw.models import (
     TicketTask,
 )
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX
-from tests.conftest import find_completed_session
+from tests.conftest import (
+    _audit_failure_logged,
+    _fail_audit_append,
+    find_completed_session,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -788,6 +793,38 @@ def test_spawn_fire_and_forget_preflight_blocked_completes_session(
             "session_name": session.name,
         },
     )
+
+
+def test_spawn_fire_and_forget_preflight_blocked_audit_failure_still_persists_result(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Executor-direct writers fail open (#2465): a broken audit inbox is
+    logged, and the session still gets its EXECUTOR_DIRECT result and is
+    completed."""
+    worktree = make_git_repo("wt-faf-audit-failure")
+    runner = FakeFireAndForgetRunner()
+    blocked = make_blocked(
+        ticket_id=_FAF_TICKET, worktree=worktree, reason="preflight_nope"
+    )
+    _fail_audit_append(monkeypatch)
+
+    with (
+        patch("cw.executor.core._record_orchestrator_event"),
+        caplog.at_level(logging.WARNING, logger="cw.result"),
+    ):
+        sid = _faf_spawn(worktree, runner=runner, preflight=blocked)
+
+    session = find_completed_session(load_state())
+    assert session.id == sid
+    assert session.status == SessionStatus.COMPLETED
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.blocker is not None
+    assert result.blocker.reason == "preflight_nope"
+    assert _audit_failure_logged(caplog, session_id=sid)
 
 
 @pytest.mark.parametrize("executor_name", ["aider", "opencode", "codex"])

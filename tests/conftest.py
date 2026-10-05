@@ -7,6 +7,7 @@ import errno
 import fcntl
 import importlib.util
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -631,6 +632,70 @@ def _plan_pending_payload(**overrides: object) -> dict[str, Any]:
     }
     payload.update(overrides)
     return payload
+
+
+def _fail_audit_append(monkeypatch: pytest.MonkeyPatch) -> list[OrchestratorEventType]:
+    """Make every ``session.result_emitted`` audit append raise ``OSError`` (#2465).
+
+    Patches ``cw.result.record_event`` -- the one chokepoint behind
+    ``_record_result_emitted_audit``, which every result-write path (direct
+    CLI, Stop-hook harvest, executor-direct, reconcile) funnels through.
+    Returns the list of attempted event types so a test can assert the append
+    was (or, for a refused write, was not) tried.
+    """
+    attempts: list[OrchestratorEventType] = []
+
+    def _raise_event(
+        event_type: OrchestratorEventType, *_a: object, **_k: object
+    ) -> None:
+        attempts.append(event_type)
+        msg = "event inbox unavailable"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.result.record_event", _raise_event)
+    return attempts
+
+
+def _audit_failure_logged(
+    caplog: pytest.LogCaptureFixture,
+    *,
+    session_id: str,
+    source: str | None = None,
+    status: str | None = None,
+    payload_digest: str | None = None,
+) -> logging.LogRecord | None:
+    """Return the fail-open audit-append WARNING for SESSION_ID, else ``None``.
+
+    Only a ``cw.result`` WARNING record counts. ``session=<id> `` is matched
+    with its trailing space so ``test1234`` never matches ``test12345``. When
+    SOURCE, STATUS or PAYLOAD_DIGEST are given the found record must carry
+    them, so a log that drops those fields fails the calling test.
+    """
+    record = next(
+        (
+            r
+            for r in caplog.records
+            if r.name == "cw.result"
+            and r.levelno == logging.WARNING
+            and "audit append failed" in r.getMessage()
+            and f"session={session_id} " in r.getMessage()
+        ),
+        None,
+    )
+    if record is None:
+        return None
+    message = record.getMessage()
+    expected = {
+        "source": source,
+        "status": status,
+        "payload_digest": payload_digest,
+    }
+    for field, value in expected.items():
+        if value is not None:
+            assert f"{field}={value}" in message, (
+                f"audit-failure log is missing {field}={value}: {message}"
+            )
+    return record
 
 
 def _seed_daemon_session(

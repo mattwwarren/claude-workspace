@@ -917,6 +917,14 @@ wrote the result (§11.1's table), before the caller persists the write, and is
 skipped entirely on a first-writer-wins refusal (§11.2) since a refusal mutates
 nothing.
 
+Recording is best-effort and independent of result persistence (#2465): an
+accepted result is persisted whether or not the audit append succeeds. An
+event-inbox `OSError` is logged as a missing audit record and the write
+proceeds -- the same fail-open policy on every path (`cw result emit`, the
+Stop-hook harvest, executor-direct writers, reconcile). A failure to persist
+session or queue state is not covered by this and still surfaces as a
+state-write failure.
+
 Payload: `session_id`, `ticket_id` (derived from the session name), `client`,
 `lane`, `stage`, `last_result_source`, `status`, `payload_digest` (a sha256
 hex digest of the normalized sentinel written, not the raw payload), `actor`

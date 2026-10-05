@@ -600,7 +600,9 @@ authorities can route that staged result to the dev-queue row:
   stamps the #1149 refusal marker (`paused_status=sentinel_stage_mismatch_refused`)
   in place of the staged result so the candidate is not re-offered; only the
   emit's `session.result_emitted` audit event (status and payload digest)
-  remains of the staged result.
+  remains of the staged result. That audit trace is best-effort since #2465: if
+the event inbox is unwritable the append is skipped and only the logged
+`payload_digest` records the staged result.
 - **`cw spawn close`.** Closing a DAEMON session routes a staged result first.
   The #317 cancel runs only when nothing is staged, the staged dict does not
   reconstruct, or the route is refused.

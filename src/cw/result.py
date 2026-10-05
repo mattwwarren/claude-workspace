@@ -384,7 +384,7 @@ def _record_result_emitted_audit(
     source: LastResultSource,
     status: str,
 ) -> None:
-    """Append the #2439 audit-only ``session.result_emitted`` event.
+    """Append the #2439 audit-only ``session.result_emitted`` event, best-effort.
 
     Audit-only by construction (R2): never read by any routing, reconcile,
     salvage, or attention consumer, and carries no completion/task-routing
@@ -393,6 +393,15 @@ def _record_result_emitted_audit(
     logs. ``payload_digest`` is a sha256 hex of the normalized sentinel
     actually written to ``session.last_result`` (``payload_for_digest``),
     not the raw incoming payload.
+
+    Fails open (#2465): the result is already accepted by first-writer-wins
+    arbitration before this runs, and persisting it matters more than
+    recording who wrote it. An ``OSError`` from the event inbox (or from
+    resolving the actor) is therefore logged and swallowed, so every caller
+    -- ``cw result emit``, the Stop-hook harvest, executor-direct writers and
+    the reconcile result-write paths -- still persists the accepted result.
+    Only the audit append is covered; a failure to persist session or queue
+    state elsewhere is never routed through here and still propagates.
     """
     # Function-local import breaks the cw.cli <-> cw.result circular dependency;
     # inline import is the sanctioned mechanism (PLC0415), not a workaround.
@@ -411,14 +420,26 @@ def _record_result_emitted_audit(
         "last_result_source": source.value,
         "status": status,
         "payload_digest": payload_digest,
-        "actor": getpass.getuser(),
         "recorded_at": datetime.now(UTC).isoformat(),
     }
-    record_event(
-        OrchestratorEventType.SESSION_RESULT_EMITTED,
-        audit_payload,
-        correlation_id=ticket_id,
-    )
+    try:
+        actor = getpass.getuser()
+        record_event(
+            OrchestratorEventType.SESSION_RESULT_EMITTED,
+            {**audit_payload, "actor": actor},
+            correlation_id=ticket_id,
+        )
+    except OSError as exc:
+        logger.warning(
+            "session.result_emitted audit append failed for session=%s "
+            "source=%s status=%s payload_digest=%s; continuing without the "
+            "audit record: %s",
+            session.id,
+            source.value,
+            status,
+            payload_digest,
+            exc,
+        )
 
 
 def emit_result_on_audited(
@@ -459,7 +480,10 @@ def emit_result_locked(
 
     Records an audit-only ``session.result_emitted`` event (#2439) on every
     accepted write, before the state save -- never consumed by any routing,
-    reconcile, salvage, or attention path (R2). The function still performs
+    reconcile, salvage, or attention path (R2). The audit append is
+    best-effort (#2465): an inbox failure is logged and the accepted result
+    still reaches ``save_state``, whose own failure still propagates. A
+    refusal records no event and persists nothing. The function still performs
     NO task routing of its own: the Stop hook remains the sole
     completion-event source, matching the original cw result emit CLI
     contract byte-for-byte (RFC 0012 D-A1).
@@ -496,7 +520,8 @@ def emit_result_locked(
     # tests/test_dev_queue.py's test_revoke_plan_approval_save_failure_
     # raises_with_event_recorded) -- if save_state below later fails, a
     # phantom audit record is preferable to an unaudited mutation
-    # reaching disk with no trail.
+    # reaching disk with no trail. The audit append itself fails open
+    # (#2465): it cannot keep the accepted result from reaching save_state.
     outcome = emit_result_on_audited(session, payload, source=source)
     # outcome.result is non-None exactly when the write was accepted (see
     # EmitOutcome's docstring) -- narrowing on this, rather than on
