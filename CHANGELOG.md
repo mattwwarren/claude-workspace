@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`cw doctor` now flags a stale optional-extra install with a new `cw-deps-drift` check (#2124).** `cw-deps` only proves that declared dependencies are installed, so a tool environment carrying `mcp` 1.27.1 while `uv.lock` pins 2.1.1 (the mcp 2.x incident) reported healthy. For an editable install, the new check compares the installed version of each package declared in `[project.optional-dependencies]` (`mcp`, `starlette`, `uvicorn`) against the source tree's `uv.lock` and warns with `uv tool install --reinstall -e '<path>[<extras>]'`, listing every extra still in use because the reinstall replaces the tool environment. Only drift warns: an extra whose packages are not installed, a package missing from the lock, a registry install, and an unreadable or malformed `pyproject.toml`/`uv.lock` are skipped with a reason. Only packages named directly in the extras are checked, not their transitive dependencies. `_dep_distribution_name` now also strips an `[extras]` bracket (`mcp[cli]>=2.1.1,<3` resolves to `mcp`).
+
 ### Fixed
 
 - **A failed `session.result_emitted` audit append no longer discards an accepted result (#2465).** The operator chose fail open for #2439 audit failures, but the shipped door raised the event-inbox `OSError` before `save_state`, so direct `cw result emit` and executor-direct writers lost a result that had already won first-writer-wins arbitration (only the Stop-hook wrapper caught it). The audit helper now logs the `OSError` as a missing audit record and the normalized `last_result` is persisted on every path: `cw result emit`, the Stop-hook harvest, executor-direct writes and the reconcile result-write seams. A refused write still mutates nothing and records no event, a failure to persist session state still surfaces as a state-write failure, and the event stays audit-only with no routing or completion effect. The Stop hook's own handler now reports a state read/write failure, since the audit failure no longer reaches it.
