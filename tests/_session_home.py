@@ -53,7 +53,11 @@ XDG_ENV_VARS = (
 # strips every ``GIT_*`` variable, so ``$HOME/.gitconfig`` is the only global
 # config that reaches those subprocesses. Nothing else is set, so CI's git
 # defaults (e.g. ``init.defaultBranch``) stay unmasked.
-_MINIMAL_GITCONFIG = "[user]\n\tname = cw test\n\temail = test@example.com\n"
+TEST_GIT_USER_NAME = "cw test"
+TEST_GIT_USER_EMAIL = "test@example.com"
+_MINIMAL_GITCONFIG = (
+    f"[user]\n\tname = {TEST_GIT_USER_NAME}\n\temail = {TEST_GIT_USER_EMAIL}\n"
+)
 
 
 def wants_real_home(environ: Mapping[str, str]) -> bool:

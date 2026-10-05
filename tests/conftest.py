@@ -2151,8 +2151,8 @@ def make_git_repo(tmp_path: Path) -> Callable[..., Path]:
             )
 
         _git("init", "-b", "main")
-        _git("config", "user.email", "test@example.com")
-        _git("config", "user.name", "cw test")
+        _git("config", "user.email", tests._session_home.TEST_GIT_USER_EMAIL)
+        _git("config", "user.name", tests._session_home.TEST_GIT_USER_NAME)
         _git("commit", "--allow-empty", "-m", "initial")
         return repo
 
@@ -2241,9 +2241,9 @@ def push_commit_to_origin(
     git_in(
         work_dir,
         "-c",
-        "user.email=test@example.com",
+        f"user.email={tests._session_home.TEST_GIT_USER_EMAIL}",
         "-c",
-        "user.name=cw test",
+        f"user.name={tests._session_home.TEST_GIT_USER_NAME}",
         "commit",
         "-m",
         f"out-of-band {filename}",
