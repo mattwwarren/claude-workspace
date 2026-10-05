@@ -488,9 +488,7 @@ def _check_sessions_size() -> CheckResult:
             _SESSIONS_SIZE_CHECK_NAME, ok=True, warn=True, detail=too_big
         )
 
-    return CheckResult(
-        _SESSIONS_SIZE_CHECK_NAME, ok=True, detail=f"{size_bytes}B"
-    )
+    return CheckResult(_SESSIONS_SIZE_CHECK_NAME, ok=True, detail=f"{size_bytes}B")
 
 
 def _inode_shortfall(
