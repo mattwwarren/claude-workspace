@@ -45,6 +45,8 @@ permissions:
 jobs:
   tag-release:
     runs-on: ubuntu-latest
+    # Observed green runs: chore(release) publish 292-325 s (v1.61.0-v1.63.0); skip path ~8-11 s (#1937)
+    timeout-minutes: 15
     permissions:
       contents: write
       # `issues: write` is for the "Close dispatch-drift issues" step below;

@@ -14,7 +14,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from cw._util import _shorten_worktree
+from cw._util import _shorten_worktree, format_compact_age
 from cw.config import (
     load_effective_clients,
     load_effective_config,
@@ -80,10 +80,6 @@ _STATUS_LABEL: dict[QueueItemStatus, str] = {
 # locally rather than importing orchestrate.py's private helpers.
 _EVENT_FEED_WINDOW = timedelta(hours=24)
 _EVENT_FEED_LIMIT = 20
-
-_SECONDS_PER_MINUTE = 60
-_SECONDS_PER_HOUR = 3600
-_SECONDS_PER_DAY = 86400
 
 _PR_CI_OK = "CI-OK"
 _PR_CI_FAIL = "CI-FAIL"
@@ -190,12 +186,7 @@ def _format_age(now: datetime, anchor: datetime | None) -> str:
     """Render a compact age string (Xm/Xh/Xd) from anchor to now. Pure."""
     if anchor is None:
         return _DASH
-    total_seconds = (now - anchor).total_seconds()
-    if total_seconds < _SECONDS_PER_HOUR:
-        return f"{int(total_seconds // _SECONDS_PER_MINUTE)}m"
-    if total_seconds < _SECONDS_PER_DAY:
-        return f"{int(total_seconds // _SECONDS_PER_HOUR)}h"
-    return f"{int(total_seconds // _SECONDS_PER_DAY)}d"
+    return format_compact_age(now - anchor)
 
 
 def _session_started_map(cw_state: CwState) -> dict[str, datetime]:

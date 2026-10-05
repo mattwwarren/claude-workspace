@@ -9,6 +9,8 @@ on:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    # Observed green legs: macOS 9.8-12.4 min (unit-test step ~9.6), ubuntu ~5-7 min; cap per leg, default is 360 (#1937)
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -88,6 +90,8 @@ jobs:
 
   package-smoke:
     runs-on: ubuntu-latest
+    # Observed green runs: 11-15 s (#1937)
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 

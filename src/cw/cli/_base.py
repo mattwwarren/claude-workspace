@@ -13,13 +13,14 @@ from __future__ import annotations
 import functools
 import logging
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import click
 from click.shell_completion import CompletionItem
 
 from cw import __version__
+from cw._util import format_compact_age
 from cw.config import get_client, load_clients, load_state
 from cw.dispatch import (
     FRESHNESS_MAIN_BEHIND,
@@ -164,30 +165,15 @@ def main(verbose: int) -> None:
     _configure_logging(verbose)
 
 
-_SECONDS_PER_MINUTE = 60
-_SECONDS_PER_HOUR = 3600
-_SECONDS_PER_DAY = 86400
-
-
 def _relative_time(dt: datetime | None) -> str:
     """Format a datetime as a relative time string."""
     if dt is None:
         return "unknown"
 
-    now = datetime.now(UTC)
-    delta = now - dt
-    seconds = int(delta.total_seconds())
-
-    if seconds < _SECONDS_PER_MINUTE:
+    delta = datetime.now(UTC) - dt
+    if delta < timedelta(minutes=1):
         return "just now"
-    if seconds < _SECONDS_PER_HOUR:
-        m = seconds // _SECONDS_PER_MINUTE
-        return f"{m}m ago"
-    if seconds < _SECONDS_PER_DAY:
-        h = seconds // _SECONDS_PER_HOUR
-        return f"{h}h ago"
-    d = seconds // _SECONDS_PER_DAY
-    return f"{d}d ago"
+    return f"{format_compact_age(delta)} ago"
 
 
 def _resolve_client(client_name: str | None) -> ClientConfig:

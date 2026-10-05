@@ -234,15 +234,23 @@ def test_resolve_effective_automerge_required_false_base_stays_false(
     assert _mod.resolve_effective_automerge_required(base_required=False) is False
 
 
-def test_cmd_verify_downgrades_automerge_when_config_disabled(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """End-to-end: pr.auto_merge: false downgrades automerge-enabled to optional
-    and the overall verify status stays ok despite auto-merge not being enabled.
+def _run_verify_with_pr(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    state: str,
+    auto_merge_request: dict[str, str] | None,
+    config_yaml: str | None = None,
+) -> tuple[int, dict[str, object]]:
+    """Run `verify --require-automerge --json` against a faked `gh pr view`.
+
+    Returns (exit_code, parsed JSON payload).
     """
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".git").mkdir()
-    _write_project_config_yaml(tmp_path, "pr:\n  auto_merge: false\n")
+    if config_yaml is not None:
+        _write_project_config_yaml(tmp_path, config_yaml)
 
     head_sha = "a" * 40
 
@@ -261,9 +269,9 @@ def test_cmd_verify_downgrades_automerge_when_config_disabled(
                 "number": 42,
                 "url": "https://github.com/example/repo/pull/42",
                 "headRefOid": head_sha,
-                "state": "OPEN",
+                "state": state,
                 "title": "test PR",
-                "autoMergeRequest": None,
+                "autoMergeRequest": auto_merge_request,
             }
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0, stdout=json.dumps(payload), stderr=""
@@ -280,15 +288,171 @@ def test_cmd_verify_downgrades_automerge_when_config_disabled(
     exit_code = _mod.cmd_verify(args)
 
     captured = capsys.readouterr()
-    payload = json.loads(captured.out)
+    payload: dict[str, object] = json.loads(captured.out)
+    return exit_code, payload
+
+
+def _find_check(payload: dict[str, object], name: str) -> dict[str, object]:
+    """Return the check dict named `name` from a verify JSON payload."""
+    checks = payload["checks"]
+    assert isinstance(checks, list)
+    return next(c for c in checks if c["name"] == name)
+
+
+def test_cmd_verify_downgrades_automerge_when_config_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """End-to-end: pr.auto_merge: false downgrades automerge-enabled to optional
+    and the overall verify status stays ok despite auto-merge not being enabled.
+    """
+    exit_code, payload = _run_verify_with_pr(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        state="OPEN",
+        auto_merge_request=None,
+        config_yaml="pr:\n  auto_merge: false\n",
+    )
 
     assert exit_code == 0
     assert payload["status"] == "ok"
-    automerge_check = next(
-        c for c in payload["checks"] if c["name"] == "automerge-enabled"
-    )
+    automerge_check = _find_check(payload, "automerge-enabled")
     assert automerge_check["required"] is False
-    assert any("pr.auto_merge: false" in w for w in payload["warnings"])
+    warnings = payload["warnings"]
+    assert isinstance(warnings, list)
+    assert any("pr.auto_merge: false" in w for w in warnings)
+
+
+# --- MERGED PR accepted by --require-automerge (#2163) ---
+
+
+def test_check_automerge_passes_when_pr_already_merged() -> None:
+    summary = _mod.ShipSummary(pr_state="MERGED")
+
+    result = _mod.check_automerge(summary, required=True)
+
+    assert result.passed is True
+    assert result.name == "automerge-enabled"
+    assert result.required is True
+    assert "merged" in result.detail.lower()
+    assert summary.automerge_enabled is False
+
+
+def test_check_automerge_fails_when_pr_closed_unmerged() -> None:
+    summary = _mod.ShipSummary(pr_state="CLOSED")
+
+    result = _mod.check_automerge(summary, required=True)
+
+    assert result.passed is False
+    assert result.detail == "auto-merge is not enabled on the PR"
+
+
+def test_check_automerge_fails_when_pr_open_and_not_armed() -> None:
+    summary = _mod.ShipSummary(pr_state="OPEN")
+
+    result = _mod.check_automerge(summary, required=True)
+
+    assert result.passed is False
+
+
+@pytest.mark.parametrize(
+    ("pr_state", "method", "expected_detail"),
+    [
+        pytest.param("OPEN", "SQUASH", "SQUASH", id="open-armed-method"),
+        pytest.param("OPEN", "", "enabled", id="open-armed-no-method"),
+        pytest.param("MERGED", "SQUASH", "SQUASH", id="merged-armed-wins"),
+    ],
+)
+def test_check_automerge_armed_path_unchanged(
+    pr_state: str, method: str, expected_detail: str
+) -> None:
+    summary = _mod.ShipSummary(
+        pr_state=pr_state, automerge_enabled=True, automerge_method=method
+    )
+
+    result = _mod.check_automerge(summary, required=True)
+
+    assert result.passed is True
+    assert result.detail == expected_detail
+
+
+def test_cmd_verify_require_automerge_accepts_merged_pr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code, payload = _run_verify_with_pr(
+        monkeypatch, tmp_path, capsys, state="MERGED", auto_merge_request=None
+    )
+
+    assert exit_code == 0
+    assert payload["status"] == "ok"
+    assert payload["pr_state"] == "MERGED"
+    assert payload["automerge_enabled"] is False
+    automerge_check = _find_check(payload, "automerge-enabled")
+    assert automerge_check["passed"] is True
+    assert automerge_check["required"] is True
+    detail = automerge_check["detail"]
+    assert isinstance(detail, str)
+    assert "merged" in detail.lower()
+
+
+def test_cmd_verify_require_automerge_fails_closed_unmerged_pr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code, payload = _run_verify_with_pr(
+        monkeypatch, tmp_path, capsys, state="CLOSED", auto_merge_request=None
+    )
+
+    assert exit_code == 1
+    assert payload["status"] == "failed"
+    assert payload["pr_state"] == "CLOSED"
+    automerge_check = _find_check(payload, "automerge-enabled")
+    assert automerge_check["passed"] is False
+    assert automerge_check["required"] is True
+
+
+def test_cmd_verify_require_automerge_armed_open_pr_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code, payload = _run_verify_with_pr(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        state="OPEN",
+        auto_merge_request={"mergeMethod": "SQUASH"},
+    )
+
+    assert exit_code == 0
+    assert payload["status"] == "ok"
+    assert payload["automerge_enabled"] is True
+    assert payload["automerge_method"] == "SQUASH"
+    assert _find_check(payload, "automerge-enabled")["detail"] == "SQUASH"
+
+
+@pytest.mark.parametrize(
+    ("pr_state", "armed", "expected"),
+    [
+        pytest.param("OPEN", True, "enabled (SQUASH)", id="open-armed"),
+        pytest.param("MERGED", True, "enabled (SQUASH)", id="merged-armed"),
+        pytest.param("MERGED", False, "n/a (PR already merged)", id="merged-unarmed"),
+        pytest.param("OPEN", False, "disabled", id="open-unarmed"),
+        pytest.param("CLOSED", False, "disabled", id="closed-unarmed"),
+    ],
+)
+def test_render_markdown_auto_merge_line(
+    pr_state: str, armed: bool, expected: str
+) -> None:
+    summary = _mod.ShipSummary(
+        pr_state=pr_state,
+        automerge_enabled=armed,
+        automerge_method="SQUASH" if armed else "",
+    )
+
+    rendered = _mod.render_markdown(summary)
+
+    line = next(
+        ln for ln in rendered.splitlines() if ln.startswith("- **Auto-merge:**")
+    )
+    assert line == f"- **Auto-merge:** {expected}"
 
 
 def test_cmd_check_automerge_allowed_prints_true_and_exits_0_when_config_absent(
@@ -446,3 +610,26 @@ def test_resolve_project_config_auto_merge_pyyaml_unavailable_shape_differs_no_c
     config_path.write_text("pr:\n  auto_merge: false\n", encoding="utf-8")
     monkeypatch.setattr(_mod, "yaml", None)
     assert _mod.resolve_project_config_auto_merge(config_path) is None
+
+
+def test_pr_state_merged_matches_cw_gh_constant() -> None:
+    """The script keeps its own MERGED literal; pin it to the cw.gh source."""
+    from cw.gh import _GH_PR_STATE_MERGED
+
+    assert _mod.PR_STATE_MERGED == _GH_PR_STATE_MERGED
+
+
+def test_script_runs_without_cw_importable() -> None:
+    """The script is exec'd via its shebang interpreter, where `cw` is absent.
+
+    `-S` skips site processing (so the editable `.pth` does not expose `cw`)
+    on the SAME interpreter, keeping compiled deps loadable.
+    """
+    result = subprocess.run(
+        [sys.executable, "-S", str(_SCRIPT), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "verify" in result.stdout

@@ -8,7 +8,7 @@ so those modules load without circular dependencies.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -24,6 +24,16 @@ MCP_EXTRA_MSG = (
     'git+https://github.com/mattwwarren/claude-workspace.git" '
     "(or run ./scripts/install.sh from a local clone)."
 )
+
+
+def format_compact_age(delta: timedelta) -> str:
+    """Compact Nm/Nh/Nd age; a negative delta (clock skew) renders 0m. Pure."""
+    delta = max(delta, timedelta(0))
+    if delta < timedelta(hours=1):
+        return f"{delta // timedelta(minutes=1)}m"
+    if delta < timedelta(days=1):
+        return f"{delta // timedelta(hours=1)}h"
+    return f"{delta // timedelta(days=1)}d"
 
 
 def _tail_lines(content: str, n: int) -> str:
