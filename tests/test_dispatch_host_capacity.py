@@ -32,6 +32,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from tests._clients_yaml import write_clients_yaml
 from tests.conftest import _make_daemon_session, _make_ticket_task
 
 if TYPE_CHECKING:
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# Fixtures — mirrors tests/test_dispatch.py's sample_client_config/_make_clients_yaml
+# Fixtures — mirrors tests/test_dispatch.py's sample_client_config
 # ---------------------------------------------------------------------------
 
 
@@ -62,21 +63,6 @@ def sample_client_config(workspace_dir: Path, tmp_path: Path) -> ClientConfig:
         default_branch="main",
         worktree_base=tmp_path / "worktrees",
     )
-
-
-def _make_clients_yaml(tmp_path: Path, *clients: ClientConfig) -> None:
-    """Write a minimal clients.yaml for the given clients."""
-    config_dir = tmp_path / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    clients_file = config_dir / "clients.yaml"
-    lines = ["clients:\n"]
-    for client in clients:
-        lines.append(f"  {client.name}:\n")
-        lines.append(f"    workspace_path: {client.workspace_path}\n")
-        lines.append(f"    default_branch: {client.default_branch}\n")
-        if client.worktree_base is not None:
-            lines.append(f"    worktree_base: {client.worktree_base}\n")
-    clients_file.write_text("".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +313,7 @@ class TestDispatchTickHostCapacity:
             default_branch="main",
             worktree_base=tmp_path / "worktrees-b",
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client_a, client_b)
+        write_clients_yaml(client_a, client_b)
         add_ticket(TicketTask(ticket_id="A-1", client="client-a"))
         add_ticket(TicketTask(ticket_id="B-1", client="client-b"))
 
@@ -356,7 +342,7 @@ class TestDispatchTickHostCapacity:
         host_budget_config: OrchestratorConfig,
     ) -> None:
         """Pre-existing sessions over budget are left alone (R0: no kill, no reject)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         pre_existing = [
             _make_daemon_session(
                 id="pre-1", client="other-client", status=SessionStatus.ACTIVE
@@ -385,7 +371,7 @@ class TestDispatchTickHostCapacity:
         sample_client_config: ClientConfig,
         host_budget_config: OrchestratorConfig,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         save_state(
             CwState(
                 sessions=[
@@ -413,7 +399,7 @@ class TestDispatchTickHostCapacity:
     ) -> None:
         """A ghost (ACTIVE session, BLOCKED_ON_USER task) does not permanently
         strand the host budget slot it appears to occupy (amended R4)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         save_state(
             CwState(
                 sessions=[
@@ -454,7 +440,7 @@ class TestDispatchTickHostCapacity:
             per_client_ceiling={"test-client": 5},
             host_session_budget=7,
         )
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="CW-4", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -479,7 +465,7 @@ class TestDispatchTickHostCapacity:
             per_client_ceiling={"test-client": 1},
             host_session_budget=1,
         )
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         save_state(
             CwState(
                 sessions=[

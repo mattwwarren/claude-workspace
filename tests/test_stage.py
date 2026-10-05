@@ -35,6 +35,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from tests._clients_yaml import write_clients_yaml
 from tests.conftest import _make_daemon_session, _make_ticket_task
 
 if TYPE_CHECKING:
@@ -70,26 +71,6 @@ def client_with_pipeline(workspace_dir: Path, tmp_path: Path) -> ClientConfig:
             stages=[Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
         ),
     )
-
-
-def _make_clients_yaml(tmp_path: Path, client: ClientConfig) -> None:
-    """Write a minimal clients.yaml."""
-    config_dir = tmp_path / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    clients_file = config_dir / "clients.yaml"
-    lines = [
-        "clients:\n",
-        f"  {client.name}:\n",
-        f"    workspace_path: {client.workspace_path}\n",
-        f"    default_branch: {client.default_branch}\n",
-    ]
-    if client.worktree_base is not None:
-        lines.append(f"    worktree_base: {client.worktree_base}\n")
-    lines += [
-        "    pipeline:\n",
-        "      stages: [plan, impl, review, finalize]\n",
-    ]
-    clients_file.write_text("".join(lines))
 
 
 def _make_session(
@@ -201,7 +182,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """Rule 1: ambiguities_pending_resolution -> BLOCKED_ON_USER."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -224,7 +205,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """Rule 1: premises_pending_verification -> BLOCKED_ON_USER."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -247,7 +228,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """Rule 2a: plan_pending_approval + scope.tier=small -> advances to IMPL."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -273,7 +254,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """Rule 2b: plan_pending_approval + scope.tier=large -> BLOCKED_ON_USER."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -298,7 +279,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """Rule 2c: review_pending_approval + scope.tier=small -> advances."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -324,7 +305,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """Rule 2d: missing scope.tier + no scope_hint -> BLOCKED_ON_USER."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -357,7 +338,7 @@ class TestDecisionTable:
         tier-unavailable resolution. Fails before the fix (null != "small" ->
         BLOCKED_ON_USER).
         """
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -394,7 +375,7 @@ class TestDecisionTable:
         The scope_hint fallback resolves the tier as large, so the gate parks
         for operator approval rather than auto-advancing.
         """
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -420,7 +401,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """Rule 3: shipped -> advances to next stage."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -442,7 +423,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """Rule 3: shipped at terminal stage (FINALIZE) -> COMPLETED."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -468,7 +449,7 @@ class TestDecisionTable:
         the schema validators don't require a non-null pr or wait_for_ci.
         The B2 advance machine must still route stage_complete via _stage_advance.
         """
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -490,7 +471,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """Rule 3: stage_complete at terminal stage (FINALIZE) -> COMPLETED."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -511,7 +492,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """Rule 4: no_op -> COMPLETED (terminal, regardless of remaining stages)."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -533,7 +514,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """Rule 5: blocked -> BLOCKED_ON_USER."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -553,7 +534,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """Rule 5: merge_gate_blocked -> BLOCKED_ON_USER."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -573,7 +554,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """Rule 5: scope_exceeded -> BLOCKED_ON_USER."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -593,7 +574,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """Rule 5: forbidden_area -> BLOCKED_ON_USER."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -613,7 +594,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """Rule 6: last_result=None -> BLOCKED_ON_USER (conservative fallback)."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -633,7 +614,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """Rule 6: last_result dict missing status key -> BLOCKED_ON_USER."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -653,7 +634,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """Idempotency: same event processed twice is a no-op (already transitioned)."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -762,7 +743,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """R6: session_id is cleared to None when task advances stage."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()
@@ -801,7 +782,7 @@ class TestDecisionTable:
         client_with_pipeline: ClientConfig,
     ) -> None:
         """stage_base_ref is cleared to None on stage advance (RFC idempotency)."""
-        _make_clients_yaml(tmp_stage_dirs, client_with_pipeline)
+        write_clients_yaml(client_with_pipeline)
         from cw.config import load_effective_clients
 
         clients = load_effective_clients()

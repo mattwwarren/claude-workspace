@@ -107,6 +107,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from tests._clients_yaml import ClientSpec, executor_backend_extra, write_clients_yaml
 from tests.conftest import (
     _hold_sessions_lock,
     _make_daemon_session,
@@ -293,59 +294,6 @@ def breaker_config() -> OrchestratorConfig:
     )
 
 
-def _make_clients_yaml(
-    tmp_path: Path, *clients: ClientConfig, codex_review_client: str | None = None
-) -> None:
-    """Write a minimal clients.yaml for the given clients.
-
-    Variadic to match ``tests/test_dispatch_host_capacity.py:67``'s same-named
-    helper (#1727 R4), so multi-client dispatch tests don't need a second
-    writer. ``codex_review_client`` pins that one client's REVIEW stage to the
-    codex backend — the only per-client pipeline block these tests need.
-    """
-    config_dir = tmp_path / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    clients_file = config_dir / "clients.yaml"
-    lines = ["clients:\n"]
-    for client in clients:
-        lines.append(f"  {client.name}:\n")
-        lines.append(f"    workspace_path: {client.workspace_path}\n")
-        lines.append(f"    default_branch: {client.default_branch}\n")
-        if client.blocked_result_requeue_enabled:
-            lines.append("    blocked_result_requeue_enabled: true\n")
-        if client.occupancy_gate_enabled is not None:
-            token = str(client.occupancy_gate_enabled).lower()
-            lines.append(f"    occupancy_gate_enabled: {token}\n")
-        if client.worktree_base is not None:
-            lines.append(f"    worktree_base: {client.worktree_base}\n")
-        if client.tracker_mcp_gate is not None:
-            gate = client.tracker_mcp_gate
-            lines.append("    tracker_mcp_gate:\n")
-            lines.append(f"      enabled: {str(gate.enabled).lower()}\n")
-            lines.append(f'      plugin_id: "{gate.plugin_id}"\n')
-        if client.lanes:
-            lines.append("    lanes:\n")
-            for lane in client.lanes:
-                lines.append(f"      - name: {lane.name}\n")
-                lines.append(f"        max_parallel: {lane.max_parallel}\n")
-                if lane.priority != 0:
-                    lines.append(f"        priority: {lane.priority}\n")
-                # #1751: `false` (disable) and a positive int are distinct
-                # states, and both differ from `None` (defer to global) — so
-                # the emitted YAML must preserve the literal token, not
-                # coerce it. `str(False)` is "False", which PyYAML parses as
-                # a bool, so lowercasing is what keeps the round-trip honest.
-                if lane.attempt_ceiling is not None:
-                    token = str(lane.attempt_ceiling).lower()
-                    lines.append(f"        attempt_ceiling: {token}\n")
-        if codex_review_client == client.name:
-            lines.append("    pipeline:\n")
-            lines.append("      executors:\n")
-            lines.append("        review:\n")
-            lines.append("          backend: codex\n")
-    clients_file.write_text("".join(lines))
-
-
 # ---------------------------------------------------------------------------
 # TestDispatchTickSpawnsSession
 # ---------------------------------------------------------------------------
@@ -359,7 +307,7 @@ class TestDispatchTickSpawnsSession:
         simple_config: OrchestratorConfig,
     ) -> None:
         """Enqueue one task, run tick, confirm session created and task is RUNNING."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         task = TicketTask(
             ticket_id="GEN-100",
@@ -401,7 +349,7 @@ class TestDispatchTickSpawnsSession:
         machine-readable AUTO_DEV_RESULT block is parseable by the
         orchestrator.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-300", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -418,7 +366,7 @@ class TestDispatchTickSpawnsSession:
         cap2_config: OrchestratorConfig,
     ) -> None:
         """dispatch_tick with parent= writes bidirectional linkage on every worker."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         # Seed an orchestrator session as the parent.
         parent_workspace = tmp_dispatch_dirs / "workspace" / "orch"
@@ -465,7 +413,7 @@ class TestDispatchTickSpawnsSession:
         SESSION_COMPLETED events when an older session for the same ticket
         crashed and was respawned. See GitHub issue #97.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-STAMP", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -487,7 +435,7 @@ class TestDispatchTickSpawnsSession:
         simple_config: OrchestratorConfig,
     ) -> None:
         """Direct CLI run (no orchestrator): parent=None → no linkage, no error."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-400", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -505,7 +453,7 @@ class TestDispatchTickSpawnsSession:
         simple_config: OrchestratorConfig,
     ) -> None:
         """dispatch_tick passes task.lane to spawn_create_impl, stamps Session.lane."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         # Use DEFAULT_LANE so the task matches the client's effective lane and
         # gets dispatched. Lane is stamped verbatim on the spawned session.
         task = TicketTask(
@@ -536,7 +484,7 @@ class TestPerClientCapRespected:
         cap2_config: OrchestratorConfig,
     ) -> None:
         """Enqueue 3 tasks, cap=2, tick spawns exactly 2."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         for i in range(3):
             add_ticket(TicketTask(ticket_id=f"GEN-{i}", client="test-client"))
@@ -562,7 +510,7 @@ class TestPerClientCapRespected:
         be hardcoded to 1, so a top-level ``default_max_parallel: 3`` had
         no effect on unlisted clients.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         config = OrchestratorConfig(
             tick_interval_seconds=30,
             per_client_max_parallel={},  # test-client deliberately unlisted
@@ -595,7 +543,7 @@ class TestNoDoubleDispatch:
         simple_config: OrchestratorConfig,
     ) -> None:
         """Two ticks with cap=1: second tick skips (task already RUNNING)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         add_ticket(TicketTask(ticket_id="GEN-200", client="test-client"))
 
@@ -629,7 +577,7 @@ class TestConsumeCompletesTasks:
         simple_config: OrchestratorConfig,
     ) -> None:
         """A session.completed event carrying session_id completes the task."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         # Put a RUNNING task in the queue
         task = TicketTask(
@@ -665,7 +613,7 @@ class TestConsumeCompletesTasks:
         to ``test_consume_skips_legacy_event_with_no_session_id_key`` below,
         which covers the same shape against a duplicate-row queue.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         task = TicketTask(
             ticket_id="GEN-301",
@@ -709,7 +657,7 @@ class TestConsumeCompletesTasks:
         through this path; crashed events are skipped (see
         ``test_consume_skips_crashed_events``).
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         # GitHub #1692: the event carries a session_id, so the task must be
         # stamped with the matching one -- otherwise the new raced-to-
@@ -753,7 +701,7 @@ class TestConsumeCompletesTasks:
         falsely matches a freshly-respawned task with the same ticket_id.
         See GitHub issue #97.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         task = TicketTask(
             ticket_id="GEN-CRASH",
@@ -787,7 +735,7 @@ class TestConsumeCompletesTasks:
         Belt-and-suspenders: even if a crashed event lacks ticket_id and
         only carries session_name, it must not be drained.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         task = TicketTask(
             ticket_id="GEN-CRASH-FB",
@@ -823,7 +771,7 @@ class TestConsumeCompletesTasks:
         (#2324). Routing it here would park the still-RUNNING row with no
         sentinel -- and charge an attempt -- before reconcile can finish it.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(
             ticket_id="GEN-2324",
             client="test-client",
@@ -862,7 +810,7 @@ class TestConsumeCompletesTasks:
         non-crashed events carrying an older session_id must not falsely
         complete a freshly-respawned task.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         task = TicketTask(
             ticket_id="GEN-STALE",
@@ -892,7 +840,7 @@ class TestConsumeCompletesTasks:
         simple_config: OrchestratorConfig,
     ) -> None:
         """Matching session_id on event and task completes the task."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         task = TicketTask(
             ticket_id="GEN-MATCH",
@@ -933,7 +881,7 @@ class TestConsumeCompletesTasks:
         event DOES carry a session_id but the task hasn't been stamped with
         one yet (see test_consume_skips_session_tagged_event_against_unstamped_task).
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         # Task predates the session_id field — session_id stays None.
         task = TicketTask(
@@ -975,7 +923,7 @@ class TestConsumeCompletesTasks:
         completion — it must be skipped, not fall back to ticket_id-only
         matching.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         # Fresh respawn: RUNNING but not yet stamped with a session_id.
         task = TicketTask(
@@ -1011,7 +959,7 @@ class TestConsumeCompletesTasks:
         #2219 site); the event's own session_id must select the owning row,
         not whichever RUNNING row for the ticket happens to be first.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         row_a = TicketTask(
             ticket_id="GEN-DUP",
@@ -1058,7 +1006,7 @@ class TestConsumeCompletesTasks:
         includes the key but sometimes writes ``None`` must still hit the
         no-identity skip path.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         task = TicketTask(
             ticket_id="GEN-EXPLICIT-NONE",
@@ -1092,7 +1040,7 @@ class TestConsumeCompletesTasks:
         ``str`` to be treated as a real session_id; an empty string is
         skipped rather than falling back to ticket-id-only matching.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         task = TicketTask(
             ticket_id="GEN-EMPTY-SID",
@@ -1123,7 +1071,7 @@ class TestConsumeCompletesTasks:
         """A present non-str, non-None session_id (e.g. an int) is malformed
         and must be skipped, never matched by ticket-id-only fallback.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         task = TicketTask(
             ticket_id="GEN-NONSTR-SID",
@@ -1158,7 +1106,7 @@ class TestConsumeCompletesTasks:
         The consumer must treat this exactly like a legacy non-crashed event
         — the extra fields are forward-compatible metadata, not behavior.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         task = TicketTask(
             ticket_id="GEN-WRAP",
@@ -1208,7 +1156,7 @@ class TestConsumeCompletesTasks:
         not COMPLETED. See #489 (original) and #633 (plan_pending_approval,
         review_pending_approval).
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         task = TicketTask(
             ticket_id="GEN-489A",
@@ -1275,7 +1223,7 @@ class TestConsumeCompletesTasks:
         (mirroring ``test_consume_paused_status_routes_to_blocked_on_user``) so
         ``apply_staged_decision`` reads a real sentinel.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         task = TicketTask(
             ticket_id="GEN-923",
@@ -1363,7 +1311,7 @@ class TestConsumeCompletesTasks:
         Verifies the paused-status guard does not affect normal shipped/no_op
         outcomes. See #489.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         task = TicketTask(
             ticket_id="GEN-489B",
@@ -1418,7 +1366,7 @@ class TestConsumeCompletesTasks:
         """
         from cw.models import Stage
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         task = TicketTask(
             ticket_id="GEN-694",
@@ -1499,7 +1447,7 @@ class TestConsumeCompletesTasks:
         Sessions that did not emit a sentinel (e.g. interactive) have
         last_result=None; they must fall through to COMPLETED. See #489.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         task = TicketTask(
             ticket_id="GEN-489C",
@@ -1562,7 +1510,7 @@ class TestDispatchTickReturnsCount:
         cap2_config: OrchestratorConfig,
     ) -> None:
         """Enqueue 2 tasks with cap=2; tick returns 2."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         add_ticket(TicketTask(ticket_id="GEN-500", client="test-client"))
         add_ticket(TicketTask(ticket_id="GEN-501", client="test-client"))
@@ -1579,7 +1527,7 @@ class TestDispatchTickReturnsCount:
         simple_config: OrchestratorConfig,
     ) -> None:
         """Empty queue returns 0."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         daemon = FakeNativeDaemonClient()
         count = dispatch_tick(simple_config, native_daemon=daemon).spawned
@@ -1593,7 +1541,7 @@ class TestDispatchTickReturnsCount:
         simple_config: OrchestratorConfig,
     ) -> None:
         """Pre-existing DAEMON ACTIVE sessions count toward the per-client cap."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         # Put an already-running session in state
         existing_session = Session(
@@ -1633,7 +1581,7 @@ class TestDispatchTickWithPlan:
         cap2_config: OrchestratorConfig,
     ) -> None:
         """When use_plan=True, dispatch claims tickets in plan order, not enqueue."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         # Enqueue in order A, B, C
         add_ticket(TicketTask(ticket_id="GEN-A", client="test-client"))
@@ -1669,7 +1617,7 @@ class TestDispatchTickWithPlan:
         simple_config: OrchestratorConfig,
     ) -> None:
         """No persisted plan: dispatch falls back to enqueue order, no crash."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         add_ticket(TicketTask(ticket_id="GEN-FIRST", client="test-client"))
         add_ticket(TicketTask(ticket_id="GEN-SECOND", client="test-client"))
@@ -1692,7 +1640,7 @@ class TestDispatchTickWithPlan:
         cap2_config: OrchestratorConfig,
     ) -> None:
         """Planned tickets first, then unplanned still get dispatched."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         add_ticket(TicketTask(ticket_id="GEN-A", client="test-client"))
         add_ticket(TicketTask(ticket_id="GEN-B", client="test-client"))
@@ -1789,7 +1737,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         from cw.worktree import create_worktree
         from tests.conftest import plan_body
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         branch = f"{sample_client_config.feature_branch_prefix}/GEN-BYPASS"
         worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
         cw_dir = worktree / ".cw"
@@ -1871,7 +1819,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         False``, so the local miss must short-circuit before ever reaching
         the tracker fallback.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         def _fail_if_called(*_args: object, **_kwargs: object) -> str | None:
             msg = "fetch_approved_plan_comment must not be called on the automatic path"
@@ -1903,7 +1851,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         from cw.worktree import create_worktree
         from tests.conftest import plan_body
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         branch = f"{sample_client_config.feature_branch_prefix}/GEN-UNSIGNED"
         worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
         cw_dir = worktree / ".cw"
@@ -1933,7 +1881,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         from cw.worktree import create_worktree
         from tests.conftest import plan_body
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         branch = f"{sample_client_config.feature_branch_prefix}/GEN-EVT"
         worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
         cw_dir = worktree / ".cw"
@@ -1981,7 +1929,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         from cw.worktree import create_worktree
         from tests.conftest import plan_body
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         branch = f"{sample_client_config.feature_branch_prefix}/GEN-REGRESS"
         worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
         cw_dir = worktree / ".cw"
@@ -2144,7 +2092,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         from cw.worktree import create_worktree
         from tests.conftest import plan_body
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         branch = f"{sample_client_config.feature_branch_prefix}/GEN-RACE"
         worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
         cw_dir = worktree / ".cw"
@@ -2200,7 +2148,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         """
         import cw.dispatch.claim as claim_mod
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         worktree, row_a, row_b = _seed_duplicate_running_rows(sample_client_config)
         row_a_before = load_dev_queue().tasks[0].model_dump()
         stage_changed = capture_events(
@@ -2233,7 +2181,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         missing-row guard fires: no advance, no mutation, no event."""
         import cw.dispatch.claim as claim_mod
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         worktree, _row_a, row_b = _seed_duplicate_running_rows(sample_client_config)
         before = [t.model_dump() for t in load_dev_queue().tasks]
         stage_changed = capture_events(
@@ -2260,7 +2208,7 @@ def test_dispatch_tick_reconciles_phantoms_before_counting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Phantom DAEMON sessions do not block new dispatch."""
-    _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+    write_clients_yaml(sample_client_config)
 
     # Cap = 1, one ACTIVE phantom DAEMON session for the same client,
     # and one PENDING ticket. Without reconciliation, running_count == 1
@@ -2354,7 +2302,7 @@ def test_crash_revert_respawn_rejects_old_event_completes_new(
     4. A subsequent SESSION_COMPLETED event matching the NEW session_id
        is consumed and correctly completes the task.
     """
-    _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+    write_clients_yaml(sample_client_config)
 
     # Step 1: pre-existing phantom DAEMON session + RUNNING task with
     # the old session's id stamped.
@@ -2489,7 +2437,7 @@ class TestDispatchTickSpawnErrors:
         simple_config: OrchestratorConfig,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-149A", client="test-client"))
 
         daemon = _RaisingNativeDaemon(
@@ -2525,7 +2473,7 @@ class TestDispatchTickSpawnErrors:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-149B", client="test-client"))
 
         def _boom(*_args: object, **_kwargs: object) -> Path:
@@ -2564,7 +2512,7 @@ class TestDispatchTickSpawnErrors:
         """The dispatch claim path asks ``create_worktree`` to refresh a reused
         per-ticket worktree (#2213) and names the ticket, so a fast-forward's
         audit event is attributable; the default stays path-only."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-2213", client="test-client"))
         seen: list[dict[str, object]] = []
 
@@ -2601,7 +2549,7 @@ class TestDispatchTickSpawnErrors:
         worktree every tick — an infinite spin, because no session is created
         here for reconcile's TIMED_OUT cleanup to act on (#404).
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-404S", client="test-client"))
 
         def _stale(*_args: object, **_kwargs: object) -> Path:
@@ -2640,7 +2588,7 @@ class TestDispatchTickSpawnErrors:
     ) -> None:
         """If the force-remove itself fails, the loop still survives and reverts
         the task to PENDING — removal is best-effort (#404)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-404F", client="test-client"))
 
         def _stale(*_args: object, **_kwargs: object) -> Path:
@@ -2671,7 +2619,7 @@ class TestDispatchTickSpawnErrors:
     ) -> None:
         """StaleWorktreeError + dirty worktree: removal SKIPPED, task →
         BLOCKED_ON_USER (#425)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-425D", client="test-client"))
 
         def _stale(*_args: object, **_kwargs: object) -> Path:
@@ -2720,7 +2668,7 @@ class TestDispatchTickSpawnErrors:
         fired (#1257, #2114)."""
         from cw.worktree import worktree_path_for
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-425D-ATT", client="test-client"))
 
         def _stale(*_args: object, **_kwargs: object) -> Path:
@@ -2760,7 +2708,7 @@ class TestDispatchTickSpawnErrors:
     ) -> None:
         """StaleWorktreeError + clean worktree: removal proceeds, task → PENDING
         (#425)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-425C", client="test-client"))
 
         def _stale(*_args: object, **_kwargs: object) -> Path:
@@ -2866,7 +2814,7 @@ class TestDispatchTickSpawnErrors:
     ) -> None:
         """A hook-context conflict reverts to PENDING and records WHICH session
         blocked the worktree (#1674)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-1674A", client="test-client"))
         self._seed_hook_context_conflict(sample_client_config, "GEN-1674A")
 
@@ -2896,7 +2844,7 @@ class TestDispatchTickSpawnErrors:
         advances the ordinary spawn-error backoff, and the stamp is simply
         re-affirmed.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(
             TicketTask(
                 ticket_id="GEN-1674B",
@@ -2933,7 +2881,7 @@ class TestDispatchTickSpawnErrors:
         ``hook_context_conflict_session_id`` stamp, a short hold, and a
         ``worktree_occupied`` dispatch.tick event.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-2077L", client="test-client"))
         self._seed_hook_context_conflict(sample_client_config, "GEN-2077L")
         monkeypatch.setattr(
@@ -2999,7 +2947,7 @@ class TestDispatchTickSpawnErrors:
     ) -> None:
         """A successful spawn clears the stamp alongside the #868 backoff
         fields, so a later genuine park is not refused on stale evidence."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(
             TicketTask(
                 ticket_id="GEN-1674C",
@@ -3029,7 +2977,7 @@ class TestDispatchTickSpawnErrors:
         marker, while the cumulative regress_attempts counter is left untouched."""
         from cw.models import Stage
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(
             TicketTask(
                 ticket_id="GEN-1794",
@@ -3060,7 +3008,7 @@ class TestDispatchTickSpawnErrors:
         copy is consumed so no later stage entry inherits it."""
         from cw.models import Stage
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(
             TicketTask(
                 ticket_id="GEN-2337",
@@ -3102,7 +3050,7 @@ class TestDispatchTickSpawnErrors:
         from cw.worktree import worktree_path_for
         from tests._reconcile_helpers import _mk_daemon_session_with_worktree
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         ticket_id = "GEN-1801D"
         task = TicketTask(
@@ -3174,7 +3122,7 @@ class TestDispatchTickSpawnErrors:
         worker's queue_metadata, so the marker is consumed and cleared."""
         from cw.models import Stage
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(
             TicketTask(
                 ticket_id="GEN-1730R",
@@ -3203,7 +3151,7 @@ class TestDispatchTickSpawnErrors:
         gone long before the task advances IMPL -> REVIEW where it is useful."""
         from cw.models import Stage
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(
             TicketTask(
                 ticket_id="GEN-1730I",
@@ -3239,7 +3187,7 @@ class TestDispatchTickSpawnErrors:
         conflicting session going terminal or being superseded by id only
         clears concierge recipe 1's refusal predicate, not this field.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(
             TicketTask(
                 ticket_id="GEN-1674D",
@@ -3344,7 +3292,7 @@ class TestClaimRefusesOccupiedWorktree:
         caplog: pytest.LogCaptureFixture,
         source: str,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         daemon = FakeNativeDaemonClient()
         worktree = _seed_occupied_ticket_worktree(
             sample_client_config,
@@ -3397,7 +3345,7 @@ class TestClaimRefusesOccupiedWorktree:
         it as a spawn error would pause the whole lane after a few ticks while
         the occupant is still running; it must not, and must not consume the
         ticket's attempt budget either."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         daemon = FakeNativeDaemonClient()
         _seed_occupied_ticket_worktree(
             sample_client_config,
@@ -3433,7 +3381,7 @@ class TestClaimRefusesOccupiedWorktree:
     ) -> None:
         from cw.dispatch.claim import _claim_next_pending, _spawn_claimed_task
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         daemon = FakeNativeDaemonClient()
         worktree = _seed_occupied_ticket_worktree(
             sample_client_config,
@@ -3498,7 +3446,7 @@ class TestClaimRefusesOccupiedWorktree:
         from cw.exceptions import WorktreeOccupiedError
         from cw.worktree import create_worktree
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         daemon = FakeNativeDaemonClient()
         branch = f"{sample_client_config.feature_branch_prefix}/{self._TICKET}"
         worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
@@ -3568,7 +3516,7 @@ class TestClaimRefusesOccupiedWorktree:
         it would never get a slot."""
         from cw.dispatch.claim import _claim_next_pending, _spawn_claimed_task
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         daemon = FakeNativeDaemonClient()
         _seed_occupied_ticket_worktree(
             sample_client_config,
@@ -3625,7 +3573,7 @@ class TestClaimRefusesOccupiedWorktree:
         session is what releases the tree."""
         from cw import native_daemon
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         daemon = FakeNativeDaemonClient()
         if roster_elsewhere:
@@ -3713,7 +3661,7 @@ class TestClaimScreensOccupiedWorktreeBeforeClaiming:
         caplog: pytest.LogCaptureFixture,
         source: str,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         daemon = FakeNativeDaemonClient()
         worktree = _seed_occupied_ticket_worktree(
             sample_client_config,
@@ -3773,7 +3721,7 @@ class TestClaimScreensOccupiedWorktreeBeforeClaiming:
         """Mirrors TestClaimRefusesOccupiedWorktree's own breaker test for
         the post-claim path -- an occupied worktree must not pause the
         lane whichever mechanism catches it."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         daemon = FakeNativeDaemonClient()
         _seed_occupied_ticket_worktree(
             sample_client_config,
@@ -3811,7 +3759,7 @@ class TestClaimScreensOccupiedWorktreeBeforeClaiming:
         next PENDING row -- contrast with
         test_a_deferred_head_of_line_ticket_does_not_starve_the_next_one's
         defer-based demonstration for the post-claim path."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         daemon = FakeNativeDaemonClient()
         _seed_occupied_ticket_worktree(
             sample_client_config,
@@ -3855,7 +3803,7 @@ class TestClaimScreensOccupiedWorktreeBeforeClaiming:
         from cw.auto_dev_result import BlockedResult, Blocker
         from cw.reconcile import _apply_sentinel_to_task
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         daemon = FakeNativeDaemonClient()
         worktree = _seed_occupied_ticket_worktree(
             sample_client_config,
@@ -3912,7 +3860,7 @@ class TestClaimScreensOccupiedWorktreeBeforeClaiming:
         to PENDING, no attempt/spawn_error charged)."""
         from cw.dispatch.claim import resolve_occupied_ticket_ids
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         calls: list[str] = []
         real_resolve = resolve_occupied_ticket_ids
 
@@ -3973,7 +3921,7 @@ class TestClaimScreensOccupiedWorktreeBeforeClaiming:
         client = sample_client_config.model_copy(
             update={"occupancy_gate_enabled": False}
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
 
         def _unexpected_resolve(*_args: object, **_kwargs: object) -> dict[str, str]:
             pytest.fail("client override did not bypass")
@@ -4121,7 +4069,7 @@ class TestStaleWorktreeYieldsToLiveOccupant:
         caplog: pytest.LogCaptureFixture,
         source: str,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         # Dirty on purpose: were dirtiness consulted first it would PARK the
         # task BLOCKED_ON_USER instead of releasing it.
@@ -4158,7 +4106,7 @@ class TestStaleWorktreeYieldsToLiveOccupant:
     ) -> None:
         """An unreadable session state and an unreadable daemon roster are two
         distinct early returns in the predicate; each must read as occupied."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         calls = self._stub_stale(monkeypatch, unsaved=None)
         daemon = FakeNativeDaemonClient()
@@ -4188,7 +4136,7 @@ class TestStaleWorktreeYieldsToLiveOccupant:
 
         from cw.dispatch.claim import _OCCUPIED_DEFER_SECONDS
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         self._stub_stale(monkeypatch, unsaved=None)
         daemon = FakeNativeDaemonClient()
@@ -4235,7 +4183,7 @@ class TestStaleWorktreeYieldsToLiveOccupant:
 
         from cw.dispatch.claim import _OCCUPIED_DEFER_SECONDS
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         self._stub_stale(monkeypatch, unsaved=None)
         daemon = FakeNativeDaemonClient()
@@ -4292,7 +4240,7 @@ class TestStaleWorktreeYieldsToLiveOccupant:
         handling the reuse-refresh occupancy refusal reaches."""
         from cw.dispatch.claim import _claim_next_pending, _spawn_claimed_task
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         self._stub_stale(monkeypatch, unsaved="1 uncommitted path(s)")
         daemon = FakeNativeDaemonClient()
@@ -4335,7 +4283,7 @@ class TestStaleWorktreeYieldsToLiveOccupant:
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         calls = self._stub_stale(monkeypatch, unsaved="1 uncommitted path(s)")
 
@@ -4359,7 +4307,7 @@ class TestStaleWorktreeYieldsToLiveOccupant:
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
         calls = self._stub_stale(monkeypatch, unsaved=None)
 
@@ -4378,23 +4326,6 @@ class TestStaleWorktreeYieldsToLiveOccupant:
 # ---------------------------------------------------------------------------
 # TestDispatchCodexCapabilityGate
 # ---------------------------------------------------------------------------
-
-
-def _make_codex_clients_yaml(tmp_path: Path, client: ClientConfig) -> None:
-    """Write a clients.yaml whose plan-stage executor uses the codex backend."""
-    config_dir = tmp_path / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "clients.yaml").write_text(
-        "clients:\n"
-        f"  {client.name}:\n"
-        f"    workspace_path: {client.workspace_path}\n"
-        f"    default_branch: {client.default_branch}\n"
-        f"    worktree_base: {client.worktree_base}\n"
-        "    pipeline:\n"
-        "      executors:\n"
-        "        plan:\n"
-        "          backend: codex\n"
-    )
 
 
 class _SpyExecutor:
@@ -4437,7 +4368,11 @@ class TestDispatchCodexCapabilityGate:
     ) -> None:
         from cw.executor import CODEX_NOT_FOUND, CodexCapabilityDiagnosis
 
-        _make_codex_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(
+            ClientSpec.from_config(
+                sample_client_config, extra=executor_backend_extra("plan", "codex")
+            )
+        )
         add_ticket(TicketTask(ticket_id="GEN-CDX1", client="test-client"))
 
         monkeypatch.setattr(
@@ -4482,7 +4417,11 @@ class TestDispatchCodexCapabilityGate:
         """codex-not-found park emits SESSION_NEEDS_ATTENTION w/ breadcrumbs (#1257)."""
         from cw.executor import CODEX_NOT_FOUND, CodexCapabilityDiagnosis
 
-        _make_codex_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(
+            ClientSpec.from_config(
+                sample_client_config, extra=executor_backend_extra("plan", "codex")
+            )
+        )
         add_ticket(TicketTask(ticket_id="GEN-CDX1", client="test-client"))
 
         monkeypatch.setattr(
@@ -4517,7 +4456,11 @@ class TestDispatchCodexCapabilityGate:
     ) -> None:
         from cw.executor import CODEX_VERSION_UNKNOWN, CodexCapabilityDiagnosis
 
-        _make_codex_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(
+            ClientSpec.from_config(
+                sample_client_config, extra=executor_backend_extra("plan", "codex")
+            )
+        )
         add_ticket(TicketTask(ticket_id="GEN-CDX2", client="test-client"))
 
         monkeypatch.setattr(
@@ -4551,7 +4494,11 @@ class TestDispatchCodexCapabilityGate:
         """Gate is a no-op when the probe reports capable — regression guard."""
         from cw.executor import CodexCapabilityDiagnosis
 
-        _make_codex_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(
+            ClientSpec.from_config(
+                sample_client_config, extra=executor_backend_extra("plan", "codex")
+            )
+        )
         add_ticket(TicketTask(ticket_id="GEN-CDX3", client="test-client"))
 
         monkeypatch.setattr(
@@ -4580,7 +4527,7 @@ class TestDispatchCodexCapabilityGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A claude-native task must not invoke the codex probe at all."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-CDX4", client="test-client"))
 
         probe_calls = 0
@@ -4790,7 +4737,7 @@ class TestDispatchTickFreshnessGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Stale client: dispatch returns 0, task stays PENDING, event emitted."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(ticket_id="CW-1", client="test-client")
         add_ticket(task)
 
@@ -4825,7 +4772,7 @@ class TestDispatchTickFreshnessGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Two PENDING tasks emit two ticket.needs_sync events (one per task)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="CW-10", client="test-client"))
         add_ticket(TicketTask(ticket_id="CW-11", client="test-client"))
 
@@ -4855,7 +4802,7 @@ class TestDispatchTickFreshnessGate:
         make_git_repo: Callable[[str], Path],
     ) -> None:
         """Stale client A skipped; fresh client B dispatches normally."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         # Create second fresh client
         fresh_ws = make_git_repo("workspace/fresh-project")
@@ -4918,7 +4865,7 @@ class TestDispatchTickFreshnessGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Fresh main: existing dispatch behaviour unchanged."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="CW-30", client="test-client"))
 
         monkeypatch.setattr(
@@ -4945,7 +4892,7 @@ class TestDispatchTickFreshnessGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """is_main_behind_origin called exactly once per client even with 3 tasks."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         for i in range(3):
             add_ticket(TicketTask(ticket_id=f"CW-4{i}", client="test-client"))
 
@@ -4980,7 +4927,7 @@ class TestDispatchTickFreshnessGate:
             workspace_path=missing_dir,
             default_branch="main",
         )
-        _make_clients_yaml(tmp_dispatch_dirs, missing_client)
+        write_clients_yaml(missing_client)
         add_ticket(TicketTask(ticket_id="CW-99", client="missing-ws"))
 
         daemon = FakeNativeDaemonClient()
@@ -5022,7 +4969,7 @@ class TestDispatchTickFreshnessGate:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """RuntimeError from freshness check: WARNING logged, dispatch proceeds."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="CW-50", client="test-client"))
 
         def _boom(
@@ -5062,7 +5009,7 @@ class TestDispatchTickReconcileErrors:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         def _boom_reconcile(*_args: object, **_kwargs: object) -> None:
             msg = "simulated reconcile failure"
@@ -5121,7 +5068,7 @@ class TestDispatchTickSessionsLockTimeout:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-2491", client="test-client"))
 
         def _timeout(*_args: object, **_kwargs: object) -> None:
@@ -5163,7 +5110,7 @@ class TestDispatchTickSessionsLockTimeout:
         This is the premise of the watchdog claim in ``tick.py``: the gap is
         visible only through the watchdogs that read ``dispatch.tick`` age.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-2493", client="test-client"))
 
         def _timeout(*_args: object, **_kwargs: object) -> None:
@@ -5193,7 +5140,7 @@ class TestDispatchTickSessionsLockTimeout:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Real contention end to end: held lock -> skipped tick; released -> spawn."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-2492", client="test-client"))
         monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.2")
         caplog.set_level(logging.WARNING, logger="cw.dispatch")
@@ -5224,7 +5171,7 @@ class TestDispatchTickSessionsLockTimeout:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Only the lock timeout escapes the guard; the broad catch is intact."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         def _boom(*_args: object, **_kwargs: object) -> None:
             msg = "simulated reconcile failure"
@@ -5243,7 +5190,7 @@ def test_dispatch_tick_runs_diagnostics_cleanup_outside_lock(
 ) -> None:
     """dispatch_tick runs the diagnostics cleanup once per tick, with the
     configured retention window and WITHOUT sessions_lock held (#1239)."""
-    _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+    write_clients_yaml(sample_client_config)
     captured: dict[str, object] = {}
 
     def _spy(*, retention_hours: int) -> int:
@@ -5272,7 +5219,7 @@ def test_dispatch_tick_cleanup_failure_does_not_abort_tick(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A raising diagnostics cleanup is swallowed; the tick still spawns (#1239)."""
-    _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+    write_clients_yaml(sample_client_config)
     add_ticket(TicketTask(ticket_id="GEN-diag-cleanup", client="test-client"))
 
     def _boom(*_a: object, **_k: object) -> int:
@@ -5310,7 +5257,7 @@ class TestClaimNextPendingAttempts:
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(
             ticket_id="GEN-251-attempts",
             client="test-client",
@@ -5336,7 +5283,7 @@ class TestClaimNextPendingAttempts:
         """A task reverted to PENDING and re-claimed accumulates attempts."""
         from cw.dev_queue import save_dev_queue
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         # Pre-seed with attempts=2 (simulates two prior claim+revert cycles).
         task = TicketTask(
             ticket_id="GEN-251-cumulative",
@@ -5384,7 +5331,7 @@ class TestGlobalAttemptCeiling:
         sample_client_config: ClientConfig,
     ) -> None:
         """Task below the ceiling is claimed and attempts is incremented."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(
             ticket_id="GEN-786-below",
             client="test-client",
@@ -5408,7 +5355,7 @@ class TestGlobalAttemptCeiling:
         sample_client_config: ClientConfig,
     ) -> None:
         """Task at the ceiling is parked BLOCKED_ON_USER; attempts not incremented."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(
             ticket_id="GEN-786-ceiling",
             client="test-client",
@@ -5446,7 +5393,7 @@ class TestGlobalAttemptCeiling:
         #1750 this parked at ``attempt_cap_blocked`` mid-pipeline; now only
         ``unproductive_attempts`` counts, so the row stays claimable.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(
             ticket_id="GEN-1750-productive",
             client="test-client",
@@ -5475,7 +5422,7 @@ class TestGlobalAttemptCeiling:
         Low raw ``attempts`` but an at-cap unproductive count is the dead-session
         crashloop the ceiling exists to stop. It must still park.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(
             ticket_id="GEN-1750-crashloop",
             client="test-client",
@@ -5500,7 +5447,7 @@ class TestGlobalAttemptCeiling:
         sample_client_config: ClientConfig,
     ) -> None:
         """#1750 is additive: the raw claim counter is unchanged by the split."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(
             ticket_id="GEN-1750-additive",
             client="test-client",
@@ -5526,7 +5473,7 @@ class TestGlobalAttemptCeiling:
         sample_client_config: ClientConfig,
     ) -> None:
         """Ceiling-parked task emits dispatch.tick skip_reason=attempt_cap_blocked."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(
             ticket_id="GEN-786-event",
             client="test-client",
@@ -5569,7 +5516,7 @@ class TestGlobalAttemptCeiling:
         sample_client_config: ClientConfig,
     ) -> None:
         """Ceiling check also fires on the priority-ticket path."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(
             ticket_id="GEN-786-pri",
             client="test-client",
@@ -5619,7 +5566,7 @@ class TestGlobalAttemptCeiling:
         A single dispatch_tick must park the older AND claim the younger in
         the same tick.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         older_capped = TicketTask(
             ticket_id="GEN-1248-old",
             client="test-client",
@@ -5700,7 +5647,7 @@ class TestPerLaneAttemptCeiling:
             max_parallel=1,
             attempt_ceiling=25,
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -5739,7 +5686,7 @@ class TestPerLaneAttemptCeiling:
             max_parallel=1,
             attempt_ceiling=2,
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -5778,7 +5725,7 @@ class TestPerLaneAttemptCeiling:
             max_parallel=1,
             attempt_ceiling=False,
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -5818,7 +5765,7 @@ class TestPerLaneAttemptCeiling:
                 ]
             }
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -5863,7 +5810,7 @@ class TestPerLaneAttemptCeiling:
             max_parallel=1,
             attempt_ceiling=5,
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -5924,7 +5871,7 @@ class TestClaimNextPendingPriority:
         simple_config: OrchestratorConfig,
     ) -> None:
         """High-priority task enqueued after low-priority is claimed first."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         # Enqueue low-priority first, high-priority second
         add_ticket(
@@ -5959,7 +5906,7 @@ class TestClaimNextPendingPriority:
         simple_config: OrchestratorConfig,
     ) -> None:
         """Equal-priority tasks are claimed in FIFO (oldest created_at first)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         # Enqueue in order: earlier created_at first, later second
         add_ticket(
@@ -5994,7 +5941,7 @@ class TestClaimNextPendingPriority:
         cap2_config: OrchestratorConfig,
     ) -> None:
         """Priority respected in fallback loop even when use_plan=False."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         # FIFO backlog: two low-priority tasks enqueued first
         add_ticket(
@@ -6059,7 +6006,7 @@ class TestDispatchDoesNotTouchMainCheckout:
             text=True,
         ).strip()
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-300", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -6093,7 +6040,7 @@ class TestDispatchDoesNotTouchMainCheckout:
             lambda _client, _branch: workspace_dir,
         )
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-300-guard", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -6135,7 +6082,7 @@ class TestSpawnCloseRaceRegression:
         from cw.config import save_state
         from cw.models import SessionPurpose
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         # Build a DAEMON ACTIVE session.
         workspace = sample_client_config.workspace_path
@@ -6346,7 +6293,7 @@ class TestRunDispatchLoopVerbose:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Freshness-gate fires → at least one 'main behind origin' line emitted."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="CW-420", client="test-client"))
 
         monkeypatch.setattr(
@@ -6376,7 +6323,7 @@ class TestRunDispatchLoopVerbose:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Freshness-gate warn line includes client name and ticket_id."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="CW-421", client="test-client"))
 
         monkeypatch.setattr(
@@ -6406,7 +6353,7 @@ class TestRunDispatchLoopVerbose:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Same stale ticket warned only once per run (deduplication)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="CW-422", client="test-client"))
 
         monkeypatch.setattr(
@@ -6484,7 +6431,7 @@ class TestRunDispatchLoopVerbose:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Successful spawn → emit line containing 'SPAWN' with client/ticket info."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="CW-423", client="test-client"))
 
         monkeypatch.setattr(
@@ -6513,7 +6460,7 @@ class TestRunDispatchLoopVerbose:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """dispatch_tick emits a per-client summary line including spawned count."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="CW-424", client="test-client"))
 
         monkeypatch.setattr(
@@ -6541,7 +6488,7 @@ class TestRunDispatchLoopVerbose:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """emit=None (quiet mode) produces no output — no exception raised."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="CW-425", client="test-client"))
 
         monkeypatch.setattr(
@@ -6569,7 +6516,7 @@ class TestDispatchTickEvents:
         simple_config: OrchestratorConfig,
     ) -> None:
         """Successful spawn → skip_reason='none', claimed≥1."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="TICK-1", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -6594,7 +6541,7 @@ class TestDispatchTickEvents:
         simple_config: OrchestratorConfig,
     ) -> None:
         """No pending tasks → skip_reason='no_pending', claimed=0."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         # No tickets added — queue is empty
 
         daemon = FakeNativeDaemonClient()
@@ -6617,7 +6564,7 @@ class TestDispatchTickEvents:
         simple_config: OrchestratorConfig,
     ) -> None:
         """Running session at cap → skip_reason='cap_full', claimed=0."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="TICK-CF", client="test-client"))
 
         # Put an active DAEMON session in state so running_count == cap (1)
@@ -6654,7 +6601,7 @@ class TestDispatchTickEvents:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Stale main → skip_reason='freshness_gate', claimed=0, pending=pre-claim."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="TICK-FG-1", client="test-client"))
         add_ticket(TicketTask(ticket_id="TICK-FG-2", client="test-client"))
 
@@ -6694,7 +6641,7 @@ class TestDispatchTickEvents:
         simple_config: OrchestratorConfig,
     ) -> None:
         """Spawn failure → skip_reason='spawn_error', claimed=0."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="TICK-SE", client="test-client"))
 
         daemon = _RaisingNativeDaemon(
@@ -6718,7 +6665,7 @@ class TestDispatchTickEvents:
         simple_config: OrchestratorConfig,
     ) -> None:
         """Spawn failure → dispatch.tick carries the error as last_error (#1679)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="TICK-SE-TXT", client="test-client"))
 
         daemon = _RaisingNativeDaemon(RuntimeError("backend outage"))
@@ -6745,7 +6692,7 @@ class TestDispatchTickEvents:
         simple_config: OrchestratorConfig,
     ) -> None:
         """A multi-line exception message is collapsed to one line (#1679)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="TICK-SE-ML", client="test-client"))
 
         daemon = _RaisingNativeDaemon(
@@ -6769,7 +6716,7 @@ class TestDispatchTickEvents:
         simple_config: OrchestratorConfig,
     ) -> None:
         """An exception with no message yields last_error == '' (key present)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="TICK-SE-BLANK", client="test-client"))
 
         daemon = _RaisingNativeDaemon(RuntimeError())
@@ -6791,7 +6738,7 @@ class TestDispatchTickEvents:
         simple_config: OrchestratorConfig,
     ) -> None:
         """no_pending and successful-spawn ticks carry no last_error key."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         # no_pending: nothing queued.
         dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
@@ -6815,7 +6762,7 @@ class TestDispatchTickEvents:
         simple_config: OrchestratorConfig,
     ) -> None:
         """A usage-limit tick is not a spawn error and carries no last_error."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="TICK-UL-NOERR", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -6837,7 +6784,7 @@ class TestDispatchTickEvents:
         simple_config: OrchestratorConfig,
     ) -> None:
         """pending in event payload reflects pre-claim count, not post-claim."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="TICK-PRE-1", client="test-client"))
         add_ticket(TicketTask(ticket_id="TICK-PRE-2", client="test-client"))
         # cap=1, so only one will be claimed
@@ -6977,7 +6924,7 @@ class TestDispatchUsageLimitBackoff:
         simple_config: OrchestratorConfig,
     ) -> None:
         """UsageLimitError from spawn: tick result has usage_limit_detected=True."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL1", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -6996,7 +6943,7 @@ class TestDispatchUsageLimitBackoff:
         simple_config: OrchestratorConfig,
     ) -> None:
         """dispatch.tick event has skip_reason=usage_limited when limit detected."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL2", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -7025,7 +6972,7 @@ class TestDispatchUsageLimitBackoff:
         """
         from datetime import timedelta
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL3", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -7058,7 +7005,7 @@ class TestDispatchUsageLimitBackoff:
         """After a client's window elapses, spawning resumes normally."""
         from datetime import timedelta
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL4", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -7081,7 +7028,7 @@ class TestDispatchUsageLimitBackoff:
         simple_config: OrchestratorConfig,
     ) -> None:
         """run_dispatch_loop with usage limit hit: no spawns occur."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL5", client="test-client"))
         add_ticket(TicketTask(ticket_id="GEN-UL6", client="test-client"))
 
@@ -7105,7 +7052,7 @@ class TestDispatchUsageLimitBackoff:
         simple_config: OrchestratorConfig,
     ) -> None:
         """once=True: usage_limit_detected does NOT set usage_limited_until."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL7", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -7131,7 +7078,7 @@ class TestDispatchUsageLimitBackoff:
         """Same-tick race fix: when reconcile reports usage_limited, dispatch_tick
         skips spawning immediately (before the spawn loop runs) so the task is not
         re-spawned into the active rate-limit window (#804)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL-RACE", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -7156,7 +7103,7 @@ class TestDispatchUsageLimitBackoff:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Same-tick race: skip event has skip_reason=usage_limited (#804)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL-RACE2", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -7190,7 +7137,7 @@ class TestDispatchUsageLimitBackoff:
         client that actually hit the limit."""
         import cw.dispatch
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL-PERSIST", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -7247,7 +7194,7 @@ class TestDispatchUsageLimitBackoff:
         active, spawning is suppressed without requiring a fresh detection (#804)."""
         from datetime import timedelta
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL-LOAD", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -7275,7 +7222,7 @@ class TestDispatchUsageLimitBackoff:
         spawning through another process's active backoff for that client."""
         import cw.dispatch
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-1346-XPROC", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -7338,7 +7285,7 @@ class TestDispatchUsageLimitBackoff:
         import cw.dispatch
         import cw.dispatch_state
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-1346-CORRUPT", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -7401,7 +7348,7 @@ class TestDispatchUsageLimitBackoff:
 
         import cw.dispatch
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-1346-EXPIRE", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -7457,7 +7404,7 @@ class TestDispatchUsageLimitBackoff:
 
         import cw.dispatch
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-1343-CLEARED", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -7545,7 +7492,7 @@ class TestDispatchUsageLimitBackoff:
 
         import cw.dispatch
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-1343-RESTART", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -7620,7 +7567,7 @@ class TestDispatchUsageLimitBackoff:
         time (#1343 R3)."""
         import cw.dispatch.loop
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-1343-ONCE", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -7726,7 +7673,7 @@ class TestUsageLimitResetThreading:
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL-RESET1", client="test-client"))
 
         reset_at = datetime.now(UTC) + timedelta(hours=2)
@@ -7745,7 +7692,7 @@ class TestUsageLimitResetThreading:
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL-RESET2", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -7769,7 +7716,7 @@ class TestUsageLimitResetThreading:
         back-off -- see tests/test_dispatch_usage_limit.py for the
         multi-client version of this.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL-RESET3", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -7867,7 +7814,7 @@ class TestUsageLimitResetThreading:
 
         import cw.dispatch
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL-RESET-LOOP", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -7935,7 +7882,7 @@ class TestClaimNextPendingUsageLimitedGate:
     ) -> None:
         from cw.dispatch import _claim_next_pending
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-1346-CLAIM1", client="test-client"))
 
         future = datetime.now(UTC) + timedelta(hours=1)
@@ -7960,7 +7907,7 @@ class TestClaimNextPendingUsageLimitedGate:
     ) -> None:
         from cw.dispatch import _claim_next_pending
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-1346-CLAIM2", client="test-client"))
 
         past = datetime.now(UTC) - timedelta(hours=1)
@@ -8097,7 +8044,7 @@ class TestConfigReloadedEachTick:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """run_dispatch_loop re-calls load_effective_config on every tick."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         call_count = 0
         real_load = load_effective_config
@@ -8122,7 +8069,7 @@ class TestConfigReloadedEachTick:
         sample_client_config: ClientConfig,
     ) -> None:
         """A cap change written between ticks is honored on the next tick."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         # Resolve the write path via the fixture-patched accessor
         config_path = orchestrator_config_file()
@@ -8170,7 +8117,7 @@ class TestConfigReloadedEachTick:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """In-loop reload failure logs WARNING and continues with last-good config."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         real_load = load_effective_config
         call_count = 0
@@ -8209,7 +8156,7 @@ class TestConfigReloadedEachTick:
         typo etc, wrapped as ConfigValidationError) logs WARNING and continues
         with last-good config — mirrors test_config_last_good_on_corrupt's
         yaml.YAMLError case for the pydantic-validation failure mode (#1200)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         real_load = load_effective_config
         call_count = 0
@@ -8257,7 +8204,7 @@ class TestFreshnessGateAutoFF:
 
         TICKET_NEEDS_SYNC must NOT be emitted; spawned=1.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(ticket_id="CW-100", client="test-client")
         add_ticket(task)
 
@@ -8295,7 +8242,7 @@ class TestFreshnessGateAutoFF:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """safety='ahead' → TICKET_NEEDS_SYNC emitted, claim blocked."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(ticket_id="CW-101", client="test-client")
         add_ticket(task)
 
@@ -8327,7 +8274,7 @@ class TestFreshnessGateAutoFF:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """safety='diverged' → TICKET_NEEDS_SYNC emitted, claim blocked."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(ticket_id="CW-102", client="test-client")
         add_ticket(task)
 
@@ -8358,7 +8305,7 @@ class TestFreshnessGateAutoFF:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """safety='detached' → TICKET_NEEDS_SYNC emitted, claim blocked."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(ticket_id="CW-103", client="test-client")
         add_ticket(task)
 
@@ -8392,7 +8339,7 @@ class TestFreshnessGateAutoFF:
 
         Exception must be swallowed; TICKET_NEEDS_SYNC emitted as fallback.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(ticket_id="CW-104", client="test-client")
         add_ticket(task)
 
@@ -8438,7 +8385,7 @@ class TestFreshnessGateAutoFF:
         - NOT call fast_forward_main
         - not spawn any sessions (spawned==0)
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(ticket_id="CW-110", client="test-client")
         add_ticket(task)
 
@@ -8494,7 +8441,7 @@ class TestFreshnessGateAutoFF:
         A detached HEAD is not the non-main-HEAD case; fast_forward_main should
         be attempted (check_main_ff_safety gates it appropriately).
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(ticket_id="CW-111", client="test-client")
         add_ticket(task)
 
@@ -8537,7 +8484,7 @@ class TestFreshnessGateAutoFF:
         dispatch emits freshness_detail="main_diverged_from_origin" — NOT
         "non_main_head" (which would be wrong when we ARE on the default branch).
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(ticket_id="CW-112", client="test-client")
         add_ticket(task)
 
@@ -8584,7 +8531,7 @@ class TestFreshnessGateAutoFF:
         get_head_branch a second time the HEAD has moved to detached; the WARN
         message should fall back to "(detached)".
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(ticket_id="CW-113", client="test-client")
         add_ticket(task)
 
@@ -8621,7 +8568,7 @@ class TestFreshnessGateAutoFF:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """auto_ff=False preserves legacy block-only behavior even when 'behind'."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(ticket_id="CW-105", client="test-client")
         add_ticket(task)
 
@@ -8663,7 +8610,7 @@ class TestFreshnessGateAutoFF:
         dispatch loop should emit a distinct freshness_detail so the operator
         can distinguish "ahead" from "behind" in the status output.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(ticket_id="CW-120", client="test-client")
         add_ticket(task)
 
@@ -8702,7 +8649,7 @@ class TestFreshnessGateAutoFF:
         commits), a distinct freshness_detail tells the operator to reconcile
         rather than just wait for auto-ff.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(ticket_id="CW-121", client="test-client")
         add_ticket(task)
 
@@ -8741,7 +8688,7 @@ class TestFreshnessGateAutoFF:
         tracked changes, auto-ff is blocked.  A distinct freshness_detail
         tells the operator to commit or stash — not wait for auto-ff.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(ticket_id="CW-122", client="test-client")
         add_ticket(task)
 
@@ -8788,7 +8735,7 @@ class TestFreshnessGateAutoFF:
         read-only ``git log origin/<default_branch>..HEAD`` and explicitly warns
         against auto-rebase/reset.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(ticket_id="CW-940", client="test-client")
         add_ticket(task)
 
@@ -8830,7 +8777,7 @@ class TestFreshnessGateAutoFF:
         checkout advice instead of falling through to the generic
         "main behind origin" message.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(ticket_id="CW-964", client="test-client")
         add_ticket(task)
 
@@ -9043,7 +8990,7 @@ class TestTier2LaneAllocation:
             worktree_base=sample_client_config.worktree_base,
             lanes=lanes,
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
 
         add_ticket(TicketTask(ticket_id="IMPL-1", client="test-client", lane="impl"))
         add_ticket(TicketTask(ticket_id="IDEA-1", client="test-client", lane="idea"))
@@ -9071,7 +9018,7 @@ class TestTier2LaneAllocation:
             worktree_base=sample_client_config.worktree_base,
             lanes=lanes,
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
 
         # Seed an active session for the 'impl' lane task
         impl_task = TicketTask(
@@ -9132,7 +9079,7 @@ class TestTier2LaneAllocation:
             worktree_base=sample_client_config.worktree_base,
             lanes=lanes,
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
 
         # Higher-priority task in wrong lane
         add_ticket(
@@ -9186,7 +9133,7 @@ class TestLaneCapCountingWithBlockedOnUser:
             default_branch="main",
             lanes=lanes,
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
 
         # A BLOCKED_ON_USER task with a live session_id
         blocked_task = TicketTask(
@@ -9253,7 +9200,7 @@ class TestLaneCapBlockedSkipReason:
             default_branch="main",
             lanes=lanes,
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
 
         blocked_task = TicketTask(
             ticket_id="LCAP-BLOCKED",
@@ -9362,7 +9309,7 @@ class TestLaneCapBlockedSkipReason:
             default_branch="main",
             lanes=lanes,
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
 
         # Only a BLOCKED_ON_USER task — no pending work at all
         blocked_task = TicketTask(
@@ -9407,7 +9354,7 @@ class TestLaneCapCountingWithAwaitingSignoff:
             default_branch="main",
             lanes=lanes,
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
 
         signoff_task = TicketTask(
             ticket_id="SIGNOFF-BLOCKED",
@@ -9488,7 +9435,7 @@ class TestLaneCapCountingWithAwaitingSignoff:
             default_branch="main",
             lanes=lanes,
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
 
         signoff_task = TicketTask(
             ticket_id="SIGNOFF-2",
@@ -9551,7 +9498,7 @@ class TestLaneCapCountingWithAwaitingSignoff:
             lanes=lanes,
             worktree_base=sample_client_config.worktree_base,
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
 
         sibling_park = TicketTask(
             ticket_id="SIBLING-2",
@@ -9656,7 +9603,7 @@ def test_opencode_lane_max1_running_holds_slot(
         default_branch="main",
         lanes=lanes,
     )
-    _make_clients_yaml(tmp_dispatch_dirs, client)
+    write_clients_yaml(client)
 
     running_task = TicketTask(
         ticket_id="OC-RUNNING",
@@ -9722,7 +9669,7 @@ def test_opencode_lane_max1_blocked_holds_slot(
         default_branch="main",
         lanes=lanes,
     )
-    _make_clients_yaml(tmp_dispatch_dirs, client)
+    write_clients_yaml(client)
 
     blocked_task = TicketTask(
         ticket_id="OC-BLOCKED",
@@ -9780,7 +9727,7 @@ class TestLaneOccupantsPayload:
             default_branch="main",
             lanes=[LaneConfig(name="impl", max_parallel=1)],
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
         running_task = TicketTask(
             ticket_id="OCC-RUN", client="test-client", lane="impl"
         )
@@ -9898,7 +9845,7 @@ class TestLaneOccupantsPayload:
                 LaneConfig(name="lane-b", max_parallel=1),
             ],
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
         run_task = TicketTask(ticket_id="OCC-A", client="test-client", lane="lane-a")
         run_task.status = QueueItemStatus.RUNNING
         blocked_task = TicketTask(
@@ -10038,7 +9985,7 @@ class TestSingleLaneBackwardCompat:
         simple_config: OrchestratorConfig,
     ) -> None:
         """A client with no lanes: dispatches exactly as before (1 task, 1 session)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="COMPAT-1", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -10069,7 +10016,7 @@ class TestSingleLaneBackwardCompat:
         simple_config: OrchestratorConfig,
     ) -> None:
         """No-lanes client: second tick, cap=1, running session → does not overspawn."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="COMPAT-A", client="test-client"))
         add_ticket(TicketTask(ticket_id="COMPAT-B", client="test-client"))
 
@@ -10274,8 +10221,11 @@ class TestCodexSpawnDoesNotBlockDispatch:
             default_branch="main",
             worktree_base=tmp_path / "worktrees-b",
         )
-        _make_clients_yaml(
-            tmp_dispatch_dirs, client_a, client_b, codex_review_client="client-a"
+        write_clients_yaml(
+            ClientSpec.from_config(
+                client_a, extra=executor_backend_extra("review", "codex")
+            ),
+            client_b,
         )
         add_ticket(TicketTask(ticket_id="A-1", client="client-a", stage=Stage.REVIEW))
         add_ticket(TicketTask(ticket_id="B-1", client="client-b"))
@@ -10373,7 +10323,11 @@ class TestCodexSpawnDoesNotBlockDispatch:
             default_branch="main",
             worktree_base=tmp_path / "worktrees-boot",
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client_a, codex_review_client="client-a")
+        write_clients_yaml(
+            ClientSpec.from_config(
+                client_a, extra=executor_backend_extra("review", "codex")
+            )
+        )
 
         worktree = tmp_path / "orphan-wt"
         (worktree / ".claude").mkdir(parents=True)
@@ -10888,7 +10842,7 @@ class TestRevertClaimedTaskDuplicateRunning:
         goes back to PENDING."""
         from cw.dispatch.claim import _claim_next_pending, _spawn_claimed_task
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _worktree, row_a, row_b = _seed_duplicate_running_rows(
             sample_client_config, status_b=QueueItemStatus.PENDING
         )
@@ -10970,7 +10924,7 @@ class TestParkPreSpawnDuplicateRunning:
     ) -> None:
         from cw.dispatch.claim import _claim_next_pending, _spawn_claimed_task
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _worktree, row_a, row_b = _seed_duplicate_running_rows(
             sample_client_config, status_b=QueueItemStatus.PENDING
         )
@@ -11023,7 +10977,7 @@ class TestDispatchLoopExitedEvent:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """run_dispatch_loop(once=True) emits DISPATCH_LOOP_EXITED with normal=True."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         captured: list[tuple[object, dict[str, object]]] = []
 
@@ -11058,7 +11012,7 @@ class TestDispatchLoopExitedEvent:
             save_executor_blocked_marker,
         )
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         save_executor_blocked_marker(
             ExecutorBlockedMarker(
                 client="test-client",
@@ -11083,7 +11037,7 @@ class TestDispatchLoopExitedEvent:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A crash in dispatch_tick emits DISPATCH_LOOP_EXITED with normal=False."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         captured: list[tuple[object, dict[str, object]]] = []
 
@@ -11118,7 +11072,7 @@ class TestDispatchLoopExitedEvent:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """record_event failure in finally is suppressed — loop completes normally."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         def raising_on_loop_exited(
             event_type: object,
@@ -11143,7 +11097,7 @@ class TestDispatchLoopExitedEvent:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Drift between loaded and installed version raises VersionDriftError."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr(
             "cw.dispatch.loop.importlib.metadata.version",
             lambda _name: "0.0.0-fake",
@@ -11161,7 +11115,7 @@ class TestDispatchLoopExitedEvent:
         """Drift causes exactly one DISPATCH_LOOP_EXITED event with drift fields."""
         import cw
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr(
             "cw.dispatch.loop.importlib.metadata.version",
             lambda _name: "0.0.0-fake",
@@ -11199,7 +11153,7 @@ class TestDispatchLoopExitedEvent:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Version check fires before dispatch_tick — tick is never called on drift."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr(
             "cw.dispatch.loop.importlib.metadata.version",
             lambda _name: "0.0.0-fake",
@@ -11247,7 +11201,7 @@ class TestDispatchLoopExitedEvent:
         """
         import importlib.metadata
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         # Pin _LOADED_VERSION to the same sentinel so the comparison is equal.
         monkeypatch.setattr("cw.dispatch.loop._LOADED_VERSION", "0.0.0+unknown")
         monkeypatch.setattr(
@@ -17410,7 +17364,7 @@ class TestUnifiedReentryContractCompose:
         owns it. Fails if #1730's clear is made unconditional (the mutation that
         would silently drop the send-back on every self-heal round trip), and
         fails if the spawn claim clears #1717's field as collateral."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         from cw.dev_queue import _stage_regress
 
@@ -17449,7 +17403,7 @@ class TestUnifiedReentryContractCompose:
         for its own consumer (dispatch/routing.py's REVIEW-scoped gates) —
         fails if the spawn claim clears it too, which would blind the repeat
         detector on exactly the re-entry it exists to catch."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         from cw.dev_queue import _stage_regress
 
@@ -17772,7 +17726,7 @@ class TestPersistCarriedContext:
     ) -> None:
         """consume_completed_sessions persists plan_source/scope.tier from a
         SESSION_COMPLETED event's last_result, surviving the queue-store save."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         task = TicketTask(
             ticket_id="PC-CONSUME-1",
@@ -17832,7 +17786,7 @@ class TestWaveCollisionDetection:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """dispatch_tick must accept warned_collision without raising TypeError."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         monkeypatch.setattr(
             "cw.dispatch.gating.is_main_behind_origin",
@@ -17856,7 +17810,7 @@ class TestWaveCollisionDetection:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """run_dispatch_loop must pass warned_collision to each dispatch_tick call."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         captured_collision_sets: list[object] = []
 
@@ -17917,7 +17871,7 @@ class TestWaveCollisionDetection:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Two RUNNING tasks sharing a file → WAVE_COLLISION event emitted."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         # Pre-populate two RUNNING tasks on the same client with worktrees
         wt1 = tmp_dispatch_dirs / "wt1"
@@ -17991,7 +17945,7 @@ class TestSpawnErrorBackoff:
     ) -> None:
         """After a spawn error the task has next_eligible_at in the future and
         spawn_error_count == 1."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-868A", client="test-client"))
 
         before = datetime.now(UTC)
@@ -18017,7 +17971,7 @@ class TestSpawnErrorBackoff:
         """A task with next_eligible_at in the future is not claimed."""
         # Also the release gate for a #2324 mid-turn usage-limit park under
         # reap_policy: auto, which sets next_eligible_at to the parsed reset.
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         # Pre-seed task with active backoff
         task = TicketTask(
             ticket_id="GEN-868B",
@@ -18043,7 +17997,7 @@ class TestSpawnErrorBackoff:
     ) -> None:
         """dispatch.tick event has skip_reason=spawn_error_backoff when all
         pending tasks are in backoff."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(
             ticket_id="GEN-868C",
             client="test-client",
@@ -18071,7 +18025,7 @@ class TestSpawnErrorBackoff:
         simple_config: OrchestratorConfig,
     ) -> None:
         """Successive spawn errors produce increasing next_eligible_at delays."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-868D", client="test-client"))
 
         daemon = _RaisingNativeDaemon(RuntimeError("daemon hiccup"))
@@ -18105,7 +18059,7 @@ class TestSpawnErrorBackoff:
         """Delay is capped at _SPAWN_ERROR_BACKOFF_CAP_SECONDS regardless of count."""
         from cw.dispatch import _SPAWN_ERROR_BACKOFF_CAP_SECONDS
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         # Pre-seed with very high count so uncapped delay would be enormous
         task = TicketTask(
             ticket_id="GEN-868E",
@@ -18133,7 +18087,7 @@ class TestSpawnErrorBackoff:
         simple_config: OrchestratorConfig,
     ) -> None:
         """After a successful spawn, spawn_error_count and next_eligible_at clear."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         # Pre-seed task that has suffered a prior backoff but the window has elapsed
         task = TicketTask(
             ticket_id="GEN-868F",
@@ -18166,7 +18120,7 @@ class TestSpawnErrorBackoff:
         predicate tests construct their TicketTask literals by hand and never
         reach claim.py, so this is what a mutation of the stamp line falsifies.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(
             ticket_id="GEN-1631",
             client="test-client",
@@ -18190,7 +18144,7 @@ class TestSpawnErrorBackoff:
         simple_config: OrchestratorConfig,
     ) -> None:
         """A task whose next_eligible_at has passed is claimed and spawned normally."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         task = TicketTask(
             ticket_id="GEN-868G",
             client="test-client",
@@ -18213,7 +18167,7 @@ class TestSpawnErrorBackoff:
     ) -> None:
         """Priority-ticket path: a backedoff priority task is skipped (not claimed),
         and a non-priority eligible task is claimed instead (#868 priority loop)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         # Priority task A is in backoff
         task_a = TicketTask(
             ticket_id="GEN-868-PRIO-A",
@@ -18256,7 +18210,7 @@ class TestSpawnErrorBackoff:
             tick_interval_seconds=30,
             per_client_max_parallel={"test-client": 2},
         )
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         # Task A is in backoff; task B is eligible (created later, lower priority tie)
         task_a = TicketTask(
             ticket_id="GEN-868H-A",
@@ -18325,7 +18279,7 @@ class TestLaneCircuitBreaker:
         breaker_config: OrchestratorConfig,
     ) -> None:
         """One raising tick increments the lane counter but does not yet trip."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-875A", client="test-client"))
 
         daemon = _RaisingNativeDaemon(RuntimeError("boom"))
@@ -18343,7 +18297,7 @@ class TestLaneCircuitBreaker:
         breaker_config: OrchestratorConfig,
     ) -> None:
         """Two pending tasks + raising daemon → counter increments by exactly 1."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-875B1", client="test-client"))
         add_ticket(TicketTask(ticket_id="GEN-875B2", client="test-client"))
 
@@ -18359,7 +18313,7 @@ class TestLaneCircuitBreaker:
         breaker_config: OrchestratorConfig,
     ) -> None:
         """Reaching the threshold on a tick sets the lane's paused flag."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_lane_override(1)
         add_ticket(TicketTask(ticket_id="GEN-875C", client="test-client"))
 
@@ -18377,7 +18331,7 @@ class TestLaneCircuitBreaker:
         breaker_config: OrchestratorConfig,
     ) -> None:
         """The tripping tick emits a circuit-breaker-sourced LANE_PAUSED event."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_lane_override(1)
         add_ticket(TicketTask(ticket_id="GEN-875D", client="test-client"))
 
@@ -18404,7 +18358,7 @@ class TestLaneCircuitBreaker:
         breaker_config: OrchestratorConfig,
     ) -> None:
         """A blank exception message yields last_error == "" (never null)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_lane_override(1)
         add_ticket(TicketTask(ticket_id="GEN-875E", client="test-client"))
 
@@ -18429,7 +18383,7 @@ class TestLaneCircuitBreaker:
         before it lands in the LANE_PAUSED payload — _format_event_line
         renders one event per terminal line, and an embedded newline breaks
         that contract. Nothing is lost, just joined onto one line."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_lane_override(1)
         add_ticket(TicketTask(ticket_id="GEN-2034A", client="test-client"))
 
@@ -18459,7 +18413,7 @@ class TestLaneCircuitBreaker:
         breaker_config: OrchestratorConfig,
     ) -> None:
         """A successful spawn resets the lane's consecutive-error counter."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_lane_override(1)
         add_ticket(TicketTask(ticket_id="GEN-875F", client="test-client"))
 
@@ -18477,7 +18431,7 @@ class TestLaneCircuitBreaker:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """An already-zero counter is not re-persisted on a successful spawn."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_lane_override(0)
         add_ticket(TicketTask(ticket_id="GEN-875G", client="test-client"))
 
@@ -18506,7 +18460,7 @@ class TestLaneCircuitBreaker:
         breaker_config: OrchestratorConfig,
     ) -> None:
         """A breaker-paused lane is skipped: no spawn attempted."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_lane_override(2, paused=True)
         add_ticket(TicketTask(ticket_id="GEN-875H", client="test-client"))
 
@@ -18523,7 +18477,7 @@ class TestLaneCircuitBreaker:
         breaker_config: OrchestratorConfig,
     ) -> None:
         """A breaker-paused lane with pending work reports LANE_CIRCUIT_PAUSED."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_lane_override(2, paused=True)
         add_ticket(TicketTask(ticket_id="GEN-875I", client="test-client"))
 
@@ -18546,7 +18500,7 @@ class TestLaneCircuitBreaker:
         breaker_config: OrchestratorConfig,
     ) -> None:
         """An operator pause (counter below threshold) is not LANE_CIRCUIT_PAUSED."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_lane_override(0, paused=True)
         add_ticket(TicketTask(ticket_id="GEN-875J", client="test-client"))
 
@@ -18567,7 +18521,7 @@ class TestLaneCircuitBreaker:
         breaker_config: OrchestratorConfig,
     ) -> None:
         """The tick that trips reports SPAWN_ERROR (higher precedence)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_lane_override(1)
         add_ticket(TicketTask(ticket_id="GEN-875K", client="test-client"))
 
@@ -18588,7 +18542,7 @@ class TestLaneCircuitBreaker:
         breaker_config: OrchestratorConfig,
     ) -> None:
         """Per-task spawn_error_count still increments alongside the lane counter."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-875L", client="test-client"))
 
         daemon = _RaisingNativeDaemon(RuntimeError("boom"))
@@ -18730,7 +18684,7 @@ class TestLaneCircuitBreaker:
             worktree_base=sample_client_config.worktree_base,
             lanes=lanes,
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
         _save_concurrency_overrides(
             ConcurrencyOverrides(
                 lanes={
@@ -18784,7 +18738,7 @@ class TestLaneStarvedAttention:
         breaker_config: OrchestratorConfig,
     ) -> None:
         """A tripped, paused lane with no pending tickets never emits."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_lane_override(2, paused=True)
 
         daemon = FakeNativeDaemonClient()
@@ -18803,7 +18757,7 @@ class TestLaneStarvedAttention:
         breaker_config: OrchestratorConfig,
     ) -> None:
         """First tick of a starved circuit-paused lane emits immediately."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_lane_override(2, paused=True)
         add_ticket(TicketTask(ticket_id="GEN-1630A", client="test-client"))
 
@@ -18838,7 +18792,7 @@ class TestLaneStarvedAttention:
         """Recurs only after the debounce interval elapses, not sooner (#1630)."""
         from freezegun import freeze_time
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_lane_override(2, paused=True)
         add_ticket(TicketTask(ticket_id="GEN-1630B", client="test-client"))
 
@@ -18891,7 +18845,7 @@ class TestLaneStarvedAttention:
             worktree_base=tmp_path / "worktrees",
             lanes=lanes,
         )
-        _make_clients_yaml(tmp_dispatch_dirs, client)
+        write_clients_yaml(client)
         _save_concurrency_overrides(
             ConcurrencyOverrides(
                 lanes={
@@ -18949,7 +18903,7 @@ class TestLaneStarvedAttention:
 
         from cw.cli.queues import _dedup_terminal
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_lane_override(2, paused=True)
         add_ticket(TicketTask(ticket_id="GEN-1630E1", client="test-client"))
 
@@ -18993,7 +18947,7 @@ class TestLaneStarvedAttention:
 
         from cw.cli import main
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_lane_override(2, paused=True)
         add_ticket(TicketTask(ticket_id="GEN-1630D1", client="test-client"))
 
@@ -19079,7 +19033,7 @@ class TestRunDispatchLoopHydrationHook:
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         calls: list[object] = []
 
@@ -19096,7 +19050,7 @@ class TestRunDispatchLoopHydrationHook:
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
 
         def _boom(_cfg: object) -> None:
@@ -19157,7 +19111,7 @@ class TestRunDispatchLoopStaleGateHook:
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         calls: list[object] = []
 
@@ -19175,7 +19129,7 @@ class TestRunDispatchLoopStaleGateHook:
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
 
         def _boom() -> list[str]:
@@ -19199,7 +19153,7 @@ class TestRunDispatchLoopStaleDispatchWatchHook:
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         calls: list[object] = []
 
@@ -19221,7 +19175,7 @@ class TestRunDispatchLoopStaleDispatchWatchHook:
     ) -> None:
         """Ordering is load-bearing: a watch registered after hydration would
         sit un-hydrated until the NEXT tick, delaying every release by one."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         order: list[str] = []
 
@@ -19246,7 +19200,7 @@ class TestRunDispatchLoopStaleDispatchWatchHook:
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
 
         def _boom() -> list[str]:
@@ -19662,7 +19616,7 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         calls: list[object] = []
         monkeypatch.setattr(
@@ -19689,7 +19643,7 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
         healthy loop's newest tick was always a full iteration old (sleep +
         guarded pre-tick passes + spawn work), routinely aging past
         TICK_STALE_SECONDS and false-paging the operator."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         order: list[str] = []
         monkeypatch.setattr(
@@ -19710,7 +19664,7 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Two back-to-back ticks produce exactly one inbox scan."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
         calls: list[object] = []
@@ -19732,7 +19686,7 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
         """Advancing the clock past the gate re-arms the scan."""
         from freezegun import freeze_time
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         calls: list[object] = []
         monkeypatch.setattr(
@@ -19764,7 +19718,7 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
         rescanning every tick — the gate advances on the failure path too."""
         from freezegun import freeze_time
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
 
         def _boom(**_kwargs: object) -> None:
@@ -19815,7 +19769,7 @@ class TestWarnIfScopedServeStarvesSiblings:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         self._stub_ticks(
             monkeypatch,
@@ -19842,7 +19796,7 @@ class TestWarnIfScopedServeStarvesSiblings:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         self._stub_ticks(monkeypatch, {"review-bingo": _make_tick_summary(pending=3)})
         caplog.set_level(logging.WARNING, logger="cw.dispatch")
@@ -19856,7 +19810,7 @@ class TestWarnIfScopedServeStarvesSiblings:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         self._stub_ticks(
             monkeypatch,
@@ -19877,7 +19831,7 @@ class TestWarnIfScopedServeStarvesSiblings:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """The scoped client's own pending work is being dispatched, not starved."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
         self._stub_ticks(
             monkeypatch,
@@ -19957,7 +19911,7 @@ class TestFreshnessBlockAttentionLatch:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """One stale tick increments the counter but does not yet emit."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-W2A", client="test-client"))
         _force_stale(monkeypatch)
 
@@ -19979,7 +19933,7 @@ class TestFreshnessBlockAttentionLatch:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Two pending tickets on a stale client → counter increments by 1."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-W2B1", client="test-client"))
         add_ticket(TicketTask(ticket_id="GEN-W2B2", client="test-client"))
         _force_stale(monkeypatch)
@@ -19997,7 +19951,7 @@ class TestFreshnessBlockAttentionLatch:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Reaching the threshold emits session.needs_attention with all 8 fields."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_client_freshness_override(1)
         add_ticket(TicketTask(ticket_id="GEN-W2C", client="test-client"))
         _force_stale(monkeypatch)
@@ -20031,7 +19985,7 @@ class TestFreshnessBlockAttentionLatch:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A tick that keeps the client at/above threshold does not re-emit."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_client_freshness_override(2)
         add_ticket(TicketTask(ticket_id="GEN-W2D", client="test-client"))
         _force_stale(monkeypatch)
@@ -20053,7 +20007,7 @@ class TestFreshnessBlockAttentionLatch:
         freshness_breaker_config: OrchestratorConfig,
     ) -> None:
         """A non-stale tick resets the client's freshness-block counter to 0."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_client_freshness_override(1)
         add_ticket(TicketTask(ticket_id="GEN-W2E", client="test-client"))
 
@@ -20073,7 +20027,7 @@ class TestFreshnessBlockAttentionLatch:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """An already-zero counter is not re-persisted on a non-stale tick."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_client_freshness_override(0)
         add_ticket(TicketTask(ticket_id="GEN-W2F", client="test-client"))
 
@@ -20105,7 +20059,7 @@ class TestFreshnessBlockAttentionLatch:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The freshness-block escalation never calls fire_push_notification."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         _seed_client_freshness_override(1)
         add_ticket(TicketTask(ticket_id="GEN-W2G", client="test-client"))
         _force_stale(monkeypatch)
@@ -20173,7 +20127,7 @@ class TestAvailabilityPreflightGate:
         simple_config: OrchestratorConfig,
     ) -> None:
         """When the probe reports available, dispatch proceeds as usual."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-A5A", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -20189,7 +20143,7 @@ class TestAvailabilityPreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The core binding requirement: a gated PENDING task keeps attempts=0."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-A5B", client="test-client", attempts=0))
         _force_gh_unavailable(monkeypatch)
 
@@ -20211,7 +20165,7 @@ class TestAvailabilityPreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A gated client emits dispatch.tick with skip_reason=availability_gate."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-A5C", client="test-client"))
         _force_gh_unavailable(monkeypatch)
 
@@ -20241,7 +20195,7 @@ class TestAvailabilityPreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The first bad probe fires the full fleet-wide attention payload."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-A5D", client="test-client"))
         _force_gh_unavailable(monkeypatch)
 
@@ -20273,7 +20227,7 @@ class TestAvailabilityPreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A cache-hit second tick within the TTL fires no second attention."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-A5E", client="test-client"))
         _force_gh_unavailable(monkeypatch)
 
@@ -20305,7 +20259,7 @@ class TestAvailabilityPreflightGate:
         """
         from freezegun import freeze_time
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-A5F", client="test-client"))
 
         calls: list[int] = []
@@ -20341,7 +20295,7 @@ class TestAvailabilityPreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A fresh success after an outage resets the latch and fires no event."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-A5G", client="test-client"))
         # Seed a latched outage state whose TTL is already expired so the next
         # tick re-probes (autouse default → available → recovery).
@@ -20371,7 +20325,7 @@ class TestAvailabilityPreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Two ticks within the TTL trigger only one real probe call."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-A5H", client="test-client"))
 
         calls: list[int] = []
@@ -20398,7 +20352,7 @@ class TestAvailabilityPreflightGate:
         """A tick after the TTL window runs a fresh probe."""
         from freezegun import freeze_time
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-A5I", client="test-client"))
 
         calls: list[int] = []
@@ -20485,7 +20439,7 @@ class TestAvailabilityPreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Any resolution error fails open — dispatch proceeds (no gate)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-A5J", client="test-client"))
 
         def _boom(**_kw: object) -> bool:
@@ -20507,7 +20461,7 @@ class TestAvailabilityPreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The outage escalation never calls fire_push_notification."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-A5K", client="test-client"))
         _force_gh_unavailable(monkeypatch)
 
@@ -20538,7 +20492,7 @@ class TestAvailabilityPreflightGate:
         Event-ordering alone doesn't prove short-circuit (MF1) — spy the
         freshness resolver and assert it is never invoked on the gated path.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-A5L", client="test-client"))
         _force_gh_unavailable(monkeypatch)
 
@@ -20561,7 +20515,7 @@ class TestAvailabilityPreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A FINALIZE-stage PENDING task is also held by the single gate (S2)."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(
             TicketTask(
                 ticket_id="GEN-A5M",
@@ -20593,7 +20547,7 @@ class TestAvailabilityPreflightGate:
         The freshness counter must stay frozen during an outage, not reset —
         prevents a future reorder from silently clearing real freshness latches.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-A5N", client="test-client"))
         _force_gh_unavailable(monkeypatch)
 
@@ -20629,7 +20583,7 @@ class TestAvailabilityPreflightGate:
         the loop on its very first iteration before reaching the gate, must
         not shell out to `gh auth status` or touch the outage latch.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-A5O", client="test-client"))
 
         calls: list[int] = []
@@ -20682,7 +20636,7 @@ class TestSshKeyPreflightGate:
         simple_config: OrchestratorConfig,
     ) -> None:
         """When the probe reports available, dispatch proceeds as usual."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-S1A", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -20698,7 +20652,7 @@ class TestSshKeyPreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The core binding requirement: a gated PENDING task keeps attempts=0."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-S1B", client="test-client", attempts=0))
         _force_ssh_key_unavailable(monkeypatch)
 
@@ -20720,7 +20674,7 @@ class TestSshKeyPreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A gated client emits dispatch.tick with skip_reason=ssh_key_gate."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-S1C", client="test-client"))
         _force_ssh_key_unavailable(monkeypatch)
 
@@ -20750,7 +20704,7 @@ class TestSshKeyPreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The operator error line is deduplicated across ticks in one run."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-S1D", client="test-client"))
         _force_ssh_key_unavailable(monkeypatch)
 
@@ -20787,7 +20741,7 @@ class TestSshKeyPreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Both probes forced unavailable: AVAILABILITY_GATE wins, not SSH_KEY_GATE."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-S1E", client="test-client"))
         _force_gh_unavailable(monkeypatch)
         _force_ssh_key_unavailable(monkeypatch)
@@ -20810,7 +20764,7 @@ class TestSshKeyPreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """SSH unavailable + stale repo: SSH_KEY_GATE wins over FRESHNESS_GATE."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-S1F", client="test-client"))
         _force_ssh_key_unavailable(monkeypatch)
         monkeypatch.setattr(
@@ -20842,7 +20796,7 @@ class TestSshKeyPreflightGate:
         """GitHub #1437: ssh_key_gate_enabled=False bypasses the probe-failure
         skip — the client dispatches normally, an SSH_KEY_GATE_BYPASSED event
         is recorded, and no dispatch.tick SSH_KEY_GATE skip is recorded."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-S1G", client="test-client"))
         _force_ssh_key_unavailable(monkeypatch)
 
@@ -20882,7 +20836,7 @@ class TestSshKeyPreflightGate:
         Even with the probe forced unavailable, the client dispatches, no
         SSH_KEY_GATE skip is recorded, and the probe is never even called.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-S1I", client="test-client"))
         probe_calls: list[bool] = []
 
@@ -20916,7 +20870,7 @@ class TestSshKeyPreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """GitHub #1495: a local-path push remote is exempt the same way."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-S1J", client="test-client"))
         _force_ssh_key_unavailable(monkeypatch)
         monkeypatch.setattr("cw.dispatch.gating.push_remote_scheme", lambda _p: "local")
@@ -20934,7 +20888,7 @@ class TestSshKeyPreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """GitHub #1495: a scheme-resolution failure keeps the gate fail-closed."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-S1K", client="test-client"))
         _force_ssh_key_unavailable(monkeypatch)
         monkeypatch.setattr(
@@ -20966,7 +20920,7 @@ class TestSshKeyPreflightGate:
     ) -> None:
         """GitHub #1495: both ssh-gate events name the transport that engaged
         the probe, so a false gate is diagnosable from events alone."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-S1L", client="test-client"))
         _force_ssh_key_unavailable(monkeypatch)
         daemon = FakeNativeDaemonClient()
@@ -20998,7 +20952,7 @@ class TestSshKeyPreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """GitHub #1495: the scheme is resolved against the client's repo."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-S1M", client="test-client"))
         _force_ssh_key_unavailable(monkeypatch)
         probed: list[Path] = []
@@ -21025,7 +20979,7 @@ class TestSshKeyPreflightGate:
         """GitHub #1437: default (ssh_key_gate_enabled=True) is unchanged —
         client still skipped, SSH_KEY_GATE skip still recorded, and the new
         bypass event is NOT recorded."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-S1H", client="test-client"))
         _force_ssh_key_unavailable(monkeypatch)
 
@@ -21091,7 +21045,7 @@ class TestDiskPressurePreflightGate:
         simple_config: OrchestratorConfig,
     ) -> None:
         """With plenty of free space, dispatch proceeds as usual."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-D1A", client="test-client"))
 
         daemon = FakeNativeDaemonClient()
@@ -21107,7 +21061,7 @@ class TestDiskPressurePreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The core binding requirement: a gated PENDING task keeps attempts=0."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-D1B", client="test-client", attempts=0))
         _force_disk_pressure_gated(monkeypatch)
 
@@ -21129,7 +21083,7 @@ class TestDiskPressurePreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A gated client emits dispatch.tick with skip_reason=disk_pressure_gate."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-D1C", client="test-client"))
         _force_disk_pressure_gated(monkeypatch, free_gb=1.25)
 
@@ -21161,7 +21115,7 @@ class TestDiskPressurePreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The operator WARN line is deduplicated across ticks in one run."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-D1D", client="test-client"))
         _force_disk_pressure_gated(monkeypatch)
 
@@ -21191,7 +21145,7 @@ class TestDiskPressurePreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Both probes forced bad: SSH_KEY_GATE wins, not DISK_PRESSURE_GATE."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-D1E", client="test-client"))
         _force_ssh_key_unavailable(monkeypatch)
         _force_disk_pressure_gated(monkeypatch)
@@ -21214,7 +21168,7 @@ class TestDiskPressurePreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Low disk + stale repo: DISK_PRESSURE_GATE wins over FRESHNESS_GATE."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-D1F", client="test-client"))
         _force_disk_pressure_gated(monkeypatch)
         monkeypatch.setattr(
@@ -21246,7 +21200,7 @@ class TestDiskPressurePreflightGate:
         """disk_pressure_gate_enabled=False bypasses the pressure skip — the
         client dispatches normally, a DISK_PRESSURE_GATE_BYPASSED event is
         recorded, and no dispatch.tick DISK_PRESSURE_GATE skip is recorded."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-D1G", client="test-client"))
         _force_disk_pressure_gated(monkeypatch, free_gb=1.5)
 
@@ -21289,7 +21243,7 @@ class TestDiskPressurePreflightGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """An unprobeable mount is not evidence of pressure: the gate fails open."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-D1H", client="test-client"))
 
         probe_error = "mount went away"
@@ -21372,7 +21326,7 @@ class TestHostTmpInodePressureGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Bytes fine, inodes low: DISK_PRESSURE_GATE skip carrying inode fields."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-I1A", client="test-client", attempts=0))
         _force_inode_usage(monkeypatch, free_inodes=10_000)
 
@@ -21396,7 +21350,7 @@ class TestHostTmpInodePressureGate:
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-I1W", client="test-client"))
         _force_inode_usage(monkeypatch, free_inodes=10_000)
 
@@ -21422,7 +21376,7 @@ class TestHostTmpInodePressureGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Fires once per outage episode, per client; a healthy probe re-arms it."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-I1B", client="test-client"))
         daemon = FakeNativeDaemonClient()
 
@@ -21461,7 +21415,7 @@ class TestHostTmpInodePressureGate:
             default_branch="main",
             worktree_base=tmp_path / "worktrees-other",
         )
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config, other)
+        write_clients_yaml(sample_client_config, other)
         add_ticket(TicketTask(ticket_id="GEN-I1C", client="test-client"))
         add_ticket(TicketTask(ticket_id="GEN-I1D", client="other-client"))
         exhausted_base = sample_client_config.worktree_base
@@ -21515,7 +21469,7 @@ class TestHostTmpInodePressureGate:
         free_inodes: int,
         gated: bool,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-I1E", client="test-client"))
         _force_inode_usage(
             monkeypatch, total_inodes=total_inodes, free_inodes=free_inodes
@@ -21536,7 +21490,7 @@ class TestHostTmpInodePressureGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The informational signal is independent of the enforcement bypass."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-I1F", client="test-client"))
         _force_inode_usage(monkeypatch, free_inodes=10_000)
         bypass_config = simple_config.model_copy(
@@ -21566,7 +21520,7 @@ class TestHostTmpInodePressureGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """btrfs reports f_files=f_ffree=0: the inode dimension does not apply."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-I1G", client="test-client"))
         _force_inode_usage(monkeypatch, total_inodes=0, free_inodes=0)
 
@@ -21585,7 +21539,7 @@ class TestHostTmpInodePressureGate:
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-I1H", client="test-client"))
         probe_error = "statvfs failed"
 
@@ -21609,7 +21563,7 @@ class TestHostTmpInodePressureGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """disk_pressure_min_free_inodes/_fraction reach the gate from config."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-I1J", client="test-client"))
         _force_inode_usage(monkeypatch, total_inodes=1_000_000, free_inodes=150_000)
         strict = simple_config.model_copy(
@@ -21654,7 +21608,7 @@ class TestSpawnInvalidatesStaleContextJson:
         .cw/context.json is removed before spawn."""
         from cw.worktree import create_worktree
 
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         branch = f"{sample_client_config.feature_branch_prefix}/GEN-STALE"
         worktree_path = create_worktree(
@@ -22182,7 +22136,7 @@ class TestClaimNextPendingStalePr:
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         self._stub_gate(monkeypatch, "GEN-1862")
         save_dev_queue(
             DevQueueStore(
@@ -22214,7 +22168,7 @@ class TestClaimNextPendingStalePr:
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         self._stub_gate(monkeypatch, "GEN-impl")
         save_dev_queue(
             DevQueueStore(
@@ -22242,7 +22196,7 @@ class TestClaimNextPendingStalePr:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Stage-scoped: a REVIEW-stage ticket legitimately has an open PR."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         self._stub_gate(monkeypatch, "GEN-review")
         save_dev_queue(
             DevQueueStore(
@@ -22270,7 +22224,7 @@ class TestClaimNextPendingStalePr:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """No false positive: the existing claim path is unchanged."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         self._stub_gate(monkeypatch)
         save_dev_queue(
             DevQueueStore(
@@ -22298,7 +22252,7 @@ class TestClaimNextPendingStalePr:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The gate fires on the priority-ticket loop too."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         self._stub_gate(monkeypatch, "GEN-pri")
         save_dev_queue(
             DevQueueStore(
@@ -22330,7 +22284,7 @@ class TestClaimNextPendingStalePr:
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         self._stub_gate(monkeypatch, "GEN-events")
         task = _make_ticket_task(
             ticket_id="GEN-events",
@@ -22373,7 +22327,7 @@ class TestClaimNextPendingStalePr:
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         calls = self._stub_gate(monkeypatch)
         save_dev_queue(
             DevQueueStore(
@@ -22405,7 +22359,7 @@ class TestClaimNextPendingStalePr:
         Mirrors ``test_skip_reason_cap_full_when_running_at_cap``'s shape --
         an ACTIVE DAEMON session already occupies the sole cap=1 slot.
         """
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         calls = self._stub_gate(monkeypatch, "GEN-nocap")
         save_dev_queue(
             DevQueueStore(
@@ -22447,7 +22401,7 @@ class TestClaimNextPendingStalePr:
         """OrchestratorConfig.pr_gate_enabled=False is the fleet-wide escape
         hatch (#1862), mirroring ssh_key_gate_enabled: the resolver is never
         called and a stale-PR task claims normally."""
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
         calls = self._stub_gate(monkeypatch, "GEN-toggle-off")
         save_dev_queue(
             DevQueueStore(
@@ -22549,7 +22503,7 @@ class TestClaimNextPendingTrackerMcpGate:
         from cw.dev_queue import TRACKER_MCP_GATE_DISPOSITION
         from cw.dev_queue.lifecycle import _PRE_DISPATCH_TRACKER_MCP_REASON
 
-        _make_clients_yaml(tmp_dispatch_dirs, self._gated_client(sample_client_config))
+        write_clients_yaml(self._gated_client(sample_client_config))
         self._stub_resolver(monkeypatch, "GEN-2442")
         task = self._seed("GEN-2442")
 
@@ -22604,7 +22558,7 @@ class TestClaimNextPendingTrackerMcpGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """R6 case 1: no hit -> the task claims and spawns normally."""
-        _make_clients_yaml(tmp_dispatch_dirs, self._gated_client(sample_client_config))
+        write_clients_yaml(self._gated_client(sample_client_config))
         calls = self._stub_resolver(monkeypatch)
         self._seed("GEN-enabled")
 
@@ -22625,7 +22579,7 @@ class TestClaimNextPendingTrackerMcpGate:
     ) -> None:
         """R6 case 2: the real resolver runs, stubbed only at its git-read
         boundary to report the missing-file (None) outcome -> spawn proceeds."""
-        _make_clients_yaml(tmp_dispatch_dirs, self._gated_client(sample_client_config))
+        write_clients_yaml(self._gated_client(sample_client_config))
         reads: list[str] = []
 
         def _missing(client: ClientConfig, branch: str, relpath: str) -> None:
@@ -22650,7 +22604,7 @@ class TestClaimNextPendingTrackerMcpGate:
     ) -> None:
         """R6 case 4: ``tracker_mcp_gate`` unset -> the resolver never runs."""
         assert sample_client_config.tracker_mcp_gate is None
-        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        write_clients_yaml(sample_client_config)
 
         def _explode(client: ClientConfig, snapshot: DevQueueStore) -> None:
             msg = "tracker-MCP resolver must not run for an opted-out client"
@@ -22675,7 +22629,7 @@ class TestClaimNextPendingTrackerMcpGate:
     ) -> None:
         """Slot-gated like its #1862 sibling: a saturated client never pays
         the settings-file read."""
-        _make_clients_yaml(tmp_dispatch_dirs, self._gated_client(sample_client_config))
+        write_clients_yaml(self._gated_client(sample_client_config))
         calls = self._stub_resolver(monkeypatch, "GEN-nocap")
         self._seed("GEN-nocap")
         sess = Session(
@@ -22704,7 +22658,7 @@ class TestClaimNextPendingTrackerMcpGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Stage-scoped at the point of use, like ``_is_stale_pr_gated``."""
-        _make_clients_yaml(tmp_dispatch_dirs, self._gated_client(sample_client_config))
+        write_clients_yaml(self._gated_client(sample_client_config))
         self._stub_resolver(monkeypatch, "GEN-rev")
         self._seed("GEN-rev", stage=Stage.REVIEW)
 
