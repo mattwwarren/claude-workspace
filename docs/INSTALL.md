@@ -109,9 +109,11 @@ Because agents are copied rather than symlinked, `install-skills.sh` guards agai
 ```bash
 git clone https://github.com/mattwwarren/claude-workspace.git
 cd claude-workspace
-uv sync                    # Install dependencies
+uv sync --locked --dev --extra mcp   # Install dependencies, incl. the mcp extra
 uv run cw --help           # Run without global install
 ```
+
+Use this exact command, not a bare `uv sync`. `uv sync` is exact: it removes any package the lock does not list, and without `--extra mcp` that includes the `mcp` extra itself. A venv left behind by a bare sync (or one that predates an `mcp` version bump) then fails `mypy` with `[arg-type]` errors that CI never sees. `--locked` makes the command fail rather than rewrite a stale `uv.lock`. `--dev` is the default and is kept only so the command is identical to CI's install step and to gate 2 in `CLAUDE.md`. Anything you installed by hand with `uv pip install` is still removed.
 
 ### Upgrading
 
