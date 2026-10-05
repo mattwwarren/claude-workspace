@@ -50,16 +50,19 @@ fi
 PKG_VERSION=$(uv run python -c "import cw; print(cw.__version__)")
 if [ "$PKG_VERSION" != "$VERSION" ]; then
     echo "Error: installed package version ($PKG_VERSION) does not match $VERSION"
-    echo "Bump pyproject.toml, run 'uv sync', then re-run."
+    echo "Bump pyproject.toml, run 'uv lock && uv sync --dev --extra mcp', then re-run."
     exit 1
 fi
 
 # Run quality gates
+# `--extra mcp` is kept here because, unlike release-tag.yml (whose bare gates
+# follow a fresh `uv sync --dev --extra mcp`), this script has no preceding
+# extra-aware sync; bare `uv run` would not upgrade a stale mcp extra (#2242).
 echo "Running quality gates..."
 uv run ruff check src/ tests/
 uv run ruff format --check src/ tests/
-uv run mypy --strict src/
-uv run pytest tests/ -v
+uv run --extra mcp mypy --strict src/
+uv run --extra mcp pytest tests/ -v
 
 echo ""
 echo "All checks passed. Creating tag v$VERSION..."
