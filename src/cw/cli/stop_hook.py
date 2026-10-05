@@ -1114,18 +1114,18 @@ def _resolve_stop_under_lock(
 
         # Issue #176 Layer 1: headless backstop.
         #
-        # A headless DAEMON session (ticket_id present in context) must NOT be
-        # silently marked COMPLETED unless it emitted an AUTO_DEV_RESULT sentinel.
-        # The bg_tasks guard in signal_stop defers when a subagent is in flight,
-        # but the parent's *next* turn may end (with background_tasks=[]) before
-        # it has finished its post-wait pipeline work — a silent orphan.
+        # A headless DAEMON session must NOT be silently marked COMPLETED unless
+        # it emitted an AUTO_DEV_RESULT sentinel. The bg_tasks guard in
+        # signal_stop defers when a subagent is in flight, but the parent's
+        # *next* turn may end (with background_tasks=[]) before it has finished
+        # its post-wait pipeline work — a silent orphan.
         #
-        # Detection: DAEMON-origin + non-None ticket_id in context ≡ headless.
+        # Detection: DAEMON-origin + ``context["headless"]`` truthy.
         # Sentinel check: look for the sentinel open tag in the Claude transcript.
-        # Budget: if no sentinel AND wall-clock since session.started_at exceeds
-        # HEADLESS_TIMEOUT_SECONDS, transition to TIMED_OUT (retry-eligible) so
-        # the failure is loud and dev-queue can retry. Under budget: defer (return)
-        # so another Stop hook (or reconcile) can catch it later.
+        # No sentinel: defer unconditionally (ADR-0014) — there is no wall-clock
+        # budget and no TIMED_OUT transition — so another Stop hook (or
+        # reconcile) can catch it later. A dispatch whose prompt never emits a
+        # sentinel must therefore spawn with ``headless=False``.
         #
         # The guard does NOT replace the bg_tasks deferral — both fire independently.
         ticket_id_value = context.get("ticket_id")
