@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.64.0] - 2026-10-05
+
 ### Added
 
 - **`cw doctor` now nudges toward `cw session prune` with a new `sessions-size` check (#1999).** `sessions.json` grows without bound, and nothing told an operator when it was worth pruning. The check is an advisory WARN (`ok=True, warn=True`, so doctor's exit code is unchanged) once the file exceeds the new `sessions_size_warn_bytes` field of `orchestrator.yaml` (default 15000000, about 15 MB), and the detail names the field and the `cw session prune` command. It is stat-only and read-only: it never parses or prunes `sessions.json`, and an absent file is healthy. Because `cw session prune` keeps live and dev-queue-referenced sessions, raise the field if the warning persists after a prune. The `_seed_sessions` test helper is also hoisted into `tests/conftest.py`.
