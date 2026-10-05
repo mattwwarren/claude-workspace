@@ -385,7 +385,7 @@ The script verifies:
 - Branch is pushed to origin and origin SHA matches local HEAD
 - A PR exists for the current branch (`gh pr view` succeeds)
 - PR head SHA matches local HEAD (push and PR are in sync)
-- Auto-merge is enabled (required — auto-dev relies on this) — downgraded to informational when `.claude/project-config.yaml`'s `pr.auto_merge` is explicitly `false` (e.g. no branch protection on a free plan); `prep_pr_finalize.py` itself makes this determination (#2046).
+- Auto-merge is enabled (required — auto-dev relies on this) — downgraded to informational when `.claude/project-config.yaml`'s `pr.auto_merge` is explicitly `false` (e.g. no branch protection on a free plan); `prep_pr_finalize.py` itself makes this determination (#2046). An already-MERGED PR also satisfies it (a synchronous-merge ship-it, #2163); a CLOSED-unmerged PR still fails.
 - Monitor registered (reported as optional unless `--require-monitor` is passed)
 
 Output is the canonical Ship Summary (markdown). For programmatic callers (e.g. /auto-dev's subagent), pass `--json`.

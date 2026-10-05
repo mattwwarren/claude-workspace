@@ -16,9 +16,10 @@ Checks (all required unless flagged optional):
   - Branch is pushed to origin and origin SHA matches local HEAD
   - PR exists for this branch (gh pr view succeeds)
   - PR head SHA matches local HEAD
-  - Auto-merge is enabled (optional, --require-automerge; downgraded to
-    optional regardless when .claude/project-config.yaml sets
-    pr.auto_merge: false — see check-automerge-allowed below)
+  - Auto-merge is enabled, or the PR is already MERGED (optional,
+    --require-automerge; downgraded to optional regardless when
+    .claude/project-config.yaml sets pr.auto_merge: false — see
+    check-automerge-allowed below)
   - Monitor is registered (optional, --require-monitor)
 
 Subcommands:
@@ -65,7 +66,7 @@ except ImportError:  # pragma: no cover - downstream repo without PyYAML
     yaml = None
 
 
-def _load_project_config_module():
+def _load_project_config_module() -> ModuleType | None:
     """Load the shared config reader from source or an installed package."""
     source = Path(__file__).resolve().parents[2] / "src" / "cw" / "project_config.py"
     if source.exists():
@@ -93,6 +94,10 @@ logger = logging.getLogger(__name__)
 PROTECTED_BRANCHES = {"main", "master"}
 MONITOR_SCRIPT = review_monitor_script_path()
 PROJECT_CONFIG_PATH = Path(".claude") / "project-config.yaml"
+# gh `state` of a merged PR. Kept local (not imported from cw.gh) because this
+# script runs under the shebang interpreter, where `cw` is not importable; a
+# test pins it to cw.gh._GH_PR_STATE_MERGED so the two cannot drift.
+PR_STATE_MERGED = "MERGED"
 
 
 # --- Data Models ---
@@ -328,11 +333,25 @@ def resolve_effective_automerge_required(base_required: bool) -> bool:
 
 
 def check_automerge(summary: ShipSummary, required: bool) -> CheckResult:
+    """Pass when auto-merge is armed, or the PR is already MERGED.
+
+    A synchronous squash-merge flow (a repo with no required status checks)
+    leaves the PR MERGED with `autoMergeRequest` null; a merged PR satisfies
+    the intent of the check. A CLOSED-unmerged or un-armed OPEN PR still
+    fails (#2163).
+    """
     if summary.automerge_enabled:
         return CheckResult(
             name="automerge-enabled",
             passed=True,
             detail=summary.automerge_method or "enabled",
+            required=required,
+        )
+    if summary.pr_state == PR_STATE_MERGED:
+        return CheckResult(
+            name="automerge-enabled",
+            passed=True,
+            detail="PR already merged — auto-merge not needed",
             required=required,
         )
     return CheckResult(
@@ -469,14 +488,13 @@ def render_markdown(summary: ShipSummary) -> str:
             f"- **Origin SHA:** `{summary.origin_sha[:8]}`"
             f" (matches HEAD: {summary.origin_sha == summary.head_sha})"
         )
-    lines.append(
-        "- **Auto-merge:** "
-        + (
-            f"enabled ({summary.automerge_method})"
-            if summary.automerge_enabled
-            else "disabled"
-        )
-    )
+    if summary.automerge_enabled:
+        auto_merge_text = f"enabled ({summary.automerge_method})"
+    elif summary.pr_state == PR_STATE_MERGED:
+        auto_merge_text = "n/a (PR already merged)"
+    else:
+        auto_merge_text = "disabled"
+    lines.append("- **Auto-merge:** " + auto_merge_text)
     lines.append(
         "- **Monitor:** "
         + ("registered" if summary.monitor_registered else "not registered")
@@ -609,7 +627,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--require-automerge",
         action="store_true",
         help=(
-            "Treat auto-merge-not-enabled as a required failure "
+            "Treat auto-merge-not-enabled as a required failure; an "
+            "already-MERGED PR satisfies it "
             "(downgraded to optional when .claude/project-config.yaml "
             "sets pr.auto_merge: false)"
         ),
