@@ -25,13 +25,14 @@ from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from cw.auto_dev_result import (
     AutoDevResult,
+    BlockedResult,
     Blocker,
     Health,
     Review,
     Scope,
     StageReached,
+    parse_last_block_in_chunks,
 )
-from cw.auto_dev_result.parse import parse_stdout
 from cw.executor_diagnostics import (
     append_diagnostics_pointer,
     build_executor_failure,
@@ -42,6 +43,7 @@ from cw.worktree import apply_worker_tmpdir
 
 if TYPE_CHECKING:
     import subprocess
+    from collections.abc import Iterator
 
     from cw.models import TicketTask
 
@@ -639,17 +641,12 @@ def make_blocked(
     )
 
 
-def extract_text_from_jsonl(log_content: str) -> str:
-    """Parse opencode JSONL events and return concatenated text content.
+def _iter_text_events(log_content: str) -> Iterator[str]:
+    """Yield the payload of each opencode ``text`` event, in log order.
 
-    opencode's ``--format json`` stream emits events with a ``type`` field.
-    Text content lives in ``text`` events:
-    ``{"type": "text", "part": {"text": "..."}}``. The sentinel
-    (``<<<AUTO_DEV_RESULT>>>``) is embedded in these text events. Returns the
-    concatenation of all text event payloads, or empty string if no text events
-    are found or the JSONL is unparseable.
+    Lines that are blank, unparseable, not a JSON object, not a ``text`` event,
+    or whose ``part.text`` is not a string are skipped.
     """
-    texts: list[str] = []
     for raw_line in log_content.splitlines():
         line = raw_line.strip()
         if not line:
@@ -667,8 +664,41 @@ def extract_text_from_jsonl(log_content: str) -> str:
             continue
         text = part.get("text")
         if isinstance(text, str):
-            texts.append(text)
-    return "".join(texts)
+            yield text
+
+
+def extract_text_from_jsonl(log_content: str) -> str:
+    """Parse opencode JSONL events and return concatenated text content.
+
+    opencode's ``--format json`` stream emits events with a ``type`` field.
+    Text content lives in ``text`` events:
+    ``{"type": "text", "part": {"text": "..."}}``. The sentinel
+    (``<<<AUTO_DEV_RESULT>>>``) is embedded in these text events. Returns the
+    concatenation of all text event payloads, or empty string if no text events
+    are found or the JSONL is unparseable.
+
+    Sentinel selection must NOT run on this concatenation: a session's earlier
+    text events can quote a prior stage's result, and joined with the final one
+    they read as ``multiple_result_blocks``. Use :func:`parse_last_sentinel`.
+    """
+    return "".join(_iter_text_events(log_content))
+
+
+def parse_last_sentinel(
+    log_content: str, *, ticket_id: str
+) -> AutoDevResult | BlockedResult | None:
+    """Return the last real ``AUTO_DEV_RESULT`` for *ticket_id* in an opencode log.
+
+    The log's ``text`` events (:func:`_iter_text_events`) are the chunk stream
+    :func:`~cw.auto_dev_result.parse_last_block_in_chunks` selects over; that
+    function owns the rules (the last COMPLETE frame wins, a block quoted for
+    another ticket is ignored, a truncated or split final frame, the bare-fence
+    fallback -- see its docstring, GitHub #2490). An empty *ticket_id* (a
+    session with no associated ticket) disables the ticket-identity check.
+    """
+    return parse_last_block_in_chunks(
+        _iter_text_events(log_content), ticket_id=ticket_id or None
+    )
 
 
 def _persist_opencode_no_output_diagnostics(*, session_id: str, log_tail: str) -> None:
@@ -705,7 +735,9 @@ def synthesize_opencode_result(
     extracts text content, and feeds it to ``parse_stdout`` for sentinel
     extraction.
 
-    - sentinel found in text → the parsed ``AutoDevResult``
+    - sentinel found in text → the parsed ``AutoDevResult`` of the LAST block in
+      the log that is for ``task.ticket_id`` (:func:`parse_last_sentinel`,
+      #2490); a block quoted for another ticket is never applied
     - no sentinel / empty log / unparseable → ``OPENCODE_NO_OUTPUT`` (blocked,
       ``retry_eligible``, details from the log tail when readable). The
       synthesized blocker carries ``task.stage``'s own entry marker so a
@@ -722,11 +754,9 @@ def synthesize_opencode_result(
         log_content = log_path.read_text(encoding="utf-8", errors="replace")
 
     if log_content:
-        text = extract_text_from_jsonl(log_content)
-        if text:
-            result = parse_stdout(text)
-            if isinstance(result, AutoDevResult):
-                return result
+        result = parse_last_sentinel(log_content, ticket_id=task.ticket_id)
+        if isinstance(result, AutoDevResult):
+            return result
 
     details = log_content[-_OPENCODE_LOG_TAIL_CHARS:] if log_content else ""
     if session_id is not None:

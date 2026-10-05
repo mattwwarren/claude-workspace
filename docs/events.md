@@ -747,7 +747,9 @@ without task revert).
 **Emitter:** `revert_timed_out_tasks`, `revert_completed_silent_tasks`, the
 liveness sweep's distress check (`record_session_liveness_changes`), and the
 Stop hook's abandoned-exit park (`_route_stopped_without_sentinel`, invoked
-from `cw signal-stop`, #2135) in `cw.reconcile`; `apply_staged_decision`,
+from `cw signal-stop`, #2135) and the local dead-process harvest's
+stage-mismatch refusal (`_act_on_local_harvest_candidates`, #2490) in
+`cw.reconcile`; `apply_staged_decision`,
 `dispatch_tick` (via `_record_client_freshness_block`), and the dispatch
 loop's per-tick staleness watchdog (via `_notify_stale_clients_with_pending`)
 in `cw.dispatch`. (The former idle-watchdog / salvage / salvage-skip emitters
@@ -996,6 +998,31 @@ open enum; consumers MUST tolerate unknown values. Known values:
   probe and re-arms only after a healthy one — and fires even when
   `disk_pressure_gate_enabled` is `false`. `breadcrumbs` carries
   `free_inodes=<n> min_free_inodes=<n>`.
+- `"sentinel_stage_mismatch_dead_session"` — the local dead-process harvest
+  (`cw.reconcile.local`, #2490) synthesized a result for a session whose
+  PID is gone (an opencode or aider worker) and the shared staged-advance
+  guard refused it with `sentinel.stage_mismatch`. The process is dead, so no
+  matching-stage result will ever follow: the worker's real outcome (e.g. a
+  `blocked` finalize sentinel) was **not** applied and the row is unchanged,
+  still `RUNNING`. Fires once per session in the normal case, **at-least-once**
+  in general: the page is emitted first, and only after that write succeeds is
+  the refusal latched on `session.last_result` (the same
+  `sentinel_stage_mismatch_refused` / `sentinel_advance_refused` markers the
+  phantom/stalled sweeps use). A failed page write leaves the session
+  un-latched, so the next tick re-offers it and pages again; a crash between the
+  page and the state save does the same. The harvest sweep skips a latched
+  session only while its row is still bound to it: any dev-queue row with the
+  session's ticket id and the same session id in an occupied status (the
+  router's own match, so a duplicate row for the ticket id is not mistaken for
+  the session's row); once the row moved on (requeued, cancelled, session id
+  cleared or replaced by a newer session) the dead session is offered again and
+  completes normally.
+  `breadcrumbs` names the backend, the status, stage, blocker reason and
+  recovery hint the dead worker reported, the row's **live** stage (read under
+  the queue lock when the guard refused), and the recovery command
+  `cw spawn close --confirmed-dead --requeue <session-id>` (the close cancels the
+  `RUNNING` row, `--requeue` puts it back to `PENDING` at its current stage).
+  The operator can inspect the worktree log (`.cw/opencode.log`) first.
 - `"merge_gate_blocked"` — Rule 5: the merge/CI gate rejected the PR
   (optionally `blocker.reason` in `breadcrumbs`, e.g.
   `"prior_pipeline_pr_open"` per issue #777; empty otherwise). See #1117.
@@ -1668,6 +1695,13 @@ gate on `_route_staged_decision`'s `False` return skip `save_dev_queue`
 entirely. The row stays in whatever status it holds (`RUNNING`,
 `BLOCKED_ON_USER`, or `AWAITING_OPERATOR_SIGNOFF`) and remains routable by
 the next legitimate sentinel or operator action.
+
+When the refused sentinel came from the local dead-process harvest (#2490),
+the session is provably dead, so no later sentinel can arrive. A single
+`session.needs_attention` with
+`paused_status=sentinel_stage_mismatch_dead_session` is emitted, and only after
+it the refusal is latched on the session (so this event no longer repeats every
+tick); a failed page write leaves the session un-latched and it is retried.
 
 `correlation_id` is the `ticket_id`.
 

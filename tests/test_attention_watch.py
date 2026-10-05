@@ -37,6 +37,7 @@ import pytest
 from cw.dispatch import BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
 from cw.dispatch.regress_repeat import _FINALIZE_REGRESS_REPEAT_REASON
 from cw.models import LivenessBucket, OrchestratorEventType
+from cw.reconcile.local import SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON
 from tests.conftest import _stub_cw
 
 _SCRIPT = (
@@ -156,6 +157,20 @@ def test_surfaced_liveness_buckets_are_canonical_bucket_values(aw: ModuleType) -
 def test_finalize_regress_status_matches_canonical_reason(aw: ModuleType) -> None:
     """Hand-copy of the #1717 finalize_regress_repeat reason, pinned (#2250)."""
     assert aw.FINALIZE_REGRESS_REPEAT_PAUSED_STATUS == _FINALIZE_REGRESS_REPEAT_REASON
+
+
+def test_stage_mismatch_dead_session_status_matches_canonical_reason(
+    aw: ModuleType,
+) -> None:
+    """Hand-copy of the #2490 dead-session stage-mismatch reason, pinned."""
+    assert (
+        aw.SENTINEL_STAGE_MISMATCH_DEAD_SESSION_PAUSED_STATUS
+        == SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON
+    )
+    assert (
+        aw.SENTINEL_STAGE_MISMATCH_DEAD_SESSION_PAUSED_STATUS
+        in aw.DIAGNOSTIC_BREADCRUMB_PAUSED_STATUSES
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +542,25 @@ def test_breadcrumbs_hidden_for_non_allowlisted_paused_status(aw: ModuleType) ->
 def test_finalize_regress_repeat_breadcrumbs_surfaced(aw: ModuleType) -> None:
     event = _event(paused_status="finalize_regress_repeat", breadcrumbs="attempts=3")
     assert "reason=attempts=3" in _render(aw, [event])[0]
+
+
+def test_stage_mismatch_dead_session_breadcrumbs_surfaced(aw: ModuleType) -> None:
+    """The page carries what the worker reported and the recovery command (#2490)."""
+    breadcrumbs = (
+        "dead opencode process reported blocked at stage4a_merge_gate"
+        " (prior_pipeline_pr_open); the row is at stage finalize."
+        " cw spawn close --confirmed-dead --requeue sess-1"
+    )
+    event = _event(
+        paused_status=SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON,
+        breadcrumbs=breadcrumbs,
+    )
+
+    line = _render(aw, [event])[0]
+
+    assert f"reason={breadcrumbs}" in line
+    assert "prior_pipeline_pr_open" in line
+    assert "cw spawn close --confirmed-dead --requeue sess-1" in line
 
 
 def test_unknown_type_passthrough(aw: ModuleType) -> None:

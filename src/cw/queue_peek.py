@@ -44,7 +44,7 @@ from cw.gh import _fetch_pr_state
 from cw.models import QueueItemStatus, Stage, TicketTask
 from cw.opencode_runner import (
     OPENCODE_LOG_RELATIVE_PATH,
-    extract_text_from_jsonl,
+    parse_last_sentinel,
 )
 from cw.pr_hydrate import _PR_URL_RE
 
@@ -517,14 +517,15 @@ def parse_transcript(path: Path) -> dict[str, Any]:
     }
 
 
-def parse_opencode_transcript(path: Path) -> dict[str, Any]:
+def parse_opencode_transcript(path: Path, ticket_id: str) -> dict[str, Any]:
     """Parse an opencode JSONL log for queue_peek (#1671 R3).
 
     opencode's ``--format json`` output has a different shape than claude-jsonl
     (event types: ``step_start``/``step_finish``/``text``; no user/assistant
-    distinction; no timestamps in events). This reader reuses
-    ``extract_text_from_jsonl`` to concatenate text event payloads, then
-    ``parse_stdout`` for sentinel extraction.
+    distinction; no timestamps in events). This reader shares
+    ``parse_last_sentinel`` with the harvest path so peek and harvest always
+    agree on which sentinel a log carries (#2490): the last one for *ticket_id*,
+    a block quoted for another ticket is ignored.
 
     Since opencode events carry no timestamps, the file's mtime serves as the
     last-activity proxy (``last_asst_ts``). ``first_user_ts`` is None —
@@ -544,11 +545,9 @@ def parse_opencode_transcript(path: Path) -> dict[str, Any]:
         }
 
     if log_content:
-        text = extract_text_from_jsonl(log_content)
-        if text:
-            result = parse_stdout(text)
-            if isinstance(result, AutoDevResult) and not is_documented_example(result):
-                last_sentinel = result
+        result = parse_last_sentinel(log_content, ticket_id=ticket_id)
+        if isinstance(result, AutoDevResult):
+            last_sentinel = result
 
     last_asst_ts: str | None = None
     try:
@@ -896,7 +895,9 @@ def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]
         if transcript is not None:
             refs = _load_session_refs(t.session_id)
             if transcript.name == OPENCODE_LOG_RELATIVE_PATH.name:
-                info: dict[str, Any] = parse_opencode_transcript(transcript)
+                info: dict[str, Any] = parse_opencode_transcript(
+                    transcript, str(t.ticket_id)
+                )
             else:
                 info = parse_transcript(transcript)
                 info["subagent_last_asst_ts"] = _newest_subagent_ts(

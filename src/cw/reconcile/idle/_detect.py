@@ -19,15 +19,13 @@ from typing import TYPE_CHECKING
 from cw.models import DEFAULT_LANE, LastResultSource, SessionOrigin
 from cw.reconcile._shared import (
     _LIVE_STATUSES,
-    _PAUSED_STATUS_KEY,
-    _SENTINEL_ADVANCE_REFUSED_KEY,
-    _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     ProposedAction,
     ReapCandidate,
     _has_terminal_sentinel,
     _parse_any_sentinel_from_transcript,
     _unresolved_subagent_spawn_age_seconds,
     holds_staged_emit_result,
+    stage_refusal_latched,
     ticket_id_for_session,
 )
 from cw.result import reconstruct_staged_sentinel
@@ -64,23 +62,6 @@ def _background_work_still_draining(
     return spawn_age is not None and spawn_age < deadline_seconds
 
 
-def _staged_emit_result_refused(session: Session) -> bool:
-    """Whether a prior tick already refused this staged result (#1149).
-
-    The phantom sweep's ``already_refused`` check
-    (``phantom._detect._detect_phantom_candidates``), applied verbatim to the
-    idle sweep's staged-result producer. A refusal flag merged INTO a staged
-    ``last_result`` (as the phantom and stalled sweeps stamp it) leaves it
-    terminal-shaped, so without this check it would be reconstructed and
-    re-refused on every tick, forever.
-    """
-    last_result = session.last_result
-    return isinstance(last_result, dict) and (
-        last_result.get(_PAUSED_STATUS_KEY) == _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
-        or last_result.get(_SENTINEL_ADVANCE_REFUSED_KEY) is True
-    )
-
-
 def _staged_emit_candidate(
     session: Session,
     *,
@@ -97,7 +78,10 @@ def _staged_emit_candidate(
     result was already refused or reconstructs into neither arm of the
     ``AutoDevResult``/``BlockedResult`` union -- there is nothing to route.
     """
-    if _staged_emit_result_refused(session):
+    # #1149: a refusal flag merged INTO a staged ``last_result`` (as the phantom
+    # and stalled sweeps stamp it) leaves it terminal-shaped, so without this
+    # check it would be reconstructed and re-refused on every tick, forever.
+    if stage_refusal_latched(session):
         return None
     staged = reconstruct_staged_sentinel(session.last_result)
     if staged is None:
