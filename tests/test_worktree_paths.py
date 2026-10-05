@@ -19,6 +19,7 @@ from cw.worktree import (
     slugify_branch,
     worktree_path_for,
 )
+from tests._session_home import REAL_HOME, SESSION_HOME
 
 if TYPE_CHECKING:
     pass
@@ -167,6 +168,24 @@ class TestWorktreePathFor:
         first = worktree_path_for(client, "auto-dev/1")
         second = worktree_path_for(client, "auto-dev/1")
         assert first == second
+
+    @pytest.mark.skipif(SESSION_HOME is None, reason="HOME redirect opted out")
+    def test_hashed_base_resolves_under_redirected_home(self, tmp_path: Path) -> None:
+        """#2460: with no ``Path.home`` patch, the hashed base lives in the test HOME.
+
+        Unlike the two tests above, nothing stubs ``Path.home`` here — the
+        suite-wide redirect (#1756) alone must keep ``~/.cw/wt/<hash>`` off
+        the operator's real tree, where a stale directory used to leak in.
+        """
+        ws = tmp_path / "ws"
+        client = ClientConfig(name="test", workspace_path=ws)
+
+        hashed = _hashed_worktree_base(client)
+
+        assert hashed.is_relative_to(Path.home())
+        assert hashed != REAL_HOME / hashed.relative_to(Path.home())
+        for base in effective_worktree_bases(client):
+            assert base.is_relative_to(ws.parent) or base.is_relative_to(Path.home())
 
     def test_client_override_used_even_when_long(self) -> None:
         """An explicit ``worktree_base`` is respected even if it makes the
