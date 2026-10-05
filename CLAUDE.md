@@ -104,9 +104,10 @@ written `--locked --dev --extra mcp` rather than bare (`--dev` is redundant,
 since the dev group is on by default, and is kept only so the token set is
 CI-identical). The exact-sync removal still applies to the gate as written, so
 anything installed by hand into the project venv with `uv pip install` is
-removed. The pre-commit pytest hook (`uv run pytest tests/ -x -q`) does not yet
-carry the extra and can still hit the stale-extra failure (tracked in #2242).
-Gate 2 is an environment step that mutates the venv, not a check: a failure
+removed. The pre-commit pytest hook and the pre-push diff-cover hook run
+`uv run --extra mcp pytest` (#2242), so they re-sync a stale mcp extra
+themselves, and `docs/INSTALL.md`'s contributor setup uses the same command as
+gate 2. Gate 2 is an environment step that mutates the venv, not a check: a failure
 there (no network, cold cache) is an environment problem to report, not code
 to fix or a reason to revert a resolved merge.
 
@@ -116,9 +117,8 @@ directly, with no `uv run` wrapper, so gate 1 is genuine on that path. Only
 running gate 9 **by hand** via `uv run pre-commit run` masks it. Gates 2 and 6
 have no hook: gate 6 runs only in CI and this list, and gate 2 is a venv sync,
 not a check. (The hook's mypy runs in pre-commit's isolated env without `mcp`,
-so it never sees the stale-extra failure. The pre-commit pytest hook does run
-in the project venv without `--extra mcp` and can still hit it; that gap is
-tracked in #2242.)
+so it never sees the stale-extra failure. The pre-commit pytest hook runs in
+the project venv with `--extra mcp` (#2242), so it does not hit it either.)
 
 Gate 7 compares each released `## [X.Y.Z]` section of `CHANGELOG.md` with the
 copy its release tag captured, for `[tool.cw.changelog_freeze].since_tag` and

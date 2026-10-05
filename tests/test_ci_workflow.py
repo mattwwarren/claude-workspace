@@ -14,6 +14,7 @@ upstream pre-commit hook which CI's all-hooks pre-commit step runs (#1626).
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,10 @@ ACTIONLINT_HOOK_ID = "actionlint"
 ACTIONLINT_REPO = "https://github.com/rhysd/actionlint"
 PINNED_REV = re.compile(r"v\d+\.\d+\.\d+")
 PRE_COMMIT_STEP_NAME = "Validate pre-commit hook config"
+PYTEST_HOOK_ID = "pytest"
+DIFF_COVER_HOOK_ID = "diff-cover"
+# `uv run --extra mcp pytest ...`: the tokens right after `uv run`.
+MCP_PYTEST_PREFIX = ["--extra", "mcp", "pytest"]
 
 
 def _steps() -> list[dict[str, Any]]:
@@ -146,3 +151,44 @@ def test_ci_pre_commit_step_runs_actionlint() -> None:
     assert all(arg.startswith("-") for arg in argv[run_at + 1 :]), argv
     skipped = str(steps[0].get("env", {}).get("SKIP", "")).split(",")
     assert ACTIONLINT_HOOK_ID not in [name.strip() for name in skipped]
+
+
+def _uv_run_pytest_argvs(entry: str) -> list[list[str]]:
+    """Every `uv run ... pytest ...` invocation inside a hook `entry`.
+
+    A hook entry is either a bare command or a `bash -c '<a && b && c>'`
+    script; the latter is split on `&&` so each chained command is checked.
+    """
+    argv = shlex.split(entry)
+    if argv[:2] == ["bash", "-c"]:
+        commands = [shlex.split(part) for part in argv[2].split("&&")]
+    else:
+        commands = [argv]
+    return [
+        command
+        for command in commands
+        if command[:2] == ["uv", "run"] and "pytest" in command
+    ]
+
+
+def test_pre_commit_pytest_hook_syncs_mcp_extra() -> None:
+    """The pytest hook mirrors CLAUDE.md gate 10 (`uv run --extra mcp pytest`).
+
+    Bare `uv run pytest` does not upgrade an already-installed but stale
+    `mcp` extra, so the hook could fail on code CI passes (#2242).
+    """
+    invocations = _uv_run_pytest_argvs(_hook(PYTEST_HOOK_ID)["entry"])
+    assert invocations, "pytest hook has no `uv run ... pytest` invocation"
+    for argv in invocations:
+        assert argv[2:5] == MCP_PYTEST_PREFIX, argv
+
+
+def test_pre_commit_diff_cover_hook_syncs_mcp_extra() -> None:
+    """The pre-push diff-cover hook runs pytest too, so it needs the same
+    `--extra mcp` as the pytest hook and CLAUDE.md gate 10 (#2242)."""
+    hook = _hook(DIFF_COVER_HOOK_ID)
+    assert "pre-push" in hook["stages"]
+    invocations = _uv_run_pytest_argvs(hook["entry"])
+    assert invocations, "diff-cover hook has no `uv run ... pytest` invocation"
+    for argv in invocations:
+        assert argv[2:5] == MCP_PYTEST_PREFIX, argv

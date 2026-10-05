@@ -176,3 +176,20 @@ def _pattern_from_release_sh() -> str:
 def test_release_sh_guard_regex_matches_release_tag_workflow() -> None:
     """Anti-drift pin: the two regex copies must never diverge."""
     assert _pattern_from_release_sh() == _pattern_from_workflow()
+
+
+def test_release_sh_quality_gates_sync_mcp_extra() -> None:
+    """release.sh has no extra-aware sync before its gates, so each `uv run`
+    gate that imports `mcp` must request the extra itself, and the hint must
+    not recommend a bare (exact) `uv sync` that drops it (#2242)."""
+    lines = [
+        line.strip() for line in RELEASE_SH.read_text(encoding="utf-8").splitlines()
+    ]
+    assert "uv run --extra mcp mypy --strict src/" in lines
+    assert "uv run --extra mcp pytest tests/ -v" in lines
+    bare = [line for line in lines if re.match(r"uv run (mypy|pytest)\b", line)]
+    assert not bare, f"release.sh gates without --extra mcp: {bare}"
+    hints = [line for line in lines if "Bump pyproject.toml" in line]
+    assert len(hints) == 1, hints
+    assert "'uv sync'" not in hints[0]
+    assert "--extra mcp" in hints[0]
