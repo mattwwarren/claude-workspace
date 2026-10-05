@@ -2389,6 +2389,7 @@ class TestPackageExportCompleteness:
             "_USAGE_LIMIT_BACKOFF_SECONDS",
             "_validate_gate_recipe_keys",
             "_validate_review_recipe_keys",
+            "counts_toward_client_ceiling",
             "extract_unresolved_spawn_count",
             "occupies_lane_slot",
             "read_park_comment_marker",
