@@ -31,6 +31,7 @@ from cw.models import (
     QueueItemStatus,
 )
 from cw.statusline import render_work_segment, resolve_client_for_cwd
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import _make_ticket_task
 
 if TYPE_CHECKING:
@@ -69,21 +70,10 @@ def _write_clients(tmp_path: Path) -> Path:
     """
     ws_a = tmp_path / "ws" / "client-a"
     ws_b = tmp_path / "ws" / "client-b"
-    ws_a.mkdir(parents=True, exist_ok=True)
-    ws_b.mkdir(parents=True, exist_ok=True)
-    lanes = [{"name": "impl"}, {"name": "debt"}]
-    clients_file().write_text(
-        yaml.safe_dump(
-            {
-                "clients": {
-                    "client-a": {
-                        "workspace_path": str(ws_a),
-                        "lanes": lanes,
-                    },
-                    "client-b": {"workspace_path": str(ws_b)},
-                }
-            }
-        )
+    write_clients_yaml(
+        ClientSpec("client-a", ws_a, lanes=[{"name": "impl"}, {"name": "debt"}]),
+        ClientSpec("client-b", ws_b),
+        ensure_workspaces=True,
     )
     return ws_a
 

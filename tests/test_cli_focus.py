@@ -10,12 +10,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
-import yaml
 from click.testing import CliRunner
 
 from cw.cli import main
-from cw.config import clients_file
 from cw.models import OrchestratorEventType
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -29,19 +28,10 @@ _SESSION = "sess-focus-1"
 def _write_clients(tmp_path: Path) -> None:
     """Write a two-client clients.yaml; ``client-a`` declares two lanes."""
     workspace = tmp_path / "ws"
-    workspace.mkdir(parents=True, exist_ok=True)
-    clients_file().write_text(
-        yaml.safe_dump(
-            {
-                "clients": {
-                    "client-a": {
-                        "workspace_path": str(workspace),
-                        "lanes": [{"name": "impl"}, {"name": "debt"}],
-                    },
-                    "client-b": {"workspace_path": str(workspace)},
-                }
-            }
-        )
+    write_clients_yaml(
+        ClientSpec("client-a", workspace, lanes=[{"name": "impl"}, {"name": "debt"}]),
+        ClientSpec("client-b", workspace),
+        ensure_workspaces=True,
     )
 
 

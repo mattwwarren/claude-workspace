@@ -10,14 +10,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
-import yaml
 from click.testing import CliRunner
 
 from cw.cli import main
-from cw.config import clients_file, focus_file
+from cw.config import focus_file
 from cw.dev_queue import save_dev_queue
 from cw.focus import set_focus
 from cw.models import DevQueueStore, QueueItemStatus
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import _make_ticket_task
 
 if TYPE_CHECKING:
@@ -28,18 +28,8 @@ _SESSION = "sess-cli-statusline"
 
 def _write_clients(tmp_path: Path) -> Path:
     ws = tmp_path / "ws" / "client-a"
-    ws.mkdir(parents=True, exist_ok=True)
-    clients_file().write_text(
-        yaml.safe_dump(
-            {
-                "clients": {
-                    "client-a": {
-                        "workspace_path": str(ws),
-                        "lanes": [{"name": "impl"}],
-                    }
-                }
-            }
-        )
+    write_clients_yaml(
+        ClientSpec("client-a", ws, lanes=[{"name": "impl"}]), ensure_workspaces=True
     )
     return ws
 

@@ -16,6 +16,7 @@ from types import ModuleType
 
 import pytest
 
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import init_repo_with_remote
 
 _PREFLIGHT = (
@@ -43,34 +44,6 @@ def _write_config(root: Path, system: str) -> None:
     (cfg / "project-config.yaml").write_text(
         f"tracking:\n  primary:\n    system: {system}\n", encoding="utf-8"
     )
-
-
-def _write_clients_yaml(
-    tmp_config_dir: Path,
-    name: str,
-    *,
-    workspace_path: Path | None = None,
-    repo_path: Path | None = None,
-    branch: str | None = None,
-) -> None:
-    """Write a minimal clients.yaml entry for *name* under tmp_config_dir.
-
-    File-local copy — mirrors the inline pattern at
-    tests/test_doctor.py:1409-1479 (six-plus siblings of this helper already
-    exist with no shared utility; extraction is tracked separately as debt
-    in #2165, out of scope here). Worktree-mode clients need both repo_path
-    and branch set (ClientConfig's validator, src/cw/models/client.py).
-    """
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    lines = ["clients:", f"  {name}:"]
-    if workspace_path is not None:
-        lines.append(f"    workspace_path: {workspace_path}")
-    if repo_path is not None:
-        assert branch is not None, "repo_path requires branch (ClientConfig validator)"
-        lines.append(f"    repo_path: {repo_path}")
-        lines.append(f"    branch: {branch}")
-    (config_dir / "clients.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _make_agent_repo(root: Path, *, tracker: str | None = "github-issues") -> Path:
@@ -482,7 +455,7 @@ class TestResolveClientRepoRoot:
         pf = _load()
         client_root = tmp_path / "acme"
         client_root.mkdir()
-        _write_clients_yaml(tmp_config_dir, "acme", workspace_path=client_root)
+        write_clients_yaml(ClientSpec("acme", workspace_path=client_root))
         assert pf._resolve_client_repo_root("acme") == client_root
 
     def test_resolves_repo_path_over_workspace_path(
@@ -491,16 +464,14 @@ class TestResolveClientRepoRoot:
         pf = _load()
         repo_root = tmp_path / "acme-repo"
         repo_root.mkdir()
-        _write_clients_yaml(
-            tmp_config_dir, "acme", repo_path=repo_root, branch="dev/123"
-        )
+        write_clients_yaml(ClientSpec("acme", repo_path=repo_root, branch="dev/123"))
         assert pf._resolve_client_repo_root("acme") == repo_root
 
     def test_dangling_client_raises(self, tmp_config_dir: Path, tmp_path: Path) -> None:
         pf = _load()
         other_root = tmp_path / "other"
         other_root.mkdir()
-        _write_clients_yaml(tmp_config_dir, "other-client", workspace_path=other_root)
+        write_clients_yaml(ClientSpec("other-client", workspace_path=other_root))
         with pytest.raises(pf._ClientRepoUnresolvedError) as exc_info:
             pf._resolve_client_repo_root("missing-client")
         assert "missing-client" in str(exc_info.value)
@@ -577,7 +548,7 @@ class TestMainRepoResolution:
         decoy_root = tmp_path / "decoy-root"
         decoy_root.mkdir()
 
-        _write_clients_yaml(tmp_config_dir, "acme", workspace_path=client_root)
+        write_clients_yaml(ClientSpec("acme", workspace_path=client_root))
         monkeypatch.setattr(pf, "_resolve_repo_root", lambda: decoy_root)
         monkeypatch.setattr(pf, "_resolve_repo_slug", lambda _root: "acme/widgets")
 

@@ -1,7 +1,7 @@
 """One shared ``clients.yaml`` writer for the test suite (#2165).
 
-Replaces the per-file ``_write_clients_yaml`` / ``_make_clients_yaml`` copies,
-each of which wrote its own subset of client fields as hand-built YAML text.
+Replaces the per-file clients.yaml writer copies, each of which wrote its own
+subset of client fields as hand-built YAML text.
 This module has no ``test_`` prefix, so pytest does not collect it (same
 convention as ``tests/_reconcile_helpers.py``); test modules import it
 explicitly.

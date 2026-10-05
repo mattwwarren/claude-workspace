@@ -13,6 +13,7 @@ from cw.auto_dev_result import AutoDevResult
 from cw.worktree import (
     resolve_scope_guard_default_branch,
 )
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._reconcile_helpers import _no_op_salvage_payload
 from tests._worktree_helpers import patch_worktree
 from tests.conftest import git_in
@@ -495,24 +496,11 @@ class TestReconcileResultScope:
 # ----------------------------------------------------------------------
 
 
-def _write_clients_yaml(
-    tmp_config_dir: Path, name: str, *, default_branch: str
-) -> None:
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "clients.yaml").write_text(
-        "clients:\n"
-        f"  {name}:\n"
-        f"    workspace_path: /tmp/ws-{name}\n"
-        f"    default_branch: {default_branch}\n"
-    )
-
-
 class TestResolveScopeGuardDefaultBranch:
     def test_configured_client_resolves_its_own_default_branch(
         self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        _write_clients_yaml(tmp_config_dir, "acme", default_branch="trunk")
+        write_clients_yaml(ClientSpec("acme", "/tmp/ws-acme", default_branch="trunk"))
 
         with caplog.at_level(logging.WARNING, logger="cw.worktree"):
             branch = resolve_scope_guard_default_branch("acme", log_context="ctx")
@@ -540,7 +528,7 @@ class TestResolveScopeGuardDefaultBranch:
         _shared.py's dict.get() silently returned None (unlogged). The shared
         helper must log in both cases.
         """
-        _write_clients_yaml(tmp_config_dir, "beta", default_branch="develop")
+        write_clients_yaml(ClientSpec("beta", "/tmp/ws-beta", default_branch="develop"))
 
         with caplog.at_level(logging.WARNING, logger="cw.worktree"):
             branch = resolve_scope_guard_default_branch("acme", log_context="ctx")

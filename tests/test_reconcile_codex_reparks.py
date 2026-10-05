@@ -57,6 +57,7 @@ from cw.reconcile.codex_reparks import (
     _ReparkCandidate,
     run_codex_live_writer_reparks,
 )
+from tests._clients_yaml import review_backend_clients, write_clients_yaml
 from tests._codex_recovery_helpers import (
     _STARTED_AT,
     _completed_events,
@@ -68,7 +69,7 @@ from tests._codex_recovery_helpers import (
     _seed_clean_codex_orphan,
 )
 from tests._reconcile_helpers import _mk_headless_daemon_session
-from tests.conftest import _write_backend_clients_yaml, commit_tracked_file, git_in
+from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -601,12 +602,13 @@ def _seed_two_client_parks(
     """
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    _write_backend_clients_yaml(
-        tmp_config_dir,
-        workspace,
-        "codex",
-        names=tuple(lane_policies),
-        lane_reap_policies=lane_policies,
+    write_clients_yaml(
+        *review_backend_clients(
+            workspace,
+            "codex",
+            names=tuple(lane_policies),
+            lane_reap_policies=lane_policies,
+        )
     )
     sessions: dict[str, Session] = {}
     tasks: list[TicketTask] = []
