@@ -319,6 +319,11 @@ class _CheckVoidedOutput(BaseModel):
     the adjudications are appended verbatim to the session's ``ADJUDICATIONS``
     array so the later ``cw review adjudicate`` pass re-stamps the same outcome
     from the same single source of truth.
+
+    The unmatched-new-entry count (#2319) rides on the nested
+    ``verdict.unmatched_voided_count``, not on a top-level field here, so the
+    verdict stays the single source of truth for it (the
+    ``unmatched_adjudication_count`` precedent).
     """
 
     verdict: ReviewVerdict
