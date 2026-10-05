@@ -1511,6 +1511,25 @@ class TestApplyVoidedSuppression:
             read_events(event_types=[OrchestratorEventType.REVIEW_FINDING_VOIDED]) == []
         )
 
+    @pytest.mark.parametrize(
+        "voided_file", ["src/cw/foo.py", "src/cw/other.py"], ids=["match", "no_match"]
+    )
+    def test_unmatched_voided_count_is_preserved_not_written(
+        self, voided_file: str
+    ) -> None:
+        """#2319: the count is the CLI's to stamp, not this shared seam's.
+
+        The codex backend calls this same function, so it must carry the input
+        value through on both return paths rather than computing one.
+        """
+        verdict = _verdict(_accepted(_make_finding()), unmatched_voided_count=4)
+
+        suppressed, _adjudications = apply_voided_suppression(
+            verdict, [_make_voided_finding(file=voided_file)], ticket_id=_TICKET
+        )
+
+        assert suppressed.unmatched_voided_count == 4
+
 
 class TestVoidedFindingsBlockRoundTrip:
     """#1814: the ticket-comment JSON sentinel is machine-parsed, not prose."""

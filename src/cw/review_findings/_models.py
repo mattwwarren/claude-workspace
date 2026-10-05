@@ -713,6 +713,14 @@ class ReviewVerdict(BaseModel):
     ``capability_mode``, it is purely recorded here — nothing in this module
     reads it back; the approval gate surfaces it so a silently-degraded
     adjudication is visible rather than invisible.
+
+    ``unmatched_voided_count`` (#2319) is written solely by ``cw review
+    check-voided``: the number of distinct ``new_voided_entries`` of one
+    invocation that matched no accepted finding. Prior voids carried in
+    ``comment_bodies`` are never counted — a prior void that matches nothing
+    is normal, its code having been fixed or rewritten. The count is
+    recomputed on each call rather than carried from the input verdict, and
+    like ``unmatched_adjudication_count`` it is purely recorded here.
     """
 
     schema_version: Literal[1] = _REVIEW_VERDICT_SCHEMA_VERSION
@@ -761,6 +769,11 @@ class ReviewVerdict(BaseModel):
     # and default-0 (the `rejected_must_fix`/`stripped_escalations` precedent):
     # `consolidate_verdict` never touches it, only `apply_adjudication` does.
     unmatched_adjudication_count: int = 0
+    # #2319: distinct `new_voided_entries` that matched no accepted finding.
+    # Additive and default-0 (the `unmatched_adjudication_count` precedent):
+    # written solely by `cw review check-voided` via `model_copy`, never by
+    # `apply_voided_suppression`, which the codex backend also calls.
+    unmatched_voided_count: int = 0
     # #1837: the head this pass's diff was taken FROM, set only on a fix-loop
     # re-review (cycle N reviews `previous_reviewed_sha..reviewed_sha`, not
     # the whole PR). `None` means the pass reviewed the full branch diff.
