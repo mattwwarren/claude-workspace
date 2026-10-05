@@ -6711,6 +6711,125 @@ class TestDispatchTickEvents:
         assert p["skip_reason"] == DispatchSkipReason.SPAWN_ERROR
         assert p["claimed"] == 0
 
+    def test_spawn_error_tick_carries_last_error(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Spawn failure → dispatch.tick carries the error as last_error (#1679)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="TICK-SE-TXT", client="test-client"))
+
+        daemon = _RaisingNativeDaemon(RuntimeError("backend outage"))
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-tick-last-error",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        p = events[0].payload
+        assert p["last_error"] == "backend outage"
+        assert p["skip_reason"] == DispatchSkipReason.SPAWN_ERROR
+        # Pre-existing keys are unchanged by the additive field.
+        assert p["client"] == "test-client"
+        assert p["claimed"] == 0
+        assert p["pending"] == 1
+        assert p["cap"] == 1
+
+    def test_spawn_error_tick_last_error_is_single_line(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """A multi-line exception message is collapsed to one line (#1679)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="TICK-SE-ML", client="test-client"))
+
+        daemon = _RaisingNativeDaemon(
+            WorktreeError("git failed:\n  line two\n\tline 3")
+        )
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-tick-last-error-ml",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        last_error = events[0].payload["last_error"]
+        assert "\n" not in last_error
+        assert last_error == "git failed: line two line 3"
+
+    def test_spawn_error_tick_blank_exception_gives_empty_last_error(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """An exception with no message yields last_error == '' (key present)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="TICK-SE-BLANK", client="test-client"))
+
+        daemon = _RaisingNativeDaemon(RuntimeError())
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-tick-last-error-blank",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        p = events[0].payload
+        assert p["skip_reason"] == DispatchSkipReason.SPAWN_ERROR
+        assert p["last_error"] == ""
+
+    def test_tick_without_spawn_error_has_no_last_error_key(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """no_pending and successful-spawn ticks carry no last_error key."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        # no_pending: nothing queued.
+        dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+        # success: one task spawns cleanly.
+        add_ticket(TicketTask(ticket_id="TICK-OK-1", client="test-client"))
+        dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+
+        events = read_events(
+            consumer="test-tick-no-last-error",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 2
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.NO_PENDING
+        assert events[1].payload["claimed"] == 1
+        assert all("last_error" not in e.payload for e in events)
+
+    def test_usage_limit_tick_has_no_last_error_key(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """A usage-limit tick is not a spawn error and carries no last_error."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="TICK-UL-NOERR", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_usage_limit = True
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-tick-ul-no-last-error",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.USAGE_LIMITED
+        assert "last_error" not in events[0].payload
+
     def test_pending_is_pre_claim_count(
         self,
         tmp_dispatch_dirs: Path,
@@ -6735,6 +6854,112 @@ class TestDispatchTickEvents:
         # Pre-claim: 2 pending. Post-claim: 1 pending. Event must show 2.
         assert p["pending"] == 2
         assert p["claimed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# TestSpawnErrorTickFields
+# ---------------------------------------------------------------------------
+
+
+class TestSpawnErrorTickFields:
+    """``_spawn_error_tick_fields`` builds the tick ``last_error`` fragment (#1679)."""
+
+    def test_none_outcome_returns_empty_dict(self) -> None:
+        from cw.dispatch.claim.events import _spawn_error_tick_fields
+
+        assert _spawn_error_tick_fields(None) == {}
+
+    def test_error_text_carried_in_last_error_key(self) -> None:
+        from cw.dispatch.claim.codex_capability import _SpawnOutcome
+        from cw.dispatch.claim.events import _spawn_error_tick_fields
+
+        outcome = _SpawnOutcome(spawn_error=True, error="backend outage")
+
+        assert _spawn_error_tick_fields(outcome) == {"last_error": "backend outage"}
+
+    def test_empty_error_yields_empty_string_key_present(self) -> None:
+        from cw.dispatch.claim.codex_capability import _SpawnOutcome
+        from cw.dispatch.claim.events import _spawn_error_tick_fields
+
+        outcome = _SpawnOutcome(spawn_error=True, error="")
+
+        assert _spawn_error_tick_fields(outcome) == {"last_error": ""}
+
+    def test_multiline_error_collapsed_to_single_line(self) -> None:
+        from cw.dispatch.claim.codex_capability import _SpawnOutcome
+        from cw.dispatch.claim.events import _spawn_error_tick_fields
+
+        outcome = _SpawnOutcome(spawn_error=True, error="a\n  b\t\tc\r\nd")
+
+        assert _spawn_error_tick_fields(outcome) == {"last_error": "a b c d"}
+
+    def test_error_at_cap_not_truncated(self) -> None:
+        from cw.dispatch.claim.codex_capability import _SpawnOutcome
+        from cw.dispatch.claim.events import (
+            _SPAWN_ERROR_TEXT_MAX_CHARS,
+            _spawn_error_tick_fields,
+        )
+
+        text = "x" * _SPAWN_ERROR_TEXT_MAX_CHARS
+        outcome = _SpawnOutcome(spawn_error=True, error=text)
+
+        assert _spawn_error_tick_fields(outcome) == {"last_error": text}
+
+    def test_error_over_cap_truncated_with_ellipsis(self) -> None:
+        from cw.dispatch.claim.codex_capability import _SpawnOutcome
+        from cw.dispatch.claim.events import (
+            _SPAWN_ERROR_TEXT_MAX_CHARS,
+            _spawn_error_tick_fields,
+        )
+
+        outcome = _SpawnOutcome(
+            spawn_error=True, error="x" * (_SPAWN_ERROR_TEXT_MAX_CHARS + 25)
+        )
+
+        result = _spawn_error_tick_fields(outcome)["last_error"]
+        assert result == "x" * _SPAWN_ERROR_TEXT_MAX_CHARS + "…"
+
+    def test_secret_shaped_text_redacted(self) -> None:
+        from cw.dispatch.claim.codex_capability import _SpawnOutcome
+        from cw.dispatch.claim.events import _spawn_error_tick_fields
+
+        outcome = _SpawnOutcome(
+            spawn_error=True, error="401 from api: Authorization: Bearer abc.def"
+        )
+
+        result = _spawn_error_tick_fields(outcome)["last_error"]
+        assert "abc.def" not in result
+        assert "<redacted>" in result
+
+    def test_secret_straddling_cap_is_redacted_before_truncation(self) -> None:
+        from cw.dispatch.claim.codex_capability import _SpawnOutcome
+        from cw.dispatch.claim.events import (
+            _SPAWN_ERROR_TEXT_MAX_CHARS,
+            _spawn_error_tick_fields,
+        )
+
+        # The secret starts ~14 chars before the cap: a truncate-then-redact
+        # order would leave a partial `sk-...` fragment (under the pattern's
+        # 20-char floor) that survives unredacted.
+        secret = "sk-" + "A1b2C3d4E5" * 3
+        prefix = "y" * (_SPAWN_ERROR_TEXT_MAX_CHARS - 15)
+        outcome = _SpawnOutcome(spawn_error=True, error=f"{prefix} {secret} tail")
+
+        result = _spawn_error_tick_fields(outcome)["last_error"]
+        assert "sk-" not in result
+        assert "<redacted>" in result
+
+    def test_codex_breaker_outcome_error_carried(self) -> None:
+        from cw.dispatch.claim.codex_capability import _SpawnOutcome
+        from cw.dispatch.claim.events import _spawn_error_tick_fields
+
+        outcome = _SpawnOutcome(
+            capability_parked=True, spawn_error=True, error="codex_version_unknown"
+        )
+
+        assert _spawn_error_tick_fields(outcome) == {
+            "last_error": "codex_version_unknown"
+        }
 
 
 # ---------------------------------------------------------------------------

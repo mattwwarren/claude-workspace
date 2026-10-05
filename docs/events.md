@@ -376,7 +376,21 @@ inode probe failed or the filesystem reports no fixed inode count, #2470)
 are present only on `disk_pressure_gate` ticks. `freshness_detail`
 (`non_main_head | main_behind_origin | main_dirty_checkout |
 main_diverged_from_origin | main_detached_head`) plus `blocked_branch` are
-present only on `freshness_gate` ticks.
+present only on `freshness_gate` ticks. `last_error` (str, #1679) is present
+only on a main claim-loop tick where a spawn failure occurred (the generic
+spawn exception, a non-live `HookContextConflictError`, or the codex
+capability breaker engaging) and carries the failure text, so an operator
+reading `skip_reason=spawn_error` can see why without opening the dispatcher
+log. It is a single line (whitespace collapsed), redacted for secret shapes,
+and truncated to the first 500 characters followed by `…` (so up to 501
+characters); an exception with no message yields `""`. It holds `str(exc)`,
+not the traceback, which stays in the dispatcher log. It is keyed on a spawn
+failure having occurred, not on the resolved `skip_reason`, so it is still
+present when a higher-precedence reason (`cap_full`, `lane_cap_blocked`)
+masks `spawn_error`. It is absent on every other tick, including the per-task
+ticks (`worktree_occupied` deferrals carry none) and `usage_limited`. It is
+the same text `lane.paused` reports as `last_error` when the lane circuit
+breaker trips (`lane.paused.last_error` is collapsed but not redacted).
 
 `correlation_id` is `None` (per-client aggregate, not per-ticket).
 Consumers MUST tolerate unknown `skip_reason` values.
@@ -1678,10 +1692,23 @@ supersedes it by id. Any successful spawn also wipes the recorded id.
   "lane": "<str>",
   "stage": "harden | plan | impl | review | finalize",
   "parked_at": "<ISO 8601 timestamp>",
-  "elapsed_minutes": "<float>"
+  "elapsed_minutes": "<float>",
+  "trigger": "timer"
 }
 ```
-**Semantics:** RFC 0008 capstone (#1015). Fires exactly once per parked
+**Semantics:** This event is a synthetic timer. It does **not** mean a worker
+requested help: it fires purely because `ESCALATION_PARK_MINUTES` (45)
+elapsed since the ticket entered the escalation-eligible set, with no
+worker-side signal of any kind. Read it as "this parked row has gone
+unattended for 45 minutes", not "an agent is asking for a human".
+
+`trigger` (#1680) records why the event fired. Currently the only value
+emitted is `timer` (the flat 45-minute clock elapsed). A worker-initiated
+value is not implemented and is not named here; consumers must tolerate
+additional values appearing in future. The field is additive and the event
+name is unchanged.
+
+RFC 0008 capstone (#1015). Fires exactly once per parked
 episode: a task entering the escalation-eligible set gets
 `TicketTask.escalation_parked_at` stamped (no event yet); once
 `now - escalation_parked_at >= 45` minutes (`ESCALATION_PARK_MINUTES`, a flat
@@ -1704,7 +1731,8 @@ Runs **unconditionally** every reconcile tick (not gated by
 even when the dispatch loop itself is down.
 
 Added to the operator-channel's default forward set (unlike
-`concierge.recovered` above) — this IS the operator-facing signal.
+`concierge.recovered` above) — this is the operator-facing "parked row has
+gone unattended" signal, derived from the timer alone.
 
 `correlation_id` is the `ticket_id`.
 

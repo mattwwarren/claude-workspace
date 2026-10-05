@@ -24,7 +24,7 @@ from __future__ import annotations
 import datetime as dt
 import threading
 import time
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner, Result
@@ -32,9 +32,6 @@ from click.testing import CliRunner, Result
 from cw.cli import main
 from cw.config import orchestrator_config_file
 from tests.conftest import _write_idle_transcript
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 _MAIN_CSID = "aaaa1111-0000-0000-0000-000000000000"
 # Far enough in the past that any file written during the test run has an
@@ -58,12 +55,9 @@ def _write_orchestrator_config(**fields: int) -> None:
 
 
 @pytest.fixture
-def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect HOME so ``claude_project_dir`` resolves under tmp_path."""
-    h = tmp_path / "home"
-    h.mkdir()
-    monkeypatch.setenv("HOME", str(h))
-    return h
+def home() -> Path:
+    """The per-test HOME (``_isolate_home``) ``claude_project_dir`` resolves under."""
+    return Path.home()
 
 
 def _invoke(worktree: Path, *extra: str) -> Result:

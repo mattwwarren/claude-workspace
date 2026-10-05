@@ -205,8 +205,9 @@ def _install_fake_daemon_roster(
 
     Promoted from ``tests/test_doctor.py``'s class-8 ``_setup_common``
     (#2524). Writes an empty roster, points the doctor's roster-path seams at
-    it, redirects ``HOME`` to ``tmp_path/home`` (returned) so transcript
-    lookup finds files the test writes, and patches every doctor-side
+    it, returns the per-test ``Path.home()`` (already redirected by the
+    autouse ``_isolate_home`` fixture, #1756) so transcript lookup finds
+    files the test writes, and patches every doctor-side
     ``get_native_daemon_client`` -- including the stranded-routed-result
     class's -- so a doctor run stays hermetic.
     """
@@ -214,9 +215,7 @@ def _install_fake_daemon_roster(
     monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
     monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     daemon = FakeNativeDaemonClient()
     daemon._live.add(surface_ref)

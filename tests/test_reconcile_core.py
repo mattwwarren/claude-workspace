@@ -349,9 +349,7 @@ def test_reconcile_usage_limited_true_from_phantom_path(
     transcript contains a usage-limit message (#804, Fix 3)."""
     monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-phantom-ul"
@@ -409,9 +407,7 @@ def test_reconcile_usage_limited_false_from_incomplete_phantom_transcript(
     """A malformed tail cannot provide positive phantom usage-limit evidence."""
     monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-phantom-ul-incomplete"
@@ -466,7 +462,6 @@ def test_reconcile_usage_limited_false_from_incomplete_phantom_transcript(
 
 
 def _setup_stalled_ul_session(
-    home: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -476,7 +471,6 @@ def _setup_stalled_ul_session(
     """Wire up a headless daemon session whose ancient started_at trips the
     wall-clock watchdog, with a real timestamped transcript for the recency gate."""
     monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
-    monkeypatch.setenv("HOME", str(home))
 
     worktree = tmp_path / f"wt-{slug}"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -496,7 +490,7 @@ def _setup_stalled_ul_session(
         )
     )
 
-    transcript = _write_transcript_records(home, worktree, records)
+    transcript = _write_transcript_records(Path.home(), worktree, records)
     after_ts = started_at.timestamp() + 60
     os.utime(str(transcript), (after_ts, after_ts))
 
@@ -521,10 +515,7 @@ def test_watchdog_usage_limited_true_when_limit_message_at_tail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1345: a limit message at the transcript tail → report.usage_limited True."""
-    home = tmp_path / "home"
-    home.mkdir()
     _setup_stalled_ul_session(
-        home,
         tmp_path,
         monkeypatch,
         records=[
@@ -550,10 +541,7 @@ def test_watchdog_usage_limited_false_when_limit_message_stale_and_reap_unrelate
 ) -> None:
     """#1345: an early limit message with later unrelated work is stale →
     report.usage_limited False even though the session is still reaped."""
-    home = tmp_path / "home"
-    home.mkdir()
     _setup_stalled_ul_session(
-        home,
         tmp_path,
         monkeypatch,
         records=[
@@ -580,10 +568,7 @@ def test_watchdog_usage_limited_true_when_timestamp_missing(
 ) -> None:
     """#1345: a limit message with no parseable timestamp has no recency anchor
     → the backoff site's fail_open=True default still arms report.usage_limited."""
-    home = tmp_path / "home"
-    home.mkdir()
     _setup_stalled_ul_session(
-        home,
         tmp_path,
         monkeypatch,
         records=[_ul_record("You've hit your session limit · resets 3:40am")],
@@ -2007,9 +1992,7 @@ def _seed_mid_turn_limit(
 ) -> None:
     """One roster-present worker stopped on a usage limit, plus an optional phantom."""
     monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", lambda: config)
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     monkeypatch.setattr(
         "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
     )
@@ -2285,9 +2268,7 @@ def _seed_routed_session(
     row: TicketTask | None = None,
 ) -> None:
     """Persist an ACTIVE routed session (31m stale) + its advanced row."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-routed"
     _stamp_transcript_age(home, worktree, stale_minutes=31, surface_ref=_ROUTED_REF)
     sess = _mk_routed_session(_ROUTED_SID, worktree, surface_ref=_ROUTED_REF)

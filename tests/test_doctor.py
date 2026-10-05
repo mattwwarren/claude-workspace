@@ -7147,9 +7147,6 @@ class TestWedgeActiveNullLivenessOrphan:
         )
         monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
         monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
         monkeypatch.setattr(

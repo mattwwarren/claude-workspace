@@ -5,11 +5,15 @@ fixture repos under a home-tree base dir because snap-confined
 codex cannot reach ``/tmp``. Every pre-existing positional caller
 (``make_git_repo("name")``) must keep its exact ``tmp_path``-relative
 behavior.
+
+Also pins the suite-wide ``HOME`` redirect (#1756) owned by
+``tests/_session_home.py`` and the autouse ``_isolate_home`` fixture.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from datetime import UTC, datetime
@@ -19,15 +23,21 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import ValidationError
 
+import cw.config
+from cw import native_daemon, queue_peek
 from cw.config import load_state
+from cw.doctor import skills_drift, versions
 from cw.models import (
     QueueItemStatus,
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
 )
+from tests._session_home import REAL_HOME, SESSION_HOME, wants_real_home
 from tests.conftest import (
     _OPTIONAL_BINARY_DENYLIST,
+    _clean_git_env,
+    _guard_no_real_claude_projects_writes,
     _make_daemon_session,
     _make_ticket_task,
     _seed_daemon_session,
@@ -35,6 +45,13 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+# The redirect is decided once per process at import time (#1756): an
+# opted-out run (CW_TEST_REAL_HOME / INTEGRATION_*) has no redirect at all, so
+# every assertion about the redirect is skipped there rather than failing.
+requires_home_redirect = pytest.mark.skipif(
+    SESSION_HOME is None, reason="HOME redirect opted out"
+)
 
 
 def _head_ok(repo: Path) -> bool:
@@ -223,3 +240,135 @@ class TestOptionalBinaryAbsenceGuard:
 
         result = shutil.which("codex")
         assert result == str(bin_dir / "codex")
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run git under the same ``GIT_*``-stripped env the git fixtures use."""
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        env=_clean_git_env(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+class TestHomeRedirectByConstruction:
+    """The import-time + per-test ``HOME`` redirect (#1756).
+
+    ``tests/_session_home.py`` points ``HOME`` at a throwaway directory before
+    any ``cw`` module binds an import-time ``Path.home()`` constant, and the
+    autouse ``_isolate_home`` fixture gives each test its own
+    ``tmp_path / "_home"``. These pin that no test can reach the operator's
+    real ``~/.cw`` or ``~/.claude`` (#1736, #2460).
+
+    The real-home checks compare against the equivalent path under
+    ``REAL_HOME`` rather than asserting ``REAL_HOME`` is not an ancestor: a
+    dispatched worker's ``TMPDIR`` (and so ``tmp_path``) legitimately lives
+    under the real ``~/.cw/wt/<worktree>/.cw/tmp``.
+    """
+
+    @requires_home_redirect
+    def test_path_home_is_per_test_tmp_home(self, tmp_path: Path) -> None:
+        """Each test sees ``tmp_path / "_home"`` as its home, never the real one."""
+        home = Path.home()
+        assert home == tmp_path / "_home"
+        assert os.environ["HOME"] == str(home)
+        assert home != REAL_HOME
+        assert home / ".cw" != REAL_HOME / ".cw"
+        assert home / ".claude" / "projects" != REAL_HOME / ".claude" / "projects"
+
+    @requires_home_redirect
+    @pytest.mark.parametrize(
+        "constant",
+        [
+            pytest.param(lambda: cw.config._REAL_STATE_DIR, id="config-state"),
+            pytest.param(lambda: cw.config._REAL_CONFIG_DIR, id="config-config"),
+            pytest.param(lambda: queue_peek.CLAUDE_PROJECTS, id="queue-peek"),
+            pytest.param(lambda: native_daemon._JOBS_PATH, id="daemon-jobs"),
+            pytest.param(lambda: versions._CLAUDE_SETTINGS_PATH, id="doctor-versions"),
+            pytest.param(lambda: skills_drift._CLAUDE_HOME, id="doctor-skills"),
+        ],
+    )
+    def test_import_time_constants_follow_session_home(
+        self, constant: Callable[[], Path]
+    ) -> None:
+        """Import-time ``Path.home()`` constants resolved under the session home.
+
+        Pins the import ordering in ``tests/conftest.py``: if
+        ``tests._session_home`` stops running before the first ``cw`` import,
+        these bind to the real home and fail here.
+        """
+        assert SESSION_HOME is not None
+        path = constant()
+        assert path.is_relative_to(SESSION_HOME)
+        assert path != REAL_HOME / path.relative_to(SESSION_HOME)
+
+    @requires_home_redirect
+    def test_xdg_overrides_not_inherited(self) -> None:
+        """Operator ``XDG_*`` overrides cannot steer ``cw.config`` to real dirs."""
+        assert not os.environ.get("XDG_CONFIG_HOME")
+        assert not os.environ.get("XDG_DATA_HOME")
+
+    @requires_home_redirect
+    def test_git_identity_from_redirected_home(self, tmp_path: Path) -> None:
+        """Git identity comes from ``$HOME/.gitconfig`` and survives the GIT_* strip."""
+        email = _git(tmp_path, "config", "--global", "user.email")
+        assert email.stdout.strip() == "test@example.com"
+
+        origin = _git(tmp_path, "config", "--global", "--show-origin", "user.email")
+        assert origin.returncode == 0
+        origin_path = Path(origin.stdout.split("\t", 1)[0].removeprefix("file:"))
+        assert origin_path.is_relative_to(Path.home())
+
+        repo = tmp_path / "bare-init"
+        repo.mkdir()
+        assert _git(repo, "init", "-q").returncode == 0
+        commit = _git(repo, "commit", "--allow-empty", "-q", "-m", "identity")
+        assert commit.returncode == 0, commit.stderr
+
+    @pytest.mark.parametrize(
+        ("environ", "expected"),
+        [
+            ({}, False),
+            ({"CW_TEST_REAL_HOME": "1"}, True),
+            ({"INTEGRATION_CODEX_LIVE": "1"}, True),
+            ({"INTEGRATION_OPENCODE_LIVE": "1"}, True),
+            ({"INTEGRATION_REAL_API": "1"}, True),
+            ({"CW_TEST_REAL_HOME": "0"}, False),
+            ({"CW_TEST_REAL_HOME": ""}, False),
+            ({"INTEGRATION_CODEX_LIVE": " 0 "}, False),
+            ({"UNRELATED": "1"}, False),
+        ],
+    )
+    def test_wants_real_home_predicate(
+        self, environ: dict[str, str], expected: bool
+    ) -> None:
+        """Opt-out gate uses the live tests' ``.strip() not in ("", "0")`` rule."""
+        assert wants_real_home(environ) is expected
+
+    @requires_home_redirect
+    def test_guard_uses_captured_real_home(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The leak guard watches the captured real home, not ``Path.home()``."""
+        fake_real = tmp_path / "fake-real-home"
+        real_projects = fake_real / ".claude" / "projects"
+        real_projects.mkdir(parents=True)
+        monkeypatch.setattr("tests._session_home.REAL_HOME", fake_real)
+        guard = _guard_no_real_claude_projects_writes.__wrapped__
+
+        # A signature-matching entry under the redirected home is invisible.
+        quiet = guard()
+        next(quiet)
+        (Path.home() / ".claude" / "projects" / "pytest-of-x").mkdir(parents=True)
+        with pytest.raises(StopIteration):
+            next(quiet)
+
+        # The same entry under the captured real home fails the suite.
+        loud = guard()
+        next(loud)
+        (real_projects / "pytest-of-x").mkdir()
+        with pytest.raises(AssertionError, match=re.escape(str(real_projects))):
+            next(loud)

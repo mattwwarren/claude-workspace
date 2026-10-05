@@ -61,12 +61,9 @@ _SID = "2524"
 
 
 @pytest.fixture
-def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect HOME so transcript lookup finds the .jsonl files we write."""
-    h = tmp_path / "home"
-    h.mkdir()
-    monkeypatch.setenv("HOME", str(h))
-    return h
+def home() -> Path:
+    """Per-test HOME (autouse ``_isolate_home``); transcripts are written here."""
+    return Path.home()
 
 
 @pytest.fixture

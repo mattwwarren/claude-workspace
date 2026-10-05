@@ -331,14 +331,11 @@ def test_awaiting_subagent_and_window_constant_removed_from_reconcile() -> None:
 def test_detect_usage_limit_returns_true_when_message_present(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """_detect_usage_limit returns True for a usage-limit phrase (#486)."""
     from cw.reconcile import _detect_usage_limit
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-ul-direct"
@@ -360,14 +357,11 @@ def test_detect_usage_limit_returns_true_when_message_present(
 def test_detect_usage_limit_returns_false_when_absent(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """_detect_usage_limit returns False for a normal assistant message (#486)."""
     from cw.reconcile import _detect_usage_limit
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-no-ul"
@@ -385,14 +379,11 @@ def test_detect_usage_limit_returns_false_when_absent(
 def test_detect_usage_limit_returns_false_for_stale_transcript(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """_detect_usage_limit returns False when transcript predates started_at (#486)."""
     from cw.reconcile import _detect_usage_limit
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)  # session started at 01:00
     worktree = tmp_path / "wt-stale-ul"
@@ -414,14 +405,9 @@ def test_detect_usage_limit_returns_false_for_stale_transcript(
 def test_detect_usage_limit_returns_false_when_no_transcript(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """_detect_usage_limit returns False when no transcript exists (#486)."""
     from cw.reconcile import _detect_usage_limit
-
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-no-trans"
@@ -463,15 +449,12 @@ def _tool_result_record(tool_use_id: str) -> dict[str, object]:
 def test_detect_dangling_tool_use_returns_evidence_for_unresolved_bash_call(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unresolved Bash tool_use at the transcript tail returns its evidence
     (#1482)."""
     from cw.reconcile._shared import DanglingToolUseEvidence, _detect_dangling_tool_use
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-dangling-bash"
@@ -492,14 +475,11 @@ def test_detect_dangling_tool_use_returns_evidence_for_unresolved_bash_call(
 def test_detect_dangling_tool_use_returns_none_when_resolved(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A resolved tool_use/tool_result pair returns None (#1482)."""
     from cw.reconcile._shared import _detect_dangling_tool_use
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-dangling-resolved"
@@ -521,15 +501,12 @@ def test_detect_dangling_tool_use_returns_none_when_resolved(
 def test_detect_dangling_tool_use_returns_latest_unresolved_among_multiple_pairs(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Several resolved pairs plus one trailing unresolved call returns the
     trailing one, not an earlier resolved one (#1482)."""
     from cw.reconcile._shared import DanglingToolUseEvidence, _detect_dangling_tool_use
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-dangling-multi"
@@ -557,7 +534,6 @@ def test_detect_dangling_tool_use_returns_latest_unresolved_among_multiple_pairs
 def test_detect_dangling_tool_use_truncates_long_command(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A command longer than the snippet cap is truncated with a trailing
     ellipsis (#1482)."""
@@ -566,9 +542,7 @@ def test_detect_dangling_tool_use_truncates_long_command(
         _detect_dangling_tool_use,
     )
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-dangling-long"
@@ -593,15 +567,10 @@ def test_detect_dangling_tool_use_truncates_long_command(
 def test_detect_dangling_tool_use_returns_none_for_missing_transcript(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No locatable transcript → None (fail-open, mirrors _detect_usage_limit)
     (#1482)."""
     from cw.reconcile._shared import _detect_dangling_tool_use
-
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-dangling-notrans"
@@ -613,15 +582,12 @@ def test_detect_dangling_tool_use_returns_none_for_missing_transcript(
 def test_detect_dangling_tool_use_returns_none_on_malformed_json_lines(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Malformed JSONL lines are skipped without raising; a correct resolved
     pair around them still returns None (#1482)."""
     from cw.reconcile._shared import _detect_dangling_tool_use
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-dangling-malformed"
@@ -645,7 +611,6 @@ def test_detect_dangling_tool_use_returns_none_on_malformed_json_lines(
 def test_detect_dangling_tool_use_ignores_agent_and_task_tool_names(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1969 regression pin: a dangling Agent tool_use AND a dangling Task
     tool_use are both excluded -- that domain belongs exclusively to
@@ -655,9 +620,7 @@ def test_detect_dangling_tool_use_ignores_agent_and_task_tool_names(
     subagent spawn (#1482)."""
     from cw.reconcile._shared import _detect_dangling_tool_use
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-dangling-agent"
@@ -679,15 +642,12 @@ def test_detect_dangling_tool_use_ignores_agent_and_task_tool_names(
 def test_detect_dangling_tool_use_handles_tool_without_command_input(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A non-Bash tool with no input.command still returns evidence, with
     command_snippet=None (#1482)."""
     from cw.reconcile._shared import DanglingToolUseEvidence, _detect_dangling_tool_use
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-dangling-nocommand"
@@ -723,7 +683,6 @@ def test_dangling_tool_use_detector_importable_from_reconcile_package() -> None:
 def test_bash_command_snippet_redacts_secret_shaped_substrings(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A command containing a token=/Authorization:/ghp_-shaped substring has
     the secret replaced with executor_diagnostics.redact()'s placeholder
@@ -731,9 +690,7 @@ def test_bash_command_snippet_redacts_secret_shaped_substrings(
     2026-09-05T12:42:16Z)."""
     from cw.reconcile._shared import _detect_dangling_tool_use
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-dangling-secret"
@@ -761,12 +718,10 @@ _BG_DONE_TEXT = "Background command ci-local.sh completed (exit code 0)"
 
 
 def _unconsumed_queue_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+    tmp_path: Path, name: str
 ) -> tuple[Session, Path, Path, datetime]:
     """Return ``(session, home, worktree, started_at)`` for the #2251 tests."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / f"wt-{name}"
     sess = _mk_headless_daemon_session(name, worktree, started_at)
@@ -776,14 +731,13 @@ def _unconsumed_queue_session(
 def test_detect_unconsumed_queue_notification_returns_text_for_trailing_enqueue(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A transcript whose last record is a queue-operation enqueue returns that
     record's content (#2251)."""
     from cw.reconcile._shared import _detect_unconsumed_queue_notification
 
     sess, home, worktree, started_at = _unconsumed_queue_session(
-        tmp_path, monkeypatch, "uqn-trailing"
+        tmp_path, "uqn-trailing"
     )
     transcript = _write_transcript_records(
         home,
@@ -802,14 +756,13 @@ def test_detect_unconsumed_queue_notification_returns_text_for_trailing_enqueue(
 def test_detect_unconsumed_queue_notification_returns_none_when_not_last_record(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An enqueue record followed by a later assistant turn means the session
     resumed and consumed it → None (#2251)."""
     from cw.reconcile._shared import _detect_unconsumed_queue_notification
 
     sess, home, worktree, started_at = _unconsumed_queue_session(
-        tmp_path, monkeypatch, "uqn-consumed"
+        tmp_path, "uqn-consumed"
     )
     transcript = _write_transcript_records(
         home,
@@ -833,7 +786,6 @@ def test_detect_unconsumed_queue_notification_returns_none_when_not_last_record(
 def test_detect_unconsumed_queue_notification_returns_none_for_dequeue_operation(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Only ``operation == "enqueue"`` counts; a trailing dequeue-shaped
     queue-operation record returns None (#2251)."""
@@ -843,7 +795,7 @@ def test_detect_unconsumed_queue_notification_returns_none_for_dequeue_operation
     )
 
     sess, home, worktree, started_at = _unconsumed_queue_session(
-        tmp_path, monkeypatch, "uqn-dequeue"
+        tmp_path, "uqn-dequeue"
     )
     transcript = _write_transcript_records(
         home, worktree, [{"type": _QUEUE_OPERATION_RECORD_TYPE, "op": "dequeue"}]
@@ -856,14 +808,13 @@ def test_detect_unconsumed_queue_notification_returns_none_for_dequeue_operation
 def test_detect_unconsumed_queue_notification_returns_none_for_missing_transcript(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No locatable transcript → None (fail-open, mirrors
     _detect_dangling_tool_use) (#2251)."""
     from cw.reconcile._shared import _detect_unconsumed_queue_notification
 
     sess, _home, _worktree, _started_at = _unconsumed_queue_session(
-        tmp_path, monkeypatch, "uqn-notrans"
+        tmp_path, "uqn-notrans"
     )
 
     assert _detect_unconsumed_queue_notification(sess) is None
@@ -879,7 +830,7 @@ def test_detect_unconsumed_queue_notification_returns_none_on_read_error(
     from cw.reconcile._shared import _detect_unconsumed_queue_notification
 
     sess, _home, worktree, _started_at = _unconsumed_queue_session(
-        tmp_path, monkeypatch, "uqn-oserror"
+        tmp_path, "uqn-oserror"
     )
     fake_path = worktree / "does-not-exist.jsonl"
     monkeypatch.setattr(
@@ -893,7 +844,6 @@ def test_detect_unconsumed_queue_notification_returns_none_on_read_error(
 def test_detect_unconsumed_queue_notification_returns_none_on_malformed_json_lines(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Malformed and non-dict JSONL lines are skipped without raising; the last
     *well-formed* record decides. A trailing garbage line after a consumed
@@ -902,7 +852,7 @@ def test_detect_unconsumed_queue_notification_returns_none_on_malformed_json_lin
     from cw.reconcile._shared import _detect_unconsumed_queue_notification
 
     sess, home, worktree, started_at = _unconsumed_queue_session(
-        tmp_path, monkeypatch, "uqn-malformed"
+        tmp_path, "uqn-malformed"
     )
     transcript = _write_transcript_records(
         home,
@@ -931,7 +881,6 @@ def test_detect_unconsumed_queue_notification_returns_none_on_malformed_json_lin
 def test_detect_unconsumed_queue_notification_returns_none_for_non_string_content(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A trailing enqueue record whose content is not a string returns None
     (#2251)."""
@@ -941,9 +890,7 @@ def test_detect_unconsumed_queue_notification_returns_none_for_non_string_conten
         _detect_unconsumed_queue_notification,
     )
 
-    sess, home, worktree, started_at = _unconsumed_queue_session(
-        tmp_path, monkeypatch, "uqn-nonstr"
-    )
+    sess, home, worktree, started_at = _unconsumed_queue_session(tmp_path, "uqn-nonstr")
     transcript = _write_transcript_records(
         home,
         worktree,
@@ -963,7 +910,6 @@ def test_detect_unconsumed_queue_notification_returns_none_for_non_string_conten
 def test_detect_unconsumed_queue_notification_truncates_and_redacts_long_content(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The notification text is redacted, then capped at the shared snippet
     length with a trailing ellipsis (#2251)."""
@@ -972,9 +918,7 @@ def test_detect_unconsumed_queue_notification_truncates_and_redacts_long_content
         _detect_unconsumed_queue_notification,
     )
 
-    sess, home, worktree, started_at = _unconsumed_queue_session(
-        tmp_path, monkeypatch, "uqn-long"
-    )
+    sess, home, worktree, started_at = _unconsumed_queue_session(tmp_path, "uqn-long")
     secret = "c" * 40
     content = f"Authorization: {secret} " + "y" * (
         _TOOL_USE_COMMAND_SNIPPET_MAX_CHARS + 50
@@ -1022,14 +966,11 @@ def _stamp_after_start(transcript: Path, started_at: datetime) -> None:
 def test_detect_usage_limit_matched_at_is_last_matching_record_timestamp(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """matched_at is the LAST matching record's timestamp (last-match-wins)."""
     from cw.reconcile import _detect_usage_limit
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-lastmatch"
@@ -1060,7 +1001,6 @@ def test_detect_usage_limit_matched_at_is_last_matching_record_timestamp(
 def test_detect_usage_limit_matched_text_is_last_matching_record_text(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """matched_text carries the LAST matching record's text, even untimestamped
     (#2324: feeds parse_usage_limit_reset without a second transcript scan).
@@ -1071,9 +1011,7 @@ def test_detect_usage_limit_matched_text_is_last_matching_record_text(
     """
     from cw.reconcile import _detect_usage_limit
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-matched-text"
@@ -1100,14 +1038,11 @@ def test_detect_usage_limit_matched_text_is_last_matching_record_text(
 def test_detect_usage_limit_matched_text_none_when_nothing_matched(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No usage-limit match leaves matched_text at its None default (#2324)."""
     from cw.reconcile import _detect_usage_limit
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-matched-none"
@@ -1123,14 +1058,11 @@ def test_detect_usage_limit_matched_text_none_when_nothing_matched(
 def test_detect_usage_limit_transcript_tail_at_tracks_last_record_even_when_unmatched(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """transcript_tail_at follows the last content record even if it's unmatched."""
     from cw.reconcile import _detect_usage_limit
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-tailunmatched"
@@ -1157,14 +1089,11 @@ def test_detect_usage_limit_transcript_tail_at_tracks_last_record_even_when_unma
 def test_detect_usage_limit_matched_at_none_when_matching_record_has_no_timestamp(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A matching record without a parseable timestamp yields matched_at None."""
     from cw.reconcile import _detect_usage_limit
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-matchnots"
@@ -1191,14 +1120,11 @@ def test_detect_usage_limit_matched_at_none_when_matching_record_has_no_timestam
 def test_detect_usage_limit_tail_none_when_no_record_has_timestamp(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No record carries a parseable timestamp → transcript_tail_at is None."""
     from cw.reconcile import _detect_usage_limit
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-nots"
@@ -1228,14 +1154,11 @@ def test_detect_usage_limit_tail_none_when_no_record_has_timestamp(
 def test_detect_provider_overload_returns_true_for_queue_operation_record(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A queue-operation-typed record carrying the captured 529 text → True."""
     from cw.reconcile import _detect_provider_overload
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-529-qo"
@@ -1254,14 +1177,11 @@ def test_detect_provider_overload_returns_true_for_queue_operation_record(
 def test_detect_provider_overload_returns_true_for_user_record(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A user-typed record carrying the captured 529 text → True."""
     from cw.reconcile import _detect_provider_overload
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-529-user"
@@ -1280,14 +1200,11 @@ def test_detect_provider_overload_returns_true_for_user_record(
 def test_detect_provider_overload_returns_false_when_absent(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No matching text anywhere in the transcript → False."""
     from cw.reconcile import _detect_provider_overload
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-529-absent"
@@ -1306,14 +1223,9 @@ def test_detect_provider_overload_returns_false_when_absent(
 def test_detect_provider_overload_returns_false_when_no_transcript(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No locatable transcript → False (mirrors _detect_usage_limit's fail-open)."""
     from cw.reconcile import _detect_provider_overload
-
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-529-notrans"
@@ -1325,7 +1237,6 @@ def test_detect_provider_overload_returns_false_when_no_transcript(
 def test_detect_provider_overload_ignores_assistant_typed_record(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Regression: an assistant-typed, list-content record carrying the same
 
@@ -1334,9 +1245,7 @@ def test_detect_provider_overload_ignores_assistant_typed_record(
     """
     from cw.reconcile import _detect_provider_overload
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-529-assistant"
@@ -1355,14 +1264,11 @@ def test_detect_provider_overload_ignores_assistant_typed_record(
 def test_detect_provider_overload_is_case_sensitive(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A lowercased variant of the signature must NOT match."""
     from cw.reconcile import _detect_provider_overload
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-529-case"
@@ -1650,9 +1556,7 @@ def test_salvage_all_terminal_statuses_from_phantom(
     NOT be marked COMPLETED (#1566): live dispatch routes them to
     BLOCKED_ON_USER, so salvage must agree.
     """
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     ticket_id = f"431-{status}"
     worktree = tmp_path / f"wt-{status}"
@@ -1724,9 +1628,7 @@ def test_salvage_paused_statuses_from_phantom_route_to_blocked_on_user(
     the queue task must be set to BLOCKED_ON_USER (not COMPLETED), so downstream
     operators know the session requires human input before re-dispatch (#471).
     """
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     ticket_id = f"471p-{status}"
     worktree = tmp_path / f"wt-{status}"
@@ -1786,9 +1688,7 @@ def test_salvage_merge_pending_from_phantom_routes_to_blocked_on_user(
     """Phantom session whose transcript emits merge_pending must be salvaged
     to BLOCKED_ON_USER, matching dispatch Rule 3b (#899, #1566). No existing
     coverage exercised this status through the salvage path before #1566."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     status = "merge_pending"
     ticket_id = "899p-merge_pending"
@@ -2000,9 +1900,7 @@ def test_backfill_claude_session_id_same_tick_liveness(
     """After backfill, _transcript_recently_active uses the by-id path."""
     full_uuid = "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"
     short_id = full_uuid[:8]
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     worktree = tmp_path / "wt-liveness"
     sess = _mk_headless_daemon_session(
@@ -2108,9 +2006,7 @@ def test_backfill_claude_session_id_transcript_fallback(
     full_uuid = "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"
     short_id = full_uuid[:8]  # "04bf1c48"
     transcript_stem = f"{short_id}-{full_uuid}"
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-tx-fallback"
     sess = _mk_headless_daemon_session(
         "tx-fallback-1", worktree, _BACKFILL_STARTED_AT, surface_ref=short_id
@@ -2146,9 +2042,7 @@ def test_backfill_claude_session_id_agents_primary_over_transcript(
     full_uuid = "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"
     short_id = full_uuid[:8]
     transcript_stem = f"{short_id}-different-uuid-xxxx"
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-agents-primary"
     sess = _mk_headless_daemon_session(
         "agents-primary-1", worktree, _BACKFILL_STARTED_AT, surface_ref=short_id
@@ -2178,9 +2072,7 @@ def test_backfill_claude_session_id_no_transcript_fallback(
 ) -> None:
     """surface_ref absent from agents map and no transcript → csid stays None."""
     short_id = "04bf1c48"
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-no-tx"
     sess = _mk_headless_daemon_session(
         "no-tx-fallback-1", worktree, _BACKFILL_STARTED_AT, surface_ref=short_id
@@ -2212,9 +2104,7 @@ def test_backfill_claude_session_id_stale_transcript(
     full_uuid = "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"
     short_id = full_uuid[:8]
     transcript_stem = f"{short_id}-{full_uuid}"
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-stale-tx"
     sess = _mk_headless_daemon_session(
         "stale-tx-fallback-1", worktree, _BACKFILL_STARTED_AT, surface_ref=short_id
@@ -2278,7 +2168,6 @@ def test_claude_project_dir_matches_verified_real_path() -> None:
 def test_transcript_recently_active_finds_dotted_worktree(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """_transcript_recently_active returns True for a ~/.cw/-style worktree.
 
@@ -2290,10 +2179,6 @@ def test_transcript_recently_active_finds_dotted_worktree(
     encoding mismatch without depending on the real ~/.cw directory.
     """
     from cw.reconcile import _transcript_recently_active
-
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
 
     # Worktree path with a dot-prefixed segment, mirroring ~/.cw/wt/...
     worktree = tmp_path / ".dot-cw" / "wt" / "abc123" / "auto-dev-1"
@@ -2365,7 +2250,6 @@ def _mk_content_ts_session(
 def test_transcript_recently_active_ignores_trailing_metadata_write(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A trailing metadata-only write must not falsely resurrect liveness (#1076).
 
@@ -2376,9 +2260,7 @@ def test_transcript_recently_active_ignores_trailing_metadata_write(
     """
     from cw.reconcile import _transcript_age_seconds, _transcript_recently_active
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     worktree = tmp_path / "wt-trailing-meta"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -2414,7 +2296,6 @@ def test_transcript_recently_active_ignores_trailing_metadata_write(
 def test_transcript_age_seconds_falls_back_to_mtime_without_content_timestamp(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No parseable content timestamp anywhere → fall back to mtime (#1076).
 
@@ -2424,9 +2305,7 @@ def test_transcript_age_seconds_falls_back_to_mtime_without_content_timestamp(
     """
     from cw.reconcile import _transcript_age_seconds, _transcript_recently_active
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     worktree = tmp_path / "wt-fallback-mtime"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -2444,15 +2323,12 @@ def test_transcript_age_seconds_falls_back_to_mtime_without_content_timestamp(
 def test_transcript_recently_active_widens_to_subagent_transcript(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1283: a stale registered transcript but a fresh sibling subagent
     transcript in the same project dir -> recently active (widened lookup)."""
     from cw.reconcile import _transcript_recently_active
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-widen-active"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
@@ -2474,15 +2350,12 @@ def test_transcript_recently_active_widens_to_subagent_transcript(
 def test_transcript_age_seconds_widens_to_subagent_transcript(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1283: age is computed from the FRESHER sibling, not the stale registered
     transcript."""
     from cw.reconcile import _transcript_age_seconds
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-widen-age"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
@@ -2504,16 +2377,13 @@ def test_transcript_age_seconds_widens_to_subagent_transcript(
 def test_transcript_age_seconds_widens_to_nested_subagent_transcript(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1431: a fresh subagent transcript nested under a subdirectory (e.g.
     ``<uuid>/subagents/agent-x.jsonl``) must widen liveness too, not just a
     flat sibling -- the glob must be recursive."""
     from cw.reconcile import _transcript_age_seconds
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-widen-nested-age"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
@@ -2537,16 +2407,13 @@ def test_transcript_age_seconds_widens_to_nested_subagent_transcript(
 def test_transcript_recently_active_ignores_stale_prior_session_transcript(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1283 regression guard: a sibling transcript from a PRIOR session (mtime
     before started_at) must NOT count -- the mtime > started_at guard is applied
     per-file across the whole glob, not just the registered transcript."""
     from cw.reconcile import _transcript_recently_active
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-widen-guard"
     # Session starts at 00:10; a prior-session sibling's mtime (00:09:30) is
     # recent relative to `now` (00:11:00) but predates this session's start.
@@ -2575,9 +2442,7 @@ def test_project_transcripts_latest_timestamp_isolates_one_bad_sibling(
     aborted the whole glob scan and returned None."""
     from cw.reconcile import _transcript_recently_active
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-widen-partial-fail"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
@@ -2618,9 +2483,7 @@ def test_widened_transcript_timestamp_survives_primary_transcript_oserror(
     before project_ts was ever computed."""
     from cw.reconcile import _transcript_age_seconds, _transcript_recently_active
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-widen-primary-fail"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
@@ -3254,14 +3117,11 @@ def _make_locate_session(
 def test_locate_by_csid_returns_path(
     tmp_path: Path,
     tmp_config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """claude_session_id set and file exists → returns that path."""
     from cw.reconcile import _locate_session_transcript
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     worktree = tmp_path / "wt-csid"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -3284,14 +3144,11 @@ def test_locate_by_csid_returns_path(
 def test_locate_by_csid_missing_file(
     tmp_path: Path,
     tmp_config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """claude_session_id set but file absent → None."""
     from cw.reconcile import _locate_session_transcript
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     worktree = tmp_path / "wt-csid-missing"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -3313,14 +3170,11 @@ def test_locate_by_csid_missing_file(
 def test_locate_by_surface_ref_precise_glob(
     tmp_path: Path,
     tmp_config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """surface_ref set, matching file mtime > started_at → returns Path."""
     from cw.reconcile import _locate_session_transcript
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     worktree = tmp_path / "wt-sref"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -3346,7 +3200,6 @@ def test_locate_by_surface_ref_precise_glob(
 def test_locate_excludes_sibling_by_prefix(
     tmp_path: Path,
     tmp_config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reused-worktree scenario: sibling transcript (different surface_ref,
     mtime NEWER than target's started_at) does NOT win; the target's own
@@ -3355,9 +3208,7 @@ def test_locate_excludes_sibling_by_prefix(
     """
     from cw.reconcile import _locate_session_transcript
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     worktree = tmp_path / "wt-sibling"
     started_at = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
@@ -3395,14 +3246,11 @@ def test_locate_excludes_sibling_by_prefix(
 def test_locate_stale_mtime_returns_none(
     tmp_path: Path,
     tmp_config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """surface_ref set, matching file exists but mtime <= started_at → None."""
     from cw.reconcile import _locate_session_transcript
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     worktree = tmp_path / "wt-stale-sref"
     started_at = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
@@ -3429,14 +3277,11 @@ def test_locate_stale_mtime_returns_none(
 def test_locate_no_surface_ref_no_csid(
     tmp_path: Path,
     tmp_config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Both surface_ref and claude_session_id are None → None (no fallback)."""
     from cw.reconcile import _locate_session_transcript
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     worktree = tmp_path / "wt-no-ids"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -3464,14 +3309,11 @@ def test_locate_no_surface_ref_no_csid(
 def test_csid_from_transcript_via_helper(
     tmp_path: Path,
     tmp_config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """_csid_from_transcript delegates to _locate_session_transcript; returns stem."""
     from cw.reconcile import _csid_from_transcript
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-csid-helper"
@@ -3557,7 +3399,6 @@ def _make_sentinel_record(payload: dict[str, Any]) -> dict[str, Any]:
 def test_parse_sentinel_from_blocks_last_match_skips_documented_example(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Multi-block: documented example first, real sentinel second → real one returned.
 
@@ -3567,9 +3408,7 @@ def test_parse_sentinel_from_blocks_last_match_skips_documented_example(
     """
     from cw.reconcile._shared import _parse_sentinel_from_blocks
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-591"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
@@ -3594,7 +3433,6 @@ def test_parse_sentinel_from_blocks_last_match_skips_documented_example(
 def test_parse_sentinel_from_blocks_example_only_returns_none(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Only the documented example block present → treated as no sentinel (None).
 
@@ -3603,9 +3441,7 @@ def test_parse_sentinel_from_blocks_example_only_returns_none(
     """
     from cw.reconcile._shared import _parse_sentinel_from_blocks
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-591b"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
@@ -3833,7 +3669,6 @@ class TestParseAnySentinelFromTranscript:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Layer 2 fallthrough: csid transcript found but no sentinel; surface_ref
         transcript (distinct file) carries review_pending_approval → returned.
@@ -3844,9 +3679,6 @@ class TestParseAnySentinelFromTranscript:
         """
         from cw.reconcile._shared import _parse_any_sentinel_from_transcript
 
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
         worktree = tmp_path / "wt-892-layer2"
         project_dir = claude_project_dir(worktree)
         project_dir.mkdir(parents=True)
@@ -3873,14 +3705,10 @@ class TestParseAnySentinelFromTranscript:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Both csid transcript and surface_ref transcript lack a sentinel → None."""
         from cw.reconcile._shared import _parse_any_sentinel_from_transcript
 
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
         worktree = tmp_path / "wt-892-none"
         project_dir = claude_project_dir(worktree)
         project_dir.mkdir(parents=True)
@@ -3901,15 +3729,11 @@ class TestParseAnySentinelFromTranscript:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Regression: when csid transcript has a sentinel, Layer 1 returns it
         immediately without consulting surface_ref (Layer 2 never fires)."""
         from cw.reconcile._shared import _parse_any_sentinel_from_transcript
 
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
         worktree = tmp_path / "wt-892-layer1-wins"
         project_dir = claude_project_dir(worktree)
         project_dir.mkdir(parents=True)
@@ -3938,14 +3762,10 @@ class TestParseAnySentinelFromTranscript:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """No csid set — existing csid=None path still works via Layer 2 only."""
         from cw.reconcile._shared import _parse_any_sentinel_from_transcript
 
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
         worktree = tmp_path / "wt-892-no-csid"
         project_dir = claude_project_dir(worktree)
         project_dir.mkdir(parents=True)
@@ -3981,16 +3801,12 @@ class TestSalvageTerminalResultTwoLayerFallback:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Regression for #1353: csid (V2) transcript exists but carries no
         sentinel; surface_ref (V1) transcript carries review_pending_approval.
         _salvage_terminal_result must fall through to Layer 2 and find it."""
         from cw.reconcile._shared import _salvage_terminal_result
 
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
         worktree = tmp_path / "wt-1353-layer2"
         project_dir = claude_project_dir(worktree)
         project_dir.mkdir(parents=True)
@@ -4015,15 +3831,11 @@ class TestSalvageTerminalResultTwoLayerFallback:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Layer 1 wins (unchanged behavior) — guards the delegation doesn't
         regress the already-working case."""
         from cw.reconcile._shared import _salvage_terminal_result
 
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
         worktree = tmp_path / "wt-1353-layer1-wins"
         project_dir = claude_project_dir(worktree)
         project_dir.mkdir(parents=True)
@@ -4048,7 +3860,6 @@ class TestSalvageTerminalResultTwoLayerFallback:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """csid transcript has no sentinel; surface_ref transcript carries
         stage_complete (INTERMEDIATE_ADVANCE_STATUSES, NOT SALVAGE_TERMINAL).
@@ -4056,9 +3867,6 @@ class TestSalvageTerminalResultTwoLayerFallback:
         of the shared two-layer walk."""
         from cw.reconcile._shared import _salvage_terminal_result
 
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
         worktree = tmp_path / "wt-1353-intermediate"
         project_dir = claude_project_dir(worktree)
         project_dir.mkdir(parents=True)
@@ -4079,15 +3887,11 @@ class TestSalvageTerminalResultTwoLayerFallback:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """No claude_session_id set, surface_ref-only transcript carries
         no_op. Layer-2-only path still works after delegation."""
         from cw.reconcile._shared import _salvage_terminal_result
 
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
         worktree = tmp_path / "wt-1353-no-csid"
         project_dir = claude_project_dir(worktree)
         project_dir.mkdir(parents=True)
@@ -4108,14 +3912,10 @@ class TestSalvageTerminalResultTwoLayerFallback:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Both transcripts empty of any sentinel framing -> None."""
         from cw.reconcile._shared import _salvage_terminal_result
 
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
         worktree = tmp_path / "wt-1353-neither"
         project_dir = claude_project_dir(worktree)
         project_dir.mkdir(parents=True)
@@ -4171,13 +3971,10 @@ def _parse_scope_guard_sentinel(
 def test_salvaged_sentinel_scope_corrected_against_git_facts(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     make_git_repo: Any,
 ) -> None:
     """Inflated self-report from a stale merge-base → corrected to real numbers."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = _make_stale_base_repo(make_git_repo, "wt-scope-guard")
 
     result = _parse_scope_guard_sentinel(
@@ -4195,13 +3992,10 @@ def test_salvaged_sentinel_scope_corrected_against_git_facts(
 def test_salvaged_sentinel_scope_honours_client_default_branch(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     make_git_repo: Any,
 ) -> None:
     """The measurement resolves the client's configured default_branch, not 'main'."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = _make_stale_base_repo(
         make_git_repo, "wt-scope-trunk", default_branch="trunk"
     )
@@ -4218,7 +4012,6 @@ def test_salvaged_sentinel_scope_honours_client_default_branch(
 def test_salvaged_sentinel_scope_unknown_client_key_logs_warning(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     make_git_repo: Any,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -4229,9 +4022,7 @@ def test_salvaged_sentinel_scope_unknown_client_key_logs_warning(
     resolved this case via a silent dict.get() miss with no WARNING, diverging
     from the Stop-hook family's logged get_client()-raises path.
     """
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = _make_stale_base_repo(make_git_repo, "wt-scope-unknown-client")
     config_dir = tmp_config_dir / ".config" / "cw"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -4253,12 +4044,9 @@ def test_salvaged_sentinel_scope_unknown_client_key_logs_warning(
 def test_salvaged_sentinel_scope_unverifiable_worktree_left_alone(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Non-git worktree → measurement unavailable, self-report preserved."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-scope-nogit"
     worktree.mkdir()
 
@@ -4285,9 +4073,7 @@ def test_salvaged_sentinel_scope_survives_unresolvable_client_config(
     """
     from cw.exceptions import CwError
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = _make_stale_base_repo(make_git_repo, "wt-scope-badcfg")
 
     def _boom() -> dict[str, ClientConfig]:
