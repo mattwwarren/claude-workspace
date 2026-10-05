@@ -80,6 +80,16 @@ def doctor(reap: bool, session: str | None, as_json: bool) -> None:
       the hook context lock so the worktree can be reused.
       Recipe: cw doctor --reap
 
+    \b
+    wedge/active-routed-result-stranded
+      ACTIVE/IDLE session whose result was already routed (its ticket's row
+      advanced) but which never completed: no occupied row binds it, its
+      transcript is stale, and it still holds a ceiling slot and worktree.
+      Reported by every cw doctor run; nothing closes it automatically.
+      Action (--reap only): mark EVERY session of this class COMPLETED and
+      stop its daemon worker; never touches a queue row.
+      Recipe: cw doctor --reap, or cw spawn close --confirmed-dead <id>
+
     ``--reap`` also reconciles session state against the native daemon
     roster, marking phantom sessions COMPLETED and reverting their tickets
     to PENDING.

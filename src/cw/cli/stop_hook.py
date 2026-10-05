@@ -612,8 +612,12 @@ def _resolve_and_complete_headless_session(
     ``claude_session_id`` mutation, no ``save_state``, no harvest. Safe to
     split because ``_apply_sentinel_to_task`` takes its own
     ``dev_queue_lock``, persists its own queue write, and never mutates
-    *session*. A later Stop (background work drained) or the idle-sweep
-    backstop completes the session.
+    *session*. A later Stop (background work drained) completes the session.
+    The idle sweep does not: once this route stamps the consumed marker,
+    ``holds_staged_emit_result`` is False. If no later Stop ever fires, the
+    stranded-routed-result detector (``cw.reconcile.routed_result_sessions``,
+    #2524) pages the operator once, and the operator closes it with
+    ``cw doctor --reap`` or ``cw spawn close``.
     """
     parsed_sentinel: AutoDevResult | BlockedResult | None = None
     # Issue #536: emit precedence. When the producer already pushed a
@@ -992,8 +996,10 @@ def signal_stop() -> None:
     if bg_count:
         # #2458: the staged result has routed the task; the session stays
         # live (and its daemon running) for the background work still in
-        # flight. A later Stop with background_tasks drained, or the idle
-        # sweep, completes it.
+        # flight. A later Stop with background_tasks drained completes it.
+        # If none ever fires, reconcile's stranded-routed-result sweep pages
+        # the operator once (#2524) and the operator closes it (cw doctor
+        # --reap or cw spawn close); the idle sweep no longer routes it.
         return
 
     payload = _build_completed_payload(
