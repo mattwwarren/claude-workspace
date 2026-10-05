@@ -603,6 +603,22 @@ authorities can route that staged result to the dev-queue row:
   remains of the staged result. That audit trace is best-effort since #2465: if
 the event inbox is unwritable the append is skipped and only the logged
 `payload_digest` records the staged result.
+- **A stranded routed session (#2524).** Once the Stop hook has routed a
+  staged result while `background_tasks` was still non-empty, it merges a
+  `sentinel_partial_route_consumed` marker into `last_result`. From then on
+  neither the idle sweep (the result is no longer "staged and routable") nor
+  the stalled sweep (which skips emit_cli results) completes the session; only
+  a later Stop does. If that Stop never fires, the session stays ACTIVE,
+  holding a ceiling slot and its worktree. Reconcile pages it **once**
+  (`session.needs_attention`, `paused_status=routed_result_session_stranded`)
+  when its worker is still in the roster, no RUNNING/BLOCKED_ON_USER/
+  AWAITING_OPERATOR_SIGNOFF row is bound to it, its transcript sits in the
+  30m/45m liveness bucket and no background work is still draining. Nothing
+  closes it automatically, under any `reap_policy`. `cw doctor` reports it as
+  `wedge/active-routed-result-stranded`; close it with
+  `cw spawn close --confirmed-dead <id>` (this one session) or
+  `cw doctor --reap` (every session of the class). Either way the already
+  advanced row is left alone.
 - **`cw spawn close`.** Closing a DAEMON session routes a staged result first.
   The #317 cancel runs only when nothing is staged, the staged dict does not
   reconstruct, or the route is refused.
