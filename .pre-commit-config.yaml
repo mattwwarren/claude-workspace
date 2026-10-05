@@ -27,6 +27,17 @@ repos:
         pass_filenames: false
         entry: mypy src/
 
+  # Lints .github/workflows/*.yml: expression/context typing, `if:` syntax,
+  # step-id references, and `run:` scripts (#1626). CI runs it through its
+  # existing all-hooks "Validate pre-commit hook config" step, not a dedicated
+  # step. `language: golang`, so the first run bootstraps Go (needs network).
+  # The shellcheck pass over `run:` blocks only fires when `shellcheck` is on
+  # PATH.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+
   - repo: local
     hooks:
       # Mirrors the `uv lock --check` step in .github/workflows/ci.yml, which a

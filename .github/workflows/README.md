@@ -2,7 +2,7 @@
 
 | Workflow | Schedule | Runner | Purpose |
 |---|---|---|---|
-| `ci.yml` | Push / PR | ubuntu + macOS | Lint, type check, unit tests, integration tests, diff coverage |
+| `ci.yml` | Push / PR | ubuntu + macOS | Lint, type check, workflow lint (actionlint), unit tests, integration tests, diff coverage |
 | `nightly-native.yml` | Manual (`workflow_dispatch`) | ubuntu | Full test suite (incl. integration) + native daemon smoke tests |
 | `nightly-codex.yml` | Manual (`workflow_dispatch`) | ubuntu | Live `codex exec` CLI contract suite (requires `OPENAI_CI_KEY`) |
 | `release.yml` | Tag push | ubuntu | Creates a GitHub Release via `softprops/action-gh-release` (fixed install-instructions body) and closes `dispatch-drift` issues on any `v*` tag push; no PyPI publish step exists — this is the manual-tag path (`release-tag.yml` is the automated release path and creates its own release directly, so this rarely fires against a fresh tag) |

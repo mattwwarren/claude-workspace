@@ -118,9 +118,11 @@ jobs:
               ;;
           esac
 
-          echo "event_type=$EVENT_TYPE" >> "$GITHUB_OUTPUT"
-          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-          echo "payload=$PAYLOAD" >> "$GITHUB_OUTPUT"
+          {
+            echo "event_type=$EVENT_TYPE"
+            echo "pr_number=$PR_NUMBER"
+            echo "payload=$PAYLOAD"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Post event to relay
         if: steps.resolve.outputs.skip != 'true'

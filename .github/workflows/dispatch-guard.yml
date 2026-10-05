@@ -52,9 +52,9 @@ jobs:
             src/cw/spawn.py)
 
           if [ -n "$CHANGED" ]; then
-            echo "unreleased=true" >> "$GITHUB_OUTPUT"
-            echo "last_tag=${LAST_TAG}" >> "$GITHUB_OUTPUT"
             {
+              echo "unreleased=true"
+              echo "last_tag=${LAST_TAG}"
               echo "changed_files<<EOF"
               echo "$CHANGED"
               echo "EOF"
