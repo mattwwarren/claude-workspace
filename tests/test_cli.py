@@ -55,6 +55,7 @@ from cw.models import (
     STAGED_EMIT_RESULT_KEY,
     ClientConfig,
     CwState,
+    LaneConfig,
     LastResultSource,
     OrchestratorEventType,
     ParkCommentMarker,
@@ -66,6 +67,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.sprint import AppliedBuildout, BuildoutPlan
+from tests._clients_yaml import ClientSpec, staged_client, write_clients_yaml
 from tests._reconcile_helpers import (
     SCOPE_GUARD_FILES,
     SCOPE_GUARD_LINES,
@@ -1956,7 +1958,7 @@ class TestSignalStop:
         # B2: apply_staged_decision needs the pipeline to route shipped →
         # COMPLETED. Place the task at the terminal stage (mirrors the #285
         # shipped-routing test above).
-        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        write_clients_yaml(staged_client("test-client", "/tmp/ws-test"))
         dev_store = DevQueueStore(
             tasks=[
                 TicketTask(
@@ -2742,7 +2744,7 @@ class TestSignalStop:
 
         # B2: apply_staged_decision needs the pipeline to route shipped → COMPLETED.
         # Place task at terminal stage (FINALIZE) so shipped there → COMPLETED.
-        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        write_clients_yaml(staged_client("test-client", "/tmp/ws-test"))
         store2 = load_dev_queue()
         task2 = next(t for t in store2.tasks if t.ticket_id == self.SEED_TICKET_ID)
         task2.status = QueueItemStatus.RUNNING
@@ -2824,7 +2826,7 @@ class TestSignalStop:
         worktree, session = self._setup_headless_session(
             tmp_path, f"sess-918-{name}", f"worktree-918-{name}"
         )
-        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        write_clients_yaml(staged_client("test-client", "/tmp/ws-test"))
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -3058,7 +3060,7 @@ class TestSignalStop:
             "worktree-1031-mismatch",
             surface_ref="sfref-1031-mismatch",
         )
-        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        write_clients_yaml(staged_client("test-client", "/tmp/ws-test"))
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -3157,7 +3159,7 @@ class TestSignalStop:
             "worktree-1189-race",
             surface_ref="sfref-1189-race",
         )
-        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        write_clients_yaml(staged_client("test-client", "/tmp/ws-test"))
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -3259,7 +3261,7 @@ class TestSignalStop:
             "worktree-263-schema-unsupported",
             surface_ref="sfref-263-schema",
         )
-        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        write_clients_yaml(staged_client("test-client", "/tmp/ws-test"))
         dev_store = DevQueueStore(
             tasks=[
                 TicketTask(
@@ -3339,7 +3341,7 @@ class TestSignalStop:
             "worktree-263-schema-unsupported-cap",
             surface_ref="sfref-263-schema",
         )
-        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        write_clients_yaml(staged_client("test-client", "/tmp/ws-test"))
         dev_store = DevQueueStore(
             tasks=[
                 TicketTask(
@@ -3641,7 +3643,7 @@ class TestSignalStop:
         worktree, session = self._setup_headless_session(
             tmp_path, "sess-1149-later", "worktree-1149-later"
         )
-        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        write_clients_yaml(staged_client("test-client", "/tmp/ws-test"))
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -5037,7 +5039,7 @@ class TestSignalStop:
             f"worktree-2458-{name}",
             surface_ref=f"sfref-2458-{name}",
         )
-        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        write_clients_yaml(staged_client("test-client", "/tmp/ws-test"))
         self._stage_emit_cli_result(session.id, payload)
         self._seed_running_row(session.id, stage=stage, attempts=attempts)
         self._write_headless_context(
@@ -7858,20 +7860,6 @@ def test_display_status_reconciles_phantom_active_sessions(
 class TestDevQueueRefreshAll:
     """Tests for `cw dev-queue refresh-all`."""
 
-    def _write_clients_yaml(
-        self,
-        tmp_config_dir: Path,
-        clients: list[tuple[str, str]],
-    ) -> None:
-        """Write a minimal clients.yaml with the given (name, workspace_path) tuples."""
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        lines = ["clients:\n"]
-        for name, ws in clients:
-            lines.append(f"  {name}:\n")
-            lines.append(f"    workspace_path: {ws}\n")
-        (config_dir / "clients.yaml").write_text("".join(lines))
-
     def test_refresh_all_runs_fast_forward_for_each_client(
         self,
         tmp_config_dir: Path,
@@ -7883,9 +7871,8 @@ class TestDevQueueRefreshAll:
         ws_a.mkdir()
         ws_b = tmp_path / "ws-b"
         ws_b.mkdir()
-        self._write_clients_yaml(
-            tmp_config_dir,
-            [("client-a", str(ws_a)), ("client-b", str(ws_b))],
+        write_clients_yaml(
+            ClientSpec("client-a", str(ws_a)), ClientSpec("client-b", str(ws_b))
         )
 
         called_clients: list[str] = []
@@ -7916,7 +7903,7 @@ class TestDevQueueRefreshAll:
         """Same before/after SHA → 'already up to date' in output."""
         ws = tmp_path / "ws"
         ws.mkdir()
-        self._write_clients_yaml(tmp_config_dir, [("my-client", str(ws))])
+        write_clients_yaml(ClientSpec("my-client", str(ws)))
 
         monkeypatch.setattr(
             "cw.cli.dev_queue.tasks.fast_forward_main",
@@ -7940,7 +7927,7 @@ class TestDevQueueRefreshAll:
         """Different before/after SHA → output shows both SHAs."""
         ws = tmp_path / "ws"
         ws.mkdir()
-        self._write_clients_yaml(tmp_config_dir, [("my-client", str(ws))])
+        write_clients_yaml(ClientSpec("my-client", str(ws)))
 
         monkeypatch.setattr(
             "cw.cli.dev_queue.tasks.fast_forward_main",
@@ -7969,9 +7956,8 @@ class TestDevQueueRefreshAll:
         ws_a.mkdir()
         ws_b = tmp_path / "ws-b"
         ws_b.mkdir()
-        self._write_clients_yaml(
-            tmp_config_dir,
-            [("client-a", str(ws_a)), ("client-b", str(ws_b))],
+        write_clients_yaml(
+            ClientSpec("client-a", str(ws_a)), ClientSpec("client-b", str(ws_b))
         )
 
         called_clients: list[str] = []
@@ -8006,7 +7992,7 @@ class TestDevQueueRefreshAll:
 
         ws = tmp_path / "ws"
         ws.mkdir()
-        self._write_clients_yaml(tmp_config_dir, [("my-client", str(ws))])
+        write_clients_yaml(ClientSpec("my-client", str(ws)))
 
         monkeypatch.setattr(
             "cw.cli.dev_queue.tasks.fast_forward_main",
@@ -8037,9 +8023,9 @@ class TestDevQueueRefreshAll:
 
         ws_b = tmp_path / "ws-b"
         ws_b.mkdir()
-        self._write_clients_yaml(
-            tmp_config_dir,
-            [("client-a", str(tmp_path / "nonexistent")), ("client-b", str(ws_b))],
+        write_clients_yaml(
+            ClientSpec("client-a", str(tmp_path / "nonexistent")),
+            ClientSpec("client-b", str(ws_b)),
         )
 
         called_clients: list[str] = []
@@ -8072,7 +8058,7 @@ class TestDevQueueRefreshAll:
         from cw.exceptions import MissingWorkspaceError
 
         ws = tmp_path / "nonexistent"
-        self._write_clients_yaml(tmp_config_dir, [("client-a", str(ws))])
+        write_clients_yaml(ClientSpec("client-a", str(ws)))
 
         def _mock_ff(client: object, **_kwargs: object) -> tuple[str, str]:
             msg = "workspace missing for client-a"
@@ -8098,13 +8084,10 @@ class TestDevQueueRefreshAll:
 
         ws_c = tmp_path / "ws-c"
         ws_c.mkdir()
-        self._write_clients_yaml(
-            tmp_config_dir,
-            [
-                ("client-a", str(tmp_path / "nonexistent")),
-                ("client-b", str(tmp_path / "ws-b")),
-                ("client-c", str(ws_c)),
-            ],
+        write_clients_yaml(
+            ClientSpec("client-a", str(tmp_path / "nonexistent")),
+            ClientSpec("client-b", str(tmp_path / "ws-b")),
+            ClientSpec("client-c", str(ws_c)),
         )
 
         def _mock_ff(client: object, **_kwargs: object) -> tuple[str, str]:
@@ -8394,43 +8377,6 @@ class TestDevQueueAddHoldFinalize:
 # ---------------------------------------------------------------------------
 
 
-def _write_clients_yaml_for_test(
-    tmp_config_dir: Path,
-    clients: list[tuple[str, str]],
-) -> None:
-    """Write a minimal clients.yaml with the given (name, workspace_path) tuples."""
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    lines = ["clients:\n"]
-    for name, ws in clients:
-        lines.append(f"  {name}:\n")
-        lines.append(f"    workspace_path: {ws}\n")
-    (config_dir / "clients.yaml").write_text("".join(lines))
-
-
-def _write_staged_clients_yaml_for_test(
-    tmp_config_dir: Path,
-    client_name: str,
-    workspace_path: str = "/tmp/ws-test",
-) -> None:
-    """Write a staged clients.yaml for B2 advance decision tests.
-
-    Required when a sentinel routes through apply_staged_decision, which
-    calls _stage_advance and needs the client's pipeline on disk (#698).
-    """
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "clients.yaml").write_text(
-        f"clients:\n"
-        f"  {client_name}:\n"
-        f"    workspace_path: {workspace_path}\n"
-        f"    default_branch: main\n"
-        f"    blocked_result_requeue_enabled: true\n"
-        f"    pipeline:\n"
-        f"      stages: [plan, impl, review, finalize]\n"
-    )
-
-
 def _make_git_workspace_for_test(tmp_path: Path, name: str) -> Path:
     """Create a minimal git repo suitable for spawn_create_impl's _validate_worktree."""
     import os
@@ -8466,7 +8412,7 @@ class TestOrchestratorStart:
         from cw.native_daemon import FakeNativeDaemonClient
 
         ws = _make_git_workspace_for_test(tmp_path, "ws-explicit")
-        _write_clients_yaml_for_test(tmp_config_dir, [("mytest", str(ws))])
+        write_clients_yaml(ClientSpec("mytest", str(ws)))
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
 
@@ -8492,7 +8438,7 @@ class TestOrchestratorStart:
         """--client unknown-name exits with error mentioning the unknown name."""
         ws = tmp_path / "ws-unknown"
         ws.mkdir()
-        _write_clients_yaml_for_test(tmp_config_dir, [("real-client", str(ws))])
+        write_clients_yaml(ClientSpec("real-client", str(ws)))
 
         runner = CliRunner()
         result = runner.invoke(main, ["orchestrator-start", "--client", "unknown-name"])
@@ -8507,7 +8453,7 @@ class TestOrchestratorStart:
         from cw.native_daemon import FakeNativeDaemonClient
 
         ws = _make_git_workspace_for_test(tmp_path, "ws-default")
-        _write_clients_yaml_for_test(tmp_config_dir, [("first-client", str(ws))])
+        write_clients_yaml(ClientSpec("first-client", str(ws)))
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
 
@@ -8526,7 +8472,7 @@ class TestOrchestratorStart:
         from cw.native_daemon import FakeNativeDaemonClient
 
         ws = _make_git_workspace_for_test(tmp_path, "ws-args")
-        _write_clients_yaml_for_test(tmp_config_dir, [("args-client", str(ws))])
+        write_clients_yaml(ClientSpec("args-client", str(ws)))
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
 
@@ -9202,7 +9148,7 @@ class TestDevQueueRunClientFilter:
         from cw.cli import main
         from cw.cli.dev_queue import run as cli_module
 
-        _write_clients_yaml_for_test(tmp_config_dir, [("my-client", str(tmp_path))])
+        write_clients_yaml(ClientSpec("my-client", str(tmp_path)))
 
         captured_client: list[str | None] = []
 
@@ -9269,7 +9215,7 @@ class TestDevQueueRunClientFilter:
         """--client unknown-name exits with non-zero and mentions the name."""
         from cw.cli import main
 
-        _write_clients_yaml_for_test(tmp_config_dir, [("real-client", str(tmp_path))])
+        write_clients_yaml(ClientSpec("real-client", str(tmp_path)))
 
         runner = CliRunner()
         result = runner.invoke(
@@ -9404,7 +9350,7 @@ class TestDevQueueServe:
         from cw.cli import main
         from cw.cli.dev_queue import run as cli_module
 
-        _write_clients_yaml_for_test(tmp_config_dir, [("my-client", str(tmp_path))])
+        write_clients_yaml(ClientSpec("my-client", str(tmp_path)))
 
         captured, fake_fn = self._fake_serve()
         monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
@@ -9426,7 +9372,7 @@ class TestDevQueueServe:
         from cw.cli import main
         from cw.cli.dev_queue import run as cli_module
 
-        _write_clients_yaml_for_test(tmp_config_dir, [("my-client", str(tmp_path))])
+        write_clients_yaml(ClientSpec("my-client", str(tmp_path)))
 
         captured, fake_fn = self._fake_serve()
         monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
@@ -9554,9 +9500,9 @@ class TestDevQueueSingletonLock:
         """
         from cw.cli import main
 
-        _write_clients_yaml_for_test(
-            tmp_config_dir,
-            [("client-a", str(tmp_path / "a")), ("client-b", str(tmp_path / "b"))],
+        write_clients_yaml(
+            ClientSpec("client-a", str(tmp_path / "a")),
+            ClientSpec("client-b", str(tmp_path / "b")),
         )
 
         runner = CliRunner()
@@ -14822,46 +14768,17 @@ class TestDoctorTargetedReap:
 # ---------------------------------------------------------------------------
 
 
-def _write_clients_yaml_with_lanes(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    client_name: str,
-    lanes: list[str],
-) -> None:
-    """Write clients.yaml with named lanes for a client."""
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    ws = tmp_path / "ws"
-    ws.mkdir(parents=True, exist_ok=True)
-    lane_yaml = "".join(
-        f"      - name: {ln}\n        max_parallel: 1\n" for ln in lanes
-    )
-    (config_dir / "clients.yaml").write_text(
-        f"clients:\n  {client_name}:\n    workspace_path: {ws}\n    lanes:\n{lane_yaml}"
-    )
-
-
-def _write_clients_yaml_no_lanes(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    client_name: str,
-) -> None:
-    """Write clients.yaml without explicit lanes (uses default)."""
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    ws = tmp_path / "ws"
-    ws.mkdir(parents=True, exist_ok=True)
-    (config_dir / "clients.yaml").write_text(
-        f"clients:\n  {client_name}:\n    workspace_path: {ws}\n"
-    )
-
-
 class TestLaneLs:
     def test_lane_ls_lists_declared_lanes(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        _write_clients_yaml_with_lanes(
-            tmp_config_dir, tmp_path, "acme", ["default", "urgent"]
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="urgent")],
+            ),
+            ensure_workspaces=True,
         )
         runner = CliRunner()
         result = runner.invoke(main, ["lane", "ls", "acme"])
@@ -14870,8 +14787,13 @@ class TestLaneLs:
         assert "urgent" in result.output
 
     def test_lane_ls_json_output(self, tmp_config_dir: Path, tmp_path: Path) -> None:
-        _write_clients_yaml_with_lanes(
-            tmp_config_dir, tmp_path, "acme", ["default", "urgent"]
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="urgent")],
+            ),
+            ensure_workspaces=True,
         )
         runner = CliRunner()
         result = runner.invoke(main, ["lane", "ls", "acme", "--json"])
@@ -14885,11 +14807,13 @@ class TestLaneLs:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """cw lane ls -c/--client acme works like the CLIENT positional (#1607)."""
-        _write_clients_yaml_with_lanes(
-            tmp_config_dir=tmp_config_dir,
-            tmp_path=tmp_path,
-            client_name="acme",
-            lanes=["default", "urgent"],
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="urgent")],
+            ),
+            ensure_workspaces=True,
         )
         runner = CliRunner()
         result = runner.invoke(cli=main, args=["lane", "ls", "-c", "acme"])
@@ -14900,11 +14824,13 @@ class TestLaneLs:
     def test_lane_ls_rejects_positional_and_option_together(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        _write_clients_yaml_with_lanes(
-            tmp_config_dir=tmp_config_dir,
-            tmp_path=tmp_path,
-            client_name="acme",
-            lanes=["default", "urgent"],
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="urgent")],
+            ),
+            ensure_workspaces=True,
         )
         runner = CliRunner()
         result = runner.invoke(cli=main, args=["lane", "ls", "acme", "-c", "acme"])
@@ -14926,7 +14852,7 @@ class TestLaneAdd:
     def test_lane_add_writes_clients_yaml(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        _write_clients_yaml_no_lanes(tmp_config_dir, tmp_path, "acme")
+        write_clients_yaml(ClientSpec("acme", tmp_path / "ws"), ensure_workspaces=True)
 
         runner = CliRunner()
         result = runner.invoke(main, ["lane", "add", "acme", "fast"])
@@ -14942,7 +14868,7 @@ class TestLaneAdd:
     def test_lane_add_emits_lane_created_event(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        _write_clients_yaml_no_lanes(tmp_config_dir, tmp_path, "acme")
+        write_clients_yaml(ClientSpec("acme", tmp_path / "ws"), ensure_workspaces=True)
         from cw.events import read_events
         from cw.models import OrchestratorEventType
 
@@ -14961,7 +14887,10 @@ class TestLaneAdd:
     def test_lane_add_duplicate_hard_fails(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        _write_clients_yaml_with_lanes(tmp_config_dir, tmp_path, "acme", ["default"])
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path / "ws", lanes=[LaneConfig(name="default")]),
+            ensure_workspaces=True,
+        )
         runner = CliRunner()
         result = runner.invoke(main, ["lane", "add", "acme", "default"])
         assert result.exit_code != 0
@@ -14971,11 +14900,7 @@ class TestLaneAdd:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """cw lane add fast -c acme works like the CLIENT positional (#1607)."""
-        _write_clients_yaml_no_lanes(
-            tmp_config_dir=tmp_config_dir,
-            tmp_path=tmp_path,
-            client_name="acme",
-        )
+        write_clients_yaml(ClientSpec("acme", tmp_path / "ws"), ensure_workspaces=True)
 
         runner = CliRunner()
         result = runner.invoke(cli=main, args=["lane", "add", "fast", "-c", "acme"])
@@ -14992,8 +14917,13 @@ class TestLaneRm:
     def test_lane_rm_removes_from_clients_yaml(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        _write_clients_yaml_with_lanes(
-            tmp_config_dir, tmp_path, "acme", ["default", "fast"]
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="fast")],
+            ),
+            ensure_workspaces=True,
         )
         runner = CliRunner()
         result = runner.invoke(main, ["lane", "rm", "acme", "fast"])
@@ -15008,8 +14938,13 @@ class TestLaneRm:
     def test_lane_rm_with_active_tasks_hard_fails(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        _write_clients_yaml_with_lanes(
-            tmp_config_dir, tmp_path, "acme", ["default", "urgent"]
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="urgent")],
+            ),
+            ensure_workspaces=True,
         )
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
@@ -15030,8 +14965,13 @@ class TestLaneRm:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """AWAITING_OPERATOR_SIGNOFF blocks lane removal like BLOCKED_ON_USER (#990)."""
-        _write_clients_yaml_with_lanes(
-            tmp_config_dir, tmp_path, "acme", ["default", "urgent"]
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="urgent")],
+            ),
+            ensure_workspaces=True,
         )
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
@@ -15052,11 +14992,13 @@ class TestLaneRm:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """cw lane rm fast -c acme works like the CLIENT positional (#1607)."""
-        _write_clients_yaml_with_lanes(
-            tmp_config_dir=tmp_config_dir,
-            tmp_path=tmp_path,
-            client_name="acme",
-            lanes=["default", "fast"],
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="fast")],
+            ),
+            ensure_workspaces=True,
         )
         runner = CliRunner()
         result = runner.invoke(cli=main, args=["lane", "rm", "fast", "-c", "acme"])
@@ -15071,11 +15013,13 @@ class TestLaneRm:
     def test_lane_rm_rejects_positional_and_option_together(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        _write_clients_yaml_with_lanes(
-            tmp_config_dir=tmp_config_dir,
-            tmp_path=tmp_path,
-            client_name="acme",
-            lanes=["default", "fast"],
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="fast")],
+            ),
+            ensure_workspaces=True,
         )
         runner = CliRunner()
         result = runner.invoke(
@@ -15096,8 +15040,13 @@ class TestLanePauseResume:
     def test_lane_pause_writes_override_and_emits_event(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        _write_clients_yaml_with_lanes(
-            tmp_config_dir, tmp_path, "acme", ["default", "slow"]
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="slow")],
+            ),
+            ensure_workspaces=True,
         )
         from cw.events import read_events
         from cw.models import OrchestratorEventType
@@ -15118,8 +15067,13 @@ class TestLanePauseResume:
     def test_lane_resume_writes_override_and_emits_event(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        _write_clients_yaml_with_lanes(
-            tmp_config_dir, tmp_path, "acme", ["default", "slow"]
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="slow")],
+            ),
+            ensure_workspaces=True,
         )
         from cw.events import read_events
         from cw.models import OrchestratorEventType
@@ -15142,8 +15096,13 @@ class TestLanePauseResume:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """cw lane resume clears the breaker's consecutive_spawn_errors counter."""
-        _write_clients_yaml_with_lanes(
-            tmp_config_dir, tmp_path, "acme", ["default", "slow"]
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="slow")],
+            ),
+            ensure_workspaces=True,
         )
         from cw.config import (
             _load_concurrency_overrides,
@@ -15173,11 +15132,13 @@ class TestLanePauseResume:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """cw lane pause slow -c acme works like the CLIENT positional (#1607)."""
-        _write_clients_yaml_with_lanes(
-            tmp_config_dir=tmp_config_dir,
-            tmp_path=tmp_path,
-            client_name="acme",
-            lanes=["default", "slow"],
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="slow")],
+            ),
+            ensure_workspaces=True,
         )
         from cw.events import read_events
         from cw.models import OrchestratorEventType
@@ -15198,11 +15159,13 @@ class TestLanePauseResume:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """cw lane resume slow -c acme works like the CLIENT positional (#1607)."""
-        _write_clients_yaml_with_lanes(
-            tmp_config_dir=tmp_config_dir,
-            tmp_path=tmp_path,
-            client_name="acme",
-            lanes=["default", "slow"],
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="slow")],
+            ),
+            ensure_workspaces=True,
         )
         from cw.events import read_events
         from cw.models import OrchestratorEventType
@@ -15231,7 +15194,7 @@ class TestConfigGroup:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """cw config (bare) calls show_config (backward compat)."""
-        _write_clients_yaml_no_lanes(tmp_config_dir, tmp_path, "acme")
+        write_clients_yaml(ClientSpec("acme", tmp_path / "ws"), ensure_workspaces=True)
         runner = CliRunner()
         with patch("cw.cli.config_cmds.show_config") as mock_cfg:
             result = runner.invoke(main, ["config"])
@@ -15240,7 +15203,7 @@ class TestConfigGroup:
 
     def test_config_show_subcommand(self, tmp_config_dir: Path, tmp_path: Path) -> None:
         """cw config show calls show_config."""
-        _write_clients_yaml_no_lanes(tmp_config_dir, tmp_path, "acme")
+        write_clients_yaml(ClientSpec("acme", tmp_path / "ws"), ensure_workspaces=True)
         runner = CliRunner()
         with patch("cw.cli.config_cmds.show_config") as mock_cfg:
             result = runner.invoke(main, ["config", "show"])
@@ -15351,7 +15314,10 @@ class TestDevQueueAddLane:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """--lane default (implicit) routes to default lane."""
-        _write_clients_yaml_with_lanes(tmp_config_dir, tmp_path, "acme", ["default"])
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path / "ws", lanes=[LaneConfig(name="default")]),
+            ensure_workspaces=True,
+        )
         from cw.dev_queue import load_dev_queue
         from cw.models import DEFAULT_LANE
 
@@ -15367,8 +15333,13 @@ class TestDevQueueAddLane:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """--lane fast routes to the fast lane."""
-        _write_clients_yaml_with_lanes(
-            tmp_config_dir, tmp_path, "acme", ["default", "fast"]
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="fast")],
+            ),
+            ensure_workspaces=True,
         )
         from cw.dev_queue import load_dev_queue
 
@@ -15386,7 +15357,10 @@ class TestDevQueueAddLane:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """--lane undeclared exits non-zero with helpful message."""
-        _write_clients_yaml_with_lanes(tmp_config_dir, tmp_path, "acme", ["default"])
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path / "ws", lanes=[LaneConfig(name="default")]),
+            ensure_workspaces=True,
+        )
         runner = CliRunner()
         result = runner.invoke(
             main, ["dev-queue", "add", "ACM-3", "-c", "acme", "--lane", "undeclared"]
@@ -15405,8 +15379,13 @@ class TestDevQueueMove:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """cw dev-queue move moves PENDING ticket and emits TICKET_MOVED event."""
-        _write_clients_yaml_with_lanes(
-            tmp_config_dir, tmp_path, "acme", ["default", "fast"]
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="fast")],
+            ),
+            ensure_workspaces=True,
         )
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.events import read_events
@@ -15445,8 +15424,13 @@ class TestDevQueueMove:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """cw dev-queue move on RUNNING task exits non-zero."""
-        _write_clients_yaml_with_lanes(
-            tmp_config_dir, tmp_path, "acme", ["default", "fast"]
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="fast")],
+            ),
+            ensure_workspaces=True,
         )
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus

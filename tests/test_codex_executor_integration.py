@@ -37,7 +37,7 @@ from cw.models import (
     StageExecutorConfig,
     TicketTask,
 )
-from tests.test_cli import _write_clients_yaml_for_test
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -102,7 +102,7 @@ def test_detached_codex_run_completes_session_without_parent(
         "wt-codex-detached", filename="new.py", content="def broken():\n"
     )
     _isolate_child_environment(monkeypatch, tmp_path)
-    _write_clients_yaml_for_test(tmp_config_dir, [("test", str(worktree))])
+    write_clients_yaml(ClientSpec("test", str(worktree)))
     client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
     task = TicketTask(ticket_id="T-detached", client="test", stage=Stage.REVIEW)
     add_ticket(

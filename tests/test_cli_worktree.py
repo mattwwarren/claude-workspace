@@ -10,7 +10,7 @@ from click.testing import CliRunner
 from cw.cli import main
 from cw.tracker import TRACKER_GITHUB_ISSUES
 from cw.worktree_gc import GcVerdict, WorktreeEntry, WorktreeGcReport, WorktreeGcResult
-from tests.test_cli import _write_clients_yaml_for_test
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 
 
 class TestWorktreeGcMultiClient:
@@ -27,8 +27,8 @@ class TestWorktreeGcMultiClient:
         ws_a, ws_b = tmp_path / "ws-a", tmp_path / "ws-b"
         ws_a.mkdir()
         ws_b.mkdir()
-        _write_clients_yaml_for_test(
-            tmp_config_dir, [("client-a", str(ws_a)), ("client-b", str(ws_b))]
+        write_clients_yaml(
+            ClientSpec("client-a", str(ws_a)), ClientSpec("client-b", str(ws_b))
         )
         monkeypatch.setattr(
             "cw.cli.worktree.resolve_tracker", lambda _root: TRACKER_GITHUB_ISSUES
@@ -58,8 +58,8 @@ class TestWorktreeGcMultiClient:
         ws_a, ws_b = tmp_path / "ws-a", tmp_path / "ws-b"
         ws_a.mkdir()
         ws_b.mkdir()
-        _write_clients_yaml_for_test(
-            tmp_config_dir, [("client-a", str(ws_a)), ("client-b", str(ws_b))]
+        write_clients_yaml(
+            ClientSpec("client-a", str(ws_a)), ClientSpec("client-b", str(ws_b))
         )
         monkeypatch.setattr(
             "cw.cli.worktree.resolve_tracker", lambda _root: TRACKER_GITHUB_ISSUES
@@ -89,7 +89,7 @@ class TestWorktreeGcMultiClient:
     ) -> None:
         ws_a = tmp_path / "ws-a"
         ws_a.mkdir()
-        _write_clients_yaml_for_test(tmp_config_dir, [("client-a", str(ws_a))])
+        write_clients_yaml(ClientSpec("client-a", str(ws_a)))
         monkeypatch.setattr(
             "cw.cli.worktree.resolve_tracker", lambda _root: TRACKER_GITHUB_ISSUES
         )
@@ -113,7 +113,7 @@ class TestWorktreeGcMultiClient:
         """R1 binding: exit code stays 0 on partial failure this ticket."""
         ws_a = tmp_path / "ws-a"
         ws_a.mkdir()
-        _write_clients_yaml_for_test(tmp_config_dir, [("client-a", str(ws_a))])
+        write_clients_yaml(ClientSpec("client-a", str(ws_a)))
         monkeypatch.setattr(
             "cw.cli.worktree.resolve_tracker", lambda _root: TRACKER_GITHUB_ISSUES
         )
@@ -136,8 +136,8 @@ class TestWorktreeGcMultiClient:
         ws_a, ws_b = tmp_path / "ws-a", tmp_path / "ws-b"
         ws_a.mkdir()
         ws_b.mkdir()
-        _write_clients_yaml_for_test(
-            tmp_config_dir, [("client-a", str(ws_a)), ("client-b", str(ws_b))]
+        write_clients_yaml(
+            ClientSpec("client-a", str(ws_a)), ClientSpec("client-b", str(ws_b))
         )
         monkeypatch.setattr(
             "cw.cli.worktree.resolve_tracker", lambda _root: TRACKER_GITHUB_ISSUES
@@ -170,7 +170,7 @@ class TestWorktreeGcMultiClient:
         implementation — see Adopted Assumptions)."""
         ws_a = tmp_path / "ws-a"
         ws_a.mkdir()
-        _write_clients_yaml_for_test(tmp_config_dir, [("client-a", str(ws_a))])
+        write_clients_yaml(ClientSpec("client-a", str(ws_a)))
         monkeypatch.setattr(
             "cw.cli.worktree.resolve_tracker", lambda _root: TRACKER_GITHUB_ISSUES
         )

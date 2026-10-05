@@ -44,8 +44,8 @@ from cw.models import (
     StagePipelineConfig,
     TicketTask,
 )
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import _make_daemon_session
-from tests.test_cli import _write_clients_yaml_for_test
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -129,7 +129,7 @@ def _seed(
     lane: str | None = None,
 ) -> None:
     """Seed a Session + a matching RUNNING dev-queue row, plus clients.yaml."""
-    _write_clients_yaml_for_test(tmp_config_dir, [(client_name, str(worktree))])
+    write_clients_yaml(ClientSpec(client_name, str(worktree)))
     save_state(
         CwState(
             sessions=[
@@ -380,7 +380,7 @@ def test_run_codex_review_stage_no_running_task_raises(
 ) -> None:
     """A session with no matching RUNNING dev-queue row is refused."""
     worktree = _worktree_with_change(make_worktree_with_change, "wt-driver-no-task")
-    _write_clients_yaml_for_test(tmp_config_dir, [("test", str(worktree))])
+    write_clients_yaml(ClientSpec("test", str(worktree)))
     save_state(
         CwState(
             sessions=[
@@ -413,7 +413,7 @@ def test_run_codex_review_stage_no_worktree_path_raises(
     tmp_config_dir: Path,
 ) -> None:
     """A session with no worktree_path cannot be reviewed → CwError."""
-    _write_clients_yaml_for_test(tmp_config_dir, [("test", "/tmp/does-not-matter")])
+    write_clients_yaml(ClientSpec("test", "/tmp/does-not-matter"))
     save_state(
         CwState(
             sessions=[
