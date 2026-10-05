@@ -362,7 +362,7 @@ def test_pyproject_missing_skips_with_reason(
     _assert_quiet(result)
     assert result.detail == (
         f"could not read optional extras from {repo / 'pyproject.toml'}"
-        f" (unreadable: FileNotFoundError); {_SKIP_SUFFIX}"
+        f" (not found); {_SKIP_SUFFIX}"
     )
 
 
@@ -464,7 +464,7 @@ def test_non_string_extra_entries_skipped(
     repo = _write_repo(tmp_path, extras={}, lock_packages={"mcp": ["2.1.1"]})
     (repo / "pyproject.toml").write_text(
         '[project]\nname = "demo"\n[project.optional-dependencies]\n'
-        'mcp = ["mcp>=2", 42, {table = "x"}]\nbad = "not-a-list"\n',
+        'mcp = ["mcp>=2", 42, {table = "x"}, "", "[cli]"]\nbad = "not-a-list"\n',
         encoding="utf-8",
     )
     _patch_source(monkeypatch, repo)
