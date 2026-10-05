@@ -25,6 +25,7 @@ under ``sessions_lock``, release, stop the daemon, then emit the audit event.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -67,6 +68,16 @@ WEDGE_ROUTED_RESULT_STRANDED = "wedge/active-routed-result-stranded"
 
 _AUDIT_OUTBOX_NAME = "routed_result_reap_audit.json"
 _logger = logging.getLogger(__name__)
+
+
+def _stop_daemon_best_effort(
+    daemon: NativeDaemonClient, surface_ref: str
+) -> tuple[bool, str | None]:
+    """Stop a worker and return a durable success/error summary."""
+    with contextlib.suppress(Exception):
+        daemon.stop(surface_ref)
+        return True, None
+    return False, "daemon stop failed"
 
 
 def _routed_result_recipe(hit: StrandedRoutedSession) -> str:
@@ -156,12 +167,27 @@ def _queue_audit_intents(hits: list[StrandedRoutedSession]) -> None:
     """Write pending audit intents before their corresponding state save."""
     records = _read_audit_outbox()
     known = {record.get("session_id") for record in records}
+    recorded_at = datetime.now(UTC).isoformat()
     for hit in hits:
         if hit.session.id in known:
             continue
         records.append(
             {
                 "session_id": hit.session.id,
+                # Immutable mutation intent: this ledger entry is appended
+                # before the session commit and retained until the audit event
+                # lands. Delivery status below may change; this record does not.
+                "mutation_record": {
+                    "recorded_at": recorded_at,
+                    "session_id": hit.session.id,
+                    "session_name": hit.session.name,
+                    "client": hit.session.client,
+                    "ticket_id": hit.ticket_id,
+                    "lane": hit.lane,
+                    "proposed_action": ProposedAction.CLOSE_ROUTED_RESULT_SESSION.value,
+                    "mutations": ["session_status_completed"],
+                    "correlation_id": hit.ticket_id or hit.session.id,
+                },
                 "surface_ref": hit.session.surface_ref,
                 "status": "pending_stop",
                 "payload": {
@@ -248,11 +274,7 @@ def _retry_pending_audits(daemon: NativeDaemonClient) -> None:
             try:
                 state = load_state()
                 session = next(
-                    (
-                        s
-                        for s in state.sessions
-                        if s.id == record.get("session_id")
-                    ),
+                    (s for s in state.sessions if s.id == record.get("session_id")),
                     None,
                 )
             except (OSError, ValueError):
@@ -264,22 +286,18 @@ def _retry_pending_audits(daemon: NativeDaemonClient) -> None:
                     record.get("session_id"),
                 )
                 continue
-            try:
-                daemon.stop(record["surface_ref"])
-            except Exception as exc:  # noqa: BLE001 - daemon stop is best-effort
-                finalized = _finalize_audit_intent(
-                    str(record["session_id"]),
-                    mutations=["session_status_completed"],
-                    stop_succeeded=False,
-                    stop_error=f"{type(exc).__name__}: {exc}",
-                )
-            else:
-                finalized = _finalize_audit_intent(
-                    str(record["session_id"]),
-                    mutations=["session_status_completed", "daemon_stopped"],
-                    stop_succeeded=True,
-                    stop_error=None,
-                )
+            stop_succeeded, stop_error = _stop_daemon_best_effort(
+                daemon, record["surface_ref"]
+            )
+            mutations = ["session_status_completed"]
+            if stop_succeeded:
+                mutations.append("daemon_stopped")
+            finalized = _finalize_audit_intent(
+                str(record["session_id"]),
+                mutations=mutations,
+                stop_succeeded=stop_succeeded,
+                stop_error=stop_error,
+            )
             if finalized is not None:
                 _emit_audit_record(finalized)
         elif record.get("status") == "pending_event":
@@ -293,14 +311,9 @@ def _stop_and_audit(hit: StrandedRoutedSession, daemon: NativeDaemonClient) -> N
     ``_reap_session_by_selector``: the session is already COMPLETED, so the
     #2481 leaked-worker sweep stops the worker on the next reconcile tick.
     """
-    stop_succeeded = True
-    stop_error: str | None = None
-    try:
-        daemon.stop(hit.surface_ref)
-    except Exception as exc:
-        stop_succeeded = False
-        stop_error = f"{type(exc).__name__}: {exc}"
-        _logger.exception("failed to stop routed-result worker %s", hit.session.id)
+    stop_succeeded, stop_error = _stop_daemon_best_effort(daemon, hit.surface_ref)
+    if not stop_succeeded:
+        _logger.warning("failed to stop routed-result worker %s", hit.session.id)
     mutations = ["session_status_completed"]
     if stop_succeeded:
         mutations.append("daemon_stopped")

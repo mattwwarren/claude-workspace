@@ -44,7 +44,10 @@ from cw.doctor.loop_health import (
     _check_loop_liveness,
     _check_timed_out_merged,
 )
-from cw.doctor.routed_result_wedge import _check_wedge_routed_result_session
+from cw.doctor.routed_result_wedge import (
+    _check_wedge_routed_result_session,
+    has_pending_routed_result_audits,
+)
 from cw.doctor.skills_drift import _check_skills_commands_drift
 from cw.doctor.user_level_hooks import _check_user_level_stop_hook
 from cw.doctor.versions import (
@@ -100,7 +103,10 @@ def _collect_wedge_findings(
 
 
 def run_doctor(
-    *, reap: bool = False, routed_result_session_ids: set[str] | None = None
+    *,
+    reap: bool = False,
+    routed_result_session_ids: set[str] | None = None,
+    reap_routed_result: bool = True,
 ) -> DoctorReport:
     """Run every preflight check and return a populated report.
 
@@ -161,10 +167,11 @@ def run_doctor(
         # Wedge checks: load queue once, run every check off it.
         queue = _deps.load_dev_queue()
         report.wedge_findings.extend(_collect_wedge_findings(link_state, queue))
-        if reap and report.wedge_findings:
+        if reap and (report.wedge_findings or has_pending_routed_result_audits()):
             _reap_wedge_findings(
                 report.wedge_findings,
                 routed_result_session_ids=routed_result_session_ids,
+                reap_routed_result=reap_routed_result,
             )
 
     if reap:

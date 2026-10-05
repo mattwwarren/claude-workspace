@@ -897,6 +897,7 @@ def _reap_wedge_findings(
     findings: list[WedgeFinding],
     *,
     routed_result_session_ids: set[str] | None = None,
+    reap_routed_result: bool = True,
 ) -> None:
     """Apply mutations for actionable wedge classes.
 
@@ -993,16 +994,20 @@ def _reap_wedge_findings(
         f.wedge_class == _WEDGE_LEAKED_DAEMON_WORKER for f in findings
     )
     pending_routed_result_audits = has_pending_routed_result_audits()
-    routed_result_findings = [
-        f
-        for f in findings
-        if f.session_id
-        and f.wedge_class == WEDGE_ROUTED_RESULT_STRANDED
-        and (
-            routed_result_session_ids is None
-            or f.session_id in routed_result_session_ids
-        )
-    ]
+    routed_result_findings = (
+        [
+            f
+            for f in findings
+            if f.session_id
+            and f.wedge_class == WEDGE_ROUTED_RESULT_STRANDED
+            and (
+                routed_result_session_ids is None
+                or f.session_id in routed_result_session_ids
+            )
+        ]
+        if reap_routed_result
+        else []
+    )
 
     if not (
         running_ticket_ids
