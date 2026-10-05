@@ -9017,7 +9017,6 @@ class TestLaneCapBlockedSkipReason:
 
     def test_skip_reason_is_lane_cap_blocked(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """BLOCKED_ON_USER fills lane cap; pending>0 → skip_reason=lane_cap_blocked."""
@@ -9041,7 +9040,6 @@ class TestLaneCapBlockedSkipReason:
 
     def test_lane_stats_show_blocked_count(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """dispatch.tick lane stats split running vs blocked for operator visibility."""
@@ -9070,7 +9068,6 @@ class TestLaneCapBlockedSkipReason:
 
     def test_lane_occupants_names_the_blocking_ticket(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """lane_occupants names the BLOCKED_ON_USER ticket; PENDING is excluded."""
@@ -9166,7 +9163,6 @@ class TestLaneCapCountingWithAwaitingSignoff:
 
     def test_dispatch_client_lanes_signoff_counted_occupied_not_running(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """AWAITING_OPERATOR_SIGNOFF fills lane cap -> skip_reason=lane_cap_blocked."""
@@ -9188,7 +9184,6 @@ class TestLaneCapCountingWithAwaitingSignoff:
 
     def test_dispatch_client_lanes_event_payload_includes_signoff_bucket(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """dispatch.tick lane stats split running vs signoff for operators."""
@@ -9535,7 +9530,6 @@ class TestLaneOccupantsPayload:
 
     def test_availability_skip_emits_lane_occupants(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -9561,7 +9555,6 @@ class TestLaneOccupantsPayload:
 
     def test_usage_limit_skip_emits_lane_occupants(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -9590,7 +9583,6 @@ class TestLaneOccupantsPayload:
 
     def test_stale_skip_emits_lane_occupants(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
