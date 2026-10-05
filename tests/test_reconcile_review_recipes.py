@@ -90,6 +90,7 @@ from cw.reconcile.review_recipes import (
 )
 from cw.review_strategy import ReviewStrategy
 from cw.worktree import FetchOutcome, FetchResult, create_worktree, worktree_path_for
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 
 # Reuse the sibling test helpers rather than re-deriving TicketTask / PrState
 # construction: _make_task accepts **kwargs (pr_url / pr_state / session_id /
@@ -274,7 +275,7 @@ def test_run_review_recipes_loads_from_dev_queue(
     # detect → act path, not just the pure _detect_address_review helper.
     # Ticket-level override opts the recipe in (highest tier) so the candidate
     # surfaces; a resolvable client + a real worktree let the act phase dispatch.
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     worktree = make_git_repo("run-review-recipes")
     task = _cr_task(
         review_recipes={RECIPE_ADDRESS_REVIEW: True}, worktree_path=worktree
@@ -314,7 +315,7 @@ def test_act_phases_return_jobs_and_dispatch_nothing(
     dispatch back as jobs in the caller's sink -- no spawn, no requeue, until
     the caller runs them via dispatch_deferred_review_jobs. The auto_fix_ci job
     runs no dispatch tick of its own."""
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     ticks: list[dict[str, Any]] = []
     monkeypatch.setattr(
         "cw.dispatch.run_dispatch_loop", lambda **kwargs: ticks.append(kwargs)
@@ -362,7 +363,7 @@ def test_run_review_recipes_without_a_sink_skips_the_dispatching_recipes(
     runs neither address_review nor auto_fix_ci -- no latch stamped, no
     PR_ACTION_TAKEN -- while the inline recipes (request_reviewer,
     escalate_merge_block) still run."""
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     ar_task = _cr_task(
         ticket_id="GEN-1",
         review_recipes={RECIPE_ADDRESS_REVIEW: True},
@@ -402,7 +403,7 @@ def test_run_review_recipes_appends_each_recipes_jobs_before_the_next_runs(
     """#1229: a recipe's jobs reach the sink the moment its act returns, so an
     exception in a LATER recipe leaves the earlier job (latch already stamped)
     in the caller's hands, and the exception still propagates."""
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     ar_task = _cr_task(
         ticket_id="GEN-1",
         review_recipes={RECIPE_ADDRESS_REVIEW: True},
@@ -432,7 +433,7 @@ def test_dispatch_deferred_review_jobs_isolates_a_failing_job(
 ) -> None:
     """A job whose dispatch raises is logged + PR_ACTION_FAILED'd and skipped;
     its sibling still dispatches and only the success is reported acted."""
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     tasks = [
         _cr_task(
             ticket_id=ticket_id,
@@ -658,21 +659,6 @@ def stub_spawn(monkeypatch: pytest.MonkeyPatch) -> _SpawnRecorder:
     return recorder
 
 
-def _write_acme_clients_yaml(tmp_config_dir: Path) -> None:
-    """Write a minimal clients.yaml so ``load_effective_clients`` resolves acme.
-
-    The act phase resolves ``clients.get(task.client)`` to build the spawn's
-    ``ClientConfig``; without an on-disk entry the row would anomaly-skip with a
-    "missing client" PR_ACTION_FAILED.
-    """
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "clients.yaml").write_text(
-        f"clients:\n  acme:\n    workspace_path: {tmp_config_dir}\n"
-        "    default_branch: main\n"
-    )
-
-
 def _candidate_for(task: TicketTask) -> ReviewRecipeCandidate:
     """Build the detect-phase candidate matching *task* (act tests skip detect)."""
     assert task.pr_url is not None
@@ -701,7 +687,7 @@ def test_pr_action_taken_emitted_before_mutation(
     emit-before-dispatch ordering (the event fires inside the lock; the spawn
     strictly afterward, outside it).
     """
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     worktree = make_git_repo("action-taken")
     task = _cr_task(
         worktree_path=worktree,
@@ -768,7 +754,7 @@ def test_lane_in_needs_attention_payload_matches_task_lane(
     recipe) survives end-to-end through ``_act_address_review``'s repeat-fire
     escalation into the SESSION_NEEDS_ATTENTION payload, and matches the
     triggering task's own ``lane`` — not the default."""
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     worktree = make_git_repo("lane-integration")
     task = _cr_task(
         worktree_path=worktree,
@@ -811,7 +797,7 @@ def test_stale_attention_state_skips_silently(
     The detect-time candidate said changes_requested, but the re-loaded row's
     pr_state has moved on (or vanished) — no spawn, no PR_ACTION_* event, [].
     """
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     worktree = make_git_repo("stale")
     if stale_state is None:
         task = _make_task(
@@ -863,7 +849,7 @@ def test_no_self_deadlock_under_dev_queue_lock(
     hanging — this repo has no pytest-timeout/CI job timeout, so a blocking
     re-acquire here would hang the whole CI job rather than fail fast.
     """
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     worktree = make_git_repo("no-deadlock")
     task = _cr_task(worktree_path=worktree)
     save_dev_queue(DevQueueStore(tasks=[task]))
@@ -910,7 +896,7 @@ def test_reconcile_reentry_guard_fires_and_is_swallowed(
     ``except CwError``, and is converted to a logged PR_ACTION_FAILED
     correction instead of a call-site change.
     """
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _cr_task(
         review_recipes={RECIPE_ADDRESS_REVIEW: True},
         worktree_path=make_git_repo("reentry"),
@@ -970,7 +956,7 @@ def test_action_failure_emits_pr_action_failed(
     so PR_ACTION_FAILED is emitted with the error and correlation_id. The loop
     continues: a second candidate whose spawn succeeds still dispatches.
     """
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     wt1 = make_git_repo("fail-1")
     wt2 = make_git_repo("fail-2")
     task1 = _cr_task(
@@ -1029,7 +1015,7 @@ def test_unparseable_pr_url_emits_pr_action_failed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """An unparseable pr_url anomaly emits PR_ACTION_FAILED (not silent)."""
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(
         pr_url="not-a-github-url",
         pr_state=_pr_state(state="OPEN", attention_state="changes_requested"),
@@ -1057,7 +1043,9 @@ def test_missing_client_emits_pr_action_failed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A row whose client is unresolvable emits PR_ACTION_FAILED (not silent)."""
-    _write_acme_clients_yaml(tmp_config_dir)  # defines acme, not ghost
+    write_clients_yaml(
+        ClientSpec("acme", tmp_config_dir, default_branch="main")
+    )  # defines acme, not ghost
     task = _make_task(
         client="ghost",
         pr_url="https://github.com/ghost/widgets/pull/42",
@@ -1087,7 +1075,7 @@ def test_missing_worktree_emits_pr_action_failed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A row whose worktree_path does not exist emits PR_ACTION_FAILED."""
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     missing = tmp_path / "never-created"
     task = _cr_task(worktree_path=missing)
     save_dev_queue(DevQueueStore(tasks=[task]))
@@ -1114,7 +1102,7 @@ def test_address_review_fires_once_per_episode(
 ) -> None:
     """The address_review latch blocks a re-dispatch within the same episode
     (GitHub #1206) — mirrors test_auto_fix_ci_fires_once_per_episode."""
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     worktree = make_git_repo("address-review-fires-once")
     task = _cr_task(worktree_path=worktree)
     save_dev_queue(DevQueueStore(tasks=[task]))
@@ -1150,7 +1138,7 @@ def test_address_review_latch_clears_on_episode_end(
 ) -> None:
     """The latch re-arms once pr_state leaves changes_requested (GitHub #1206)
     — mirrors test_auto_fix_ci_latch_clears_on_episode_end."""
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     worktree = make_git_repo("address-review-clears-on-end")
     task = _cr_task(worktree_path=worktree)
     save_dev_queue(DevQueueStore(tasks=[task]))
@@ -1198,7 +1186,7 @@ def test_repo_mismatch_emits_pr_action_failed(
     stub_spawn: _SpawnRecorder,
 ) -> None:
     """A worktree whose origin repo differs from the PR's repo skips + fails."""
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     worktree = make_git_repo("repo-mismatch")
     _set_origin(worktree, "https://github.com/other/repo.git")
     task = _cr_task(worktree_path=worktree)  # pr_url -> acme/widgets
@@ -1222,7 +1210,7 @@ def test_repo_match_dispatches_normally(
     stub_spawn: _SpawnRecorder,
 ) -> None:
     """A worktree whose origin repo matches the PR's repo dispatches normally."""
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     worktree = make_git_repo("repo-match")
     _set_origin(worktree, "https://github.com/acme/widgets.git")
     task = _cr_task(worktree_path=worktree)
@@ -1243,7 +1231,7 @@ def test_repo_unresolvable_dispatches_normally(
     stub_spawn: _SpawnRecorder,
 ) -> None:
     """A worktree with no origin remote fails open (R5) -> dispatches normally."""
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     worktree = make_git_repo("repo-unresolvable")  # no origin set
     task = _cr_task(worktree_path=worktree)
     save_dev_queue(DevQueueStore(tasks=[task]))
@@ -1264,7 +1252,7 @@ def test_repo_mismatch_override_dispatches_and_logs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """cross_repo_override=True dispatches despite the mismatch and logs a WARN."""
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     worktree = make_git_repo("repo-override")
     _set_origin(worktree, "https://github.com/other/repo.git")
     task = _cr_task(worktree_path=worktree, cross_repo_override=True)
@@ -1370,7 +1358,7 @@ def test_act_auto_fix_ci_requeues_completed_row_in_place(
     """
     from cw.dev_queue import requeue_ticket as real_requeue_ticket
 
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(
         status=QueueItemStatus.COMPLETED,
         pr_url=_PR_URL,
@@ -1423,7 +1411,7 @@ def test_act_auto_fix_ci_existing_blocked_row_is_left_alone(
     occupies the ticket -- auto_fix_ci must not add a sibling OR requeue it,
     and (#1229) runs no dispatch tick either.
     """
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(
         pr_url=_PR_URL,
         pr_state=_pr_state(attention_state="ci_failing", failing_checks=["lint"]),
@@ -1465,7 +1453,7 @@ def test_act_auto_fix_ci_succeeds_while_the_dispatch_loop_lock_is_held(
     the job reports success and the held loop picks the row up on its own next
     tick.
     """
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(
         status=QueueItemStatus.COMPLETED,
         pr_url=_PR_URL,
@@ -1500,7 +1488,7 @@ def test_act_auto_fix_ci_succeeds_while_the_dispatch_loop_lock_is_held(
 def test_act_auto_fix_ci_stale_row_silent_skip(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     # Re-loaded row is no longer ci_failing -> silent skip.
     task = _make_task(
         pr_url=_PR_URL, pr_state=_pr_state(attention_state="ready_to_approve")
@@ -1532,7 +1520,7 @@ def test_act_auto_fix_ci_requeue_raises_emits_pr_action_failed(
     """
     from cw.exceptions import RequeueStateError
 
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(
         status=QueueItemStatus.COMPLETED,
         pr_url=_PR_URL,
@@ -1577,7 +1565,7 @@ def _raise_live_session(
 
 
 def _seed_ci_failing_completed_row(tmp_config_dir: Path) -> TicketTask:
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(
         status=QueueItemStatus.COMPLETED,
         pr_url=_PR_URL,
@@ -1751,7 +1739,7 @@ def test_auto_fix_ci_non_live_session_cwerror_still_latches(
 def test_auto_fix_ci_fires_once_per_episode(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
     save_dev_queue(DevQueueStore(tasks=[task]))
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
@@ -1781,7 +1769,7 @@ def test_auto_fix_ci_fires_once_per_episode(
 def test_auto_fix_ci_latch_clears_on_episode_end(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
     save_dev_queue(DevQueueStore(tasks=[task]))
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
@@ -1811,22 +1799,16 @@ def test_auto_fix_ci_latch_clears_on_episode_end(
 # --- cross-repo dispatch guard, auto_fix_ci (GitHub #1198) ------------------
 
 
-def _write_acme_clients_yaml_with_repo(
-    tmp_config_dir: Path, make_git_repo: Any, remote_url: str
-) -> Path:
-    """clients.yaml whose acme workspace_path is a git repo with *remote_url*.
+def _acme_workspace_repo(make_git_repo: Any, remote_url: str) -> Path:
+    """Write clients.yaml whose acme workspace_path is a git repo with *remote_url*.
 
-    Unlike ``_write_acme_clients_yaml`` (which points acme at a non-git dir),
-    the auto_fix_ci guard resolves the client's ``workspace_path`` origin remote,
-    so it needs a real repo with a settable origin.
+    Unlike the plain acme client (which points at a non-git dir), the
+    auto_fix_ci guard resolves the client's ``workspace_path`` origin remote,
+    so it needs a real repo with a settable origin. Returns the repo path.
     """
     repo = make_git_repo("acme-ws")
     _set_origin(repo, remote_url)
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "clients.yaml").write_text(
-        f"clients:\n  acme:\n    workspace_path: {repo}\n    default_branch: main\n"
-    )
+    write_clients_yaml(ClientSpec("acme", repo, default_branch="main"))
     return repo
 
 
@@ -1834,9 +1816,7 @@ def test_auto_fix_ci_repo_mismatch_emits_pr_action_failed(
     tmp_config_dir: Path, make_git_repo: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Client workspace repo != PR repo -> skip + PR_ACTION_FAILED, no dispatch."""
-    _write_acme_clients_yaml_with_repo(
-        tmp_config_dir, make_git_repo, "https://github.com/other/repo.git"
-    )
+    _acme_workspace_repo(make_git_repo, "https://github.com/other/repo.git")
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
     save_dev_queue(DevQueueStore(tasks=[task]))
     monkeypatch.setattr(
@@ -1860,9 +1840,7 @@ def test_auto_fix_ci_repo_match_dispatches_normally(
     tmp_config_dir: Path, make_git_repo: Any
 ) -> None:
     """Client workspace repo == PR repo -> re-dispatch proceeds as today."""
-    _write_acme_clients_yaml_with_repo(
-        tmp_config_dir, make_git_repo, "https://github.com/acme/widgets.git"
-    )
+    _acme_workspace_repo(make_git_repo, "https://github.com/acme/widgets.git")
     task = _make_task(
         pr_url=_PR_URL,
         pr_state=_pr_state(attention_state="ci_failing", failing_checks=["lint"]),
@@ -1887,9 +1865,7 @@ def test_auto_fix_ci_repo_mismatch_override_dispatches_and_logs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """cross_repo_override=True re-dispatches despite the mismatch and logs WARN."""
-    _write_acme_clients_yaml_with_repo(
-        tmp_config_dir, make_git_repo, "https://github.com/other/repo.git"
-    )
+    _acme_workspace_repo(make_git_repo, "https://github.com/other/repo.git")
     task = _make_task(
         pr_url=_PR_URL,
         pr_state=_pr_state(attention_state="ci_failing"),
@@ -1915,9 +1891,7 @@ def test_auto_fix_ci_unparseable_pr_url_fails_open(
     tmp_config_dir: Path, make_git_repo: Any
 ) -> None:
     """An unparseable pr_url fails open (no mismatch) -> re-dispatch proceeds."""
-    _write_acme_clients_yaml_with_repo(
-        tmp_config_dir, make_git_repo, "https://github.com/other/repo.git"
-    )
+    _acme_workspace_repo(make_git_repo, "https://github.com/other/repo.git")
     task = _make_task(
         pr_url="https://example.com/not-a-pr",
         pr_state=_pr_state(attention_state="ci_failing"),
@@ -1935,7 +1909,7 @@ def test_auto_fix_ci_unparseable_pr_url_fails_open(
 
 def test_auto_fix_ci_unresolvable_client_fails_open(tmp_config_dir: Path) -> None:
     """A client absent from the clients dict fails open -> re-dispatch proceeds."""
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
     save_dev_queue(DevQueueStore(tasks=[task]))
 
@@ -1973,7 +1947,7 @@ def _stub_strategy(monkeypatch: pytest.MonkeyPatch, strategy: ReviewStrategy) ->
 def test_act_request_reviewer_ci_mode_silent_skip(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="no_reviewer"))
     save_dev_queue(DevQueueStore(tasks=[task]))
     _stub_strategy(monkeypatch, ReviewStrategy("ci", None))
@@ -2001,7 +1975,7 @@ def test_act_request_reviewer_configured_mode_calls_gh_helper(
     mode: str,
     handle: str,
 ) -> None:
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="no_reviewer"))
     save_dev_queue(DevQueueStore(tasks=[task]))
     _stub_strategy(monkeypatch, ReviewStrategy(mode, handle))  # type: ignore[arg-type]
@@ -2047,7 +2021,7 @@ def test_act_request_reviewer_scopes_gh_call_to_client_cwd(
 ) -> None:
     """#1279: the deferred add_pr_reviewer gh call is cwd-scoped to the
     client's repo (via _ReviewerJob.cwd), not the ambient CWD."""
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="no_reviewer"))
     save_dev_queue(DevQueueStore(tasks=[task]))
     _stub_strategy(monkeypatch, ReviewStrategy("repo_owner", "alice"))
@@ -2074,7 +2048,7 @@ def test_act_request_reviewer_scopes_gh_call_to_client_cwd(
 def test_act_request_reviewer_gh_call_fails_emits_failed(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="no_reviewer"))
     save_dev_queue(DevQueueStore(tasks=[task]))
     _stub_strategy(monkeypatch, ReviewStrategy("repo_owner", "alice"))
@@ -2104,7 +2078,7 @@ def test_act_request_reviewer_gh_call_errors_emits_failed(
 ) -> None:
     """``add_pr_reviewer`` returns None on a subprocess error/timeout — a
     distinct failure shape from a non-zero returncode, exercised separately."""
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="no_reviewer"))
     save_dev_queue(DevQueueStore(tasks=[task]))
     _stub_strategy(monkeypatch, ReviewStrategy("repo_owner", "alice"))
@@ -2129,7 +2103,7 @@ def test_act_request_reviewer_misconfigured_mode_missing_handle_emits_failed(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="no_reviewer"))
     save_dev_queue(DevQueueStore(tasks=[task]))
     _stub_strategy(monkeypatch, ReviewStrategy("repo_owner", None))
@@ -2156,7 +2130,7 @@ def test_act_request_reviewer_misconfigured_mode_missing_handle_emits_failed(
 def test_request_reviewer_fires_once_per_episode(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="no_reviewer"))
     save_dev_queue(DevQueueStore(tasks=[task]))
     _stub_strategy(monkeypatch, ReviewStrategy("repo_owner", "alice"))
@@ -2188,7 +2162,7 @@ def test_request_reviewer_fires_once_per_episode(
 def test_request_reviewer_latch_clears_on_episode_end(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="no_reviewer"))
     save_dev_queue(DevQueueStore(tasks=[task]))
     _stub_strategy(monkeypatch, ReviewStrategy("repo_owner", "alice"))
@@ -2241,7 +2215,7 @@ def _detect_escalate(clients: dict[str, ClientConfig]) -> list[ReviewRecipeCandi
 
 
 def test_escalate_merge_block_fires_once_per_episode(tmp_config_dir: Path) -> None:
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(
         pr_url=_PR_URL, pr_state=_pr_state(attention_state="merge_blocked")
     )
@@ -2267,7 +2241,7 @@ def test_escalate_merge_block_fires_once_per_episode(tmp_config_dir: Path) -> No
 def test_escalate_merge_block_latch_clears_on_episode_end(
     tmp_config_dir: Path,
 ) -> None:
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(
         pr_url=_PR_URL, pr_state=_pr_state(attention_state="merge_blocked")
     )
@@ -2355,7 +2329,7 @@ def test_ready_to_approve_adds_no_action() -> None:
 
 def test_run_review_recipes_wires_escalate_merge_block(tmp_config_dir: Path) -> None:
     """run_review_recipes drives the new escalate_merge_block recipe end-to-end."""
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     # Opt the ticket into escalate_merge_block via the highest tier.
     task = _make_task(
         pr_url=_PR_URL,
@@ -2392,7 +2366,7 @@ def _orphan_candidate(recipe: str, attention_state: str) -> ReviewRecipeCandidat
 def test_act_auto_fix_ci_vanished_row_silent_skip(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     save_dev_queue(DevQueueStore(tasks=[]))  # row deleted between detect and act
     monkeypatch.setattr(
         "cw.dev_queue.add_ticket", lambda _t: pytest.fail("no dispatch for a gone row")
@@ -2407,7 +2381,7 @@ def test_act_auto_fix_ci_vanished_row_silent_skip(
 
 
 def test_act_request_reviewer_vanished_row_silent_skip(tmp_config_dir: Path) -> None:
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     save_dev_queue(DevQueueStore(tasks=[]))
     acted = _act_request_reviewer(
         [_orphan_candidate(RECIPE_REQUEST_REVIEWER, "no_reviewer")],
@@ -2420,7 +2394,7 @@ def test_act_request_reviewer_vanished_row_silent_skip(tmp_config_dir: Path) -> 
 def test_act_request_reviewer_stale_row_silent_skip(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     task = _make_task(
         pr_url=_PR_URL, pr_state=_pr_state(attention_state="ready_to_approve")
     )
@@ -2442,7 +2416,9 @@ def test_act_request_reviewer_missing_client_emits_failed(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    _write_acme_clients_yaml(tmp_config_dir)  # defines acme, not ghost
+    write_clients_yaml(
+        ClientSpec("acme", tmp_config_dir, default_branch="main")
+    )  # defines acme, not ghost
     task = _make_task(
         client="ghost",
         pr_url="https://github.com/ghost/widgets/pull/42",
@@ -2468,7 +2444,7 @@ def test_act_request_reviewer_missing_client_emits_failed(
 def test_act_escalate_merge_block_vanished_row_silent_skip(
     tmp_config_dir: Path,
 ) -> None:
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     save_dev_queue(DevQueueStore(tasks=[]))
     acted = _act_escalate_merge_block(
         [_orphan_candidate(RECIPE_ESCALATE_MERGE_BLOCK, "merge_blocked")]
@@ -2478,7 +2454,7 @@ def test_act_escalate_merge_block_vanished_row_silent_skip(
 
 
 def test_act_escalate_merge_block_stale_row_silent_skip(tmp_config_dir: Path) -> None:
-    _write_acme_clients_yaml(tmp_config_dir)
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     # Re-loaded row moved off merge_blocked -> _fire returns False, no event.
     task = _make_task(
         pr_url=_PR_URL, pr_state=_pr_state(attention_state="ready_to_approve")
@@ -2899,7 +2875,7 @@ class TestRunReviewRecipesRepeatFire:
     def test_run_review_recipes_repeat_fire_triggers_attention_on_fifth_tick(
         self, tmp_config_dir: Path, make_git_repo: Any, stub_spawn: _SpawnRecorder
     ) -> None:
-        _write_acme_clients_yaml(tmp_config_dir)
+        write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
         self._enqueue_cr_task(make_git_repo("repeat-fire"))
         base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
         for i in range(5):
@@ -2916,7 +2892,7 @@ class TestRunReviewRecipesRepeatFire:
     def test_run_review_recipes_threshold_configurable(
         self, tmp_config_dir: Path, make_git_repo: Any, stub_spawn: _SpawnRecorder
     ) -> None:
-        _write_acme_clients_yaml(tmp_config_dir)
+        write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
         self._enqueue_cr_task(make_git_repo("threshold"))
         base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
         for i in range(2):
@@ -2936,7 +2912,7 @@ class TestRunReviewRecipesRepeatFire:
         stub_spawn: _SpawnRecorder,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _write_acme_clients_yaml(tmp_config_dir)
+        write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
         self._enqueue_cr_task(make_git_repo("once-per-tick"))
         calls: list[dict[str, Any]] = []
 
@@ -2954,7 +2930,7 @@ class TestRunReviewRecipesRepeatFire:
     def test_run_review_recipes_repeat_fire_isolated_per_recipe(
         self, tmp_config_dir: Path, make_git_repo: Any, stub_spawn: _SpawnRecorder
     ) -> None:
-        _write_acme_clients_yaml(tmp_config_dir)
+        write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
         task = self._enqueue_cr_task(make_git_repo("isolated"))
         base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
         with freeze_time(base):

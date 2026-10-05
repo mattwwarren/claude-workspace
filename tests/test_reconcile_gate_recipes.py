@@ -44,6 +44,7 @@ from cw.reconcile.gate_recipes import (
     resolve_gate_recipe_enabled,
     run_gate_recipes,
 )
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._worktree_helpers import patch_worktree
 from tests.conftest import (
     _make_daemon_session,
@@ -55,45 +56,19 @@ from tests.conftest import (
 _NOW = datetime(2026, 7, 8, 12, 0, 0, tzinfo=UTC)
 
 
-# YAML lanes block enabling both gate recipes on both the 'default' and
-# 'fastlane' lanes — appended to each test client so run_gate_recipes resolves
-# the recipes enabled under the 3-tier per-lane precedence (RFC 0009 P4).
-_LANES_YAML = (
-    "    lanes:\n"
-    "      - name: default\n"
-    "        gate_recipes:\n"
-    "          auto_approve_clean_review: true\n"
-    "          auto_adopt_clean_plan: true\n"
-    "      - name: fastlane\n"
-    "        gate_recipes:\n"
-    "          auto_approve_clean_review: true\n"
-    "          auto_adopt_clean_plan: true\n"
-)
-
-
-def _write_acme_clients_yaml(tmp_config_dir: Path, workspace: Path) -> None:
-    """Write a minimal clients.yaml for 'acme' pointing at *workspace*."""
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "clients.yaml").write_text(
-        f"clients:\n  acme:\n    workspace_path: {workspace}\n"
-        "    default_branch: main\n" + _LANES_YAML
-    )
-
-
-def _write_two_client_yaml(
-    tmp_config_dir: Path, acme_workspace: Path, beta_workspace: Path
-) -> None:
-    """Write a minimal clients.yaml for both 'acme' and 'beta'."""
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "clients.yaml").write_text(
-        "clients:\n"
-        f"  acme:\n    workspace_path: {acme_workspace}\n    default_branch: main\n"
-        + _LANES_YAML
-        + f"  beta:\n    workspace_path: {beta_workspace}\n    default_branch: main\n"
-        + _LANES_YAML
-    )
+# Lanes enabling both gate recipes on both the 'default' and 'fastlane' lanes —
+# given to each test client so run_gate_recipes resolves the recipes enabled
+# under the 3-tier per-lane precedence (RFC 0009 P4).
+_GATE_LANES: list[dict[str, object]] = [
+    {
+        "name": lane,
+        "gate_recipes": {
+            "auto_approve_clean_review": True,
+            "auto_adopt_clean_plan": True,
+        },
+    }
+    for lane in ("default", "fastlane")
+]
 
 
 def _clean_result(
@@ -633,7 +608,9 @@ class TestMasterSwitch:
     def test_disabled_is_full_noop(self, tmp_config_dir: Path, tmp_path: Path) -> None:
         from cw.events import read_events
 
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task()
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
@@ -733,7 +710,9 @@ class TestRunApprove:
     ) -> None:
         """The recipe advances the ticket exactly as a human approve would:
         REVIEW/BLOCKED_ON_USER -> FINALIZE/PENDING, session_id cleared."""
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task()
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
@@ -759,7 +738,10 @@ class TestRunApprove:
         beta_ws = tmp_path / "beta"
         acme_ws.mkdir()
         beta_ws.mkdir()
-        _write_two_client_yaml(tmp_config_dir, acme_ws, beta_ws)
+        write_clients_yaml(
+            ClientSpec("acme", acme_ws, default_branch="main", lanes=_GATE_LANES),
+            ClientSpec("beta", beta_ws, default_branch="main", lanes=_GATE_LANES),
+        )
         acme_task = _make_task(ticket_id="GEN-1", client="acme", session_id="sess-a")
         beta_task = _make_task(ticket_id="GEN-1", client="beta", session_id="sess-b")
         save_dev_queue(DevQueueStore(tasks=[acme_task, beta_task]))
@@ -799,7 +781,9 @@ class TestRunApprove:
         emit-before-mutation ordering since both already succeeded here."""
         from cw.events import read_events
 
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task(lane="fastlane")
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
@@ -832,7 +816,9 @@ class TestRunApprove:
         tmp_path: Path,
         stub_gh_comment: list[list[str]],
     ) -> None:
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task()
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
@@ -856,7 +842,9 @@ class TestRunApprove:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task()
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
@@ -891,7 +879,10 @@ class TestRunApprove:
         beta_ws = tmp_path / "beta"
         acme_ws.mkdir()
         beta_ws.mkdir()
-        _write_two_client_yaml(tmp_config_dir, acme_ws, beta_ws)
+        write_clients_yaml(
+            ClientSpec("acme", acme_ws, default_branch="main", lanes=_GATE_LANES),
+            ClientSpec("beta", beta_ws, default_branch="main", lanes=_GATE_LANES),
+        )
         task = _make_task()  # client="acme"
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
@@ -923,7 +914,9 @@ class TestRunApprove:
         (populated) clients dict passed to the act phase → comment skipped
         (logged), never posted with an unscoped cwd. The approve itself still
         stands (client resolves on disk for _approve_ticket_locked)."""
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task()  # client="acme"
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
@@ -981,7 +974,9 @@ class TestActApproveFailure:
         from cw.events import read_events
         from cw.exceptions import ApproveGateError
 
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task()
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
@@ -1041,7 +1036,9 @@ class TestActApproveFailure:
         that never landed."""
         from cw.events import read_events
 
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task()
         save_dev_queue(DevQueueStore(tasks=[task]))
         state = CwState(sessions=[_make_session(last_result=_clean_result())])
@@ -1099,7 +1096,9 @@ class TestActApproveFailure:
         from cw.events import read_events
         from cw.exceptions import ApproveGateError
 
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task()
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
@@ -1145,7 +1144,9 @@ class TestActApproveFailure:
         ticket, transition_task_status unconditionally clears the latch — a
         fresh episode always starts clean, matching the escalation-latch
         precedent."""
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task(gate_recipe_failed_at=_NOW)
         save_dev_queue(DevQueueStore(tasks=[task]))
 
@@ -1168,7 +1169,9 @@ class TestActApproveFailure:
         silently diverge and latch the wrong one."""
         from cw.exceptions import ApproveGateError
 
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         older = _make_task(
             session_id="sess-old", created_at=datetime(2026, 7, 1, tzinfo=UTC)
         )
@@ -1209,7 +1212,9 @@ class TestActApproveFailure:
         _find_ticket would pick, since _APPROVABLE_STATUSES pools both statuses
         newest-wins) and blindly clear a signoff gate the recipe never checked.
         Exercises the real _approve_ticket_locked (no monkeypatch)."""
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         row_a = _make_task(
             session_id="sess-old",
             stage=Stage.REVIEW,
@@ -1264,7 +1269,10 @@ class TestActApproveFailure:
         beta_ws = tmp_path / "beta"
         acme_ws.mkdir()
         beta_ws.mkdir()
-        _write_two_client_yaml(tmp_config_dir, acme_ws, beta_ws)
+        write_clients_yaml(
+            ClientSpec("acme", acme_ws, default_branch="main", lanes=_GATE_LANES),
+            ClientSpec("beta", beta_ws, default_branch="main", lanes=_GATE_LANES),
+        )
         acme_task = _make_task(ticket_id="GEN-1", client="acme", session_id="sess-a")
         beta_task = _make_task(ticket_id="GEN-1", client="beta", session_id="sess-b")
         save_dev_queue(DevQueueStore(tasks=[acme_task, beta_task]))
@@ -1318,7 +1326,9 @@ class TestActApproveFailure:
         """The row can vanish between the failed mutation and the stamp call
         (e.g. a concurrent delete) — _stamp_gate_recipe_failure must not raise,
         just skip silently, mirroring the act-loop's own task-is-None guard."""
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         save_dev_queue(DevQueueStore(tasks=[]))
 
         _stamp_gate_recipe_failure("GEN-1", "acme", now=_NOW)
@@ -1375,7 +1385,9 @@ class TestActRecheckRace:
         satisfies the predicate at act time is skipped: no event, no mutation."""
         from cw.events import read_events
 
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task()
         save_dev_queue(DevQueueStore(tasks=[task]))
         # Persist a state where the predicate NO LONGER holds (health degraded),
@@ -1439,7 +1451,9 @@ class TestActRecheckRace:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """Row no longer BLOCKED_ON_USER at act time (e.g. concurrent advance)."""
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task(status=QueueItemStatus.PENDING)
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
@@ -1453,7 +1467,9 @@ class TestActRecheckRace:
         (the ``task is None`` half of the lookup's skip condition — distinct
         from the ``test_not_blocked_at_act_skips`` case above, which only
         flips ``status`` and never removes the row from ``store.tasks``)."""
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         save_dev_queue(DevQueueStore(tasks=[]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
 
@@ -1463,7 +1479,9 @@ class TestActRecheckRace:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """Row's session_id cleared between detect and act."""
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task(session_id=None)
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
@@ -1474,7 +1492,9 @@ class TestActRecheckRace:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """Session record pruned between detect and act."""
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task(session_id="sess-1")
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[]))
@@ -1492,7 +1512,9 @@ class TestCommentNonZeroReturn:
     ) -> None:
         import subprocess
 
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task()
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
@@ -1957,7 +1979,9 @@ class TestRunAdoptPlan:
     ) -> None:
         """The recipe advances the ticket exactly as a human approve would:
         PLAN/BLOCKED_ON_USER -> IMPL/PENDING, session_id cleared."""
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         stub_fetch_plan(monkeypatch, plan_body())
         task = _make_task(stage=Stage.PLAN)
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -1977,7 +2001,9 @@ class TestRunAdoptPlan:
     ) -> None:
         from cw.events import read_events
 
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         stub_fetch_plan(monkeypatch, plan_body())
         task = _make_task(stage=Stage.PLAN, lane="fastlane")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -2006,7 +2032,9 @@ class TestRunAdoptPlan:
         monkeypatch: pytest.MonkeyPatch,
         stub_gh_comment: list[list[str]],
     ) -> None:
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         stub_fetch_plan(monkeypatch, plan_body())
         task = _make_task(stage=Stage.PLAN)
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -2034,7 +2062,9 @@ class TestRunAdoptPlan:
         plan stage passes Checkpoint 1 and runs Plan Quality Review before
         any implementation starts.
         """
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         stub_fetch_plan(monkeypatch, None)
         task = _make_task(stage=Stage.PLAN)
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -2055,7 +2085,9 @@ class TestRunAdoptPlan:
         """R6: recipe order is review-then-plan, matching constant declaration
         order. One clean-review candidate and one clean-plan candidate both
         fire in one tick; the returned approvals appear in declared order."""
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         stub_fetch_plan(monkeypatch, plan_body())
         review_task = _make_task(
             ticket_id="GEN-R", session_id="sess-r", stage=Stage.REVIEW
@@ -2091,7 +2123,9 @@ class TestRunAdoptPlan:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """A comment-write OSError is logged best-effort; the approve stands."""
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         stub_fetch_plan(monkeypatch, plan_body())
         task = _make_task(stage=Stage.PLAN)
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -2122,7 +2156,9 @@ class TestRunAdoptPlan:
         """A nonzero gh return code is logged best-effort; the approve stands."""
         import subprocess
 
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         stub_fetch_plan(monkeypatch, plan_body())
         task = _make_task(stage=Stage.PLAN)
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -2157,7 +2193,9 @@ class TestActAdoptPlanFailure:
         from cw.events import read_events
         from cw.exceptions import ApproveGateError
 
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         stub_fetch_plan(monkeypatch, plan_body())
         task = _make_task(stage=Stage.PLAN)
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -2212,7 +2250,9 @@ class TestActAdoptPlanFailure:
         from cw.events import read_events
         from cw.exceptions import ApproveGateError
 
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         stub_fetch_plan(monkeypatch, plan_body())
         task = _make_task(stage=Stage.PLAN)
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -2264,7 +2304,9 @@ class TestActAdoptRecheckRace:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """Row no longer BLOCKED_ON_USER at act time (concurrent advance)."""
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task(stage=Stage.PLAN, status=QueueItemStatus.PENDING)
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
@@ -2275,7 +2317,9 @@ class TestActAdoptRecheckRace:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """In-memory recheck (R5): last_result no longer at the plan gate."""
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task(stage=Stage.PLAN)
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(
@@ -2293,7 +2337,9 @@ class TestActAdoptRecheckRace:
     def test_row_deleted_at_act_skips(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         save_dev_queue(DevQueueStore(tasks=[]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
 
@@ -2302,7 +2348,9 @@ class TestActAdoptRecheckRace:
     def test_session_gone_at_act_skips(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task(stage=Stage.PLAN)
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[]))
@@ -2314,7 +2362,9 @@ class TestActAdoptRecheckRace:
     ) -> None:
         """Row still BLOCKED_ON_USER but its session_id was cleared between
         detect and act (the ``task.session_id is None`` half of the skip)."""
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task(stage=Stage.PLAN, session_id=None)
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
@@ -2328,7 +2378,9 @@ class TestActAdoptRecheckRace:
         must reuse candidate.evidence and never re-call
         fetch_approved_plan_comment. Asserts the approve still lands purely
         from in-memory state + the detect-time snapshot."""
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         calls: list[str] = []
         no_refetch_msg = "fetch must not be re-called during act"
 
@@ -2380,7 +2432,9 @@ class TestActAdoptRecheckRace:
 
         from cw.dev_queue import dev_queue_lock as real_lock
 
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         stub_fetch_plan(monkeypatch, plan_body())
         task = _make_task(stage=Stage.PLAN)
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -2419,7 +2473,9 @@ class TestActAdoptRecheckRace:
         """#1279 R7: adopt-plan audit comment is skipped (logged) for a client
         absent from the act phase's populated clients dict — never posted with
         an unscoped cwd. The approve itself still stands."""
-        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
         task = _make_task(stage=Stage.PLAN)  # client="acme"
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))

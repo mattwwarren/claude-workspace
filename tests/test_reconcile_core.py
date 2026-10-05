@@ -52,6 +52,7 @@ from cw.reconcile.review_recipes import (
     RECIPE_AUTO_FIX_CI,
     DeferredReviewDispatch,
 )
+from tests._clients_yaml import ClientSpec, staged_client, write_clients_yaml
 from tests._reconcile_helpers import (
     _auto_config,
     _mk_headless_daemon_session,
@@ -61,12 +62,11 @@ from tests._reconcile_helpers import (
     _stamp_transcript_age,
     _ul_record,
     _write_idle_transcript_with_text,
-    _write_staged_clients_yaml,
     _write_transcript_records,
 )
 from tests.conftest import _make_daemon_session, _make_ticket_task
 from tests.test_pr_hydrate import _pr_state
-from tests.test_reconcile_review_recipes import _cr_task, _write_acme_clients_yaml
+from tests.test_reconcile_review_recipes import _cr_task
 
 
 def test_reconcile_matches_short_id_against_full_uuid_session_id(
@@ -1251,7 +1251,7 @@ class TestReviewRecipeDispatchRunsPostLock:
 
     @staticmethod
     def _seed_address_review_row(tmp_config_dir: Path, worktree: Path) -> TicketTask:
-        _write_acme_clients_yaml(tmp_config_dir)
+        write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
         task = _cr_task(
             review_recipes={RECIPE_ADDRESS_REVIEW: True}, worktree_path=worktree
         )
@@ -1262,7 +1262,7 @@ class TestReviewRecipeDispatchRunsPostLock:
     def _seed_auto_fix_ci_row(
         tmp_config_dir: Path, status: QueueItemStatus | None = None
     ) -> TicketTask:
-        _write_acme_clients_yaml(tmp_config_dir)
+        write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
         extra: dict[str, Any] = {} if status is None else {"status": status}
         task = _cr_task(
             review_recipes={RECIPE_AUTO_FIX_CI: True},
@@ -1615,7 +1615,7 @@ class TestReviewRecipeDispatchRunsPostLock:
         with the same fault (disk full). That second failure is logged, not raised:
         the sibling job still dispatches and the locked body's original exception
         is the one the caller sees."""
-        _write_acme_clients_yaml(tmp_config_dir)
+        write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
         tasks = [
             _cr_task(
                 ticket_id=ticket_id,
@@ -1672,7 +1672,7 @@ class TestReviewRecipeDispatchRunsPostLock:
         """A job raising a non-CwError (OSError) is logged with its traceback and
         recorded as PR_ACTION_FAILED; the sibling job still dispatches, and
         complete_timed_out_merged_tasks / run_fix_dispatch still run."""
-        _write_acme_clients_yaml(tmp_config_dir)
+        write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
         tasks = [
             _cr_task(
                 ticket_id=ticket_id,
@@ -1725,7 +1725,7 @@ class TestReviewRecipeDispatchRunsPostLock:
         """The cw status/list/start/doctor path (no flag): address_review and
         auto_fix_ci do not run at all -- no latch, no PR_ACTION_TAKEN, no spawn,
         no requeue -- while request_reviewer and escalate_merge_block do."""
-        _write_acme_clients_yaml(tmp_config_dir)
+        write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
         ar_task = _cr_task(
             ticket_id="GEN-1",
             review_recipes={RECIPE_ADDRESS_REVIEW: True},
@@ -2274,7 +2274,7 @@ def _seed_routed_session(
     its configured-client rollout gate, so an unconfigured client is never
     paged (``tmp_path`` is the redirected config dir ``tmp_config_dir``).
     """
-    _write_staged_clients_yaml(tmp_path, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     home = Path.home()
     worktree = tmp_path / "wt-routed"
     _stamp_transcript_age(home, worktree, stale_minutes=31, surface_ref=_ROUTED_REF)

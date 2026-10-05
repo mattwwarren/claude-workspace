@@ -37,6 +37,7 @@ from cw.reconcile.stalled import (
     _act_on_stalled_candidates,
     _detect_stalled_candidates,
 )
+from tests._clients_yaml import staged_client, write_clients_yaml
 from tests._reconcile_helpers import (
     _blocked_result_payload,
     _make_pending_fix_dispatch,
@@ -44,7 +45,6 @@ from tests._reconcile_helpers import (
     _mk_headless_daemon_session,
     _shipped_salvage_payload,
     _stage_complete_payload,
-    _write_staged_clients_yaml,
 )
 
 _STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -260,7 +260,7 @@ def test_live_session_premises_pending_verification_defers_to_stop_hook(
     assert _detect_stalled_candidates(state, task_by_ticket={}) == []
 
     session = state.sessions[0]
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     store = load_dev_queue()
     store.tasks.append(
         TicketTask(
@@ -333,7 +333,7 @@ def test_dead_session_stage_complete_still_advances_via_sweep(
     """
     state = _foreign_result_session(tmp_path, _stage_complete_payload())
     state.sessions[0].last_result_source = LastResultSource.SALVAGE_TRANSCRIPT
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     store = load_dev_queue()
     store.tasks.append(
         TicketTask(
@@ -373,7 +373,7 @@ def test_stage_complete_at_last_pipeline_stage_still_completes_task(
     payload = _stage_complete_payload()
     payload["stage_reached"] = "stage5_post_create"
     state = _foreign_result_session(tmp_path, payload)
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     store = load_dev_queue()
     store.tasks.append(
         TicketTask(
@@ -406,7 +406,7 @@ def test_stage_mismatch_refusal_is_not_reoffered(
     candidate is never re-offered.
     """
     state = _foreign_result_session(tmp_path, _stage_complete_payload())
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     store = load_dev_queue()
     store.tasks.append(
         TicketTask(
@@ -452,7 +452,7 @@ def test_task_already_terminal_race_completes_session_not_leaked(
     same as the ordinary ``routed=True`` success arm.
     """
     state = _foreign_result_session(tmp_path, _stage_complete_payload())
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     store = load_dev_queue()
     store.tasks.append(
         TicketTask(

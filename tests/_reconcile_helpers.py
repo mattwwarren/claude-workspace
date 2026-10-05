@@ -750,27 +750,6 @@ def _client_with_lane(
     )
 
 
-def _write_staged_clients_yaml(tmp_config_dir: Path, client_name: str) -> None:
-    """Write a minimal staged clients.yaml for _apply_sentinel_to_task tests.
-
-    Uses the same tmp_config_dir that tmp_config_dir fixture redirected
-    cw.config.CLIENTS_FILE into, so load_effective_clients() resolves it.
-    """
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    clients_file = config_dir / "clients.yaml"
-    clients_file.write_text(
-        f"clients:\n"
-        f"  {client_name}:\n"
-        f"    workspace_path: /tmp/ws-staged\n"
-        f"    default_branch: main\n"
-        f"    blocked_result_requeue_enabled: true\n"
-        f"    sentinel_mismatch_veto_enabled: true\n"
-        f"    pipeline:\n"
-        f"      stages: [plan, impl, review, finalize]\n"
-    )
-
-
 # ---------------------------------------------------------------------------
 # #1487 — stale-merge-base scope fixtures
 #

@@ -42,7 +42,7 @@ from cw.reconcile import (
     _act_on_local_harvest_candidates,
     _detect_local_harvest_candidates,
 )
-from tests._reconcile_helpers import _write_staged_clients_yaml
+from tests._clients_yaml import staged_client, write_clients_yaml
 from tests.conftest import _make_daemon_session
 
 
@@ -88,7 +88,7 @@ def test_live_opencode_process_not_harvested(
 ) -> None:
     """A live opencode process (alive PID) is NOT a harvest candidate."""
     worktree = make_git_repo("wt-opencode-live")
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
 
     proc = subprocess.Popen(
         ["sleep", "60"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
@@ -127,7 +127,7 @@ def test_dead_opencode_process_is_harvested(
 ) -> None:
     """A dead opencode process (PID exited) IS a harvest candidate."""
     worktree = make_git_repo("wt-opencode-dead")
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
 
     dead_handle = LocalLivenessHandle(pid=999_999_999, start_time_ns=1)
     sess = _mk_opencode_session("ses-dead", worktree, dead_handle)
@@ -170,7 +170,7 @@ def test_cancelled_opencode_task_retains_liveness(
     kill is removed from cw's scope per #1669 R2).
     """
     worktree = make_git_repo("wt-opencode-cancelled")
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
 
     proc = subprocess.Popen(
         ["sleep", "60"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
@@ -231,7 +231,7 @@ def test_opencode_harvest_no_sentinel_parks_blocked(
     produces a typed OPENCODE_NO_OUTPUT blocked result (retry_eligible=True).
     """
     worktree = make_git_repo("wt-opencode-no-sentinel")
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
 
     _write_opencode_log(
         worktree, [{"type": "text", "part": {"text": "no sentinel here"}}]
@@ -293,7 +293,7 @@ def test_opencode_recycled_pid_not_harvested(
     The harvest then reads the opencode log for the sentinel.
     """
     worktree = make_git_repo("wt-opencode-recycled")
-    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
 
     # Use a real PID but a wrong start_time_ns — simulates PID recycling
     proc = subprocess.Popen(

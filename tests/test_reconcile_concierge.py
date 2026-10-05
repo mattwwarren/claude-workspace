@@ -35,6 +35,7 @@ from cw.reconcile.concierge import (
     resolve_concierge_recipe_enabled,
     run_concierge_recoveries,
 )
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._reconcile_helpers import (
     SCOPE_GUARD_FILES,
     SCOPE_GUARD_LINES,
@@ -47,43 +48,6 @@ from tests._reconcile_helpers import (
 from tests.conftest import _make_daemon_session, _make_ticket_task
 
 _NOW = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
-
-
-def _write_acme_clients_yaml(tmp_config_dir: Path, workspace: Path) -> None:
-    """Write a minimal clients.yaml for 'acme' pointing at *workspace*."""
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "clients.yaml").write_text(
-        f"clients:\n  acme:\n    workspace_path: {workspace}\n"
-        "    default_branch: main\n"
-    )
-
-
-def _write_acme_clients_yaml_with_lane(
-    tmp_config_dir: Path,
-    workspace: Path,
-    *,
-    lane_name: str,
-    attempt_ceiling: str,
-) -> None:
-    """Write an 'acme' clients.yaml whose *lane_name* carries *attempt_ceiling*.
-
-    Deliberately separate from :func:`_write_acme_clients_yaml` (#1751) so the
-    lane-less default every other test in this file relies on stays untouched
-    — those tests are themselves the regression guard proving the concierge
-    still falls through to the global ceiling when no lane opts in.
-    *attempt_ceiling* is the raw YAML token (``"false"``, ``"25"``) so a test
-    can assert the disable state and an override value are genuinely distinct.
-    """
-    config_dir = tmp_config_dir / ".config" / "cw"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "clients.yaml").write_text(
-        f"clients:\n  acme:\n    workspace_path: {workspace}\n"
-        "    default_branch: main\n"
-        "    lanes:\n"
-        f"      - name: {lane_name}\n"
-        f"        attempt_ceiling: {attempt_ceiling}\n"
-    )
 
 
 def _make_task(
@@ -433,11 +397,13 @@ class TestRecipeFalseParkRequeue:
         reintroduce exactly the claim/concierge drift #1750's comment warns
         against, one layer up.
         """
-        _write_acme_clients_yaml_with_lane(
-            tmp_config_dir,
-            tmp_config_dir / "ws",
-            lane_name=DEFAULT_LANE,
-            attempt_ceiling="false",
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_config_dir / "ws",
+                default_branch="main",
+                lanes=[{"name": DEFAULT_LANE, "attempt_ceiling": False}],
+            )
         )
         task = _make_task(
             disposition="stalled_retry_cap_parked",
@@ -1204,11 +1170,13 @@ class TestRecipeParkMarkerPoisonClear:
         same lane-scoped resolver as the dispatch claim path.
         """
         self._stale_45m(monkeypatch)
-        _write_acme_clients_yaml_with_lane(
-            tmp_config_dir,
-            tmp_config_dir / "ws",
-            lane_name=DEFAULT_LANE,
-            attempt_ceiling="false",
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_config_dir / "ws",
+                default_branch="main",
+                lanes=[{"name": DEFAULT_LANE, "attempt_ceiling": False}],
+            )
         )
         task = _make_task(disposition=None, attempts=10, unproductive_attempts=10)
         session = _make_session(
@@ -1440,7 +1408,7 @@ class TestRecipeCancelledRowRestore:
         _git("add", "file.txt")
         _git("commit", "-m", "feature work")
 
-        _write_acme_clients_yaml(tmp_config_dir, repo)
+        write_clients_yaml(ClientSpec("acme", repo, default_branch="main"))
 
         task = _make_task(
             status=QueueItemStatus.CANCELLED,
@@ -1487,7 +1455,7 @@ class TestRecipeCancelledRowRestore:
             capture_output=True,
             check=True,
         )
-        _write_acme_clients_yaml(tmp_config_dir, repo)
+        write_clients_yaml(ClientSpec("acme", repo, default_branch="main"))
 
         task = _make_task(
             status=QueueItemStatus.CANCELLED, disposition=None, worktree_path=repo
@@ -1825,7 +1793,7 @@ def test_close_confirmed_dead_session_corrects_salvaged_scope(
 
     home = Path.home()
     worktree = _make_stale_base_repo(make_git_repo, "wt-concierge-scope")
-    _write_acme_clients_yaml(tmp_config_dir, worktree)
+    write_clients_yaml(ClientSpec("acme", worktree, default_branch="main"))
 
     session = _make_session(
         session_id="sess-scope",
