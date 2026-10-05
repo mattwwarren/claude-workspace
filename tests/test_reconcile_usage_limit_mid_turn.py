@@ -121,12 +121,9 @@ def _limit_tail(text: str = _LIMIT_TEXT) -> list[dict[str, object]]:
 
 
 @pytest.fixture
-def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    home_dir = tmp_path / "home"
-    home_dir.mkdir()
-    monkeypatch.setenv("HOME", str(home_dir))
+def home(monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr("cw.reconcile._deps.host_timezone", lambda: _NY)
-    return home_dir
+    return Path.home()
 
 
 @pytest.fixture

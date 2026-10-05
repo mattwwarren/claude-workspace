@@ -1775,6 +1775,35 @@ class TestTickSummaryLanes:
             "fast": {"claimed": 1, "running": 0, "pending": 1}
         }
 
+    def test_latest_tick_by_client_tolerates_additive_last_error(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """A spawn_error tick with the additive last_error key parses (#1679)."""
+        from cw.events import read_events
+        from cw.orchestrate import _latest_tick_by_client
+
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "err-client",
+                "claimed": 0,
+                "pending": 1,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "spawn_error",
+                "last_error": "boom",
+                "lanes": {"fast": {"claimed": 0, "running": 0, "pending": 1}},
+            },
+        )
+        result = _latest_tick_by_client(read_events())
+
+        tick = result["err-client"]
+        assert tick.skip_reason == "spawn_error"
+        assert tick.claimed == 0
+        assert tick.pending == 1
+        assert tick.lanes == {"fast": {"claimed": 0, "running": 0, "pending": 1}}
+
     def test_latest_tick_by_client_legacy_event_no_lanes_key(
         self,
         tmp_orchestrate_dirs: Path,

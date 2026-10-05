@@ -59,6 +59,7 @@ from cw.dispatch.claim import (
     _claim_next_pending,
     _lane_occupants_for_client,
     _spawn_claimed_task,
+    _spawn_error_tick_fields,
     resolve_occupied_ticket_ids,
 )
 from cw.dispatch.pr_gate import resolve_stale_pr_ticket_ids
@@ -765,6 +766,8 @@ def _dispatch_client_lanes(
     and spawning one task per granted slot.  Breaks out of the lane walk on
     the first usage-limit or spawn-error.  Always records the per-client
     dispatch.tick event (with the resolved skip_reason and per-lane stats).
+    When a spawn failure occurred the tick also carries its redacted, capped,
+    single-line text as ``last_error`` (#1679).
 
     *usage_limited_until* is threaded straight through to
     :func:`_claim_next_pending` as defense-in-depth (#1346) — the caller
@@ -780,7 +783,9 @@ def _dispatch_client_lanes(
     not affect admission math here (that's ``host_capacity.remaining``).
     """
     client_spawned = 0
-    spawn_error = False
+    # The spawn-failure outcome itself, not a bool: it carries the error text
+    # the dispatch.tick reports as ``last_error`` (#1679).
+    spawn_error_outcome: _SpawnOutcome | None = None
     # The usage-limit outcome itself, not a bool: it carries the parsed
     # reset_at the client result must report (#1409), and `is not None` reads
     # exactly where the bool did — so this adds no statement or branch to a
@@ -895,7 +900,7 @@ def _dispatch_client_lanes(
             if outcome.usage_limit_detected:
                 limit_outcome = outcome
             if outcome.spawn_error:
-                spawn_error = True
+                spawn_error_outcome = outcome
                 _record_lane_spawn_error(
                     lane_cfg,
                     client_name=client.name,
@@ -909,7 +914,7 @@ def _dispatch_client_lanes(
                 available_client_slots -= 1
                 _reset_lane_spawn_errors(lane_cfg, client.name)
 
-            if limit_outcome is not None or spawn_error:
+            if limit_outcome is not None or spawn_error_outcome is not None:
                 break
 
         lane_stats[lane_cfg.name] = {
@@ -920,7 +925,7 @@ def _dispatch_client_lanes(
             "pending": breakdown.pending,
         }
 
-        if limit_outcome is not None or spawn_error:
+        if limit_outcome is not None or spawn_error_outcome is not None:
             break
 
     if emit is not None:
@@ -933,7 +938,7 @@ def _dispatch_client_lanes(
     skip_reason = _resolve_dispatch_skip_reason(
         usage_limit_detected=limit_outcome is not None,
         cap_full=cap_full,
-        spawn_error=spawn_error,
+        spawn_error=spawn_error_outcome is not None,
         lane_cap_blocked=lane_cap_blocked,
         spawn_backoff_skipped=spawn_backoff_skipped,
         lane_circuit_paused=lane_circuit_paused,
@@ -955,6 +960,7 @@ def _dispatch_client_lanes(
             "occupied": sum(len(v) for v in occupants_by_lane.values()),
             "host_running": host_capacity.running,
             "host_budget": host_capacity.budget,
+            **_spawn_error_tick_fields(spawn_error_outcome),
         },
     )
     return _ClientDispatchResult(

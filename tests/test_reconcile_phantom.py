@@ -90,9 +90,7 @@ def test_reconcile_crashed_phantom_salvages_shipped_sentinel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Phantom (surface gone) session that shipped → COMPLETED, not re-dispatched."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-crash"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     # Past the spawn grace window but well under the headless budget, so the
@@ -160,9 +158,7 @@ def test_reconcile_phantom_routes_stage_complete_advance_sentinel(
     The fix routes the emitted advance sentinel through apply_staged_decision so
     the stage advances (IMPL→REVIEW) instead of being reverted as a crash.
     """
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-stage"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     # Past the spawn grace window but well under the headless budget, so the
@@ -230,9 +226,7 @@ def test_reconcile_phantom_routes_tool_result_emitted_sentinel(
     #716 phantom-advance nor the idle ROUTE_EMITTED_SENTINEL path can route it,
     and the stage stalls. Reproduces #722; fails before the #731 scan fix.
     """
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-toolres"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
@@ -295,9 +289,7 @@ def test_reconcile_phantom_non_advance_sentinel_not_routed(
     salvage nor an advance, so it falls through to the crash path (BLOCKED_ON_USER
     under the default signal_only policy) — it must never silently advance.
     """
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-blocked"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
@@ -363,9 +355,7 @@ def test_reconcile_phantom_stage_mismatch_does_not_orphan_task_or_complete_sessi
     guard must refuse: task stays exactly as it was, session is NOT completed,
     and SENTINEL_STAGE_MISMATCH is emitted.
     """
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-mismatch"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
@@ -445,9 +435,7 @@ def test_reconcile_phantom_race_already_failed_task_completes_session_via_door(
     apply_staged_decision/_route_staged_decision, which is the only emitter
     of that event type.
     """
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-race"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
@@ -1069,14 +1057,11 @@ def test_detect_phantom_candidates_crashes_unreconstructable_terminal_result(
 def test_detect_phantom_candidates_salvage_on_terminal_sentinel(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """DAEMON session in phantom_set with terminal sentinel → SALVAGE_COMPLETION."""
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-phantom-salv"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     # surface_ref must match the prefix used by _write_salvage_transcript
@@ -1211,14 +1196,11 @@ def test_detect_phantom_candidates_worktree_clean_reason_none_on_candidate(
 def test_detect_phantom_candidates_usage_limit_detected_true(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """DAEMON phantom with usage-limit transcript → usage_limit_detected=True (#804)."""
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-ul-phantom"
@@ -1277,14 +1259,11 @@ def test_detect_phantom_candidates_usage_limit_false_when_no_transcript(
 def test_detect_phantom_candidates_usage_limit_recent_at_tail_true(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1345: a limit message at the transcript tail is recent → detected True."""
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-ul-recent"
@@ -1325,14 +1304,11 @@ def test_detect_phantom_candidates_usage_limit_recent_at_tail_true(
 def test_detect_phantom_candidates_usage_limit_stale_false(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1345: an early limit message with later unrelated work is stale → False."""
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-ul-stale"
@@ -1374,14 +1350,11 @@ def test_detect_phantom_candidates_usage_limit_stale_false(
 def test_detect_phantom_candidates_provider_overload_detected_true(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """DAEMON phantom with a provider-overload transcript → True (#1923)."""
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-529-phantom"
@@ -1465,7 +1438,6 @@ def test_detect_phantom_candidates_provider_overload_false_for_user_origin(
 def test_phantom_sentinel_mismatch_veto_when_transcript_live(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """GitHub #1281: an already_refused phantom whose transcript is still
     actively advancing is vetoed instead of falling straight through to
@@ -1474,9 +1446,7 @@ def test_phantom_sentinel_mismatch_veto_when_transcript_live(
     """
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-sentinel-veto-live"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(minutes=5)
@@ -1516,7 +1486,6 @@ def test_phantom_sentinel_mismatch_veto_when_transcript_live(
 def test_phantom_sentinel_mismatch_veto_fires_when_transcript_stale(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A transcript stale beyond TRANSCRIPT_LIVENESS_WINDOW_SECONDS still vetoes
     the crash while the veto counter is under the cap (GitHub #2405, ADR-0014):
@@ -1526,9 +1495,7 @@ def test_phantom_sentinel_mismatch_veto_fires_when_transcript_stale(
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
 
     _write_staged_clients_yaml(tmp_config_dir, "client-a")
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-sentinel-veto-stale"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
@@ -1595,15 +1562,12 @@ def test_phantom_sentinel_mismatch_veto_fires_when_no_transcript(
 def test_phantom_sentinel_mismatch_veto_disabled_keeps_age_fallback(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A client outside #2405 rollout keeps the old fallback with shadow telemetry."""
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-sentinel-veto-disabled"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(hours=2)
@@ -1672,9 +1636,7 @@ def test_phantom_sentinel_mismatch_veto_end_to_end_ignores_transcript_age(
     )
     from cw.reconcile import _act_on_phantom_candidates, _detect_phantom_candidates
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(minutes=5)
     sid = "veto-e2e-age-1"
@@ -1761,9 +1723,7 @@ def test_phantom_dirty_worktree_past_veto_cap_blocks_on_user_regardless_of_age(
     )
     from cw.reconcile import _act_on_phantom_candidates, _detect_phantom_candidates
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(hours=2)
     sid = "veto-dirty-cap-1"
@@ -1817,7 +1777,6 @@ def test_phantom_dirty_worktree_past_veto_cap_blocks_on_user_regardless_of_age(
 def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """GitHub #1149: a phantom-path stage-mismatch refusal stamps the
     paused_status-only marker so the doomed ROUTE_EMITTED_SENTINEL candidate
@@ -1827,9 +1786,7 @@ def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
     from cw.reconcile.phantom import _apply_phantom_routed_mutations
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-phantom-refusal"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
@@ -1906,16 +1863,13 @@ def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
 def test_phantom_route_emitted_sentinel_refusal_marker_is_not_terminal_sentinel(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Mirrors the idle-path equivalent: the phantom-path refusal marker
     carries no "status" key, so _has_terminal_sentinel stays False."""
     from cw.reconcile import _detect_phantom_candidates
     from cw.reconcile.phantom import _apply_phantom_routed_mutations
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-phantom-not-terminal"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
@@ -1961,7 +1915,6 @@ def test_phantom_route_emitted_sentinel_refusal_marker_is_not_terminal_sentinel(
 def test_phantom_routed_mutations_completes_on_task_already_terminal(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """GitHub #2140: when the dev-queue task was already raced to a genuinely
     terminal status (COMPLETED/FAILED/CANCELLED) by a concurrent caller before
@@ -1975,9 +1928,7 @@ def test_phantom_routed_mutations_completes_on_task_already_terminal(
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
     from cw.reconcile.phantom import _apply_phantom_routed_mutations
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-2140-phantom-terminal"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
@@ -2038,7 +1989,6 @@ def test_phantom_routed_mutations_completes_on_task_already_terminal(
 def test_phantom_routed_mutations_terminal_refusal_preserves_existing_result(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """GitHub #2140: a ``task_already_terminal`` race must still respect
     first-writer-wins -- if another authority already recorded a terminal
@@ -2051,9 +2001,7 @@ def test_phantom_routed_mutations_terminal_refusal_preserves_existing_result(
     from cw.reconcile import _detect_phantom_candidates
     from cw.reconcile.phantom import _apply_phantom_routed_mutations
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-2140-phantom-terminal-refused"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
@@ -2112,7 +2060,6 @@ def test_phantom_routed_mutations_terminal_refusal_preserves_existing_result(
 def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A stage-mismatch refusal must not clobber a pre-existing paused_status
     marker from another sweep, AND must still latch the refusal so the doomed
@@ -2135,9 +2082,7 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
     from cw.reconcile.phantom import _apply_phantom_routed_mutations
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-phantom-preserve-marker"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
@@ -2214,7 +2159,6 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
 def test_phantom_later_stage_sentinel_routes_forward_instead_of_looping(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """GitHub #1149 R1: a later-stage sentinel (a legitimate self-escalation
     the row hasn't caught up to) routes forward via the shared staged-advance
@@ -2224,9 +2168,7 @@ def test_phantom_later_stage_sentinel_routes_forward_instead_of_looping(
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
     from cw.reconcile.phantom import _apply_phantom_routed_mutations
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-phantom-later"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
@@ -2878,7 +2820,6 @@ def _write_fresh_refused_transcript(
 def test_sentinel_mismatch_veto_candidate_stamps_incrementing_veto_count(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A LIVE already_refused phantom below the cap yields a
     SENTINEL_STAGE_MISMATCH_VETOED candidate whose new_veto_count is the current
@@ -2886,9 +2827,7 @@ def test_sentinel_mismatch_veto_candidate_stamps_incrementing_veto_count(
     from cw.reconcile import ProposedAction
     from cw.reconcile.phantom import _sentinel_mismatch_veto_candidate
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-veto-count"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(minutes=5)
@@ -2924,7 +2863,6 @@ def test_sentinel_mismatch_veto_candidate_stamps_incrementing_veto_count(
 def test_sentinel_mismatch_veto_candidate_returns_none_once_cap_reached(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An already_refused phantom already at the cap returns
     (None, True, stale_seconds) regardless of transcript state: the veto is
@@ -2932,9 +2870,7 @@ def test_sentinel_mismatch_veto_candidate_returns_none_once_cap_reached(
     staleness read on this tick as a diagnostic (#1449, #2405)."""
     from cw.reconcile.phantom import _sentinel_mismatch_veto_candidate
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-veto-capped"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(minutes=5)
@@ -2956,7 +2892,6 @@ def test_sentinel_mismatch_veto_candidate_returns_none_once_cap_reached(
 def test_sentinel_mismatch_veto_candidate_already_escalated_no_stale_minutes(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An already_refused phantom already PAST the cap (count > cap, not
     == cap -- i.e. already escalated on a prior tick) returns
@@ -2971,9 +2906,7 @@ def test_sentinel_mismatch_veto_candidate_already_escalated_no_stale_minutes(
     invariant (caught in review before merge, never shipped)."""
     from cw.reconcile.phantom import _sentinel_mismatch_veto_candidate
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-veto-already-escalated"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(minutes=5)
@@ -3001,7 +2934,6 @@ def test_sentinel_mismatch_veto_candidate_already_escalated_no_stale_minutes(
 def test_sentinel_mismatch_veto_candidate_cap_fires_on_stale_transcript_too(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A genuinely stale transcript with the counter at the cap reports the cap
     as exhausted (GitHub #2405): staleness no longer overrides the attempt-cap
@@ -3009,9 +2941,7 @@ def test_sentinel_mismatch_veto_candidate_cap_fires_on_stale_transcript_too(
     carrying the stale age as a diagnostic."""
     from cw.reconcile.phantom import _sentinel_mismatch_veto_candidate
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-veto-stale"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
@@ -3056,7 +2986,6 @@ def test_sentinel_mismatch_veto_candidate_cap_fires_on_stale_transcript_too(
 def test_sentinel_mismatch_veto_candidate_outcome_tracks_only_the_cap(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     transcript_age_seconds: int | None,
     veto_count: int,
     expect_veto: bool,
@@ -3069,9 +2998,7 @@ def test_sentinel_mismatch_veto_candidate_outcome_tracks_only_the_cap(
     None when unlocatable or already past the cap."""
     from cw.reconcile.phantom import _sentinel_mismatch_veto_candidate
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(hours=2)
     worktree: Path | None = None
@@ -3109,16 +3036,13 @@ def test_sentinel_mismatch_veto_candidate_outcome_tracks_only_the_cap(
 def test_phantom_veto_bounded_falls_through_to_crash_complete(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A LIVE, already_refused phantom at the veto cap falls through to a single
     CRASH_COMPLETE candidate stamped veto_cap_exhausted=True — no
     SENTINEL_STAGE_MISMATCH_VETOED candidate (#1449)."""
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-bound-crash"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(minutes=5)
@@ -3169,9 +3093,7 @@ def test_sentinel_mismatch_veto_cap_end_to_end_via_detect_and_act(
         _detect_phantom_candidates,
     )
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-veto-e2e"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(minutes=5)
@@ -3245,9 +3167,7 @@ def test_sentinel_mismatch_veto_cap_exhaustion_emits_immediate_needs_attention(
         "cw.reconcile._deps.fire_push_notification",
         lambda *a, **kw: push_calls.append((a, kw)),
     )
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-veto-attn"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(minutes=5)
@@ -3317,9 +3237,7 @@ def test_sentinel_mismatch_veto_escalation_fires_once_not_every_tick(
     )
     from cw.reconcile import _act_on_phantom_candidates, _detect_phantom_candidates
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-veto-once"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(minutes=5)
@@ -3376,9 +3294,7 @@ def test_sentinel_mismatch_veto_falls_through_ordinary_first_veto_no_escalation(
     )
     from cw.reconcile import _act_on_phantom_candidates, _detect_phantom_candidates
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-first-veto"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(minutes=5)
@@ -4385,9 +4301,7 @@ def test_reconcile_crashed_phantom_salvage_corrects_inflated_scope(
     make_git_repo: Callable[..., Path],
 ) -> None:
     """#1487: the phantom sweep's salvage lands git-verified scope numbers."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = _make_stale_base_repo(make_git_repo, "wt-phantom-scope")
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
@@ -4861,9 +4775,6 @@ def _non_headless_terminal_phantom_fixture(
     isolating the phantom sweep as the only sweep that can recover it.
     Returns the ``now`` the caller should freeze ``reconcile()`` at.
     """
-    home = tmp_path / "home"
-    home.mkdir(exist_ok=True)
-    monkeypatch.setenv("HOME", str(home))
     worktree = tmp_path / f"wt-{ticket_id}"
     worktree.mkdir(parents=True, exist_ok=True)
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)

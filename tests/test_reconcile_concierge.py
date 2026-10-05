@@ -1552,9 +1552,7 @@ def test_park_marker_poison_clear_survives_widened_transcript_lookup(
     # (widened) implementation so this test exercises the glob across all files.
     monkeypatch.setattr("cw.reconcile.concierge._transcript_age_seconds", _real_age)
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = tmp_path / "wt-poison-widen"
     started_at = _NOW - timedelta(hours=3)
 
@@ -1820,15 +1818,12 @@ def test_validate_existing_result_for_routing_invalid_shape_returns_none() -> No
 def test_close_confirmed_dead_session_corrects_salvaged_scope(
     tmp_config_dir: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     make_git_repo: Any,
 ) -> None:
     """#1487: the concierge's pre-close salvage returns git-verified scope numbers."""
     from cw.reconcile.concierge import _close_confirmed_dead_session
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    home = Path.home()
     worktree = _make_stale_base_repo(make_git_repo, "wt-concierge-scope")
     _write_acme_clients_yaml(tmp_config_dir, worktree)
 

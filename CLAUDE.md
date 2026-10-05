@@ -182,6 +182,14 @@ onto source modules (`test_cli.py` ↔ `cli.py`, `test_native_daemon.py` ↔
 - Isolation: the autouse `tmp_config_dir` fixture in `conftest.py` patches
   every `cw.config.*` path at module load; consumers read paths through
   accessor functions so no per-test module-local patching is needed
+- HOME is redirected by construction (#1756): `tests/_session_home.py` (imported
+  by `conftest.py` before any `cw` import) points `HOME` at a throwaway dir and
+  drops `XDG_*`, and the autouse `_isolate_home` fixture sets `HOME` to
+  `tmp_path / "_home"` per test. Use `Path.home()`, never
+  `monkeypatch.setenv("HOME", ...)`, unless the HOME needs specific content.
+  Git identity comes from `$HOME/.gitconfig` (`_clean_git_env()` strips
+  `GIT_*`). Live runs opt out with `CW_TEST_REAL_HOME=1` or an
+  `INTEGRATION_*` live gate
 - Mock `cw.native_daemon.FakeNativeDaemonClient` via the `mock_native_daemon`
   fixture for daemon-origin spawn and reconcile tests
 - Use `freezegun` for time-dependent assertions
