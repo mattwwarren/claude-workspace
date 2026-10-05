@@ -50,7 +50,7 @@ from cw.worktree._git import (
     check_not_main_checkout,
 )
 from cw.worktree._lifecycle import (
-    _CW_EXCLUDE_PATTERN,
+    _CW_EXCLUDE_PATTERNS,
     _WORKTREE_HELD_BY_RE,
     _branch_held_error,
     _parse_worktree_holder_path,
@@ -125,7 +125,7 @@ from cw.worktree._unsaved import (
 )
 
 __all__ = [
-    "_CW_EXCLUDE_PATTERN",
+    "_CW_EXCLUDE_PATTERNS",
     "_CW_SCRATCH_PREFIX",
     "_GIT_PORCELAIN_PATH_OFFSET",
     "_GIT_PORCELAIN_UNTRACKED",

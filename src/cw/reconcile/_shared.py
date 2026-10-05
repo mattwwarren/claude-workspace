@@ -1486,12 +1486,23 @@ class SentinelRouteOutcome(NamedTuple):
     a caller (``signal_stop``) can safely complete the now-leaked session on
     this sub-cause -- unlike a stage-mismatch refusal, where a still-advancing
     worker may legitimately produce a later, matching-stage sentinel.
+
+    ``stage_refused`` (GitHub #2490) is True only when cause (a) above fired:
+    the shared staged-advance guard refused the sentinel's stage position
+    (``sentinel.stage_mismatch`` was emitted). It lets a caller whose session
+    is provably dead tell that permanent refusal apart from the other
+    ``routed=False`` causes, which are not stage mismatches. ``refused_stage``
+    is the row's stage as read under ``dev_queue_lock`` at the moment of that
+    refusal (None for every other outcome), so a page can name the row's live
+    stage rather than a stale per-pass snapshot of it.
     """
 
     rescued: bool
     routed: bool
     landed_terminal: bool
     task_already_terminal: bool = False
+    stage_refused: bool = False
+    refused_stage: Stage | None = None
 
 
 class _TaskLookupResult(NamedTuple):
@@ -1792,6 +1803,7 @@ def _apply_sentinel_to_task(
         rescued = False
         routed = True
         landed_terminal = False
+        stage_refused = False
         mutated = True
         if isinstance(sentinel, AutoDevResult):
             # Delegate to the shared B2 staged advance decision so both the
@@ -1819,6 +1831,7 @@ def _apply_sentinel_to_task(
             # #1019: a stage-mismatch refusal is a true no-op -- the routing
             # core already left `target` untouched, but skip the write too.
             mutated = routed
+            stage_refused = not routed
         elif target_status == QueueItemStatus.RUNNING:
             # BlockedResult on a live RUNNING task. A parked task falls through
             # to an implicit no-op — a BlockedResult carries no success signal,
@@ -1845,7 +1858,11 @@ def _apply_sentinel_to_task(
         if mutated:
             save_dev_queue(store)
         return SentinelRouteOutcome(
-            rescued=rescued, routed=routed, landed_terminal=landed_terminal
+            rescued=rescued,
+            routed=routed,
+            landed_terminal=landed_terminal,
+            stage_refused=stage_refused,
+            refused_stage=target.stage if stage_refused else None,
         )
 
 
@@ -2676,6 +2693,44 @@ def _stamp_sentinel_partial_route_consumed(session: Session) -> None:
         session.last_result = {
             **existing,
             _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY: True,
+        }
+
+
+def stage_refusal_latched(session: Session) -> bool:
+    """True once a stage-mismatch refusal was latched on *session* (#1149, #2490).
+
+    The one read side of the refusal latch the phantom, stalled and local-harvest
+    sweeps (and the idle sweep's staged-result producer) all stamp: the
+    single-key ``_PAUSED_STATUS_KEY`` marker, or the ``_SENTINEL_ADVANCE_REFUSED_KEY``
+    flag merged into a ``last_result`` dict that already held other content.
+    """
+    last_result = session.last_result
+    return isinstance(last_result, dict) and (
+        last_result.get(_PAUSED_STATUS_KEY) == _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+        or last_result.get(_SENTINEL_ADVANCE_REFUSED_KEY) is True
+    )
+
+
+def stamp_stage_refusal(session: Session) -> None:
+    """Latch a stage-mismatch refusal on *session* (the write side).
+
+    A refused candidate leaves the task row and the session untouched, so
+    without a latch every tick re-detects it and re-refuses it forever. A
+    pre-existing ``last_result`` dict is merged into under its own key, never
+    overwritten: it may carry another sweep's ``paused_status`` park marker
+    (idle's ``silently_idle``, salvage's ``needs_salvage``) that stalled's
+    SKIP_PARKED check still has to read. Only a missing ``last_result`` gets the
+    single-key stamp. Mutates *session* in place; the caller owns ``save_state``.
+
+    The idle sweep's own stamp (``idle/_mutations.py``) is a deliberate
+    single-key variant (#2458) and does not use this helper.
+    """
+    existing = session.last_result
+    if isinstance(existing, dict):
+        session.last_result = {**existing, _SENTINEL_ADVANCE_REFUSED_KEY: True}
+    else:
+        session.last_result = {
+            _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
         }
 
 

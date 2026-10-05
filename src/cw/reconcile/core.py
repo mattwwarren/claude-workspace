@@ -439,9 +439,7 @@ def _reconcile_locked(
     # (#888). Runs BEFORE the daemon query + outage guard: it depends only on
     # /proc liveness, not `claude agents --json`, so it must fire even when the
     # daemon roster is unavailable (a LOCAL session has no surface on the roster).
-    local_harvest_candidates = _detect_local_harvest_candidates(
-        state, task_by_ticket=shared_task_by_ticket
-    )
+    local_harvest_candidates = _detect_local_harvest_candidates(state, shared_tasks)
     local_harvested = _act_on_local_harvest_candidates(
         state,
         local_harvest_candidates,

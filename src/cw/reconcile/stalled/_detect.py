@@ -26,38 +26,17 @@ from cw.auto_dev_result import INTERMEDIATE_ADVANCE_STATUSES, AutoDevResult
 from cw.models import DEFAULT_LANE, LastResultSource, SessionOrigin
 from cw.reconcile._shared import (
     _LIVE_STATUSES,
-    _PAUSED_STATUS_KEY,
-    _SENTINEL_ADVANCE_REFUSED_KEY,
-    _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     ProposedAction,
     ReapCandidate,
     _has_terminal_sentinel,
     _is_headless,
     _validate_existing_result_for_routing,
+    stage_refusal_latched,
     ticket_id_for_session,
 )
 
 if TYPE_CHECKING:
     from cw.models import CwState, Session, TicketTask
-
-
-def _is_already_refused(session: Session) -> bool:
-    """True when a prior tick already refused this session's foreign sentinel.
-
-    Mirrors ``phantom._detect``'s ``already_refused`` latch (#1149): a
-    ``ROUTE_EMITTED_SENTINEL`` refusal merges ``_SENTINEL_ADVANCE_REFUSED_KEY``
-    into ``session.last_result`` (stalled's precondition is that
-    ``last_result`` is always already the emitted terminal dict, so the
-    single-key ``_PAUSED_STATUS_KEY``-only stamp never applies here -- the
-    check still reads for it for parity with the shared vocabulary). Without
-    this latch a stale/earlier-stage ``stage_complete`` claim would be
-    re-offered as a candidate forever.
-    """
-    existing = session.last_result
-    return isinstance(existing, dict) and (
-        existing.get(_PAUSED_STATUS_KEY) == _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
-        or existing.get(_SENTINEL_ADVANCE_REFUSED_KEY) is True
-    )
 
 
 def _append_foreign_result_candidate(
@@ -99,7 +78,9 @@ def _append_foreign_result_candidate(
         return False
     if not _has_terminal_sentinel(session):
         return False
-    if _is_already_refused(session):
+    # #1149: without this latch a stale/earlier-stage ``stage_complete`` claim
+    # would be re-offered as a candidate forever.
+    if stage_refusal_latched(session):
         return True
     validated_foreign = _validate_existing_result_for_routing(session.last_result)
     if validated_foreign is not None:

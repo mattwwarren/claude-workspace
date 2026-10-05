@@ -84,6 +84,74 @@ class TestRegisterCwExclude:
         _register_cw_exclude(repo)
         assert gitignore.read_text() == original
 
+    def test_registers_every_pattern_once_across_repeat_calls(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """Both cw patterns land exactly once however often it is called (#2447)."""
+        repo = make_git_repo("test-repo")
+        for _ in range(3):
+            _register_cw_exclude(repo)
+        lines = (repo / ".git" / "info" / "exclude").read_text().splitlines()
+        assert lines.count(".cw/") == 1
+        assert lines.count(".claude/cw-context.json*") == 1
+
+    def test_tops_up_exclude_that_predates_the_context_pattern(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """A repo carrying only the old .cw/ line (no trailing newline) gains
+        the context pattern on its own line without duplicating .cw/."""
+        repo = make_git_repo("test-repo")
+        info_dir = repo / ".git" / "info"
+        info_dir.mkdir(exist_ok=True)
+        (info_dir / "exclude").write_text("# keep me\n.cw/")
+        _register_cw_exclude(repo)
+        assert (info_dir / "exclude").read_text().splitlines() == [
+            "# keep me",
+            ".cw/",
+            ".claude/cw-context.json*",
+        ]
+
+    def _write_context_files(self, root: Path) -> None:
+        (root / ".claude").mkdir(exist_ok=True)
+        (root / ".claude" / "cw-context.json").write_text("{}")
+        (root / ".claude" / "cw-context.json.lock").write_text("")
+        (root / "real.txt").write_text("keep")
+
+    def test_plain_checkout_ignores_context_files_and_add_all_skips_them(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """In a plain checkout git check-ignore matches both files and
+        ``git add -A`` stages neither (#2447)."""
+        repo = make_git_repo("test-repo")
+        _register_cw_exclude(repo)
+        self._write_context_files(repo)
+        for rel in (".claude/cw-context.json", ".claude/cw-context.json.lock"):
+            verdict = git_in(repo, "check-ignore", "-v", rel)
+            assert "info/exclude" in verdict
+            assert ".claude/cw-context.json*" in verdict
+        git_in(repo, "add", "-A")
+        staged = git_in(repo, "diff", "--cached", "--name-only").splitlines()
+        assert staged == ["real.txt"]
+
+    def test_linked_worktree_ignores_context_files_and_add_all_skips_them(
+        self, make_git_repo: Callable[[str], Path], tmp_path: Path
+    ) -> None:
+        """The exclude lives in the common dir, so a linked worktree honours
+        it for both files when registration runs from inside the worktree
+        (#2447)."""
+        repo = make_git_repo("test-repo")
+        wt = tmp_path / "linked-wt"
+        git_in(repo, "worktree", "add", "-b", "dev/1", str(wt))
+        _register_cw_exclude(wt)  # called from inside the worktree
+        exclude = repo / ".git" / "info" / "exclude"
+        assert ".claude/cw-context.json*" in exclude.read_text().splitlines()
+        self._write_context_files(wt)
+        for rel in (".claude/cw-context.json", ".claude/cw-context.json.lock"):
+            assert "info/exclude" in git_in(wt, "check-ignore", "-v", rel)
+        git_in(wt, "add", "-A")
+        staged = git_in(wt, "diff", "--cached", "--name-only").splitlines()
+        assert staged == ["real.txt"]
+
     def test_git_failure_logs_warning_and_does_not_raise(
         self,
         tmp_path: Path,

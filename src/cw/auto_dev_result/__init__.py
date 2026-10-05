@@ -4,9 +4,12 @@ Package split (#1321). The historical flat ``cw.auto_dev_result`` module is now
 a package: ``schema`` (the :class:`AutoDevResult` model, its nested models, and
 the status/stage/scope vocabulary + cross-field invariants) and ``parse``
 (stdout extraction, JSON decode, producer-drift coercion, :func:`parse_stdout`).
-This ``__init__`` re-exports the full historical public + private surface so
-every ``from cw.auto_dev_result import X`` import site and downstream call path
-keeps working unchanged.
+``_last_block`` selects the LAST real block over a stream of text chunks
+(:func:`parse_last_block_in_chunks`, :func:`parse_last_block`; #2490), where
+``parse_stdout`` refuses a second block. This ``__init__`` re-exports the full
+historical public + private surface so every
+``from cw.auto_dev_result import X`` import site and downstream call path keeps
+working unchanged.
 
 Spec: ``docs/headless-contract.md`` (§3 framing, §4 enum, §5 health, §6
 failure modes).
@@ -14,6 +17,10 @@ failure modes).
 
 from __future__ import annotations
 
+from cw.auto_dev_result._last_block import (
+    parse_last_block,
+    parse_last_block_in_chunks,
+)
 from cw.auto_dev_result._premises_resolution import (
     _downgrade_exempt_premises,
 )
@@ -222,6 +229,8 @@ __all__ = [
     "extract_block",
     "is_documented_example",
     "is_known_blocker_reason",
+    "parse_last_block",
+    "parse_last_block_in_chunks",
     "parse_stdout",
     "queue_status_for_terminal_sentinel",
 ]
