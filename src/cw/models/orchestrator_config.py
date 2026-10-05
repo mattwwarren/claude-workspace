@@ -698,6 +698,14 @@ class OrchestratorConfig(BaseModel):
     # itself. See GitHub #856.
     inbox_size_warn_bytes: int = 5_000_000
     inbox_line_count_warn: int = 15_000
+    # `cw doctor` warns (advisory, never fails the exit code) when sessions.json
+    # exceeds this many bytes, suggesting `cw session prune` (#1999, retention
+    # from #1983). Read-only: stat-only, and nothing runs prune automatically.
+    # The 15 MB default comes from ~3.7 KB/session on a long-lived host whose
+    # retained set after a prune is ~10 MB. `cw session prune` keeps live and
+    # dev-queue-referenced sessions, so raise this field if the nudge persists
+    # after a prune. Do NOT tie it to inbox_size_warn_bytes above.
+    sessions_size_warn_bytes: int = 15_000_000
     # Auto-prune trigger (#1980): checked in record_event's append path, under
     # _inbox_lock, using the byte size already available from the append write
     # (no extra read). Distinct from inbox_size_warn_bytes/inbox_line_count_warn

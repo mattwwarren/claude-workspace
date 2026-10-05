@@ -1743,6 +1743,13 @@ class TestInboxPruneThresholds:
         assert OrchestratorConfig().inbox_line_count_warn == 15_000
 
 
+class TestSessionsSizeWarnThreshold:
+    """Issue #1999: OrchestratorConfig default for the sessions-size doctor check."""
+
+    def test_orchestrator_config_default_sessions_size_warn_bytes(self) -> None:
+        assert OrchestratorConfig().sessions_size_warn_bytes == 15_000_000
+
+
 class TestEventInboxAutoPruneDefaults:
     """#1980: OrchestratorConfig defaults for the event-inbox auto-prune trigger."""
 
