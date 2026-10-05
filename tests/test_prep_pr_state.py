@@ -762,6 +762,11 @@ class TestDetectGatesAuthoritativeBlock:
 # #2187: pin the repo's own CLAUDE.md gate list (CI contract tripwire)
 # ---------------------------------------------------------------------------
 
+# The gate that runs the whole pre-commit hook suite. Located by exact command:
+# the actionlint gate (#1626) also runs `pre-commit`, so the derived names are
+# disambiguated (`pre-commit-run`, `pre-commit-run-2`) and neither is stable.
+HOOK_SUITE_COMMAND = "uv run pre-commit run --all-files"
+
 EXPECTED_REPO_GATES: list[tuple[str, str]] = [
     ("uv-lock", "uv lock --check"),
     ("uv-sync", "uv sync --locked --dev --extra mcp"),
@@ -770,7 +775,8 @@ EXPECTED_REPO_GATES: list[tuple[str, str]] = [
     ("mypy", "uv run mypy --strict src/"),
     ("python", "uv run python .claude/scripts/check_imports.py"),
     ("python-2", "uv run python .claude/scripts/check_changelog_frozen.py"),
-    ("pre-commit", "uv run pre-commit run --all-files"),
+    ("pre-commit-run", "uv run pre-commit run actionlint --all-files"),
+    ("pre-commit-run-2", HOOK_SUITE_COMMAND),
     (
         "pytest-not-integration",
         "uv run --extra mcp pytest tests/ -m 'not integration' "
@@ -887,8 +893,10 @@ class TestRealClaudeMdGates:
         assert m_hook is not None, (
             "prose no longer says which gate `*is* the hook suite`"
         )
-        names = [g["name"] for g in _real_repo_gates(monkeypatch)["gates"]]
-        assert "pre-commit" in names, "no `pre-commit` gate detected. " + _PIN_GUIDANCE
-        assert int(m_hook.group(1)) == names.index("pre-commit") + 1, (
+        commands = [g["command"] for g in _real_repo_gates(monkeypatch)["gates"]]
+        assert HOOK_SUITE_COMMAND in commands, (
+            f"no `{HOOK_SUITE_COMMAND}` gate detected. " + _PIN_GUIDANCE
+        )
+        assert int(m_hook.group(1)) == commands.index(HOOK_SUITE_COMMAND) + 1, (
             "the prose names the wrong gate number for the hook suite. " + _PIN_GUIDANCE
         )

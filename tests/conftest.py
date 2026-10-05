@@ -530,7 +530,8 @@ def _write_bin_stub(tmp_path: Path, name: str, body: str) -> Path:
     """Write ``body`` as an executable ``name`` in ``tmp_path/bin``; return the dir.
 
     The shared mechanics behind every fake-external-CLI helper here
-    (``_stub_gh``, ``_stub_cw``) so a new one differs only in its script body.
+    (``_stub_gh``, ``_stub_gh_recording``, ``_stub_cw``) so a new one differs
+    only in its script body.
     """
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(exist_ok=True)
@@ -557,6 +558,49 @@ def _stub_gh(tmp_path: Path, *, exit_code: int, stdout: str = "") -> Path:
         "gh",
         f"#!/bin/sh\ncat <<'GH_STDOUT_EOF'\n{stdout}GH_STDOUT_EOF\nexit {exit_code}\n",
     )
+
+
+# Side file (next to the stub) that ``_stub_gh_recording`` appends to, one
+# line per invocation; each arg is terminated by the ASCII unit separator so
+# args containing spaces round-trip exactly.
+GH_CALLS_FILE = "gh.calls"
+GH_ARG_SEPARATOR = "\x1f"
+
+
+def _stub_gh_recording(
+    tmp_path: Path, *, view_exit: int = 0, create_exit: int = 0, other_exit: int = 0
+) -> Path:
+    """Write a ``gh`` stub that records argv and returns scripted exit codes (#1626).
+
+    Unlike ``_stub_gh`` (fixed exit, no record), every invocation appends its
+    argv to ``gh.calls`` beside the stub -- read it back with ``_gh_calls`` --
+    so a test can assert the exact flags a workflow step passed. The exit code
+    is chosen per subcommand: ``release view`` -> ``view_exit``,
+    ``release create`` -> ``create_exit``, anything else -> ``other_exit``.
+    """
+    lines = [
+        "#!/bin/sh",
+        'for a in "$@"; do printf \'%s\\037\' "$a"; done'
+        f' >> "$(dirname "$0")/{GH_CALLS_FILE}"',
+        f'printf \'\\n\' >> "$(dirname "$0")/{GH_CALLS_FILE}"',
+        'case "$1 $2" in',
+        f'  "release view") exit {view_exit};;',
+        f'  "release create") exit {create_exit};;',
+        f"  *) exit {other_exit};;",
+        "esac",
+    ]
+    return _write_bin_stub(tmp_path, "gh", "\n".join(lines) + "\n")
+
+
+def _gh_calls(fake_bin: Path) -> list[list[str]]:
+    """Every argv ``_stub_gh_recording`` logged, in call order; ``[]`` if none."""
+    log = fake_bin / GH_CALLS_FILE
+    if not log.exists():
+        return []
+    # Split on "\n" explicitly: one record per line, and each arg ends with the
+    # separator, so the trailing empty field is dropped.
+    records = log.read_text(encoding="utf-8").split("\n")[:-1]
+    return [record.split(GH_ARG_SEPARATOR)[:-1] for record in records]
 
 
 def _stub_cw(
