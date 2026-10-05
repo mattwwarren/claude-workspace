@@ -68,20 +68,26 @@ repos:
         pass_filenames: false
         files: ^CHANGELOG\.md$
 
+      # Runs in the project venv, and git invokes it with no `uv run` wrapper.
+      # `--extra mcp` makes `uv run` re-sync the mcp extra to the lock: without
+      # it a stale installed extra is not upgraded and the suite can fail on
+      # code CI passes (#2242). Mirrors CLAUDE.md gate 10; CI skips this hook
+      # (`SKIP: pytest`) because it syncs the extra in its own install step.
       - id: pytest
         name: pytest
-        entry: uv run pytest tests/ -x -q
+        entry: uv run --extra mcp pytest tests/ -x -q
         language: system
         pass_filenames: false
         always_run: true
 
       # Mirrors the CI patch-coverage gate so failures surface before push,
       # not after a wasted CI cycle. Same threshold (90%) and same scope
-      # (`not integration`) as .github/workflows/ci.yml.
+      # (`not integration`) as .github/workflows/ci.yml. Same `--extra mcp` as
+      # the pytest hook above (#2242).
       - id: diff-cover
         name: diff-cover (vs origin/main, 90%)
         stages: [pre-push]
-        entry: bash -c 'git fetch --quiet origin main && uv run pytest tests/ -q -m "not integration" --cov=cw --cov-report=xml --cov-report=term && uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=90'
+        entry: bash -c 'git fetch --quiet origin main && uv run --extra mcp pytest tests/ -q -m "not integration" --cov=cw --cov-report=xml --cov-report=term && uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=90'
         language: system
         pass_filenames: false
         always_run: true
