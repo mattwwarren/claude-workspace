@@ -376,6 +376,10 @@ class TestReviewConsolidateCommand:
             # Always emitted, 0 here — only `cw review adjudicate` ever sets
             # it non-zero.
             "unmatched_adjudication_count",
+            # #2319: distinct `new_voided_entries` that matched no accepted
+            # finding. Always emitted, 0 here — only `cw review check-voided`
+            # ever sets it non-zero.
+            "unmatched_voided_count",
             # #2000: the all-severity tally of `rejected` (a superset of
             # `rejected_must_fix` above), plus the verify-fixes downgrade
             # counter. All three always emitted, 0/{} here — this command
@@ -395,6 +399,7 @@ class TestReviewConsolidateCommand:
             "stale_dispositions",
         }
         assert verdict["unmatched_adjudication_count"] == 0
+        assert verdict["unmatched_voided_count"] == 0
         assert verdict["capability_mode"] is None
         assert verdict["capability_reason"] is None
         assert verdict["is_terminal_snapshot"] is True

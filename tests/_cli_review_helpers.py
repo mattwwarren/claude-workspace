@@ -1,6 +1,6 @@
 """Shared test helpers for the ``cw.cli.review`` per-submodule test suite.
 
-Payload builders and git helpers used by both of the split
+Payload builders and git helpers used by all three of the split
 ``test_cli_review_*.py`` files. This module has no ``test_`` prefix, so pytest
 does not collect it (same convention as ``tests/conftest.py``); it is imported
 explicitly by the test modules that use each helper.
@@ -13,6 +13,11 @@ tests share with the CLI-side ones. Those two constants are one source of
 truth on purpose: five tests across four modules assert that this exact pair
 clears the claim matcher's thresholds, and a hand-typed copy in each would let
 one drift silently past the matcher it is supposed to pin.
+
+As of #2319 it also hosts the raw ``ReviewVerdict`` / ``AcceptedFinding``
+payload builders (:func:`_verdict_payload`, :func:`_accepted_payload`) and the
+:data:`_TICKET` id, shared by ``test_cli_review_commands.py`` and the
+``check-voided`` tests in ``test_cli_review_voided.py``.
 """
 
 from __future__ import annotations
@@ -22,7 +27,12 @@ import re
 import subprocess
 from typing import TYPE_CHECKING, Any
 
-from tests.conftest import _clean_git_env, commit_tracked_file, git_in
+from tests.conftest import (
+    _clean_git_env,
+    _finding_kwargs,
+    commit_tracked_file,
+    git_in,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -52,6 +62,52 @@ def _consolidate_payload(**overrides: object) -> dict[str, Any]:
         "failed_reviewers": [],
     }
     payload.update(overrides)
+    return payload
+
+
+#: The ``ticket_id`` every payload command's test envelope correlates to.
+_TICKET = "T-1814"
+
+
+def _verdict_payload(*accepted: dict[str, Any], **overrides: object) -> dict[str, Any]:
+    """A raw ``ReviewVerdict`` dict for the #1805 adjudicate/verify-fixes CLI."""
+    must_fix = [
+        af["finding"]
+        for af in accepted
+        if af["finding"]["severity"] == "MUST_FIX"
+        and af.get("disposition", "fixed") != "deferred"
+    ]
+    payload: dict[str, Any] = {
+        "blocking": bool(must_fix),
+        "must_fix": must_fix,
+        "reviewed_sha": "abc1234",
+        "accepted": list(accepted),
+        "review": {
+            "must_fix_initial": len(must_fix),
+            "should_fix": 0,
+            "fix_cycles_used": 0,
+            "deferred": 0,
+            "agents_run": 1,
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _accepted_payload(**overrides: object) -> dict[str, Any]:
+    """A raw ``AcceptedFinding`` dict wrapping ``_finding_kwargs``."""
+    finding_overrides = {
+        k: v
+        for k, v in overrides.items()
+        if k not in {"disposition", "disposition_detail", "reviewers"}
+    }
+    payload: dict[str, Any] = {
+        "finding": _finding_kwargs(**finding_overrides),
+        "reviewers": overrides.get("reviewers", ["Code Quality Reviewer"]),
+    }
+    for key in ("disposition", "disposition_detail"):
+        if key in overrides:
+            payload[key] = overrides[key]
     return payload
 
 

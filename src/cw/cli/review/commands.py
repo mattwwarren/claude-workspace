@@ -1,8 +1,11 @@
 """The ``cw review`` commands without a seam of their own (#2048).
 
-``register``, ``adjudicate``, ``check-voided``, ``settle`` and
-``verify-fixes`` — the commands left after ``consolidate`` and the
-diff-integrity guards were given their own submodules.
+``register``, ``adjudicate``, ``settle`` and ``verify-fixes`` — the commands
+left after ``consolidate``, the diff-integrity guards and ``check-voided``
+(:mod:`cw.cli.review.voided`, #2319) were given their own submodules. The
+``check-voided`` request/response envelopes and :func:`_utc_now_iso` stay
+here: the envelopes ride this module's ``TC001`` per-file entry alongside the
+adjudicate/verify-fixes ones, and ``settle`` shares the clock helper.
 
 ``cw review register <pr-url>`` records a PR you were asked to review as a
 watched PR (``DevQueueStore.watched_prs``). No ``list``/``remove`` subcommand
@@ -16,13 +19,6 @@ matching ``.cw/deferred-findings.md``), the second downgrades any ``"fixed"``
 disposition the fix-cycle diff does not substantiate. Adjudication stays a
 judgment call made by the coordinating session — these commands only make its
 outcome machine-readable instead of re-typed into two places.
-
-``cw review check-voided <path>`` (#1814) runs between consolidate and
-adjudicate: it suppresses findings a prior pass's operator decision already
-settled, and renders the durable record of those decisions back out for
-posting to the ticket. It is the Claude-native half of a mechanism the codex
-backend reaches through ``cw.codex_review`` instead — same library function,
-same outcome, no coordinating session required on that side.
 
 ``cw review settle <path>`` (#2210) is the cross-round adjudication ledger's
 first production writer. #1838 shipped that ledger's renderer, parser and
@@ -69,13 +65,10 @@ from cw.review_adjudication import (
     Adjudication,
     VoidedFinding,
     apply_adjudication,
-    apply_voided_suppression,
     matched_adjudications,
     merge_deferred_adjudications,
     parse_deferred_findings_md,
-    parse_voided_findings_block,
     render_deferred_findings_md,
-    render_voided_findings_block,
     verify_fixed_dispositions,
 )
 from cw.review_finding_dispositions import (
@@ -258,9 +251,9 @@ def _artifact_entry(entry: Adjudication, next_round: int, now: str) -> Adjudicat
     Two things happen here, both required for the merge to behave:
 
     - **Stamping.** ``round``/``recorded_at`` are filled in exactly the way
-      :func:`_stamp_voided_at` fills ``voided_at``: the coordinating session
-      supplies the judgment, the CLI supplies the clock, and a value already
-      present is never overwritten.
+      :func:`cw.cli.review.voided._stamp_voided_at` fills ``voided_at``: the
+      coordinating session supplies the judgment, the CLI supplies the clock,
+      and a value already present is never overwritten.
     - **Projection.** ``line_start``/``line_end``/``evidence`` (and, for a
       rejected entry, ``severity``) are reduced to what the rendered artifact
       actually records. The artifact has never carried them, so an entry read
@@ -326,6 +319,11 @@ class _CheckVoidedOutput(BaseModel):
     the adjudications are appended verbatim to the session's ``ADJUDICATIONS``
     array so the later ``cw review adjudicate`` pass re-stamps the same outcome
     from the same single source of truth.
+
+    The unmatched-new-entry count (#2319) rides on the nested
+    ``verdict.unmatched_voided_count``, not on a top-level field here, so the
+    verdict stays the single source of truth for it (the
+    ``unmatched_adjudication_count`` precedent).
     """
 
     verdict: ReviewVerdict
@@ -339,77 +337,6 @@ def _utc_now_iso() -> str:
     ``recorded_at`` cannot come out in two shapes.
     """
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _stamp_voided_at(entry: VoidedFinding) -> VoidedFinding:
-    """Fill a blank ``voided_at`` with now, leaving a supplied one alone.
-
-    The coordinating session supplies the judgment; the CLI supplies the
-    clock. Re-stamping an entry that already carries a date would rewrite
-    history on every idempotent re-post.
-    """
-    if entry.voided_at.strip():
-        return entry
-    return entry.model_copy(update={"voided_at": _utc_now_iso()})
-
-
-@review.command(name="check-voided")
-@click.argument("path")
-@click.option(
-    "--voided-findings-out",
-    default=None,
-    type=click.Path(path_type=Path),
-    help=(
-        "Also render the merged voided-findings record to this path, as a "
-        "postable '## Voided Review Findings' ticket comment. Nothing is "
-        "written when there is no void to record."
-    ),
-)
-@handle_errors
-def review_check_voided(path: str, voided_findings_out: Path | None) -> None:
-    """Suppress findings an operator already voided on a prior pass (#1814).
-
-    PATH is a file path or '-' for stdin. Payload: {"verdict": <the
-    ReviewVerdict from `cw review consolidate`>, "ticket_id": "<id>",
-    "comment_bodies": ["<live-fetched ticket comment>", ...],
-    "new_voided_entries": [{"severity": ..., "file": ..., "summary": ...,
-    "evidence": ..., "operator_comment_id": ..., "operator_comment_excerpt":
-    ..., "original_rationale": ...}]}.
-
-    A finding is suppressed only when its content anchor — severity, file,
-    summary, and evidence — matches a recorded void exactly. File and line
-    position are deliberately NOT the identity: a voided finding whose code
-    moved still matches, and a genuinely new finding at the voided one's old
-    line never does.
-
-    Each suppression stamps `disposition="rejected"`, drops the finding from
-    `must_fix`/`blocking`, and emits one `review.finding_voided` event
-    correlated to `ticket_id`.
-
-    On success: exits 0, prints {"verdict": ..., "adjudications": [...]} to
-    stdout. Append the adjudications verbatim to your ADJUDICATIONS array.
-    On failure: exits 1, prints 'field.path: message' lines to stderr.
-    """
-    parsed = _parse_payload_or_exit(path, _CheckVoidedInput)
-    merged = [
-        *parse_voided_findings_block(parsed.comment_bodies),
-        *(_stamp_voided_at(entry) for entry in parsed.new_voided_entries),
-    ]
-    verdict, adjudications = apply_voided_suppression(
-        parsed.verdict, merged, ticket_id=parsed.ticket_id
-    )
-
-    if voided_findings_out is not None:
-        rendered = render_voided_findings_block(merged)
-        # "" means there is nothing to record — omit the artifact entirely
-        # rather than leave an empty one behind, same rule as
-        # --deferred-findings-out.
-        if rendered:
-            voided_findings_out.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_text(voided_findings_out, rendered)
-
-    output = _CheckVoidedOutput(verdict=verdict, adjudications=adjudications)
-    click.echo(output.model_dump_json(indent=2))
 
 
 class _SettleEntry(BaseModel):

@@ -1,8 +1,10 @@
 """Tests for the ``cw review`` subcommands in ``cw.cli.review.commands``.
 
-Covers ``register``, ``adjudicate``, ``check-voided`` and ``verify-fixes``
-(GitHub #1154, RFC 0011 S2; #1241). Split out of ``tests/test_cli_review.py``
-for #2049 so the test modules mirror the ``src/cw/cli/review/`` package seams.
+Covers ``register``, ``adjudicate`` and ``verify-fixes`` (GitHub #1154, RFC
+0011 S2; #1241). Split out of ``tests/test_cli_review.py`` for #2049 so the
+test modules mirror the ``src/cw/cli/review/`` package seams. The
+``check-voided`` tests moved to ``tests/test_cli_review_voided.py`` with the
+command itself (#2319).
 """
 
 from __future__ import annotations
@@ -30,11 +32,8 @@ from cw.models import (
 from cw.models.enums import OrchestratorEventType
 from cw.review_adjudication import (
     Adjudication,
-    VoidedFinding,
     parse_deferred_findings_md,
-    parse_voided_findings_block,
     render_deferred_findings_md,
-    render_voided_findings_block,
 )
 from cw.review_finding_dispositions import (
     FindingDisposition,
@@ -43,15 +42,17 @@ from cw.review_finding_dispositions import (
 )
 from tests._cli_review_helpers import (
     _CONSOLIDATE_DIFF,
+    _TICKET,
+    _accepted_payload,
     _branch_repo,
     _consolidate_payload,
     _extract_settle_payloads,
     _settle_entry,
     _settle_payload,
+    _verdict_payload,
 )
 from tests.conftest import (
     _cmd,
-    _finding_kwargs,
     _make_diff,
     _make_finding,
     _make_reviewer_doc,
@@ -183,48 +184,6 @@ class TestReviewRegisterCommand:
         assert len(watched) == 1
         assert watched[0].source == "cli"
         assert watched[0].requester_login is None
-
-
-def _verdict_payload(*accepted: dict[str, Any], **overrides: object) -> dict[str, Any]:
-    """A raw ``ReviewVerdict`` dict for the #1805 adjudicate/verify-fixes CLI."""
-    must_fix = [
-        af["finding"]
-        for af in accepted
-        if af["finding"]["severity"] == "MUST_FIX"
-        and af.get("disposition", "fixed") != "deferred"
-    ]
-    payload: dict[str, Any] = {
-        "blocking": bool(must_fix),
-        "must_fix": must_fix,
-        "reviewed_sha": "abc1234",
-        "accepted": list(accepted),
-        "review": {
-            "must_fix_initial": len(must_fix),
-            "should_fix": 0,
-            "fix_cycles_used": 0,
-            "deferred": 0,
-            "agents_run": 1,
-        },
-    }
-    payload.update(overrides)
-    return payload
-
-
-def _accepted_payload(**overrides: object) -> dict[str, Any]:
-    """A raw ``AcceptedFinding`` dict wrapping ``_finding_kwargs``."""
-    finding_overrides = {
-        k: v
-        for k, v in overrides.items()
-        if k not in {"disposition", "disposition_detail", "reviewers"}
-    }
-    payload: dict[str, Any] = {
-        "finding": _finding_kwargs(**finding_overrides),
-        "reviewers": overrides.get("reviewers", ["Code Quality Reviewer"]),
-    }
-    for key in ("disposition", "disposition_detail"):
-        if key in overrides:
-            payload[key] = overrides[key]
-    return payload
 
 
 def _defer_entry(**overrides: Any) -> dict[str, Any]:
@@ -801,9 +760,6 @@ class TestReviewAdjudicateCommand:
         assert verdict["accepted"][0]["disposition"] == "dropped"
 
 
-_TICKET = "T-1814"
-
-
 class TestReviewVerifyFixesCommand:
     """#1805: ``cw review verify-fixes`` downgrades unverified 'fixed' claims."""
 
@@ -936,170 +892,6 @@ class TestReviewVerifyFixesCommand:
         ]
         assert len(envelope_lines) == 1
         assert '"ticket_id": "$TICKET"' in envelope_lines[0]
-
-
-def _voided_payload(**overrides: object) -> dict[str, Any]:
-    """A raw ``VoidedFinding`` dict lined up with ``_accepted_payload``."""
-    payload: dict[str, Any] = {
-        "severity": "MUST_FIX",
-        "file": "src/cw/foo.py",
-        "summary": "Bug here",
-        "evidence": "def broken():",
-        "operator_comment_id": "mattwwarren@2026-08-11T02:43:30Z",
-        "operator_comment_excerpt": "intentional; do not re-raise",
-        "voided_at": "2026-08-11T02:43:30Z",
-        "original_rationale": "deliberate design choice",
-    }
-    payload.update(overrides)
-    return payload
-
-
-class TestReviewCheckVoidedCommand:
-    """#1814: ``cw review check-voided`` is the Claude path's suppression hop."""
-
-    def _payload(self, **overrides: object) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "verdict": _verdict_payload(_accepted_payload(line_start=2, line_end=2)),
-            "ticket_id": _TICKET,
-            "comment_bodies": [],
-            "new_voided_entries": [],
-        }
-        payload.update(overrides)
-        return payload
-
-    def test_existing_sentinel_comment_suppresses_a_re_derived_finding(
-        self, runner: CliRunner
-    ) -> None:
-        body = render_voided_findings_block(
-            [VoidedFinding.model_validate(_voided_payload())]
-        )
-        result = runner.invoke(
-            main,
-            ["review", "check-voided", "-"],
-            input=json.dumps(self._payload(comment_bodies=["prose", body])),
-        )
-
-        assert result.exit_code == 0, result.output
-        out = json.loads(result.output)
-        assert out["verdict"]["blocking"] is False
-        assert out["verdict"]["must_fix"] == []
-        assert out["verdict"]["accepted"][0]["disposition"] == "rejected"
-        assert [a["outcome"] for a in out["adjudications"]] == ["reject"]
-        assert out["adjudications"][0]["rationale"].strip()
-        # Identity fields come off the matched FINDING, not the void, so a
-        # later `cw review adjudicate` pass over the same array still matches.
-        assert out["adjudications"][0]["line_start"] == 2
-
-    def test_new_entries_suppress_without_any_prior_comment(
-        self, runner: CliRunner
-    ) -> None:
-        result = runner.invoke(
-            main,
-            ["review", "check-voided", "-"],
-            input=json.dumps(self._payload(new_voided_entries=[_voided_payload()])),
-        )
-
-        assert result.exit_code == 0, result.output
-        out = json.loads(result.output)
-        assert out["verdict"]["accepted"][0]["disposition"] == "rejected"
-
-    def test_emitted_event_correlates_to_the_payload_ticket_id(
-        self, runner: CliRunner
-    ) -> None:
-        result = runner.invoke(
-            main,
-            ["review", "check-voided", "-"],
-            input=json.dumps(self._payload(new_voided_entries=[_voided_payload()])),
-        )
-
-        assert result.exit_code == 0, result.output
-        events = read_events(event_types=[OrchestratorEventType.REVIEW_FINDING_VOIDED])
-        assert len(events) == 1
-        assert events[0].correlation_id == _TICKET
-
-    def test_no_match_leaves_the_verdict_blocking(self, runner: CliRunner) -> None:
-        result = runner.invoke(
-            main,
-            ["review", "check-voided", "-"],
-            input=json.dumps(
-                self._payload(
-                    new_voided_entries=[_voided_payload(summary="a different bug")]
-                )
-            ),
-        )
-
-        assert result.exit_code == 0, result.output
-        out = json.loads(result.output)
-        assert out["verdict"]["blocking"] is True
-        assert out["adjudications"] == []
-
-    def test_malformed_payload_prints_field_path_errors(
-        self, runner: CliRunner
-    ) -> None:
-        result = runner.invoke(
-            main,
-            ["review", "check-voided", "-"],
-            input=json.dumps({"ticket_id": "T-1"}),
-        )
-
-        assert result.exit_code == 1
-        assert "verdict" in result.output
-
-    def test_voided_findings_out_writes_the_merged_block(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        out_path = tmp_path / "nested" / "voided-findings-comment.md"
-        prior = _voided_payload(summary="an earlier void", evidence="def earlier():")
-        body = render_voided_findings_block([VoidedFinding.model_validate(prior)])
-        result = runner.invoke(
-            main,
-            [
-                "review",
-                "check-voided",
-                "--voided-findings-out",
-                str(out_path),
-                "-",
-            ],
-            input=json.dumps(
-                self._payload(
-                    comment_bodies=[body], new_voided_entries=[_voided_payload()]
-                )
-            ),
-        )
-
-        assert result.exit_code == 0, result.output
-        merged = parse_voided_findings_block([out_path.read_text(encoding="utf-8")])
-        assert [entry.summary for entry in merged] == ["an earlier void", "Bug here"]
-
-    def test_voided_findings_out_writes_nothing_when_there_is_nothing_to_record(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        out_path = tmp_path / "voided-findings-comment.md"
-        result = runner.invoke(
-            main,
-            ["review", "check-voided", "--voided-findings-out", str(out_path), "-"],
-            input=json.dumps(self._payload()),
-        )
-
-        assert result.exit_code == 0, result.output
-        assert not out_path.exists()
-
-    def test_absent_voided_at_is_stamped_by_the_cli(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        """The Claude session supplies the judgment; the CLI supplies the clock."""
-        out_path = tmp_path / "voided-findings-comment.md"
-        entry = _voided_payload()
-        del entry["voided_at"]
-        result = runner.invoke(
-            main,
-            ["review", "check-voided", "--voided-findings-out", str(out_path), "-"],
-            input=json.dumps(self._payload(new_voided_entries=[entry])),
-        )
-
-        assert result.exit_code == 0, result.output
-        written = parse_voided_findings_block([out_path.read_text(encoding="utf-8")])
-        assert written[0].voided_at != ""
 
 
 _SETTLE_REASON = "operator rejected: intentional tradeoff, see ADR-0012"

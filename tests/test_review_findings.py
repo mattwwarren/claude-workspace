@@ -900,6 +900,11 @@ class TestSeverityAndDispositionLiterals:
         verdict = consolidate_verdict([], _make_diff(), "abc1234")
         assert verdict.unmatched_adjudication_count == 0
 
+    def test_unmatched_voided_count_defaults_zero(self) -> None:
+        # #2319: additive and default-0, stamped only by `cw review check-voided`.
+        verdict = consolidate_verdict([], _make_diff(), "abc1234")
+        assert verdict.unmatched_voided_count == 0
+
     def test_invalid_disposition_rejected(self) -> None:
         with pytest.raises(ValidationError):
             AcceptedFinding.model_validate(
