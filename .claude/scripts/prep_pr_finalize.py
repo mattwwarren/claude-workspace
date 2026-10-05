@@ -66,7 +66,7 @@ except ImportError:  # pragma: no cover - downstream repo without PyYAML
     yaml = None
 
 
-def _load_project_config_module():
+def _load_project_config_module() -> ModuleType | None:
     """Load the shared config reader from source or an installed package."""
     source = Path(__file__).resolve().parents[2] / "src" / "cw" / "project_config.py"
     if source.exists():
