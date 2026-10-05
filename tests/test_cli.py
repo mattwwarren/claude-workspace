@@ -521,6 +521,16 @@ class TestUpgradeWorkers:
         assert "respawn" in result.output
 
 
+def test_spawn_help_headless_text_makes_no_timeout_promise() -> None:
+    """``cw spawn --help`` must not promise the ADR-0014-removed TIMED_OUT budget."""
+    result = CliRunner().invoke(main, ["spawn", "--help"])
+    assert result.exit_code == 0
+    out = " ".join(result.output.split())
+    assert "30-min" not in out
+    assert "TIMED_OUT" not in out
+    assert "AUTO_DEV_RESULT" in out
+
+
 class TestSignalStop:
     """Tests for the `cw signal-stop` Stop-hook handler (issue #147)."""
 

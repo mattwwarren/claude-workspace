@@ -259,12 +259,13 @@ def _spawn_close_requeue_impl(
     is_flag=True,
     default=False,
     help=(
-        "Mark the session as headless in cw-context.json so the signal_stop "
-        "Layer 1 backstop (issue #176) activates: a session that exits without "
-        "an AUTO_DEV_RESULT sentinel within the 30-min budget transitions to "
-        "TIMED_OUT (retry-eligible) instead of silently COMPLETED. Use when the "
-        "prompt invokes /auto-dev --headless or any other skill that emits the "
-        "sentinel contract."
+        "Mark the session as headless in cw-context.json: the Stop hook then "
+        "requires an AUTO_DEV_RESULT sentinel before it marks the session "
+        "COMPLETED, and defers indefinitely without one (ADR-0014: there is no "
+        "wall-clock budget and no timeout transition). Use only when the "
+        "prompt invokes /auto-dev --headless or another skill that emits the "
+        "sentinel contract; omit it for a prompt that emits no sentinel, or "
+        "the session never reaches a terminal state."
     ),
 )
 @click.pass_context
