@@ -22,6 +22,7 @@ from cw.session_resume_trigger import (
     NativeDaemonResumeTriggerAdapter,
     ResumeTriggerResult,
 )
+from tests._clients_yaml import write_clients_yaml
 from tests.conftest import _make_daemon_session
 
 if TYPE_CHECKING:
@@ -65,15 +66,6 @@ def _persist_multiple(sessions: list[Session]) -> None:
     from cw.config import save_state
 
     save_state(CwState(sessions=sessions))
-
-
-def _write_clients_file(tmp_config_dir: Path, sample_client: ClientConfig) -> None:
-    clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-    clients_file.write_text(
-        "clients:\n"
-        "  test-client:\n"
-        f"    workspace_path: {sample_client.workspace_path}\n"
-    )
 
 
 def _invoke(
@@ -413,7 +405,7 @@ class TestMailboxDeliveryEndToEnd:
         """The real adapter, not the Fake -- proves the send -> queue ->
         respawn -> consume path end-to-end with no hand-called
         advance_cursor anywhere in this test (#2212 review finding 1)."""
-        _write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         session = _session(sample_client)
         _persist(session)
         real_adapter = NativeDaemonResumeTriggerAdapter(

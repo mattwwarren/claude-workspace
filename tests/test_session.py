@@ -26,6 +26,7 @@ from cw.session import (
     resume_session,
     start_session,
 )
+from tests._clients_yaml import write_clients_yaml
 from tests.conftest import _make_daemon_session
 from tests.test_spawn import _write_orchestrator_disallow
 
@@ -48,22 +49,6 @@ def _noop(*_args: object, **_kwargs: object) -> None:
 
 
 class TestStartSession:
-    def _write_clients_file(
-        self,
-        tmp_config_dir: Path,
-        sample_client: ClientConfig,
-        quality_gate_commands: str | None = None,
-    ) -> None:
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        body = (
-            f"clients:\n"
-            f"  test-client:\n"
-            f"    workspace_path: {sample_client.workspace_path}\n"
-        )
-        if quality_gate_commands is not None:
-            body += f'    quality_gate_commands: "{quality_gate_commands}"\n'
-        clients_file.write_text(body)
-
     def test_new_session_creates_and_saves(
         self,
         tmp_config_dir: Path,
@@ -71,7 +56,7 @@ class TestStartSession:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -92,7 +77,7 @@ class TestStartSession:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -107,10 +92,10 @@ class TestStartSession:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        self._write_clients_file(
-            tmp_config_dir=tmp_config_dir,
-            sample_client=sample_client,
-            quality_gate_commands="npm run lint && npm test",
+        write_clients_yaml(
+            sample_client.model_copy(
+                update={"quality_gate_commands": "npm run lint && npm test"}
+            )
         )
         monkeypatch.setattr(target="cw.session._write_hook_context", name=_noop)
         monkeypatch.setattr(target="cw.session._attach_session", name=_noop)
@@ -137,7 +122,7 @@ class TestStartSession:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -154,7 +139,7 @@ class TestStartSession:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
 
         attached: list[str] = []
@@ -171,7 +156,7 @@ class TestStartSession:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
         hook_calls: list[dict[str, object]] = []
@@ -197,7 +182,7 @@ class TestStartSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """#2431: the client's ignore list reaches cw-context.json."""
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
         clients_file.write_text(
             clients_file.read_text() + "    merge_gate_ignore_paths: [uv.lock]\n"
@@ -228,7 +213,7 @@ class TestStartSession:
         Plan Soundness Advisory). See
         test_start_worktree_impl_hook_context_sets_workspace_path for the
         contrasting worktree-homed case, where workspace_path IS set."""
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
         hook_calls: list[dict[str, object]] = []
@@ -257,7 +242,7 @@ class TestStartSession:
         contrasting case to the debt/non-worktree no-op above. Prior to the
         #940 fix, workspace_path was omitted unconditionally regardless of
         purpose, silently disabling the guard for every USER-origin session."""
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
         worktree_dir = sample_client.workspace_path.parent / "wt-impl"
@@ -290,7 +275,7 @@ class TestStartSession:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -326,7 +311,7 @@ class TestStartSession:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -356,7 +341,7 @@ class TestStartSession:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -389,7 +374,7 @@ class TestStartSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """debt purpose is not in WORKTREE_PURPOSES; worktree_path stays None."""
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -415,7 +400,7 @@ class TestStartSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """If daemon.spawn_bg raises, no session is persisted to disk."""
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -447,7 +432,7 @@ class TestStartSession:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -683,22 +668,6 @@ class TestBackgroundSession:
 
 
 class TestResumeSession:
-    def _write_clients_file(
-        self,
-        tmp_config_dir: Path,
-        sample_client: ClientConfig,
-        worker_model: str | None = None,
-    ) -> None:
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        body = (
-            f"clients:\n"
-            f"  test-client:\n"
-            f"    workspace_path: {sample_client.workspace_path}\n"
-        )
-        if worker_model is not None:
-            body += f"    worker_model: {worker_model}\n"
-        clients_file.write_text(body)
-
     def test_live_session_attaches_directly(
         self,
         tmp_config_dir: Path,
@@ -707,7 +676,7 @@ class TestResumeSession:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         attached: list[str] = []
         monkeypatch.setattr("cw.session._attach_session", attached.append)
 
@@ -743,7 +712,7 @@ class TestResumeSession:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         attached: list[str] = []
         monkeypatch.setattr("cw.session._attach_session", attached.append)
 
@@ -781,7 +750,7 @@ class TestResumeSession:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
         state = CwState(
@@ -815,10 +784,10 @@ class TestResumeSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """DAEMON-origin resume of a dead surface forwards --model from client."""
-        self._write_clients_file(
-            tmp_config_dir,
-            sample_client,
-            worker_model="claude-sonnet-4-6-20251015",
+        write_clients_yaml(
+            sample_client.model_copy(
+                update={"worker_model": "claude-sonnet-4-6-20251015"}
+            )
         )
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -857,7 +826,7 @@ class TestResumeSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Regression guard: DAEMON resume without worker_model only has --resume."""
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
         state = CwState(
@@ -893,10 +862,10 @@ class TestResumeSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """USER-origin resume ignores client.worker_model (operator default wins)."""
-        self._write_clients_file(
-            tmp_config_dir,
-            sample_client,
-            worker_model="claude-sonnet-4-6-20251015",
+        write_clients_yaml(
+            sample_client.model_copy(
+                update={"worker_model": "claude-sonnet-4-6-20251015"}
+            )
         )
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -932,10 +901,10 @@ class TestResumeSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """DAEMON resume with a Haiku pin spawns with bypassPermissions (#1111)."""
-        self._write_clients_file(
-            tmp_config_dir,
-            sample_client,
-            worker_model="claude-haiku-4-5-20251001",
+        write_clients_yaml(
+            sample_client.model_copy(
+                update={"worker_model": "claude-haiku-4-5-20251001"}
+            )
         )
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -969,10 +938,10 @@ class TestResumeSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """DAEMON resume with an auto-capable pin leaves permission_mode None."""
-        self._write_clients_file(
-            tmp_config_dir,
-            sample_client,
-            worker_model="claude-sonnet-4-6-20251015",
+        write_clients_yaml(
+            sample_client.model_copy(
+                update={"worker_model": "claude-sonnet-4-6-20251015"}
+            )
         )
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -1006,7 +975,7 @@ class TestResumeSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Regression guard: DAEMON resume without a pin stays permission_mode None."""
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
         state = CwState(
@@ -1039,10 +1008,10 @@ class TestResumeSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """USER-origin resume never derives bypass — derivation is DAEMON-gated."""
-        self._write_clients_file(
-            tmp_config_dir,
-            sample_client,
-            worker_model="claude-haiku-4-5-20251001",
+        write_clients_yaml(
+            sample_client.model_copy(
+                update={"worker_model": "claude-haiku-4-5-20251001"}
+            )
         )
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -1073,7 +1042,7 @@ class TestResumeSession:
         sample_client: ClientConfig,
         mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
 
         state = CwState(
             sessions=[
@@ -1110,7 +1079,7 @@ class TestResumeSession:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
         short_id = "abcd1234"
@@ -1147,7 +1116,7 @@ class TestResumeSession:
         """DAEMON resume injects --disallowed-tools when orchestrator config
         sets ``disallowed_mcp_tools`` — tracker no longer affects this."""
         _write_orchestrator_disallow(["mcp__plugin_linear_linear__*"])
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
         state = CwState(
@@ -1186,7 +1155,7 @@ class TestResumeSession:
         """DAEMON resume comma-joins multiple patterns into ONE token — parity
         with the spawn_create_impl chokepoint's multi-pattern handling."""
         _write_orchestrator_disallow(["mcp__plugin_linear_linear__*", "mcp__foo__*"])
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
         state = CwState(
@@ -1222,7 +1191,7 @@ class TestResumeSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """DAEMON resume with no orchestrator config → no --disallowed-tools."""
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
         state = CwState(
@@ -1259,7 +1228,7 @@ class TestResumeSession:
         """USER-origin resume never injects --disallowed-tools (#726), even
         when orchestrator config sets ``disallowed_mcp_tools``."""
         _write_orchestrator_disallow(["mcp__plugin_linear_linear__*"])
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
         state = CwState(
@@ -1304,10 +1273,10 @@ class TestResumeSession:
         from cw.native_daemon import _DEFAULT_PERMISSION_MODE, _build_spawn_argv
 
         _write_orchestrator_disallow(["mcp__plugin_linear_linear__*"])
-        self._write_clients_file(
-            tmp_config_dir,
-            sample_client,
-            worker_model="claude-sonnet-4-6-20251015",
+        write_clients_yaml(
+            sample_client.model_copy(
+                update={"worker_model": "claude-sonnet-4-6-20251015"}
+            )
         )
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -1354,7 +1323,7 @@ class TestResumeSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Dead-surface re-spawn: worker never registers → SpawnUnregisteredError."""
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
         daemon = FakeNativeDaemonClient()
@@ -1389,7 +1358,7 @@ class TestResumeSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Dead-surface re-spawn: worker never registers → session NOT marked ACTIVE."""
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
         daemon = FakeNativeDaemonClient()
@@ -1857,16 +1826,6 @@ def test_start_session_reaps_phantom_before_existing_check(
 
 
 class TestStartSessionParentLinkage:
-    def _write_clients_file(
-        self, tmp_config_dir: Path, sample_client: ClientConfig
-    ) -> None:
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n"
-            f"  test-client:\n"
-            f"    workspace_path: {sample_client.workspace_path}\n"
-        )
-
     def test_parent_linkage_bidirectional(
         self,
         tmp_config_dir: Path,
@@ -1875,7 +1834,7 @@ class TestStartSessionParentLinkage:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Worker session gets parent_session_id; parent gains the worker ID."""
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -1912,7 +1871,7 @@ class TestStartSessionParentLinkage:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Calling start_session twice with the same parent accumulates worker IDs."""
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -1953,7 +1912,7 @@ class TestStartSessionParentLinkage:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
         save_state(CwState())
@@ -1976,7 +1935,7 @@ class TestStartSessionParentLinkage:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -2024,7 +1983,7 @@ class TestStartSessionParentLinkage:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -2042,7 +2001,7 @@ class TestStartSessionParentLinkage:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -2085,7 +2044,7 @@ class TestStartSessionParentLinkage:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -2129,7 +2088,7 @@ class TestStartSessionParentLinkage:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -2155,7 +2114,7 @@ class TestStartSessionParentLinkage:
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -2263,16 +2222,6 @@ class TestStartSessionParentLinkage:
 class TestStartSessionIsolationGuard:
     """start_session must call check_not_main_checkout after create_worktree (#428)."""
 
-    def _write_clients_file(
-        self, tmp_config_dir: Path, sample_client: ClientConfig
-    ) -> None:
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            f"clients:\n"
-            f"  test-client:\n"
-            f"    workspace_path: {sample_client.workspace_path}\n"
-        )
-
     def test_start_with_worktree_raises_when_worktree_is_main_checkout(
         self,
         tmp_config_dir: Path,
@@ -2284,7 +2233,7 @@ class TestStartSessionIsolationGuard:
         the main checkout path (#428)."""
         from cw.exceptions import WorktreeError
 
-        self._write_clients_file(tmp_config_dir, sample_client)
+        write_clients_yaml(sample_client)
         monkeypatch.setattr("cw.session._write_hook_context", _noop)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
