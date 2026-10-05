@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -783,3 +784,37 @@ class TestMcpExtraMsg:
 
         assert "--from" not in MCP_EXTRA_MSG
         assert "install.sh" in MCP_EXTRA_MSG
+
+
+class TestFormatCompactAge:
+    """Tests for format_compact_age (shared Nm/Nh/Nd age formatter)."""
+
+    @pytest.mark.parametrize(
+        ("delta", "expected"),
+        [
+            (timedelta(seconds=0), "0m"),
+            (timedelta(seconds=59), "0m"),
+            (timedelta(seconds=59.9), "0m"),
+            (timedelta(seconds=60), "1m"),
+            (timedelta(seconds=3599), "59m"),
+            (timedelta(seconds=3600), "1h"),
+            (timedelta(seconds=86399), "23h"),
+            (timedelta(seconds=86400), "1d"),
+            (timedelta(days=2), "2d"),
+        ],
+    )
+    def test_threshold_ladder(self, delta: timedelta, expected: str) -> None:
+        """Minutes below an hour, hours below a day, days beyond."""
+        from cw._util import format_compact_age
+
+        assert format_compact_age(delta) == expected
+
+    @pytest.mark.parametrize(
+        "delta",
+        [timedelta(seconds=-30), timedelta(hours=-2)],
+    )
+    def test_negative_delta_clamps_to_zero_minutes(self, delta: timedelta) -> None:
+        """Clock skew (a future anchor) renders 0m, never a negative age."""
+        from cw._util import format_compact_age
+
+        assert format_compact_age(delta) == "0m"
