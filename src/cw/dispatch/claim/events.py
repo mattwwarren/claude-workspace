@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cw._text import redact
 from cw.dev_queue import (
     STALE_DISPATCH_GATE_DISPOSITION,
     TRACKER_MCP_GATE_DISPOSITION,
@@ -19,7 +20,33 @@ from cw.events import record_event
 from cw.models import DispatchSkipReason, OrchestratorEventType
 
 if TYPE_CHECKING:
+    from cw.dispatch.claim.codex_capability import _SpawnOutcome
     from cw.models import TicketTask
+
+# Hard cap on the spawn-failure text carried on a dispatch.tick (#1679). Same
+# 500-char convention as spawn.py's _PRIOR_ATTEMPT_DETAILS_MAX_LEN.
+_SPAWN_ERROR_TEXT_MAX_CHARS = 500
+
+
+def _spawn_error_tick_fields(outcome: _SpawnOutcome | None) -> dict[str, str]:
+    """Return the ``dispatch.tick`` payload fragment for a spawn failure (#1679).
+
+    *outcome* is the ``spawn_error=True`` :class:`_SpawnOutcome` seen during the
+    client's lane walk, or ``None`` when no spawn failure occurred -- in which
+    case the fragment is empty and the ``last_error`` key stays absent.
+
+    The text is collapsed to one line (same idiom as ``lane.paused``'s
+    ``last_error``, #2034), redacted, and only then truncated to
+    :data:`_SPAWN_ERROR_TEXT_MAX_CHARS` plus a trailing ``…`` -- redact first so
+    a secret straddling the cap cannot be cut into an unmatchable fragment.
+    An empty exception message yields ``""``, never a missing key.
+    """
+    if outcome is None:
+        return {}
+    text = redact(" ".join(outcome.error.split()))
+    if len(text) > _SPAWN_ERROR_TEXT_MAX_CHARS:
+        text = text[:_SPAWN_ERROR_TEXT_MAX_CHARS] + "…"
+    return {"last_error": text}
 
 
 def _emit_attempt_cap_blocked_event(

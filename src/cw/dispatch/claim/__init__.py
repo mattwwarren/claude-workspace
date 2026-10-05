@@ -50,6 +50,7 @@ from cw.dispatch.claim.events import (
     _emit_stale_dispatch_attention_event,
     _emit_stale_dispatch_blocked_event,
     _emit_worktree_occupied_skip_event,
+    _spawn_error_tick_fields,
 )
 from cw.dispatch.claim.lane_stats import (
     _lane_occupants_for_client,
@@ -115,6 +116,7 @@ __all__ = [
     "_revert_claimed_task_to_pending",
     "_screen_and_claim",
     "_spawn_claimed_task",
+    "_spawn_error_tick_fields",
     "_stamp_spawn_success",
     "resolve_occupied_ticket_ids",
 ]
