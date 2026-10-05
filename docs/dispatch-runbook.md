@@ -331,7 +331,15 @@ for scripting and field reads; it prints two distinct sections:
     a client-ceiling slot that no task row accounts for, so the client reads
     `running=2/2 cap_full` beside a single RUNNING row and stops admitting
     work. The annotation is reporting only and never changes what is admitted;
-    run `cw doctor` to see whether a real session is behind it.
+    run `cw doctor` to see whether a real session is behind it. Since #2524 it
+    also names the sessions behind the excess, read from current session
+    state: `no occupied row owns: <id> (<ticket>), ...` lists each
+    ceiling-counted session that no `RUNNING`/`BLOCKED_ON_USER`/
+    `AWAITING_OPERATOR_SIGNOFF` row is bound to, oldest first, up to five with
+    a `(+K more)` suffix. A session stranded after its result was already
+    routed shows up here (see `wedge/active-routed-result-stranded` below).
+    When every counted session is owned, or the state file cannot be read, the
+    original generic text is shown.
 
 ---
 
@@ -605,6 +613,18 @@ common wedge conditions:
   reports it with the exact `cw spawn close <id>` command; nothing is reaped
   automatically. Excludes `CODEX_BACKEND` sessions (owned by `codex_boot`,
   #2285/#2307).
+- `wedge/active-routed-result-stranded` (#2524) — an `ACTIVE`/`IDLE` DAEMON
+  session whose staged result a #2458 partial route already routed (the
+  ticket's row advanced), with no `RUNNING`/`BLOCKED_ON_USER`/
+  `AWAITING_OPERATOR_SIGNOFF` row bound to it, its worker still in the daemon
+  roster, and a transcript in the 30m/45m liveness bucket. It holds a ceiling
+  slot and its worktree. Reconcile has already paged it once
+  (`session.needs_attention`, `paused_status=routed_result_session_stranded`);
+  nothing closes it automatically under any `reap_policy`. A plain
+  `cw doctor` reports it; `cw doctor --reap` closes **every** session of this
+  class (marks it `COMPLETED` with `reap_reason=routed_result_stranded` and
+  stops its worker) and never touches a queue row. To close just one, run
+  `cw spawn close --confirmed-dead <id>`.
 
 Run `cw doctor --reap --json` for machine-readable output.
 

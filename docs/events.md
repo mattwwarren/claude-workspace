@@ -622,6 +622,12 @@ propose → authorize → act chain is fully traceable in the inbox. `mutations`
 lists the destructive actions actually performed (e.g.
 `blocked_task_reverted_to_pending`).
 
+`cw doctor --reap`'s stranded routed-result close (#2524) emits this event
+with `proposed_action: "close_routed_result_session"` (the same value as its
+`session.reap_proposed`, so the two link), `authority: "operator"` and
+`mutations: ["session_status_completed", "daemon_stopped"]`; it never reverts
+a queue row.
+
 ### `session.spawn_unregistered`
 
 **Emitter:** `cw.spawn` roster-registration poll
@@ -844,6 +850,24 @@ open enum; consumers MUST tolerate unknown values. Known values:
   skipped. Signal-only exactly as its siblings are — nothing is disposed
   (ADR-0014). `breadcrumbs` carries stale minutes, stage, elapsed seconds, and
   the notification text, truncated and secret-redacted.
+- `"routed_result_session_stranded"` — reconcile's stranded routed-result
+  sweep (#2524, `cw.reconcile.routed_result_sessions`): a live DAEMON session
+  whose staged result a #2458 partial route already routed (the ticket's row
+  advanced), still in the daemon roster, with no `RUNNING`/
+  `BLOCKED_ON_USER`/`AWAITING_OPERATOR_SIGNOFF` row bound to it and a
+  transcript in the 30m/45m liveness bucket for the advanced row's stage. The
+  payload carries the canonical keys plus `stage` (the advanced row's stage),
+  `stale_minutes` and `lane` (the advanced row's lane, `"default"` when the
+  ticket has no row); `crashed` is `false`. `breadcrumbs` names the ticket,
+  the row's `stage/status` (or "no queue row"), the stale minutes and the
+  exact close command, `cw spawn close --confirmed-dead <session-id>` (or
+  `cw doctor --reap`). Emitted **once per session**: the paired
+  `session.reap_proposed` stamps `reap_proposed_at`, and a session already
+  stamped is not paged again; a failed page write leaves it unstamped, so it
+  is paged on the next tick. No desktop push notification is fired (the
+  sweep runs under `sessions_lock`, which must not start a thread or
+  subprocess). Signal-only under every `reap_policy` (ADR-0014): it mutates
+  nothing but that latch.
 - `"silently_idle"` — *historical (ADR-0014)*: the idle watchdog's park.
   No longer produced; may exist on old rows/logs.
 - `"needs_salvage"` — *historical (ADR-0014)*: the git-state salvage LOW
@@ -1251,7 +1275,7 @@ must not be auto-retried; the operator must manually clear or close it.
   "client": "<str>",
   "ticket_id": "<str | null>",
   "lane": "<str>",
-  "proposed_action": "revert_task | crash_complete | park_blocked_on_user",
+  "proposed_action": "revert_task | crash_complete | park_blocked_on_user | close_routed_result_session",
   "reason": "<ReapReason value | null>",
   "evidence": {
     "elapsed_seconds": "<float>",
@@ -1264,9 +1288,20 @@ must not be auto-retried; the operator must manually clear or close it.
 **Semantics:** Emitted by `_emit_reap_proposed` after each detect phase in
 `_reconcile_locked`, before the corresponding act phase. Satisfies ADR-0006
 invariant 3 (propose before act). Only emitted for `REVERT_TASK`,
-`CRASH_COMPLETE`, and `PARK_BLOCKED_ON_USER` proposed actions; counter
+`CRASH_COMPLETE`, `PARK_BLOCKED_ON_USER`, and the proposal-only
+`CLOSE_ROUTED_RESULT_SESSION` (#2524) proposed actions; counter
 increments, salvage completions, and skip-parked candidates do not produce
 this event.
+
+`close_routed_result_session` (reason `routed_result_stranded`) is emitted by
+reconcile's stranded routed-result sweep alongside its once-only
+`session.needs_attention` page. It is proposal-only: nothing in reconcile acts
+on it under any `reap_policy`, and `cw orchestrate run`'s reap drain logs it
+and never authorizes it; the operator closes the session with
+`cw doctor --reap` or `cw spawn close --confirmed-dead <id>`. Because it
+stamps the shared `reap_proposed_at` latch, it is the preceding proposal for
+ADR-0006 purposes if that session later becomes a phantom: the phantom
+sweep's own `crash_complete` proposal for it is deduped, not re-emitted.
 
 `evidence.transcript_age_seconds` is the content-aware staleness
 `_liveness_veto_candidate` evaluated (last content-bearing `user`/`assistant`

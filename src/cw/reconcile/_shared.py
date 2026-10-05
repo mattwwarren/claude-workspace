@@ -462,6 +462,12 @@ class ProposedAction(StrEnum):
     # write: the session/task are completed directly from the existing data.
     # See #1470.
     COMPLETE_FOREIGN_RESULT = "complete_foreign_result"
+    # Proposal-only (#2524): a live session whose staged result a #2458
+    # partial route already routed, stranded with no occupied row bound to
+    # it. Nothing in reconcile acts on it, and cw orchestrate run's reap
+    # drain never authorizes it; the operator closes it via cw doctor --reap
+    # or cw spawn close.
+    CLOSE_ROUTED_RESULT_SESSION = "close_routed_result_session"
 
 
 @dataclass(frozen=True)
@@ -2841,6 +2847,7 @@ _REAP_PROPOSED_ACTIONS: frozenset[ProposedAction] = frozenset(
         ProposedAction.REVERT_TASK,
         ProposedAction.CRASH_COMPLETE,
         ProposedAction.PARK_BLOCKED_ON_USER,
+        ProposedAction.CLOSE_ROUTED_RESULT_SESSION,
     }
 )
 
@@ -2857,7 +2864,8 @@ def _emit_reap_proposed(
     Called from _reconcile_locked after each _detect_* and before the
     corresponding _act_on_*. Satisfies ADR-0006 invariant 3 (propose before act).
 
-    Only emits for REVERT_TASK, CRASH_COMPLETE, PARK_BLOCKED_ON_USER candidates.
+    Only emits for REVERT_TASK, CRASH_COMPLETE, PARK_BLOCKED_ON_USER and the
+    proposal-only CLOSE_ROUTED_RESULT_SESSION (#2524) candidates.
     Dedup: sessions with reap_proposed_at already set are skipped.
 
     Returns the set of session_ids newly stamped in this call. Callers use this

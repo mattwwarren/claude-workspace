@@ -29,8 +29,7 @@ from cw.models import (
     DEFAULT_DISK_PRESSURE_MIN_FREE_INODES,
     ClientConfig,
     QueueItemStatus,
-    SessionOrigin,
-    SessionStatus,
+    counts_toward_client_ceiling,
     occupies_lane_slot,
 )
 from cw.native_daemon import get_native_daemon_client
@@ -222,11 +221,7 @@ def _client_tick_snapshot(
     counts.
     """
     running_count = sum(
-        1
-        for s in state.sessions
-        if s.client == client.name
-        and s.origin == SessionOrigin.DAEMON
-        and s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
+        1 for s in state.sessions if counts_toward_client_ceiling(s, client.name)
     )
     client_ceiling = config.per_client_ceiling.get(client.name, config.default_ceiling)
     with dev_queue_lock():

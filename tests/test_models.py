@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
 import re
 from datetime import UTC, datetime
@@ -34,6 +35,7 @@ from cw.models import (
     ReapReason,
     ReasoningEffort,
     Session,
+    SessionOrigin,
     SessionPurpose,
     SessionStatus,
     Stage,
@@ -41,6 +43,7 @@ from cw.models import (
     StagePipelineConfig,
     TicketTask,
     WatchedPr,
+    counts_toward_client_ceiling,
 )
 from cw.review_finding_dispositions import FindingDisposition
 from tests.conftest import _make_daemon_session
@@ -666,6 +669,41 @@ class TestReapReasonUsageLimitMidTurn:
         """#2324: the roster-present mid-turn path owns its own reap reason."""
         assert ReapReason.USAGE_LIMIT_MID_TURN.value == "usage_limit_mid_turn"
         assert ReapReason.USAGE_LIMIT_MID_TURN != ReapReason.USAGE_LIMIT_CUTOFF
+
+
+class TestReapReasonRoutedResultStranded:
+    def test_value_is_distinct(self) -> None:
+        """#2524: the stranded routed-result close owns its own reap reason."""
+        assert ReapReason.ROUTED_RESULT_STRANDED.value == "routed_result_stranded"
+        others = [r for r in ReapReason if r is not ReapReason.ROUTED_RESULT_STRANDED]
+        assert ReapReason.ROUTED_RESULT_STRANDED.value not in {r.value for r in others}
+
+
+def _legacy_ceiling_predicate(s: Session, name: str) -> bool:
+    """The inline ceiling expression dispatch used before #2524, verbatim."""
+    return (
+        s.client == name
+        and s.origin == SessionOrigin.DAEMON
+        and s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
+    )
+
+
+class TestCountsTowardClientCeiling:
+    """#2524 R4(c): the extracted predicate is byte-identical to the inline
+    comprehension it replaced in dispatch/tick.py and dispatch/gating.py."""
+
+    @pytest.mark.parametrize(
+        ("status", "origin", "client"),
+        list(itertools.product(SessionStatus, SessionOrigin, ("client-a", "client-b"))),
+    )
+    def test_matches_legacy_oracle(
+        self, status: SessionStatus, origin: SessionOrigin, client: str
+    ) -> None:
+        session = _make_daemon_session(status=status, origin=origin, client=client)
+
+        assert counts_toward_client_ceiling(
+            session, "client-a"
+        ) is _legacy_ceiling_predicate(session, "client-a")
 
 
 class TestOrchestratorConfigLegacyDefault:
@@ -2351,6 +2389,7 @@ class TestPackageExportCompleteness:
             "_USAGE_LIMIT_BACKOFF_SECONDS",
             "_validate_gate_recipe_keys",
             "_validate_review_recipe_keys",
+            "counts_toward_client_ceiling",
             "extract_unresolved_spawn_count",
             "occupies_lane_slot",
             "read_park_comment_marker",

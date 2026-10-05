@@ -35,6 +35,7 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    Stage,
     TicketTask,
     UsageLimitAct,
 )
@@ -55,9 +56,12 @@ from tests._reconcile_helpers import (
     _auto_config,
     _mk_headless_daemon_session,
     _mk_phantom_daemon_session,
+    _mk_routed_session,
     _mk_session,
+    _stamp_transcript_age,
     _ul_record,
     _write_idle_transcript_with_text,
+    _write_staged_clients_yaml,
     _write_transcript_records,
 )
 from tests.conftest import _make_daemon_session, _make_ticket_task
@@ -2248,3 +2252,143 @@ def test_reconcile_phantom_sweep_skips_session_whose_act_stopped_it(
     assert read_events(event_types=[OrchestratorEventType.SESSION_REAP_PROPOSED]) == []
 
     _assert_act_finished_uncharged(reconcile(), unproductive_attempts=before)
+
+
+# ---------------------------------------------------------------------------
+# #2524 -- stranded routed-result sweep, wired into _reconcile_locked
+# ---------------------------------------------------------------------------
+
+_ROUTED_REF = "ab12cd34"
+_ROUTED_SID = "2524"
+
+
+def _seed_routed_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    row: TicketTask | None = None,
+) -> None:
+    """Persist an ACTIVE routed session (31m stale) + its advanced row.
+
+    Also writes a ``client-a`` clients.yaml entry: reconcile hands the sweep
+    its configured-client rollout gate, so an unconfigured client is never
+    paged (``tmp_path`` is the redirected config dir ``tmp_config_dir``).
+    """
+    _write_staged_clients_yaml(tmp_path, "client-a")
+    home = Path.home()
+    worktree = tmp_path / "wt-routed"
+    _stamp_transcript_age(home, worktree, stale_minutes=31, surface_ref=_ROUTED_REF)
+    sess = _mk_routed_session(_ROUTED_SID, worktree, surface_ref=_ROUTED_REF)
+    save_state(CwState(sessions=[sess]))
+    if row is None:
+        row = TicketTask(
+            ticket_id=_ROUTED_SID,
+            client="client-a",
+            status=QueueItemStatus.PENDING,
+            stage=Stage.REVIEW,
+        )
+    save_dev_queue(DevQueueStore(tasks=[row]))
+
+
+def _routed_pages() -> list[dict[str, object]]:
+    events = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+    return [
+        dict(e.payload)
+        for e in events
+        if e.payload.get("paused_status") == "routed_result_session_stranded"
+    ]
+
+
+def _roster_has_routed_ref(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": f"{_ROUTED_REF}-0000-4000-8000-000000000000"}],
+    )
+
+
+def test_reconcile_pages_stranded_routed_session_once_across_two_ticks(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_routed_session(tmp_path, monkeypatch)
+    _roster_has_routed_ref(monkeypatch)
+
+    reconcile()
+    reconcile()
+
+    pages = _routed_pages()
+    assert len(pages) == 1
+    assert pages[0]["session_id"] == _ROUTED_SID
+    session = load_state().sessions[0]
+    assert session.status is SessionStatus.ACTIVE
+    assert session.reap_proposed_at is not None
+    proposals = read_events(event_types=[OrchestratorEventType.SESSION_REAP_PROPOSED])
+    assert [p.payload["proposed_action"] for p in proposals] == [
+        "close_routed_result_session"
+    ]
+
+
+def test_reconcile_auto_policy_still_only_pages_never_closes(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_routed_session(tmp_path, monkeypatch)
+    _roster_has_routed_ref(monkeypatch)
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+    daemon = FakeNativeDaemonClient()
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
+
+    reconcile()
+
+    assert len(_routed_pages()) == 1
+    session = load_state().sessions[0]
+    assert session.status is SessionStatus.ACTIVE
+    assert session.completed_reason is None
+    assert daemon.stop_calls == []
+
+
+def test_reconcile_skips_sweep_on_daemon_outage_guard_return(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_routed_session(tmp_path, monkeypatch)
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+
+    reconcile()
+
+    assert _routed_pages() == []
+    assert load_state().sessions[0].reap_proposed_at is None
+
+
+def test_reconcile_skips_sweep_for_unconfigured_client(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_routed_session(tmp_path, monkeypatch)
+    _roster_has_routed_ref(monkeypatch)
+    (tmp_path / ".config" / "cw" / "clients.yaml").unlink()
+
+    reconcile()
+
+    assert _routed_pages() == []
+    assert load_state().sessions[0].reap_proposed_at is None
+
+
+def test_reconcile_leaves_running_row_session_alone(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_routed_session(
+        tmp_path,
+        monkeypatch,
+        row=TicketTask(
+            ticket_id=_ROUTED_SID,
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.REVIEW,
+            session_id=_ROUTED_SID,
+        ),
+    )
+    _roster_has_routed_ref(monkeypatch)
+
+    reconcile()
+
+    assert _routed_pages() == []
+    session = load_state().sessions[0]
+    assert session.status is SessionStatus.ACTIVE
+    assert session.reap_proposed_at is None

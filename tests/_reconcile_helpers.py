@@ -13,12 +13,16 @@ import json
 import os
 import subprocess
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from cw.models import (
+    HOOK_CONTEXT_RELATIVE_PATH,
     ClientConfig,
+    LastResultSource,
     OrchestratorConfig,
     PendingFixDispatch,
     ReapPolicy,
@@ -27,7 +31,18 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
 )
-from tests.conftest import _make_daemon_session, _write_stop_hook_transcript
+from cw.native_daemon import FakeNativeDaemonClient
+from cw.reconcile._shared import _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY
+from tests.conftest import (
+    _make_daemon_session,
+    _write_idle_transcript,
+    _write_stop_hook_transcript,
+)
+
+# Default daemon surface ref shared by the promoted doctor/reconcile helpers
+# below -- the same "fake-short-id" the transcript writers key their filename
+# prefix on, so ``_locate_session_transcript``'s surface_ref glob finds them.
+_FAKE_SURFACE_REF = "fake-short-id"
 
 
 def _mk_session(
@@ -83,6 +98,134 @@ def _mk_headless_daemon_session(
         '{"headless": true, "session_id": "' + sid + '"}'
     )
     return sess
+
+
+def _routed_last_result(**extra: Any) -> dict[str, Any]:
+    """A terminal-shaped ``last_result`` a #2458 partial route already consumed.
+
+    The exact shape ``_stamp_sentinel_partial_route_consumed`` leaves behind:
+    the staged ``stage_complete`` payload with the consumed marker merged in
+    alongside it (#2524). *extra* keys are merged last, so a test can add a
+    refusal latch or override the marker's value.
+    """
+    return {
+        **_stage_complete_payload(),
+        _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY: True,
+        **extra,
+    }
+
+
+def _mk_routed_session(
+    sid: str,
+    worktree: Path,
+    *,
+    started_at: datetime | None = None,
+    surface_ref: str | None = _FAKE_SURFACE_REF,
+    status: SessionStatus = SessionStatus.ACTIVE,
+    last_result: dict[str, Any] | None = None,
+) -> Session:
+    """A headless DAEMON session whose staged result was already routed (#2524).
+
+    Built on :func:`_mk_headless_daemon_session`, so the name is
+    ``client-a/auto-dev/<sid>`` and the ticket id resolves to *sid*.
+    ``last_result`` defaults to :func:`_routed_last_result`; the source is
+    EMIT_CLI, the only path that stamps the consumed marker.
+    """
+    sess = _mk_headless_daemon_session(
+        sid,
+        worktree,
+        started_at if started_at is not None else datetime(2026, 1, 1, tzinfo=UTC),
+        surface_ref=surface_ref,
+    )
+    sess.status = status
+    sess.last_result = last_result if last_result is not None else _routed_last_result()
+    sess.last_result_source = LastResultSource.EMIT_CLI
+    return sess
+
+
+def _stamp_transcript_age(
+    home: Path,
+    worktree: Path,
+    *,
+    stale_minutes: float,
+    now: datetime | None = None,
+    surface_ref: str = _FAKE_SURFACE_REF,
+) -> Path:
+    """Write a transcript for *worktree* whose mtime is *stale_minutes* old.
+
+    Promoted from ``tests/test_doctor.py``'s class-8 ``_stamp_transcript``
+    (#2524). The age is measured from *now* (default: the real clock).
+    """
+    transcript = _write_idle_transcript(
+        home, worktree, filename=f"{surface_ref}-sess.jsonl"
+    )
+    anchor = now if now is not None else datetime.now(UTC)
+    ts = (anchor - timedelta(minutes=stale_minutes)).timestamp()
+    os.utime(str(transcript), (ts, ts))
+    return transcript
+
+
+def _write_agent_spawn_stamp(
+    worktree: Path, *, unresolved_count: int, stamped_at: datetime
+) -> None:
+    """Write an ``agent_spawn_stamp`` into *worktree*'s cw-context.json.
+
+    Promoted from ``tests/test_doctor.py``'s class-8 ``_write_spawn_stamp``
+    (#2524): the same on-disk payload ``cw agent-spawn-pre`` produces.
+    """
+    (worktree / ".claude").mkdir(parents=True, exist_ok=True)
+    payload = {
+        "agent_spawn_stamp": {
+            "unresolved_count": unresolved_count,
+            "last_stamped_at": stamped_at.isoformat(),
+        }
+    }
+    (worktree / HOOK_CONTEXT_RELATIVE_PATH).write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
+def _write_fake_roster(tmp_path: Path, *, supervisor_pid: int = 12345) -> Path:
+    """Write an empty daemon ``roster.json`` under *tmp_path*; return its path."""
+    roster_path = tmp_path / "roster.json"
+    roster_path.write_text(
+        json.dumps({"supervisorPid": supervisor_pid, "workers": {}}),
+        encoding="utf-8",
+    )
+    return roster_path
+
+
+def _install_fake_daemon_roster(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    surface_ref: str = _FAKE_SURFACE_REF,
+) -> tuple[Path, FakeNativeDaemonClient]:
+    """Wire a fake daemon (with *surface_ref* live) into every doctor seam.
+
+    Promoted from ``tests/test_doctor.py``'s class-8 ``_setup_common``
+    (#2524). Writes an empty roster, points the doctor's roster-path seams at
+    it, returns the per-test ``Path.home()`` (already redirected by the
+    autouse ``_isolate_home`` fixture, #1756) so transcript lookup finds
+    files the test writes, and patches every doctor-side
+    ``get_native_daemon_client`` -- including the stranded-routed-result
+    class's -- so a doctor run stays hermetic.
+    """
+    roster_path = _write_fake_roster(tmp_path)
+    monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+    monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
+
+    home = Path.home()
+
+    daemon = FakeNativeDaemonClient()
+    daemon._live.add(surface_ref)
+    for target in (
+        "cw.doctor.wedge.get_native_daemon_client",
+        "cw.doctor.loop_health.get_native_daemon_client",
+        "cw.doctor.routed_result_wedge.get_native_daemon_client",
+    ):
+        monkeypatch.setattr(target, lambda: daemon)
+    return home, daemon
 
 
 def _make_pending_fix_dispatch(**overrides: Any) -> PendingFixDispatch:

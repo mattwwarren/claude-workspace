@@ -22854,3 +22854,72 @@ class TestStaleDispatchSentinelRouting:
 
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.blocked_on_pr is None
+
+
+# ---------------------------------------------------------------------------
+# #2524 R4(c) -- both dispatch ceiling-count sites use the shared predicate
+# ---------------------------------------------------------------------------
+
+
+def _mixed_ceiling_sessions() -> list[Session]:
+    """One DAEMON/USER x every-status x two-client session apiece."""
+    sessions: list[Session] = []
+    for i, (status, origin, client) in enumerate(
+        (s, o, c)
+        for s in SessionStatus
+        for o in SessionOrigin
+        for c in ("ceil-client", "other-client")
+    ):
+        sessions.append(
+            _make_daemon_session(
+                id=f"ceil{i:04d}", status=status, origin=origin, client=client
+            )
+        )
+    return sessions
+
+
+def _legacy_ceiling_count(sessions: list[Session], name: str) -> int:
+    """The inline comprehension dispatch used before #2524, verbatim."""
+    return sum(
+        1
+        for s in sessions
+        if s.client == name
+        and s.origin == SessionOrigin.DAEMON
+        and s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
+    )
+
+
+def test_client_tick_snapshot_running_count_matches_legacy_ceiling_oracle(
+    tmp_config_dir: Path,
+) -> None:
+    from cw.dispatch.tick import _client_tick_snapshot
+
+    sessions = _mixed_ceiling_sessions()
+    client = ClientConfig(name="ceil-client", workspace_path=Path("/tmp/ws"))
+
+    snapshot = _client_tick_snapshot(
+        client, state=CwState(sessions=sessions), config=OrchestratorConfig()
+    )
+
+    expected = _legacy_ceiling_count(sessions, "ceil-client")
+    assert expected == 2
+    assert snapshot.running_count == expected
+
+
+def test_usage_limit_skip_event_running_count_matches_legacy_ceiling_oracle(
+    tmp_config_dir: Path,
+) -> None:
+    from cw.dispatch.gating import _emit_usage_limit_skip_events
+
+    sessions = _mixed_ceiling_sessions()
+    client = ClientConfig(name="ceil-client", workspace_path=Path("/tmp/ws"))
+
+    _emit_usage_limit_skip_events(
+        {"ceil-client": client}, OrchestratorConfig(), CwState(sessions=sessions)
+    )
+
+    events = read_events(event_types=[OrchestratorEventType.DISPATCH_TICK])
+    assert len(events) == 1
+    assert events[0].payload["running"] == _legacy_ceiling_count(
+        sessions, "ceil-client"
+    )

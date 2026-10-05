@@ -152,6 +152,12 @@ class ReapReason(StrEnum):
     # The boot pass never signals it. Proposal-only: surfaces via
     # session.reap_proposed, never stamped as a session's reap_reason.
     CODEX_ORPHAN_LIVE_WRITER = "codex_orphan_live_writer_at_boot"
+    # GitHub #2524 — an ACTIVE DAEMON session whose staged result a #2458
+    # partial route already routed (the row advanced), with no occupied row
+    # still bound to it and a stale transcript. Two jobs: the reason on the
+    # reconcile sweep's session.reap_proposed page, and the reap_reason
+    # stamped on the session when an operator closes it via cw doctor --reap.
+    ROUTED_RESULT_STRANDED = "routed_result_stranded"
 
 
 class LastResultSource(StrEnum):

@@ -52,6 +52,9 @@ re-exports. Submodules:
 - ``idle`` — emitted-sentinel router (#578).
 - ``liveness`` — transcript-staleness bucket sweep + operator distress
   signal (RFC 0008 W2; signal-only, no disposition).
+- ``routed_result_sessions`` — signal-only, page-once detector for live
+  sessions stranded after a #2458 partial route already routed their result
+  (#2524; never closes -- the operator does, via ``cw doctor --reap``).
 - ``usage_limit_mid_turn`` — roster-present usage-limit stop sweep (#2324;
   ``reap_policy``-gated revert or BLOCKED_ON_USER park, plus lockout arm).
 - ``phantom`` — phantom (dead-surface) sweep.

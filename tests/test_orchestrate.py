@@ -2626,6 +2626,39 @@ def test_orchestrate_run_drain_logs_and_leaves_park_blocked(
     assert reap_calls == []  # NOT reaped
 
 
+def test_orchestrate_run_drain_logs_and_leaves_close_routed_result_session(
+    run_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drain never authorizes CLOSE_ROUTED_RESULT_SESSION (#2524).
+
+    The stranded routed-result proposal is operator-only: only
+    ``cw doctor --reap`` or ``cw spawn close`` closes it, so the unattended
+    drain logs it and advances past it without reaping.
+    """
+    from cw.cli import _drain_reap_proposals
+
+    reap_calls: list[str] = []
+
+    def fake_reap(selector: str, **kwargs: object) -> bool:
+        reap_calls.append(selector)
+        return True
+
+    monkeypatch.setattr("cw.cli.orchestrate._reap_session_by_selector", fake_reap)
+
+    from cw.config import load_state, save_state
+
+    state = load_state()
+    state.sessions.append(_mk_impl_session("s4", lane="default"))
+    save_state(state)
+
+    _emit_reap_event("s4", "default", ProposedAction.CLOSE_ROUTED_RESULT_SESSION)
+    count = _drain_reap_proposals("client-a", "default")
+
+    assert count == 1
+    assert reap_calls == []
+
+
 def test_orchestrate_run_drain_idempotent_replay(
     run_env: Path,
     monkeypatch: pytest.MonkeyPatch,

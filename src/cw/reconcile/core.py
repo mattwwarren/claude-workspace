@@ -74,6 +74,7 @@ from cw.reconcile.review_recipes import (
     dispatch_deferred_review_jobs,
     run_review_recipes,
 )
+from cw.reconcile.routed_result_sessions import sweep_routed_result_sessions
 from cw.reconcile.stalled import (
     _act_on_stalled_candidates,
     _detect_stalled_candidates,
@@ -412,7 +413,8 @@ def _reconcile_locked(
     phantom sweep acts only on roster absence (the process is genuinely
     gone), the mid-turn usage-limit sweep acts only on a transcript tail that
     ends on a usage-limit message (#2324), and the liveness sweep is
-    signal-only. The phantom and usage-limit sweeps' destructive acts are both
+    signal-only, as is the stranded-routed-result sweep (#2524), which pages
+    once and never closes. The phantom and usage-limit sweeps' destructive acts are both
     gated by ``reap_policy`` (ADR-0006).
     """
     if clients is None:
@@ -526,6 +528,20 @@ def _reconcile_locked(
         native_live=native_live,
         config=orchestrator_config,
         task_by_ticket=shared_task_by_ticket,
+    )
+
+    # Stranded routed-result sweep (#2524): a live session whose staged result
+    # a #2458 partial route already routed, with no occupied row bound to it
+    # and a stale transcript. After the outage guard (it needs the roster);
+    # policy-independent and signal-only (ADR-0014) -- pages once via
+    # reap_proposed_at and never closes; the operator does (cw doctor --reap).
+    sweep_routed_result_sessions(
+        state,
+        now=now,
+        native_live=native_live,
+        config=orchestrator_config,
+        tasks=shared_tasks,
+        enabled_clients=clients.keys(),
     )
 
     # Mid-turn usage-limit sweep (#2324): a roster-present worker whose

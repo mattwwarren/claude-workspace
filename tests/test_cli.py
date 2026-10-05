@@ -10642,6 +10642,204 @@ class TestDevQueueStatusRunningRowDivergence:
         assert result.exit_code == 0, result.output
         assert "[ORPHAN?" not in result.output
 
+    # -- #2524: name the sessions no occupied row owns -------------------------
+
+    _ORPHAN_CLIENT = "orphan-client"
+
+    def _seed_orphan_world(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sessions: list[Session],
+        *,
+        tasks: list[TicketTask] | None = None,
+        running: int = 2,
+    ) -> None:
+        from cw.config import save_state
+        from cw.dev_queue import add_ticket
+        from cw.models import CwState, QueueItemStatus, TicketTask
+
+        for task in tasks or [
+            TicketTask(
+                ticket_id="2142",
+                client=self._ORPHAN_CLIENT,
+                status=QueueItemStatus.RUNNING,
+                session_id="owner001",
+            )
+        ]:
+            add_ticket(task)
+        save_state(CwState(sessions=sessions))
+        _patch_tick(
+            monkeypatch,
+            self._ORPHAN_CLIENT,
+            running=running,
+            cap=2,
+            skip_reason="cap_full",
+        )
+
+    def _orphan_session(
+        self,
+        sid: str,
+        *,
+        ticket: str = "2524",
+        client: str = "orphan-client",
+        minutes_ago: int = 60,
+    ) -> Session:
+        return _make_daemon_session(
+            id=sid,
+            name=f"{client}/auto-dev/{ticket}",
+            client=client,
+            started_at=datetime.now(UTC) - timedelta(minutes=minutes_ago),
+        )
+
+    def _status_line(self) -> str:
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        return next(
+            line for line in result.output.splitlines() if "orphan-client:" in line
+        )
+
+    def test_status_orphan_annotation_names_session_ids_without_occupied_row(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_orphan_world(
+            monkeypatch,
+            [
+                self._orphan_session("owner001", ticket="2142"),
+                self._orphan_session("s2524"),
+            ],
+        )
+
+        line = self._status_line()
+
+        assert "[ORPHAN? — 2 session(s) counted against the ceiling" in line
+        assert "no occupied row owns: s2524 (2524)" in line
+        assert "owner001" not in line
+        assert line.endswith("run cw doctor]")
+
+    def test_status_orphan_annotation_excludes_session_owning_running_row(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_orphan_world(
+            monkeypatch,
+            [
+                self._orphan_session("owner001", ticket="2142"),
+                self._orphan_session("s2524"),
+            ],
+        )
+
+        line = self._status_line()
+
+        assert "s2524" in line
+        assert "owner001" not in line
+
+    def test_status_orphan_annotation_excludes_session_pinned_by_blocked_row(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.models import QueueItemStatus, TicketTask
+
+        self._seed_orphan_world(
+            monkeypatch,
+            [
+                self._orphan_session("parked01", ticket="2143"),
+                self._orphan_session("s2524"),
+            ],
+            tasks=[
+                TicketTask(
+                    ticket_id="2143",
+                    client=self._ORPHAN_CLIENT,
+                    status=QueueItemStatus.BLOCKED_ON_USER,
+                    session_id="parked01",
+                )
+            ],
+        )
+
+        line = self._status_line()
+
+        assert "no occupied row owns: s2524 (2524)" in line
+        assert "parked01" not in line
+
+    def test_status_orphan_annotation_excludes_other_clients_sessions(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_orphan_world(
+            monkeypatch,
+            [
+                self._orphan_session("s2524"),
+                self._orphan_session("elsewh01", client="other-client"),
+            ],
+        )
+
+        line = self._status_line()
+
+        assert "s2524" in line
+        assert "elsewh01" not in line
+
+    def test_status_orphan_annotation_caps_ids_with_more_suffix(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sessions = [
+            self._orphan_session(
+                f"orph{i:04d}", ticket=str(3000 + i), minutes_ago=60 - i
+            )
+            for i in range(7)
+        ]
+        self._seed_orphan_world(monkeypatch, sessions, running=7)
+
+        line = self._status_line()
+
+        for i in range(5):
+            assert f"orph{i:04d} ({3000 + i})" in line
+        assert "orph0005" not in line
+        assert "(+2 more)" in line
+
+    def test_status_orphan_annotation_falls_back_to_generic_text_when_all_owned(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_orphan_world(
+            monkeypatch, [self._orphan_session("owner001", ticket="2142")]
+        )
+
+        line = self._status_line()
+
+        assert line.endswith(
+            "[ORPHAN? — 2 session(s) counted against the ceiling"
+            " vs 1 RUNNING row(s); run cw doctor]"
+        )
+
+    def test_status_orphan_annotation_falls_back_when_state_unreadable(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.config import state_file
+
+        self._seed_orphan_world(monkeypatch, [self._orphan_session("s2524")])
+        state_file().write_text("{not json", encoding="utf-8")
+
+        line = self._status_line()
+
+        assert line.endswith(
+            "[ORPHAN? — 2 session(s) counted against the ceiling"
+            " vs 1 RUNNING row(s); run cw doctor]"
+        )
+
+    def test_status_orphan_annotation_does_not_mutate_state_or_queue(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.config import dev_queue_file, state_file
+
+        self._seed_orphan_world(
+            monkeypatch,
+            [
+                self._orphan_session("owner001", ticket="2142"),
+                self._orphan_session("s2524"),
+            ],
+        )
+        before = state_file().read_bytes() + dev_queue_file().read_bytes()
+
+        assert "s2524" in self._status_line()
+
+        assert state_file().read_bytes() + dev_queue_file().read_bytes() == before
+
 
 class TestDevQueueTasksPrState:
     """`cw dev-queue tasks` surfaces pr_state fields/column (#929)."""
