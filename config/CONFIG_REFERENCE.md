@@ -1152,6 +1152,14 @@ pr_hydration_interval_seconds: 150
 inbox_size_warn_bytes: 5000000    # 5 MB
 inbox_line_count_warn: 15000
 
+# Size threshold `cw doctor` checks sessions.json against (GitHub #1999).
+# Past it, `cw doctor` reports the "sessions-size" check as an advisory WARN
+# (it does not fail doctor's exit code) and suggests `cw session prune`.
+# Read-only: stat-only, doctor never mutates or prunes sessions.json itself.
+# `cw session prune` keeps live and dev-queue-referenced sessions, so raise
+# this if the warning persists after a prune.
+sessions_size_warn_bytes: 15000000    # 15 MB
+
 # Global default operator-signoff gate (RFC 0007 Phase 3, GitHub #990).
 # "none" (default): no gate — the existing staged-advance rules apply.
 # "operator": every ticket pauses at AWAITING_OPERATOR_SIGNOFF at the

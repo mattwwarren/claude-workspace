@@ -19,7 +19,7 @@ from cw.cli.session_inspect import (
     _SESSION_WAIT_EXIT_TIMED_OUT,
     _resolve_session,
 )
-from cw.config import load_state, save_state
+from cw.config import load_state
 from cw.models import (
     CompletionReason,
     LastResultSource,
@@ -31,7 +31,7 @@ from cw.models import (
     Stage,
 )
 from cw.session_retention import prune_sessions
-from tests.conftest import _make_daemon_session, _make_diff
+from tests.conftest import _make_daemon_session, _make_diff, _seed_sessions
 
 
 def _make_session(
@@ -74,16 +74,10 @@ def _make_session(
     return _make_daemon_session(**kwargs)
 
 
-def _seed(session: Session) -> None:
-    state = load_state()
-    state.sessions.append(session)
-    save_state(state)
-
-
 class TestSessionShow:
     def test_show_by_id_prefix_json(self, tmp_config_dir: Path, tmp_path: Path) -> None:
         session = _make_session(tmp_path, session_id="abcd1234")
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "show", "abcd", "--json"])
         assert result.exit_code == 0
@@ -100,7 +94,7 @@ class TestSessionShow:
             session_id="sess0001",
             claude_session_id="uuid-1234-5678-abcd",
         )
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "show", "uuid-1234", "--json"])
         assert result.exit_code == 0
@@ -124,7 +118,7 @@ class TestSessionShow:
             tmp_path,
             started_at=datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC),
         )
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "show", "abcd1234"])
         assert result.exit_code == 0
@@ -132,7 +126,7 @@ class TestSessionShow:
 
     def test_show_last_result_none(self, tmp_config_dir: Path, tmp_path: Path) -> None:
         session = _make_session(tmp_path, last_result=None)
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "show", "abcd1234", "--json"])
         assert result.exit_code == 0
@@ -145,7 +139,7 @@ class TestSessionShow:
         wt = tmp_path / "worktrees" / "my-wt"
         wt.mkdir(parents=True)
         session = _make_session(tmp_path, worktree_path=wt)
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "show", "abcd1234", "--json"])
         assert result.exit_code == 0
@@ -159,7 +153,7 @@ class TestSessionShow:
         """Guards against session_inspect's hand-listed dict silently dropping
         fields as Session grows (GitHub #1624)."""
         session = _make_session(tmp_path)
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "show", "abcd1234", "--json"])
         assert result.exit_code == 0
@@ -177,7 +171,7 @@ class TestSessionShow:
             reap_reason=ReapReason.IDLE_STALL,
             parent_session_id="parent1",
         )
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "show", "abcd1234", "--json"])
         assert result.exit_code == 0
@@ -200,7 +194,7 @@ class TestSessionShow:
             completed_at=datetime(2025, 6, 1, 13, 0, 0, tzinfo=UTC),
             idle_at=datetime(2025, 6, 1, 12, 30, 0, tzinfo=UTC),
         )
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "show", "abcd1234", "--json"])
         assert result.exit_code == 0
@@ -224,7 +218,7 @@ class TestSessionShow:
             origin=SessionOrigin.DAEMON,
             completed_reason=CompletionReason.NORMAL,
         )
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "show", "abcd1234", "--json"])
         assert result.exit_code == 0
@@ -246,7 +240,7 @@ class TestSessionShow:
             last_result_source=LastResultSource.GIT_SYNTHESIS,
             reap_reason=ReapReason.WALL_CLOCK_BUDGET,
         )
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "show", "abcd1234"])
         assert result.exit_code == 0
@@ -265,8 +259,8 @@ class TestSessionList:
         completed = _make_session(
             tmp_path, session_id="sess0002", status=SessionStatus.COMPLETED
         )
-        _seed(active)
-        _seed(completed)
+        _seed_sessions(active)
+        _seed_sessions(completed)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "list", "--json"])
         assert result.exit_code == 0
@@ -284,8 +278,8 @@ class TestSessionList:
         timed_out = _make_session(
             tmp_path, session_id="sess0002", status=SessionStatus.TIMED_OUT
         )
-        _seed(active)
-        _seed(timed_out)
+        _seed_sessions(active)
+        _seed_sessions(timed_out)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "list", "--json"])
         assert result.exit_code == 0
@@ -303,8 +297,8 @@ class TestSessionList:
         completed = _make_session(
             tmp_path, session_id="sess0002", status=SessionStatus.COMPLETED
         )
-        _seed(active)
-        _seed(completed)
+        _seed_sessions(active)
+        _seed_sessions(completed)
         runner = CliRunner()
         result = runner.invoke(
             main, ["session", "list", "--status", "completed", "--json"]
@@ -318,8 +312,8 @@ class TestSessionList:
     def test_list_filter_by_client(self, tmp_config_dir: Path, tmp_path: Path) -> None:
         s1 = _make_session(tmp_path, session_id="sess0001", client="foo-client")
         s2 = _make_session(tmp_path, session_id="sess0002", client="bar-client")
-        _seed(s1)
-        _seed(s2)
+        _seed_sessions(s1)
+        _seed_sessions(s2)
         runner = CliRunner()
         result = runner.invoke(
             main, ["session", "list", "--client", "foo-client", "--json"]
@@ -337,8 +331,8 @@ class TestSessionList:
         idea = _make_session(
             tmp_path, session_id="sess0002", purpose=SessionPurpose.IDEA, name="c/idea"
         )
-        _seed(impl)
-        _seed(idea)
+        _seed_sessions(impl)
+        _seed_sessions(idea)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "list", "--purpose", "impl", "--json"])
         assert result.exit_code == 0
@@ -361,8 +355,8 @@ class TestSessionList:
             name="claude-workspace/auto-dev/999",
             client="claude-workspace",
         )
-        _seed(auto_dev)
-        _seed(other)
+        _seed_sessions(auto_dev)
+        _seed_sessions(other)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "list", "--ticket", "238", "--json"])
         assert result.exit_code == 0
@@ -373,7 +367,7 @@ class TestSessionList:
 
     def test_list_json_is_array(self, tmp_config_dir: Path, tmp_path: Path) -> None:
         s1 = _make_session(tmp_path, session_id="sess0001")
-        _seed(s1)
+        _seed_sessions(s1)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "list", "--json"])
         assert result.exit_code == 0
@@ -388,7 +382,7 @@ class TestSessionList:
         """Guards against session_inspect's hand-listed dict silently
         dropping fields as Session grows (GitHub #1624)."""
         session = _make_session(tmp_path)
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "list", "--json"])
         assert result.exit_code == 0
@@ -399,7 +393,7 @@ class TestSessionList:
     def test_list_human_output_shows_headers(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        _seed(_make_session(tmp_path))
+        _seed_sessions(_make_session(tmp_path))
         runner = CliRunner()
         result = runner.invoke(main, ["session", "list"])
         assert result.exit_code == 0
@@ -415,7 +409,7 @@ class TestSessionWait:
         session = _make_session(
             tmp_path, session_id="sess0001", status=SessionStatus.COMPLETED
         )
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "wait", "sess0001"])
         assert result.exit_code == 0
@@ -426,7 +420,7 @@ class TestSessionWait:
         session = _make_session(
             tmp_path, session_id="sess0001", status=SessionStatus.TIMED_OUT
         )
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "wait", "sess0001"])
         assert result.exit_code == _SESSION_WAIT_EXIT_TIMED_OUT
@@ -441,7 +435,7 @@ class TestSessionWait:
         session = _make_session(
             tmp_path, session_id="sess0001", status=SessionStatus.ACTIVE
         )
-        _seed(session)
+        _seed_sessions(session)
         monkeypatch.setattr("cw.cli.session_inspect._WAIT_POLL_INTERVAL", 0)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "wait", "sess0001", "--timeout", "-1"])
@@ -453,7 +447,7 @@ class TestSessionWait:
         session = _make_session(
             tmp_path, session_id="sess0001", status=SessionStatus.COMPLETED
         )
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "wait", "sess0001", "--json"])
         assert result.exit_code == 0
@@ -468,7 +462,7 @@ class TestSessionWait:
         session = _make_session(
             tmp_path, session_id="sess0001", status=SessionStatus.TIMED_OUT
         )
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(
             main, ["session", "wait", "sess0001", "--until", "timed_out"]
@@ -481,7 +475,7 @@ class TestSessionWait:
         session = _make_session(
             tmp_path, session_id="sess0001", status=SessionStatus.COMPLETED
         )
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "wait", "sess0001"])
         assert result.exit_code == 0
@@ -493,7 +487,7 @@ class TestSessionResult:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         session = _make_session(tmp_path, last_result={"status": "shipped", "pr": 42})
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "result", "abcd1234"])
         assert result.exit_code == 0
@@ -523,7 +517,7 @@ class TestSessionResult:
             fix_loop_enabled=False,
         )
         session = _make_session(tmp_path, last_result=result.model_dump(mode="json"))
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         cli_result = runner.invoke(main, ["session", "result", "abcd1234"])
         assert cli_result.exit_code == 0
@@ -541,7 +535,7 @@ class TestSessionResult:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         session = _make_session(tmp_path, last_result=None)
-        _seed(session)
+        _seed_sessions(session)
         runner = CliRunner()
         result = runner.invoke(main, ["session", "result", "abcd1234"])
         assert result.exit_code == 1
@@ -575,7 +569,7 @@ def _seed_and_archive(
         started_at=prune_at - timedelta(days=400),
         completed_at=prune_at - timedelta(days=400),
     )
-    _seed(session)
+    _seed_sessions(session)
     with freeze_time(prune_at):
         prune_sessions()
 
@@ -654,7 +648,7 @@ class TestSessionListArchiveNotice:
     def test_session_list_status_completed_no_notice_when_no_archives(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        _seed(_make_session(tmp_path, status=SessionStatus.COMPLETED))
+        _seed_sessions(_make_session(tmp_path, status=SessionStatus.COMPLETED))
         runner = CliRunner()
         result = runner.invoke(main, ["session", "list", "--status", "completed"])
         assert result.exit_code == 0, result.output
