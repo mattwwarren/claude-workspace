@@ -376,7 +376,21 @@ inode probe failed or the filesystem reports no fixed inode count, #2470)
 are present only on `disk_pressure_gate` ticks. `freshness_detail`
 (`non_main_head | main_behind_origin | main_dirty_checkout |
 main_diverged_from_origin | main_detached_head`) plus `blocked_branch` are
-present only on `freshness_gate` ticks.
+present only on `freshness_gate` ticks. `last_error` (str, #1679) is present
+only on a main claim-loop tick where a spawn failure occurred (the generic
+spawn exception, a non-live `HookContextConflictError`, or the codex
+capability breaker engaging) and carries the failure text, so an operator
+reading `skip_reason=spawn_error` can see why without opening the dispatcher
+log. It is a single line (whitespace collapsed), redacted for secret shapes,
+and truncated to the first 500 characters followed by `…` (so up to 501
+characters); an exception with no message yields `""`. It holds `str(exc)`,
+not the traceback, which stays in the dispatcher log. It is keyed on a spawn
+failure having occurred, not on the resolved `skip_reason`, so it is still
+present when a higher-precedence reason (`cap_full`, `lane_cap_blocked`)
+masks `spawn_error`. It is absent on every other tick, including the per-task
+ticks (`worktree_occupied` deferrals carry none) and `usage_limited`. It is
+the same text `lane.paused` reports as `last_error` when the lane circuit
+breaker trips (`lane.paused.last_error` is collapsed but not redacted).
 
 `correlation_id` is `None` (per-client aggregate, not per-ticket).
 Consumers MUST tolerate unknown `skip_reason` values.
