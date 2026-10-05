@@ -1192,6 +1192,94 @@ class TestSignalStop:
 
         assert daemon.stop_calls == [short_id]
 
+    def test_signal_stop_nonheadless_daemon_with_foreign_running_row_completes(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A ``headless: false`` DAEMON session with no sentinel completes (#2031).
+
+        This is the post-fix shape of an ``/address-review`` session: it emits no
+        AUTO_DEV_RESULT and owns no dev-queue row (a *different* session owns the
+        ticket's RUNNING row). It must reach COMPLETED at the first Stop, stop its
+        daemon worker, leave the foreign row alone, and stop pinning its worktree
+        in ``cw worktree gc``'s live set.
+        """
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+        from cw.worktree import live_session_worktree_paths
+
+        session = self._seed_session(tmp_path, sess_id="sess-nonheadless-2031")
+        assert session.worktree_path is not None
+        worktree = session.worktree_path
+
+        daemon = FakeNativeDaemonClient()
+        short_id = daemon.spawn_bg(cwd=worktree, prompt="seed")
+        state = load_state()
+        target = next(s for s in state.sessions if s.id == session.id)
+        target.surface_ref = short_id
+        save_state(state)
+        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+
+        # Production writes an explicit ``"headless": false`` (spawn.py), not an
+        # omitted key; the override wins over the helper's ``True`` default.
+        self._write_headless_context(
+            worktree, session_id=session.id, extra={"headless": False}
+        )
+
+        # A different session owns the ticket's RUNNING row. Leave its
+        # worktree_path unset so the GC assertions isolate the session half.
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=self.SEED_TICKET_ID,
+                        client="test-client",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="some-other-session",
+                    )
+                ]
+            )
+        )
+
+        # The ACTIVE session pins the worktree against `cw worktree gc`.
+        assert worktree in (live_session_worktree_paths() or frozenset())
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": f"{short_id}-nonheadless-full-uuid",
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        result = CliRunner().invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
+        events = read_events(
+            consumer="test-nonheadless-2031",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert any(e.payload.get("session_id") == session.id for e in events)
+        assert daemon.stop_calls == [short_id]
+
+        # The foreign row is untouched.
+        row = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        assert row.status == QueueItemStatus.RUNNING
+        assert row.session_id == "some-other-session"
+
+        # Only the session half of `cw worktree gc`'s SKIP_LIVE guard is covered
+        # here; its PR-state and clean-tree conditions are out of scope.
+        live_after = live_session_worktree_paths()
+        assert live_after is not None
+        assert worktree not in live_after
+
     # ------------------------------------------------------------------
     # Issue #176 Layer 1: headless-session backstop tests
     # ------------------------------------------------------------------

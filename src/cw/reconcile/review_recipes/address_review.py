@@ -204,9 +204,10 @@ def _dispatch_address_review(job: _DispatchJob) -> str | None:
     ``gate_recipes._post_auto_approve_comment`` running post-lock), so the spawn
     never nests THAT flock. The function-local ``spawn_create_impl`` import
     breaks the ``cw.spawn`` ↔ ``cw.reconcile`` cycle. Passes NO ``task=`` kwarg
-    (Resolution 6: no dev-queue correlation). On ``CwError`` emits a durable
-    ``PR_ACTION_FAILED`` correction and returns ``None`` — one candidate's
-    failure never aborts the loop.
+    (Resolution 6: no dev-queue correlation) and ``headless=False``: the skill
+    emits no sentinel, so a headless session would never complete (#2031). On
+    ``CwError`` emits a durable ``PR_ACTION_FAILED`` correction and returns
+    ``None`` — one candidate's failure never aborts the loop.
 
     ``sessions_lock`` is a separate lock from ``dev_queue_lock``, and
     ``spawn_create_impl`` acquires it. Since #1229 this function is called only
@@ -227,7 +228,13 @@ def _dispatch_address_review(job: _DispatchJob) -> str | None:
             worktree=job.worktree,
             prompt=f"/address-review {job.pr_number}",
             label=f"address-review-{job.pr_number}",
-            headless=True,
+            # Why: /address-review emits no AUTO_DEV_RESULT and owns no dev-queue
+            # row. Since ADR-0014 a headless session without a sentinel defers
+            # forever in the Stop hook (_handle_headless_no_sentinel), so it would
+            # never reach a terminal state and would pin its host slot and its
+            # worktree (cw worktree gc: SKIP_LIVE). Mirrors dispatch_fix_agent
+            # (#2031).
+            headless=False,
             ticket_id=job.ticket_id,
             lane=job.lane,
         )

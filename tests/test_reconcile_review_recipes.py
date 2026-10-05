@@ -727,7 +727,13 @@ def test_pr_action_taken_emitted_before_mutation(
     assert len(stub_spawn.calls) == 1
     call = stub_spawn.calls[0]
     assert call["prompt"] == "/address-review 42"
-    assert call["headless"] is True
+    # Why: /address-review emits no AUTO_DEV_RESULT sentinel, and since ADR-0014 a
+    # headless session without one defers forever in the Stop hook (never
+    # COMPLETED, worktree pinned SKIP_LIVE). Mirrors fix_agent.dispatch_fix_agent
+    # (#2031).
+    assert call["headless"] is False
+    # Pins the unchanged IMPL default: no SessionPurpose override is passed.
+    assert "purpose" not in call
     assert call["label"] == "address-review-42"
     assert call["ticket_id"] == task.ticket_id
     assert call["lane"] == task.lane
