@@ -14,8 +14,8 @@ paged exactly once — not on every reconcile tick, and not silently forever.
    stamp ``escalation_fired_at`` — the latch, so re-running this sweep every
    tick never re-fires for the same parked episode (mirrors the #996
    counter-shape precedent for "fire once, not once per tick"). The event is a
-timer-derived signal (its payload carries ``trigger: "timer"``), not a
-worker-initiated help request.
+   timer-derived signal (its payload carries ``trigger: "timer"``), not a
+   worker-initiated help request.
 
 Both fields are cleared together when the row leaves the parked state — that
 clear-site lives in ``cw.dev_queue.transition_task_status`` (the single
