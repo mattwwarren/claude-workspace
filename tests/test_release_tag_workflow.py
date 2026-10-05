@@ -1,6 +1,8 @@
 """Guard tests for `.github/workflows/release-tag.yml` (#1531).
 
-Two concerns live here:
+Later groups (C-F) cover steps added or left untested since; Group F (#1626)
+drives the `gh`-calling release steps through a recording `gh` shim. The
+original two concerns:
 
 * the pre-existing `guard` step's decision chain (match / loud-fail /
   silent-skip), which had zero coverage despite being the single point where
@@ -34,7 +36,7 @@ from typing import Any
 
 import yaml
 
-from tests.conftest import _clean_git_env, git_in
+from tests.conftest import _clean_git_env, _gh_calls, _stub_gh_recording, git_in
 
 ROOT = Path(__file__).parent.parent
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "release-tag.yml"
@@ -111,14 +113,39 @@ def _repo_with_remote(
 
 
 def _run_step(
-    step_id: str, repo: Path, extra_env: dict[str, str] | None = None
+    step_id: str,
+    repo: Path,
+    extra_env: dict[str, str] | None = None,
+    *,
+    expressions: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
     """Run a step's literal `run:` block in `repo`; return result + outputs.
 
     `extra_env` stands in for the step's `env:` block, which the literal
     `run:` text cannot supply on its own (see the checkpoint tests below).
+    `expressions` is forwarded to `_run_script`.
     """
-    script = _script(step_id)
+    return _run_script(_script(step_id), repo, extra_env, expressions=expressions)
+
+
+def _run_script(
+    script: str,
+    repo: Path,
+    extra_env: dict[str, str] | None = None,
+    *,
+    expressions: dict[str, str] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
+    """Run a literal `run:` script in `repo`; return result + `$GITHUB_OUTPUT`.
+
+    `expressions` maps each literal `${{ ... }}` token to the value GitHub
+    Actions would interpolate server-side before bash sees the script (plain
+    bash rejects the raw token as a "bad substitution"). Every token must be
+    covered: a leftover `${{` fails loudly rather than running a script that
+    differs from what the runner executes.
+    """
+    for token, value in (expressions or {}).items():
+        script = script.replace(token, value)
+    assert "${{" not in script, f"unsubstituted expression left in script: {script}"
     with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".env") as handle:
         output_path = Path(handle.name)
     try:
@@ -1016,3 +1043,157 @@ def test_setup_uv_pin_matches_the_ci_workflow_pin() -> None:
     }
     ported_pin = _steps()[_step_index_by_uses_prefix(SETUP_UV_PIN)]["uses"]
     assert ci_pins == {ported_pin}
+
+
+# --- Group F: `gh`-calling release steps (#1626) ---
+#
+# The existence guard and "Create GitHub Release" are the steps that touch a
+# real release, and both read their inputs through inline `${{ }}` tokens, so
+# they run through `_run_script`'s `expressions=` substitution with a
+# recording `gh` shim first on `PATH`. Each test asserts the exact argv the
+# shim saw -- the bug class here is a wrong flag or a wrong notes file -- and
+# that the shim saw *something*: real `/usr/bin/gh` exists on dev hosts and
+# runners, so a shim that lost `PATH` precedence must fail, not pass vacuously.
+
+RELEASE_STEP_ID = "release"
+CHANGELOG_STEP_ID = "changelog"
+CREATE_RELEASE_STEP_NAME = "Create GitHub Release"
+NOTES_FILE_NAME = "changelog-notes.txt"
+RELEASE_VERSION = "1.24.1"
+RELEASE_TAG = f"v{RELEASE_VERSION}"
+VERSION_EXPRESSION = "${{ steps.guard.outputs.version }}"
+NOTES_FOUND_EXPRESSION = "${{ steps.changelog.outputs.notes_found }}"
+RELEASE_EXISTS_NOTICE = f"::notice::Release {RELEASE_TAG} already exists"
+RELEASE_NOT_EXISTS_GATE = "steps.release.outputs.exists == 'false'"
+NOT_DRY_RUN_GATE = "inputs.dry_run != true"
+
+
+def _shim_env(fake_bin: Path, **extra: str) -> dict[str, str]:
+    """`extra_env` putting `fake_bin` ahead of the system `gh` on `PATH`."""
+    return {"PATH": f"{fake_bin}:/usr/bin:/bin", **extra}
+
+
+def _create_release_script() -> str:
+    script: str = _steps()[_step_index_by_name(CREATE_RELEASE_STEP_NAME)]["run"]
+    return script
+
+
+def _assert_gh_calls(fake_bin: Path, expected: list[list[str]]) -> None:
+    calls = _gh_calls(fake_bin)
+    assert calls, "the gh shim recorded no calls -- is it first on PATH?"
+    assert calls == expected
+
+
+def _run_release_guard(
+    tmp_path: Path, *, view_exit: int
+) -> tuple[subprocess.CompletedProcess[str], dict[str, str], Path]:
+    fake_bin = _stub_gh_recording(tmp_path, view_exit=view_exit)
+    result, outputs = _run_step(
+        RELEASE_STEP_ID,
+        tmp_path,
+        _shim_env(fake_bin),
+        expressions={VERSION_EXPRESSION: RELEASE_VERSION},
+    )
+    return result, outputs, fake_bin
+
+
+def _run_create_release(
+    tmp_path: Path, *, notes_found: str, create_exit: int = 0
+) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    fake_bin = _stub_gh_recording(tmp_path, create_exit=create_exit)
+    runner_temp = _runner_temp(tmp_path, NOTES_TEXT)
+    result, _outputs = _run_script(
+        _create_release_script(),
+        tmp_path,
+        _shim_env(fake_bin, RUNNER_TEMP=str(runner_temp)),
+        expressions={
+            VERSION_EXPRESSION: RELEASE_VERSION,
+            NOTES_FOUND_EXPRESSION: notes_found,
+        },
+    )
+    return result, fake_bin, runner_temp
+
+
+def test_release_guard_existing_release_outputs_exists_true(tmp_path: Path) -> None:
+    result, outputs, fake_bin = _run_release_guard(tmp_path, view_exit=0)
+    assert result.returncode == 0, result.stderr
+    assert outputs["exists"] == "true"
+    assert RELEASE_EXISTS_NOTICE in result.stdout
+    _assert_gh_calls(fake_bin, [["release", "view", RELEASE_TAG]])
+
+
+def test_release_guard_absent_release_outputs_exists_false(tmp_path: Path) -> None:
+    result, outputs, fake_bin = _run_release_guard(tmp_path, view_exit=1)
+    assert result.returncode == 0, result.stderr
+    assert outputs["exists"] == "false"
+    assert RELEASE_EXISTS_NOTICE not in result.stdout
+    _assert_gh_calls(fake_bin, [["release", "view", RELEASE_TAG]])
+
+
+def test_create_release_with_notes_passes_extracted_notes_file(
+    tmp_path: Path,
+) -> None:
+    result, fake_bin, runner_temp = _run_create_release(tmp_path, notes_found="true")
+    assert result.returncode == 0, result.stderr
+    _assert_gh_calls(
+        fake_bin,
+        [
+            [
+                "release",
+                "create",
+                RELEASE_TAG,
+                "--title",
+                RELEASE_TAG,
+                "--notes-file",
+                f"{runner_temp}/{NOTES_FILE_NAME}",
+            ]
+        ],
+    )
+    assert "--generate-notes" not in _gh_calls(fake_bin)[0]
+
+
+def test_create_release_without_notes_generates_notes(tmp_path: Path) -> None:
+    """A notes file on disk must not leak into the `notes_found=false` branch."""
+    result, fake_bin, _runner = _run_create_release(tmp_path, notes_found="false")
+    assert result.returncode == 0, result.stderr
+    _assert_gh_calls(
+        fake_bin,
+        [
+            [
+                "release",
+                "create",
+                RELEASE_TAG,
+                "--title",
+                RELEASE_TAG,
+                "--generate-notes",
+            ]
+        ],
+    )
+    assert "--notes-file" not in _gh_calls(fake_bin)[0]
+
+
+def test_create_release_failure_fails_the_step(tmp_path: Path) -> None:
+    """A failed `gh release create` must fail the job, not be swallowed."""
+    result, fake_bin, _runner = _run_create_release(
+        tmp_path, notes_found="true", create_exit=1
+    )
+    assert result.returncode != 0
+    assert _gh_calls(fake_bin), "the gh shim recorded no calls -- is it on PATH?"
+
+
+def test_create_release_gated_on_absent_release_and_not_dry_run() -> None:
+    step = _steps()[_step_index_by_name(CREATE_RELEASE_STEP_NAME)]
+    assert RELEASE_NOT_EXISTS_GATE in step["if"]
+    assert NOT_DRY_RUN_GATE in step["if"]
+
+
+def test_release_guard_gated_on_match_true() -> None:
+    assert _step(RELEASE_STEP_ID)["if"] == MATCH_TRUE_GATE
+
+
+def test_create_release_reads_the_notes_file_the_extract_step_writes() -> None:
+    """Ties `--notes-file` to the producer: a renamed file on either side
+    would ship autogenerated-looking notes from a missing path."""
+    notes_path = f'"$RUNNER_TEMP/{NOTES_FILE_NAME}"'
+    assert notes_path in _script(CHANGELOG_STEP_ID)
+    assert f"--notes-file {notes_path}" in _create_release_script()
