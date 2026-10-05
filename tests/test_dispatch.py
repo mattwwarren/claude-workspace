@@ -302,7 +302,6 @@ def breaker_config() -> OrchestratorConfig:
 class TestDispatchTickSpawnsSession:
     def test_dispatch_tick_spawns_session(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -339,7 +338,6 @@ class TestDispatchTickSpawnsSession:
 
     def test_dispatch_tick_appends_headless_flag(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -403,7 +401,6 @@ class TestDispatchTickSpawnsSession:
 
     def test_dispatch_tick_stamps_session_id_on_task(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -430,7 +427,6 @@ class TestDispatchTickSpawnsSession:
 
     def test_dispatch_tick_no_parent_leaves_linkage_empty(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -448,7 +444,6 @@ class TestDispatchTickSpawnsSession:
 
     def test_dispatch_stamps_task_lane_on_session(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -479,7 +474,6 @@ class TestDispatchTickSpawnsSession:
 class TestPerClientCapRespected:
     def test_per_client_cap_respected(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         cap2_config: OrchestratorConfig,
     ) -> None:
@@ -501,7 +495,6 @@ class TestPerClientCapRespected:
 
     def test_unlisted_client_uses_default_max_parallel(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """Client missing from per_client_max_parallel uses default_max_parallel.
@@ -538,7 +531,6 @@ class TestPerClientCapRespected:
 class TestNoDoubleDispatch:
     def test_no_double_dispatch(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -572,7 +564,6 @@ class TestNoDoubleDispatch:
 class TestConsumeCompletesTasks:
     def test_consume_completes_task(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -604,7 +595,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_skips_legacy_event_with_no_ticket_id_owning_client(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -633,7 +623,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_ignores_events_without_ticket_id(
         self,
-        tmp_dispatch_dirs: Path,
     ) -> None:
         """session.completed events without ticket_id do not affect the queue."""
         record_event(
@@ -646,7 +635,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_recovers_ticket_id_from_session_name(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -689,7 +677,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_skips_crashed_events(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -726,7 +713,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_skips_crashed_events_via_session_name_fallback(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -760,7 +746,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_skips_usage_limited_mid_turn_events(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -799,7 +784,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_rejects_event_with_mismatched_session_id(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -835,7 +819,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_completes_when_session_id_matches(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -866,7 +849,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_skips_legacy_event_with_no_session_id_key(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -906,7 +888,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_skips_session_tagged_event_against_unstamped_task(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -950,7 +931,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_duplicate_running_rows_only_session_id_matched_row_completes(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -993,7 +973,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_skips_event_with_session_id_explicit_none(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -1030,7 +1009,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_skips_event_with_empty_string_session_id(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -1064,7 +1042,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_skips_event_with_non_string_session_id(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -1095,7 +1072,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_completes_extended_event_shape(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -1145,7 +1121,6 @@ class TestConsumeCompletesTasks:
     def test_consume_paused_status_routes_to_blocked_on_user(
         self,
         paused_status: str,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -1209,7 +1184,6 @@ class TestConsumeCompletesTasks:
         v4_status: str,
         ambiguities: list[dict[str, object]],
         premises: list[dict[str, object]],
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -1302,7 +1276,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_non_paused_status_routes_to_completed(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -1349,7 +1322,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_advances_staged_pipeline_from_prepopulated_last_result(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -1438,7 +1410,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_null_last_result_routes_to_completed(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -1481,7 +1452,6 @@ class TestConsumeCompletesTasks:
 
     def test_consume_advances_cursor(
         self,
-        tmp_dispatch_dirs: Path,
     ) -> None:
         """Cursor advances after consuming so events aren't re-processed."""
         record_event(
@@ -1505,7 +1475,6 @@ class TestConsumeCompletesTasks:
 class TestDispatchTickReturnsCount:
     def test_dispatch_tick_returns_count(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         cap2_config: OrchestratorConfig,
     ) -> None:
@@ -1522,7 +1491,6 @@ class TestDispatchTickReturnsCount:
 
     def test_dispatch_tick_returns_zero_when_empty(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -1536,7 +1504,6 @@ class TestDispatchTickReturnsCount:
 
     def test_running_sessions_count_toward_cap(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -1576,7 +1543,6 @@ class TestDispatchTickWithPlan:
 
     def test_use_plan_reorders_pending_claims(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         cap2_config: OrchestratorConfig,
     ) -> None:
@@ -1612,7 +1578,6 @@ class TestDispatchTickWithPlan:
 
     def test_use_plan_missing_falls_back_to_enqueue_order(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -1635,7 +1600,6 @@ class TestDispatchTickWithPlan:
 
     def test_use_plan_drains_unplanned_after_planned(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         cap2_config: OrchestratorConfig,
     ) -> None:
@@ -1722,7 +1686,6 @@ class TestDispatchTickAutoBypassesApprovedPlan:
 
     def test_plan_stage_claim_bypasses_to_impl_when_plan_already_signed_off(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         capture_events: Callable[..., list[CapturedEvent]],
@@ -1806,7 +1769,6 @@ class TestDispatchTickAutoBypassesApprovedPlan:
 
     def test_plan_stage_claim_no_bypass_when_no_plan_md(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -1842,7 +1804,6 @@ class TestDispatchTickAutoBypassesApprovedPlan:
 
     def test_plan_stage_claim_no_bypass_when_plan_unsigned(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -1871,7 +1832,6 @@ class TestDispatchTickAutoBypassesApprovedPlan:
 
     def test_task_stage_changed_event_emitted_on_auto_bypass(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         capture_events: Callable[..., list[CapturedEvent]],
@@ -1910,7 +1870,6 @@ class TestDispatchTickAutoBypassesApprovedPlan:
 
     def test_plan_stage_claim_no_bypass_when_deliberately_regressed_into_plan(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         capture_events: Callable[..., list[CapturedEvent]],
@@ -2069,7 +2028,6 @@ class TestDispatchTickAutoBypassesApprovedPlan:
 
     def test_plan_stage_bypass_race_guard_when_stored_row_missing(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         capture_events: Callable[..., list[CapturedEvent]],
@@ -2134,7 +2092,6 @@ class TestDispatchTickAutoBypassesApprovedPlan:
 
     def test_plan_stage_bypass_advances_only_the_row_matching_created_at(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -2172,7 +2129,6 @@ class TestDispatchTickAutoBypassesApprovedPlan:
 
     def test_plan_stage_bypass_no_advance_when_no_row_matches_created_at(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -2202,7 +2158,6 @@ class TestDispatchTickAutoBypassesApprovedPlan:
 
 
 def test_dispatch_tick_reconciles_phantoms_before_counting(
-    tmp_dispatch_dirs: Path,
     sample_client_config: ClientConfig,
     simple_config: OrchestratorConfig,
     monkeypatch: pytest.MonkeyPatch,
@@ -2281,7 +2236,6 @@ def test_dispatch_tick_reconciles_phantoms_before_counting(
 
 
 def test_crash_revert_respawn_rejects_old_event_completes_new(
-    tmp_dispatch_dirs: Path,
     sample_client_config: ClientConfig,
     simple_config: OrchestratorConfig,
     monkeypatch: pytest.MonkeyPatch,
@@ -2432,7 +2386,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_subprocess_error_does_not_crash_loop(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         caplog: pytest.LogCaptureFixture,
@@ -2467,7 +2420,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_worktree_error_does_not_crash_loop(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -2504,7 +2456,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_claim_opts_into_reuse_refresh(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -2537,7 +2488,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_stale_worktree_error_force_removes_then_reverts(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -2581,7 +2531,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_stale_worktree_removal_failure_still_reverts(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -2612,7 +2561,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_stale_worktree_dirty_blocks_task_and_skips_removal(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -2658,7 +2606,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_stale_worktree_dirty_park_emits_session_needs_attention(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -2701,7 +2648,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_stale_worktree_clean_removes_and_reverts(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -2808,7 +2754,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_first_hook_context_conflict_reverts_to_pending_and_stamps_session_id(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         cap2_config: OrchestratorConfig,
     ) -> None:
@@ -2833,7 +2778,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_repeat_hook_context_conflict_does_not_re_stamp_backoff_differently(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         cap2_config: OrchestratorConfig,
     ) -> None:
@@ -2866,7 +2810,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_genuinely_live_hook_context_conflict_defers_without_charge(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -2941,7 +2884,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_successful_spawn_clears_hook_context_conflict_session_id(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -2969,7 +2911,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_successful_spawn_clears_regressed_into_stage(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -2999,7 +2940,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_successful_spawn_clears_scope_drift_approval(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -3030,7 +2970,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_regress_marker_lost_when_first_spawn_dies_before_sentinel(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -3114,7 +3053,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_successful_review_spawn_clears_pending_operator_comment(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -3142,7 +3080,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_successful_impl_spawn_does_not_clear_pending_operator_comment(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -3171,7 +3108,6 @@ class TestDispatchTickSpawnErrors:
 
     def test_unrelated_revert_preserves_existing_hook_context_conflict_stamp(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -3285,7 +3221,6 @@ class TestClaimRefusesOccupiedWorktree:
     @pytest.mark.parametrize("source", _OCCUPANT_SOURCES)
     def test_occupied_worktree_is_not_spawned_into(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -3336,7 +3271,6 @@ class TestClaimRefusesOccupiedWorktree:
 
     def test_the_skip_never_trips_the_lane_circuit_breaker(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -3374,7 +3308,6 @@ class TestClaimRefusesOccupiedWorktree:
 
     def test_outcome_flags_the_skip_without_a_spawn_error(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -3423,7 +3356,6 @@ class TestClaimRefusesOccupiedWorktree:
 
     def test_occupied_after_fast_forward_leaves_head_at_the_new_sha(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -3505,7 +3437,6 @@ class TestClaimRefusesOccupiedWorktree:
 
     def test_a_deferred_head_of_line_ticket_does_not_starve_the_next_one(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -3558,7 +3489,6 @@ class TestClaimRefusesOccupiedWorktree:
     @pytest.mark.parametrize("roster_elsewhere", [False, True])
     def test_next_stage_is_refused_while_the_prior_stage_is_live_then_spawns(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         cap2_config: OrchestratorConfig,
         roster_elsewhere: bool,
@@ -3654,7 +3584,6 @@ class TestClaimScreensOccupiedWorktreeBeforeClaiming:
     @pytest.mark.parametrize("source", _OCCUPANT_SOURCES)
     def test_occupied_worktree_is_never_claimed(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -3713,7 +3642,6 @@ class TestClaimScreensOccupiedWorktreeBeforeClaiming:
 
     def test_the_screen_never_trips_the_lane_circuit_breaker(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -3747,7 +3675,6 @@ class TestClaimScreensOccupiedWorktreeBeforeClaiming:
 
     def test_the_screen_does_not_starve_a_free_sibling_in_the_same_tick(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -3782,7 +3709,6 @@ class TestClaimScreensOccupiedWorktreeBeforeClaiming:
 
     def test_requeued_deterministic_parse_row_with_live_roster_worker_is_deferred(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -3847,7 +3773,6 @@ class TestClaimScreensOccupiedWorktreeBeforeClaiming:
 
     def test_occupancy_screen_disabled_by_config_toggle(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -3910,7 +3835,6 @@ class TestClaimScreensOccupiedWorktreeBeforeClaiming:
 
     def test_occupancy_screen_can_be_disabled_for_one_client(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -4062,7 +3986,6 @@ class TestStaleWorktreeYieldsToLiveOccupant:
     @pytest.mark.parametrize("source", _STALE_OCCUPIED_SOURCES)
     def test_live_occupant_defers_without_removal_or_dirty_check(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -4098,7 +4021,6 @@ class TestStaleWorktreeYieldsToLiveOccupant:
     @pytest.mark.parametrize("source", _STALE_INDETERMINATE_SOURCES)
     def test_indeterminate_occupancy_fails_closed(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -4229,7 +4151,6 @@ class TestStaleWorktreeYieldsToLiveOccupant:
     @pytest.mark.parametrize("source", _OCCUPANT_SOURCES)
     def test_outcome_is_the_occupied_deferral_not_a_spawn_error(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -4278,7 +4199,6 @@ class TestStaleWorktreeYieldsToLiveOccupant:
 
     def test_unoccupied_dirty_tree_still_parks_after_the_liveness_check(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -4302,7 +4222,6 @@ class TestStaleWorktreeYieldsToLiveOccupant:
 
     def test_unoccupied_clean_tree_is_still_force_removed(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -4360,7 +4279,6 @@ class TestDispatchCodexCapabilityGate:
 
     def test_codex_not_found_parks_blocked_on_user(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -4409,7 +4327,6 @@ class TestDispatchCodexCapabilityGate:
 
     def test_codex_not_found_emits_session_needs_attention(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -4449,7 +4366,6 @@ class TestDispatchCodexCapabilityGate:
 
     def test_codex_version_unknown_parks_blocked_on_user(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -4486,7 +4402,6 @@ class TestDispatchCodexCapabilityGate:
 
     def test_codex_capable_spawns_normally(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -4521,7 +4436,6 @@ class TestDispatchCodexCapabilityGate:
 
     def test_non_codex_backend_never_probes(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -4551,7 +4465,6 @@ class TestDispatchCodexCapabilityGate:
 
     def test_cache_hit_reuses_probe_within_ttl(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -4586,7 +4499,6 @@ class TestDispatchCodexCapabilityGate:
 
     def test_cache_expires_after_ttl(
         self,
-        tmp_dispatch_dirs: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Advancing past the TTL triggers a fresh probe call."""
@@ -4615,7 +4527,6 @@ class TestDispatchCodexCapabilityGate:
 
     def test_consecutive_parks_trip_circuit_breaker_at_threshold(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -4659,7 +4570,6 @@ class TestDispatchCodexCapabilityGate:
 
     def test_recovery_between_parks_resets_the_streak(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -4731,7 +4641,6 @@ class TestDispatchTickFreshnessGate:
 
     def test_stale_main_skips_dispatch_and_keeps_pending(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -4766,7 +4675,6 @@ class TestDispatchTickFreshnessGate:
 
     def test_stale_main_emits_event_once_per_pending_ticket(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -4859,7 +4767,6 @@ class TestDispatchTickFreshnessGate:
 
     def test_fresh_main_dispatches_normally(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -4886,7 +4793,6 @@ class TestDispatchTickFreshnessGate:
 
     def test_freshness_check_called_once_per_client_per_tick(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -4915,7 +4821,6 @@ class TestDispatchTickFreshnessGate:
 
     def test_freshness_check_missing_workspace_no_traceback(
         self,
-        tmp_dispatch_dirs: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
         tmp_path: Path,
@@ -4962,7 +4867,6 @@ class TestDispatchTickFreshnessGate:
 
     def test_freshness_check_failure_does_not_block_dispatch(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -5003,7 +4907,6 @@ class TestDispatchTickReconcileErrors:
 
     def test_reconcile_failure_does_not_crash_dispatch_tick(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -5062,7 +4965,6 @@ class TestDispatchTickSessionsLockTimeout:
 
     def test_reconcile_lock_timeout_skips_tick_with_warning(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -5100,7 +5002,6 @@ class TestDispatchTickSessionsLockTimeout:
 
     def test_skipped_tick_records_no_dispatch_tick_event(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -5133,7 +5034,6 @@ class TestDispatchTickSessionsLockTimeout:
 
     def test_real_contention_skips_tick_then_next_tick_proceeds(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -5165,7 +5065,6 @@ class TestDispatchTickSessionsLockTimeout:
 
     def test_other_reconcile_errors_still_swallowed(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -5183,7 +5082,6 @@ class TestDispatchTickSessionsLockTimeout:
 
 
 def test_dispatch_tick_runs_diagnostics_cleanup_outside_lock(
-    tmp_dispatch_dirs: Path,
     sample_client_config: ClientConfig,
     simple_config: OrchestratorConfig,
     monkeypatch: pytest.MonkeyPatch,
@@ -5212,7 +5110,6 @@ def test_dispatch_tick_runs_diagnostics_cleanup_outside_lock(
 
 
 def test_dispatch_tick_cleanup_failure_does_not_abort_tick(
-    tmp_dispatch_dirs: Path,
     sample_client_config: ClientConfig,
     simple_config: OrchestratorConfig,
     monkeypatch: pytest.MonkeyPatch,
@@ -5252,7 +5149,6 @@ class TestClaimNextPendingAttempts:
 
     def test_claim_next_pending_increments_attempts(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -5276,7 +5172,6 @@ class TestClaimNextPendingAttempts:
 
     def test_claim_next_pending_increments_attempts_cumulatively(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -5327,7 +5222,6 @@ class TestGlobalAttemptCeiling:
 
     def test_below_ceiling_claims_normally(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """Task below the ceiling is claimed and attempts is incremented."""
@@ -5351,7 +5245,6 @@ class TestGlobalAttemptCeiling:
 
     def test_at_ceiling_parks_task_blocked(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """Task at the ceiling is parked BLOCKED_ON_USER; attempts not incremented."""
@@ -5383,7 +5276,6 @@ class TestGlobalAttemptCeiling:
 
     def test_ceiling_reads_unproductive_attempts_not_raw_attempts(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """#1750/#1727: a busy-but-productive ticket must not park itself.
@@ -5414,7 +5306,6 @@ class TestGlobalAttemptCeiling:
 
     def test_ceiling_still_trips_when_unproductive_attempts_reaches_cap(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """#1750/#1653: the crashloop guard still fires at exactly the same rate.
@@ -5443,7 +5334,6 @@ class TestGlobalAttemptCeiling:
 
     def test_attempts_still_increments_on_every_claim(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """#1750 is additive: the raw claim counter is unchanged by the split."""
@@ -5469,7 +5359,6 @@ class TestGlobalAttemptCeiling:
 
     def test_at_ceiling_emits_attempt_cap_blocked_event(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """Ceiling-parked task emits dispatch.tick skip_reason=attempt_cap_blocked."""
@@ -5512,7 +5401,6 @@ class TestGlobalAttemptCeiling:
 
     def test_at_ceiling_priority_path_parks_task(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """Ceiling check also fires on the priority-ticket path."""
@@ -5549,7 +5437,6 @@ class TestGlobalAttemptCeiling:
 
     def test_at_ceiling_head_of_line_does_not_starve_younger_pending_task(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """Older at-ceiling task must not block a younger claimable task (#1248).
@@ -5634,7 +5521,6 @@ class TestPerLaneAttemptCeiling:
 
     def test_lane_ceiling_overrides_global_lower(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """Lane ceiling 25 with global 10: a row at 15 still claims."""
@@ -5673,7 +5559,6 @@ class TestPerLaneAttemptCeiling:
 
     def test_lane_ceiling_overrides_global_higher(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """Lane ceiling 2 with global 10: a row at 2 parks below the global bound."""
@@ -5712,7 +5597,6 @@ class TestPerLaneAttemptCeiling:
 
     def test_lane_ceiling_false_disables_park_entirely(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """``attempt_ceiling: false`` never parks, however high the counter."""
@@ -5751,7 +5635,6 @@ class TestPerLaneAttemptCeiling:
 
     def test_unmatched_lane_falls_through_to_global(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """A task whose lane is not the overridden one keeps #786's behaviour."""
@@ -5792,7 +5675,6 @@ class TestPerLaneAttemptCeiling:
 
     def test_park_events_carry_resolved_lane_ceiling(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """Both park events report the RESOLVED ceiling, not the global one.
@@ -5866,7 +5748,6 @@ class TestClaimNextPendingPriority:
 
     def test_high_priority_claimed_before_low_priority(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -5901,7 +5782,6 @@ class TestClaimNextPendingPriority:
 
     def test_equal_priority_fifo_order(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -5936,7 +5816,6 @@ class TestClaimNextPendingPriority:
 
     def test_priority_without_use_plan(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         cap2_config: OrchestratorConfig,
     ) -> None:
@@ -5995,7 +5874,6 @@ class TestDispatchDoesNotTouchMainCheckout:
 
     def test_dispatch_tick_does_not_modify_main_checkout_head(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -6022,7 +5900,6 @@ class TestDispatchDoesNotTouchMainCheckout:
 
     def test_dispatch_tick_with_worktree_equal_to_main_checkout_reverts_task(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -6064,7 +5941,6 @@ class TestDispatchDoesNotTouchMainCheckout:
 class TestSpawnCloseRaceRegression:
     def test_spawn_close_prevents_respawn_via_cancelled_status(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -6171,9 +6047,7 @@ class TestAccumulateTaskCost:
         )
         save_state(CwState(sessions=[sess]))
 
-    def test_accumulates_cost_from_cost_usd_field(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_accumulates_cost_from_cost_usd_field(self) -> None:
         """When session.cost_usd is set, accumulates from that field."""
         self._make_running_task("s_cost1")
         self._make_session("s_cost1", cost_usd=1.5)
@@ -6185,9 +6059,7 @@ class TestAccumulateTaskCost:
         store = load_dev_queue()
         assert store.tasks[0].total_cost_usd == pytest.approx(1.5)
 
-    def test_accumulates_cost_from_last_result_when_cost_usd_field_absent(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_accumulates_cost_from_last_result_when_cost_usd_field_absent(self) -> None:
         """Falls back to session.last_result['cost_usd'] when cost_usd field is None."""
         self._make_running_task("s_lr1")
         self._make_session(
@@ -6203,9 +6075,7 @@ class TestAccumulateTaskCost:
         store = load_dev_queue()
         assert store.tasks[0].total_cost_usd == pytest.approx(2.0)
 
-    def test_accumulates_cost_zero_when_both_sources_absent(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_accumulates_cost_zero_when_both_sources_absent(self) -> None:
         """When both cost sources are None, total_cost_usd is unchanged (no crash)."""
         task = TicketTask(
             ticket_id="GEN-1",
@@ -6224,9 +6094,7 @@ class TestAccumulateTaskCost:
         store = load_dev_queue()
         assert store.tasks[0].total_cost_usd == pytest.approx(5.0)
 
-    def test_stage_mismatch_skips_cost_accumulation_and_completed_count(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_stage_mismatch_skips_cost_accumulation_and_completed_count(self) -> None:
         """A refused stage-mismatch sentinel must not accumulate cost or count
         toward ``completed`` (#1019, Pre-flight Resolution #4's true-no-op
         contract) -- ``_apply_events_to_store`` is the consume-path caller of
@@ -6260,9 +6128,7 @@ class TestAccumulateTaskCost:
         assert t.status == QueueItemStatus.RUNNING
         assert t.stage == Stage.REVIEW
 
-    def test_empty_string_session_id_is_not_treated_as_missing(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_empty_string_session_id_is_not_treated_as_missing(self) -> None:
         """Empty-string session_id must not short-circuit like None."""
         task = TicketTask(
             ticket_id="GEN-1",
@@ -6288,7 +6154,6 @@ class TestRunDispatchLoopVerbose:
 
     def test_stale_main_emits_needs_sync_line(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -6318,7 +6183,6 @@ class TestRunDispatchLoopVerbose:
 
     def test_stale_main_line_includes_ticket_and_client(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -6348,7 +6212,6 @@ class TestRunDispatchLoopVerbose:
 
     def test_stale_main_deduplicated_across_ticks(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -6425,7 +6288,6 @@ class TestRunDispatchLoopVerbose:
 
     def test_spawn_emits_spawn_line(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -6454,7 +6316,6 @@ class TestRunDispatchLoopVerbose:
 
     def test_per_tick_summary_line_emitted(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -6482,7 +6343,6 @@ class TestRunDispatchLoopVerbose:
 
     def test_no_emit_when_emit_is_none(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -6511,7 +6371,6 @@ class TestDispatchTickEvents:
 
     def test_skip_reason_none_on_successful_spawn(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -6536,7 +6395,6 @@ class TestDispatchTickEvents:
 
     def test_skip_reason_no_pending_when_queue_empty(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -6559,7 +6417,6 @@ class TestDispatchTickEvents:
 
     def test_skip_reason_cap_full_when_running_at_cap(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -6595,7 +6452,6 @@ class TestDispatchTickEvents:
 
     def test_skip_reason_freshness_gate_on_stale_main(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -6636,7 +6492,6 @@ class TestDispatchTickEvents:
 
     def test_skip_reason_spawn_error_on_spawn_failure(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -6660,7 +6515,6 @@ class TestDispatchTickEvents:
 
     def test_spawn_error_tick_carries_last_error(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -6687,7 +6541,6 @@ class TestDispatchTickEvents:
 
     def test_spawn_error_tick_last_error_is_single_line(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -6711,7 +6564,6 @@ class TestDispatchTickEvents:
 
     def test_spawn_error_tick_blank_exception_gives_empty_last_error(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -6733,7 +6585,6 @@ class TestDispatchTickEvents:
 
     def test_tick_without_spawn_error_has_no_last_error_key(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -6757,7 +6608,6 @@ class TestDispatchTickEvents:
 
     def test_usage_limit_tick_has_no_last_error_key(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -6779,7 +6629,6 @@ class TestDispatchTickEvents:
 
     def test_pending_is_pre_claim_count(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -6919,7 +6768,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_usage_limit_detected_from_spawn_raises(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -6938,7 +6786,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_usage_limit_skip_reason_in_event(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -6960,7 +6807,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_usage_limited_until_future_skips_all_clients(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -6998,7 +6844,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_usage_limited_until_elapsed_spawns_normally(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -7023,7 +6868,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_run_dispatch_loop_sets_usage_limited_until(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -7047,7 +6891,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_once_mode_does_not_set_backoff(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -7070,7 +6913,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_reconcile_usage_limit_skips_spawn_same_tick(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -7097,7 +6939,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_reconcile_usage_limit_emits_skip_event_same_tick(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -7123,7 +6964,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_run_dispatch_loop_persists_usage_limited_until(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -7185,7 +7025,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_run_dispatch_loop_loads_persisted_backoff(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -7210,7 +7049,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_run_dispatch_loop_observes_backoff_written_by_another_process_mid_loop(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -7262,7 +7100,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_run_dispatch_loop_corrupt_sidecar_mid_backoff_does_not_shorten_window(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -7332,7 +7169,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_run_dispatch_loop_expired_disk_window_does_not_resurrect_backoff(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -7393,7 +7229,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_usage_limit_cleared_emitted_on_active_to_inactive_transition(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -7444,7 +7279,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_usage_limit_cleared_payload_has_clients_affected_and_counts(
         self,
-        tmp_dispatch_dirs: Path,
     ) -> None:
         """_emit_usage_limit_cleared's payload carries the exact cohort
         computed from session.timed_out(cause=usage_limit_cutoff) events
@@ -7479,7 +7313,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_usage_limit_cleared_restart_mid_backoff_still_detects_later_clear(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -7536,7 +7369,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_usage_limit_cleared_degrades_gracefully_when_armed_at_missing(
         self,
-        tmp_dispatch_dirs: Path,
     ) -> None:
         """When armed_at is None (persist failed, or the window predates
         this field), the event still emits with detected_at=null rather
@@ -7556,7 +7388,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_run_dispatch_loop_once_mode_does_not_emit_usage_limit_cleared(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -7598,7 +7429,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_usage_limit_cleared_cohort_count_excludes_idle_stall_cause(
         self,
-        tmp_dispatch_dirs: Path,
     ) -> None:
         """The cohort scan filters on cause=usage_limit_cutoff -- an
         idle-stall timeout recorded in the same window must not inflate
@@ -7639,7 +7469,6 @@ class TestDispatchUsageLimitBackoff:
 
     def test_usage_limit_cleared_not_emitted_when_window_never_active(
         self,
-        tmp_dispatch_dirs: Path,
     ) -> None:
         """_handle_usage_limit_window_transition emits nothing when the
         window was never active -- no false clear on a fleet that never hit
@@ -7669,7 +7498,6 @@ class TestUsageLimitResetThreading:
 
     def test_reset_at_threads_from_spawn_to_tick_result(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -7688,7 +7516,6 @@ class TestUsageLimitResetThreading:
 
     def test_reset_at_defaults_to_none_on_tick_result(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -7705,7 +7532,6 @@ class TestUsageLimitResetThreading:
 
     def test_reconcile_path_keeps_flat_backoff(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -7802,7 +7628,6 @@ class TestUsageLimitResetThreading:
     )
     def test_loop_persists_resolved_window(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -7876,7 +7701,6 @@ class TestClaimNextPendingUsageLimitedGate:
 
     def test_claim_blocked_while_usage_limited_until_future(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -7901,7 +7725,6 @@ class TestClaimNextPendingUsageLimitedGate:
 
     def test_claim_succeeds_once_usage_limited_until_past_or_none(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -7962,7 +7785,6 @@ class TestClaimNextPendingFixDispatchHold:
 
     def test_row_with_unconsumed_handoff_is_not_claimed(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -7977,7 +7799,6 @@ class TestClaimNextPendingFixDispatchHold:
 
     def test_row_awaiting_fix_completion_is_not_claimed(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -7991,7 +7812,6 @@ class TestClaimNextPendingFixDispatchHold:
 
     def test_priority_claim_skips_held_row(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -8015,7 +7835,6 @@ class TestClaimNextPendingFixDispatchHold:
 
     def test_claim_falls_through_to_the_next_unheld_row(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -8039,7 +7858,6 @@ class TestClaimNextPendingFixDispatchHold:
 class TestConfigReloadedEachTick:
     def test_config_reloaded_each_tick(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -8065,7 +7883,6 @@ class TestConfigReloadedEachTick:
 
     def test_config_reload_takes_effect(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """A cap change written between ticks is honored on the next tick."""
@@ -8111,7 +7928,6 @@ class TestConfigReloadedEachTick:
 
     def test_config_last_good_on_corrupt(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
@@ -8147,7 +7963,6 @@ class TestConfigReloadedEachTick:
 
     def test_config_last_good_on_config_validation_error(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
@@ -8195,7 +8010,6 @@ class TestFreshnessGateAutoFF:
 
     def test_auto_ff_behind_succeeds_claims_ticket(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -8236,7 +8050,6 @@ class TestFreshnessGateAutoFF:
 
     def test_auto_ff_ahead_skips_with_ticket_needs_sync(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -8268,7 +8081,6 @@ class TestFreshnessGateAutoFF:
 
     def test_auto_ff_diverged_skips(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -8299,7 +8111,6 @@ class TestFreshnessGateAutoFF:
 
     def test_auto_ff_detached_skips(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -8330,7 +8141,6 @@ class TestFreshnessGateAutoFF:
 
     def test_auto_ff_ff_raises_falls_through_to_ticket_needs_sync(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -8371,7 +8181,6 @@ class TestFreshnessGateAutoFF:
 
     def test_auto_ff_non_main_head_skips_fast_forward_emits_non_main_head_detail(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -8431,7 +8240,6 @@ class TestFreshnessGateAutoFF:
 
     def test_auto_ff_detached_head_uses_normal_path(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -8473,7 +8281,6 @@ class TestFreshnessGateAutoFF:
 
     def test_auto_ff_on_default_branch_uses_normal_path(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -8519,7 +8326,6 @@ class TestFreshnessGateAutoFF:
 
     def test_auto_ff_non_main_head_detached_at_emit_time_shows_detached(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -8562,7 +8368,6 @@ class TestFreshnessGateAutoFF:
 
     def test_auto_ff_false_keeps_ticket_needs_sync(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -8599,7 +8404,6 @@ class TestFreshnessGateAutoFF:
 
     def test_auto_ff_ahead_emits_diverged_detail(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -8638,7 +8442,6 @@ class TestFreshnessGateAutoFF:
 
     def test_auto_ff_diverged_emits_diverged_detail(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -8677,7 +8480,6 @@ class TestFreshnessGateAutoFF:
 
     def test_auto_ff_behind_dirty_emits_dirty_checkout_detail(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -8723,7 +8525,6 @@ class TestFreshnessGateAutoFF:
 
     def test_auto_ff_diverged_warn_advises_inspect_not_rebase(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -8765,7 +8566,6 @@ class TestFreshnessGateAutoFF:
 
     def test_auto_ff_detached_emits_detached_detail(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -8975,7 +8775,6 @@ class TestTier2LaneAllocation:
 
     def test_multi_lane_grants_respected_independently(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """Two lanes max_parallel=1 each; two tasks in different lanes → 2 spawned."""
@@ -9003,7 +8802,6 @@ class TestTier2LaneAllocation:
 
     def test_saturated_lane_does_not_block_other_lanes(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """Lane 'impl' is at capacity; lane 'idea' still spawns."""
@@ -9064,7 +8862,6 @@ class TestTier2LaneAllocation:
 
     def test_lane_filtered_claim_order(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """_claim_next_pending with lane filter only claims tasks in that lane."""
@@ -9122,7 +8919,6 @@ class TestLaneCapCountingWithBlockedOnUser:
 
     def test_blocked_on_user_session_counts_toward_lane_cap(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """A BLOCKED_ON_USER task with active session occupies lane; no over-spawn."""
@@ -9188,7 +8984,6 @@ class TestLaneCapBlockedSkipReason:
 
     def _setup_blocked_lane(
         self,
-        tmp_dispatch_dirs: Path,
         workspace_path: Path,
     ) -> None:
         """Create a client with one impl lane (max_parallel=1), one BLOCKED_ON_USER
@@ -9226,7 +9021,7 @@ class TestLaneCapBlockedSkipReason:
         sample_client_config: ClientConfig,
     ) -> None:
         """BLOCKED_ON_USER fills lane cap; pending>0 → skip_reason=lane_cap_blocked."""
-        self._setup_blocked_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+        self._setup_blocked_lane(sample_client_config.workspace_path)
 
         daemon = FakeNativeDaemonClient()
         config = OrchestratorConfig(default_ceiling=2)
@@ -9250,7 +9045,7 @@ class TestLaneCapBlockedSkipReason:
         sample_client_config: ClientConfig,
     ) -> None:
         """dispatch.tick lane stats split running vs blocked for operator visibility."""
-        self._setup_blocked_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+        self._setup_blocked_lane(sample_client_config.workspace_path)
 
         daemon = FakeNativeDaemonClient()
         config = OrchestratorConfig(default_ceiling=2)
@@ -9279,7 +9074,7 @@ class TestLaneCapBlockedSkipReason:
         sample_client_config: ClientConfig,
     ) -> None:
         """lane_occupants names the BLOCKED_ON_USER ticket; PENDING is excluded."""
-        self._setup_blocked_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+        self._setup_blocked_lane(sample_client_config.workspace_path)
 
         daemon = FakeNativeDaemonClient()
         config = OrchestratorConfig(default_ceiling=2)
@@ -9297,7 +9092,6 @@ class TestLaneCapBlockedSkipReason:
 
     def test_no_pending_still_used_when_truly_empty(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -9342,9 +9136,7 @@ class TestLaneCapBlockedSkipReason:
 class TestLaneCapCountingWithAwaitingSignoff:
     """AWAITING_OPERATOR_SIGNOFF occupies its lane slot like BLOCKED_ON_USER."""
 
-    def _setup_signoff_lane(
-        self, tmp_dispatch_dirs: Path, workspace_path: Path
-    ) -> None:
+    def _setup_signoff_lane(self, workspace_path: Path) -> None:
         """One impl lane (max_parallel=1), one AWAITING_OPERATOR_SIGNOFF task
         filling it (no active session), and one PENDING task waiting."""
         lanes = [LaneConfig(name="impl", max_parallel=1)]
@@ -9378,7 +9170,7 @@ class TestLaneCapCountingWithAwaitingSignoff:
         sample_client_config: ClientConfig,
     ) -> None:
         """AWAITING_OPERATOR_SIGNOFF fills lane cap -> skip_reason=lane_cap_blocked."""
-        self._setup_signoff_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+        self._setup_signoff_lane(sample_client_config.workspace_path)
 
         daemon = FakeNativeDaemonClient()
         config = OrchestratorConfig(default_ceiling=2)
@@ -9400,7 +9192,7 @@ class TestLaneCapCountingWithAwaitingSignoff:
         sample_client_config: ClientConfig,
     ) -> None:
         """dispatch.tick lane stats split running vs signoff for operators."""
-        self._setup_signoff_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+        self._setup_signoff_lane(sample_client_config.workspace_path)
 
         daemon = FakeNativeDaemonClient()
         config = OrchestratorConfig(default_ceiling=2)
@@ -9424,7 +9216,6 @@ class TestLaneCapCountingWithAwaitingSignoff:
 
     def test_running_by_lane_counts_signoff_as_occupied(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """A signoff-parked task with active session occupies lane; no over-spawn."""
@@ -9480,7 +9271,6 @@ class TestLaneCapCountingWithAwaitingSignoff:
 
     def test_running_by_lane_excludes_terminal_sibling_park(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """A terminal_sibling park never occupies its lane slot (#2100).
@@ -9575,7 +9365,6 @@ class TestLaneCapCountingWithAwaitingSignoff:
 
 
 def test_opencode_lane_max1_running_holds_slot(
-    tmp_dispatch_dirs: Path,
     sample_client_config: ClientConfig,
 ) -> None:
     """A RUNNING opencode task in a max_parallel=1 lane blocks a second spawn.
@@ -9646,7 +9435,6 @@ def test_opencode_lane_max1_running_holds_slot(
 
 
 def test_opencode_lane_max1_blocked_holds_slot(
-    tmp_dispatch_dirs: Path,
     sample_client_config: ClientConfig,
 ) -> None:
     """A BLOCKED_ON_USER opencode task in a max_parallel=1 lane blocks spawn."""
@@ -9719,7 +9507,7 @@ def test_opencode_lane_max1_blocked_holds_slot(
 class TestLaneOccupantsPayload:
     """dispatch.tick carries lane_occupants/occupied across every skip path."""
 
-    def _make_running_lane(self, tmp_dispatch_dirs: Path, workspace_path: Path) -> None:
+    def _make_running_lane(self, workspace_path: Path) -> None:
         """One impl lane (max_parallel=1) with a single RUNNING occupant."""
         client = ClientConfig(
             name="test-client",
@@ -9753,7 +9541,7 @@ class TestLaneOccupantsPayload:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """AVAILABILITY_GATE skip carries lane_occupants/occupied."""
-        self._make_running_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+        self._make_running_lane(sample_client_config.workspace_path)
         _force_gh_unavailable(monkeypatch)
 
         daemon = FakeNativeDaemonClient()
@@ -9778,7 +9566,7 @@ class TestLaneOccupantsPayload:
         simple_config: OrchestratorConfig,
     ) -> None:
         """USAGE_LIMITED skip carries lane_occupants/occupied."""
-        self._make_running_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+        self._make_running_lane(sample_client_config.workspace_path)
         future = datetime.now(UTC) + timedelta(hours=1)
 
         daemon = FakeNativeDaemonClient()
@@ -9808,7 +9596,7 @@ class TestLaneOccupantsPayload:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """FRESHNESS_GATE skip carries lane_occupants/occupied."""
-        self._make_running_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+        self._make_running_lane(sample_client_config.workspace_path)
         monkeypatch.setattr(
             "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
@@ -9831,7 +9619,6 @@ class TestLaneOccupantsPayload:
 
     def test_occupied_count_sums_across_lanes(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -9980,7 +9767,6 @@ class TestSingleLaneBackwardCompat:
 
     def test_no_lanes_config_dispatches_same_as_before(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -10011,7 +9797,6 @@ class TestSingleLaneBackwardCompat:
 
     def test_no_lanes_second_tick_respects_cap(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -10200,7 +9985,6 @@ class TestCodexSpawnDoesNotBlockDispatch:
 
     def test_other_client_spawns_while_codex_review_still_running(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
         mock_native_daemon: FakeNativeDaemonClient,
@@ -10261,7 +10045,6 @@ class TestCodexSpawnDoesNotBlockDispatch:
 
     def test_shutdown_join_reports_still_running_codex_threads(
         self,
-        tmp_dispatch_dirs: Path,
         monkeypatch: pytest.MonkeyPatch,
         mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
@@ -10304,7 +10087,6 @@ class TestCodexSpawnDoesNotBlockDispatch:
 
     def test_boot_pass_flags_codex_session_orphaned_by_a_crash(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
         mock_native_daemon: FakeNativeDaemonClient,
@@ -10380,9 +10162,7 @@ class TestParkRunningTaskExpectedSessionId:
     ``dev_queue_lock()`` the transition itself runs under.
     """
 
-    def test_matching_expected_session_id_parks_as_before(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_matching_expected_session_id_parks_as_before(self) -> None:
         add_ticket(
             TicketTask(
                 ticket_id="PARK-1",
@@ -10404,9 +10184,7 @@ class TestParkRunningTaskExpectedSessionId:
         assert task.status is QueueItemStatus.BLOCKED_ON_USER
         assert task.session_id is None
 
-    def test_park_charges_unproductive_attempt_by_default(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_park_charges_unproductive_attempt_by_default(self) -> None:
         """The post-spawn caller (codex_boot orphan) keeps the default charge:
         a session really ran and exited RUNNING with nothing to show."""
         add_ticket(
@@ -10428,9 +10206,7 @@ class TestParkRunningTaskExpectedSessionId:
 
         assert load_dev_queue().tasks[0].unproductive_attempts == 1
 
-    def test_park_with_unproductive_false_does_not_charge(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_park_with_unproductive_false_does_not_charge(self) -> None:
         """#2114: the pre-spawn callers (dirty-worktree guard, codex capability
         gate) pass unproductive=False -- no session ever ran, and charging a
         park that re-derives on every claim ratchets it to attempt_cap_blocked."""
@@ -10455,9 +10231,7 @@ class TestParkRunningTaskExpectedSessionId:
         assert task.status is QueueItemStatus.BLOCKED_ON_USER
         assert task.unproductive_attempts == 0
 
-    def test_mismatched_expected_session_id_skips_the_park(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_mismatched_expected_session_id_skips_the_park(self) -> None:
         """The row was re-claimed by a newer session; the stale caller must not
         touch it, even though (ticket_id, client, RUNNING) still match."""
         add_ticket(
@@ -10486,9 +10260,7 @@ class TestParkRunningTaskExpectedSessionId:
         )
         assert events == []
 
-    def test_pre_spawn_callers_match_by_created_at(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_pre_spawn_callers_match_by_created_at(self) -> None:
         """The two pre-spawn callers (dirty-worktree guard, codex capability
         gate) pass ``created_at`` instead of ``expected_session_id`` (#2219):
         no session_id is stamped yet, but the claimed row's ``created_at`` is
@@ -10512,7 +10284,7 @@ class TestParkRunningTaskExpectedSessionId:
         task = load_dev_queue().tasks[0]
         assert task.status is QueueItemStatus.BLOCKED_ON_USER
 
-    def test_no_identity_raises_value_error(self, tmp_dispatch_dirs: Path) -> None:
+    def test_no_identity_raises_value_error(self) -> None:
         """Neither identity kwarg supplied (#2219): the helper refuses the
         bare ``(ticket_id, client, RUNNING)`` match rather than silently
         parking whichever row happens to come first."""
@@ -10533,9 +10305,7 @@ class TestParkRunningTaskExpectedSessionId:
                 breadcrumbs="/some/path",
             )
 
-    def test_codex_orphan_session_id_is_stamped_after_the_transition(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_codex_orphan_session_id_is_stamped_after_the_transition(self) -> None:
         """#2307: the live-writer codex-orphan park links the row to the
         session it leaves ACTIVE. The stamp lands after transition_task_status
         has cleared the previous episode's link and rescan backoff."""
@@ -10565,9 +10335,7 @@ class TestParkRunningTaskExpectedSessionId:
         assert task.codex_orphan_session_id == "sess-orphan"
         assert task.codex_orphan_rescan_next_eligible_at is None
 
-    def test_codex_orphan_session_id_omitted_leaves_the_link_cleared(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_codex_orphan_session_id_omitted_leaves_the_link_cleared(self) -> None:
         """Every other caller omits the link: a stale one is cleared by the
         transition and nothing re-stamps it."""
         add_ticket(
@@ -10604,9 +10372,7 @@ class TestRevertClaimedTaskExpectedSessionId:
     runs under -- mirroring :class:`TestParkRunningTaskExpectedSessionId`.
     """
 
-    def test_matching_expected_session_id_reverts_as_before(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_matching_expected_session_id_reverts_as_before(self) -> None:
         add_ticket(
             TicketTask(
                 ticket_id="REV-1",
@@ -10627,9 +10393,7 @@ class TestRevertClaimedTaskExpectedSessionId:
         assert task.status is QueueItemStatus.PENDING
         assert task.session_id is None
 
-    def test_mismatched_expected_session_id_skips_the_revert(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_mismatched_expected_session_id_skips_the_revert(self) -> None:
         """The row now belongs to a newer session; the stale caller must not
         touch it, even though (ticket_id, client, RUNNING) still match."""
         add_ticket(
@@ -10653,9 +10417,7 @@ class TestRevertClaimedTaskExpectedSessionId:
         assert task.session_id == "sess-new-successor"
         assert task.unproductive_attempts == 0
 
-    def test_spawn_failure_callers_match_by_created_at(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_spawn_failure_callers_match_by_created_at(self) -> None:
         """The same-tick spawn-failure callers pass ``created_at`` instead of
         ``expected_session_id`` (#2219): they revert their own just-claimed
         row, whose ``created_at`` is its fixed identity."""
@@ -10678,7 +10440,7 @@ class TestRevertClaimedTaskExpectedSessionId:
         assert task.status is QueueItemStatus.PENDING
         assert task.session_id is None
 
-    def test_no_identity_raises_value_error(self, tmp_dispatch_dirs: Path) -> None:
+    def test_no_identity_raises_value_error(self) -> None:
         """Neither identity kwarg supplied (#2219): the helper refuses the
         bare ``(ticket_id, client, RUNNING)`` match rather than silently
         reverting whichever row happens to come first."""
@@ -10702,7 +10464,7 @@ class TestFindRunningRowRequiresIdentity:
     to the bare match would only ever serve a caller that skipped
     disambiguating a duplicate RUNNING row."""
 
-    def test_neither_identity_raises_value_error(self, tmp_dispatch_dirs: Path) -> None:
+    def test_neither_identity_raises_value_error(self) -> None:
         from cw.dispatch.claim import _find_running_row
 
         add_ticket(
@@ -10738,7 +10500,7 @@ class TestStampSpawnSuccessDuplicateRunning:
     """
 
     def test_only_the_created_at_matched_row_is_stamped(
-        self, tmp_dispatch_dirs: Path, sample_client_config: ClientConfig
+        self, sample_client_config: ClientConfig
     ) -> None:
         import cw.dispatch.claim as claim_mod
 
@@ -10759,7 +10521,7 @@ class TestStampSpawnSuccessDuplicateRunning:
         assert stored[row_b.created_at].stage_base_ref
 
     def test_single_running_row_is_stamped(
-        self, tmp_dispatch_dirs: Path, sample_client_config: ClientConfig
+        self, sample_client_config: ClientConfig
     ) -> None:
         import cw.dispatch.claim as claim_mod
 
@@ -10778,7 +10540,7 @@ class TestStampSpawnSuccessDuplicateRunning:
         assert stored.ever_spawned is True
 
     def test_no_row_matching_created_at_is_left_untouched(
-        self, tmp_dispatch_dirs: Path, sample_client_config: ClientConfig
+        self, sample_client_config: ClientConfig
     ) -> None:
         """A RUNNING row whose ``created_at`` differs is not the spawned row."""
         import cw.dispatch.claim as claim_mod
@@ -10801,7 +10563,7 @@ class TestRevertClaimedTaskDuplicateRunning:
     ``created_at`` the caller supplied, not the first RUNNING row."""
 
     def test_only_the_created_at_matched_row_reverts(
-        self, tmp_dispatch_dirs: Path, sample_client_config: ClientConfig
+        self, sample_client_config: ClientConfig
     ) -> None:
         _worktree, row_a, row_b = _seed_duplicate_running_rows(sample_client_config)
         row_a_before = _rows_by_created_at()[row_a.created_at].model_dump()
@@ -10817,7 +10579,7 @@ class TestRevertClaimedTaskDuplicateRunning:
         assert stored[row_b.created_at].spawn_error_count == 1
 
     def test_no_row_matching_created_at_reverts_nothing(
-        self, tmp_dispatch_dirs: Path, sample_client_config: ClientConfig
+        self, sample_client_config: ClientConfig
     ) -> None:
         _worktree, _row_a, row_b = _seed_duplicate_running_rows(sample_client_config)
         before = [t.model_dump() for t in load_dev_queue().tasks]
@@ -10831,7 +10593,6 @@ class TestRevertClaimedTaskDuplicateRunning:
 
     def test_spawn_error_handler_reverts_only_the_claimed_row(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -10887,7 +10648,6 @@ class TestParkPreSpawnDuplicateRunning:
 
     def test_codex_capability_gate_parks_only_the_claimed_row(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -10917,7 +10677,6 @@ class TestParkPreSpawnDuplicateRunning:
 
     def test_dirty_worktree_guard_parks_only_the_claimed_row(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -10972,7 +10731,6 @@ class TestDispatchLoopExitedEvent:
 
     def test_loop_exited_event_on_clean_exit(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -11002,7 +10760,6 @@ class TestDispatchLoopExitedEvent:
 
     def test_boot_pass_clears_stale_executor_blocked_markers(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """#1742: a marker at boot is orphaned — no thread outlives its process."""
@@ -11032,7 +10789,6 @@ class TestDispatchLoopExitedEvent:
 
     def test_loop_exited_event_on_crash(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -11067,7 +10823,6 @@ class TestDispatchLoopExitedEvent:
 
     def test_loop_exited_suppress_covers_record_event_failure(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -11092,7 +10847,6 @@ class TestDispatchLoopExitedEvent:
 
     def test_version_drift_raises_version_drift_error(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -11108,7 +10862,6 @@ class TestDispatchLoopExitedEvent:
 
     def test_version_drift_emits_loop_exited_with_drift_fields(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -11148,7 +10901,6 @@ class TestDispatchLoopExitedEvent:
 
     def test_version_drift_check_before_dispatch(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -11190,7 +10942,6 @@ class TestDispatchLoopExitedEvent:
 
     def test_version_drift_tick_package_not_found_no_drift_error(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -11246,9 +10997,7 @@ class TestApplyStagedDecision:
             "test-client": ClientConfig(name="test-client", workspace_path=tmp_path)
         }
 
-    def test_shipped_stamps_disposition_and_pr_url(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_shipped_stamps_disposition_and_pr_url(self, tmp_path: Path) -> None:
         """shipped at terminal stage → COMPLETED + disposition='shipped' + pr_url."""
         from cw.dispatch import apply_staged_decision
 
@@ -11263,9 +11012,7 @@ class TestApplyStagedDecision:
         assert task.disposition == "shipped"
         assert task.pr_url == "https://github.com/user/repo/pull/42"
 
-    def test_no_op_stamps_disposition(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_no_op_stamps_disposition(self, tmp_path: Path) -> None:
         """no_op → COMPLETED + disposition='no_op'."""
         from cw.dispatch import apply_staged_decision
 
@@ -11275,9 +11022,7 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.COMPLETED
         assert task.disposition == "no_op"
 
-    def test_stage_failure_stamps_disposition(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_stage_failure_stamps_disposition(self, tmp_path: Path) -> None:
         """STAGE_FAILURE status → BLOCKED_ON_USER + disposition=status."""
         from cw.dispatch import apply_staged_decision
 
@@ -11287,9 +11032,7 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == "blocked"
 
-    def test_none_status_stamps_abandoned(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_none_status_stamps_abandoned(self, tmp_path: Path) -> None:
         """None/unparseable status → BLOCKED_ON_USER + disposition='abandoned'."""
         from cw.dispatch import apply_staged_decision
 
@@ -11300,7 +11043,7 @@ class TestApplyStagedDecision:
         assert task.disposition == "abandoned"
 
     def test_blocked_at_finalize_with_regress_reason_regresses_to_impl(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """blocked at FINALIZE with agent_block → Stage.IMPL PENDING (#770)."""
         from cw.dispatch import apply_staged_decision
@@ -11320,7 +11063,7 @@ class TestApplyStagedDecision:
     # -- #1948: worker-declared provider_overload -- same-stage retry ------
 
     def test_blocked_provider_overload_reverts_to_pending_same_stage(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """blocked + reason=provider_overload -> PENDING, same stage (no
         regress), charged against the global unproductive-attempts ceiling
@@ -11341,7 +11084,7 @@ class TestApplyStagedDecision:
         assert task.session_id is None
 
     def test_blocked_provider_overload_at_finalize_does_not_stage_regress(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Same blocker reason at FINALIZE stays at FINALIZE -- provider
         overload is a same-stage retry, never a Rule 5a stage regress to
@@ -11360,7 +11103,7 @@ class TestApplyStagedDecision:
         assert task.regress_attempts == 0
 
     def test_blocked_retry_eligible_true_without_provider_overload_reason_still_parks(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """retry_eligible=True alone does not trigger the same-stage retry --
         only blocker.reason == 'provider_overload' does. Mandatory negative
@@ -11385,7 +11128,7 @@ class TestApplyStagedDecision:
     # -- #2017: fix-loop handoff -- routine flow, not an operator park -----
 
     def test_blocked_fix_loop_pending_dispatch_leaves_task_running(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """The handoff sentinel must not touch status or page the operator.
 
@@ -11436,7 +11179,6 @@ class TestApplyStagedDecision:
 
     def test_large_plan_park_a_recipe_will_release_does_not_page(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -11460,7 +11202,6 @@ class TestApplyStagedDecision:
 
     def test_large_plan_park_touching_a_forbidden_area_pages(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -11485,7 +11226,6 @@ class TestApplyStagedDecision:
 
     def test_large_plan_park_pages_when_gate_recipes_are_off(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capture_events: Callable[..., list[CapturedEvent]],
@@ -11514,7 +11254,6 @@ class TestApplyStagedDecision:
 
     def test_large_review_park_with_a_finalize_hold_pages(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capture_events: Callable[..., list[CapturedEvent]],
@@ -11553,7 +11292,6 @@ class TestApplyStagedDecision:
 
     def test_finalize_regress_round_trip_no_commit_emits_repeat_not_silent_rearm(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -11611,7 +11349,6 @@ class TestApplyStagedDecision:
 
     def test_finalize_regress_round_trip_with_new_commit_emits_no_repeat_signal(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -11656,7 +11393,6 @@ class TestApplyStagedDecision:
 
     def test_finalize_regress_round_trip_advances_cleanly_consumes_marker_no_signal(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -11698,7 +11434,6 @@ class TestApplyStagedDecision:
 
     def test_finalize_regress_repeat_signal_fires_identically_via_review_health_gate(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -11743,7 +11478,6 @@ class TestApplyStagedDecision:
 
     def test_finalize_regress_repeat_signal_fires_via_stage_walk_finalize_hold_gate(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -11791,7 +11525,7 @@ class TestApplyStagedDecision:
         assert repeat_signal[0][1]["ticket_id"] == "FRR-5"
 
     def test_stage_failure_operator_unavailable_stamps_awaiting_operator_disposition(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """RFC 0011 A1 (#1254): blocked + operator_unavailable blocker reason →
         BLOCKED_ON_USER with the hold-class disposition, not the verbatim status.
@@ -11810,7 +11544,7 @@ class TestApplyStagedDecision:
         assert task.blocked_reason == "operator_unavailable"
 
     def test_stage_failure_dependency_unmerged_stamps_awaiting_operator_disposition(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """#2260: blocked + dependency_unmerged blocker reason →
         BLOCKED_ON_USER with the hold-class disposition, not the verbatim status.
@@ -11829,7 +11563,7 @@ class TestApplyStagedDecision:
         assert task.blocked_reason == "dependency_unmerged"
 
     def test_stage_failure_impl_comments_unreadable_regress_stamps_awaiting_operator(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """#2415: blocked + impl_comments_unreadable_after_regress blocker reason →
         BLOCKED_ON_USER with the hold-class disposition, not the verbatim status.
@@ -11853,7 +11587,7 @@ class TestApplyStagedDecision:
         )
 
     def test_merge_gate_blocked_push_auth_failed_stamps_awaiting_operator_disposition(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """RFC 0011 A1 (#1254): merge_gate_blocked may optionally carry a blocker
         (schema.py's #777 exception), so push_auth_failed on that status must also
@@ -11874,7 +11608,7 @@ class TestApplyStagedDecision:
         assert task.blocked_reason == "push_auth_failed"
 
     def test_automerge_not_armed_park_stamps_pr_url_from_pr_info(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """GitHub #1713 Variant A: automerge_not_armed's sentinel carries
         `pr: null` (schema-forbidden non-null on a blocked status) but a real,
@@ -11907,7 +11641,7 @@ class TestApplyStagedDecision:
         assert task.pr_url == "https://github.com/user/repo/pull/77"
 
     def test_prior_pipeline_pr_open_park_stamps_blocked_on_pr(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """GitHub #1713 Variant B: merge_gate_blocked/prior_pipeline_pr_open
         carries the blocking PR's number only inside blocker.details free
@@ -11938,7 +11672,7 @@ class TestApplyStagedDecision:
         assert task.blocked_on_pr == 88
 
     def test_prior_pipeline_pr_open_malformed_details_leaves_blocked_on_pr_none(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Fail-closed: a details string with no 'PR #<N>' match (producer
         wording drift, or an absent details field) must not raise, and must
@@ -11962,7 +11696,7 @@ class TestApplyStagedDecision:
         assert task.blocked_on_pr is None
 
     def test_prior_pipeline_pr_open_multiple_pr_references_leaves_blocked_on_pr_none(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Fail-closed: the producer contract permits ``details`` to name
         MORE THAN ONE overlapping PR (auto-dev-finalize.md: "When multiple
@@ -11995,7 +11729,6 @@ class TestApplyStagedDecision:
 
     def test_stage_advance_unchecked_unknown_client_stamps_disposition(
         self,
-        tmp_dispatch_dirs: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
         """Unknown client -> BLOCKED_ON_USER + disposition='unknown_client' (#976)."""
@@ -12019,7 +11752,6 @@ class TestApplyStagedDecision:
 
     def test_stage_advance_unchecked_stage_not_in_pipeline_stamps_disposition(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -12053,7 +11785,6 @@ class TestApplyStagedDecision:
 
     def test_stage_advance_unchecked_honors_lane_pipeline_override(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
     ) -> None:
         """A lane's pipeline.stages override, not the client default, governs
@@ -12080,7 +11811,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.PLAN
 
     def test_blocked_at_finalize_regress_increments_counter(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Each regress increments regress_attempts."""
         from cw.dispatch import apply_staged_decision
@@ -12104,7 +11835,7 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.PENDING
 
     def test_blocked_at_finalize_cap_exceeded_parks_blocked_on_user(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """blocked at FINALIZE with regress_attempts >= cap → BLOCKED_ON_USER."""
         from cw.auto_dev_result import FINALIZE_REGRESS_CAP
@@ -12123,7 +11854,7 @@ class TestApplyStagedDecision:
         assert task.regress_attempts == FINALIZE_REGRESS_CAP  # unchanged
 
     def test_blocked_at_finalize_non_regress_reason_parks_blocked_on_user(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """blocked at FINALIZE with non-eligible reason → BLOCKED_ON_USER."""
         from cw.dispatch import apply_staged_decision
@@ -12139,7 +11870,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.FINALIZE
 
     def test_blocked_not_at_finalize_parks_blocked_on_user(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """blocked at non-FINALIZE stage → BLOCKED_ON_USER (no regress)."""
         from cw.dispatch import apply_staged_decision
@@ -12155,7 +11886,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.IMPL
 
     def test_blocked_at_finalize_no_blocker_in_result_parks_blocked_on_user(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """blocked at FINALIZE with no blocker dict → BLOCKED_ON_USER (defensive)."""
         from cw.dispatch import apply_staged_decision
@@ -12167,7 +11898,6 @@ class TestApplyStagedDecision:
 
     def test_blocked_at_finalize_regress_emits_ticket_requeued_event(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -12204,7 +11934,6 @@ class TestApplyStagedDecision:
 
     def test_finalize_regress_emits_both_requeued_and_stage_changed(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -12241,7 +11970,7 @@ class TestApplyStagedDecision:
         assert sc_payload["direction"] == "regress"
 
     def test_merge_pending_routes_to_blocked_on_user_with_pr_url(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """merge_pending → BLOCKED_ON_USER + disposition='merge_pending' + pr_url.
 
@@ -12271,7 +12000,6 @@ class TestApplyStagedDecision:
     def test_v4_pause_emits_needs_attention(
         self,
         v4_status: str,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -12317,7 +12045,6 @@ class TestApplyStagedDecision:
     def test_non_v4_status_does_not_emit_plan_parked(
         self,
         non_v4_status: str,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -12362,7 +12089,6 @@ class TestApplyStagedDecision:
     def test_stage_failure_status_emits_attention_with_matching_paused_status(
         self,
         stage_failure_status: str,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -12488,7 +12214,6 @@ class TestApplyStagedDecision:
         status: str,
         blocker: dict[str, str] | None,
         expected_breadcrumbs: str,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -12537,7 +12262,6 @@ class TestApplyStagedDecision:
 
     def test_finalize_regress_self_heal_does_not_emit_attention(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -12570,7 +12294,6 @@ class TestApplyStagedDecision:
 
     def test_merge_pending_emits_attention(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -12616,7 +12339,6 @@ class TestApplyStagedDecision:
 
     def test_unparseable_status_emits_attention(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -12659,7 +12381,6 @@ class TestApplyStagedDecision:
     def test_scope_gated_approval_park_emits_needs_attention(
         self,
         scope_gated_status: str,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -12705,7 +12426,6 @@ class TestApplyStagedDecision:
 
     def test_scope_gated_small_tier_plan_advance_does_not_emit_attention(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -12740,9 +12460,7 @@ class TestApplyStagedDecision:
 
         assert len(attention) == 0
 
-    def test_scope_gate_hint_large_tier_small_blocks(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_scope_gate_hint_large_tier_small_blocks(self, tmp_path: Path) -> None:
         """scope_hint='large' + sentinel tier='small' → BLOCKED_ON_USER (#926).
 
         Regression: an operator ``--scope large`` hint must force the approval
@@ -12764,9 +12482,7 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.stage == Stage.PLAN
 
-    def test_scope_gate_hint_large_tier_large_blocks(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_scope_gate_hint_large_tier_large_blocks(self, tmp_path: Path) -> None:
         """scope_hint='large' + sentinel tier='large' → BLOCKED_ON_USER (#926)."""
         from cw.dispatch import apply_staged_decision
 
@@ -12783,9 +12499,7 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.stage == Stage.PLAN
 
-    def test_scope_gate_hint_large_tier_none_blocks(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_scope_gate_hint_large_tier_none_blocks(self, tmp_path: Path) -> None:
         """scope_hint='large' + sentinel omits tier → BLOCKED_ON_USER (#926)."""
         from cw.dispatch import apply_staged_decision
 
@@ -12799,9 +12513,7 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.stage == Stage.PLAN
 
-    def test_scope_gate_hint_small_tier_large_blocks(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_scope_gate_hint_small_tier_large_blocks(self, tmp_path: Path) -> None:
         """scope_hint='small' + sentinel tier='large' → BLOCKED_ON_USER (#926).
 
         A large sentinel tier is never de-escalated by a smaller hint.
@@ -12821,9 +12533,7 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.stage == Stage.PLAN
 
-    def test_scope_gate_hint_small_tier_small_advances(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_scope_gate_hint_small_tier_small_advances(self, tmp_path: Path) -> None:
         """scope_hint='small' + sentinel tier='small' → advances PLAN→IMPL (#926)."""
         from cw.dispatch import apply_staged_decision
 
@@ -12840,9 +12550,7 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.PENDING
         assert task.stage == Stage.IMPL
 
-    def test_scope_gate_hint_none_tier_small_advances(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_scope_gate_hint_none_tier_small_advances(self, tmp_path: Path) -> None:
         """scope_hint=None + sentinel tier='small' → advances PLAN→IMPL (#926)."""
         from cw.dispatch import apply_staged_decision
 
@@ -12876,9 +12584,7 @@ class TestApplyStagedDecision:
         save_dev_queue(DevQueueStore(tasks=[task]))
         return task
 
-    def test_apply_staged_decision_asserts_running(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_apply_staged_decision_asserts_running(self, tmp_path: Path) -> None:
         """apply_staged_decision on a non-RUNNING task raises AssertionError (#918).
 
         The RUNNING precondition now lives only in the wrapper; the routing
@@ -12892,7 +12598,7 @@ class TestApplyStagedDecision:
             apply_staged_decision(task, "stage_complete", None, self._clients(tmp_path))
 
     def test_route_staged_decision_advances_parked_terminal(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """_route_staged_decision on a parked terminal task → COMPLETED (#918).
 
@@ -12915,7 +12621,7 @@ class TestApplyStagedDecision:
         assert task.pr_url == "https://github.com/user/repo/pull/918"
 
     def test_route_staged_decision_advances_parked_nonterminal(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """_route_staged_decision on a parked non-terminal task advances (#918).
 
@@ -12931,7 +12637,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.REVIEW
 
     def test_route_staged_decision_scope_gated_small_parked_advances(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Small-tier scope-gated arm advances a parked task (#918, Comment 11).
 
@@ -12954,7 +12660,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.IMPL
 
     def test_route_staged_decision_scope_gated_large_parked_restamps(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Non-small-tier scope-gated arm re-stamps a parked task (#918).
 
@@ -12983,7 +12689,7 @@ class TestApplyStagedDecision:
     # -- Operator-signoff gates (RFC 0007 Phase 3, #990) ---------------------
 
     def test_small_tier_plan_stage_with_signoff_ignores_signoff_scoping(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Rule 1 small-tier at Stage.PLAN + signoff -> advances unattended.
 
@@ -13009,7 +12715,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.IMPL
 
     def test_small_tier_without_signoff_advances_unchanged(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Regression: no signoff configured -> small tier advances as before."""
         from cw.dispatch import apply_staged_decision
@@ -13027,7 +12733,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.IMPL
 
     def test_review_pending_approval_downgraded_small_with_signoff_parks(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """review_pending_approval downgraded to small tier + signoff -> parks."""
         from cw.dispatch import apply_staged_decision
@@ -13047,7 +12753,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.REVIEW
 
     def test_stage_complete_at_review_stage_with_signoff_parks(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Rule 3 stage_complete at REVIEW + signoff -> parks before FINALIZE."""
         from cw.dispatch import apply_staged_decision
@@ -13061,7 +12767,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.REVIEW  # not advanced to FINALIZE
 
     def test_stage_complete_at_non_review_stage_ignores_signoff(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Rule 3 stage_complete at non-REVIEW stage ignores signoff scoping.
 
@@ -13141,7 +12847,7 @@ class TestApplyStagedDecision:
         )
 
     def test_should_gate_for_signoff_loads_config_without_signature_change(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """_should_gate_for_signoff reachable via (task, clients); staged-decision
         signatures stay unchanged (#990)."""
@@ -13245,7 +12951,7 @@ class TestApplyStagedDecision:
         )
 
     def test_should_force_hold_finalize_loads_config_without_signature_change(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """_should_force_hold_finalize is reachable via (task, clients) and the
         staged-decision signatures stay unchanged (#1160)."""
@@ -13284,7 +12990,7 @@ class TestApplyStagedDecision:
         ]
 
     def test_small_tier_force_hold_flag_parks_instead_of_advancing(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Rule 1 small tier at REVIEW + --hold-finalize -> BLOCKED_ON_USER park.
 
@@ -13308,9 +13014,7 @@ class TestApplyStagedDecision:
         assert task.disposition == FINALIZE_GATE_HELD_DISPOSITION
         assert task.stage == Stage.REVIEW  # not advanced to FINALIZE
 
-    def test_small_tier_force_hold_ignored_at_plan_stage(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_small_tier_force_hold_ignored_at_plan_stage(self, tmp_path: Path) -> None:
         """The force hold is REVIEW-scoped: a small-tier plan_pending_approval at
         Stage.PLAN still advances PLAN->IMPL unattended (#1160)."""
         from cw.dispatch import apply_staged_decision
@@ -13329,7 +13033,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.IMPL
 
     def test_large_tier_review_pending_approval_unaffected_by_force_hold(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """A large-tier scope gate parks before the force-hold check is reached.
 
@@ -13356,7 +13060,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.REVIEW
 
     def test_stage_complete_at_review_with_force_hold_parks(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Rule 3 stage_complete at REVIEW + force hold -> parks before FINALIZE."""
         from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION
@@ -13371,7 +13075,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.REVIEW  # not advanced to FINALIZE
 
     def test_stage_complete_at_non_review_stage_ignores_force_hold(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Rule 3 stage_complete at a non-REVIEW stage ignores the force hold.
 
@@ -13387,9 +13091,7 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.PENDING
         assert task.stage == Stage.REVIEW
 
-    def test_force_hold_takes_precedence_over_signoff(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_force_hold_takes_precedence_over_signoff(self, tmp_path: Path) -> None:
         """Both gates armed -> the force hold wins; the row lands
         BLOCKED_ON_USER/finalize_gate_held, never AWAITING_OPERATOR_SIGNOFF."""
         from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION
@@ -13406,7 +13108,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.REVIEW
 
     def test_lane_finalize_gate_manual_parks_without_per_ticket_flag(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """``finalize_gate: manual`` on the lane holds with no ticket flag set."""
         from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION
@@ -13429,7 +13131,6 @@ class TestApplyStagedDecision:
 
     def test_global_default_finalize_gate_manual_parks_as_fallback(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -13454,7 +13155,6 @@ class TestApplyStagedDecision:
 
     def test_later_stage_stops_at_review_force_hold_gate(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -13530,9 +13230,7 @@ class TestApplyStagedDecision:
 
         assert EXTERNAL_STATE_BLOCKER_REASON not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
 
-    def test_force_hold_without_flag_or_config_unchanged(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_force_hold_without_flag_or_config_unchanged(self, tmp_path: Path) -> None:
         """Regression: no ticket flag and no lane/global config -> pre-#1160
         behaviour exactly (small auto-advances, large still blocks)."""
         from cw.dispatch import apply_staged_decision
@@ -13561,7 +13259,6 @@ class TestApplyStagedDecision:
 
     def test_force_hold_park_emits_session_needs_attention(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -13621,7 +13318,7 @@ class TestApplyStagedDecision:
     # -- scope_hint escalation gate (#1617) ------------------------------
 
     def test_stage_complete_at_review_with_large_scope_hint_parks(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """#1617: Rule 3's stage_complete/shipped bypass -- a scope_hint=='large'
         task must park at REVIEW, not sail through to FINALIZE unattended."""
@@ -13637,7 +13334,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.REVIEW  # not advanced to FINALIZE
 
     def test_stage_complete_at_non_review_stage_ignores_scope_hint(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """The scope_hint gate is REVIEW-scoped, mirroring force_hold/signoff: a
         mid-pipeline stage_complete (IMPL->REVIEW here) advances unattended even
@@ -13654,7 +13351,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.REVIEW
 
     def test_scope_hint_gate_takes_precedence_over_signoff_and_force_hold(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """D1: scope_hint=='large' outranks both REVIEW gates -- the row parks
         with _APPROVAL_GATE_REASON, never AWAITING_OPERATOR_SIGNOFF or
@@ -13675,9 +13372,7 @@ class TestApplyStagedDecision:
         assert task.disposition != FINALIZE_GATE_HELD_DISPOSITION
         assert task.stage == Stage.REVIEW
 
-    def test_later_stage_stops_at_review_scope_hint_gate(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_later_stage_stops_at_review_scope_hint_gate(self, tmp_path: Path) -> None:
         """D3 (#1617): the Checkpoint-3a-headless-auto-continue shape -- a
         REVIEW-stage task whose sentinel maps directly to FINALIZE must still
         stop at the REVIEW rung when scope_hint=='large', not walk straight
@@ -13704,7 +13399,6 @@ class TestApplyStagedDecision:
 
     def test_scope_hint_gate_park_emits_session_needs_attention(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -13752,9 +13446,7 @@ class TestApplyStagedDecision:
             assert payload["crashed"] is False
             assert correlation_id == ticket_id
 
-    def test_scope_routing_decision_event_fields(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_scope_routing_decision_event_fields(self, tmp_path: Path) -> None:
         """The #1617 scope-routing audit event carries every field item 2
         requires, across all three routing.py park-decision sites
         (mutation-testing bullet (c))."""
@@ -13824,7 +13516,6 @@ class TestApplyStagedDecision:
 
     def test_signoff_gate_park_emits_session_needs_attention(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -13883,9 +13574,7 @@ class TestApplyStagedDecision:
         assert attention[0][1]["session_id"] == "sess-signoff-attn-1"
         assert attention[0][1]["lane"] == "bugs"
 
-    def test_matching_stage_reached_routes_normally(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_matching_stage_reached_routes_normally(self, tmp_path: Path) -> None:
         """stage_reached matching task.stage → routes normally (positive
         control, #1019)."""
         from cw.dispatch import apply_staged_decision
@@ -13903,9 +13592,7 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.PENDING
         assert task.stage == Stage.FINALIZE
 
-    def test_stage_mismatch_refuses_routing_no_transition(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_stage_mismatch_refuses_routing_no_transition(self, tmp_path: Path) -> None:
         """Stale IMPL sentinel against a REVIEW-stage task → refused,
         untouched (#986/#1019).
 
@@ -13974,7 +13661,6 @@ class TestApplyStagedDecision:
 
     def test_stage_mismatch_emits_sentinel_stage_mismatch_event(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -14004,9 +13690,7 @@ class TestApplyStagedDecision:
         assert payload["sentinel_stage_reached"] == "stage2_impl"
         assert correlation_id == "MISMATCH-EVT-1"
 
-    def test_missing_stage_reached_bypasses_guard(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_missing_stage_reached_bypasses_guard(self, tmp_path: Path) -> None:
         """No stage_reached key in last_result → guard bypassed, routes
         normally (#1019)."""
         from cw.dispatch import apply_staged_decision
@@ -14021,9 +13705,7 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.PENDING
         assert task.stage == Stage.FINALIZE
 
-    def test_non_string_stage_reached_treated_as_mismatch(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_non_string_stage_reached_treated_as_mismatch(self, tmp_path: Path) -> None:
         """Non-str, non-None stage_reached (malformed payload) → refused,
         not a KeyError/TypeError (#1019 defensive branch)."""
         from cw.dispatch import apply_staged_decision
@@ -14041,9 +13723,7 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.RUNNING
         assert task.stage == Stage.REVIEW
 
-    def test_none_status_none_last_result_bypasses_guard(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_none_status_none_last_result_bypasses_guard(self, tmp_path: Path) -> None:
         """(None, None) → Rule 6 fallback unaffected by the stage-mismatch
         guard (#1019)."""
         from cw.dispatch import apply_staged_decision
@@ -14055,9 +13735,7 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == "abandoned"
 
-    def test_harden_stage_sentinel_always_mismatches(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_harden_stage_sentinel_always_mismatches(self, tmp_path: Path) -> None:
         """HARDEN-stage task + any populated stage_reached → refused by construction.
 
         Stage.HARDEN has no legitimate stage_reached counterpart (RFC 0005 A1,
@@ -14081,7 +13759,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.HARDEN
 
     def test_finalize_regress_returns_true_after_guard_refactor(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Rule 5a's finalize-regress early return still reports routed=True (#1019).
 
@@ -14126,7 +13804,6 @@ class TestApplyStagedDecision:
 
     def test_later_stage_walks_forward_one_rung_at_a_time(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -14174,7 +13851,6 @@ class TestApplyStagedDecision:
 
     def test_later_stage_stops_at_review_signoff_gate(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -14209,7 +13885,7 @@ class TestApplyStagedDecision:
         assert task.session_id == "sess-walk-signoff-1"
 
     def test_later_stage_stage_complete_walks_then_advances_once_more(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """PLAN task + IMPL stage_complete sentinel: walk PLAN->IMPL, then Rule 3
         advances IMPL->REVIEW (#1149).
@@ -14236,9 +13912,7 @@ class TestApplyStagedDecision:
         # session-id preserve applies only to its own intermediate hops).
         assert task.session_id is None
 
-    def test_later_stage_positional_not_alphabetical(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_later_stage_positional_not_alphabetical(self, tmp_path: Path) -> None:
         """Stage position is by pipeline-list index, not StrEnum string order (#1149).
 
         Pipeline is reordered [REVIEW, IMPL] so a naive ``sentinel_stage <
@@ -14266,9 +13940,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.IMPL
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
 
-    def test_earlier_stage_replay_still_refused_unchanged(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_earlier_stage_replay_still_refused_unchanged(self, tmp_path: Path) -> None:
         """Earlier-stage replay (#1019) stays refused after the #1149 walk lands.
 
         Restates the two pinned refusal cases without adding assertions to
@@ -14302,7 +13974,6 @@ class TestApplyStagedDecision:
 
     def test_earlier_stage_blocked_sentinel_now_routes_instead_of_refusing(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -14345,7 +14016,7 @@ class TestApplyStagedDecision:
         assert payload["breadcrumbs"] == "plan_missing"
 
     def test_earlier_stage_paused_for_user_input_sentinel_now_routes(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """An earlier-stage 'ambiguities_pending_resolution' sentinel routes
         through Rule 2 instead of being refused (#1676)."""
@@ -14370,7 +14041,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.REVIEW
 
     def test_earlier_stage_scope_gated_approval_sentinel_now_routes(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """An earlier-stage 'plan_pending_approval' sentinel (non-small tier)
         routes through Rule 1's park arm instead of being refused (#1676)."""
@@ -14391,9 +14062,7 @@ class TestApplyStagedDecision:
         assert task.disposition == "plan_pending_approval"
         assert task.stage == Stage.IMPL
 
-    def test_earlier_stage_no_op_sentinel_now_routes(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_earlier_stage_no_op_sentinel_now_routes(self, tmp_path: Path) -> None:
         """An earlier-stage 'no_op' sentinel routes through Rule 4 instead of
         being refused (#1676). stage1_pre_flight is the only stage_reached
         value 'no_op' schema-legally pairs with."""
@@ -14413,9 +14082,7 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.COMPLETED
         assert task.disposition == "no_op"
 
-    def test_earlier_stage_shipped_sentinel_still_refused(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_earlier_stage_shipped_sentinel_still_refused(self, tmp_path: Path) -> None:
         """A well-formed earlier-stage 'shipped' sentinel stays refused (#1676):
         STAGE_SUCCESS_STATUSES is the carve-out that still refuses, proving it
         covers both 'shipped' and 'stage_complete' (the latter already pinned
@@ -14439,7 +14106,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.FINALIZE
 
     def test_earlier_stage_blocked_sentinel_does_not_self_heal_regress(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """GitHub #1676 follow-up: Rule 5a's FINALIZE self-heal regress must
         not fire on an earlier-stage report -- 'agent_block' is FINALIZE's own
@@ -14470,7 +14137,6 @@ class TestApplyStagedDecision:
 
     def test_earlier_stage_scope_gated_approval_sentinel_does_not_auto_advance(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -14508,7 +14174,7 @@ class TestApplyStagedDecision:
         assert payload["paused_status"] == _EARLIER_STAGE_REPORT_REASON
 
     def test_unresolvable_stage_position_falls_back_to_refuse(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Sentinel stage not present in the client's pipeline → fail-closed refuse.
 
@@ -14531,7 +14197,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.IMPL
 
     def test_later_stage_walk_unknown_client_falls_back_to_refuse(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Task's client absent from clients dict → fail-closed refuse (#1149).
 
@@ -14554,7 +14220,6 @@ class TestApplyStagedDecision:
 
     def test_later_stage_walk_uses_advance_task_pointer_chokepoint(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -14584,7 +14249,6 @@ class TestApplyStagedDecision:
 
     def test_later_stage_walk_to_finalize_then_regresses_on_blocked_agent_block(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
         monkeypatch: pytest.MonkeyPatch,
@@ -14638,7 +14302,6 @@ class TestApplyStagedDecision:
 
     def test_later_stage_terminal_status_walks_then_completes(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -14706,7 +14369,6 @@ class TestApplyStagedDecision:
     def test_operator_unavailable_blocker_sets_awaiting_operator_paused_status(
         self,
         reason: str,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -14754,7 +14416,6 @@ class TestApplyStagedDecision:
     def test_blocked_at_finalize_operator_unavailable_reason_parks_without_regress(
         self,
         reason: str,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
     ) -> None:
         """blocked at FINALIZE with an operator-unavailable reason parks
@@ -14776,7 +14437,6 @@ class TestApplyStagedDecision:
 
     def test_blocked_at_finalize_external_state_block_reason_parks_without_regress(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
     ) -> None:
         """blocked at FINALIZE with external_state_block parks
@@ -14803,7 +14463,7 @@ class TestApplyStagedDecision:
         assert task.regress_attempts == 0
 
     def test_blocked_plan_scope_drift_at_impl_parks_without_regress(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """blocked/plan_scope_drift fires during Stage 2 (IMPL), so
         task.stage == Stage.IMPL at apply time -- Rule 5a's regress branch
@@ -14925,7 +14585,6 @@ class TestApplyStagedDecision:
 
     def test_stage_complete_review_health_gate_parks_without_signoff(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -14974,7 +14633,7 @@ class TestApplyStagedDecision:
         assert correlation_id == "RHG-SC-1"
 
     def test_stage_complete_impl_stage_with_degraded_health_advances_unchanged(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """#1702: the gate is REVIEW-scoped, so an IMPL-stage completion carrying
         EXIT_FOR_HUMAN_REVIEW still advances IMPL->REVIEW unattended.
@@ -15009,7 +14668,7 @@ class TestApplyStagedDecision:
         assert task.disposition is None
 
     def test_stage_complete_recommendation_proceed_advances_unchanged(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """#1702: recommendation="PROCEED" leaves Rule 3 routing untouched."""
         from cw.dispatch import apply_staged_decision
@@ -15027,7 +14686,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.FINALIZE
 
     def test_stage_complete_missing_health_advances_unchanged(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """#1702: a null last_result and one with no ``health`` key both advance."""
         from cw.dispatch import apply_staged_decision
@@ -15047,7 +14706,7 @@ class TestApplyStagedDecision:
         assert no_key.stage == Stage.FINALIZE
 
     def test_stage_complete_malformed_health_advances_unchanged(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """#1702: a non-dict ``health`` value is tolerated, not gated on."""
         from cw.dispatch import apply_staged_decision
@@ -15080,7 +14739,6 @@ class TestApplyStagedDecision:
 
     def test_blocked_must_fix_mechanically_rejected_parks_with_dedicated_disposition(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -15120,7 +14778,7 @@ class TestApplyStagedDecision:
         assert correlation_id == "MFR-1"
 
     def test_blocked_must_fix_mechanically_rejected_disposition_is_not_verbatim_blocked(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """#1714: proves the override bypasses the generic verbatim-status stamp.
 
@@ -15139,7 +14797,7 @@ class TestApplyStagedDecision:
         assert task.disposition != "blocked"
 
     def test_blocked_other_reason_still_uses_generic_disposition(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """#1714 regression guard: every other blocker_reason is untouched."""
         from cw.dispatch import apply_staged_decision
@@ -15157,7 +14815,6 @@ class TestApplyStagedDecision:
 
     def test_blocked_must_fix_mechanically_rejected_never_finalize_regresses(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -15191,7 +14848,7 @@ class TestApplyStagedDecision:
     # -- codex_review_unparseable unproductive-charge exemption (#2280) ----
 
     def test_blocked_codex_review_unparseable_does_not_charge_unproductive_attempt(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """#2280: a harness-side parse failure is not evidence the claim did
         no work.
@@ -15223,7 +14880,7 @@ class TestApplyStagedDecision:
         assert task.unproductive_attempts == 0
 
     def test_blocked_codex_must_fix_findings_still_charges_unproductive_attempt(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Negative control: the exemption is CODEX_REVIEW_UNPARSEABLE-specific.
 
@@ -15247,7 +14904,7 @@ class TestApplyStagedDecision:
         assert task.unproductive_attempts == 1
 
     def test_review_pending_approval_small_tier_review_health_gate_parks(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """#1702: Rule 1's small-tier auto-advance arm is now health-gated."""
         from cw.dispatch import apply_staged_decision
@@ -15270,7 +14927,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.REVIEW
 
     def test_review_pending_approval_large_tier_with_degraded_health_reports_gate(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """#1702: a quality signal outranks the authorization-workflow signal.
 
@@ -15300,7 +14957,6 @@ class TestApplyStagedDecision:
 
     def test_codex_review_degraded_document_parks_without_signoff(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
         monkeypatch: pytest.MonkeyPatch,
@@ -15363,7 +15019,6 @@ class TestApplyStagedDecision:
 
     def test_test_reviewer_only_degraded_document_does_not_park_end_to_end(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
         monkeypatch: pytest.MonkeyPatch,
@@ -15465,7 +15120,6 @@ class TestBranchStalenessGate:
 
     def test_review_pending_approval_branch_staleness_gate_parks_on_overlap(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capture_events: Callable[..., list[CapturedEvent]],
@@ -15507,7 +15161,6 @@ class TestBranchStalenessGate:
 
     def test_review_pending_approval_large_tier_gate_parks_before_tier_check(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -15538,7 +15191,6 @@ class TestBranchStalenessGate:
 
     def test_review_pending_approval_disjoint_staleness_not_gated(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -15561,7 +15213,6 @@ class TestBranchStalenessGate:
 
     def test_stage_complete_branch_staleness_gate_parks(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -15590,7 +15241,6 @@ class TestBranchStalenessGate:
 
     def test_walk_stage_pointer_forward_branch_staleness_gate_parks(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -15615,7 +15265,6 @@ class TestBranchStalenessGate:
 
     def test_impl_stage_staleness_is_not_gated(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -15651,7 +15300,6 @@ class TestBranchStalenessGate:
 
     def test_unknown_client_fails_open(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -15740,9 +15388,7 @@ class TestReviewStalenessGate:
         )
         monkeypatch.setattr(rg_mod, "commits_ahead_of_default", lambda _p, _b: 1)
 
-    def test_missing_reviewed_sha_gates(
-        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_missing_reviewed_sha_gates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Fail closed: a review block with no ``reviewed_sha`` key parks.
 
         The operator's fourth named case. A producer that never learned to
@@ -15759,7 +15405,7 @@ class TestReviewStalenessGate:
         )
 
     def test_absent_review_block_does_not_gate(
-        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The scoping carve-out: no ``review`` block at all does NOT gate.
 
@@ -15802,7 +15448,7 @@ class TestReviewStalenessGate:
         assert _resolve_review_reviewed_sha(None) is None
 
     def test_non_string_reviewed_sha_gates(
-        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Fail closed: a non-string sha is malformed evidence, not evidence."""
         from cw.dispatch.review_gates import _should_gate_for_review_staleness
@@ -16157,7 +15803,6 @@ class TestReviewStalenessWorktreeResolution:
 
     def test_unstamped_worktree_with_fresh_sha_does_not_gate(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
     ) -> None:
@@ -16183,7 +15828,6 @@ class TestReviewStalenessWorktreeResolution:
 
     def test_unstamped_worktree_with_older_sha_gates(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
     ) -> None:
@@ -16208,9 +15852,7 @@ class TestReviewStalenessWorktreeResolution:
             is True
         )
 
-    def test_unresolvable_worktree_gates(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_unresolvable_worktree_gates(self, tmp_path: Path) -> None:
         """Fail closed when neither the stamp nor the conventional path resolves.
 
         Both sub-cases: an unknown client (no ``ClientConfig`` to derive the
@@ -16240,7 +15882,6 @@ class TestReviewStalenessWorktreeResolution:
 
     def test_foreign_branch_at_the_conventional_path_gates(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
     ) -> None:
@@ -16267,7 +15908,6 @@ class TestReviewStalenessWorktreeResolution:
 
     def test_head_probe_receives_the_resolved_path(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
         monkeypatch: pytest.MonkeyPatch,
@@ -16302,7 +15942,6 @@ class TestReviewStalenessWorktreeResolution:
 
     def test_stamped_worktree_path_still_wins(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
     ) -> None:
@@ -16419,7 +16058,6 @@ class TestEmptyDiffGate:
 
     def test_zero_commits_ahead_gates(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16432,7 +16070,6 @@ class TestEmptyDiffGate:
 
     def test_positive_commit_count_does_not_gate(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16445,7 +16082,6 @@ class TestEmptyDiffGate:
 
     def test_unmeasurable_count_does_not_gate(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16459,7 +16095,6 @@ class TestEmptyDiffGate:
 
     def test_unknown_client_fails_open(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16476,7 +16111,6 @@ class TestEmptyDiffGate:
 
     def test_park_stamps_status_disposition_and_event(
         self,
-        tmp_dispatch_dirs: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
         from cw.dev_queue import EMPTY_DIFF_GATE_DISPOSITION
@@ -16527,7 +16161,6 @@ class TestEmptyDiffGate:
 
     def test_scope_gated_approval_site_parks_ahead_of_staleness(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16557,7 +16190,6 @@ class TestEmptyDiffGate:
 
     def test_stage_success_site_parks_ahead_of_staleness(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16583,7 +16215,6 @@ class TestEmptyDiffGate:
 
     def test_stage_walk_site_parks_ahead_of_staleness(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16609,7 +16240,6 @@ class TestEmptyDiffGate:
 
     def test_impl_stage_empty_diff_is_not_gated(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16632,7 +16262,6 @@ class TestEmptyDiffGate:
 
     def test_non_empty_branch_still_advances(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16711,7 +16340,6 @@ class TestUnconcludedFinalizeRegressMergeGate:
 
     def test_no_marker_does_not_gate(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16732,7 +16360,6 @@ class TestUnconcludedFinalizeRegressMergeGate:
 
     def test_marker_set_merge_in_progress_gates(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16753,7 +16380,6 @@ class TestUnconcludedFinalizeRegressMergeGate:
 
     def test_marker_set_head_unchanged_in_class_gates(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16776,7 +16402,6 @@ class TestUnconcludedFinalizeRegressMergeGate:
 
     def test_marker_set_head_unchanged_out_of_class_does_not_gate(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16801,7 +16426,6 @@ class TestUnconcludedFinalizeRegressMergeGate:
 
     def test_marker_set_head_changed_no_merge_does_not_gate(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16822,7 +16446,6 @@ class TestUnconcludedFinalizeRegressMergeGate:
 
     def test_unresolvable_worktree_gates(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16845,7 +16468,6 @@ class TestUnconcludedFinalizeRegressMergeGate:
 
     def test_unmeasurable_merge_state_gates(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16865,7 +16487,6 @@ class TestUnconcludedFinalizeRegressMergeGate:
 
     def test_unmeasurable_head_gates(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16887,7 +16508,6 @@ class TestUnconcludedFinalizeRegressMergeGate:
 
     def test_park_stamps_status_disposition_and_event(
         self,
-        tmp_dispatch_dirs: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
         from cw.dev_queue import UNCONCLUDED_FINALIZE_REGRESS_MERGE_GATE_DISPOSITION
@@ -16940,7 +16560,6 @@ class TestUnconcludedFinalizeRegressMergeGate:
 
     def test_stage_success_site_blocks_impl_advance_on_unconcluded_merge(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16968,7 +16587,6 @@ class TestUnconcludedFinalizeRegressMergeGate:
 
     def test_stage_success_site_advances_impl_when_merge_concluded(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16991,7 +16609,6 @@ class TestUnconcludedFinalizeRegressMergeGate:
 
     def test_stage_success_site_advances_impl_when_regress_was_not_merge_caused(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -17015,7 +16632,6 @@ class TestUnconcludedFinalizeRegressMergeGate:
 
     def test_review_stage_stage_complete_not_gated_by_impl_check(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -17041,7 +16657,6 @@ class TestUnconcludedFinalizeRegressMergeGate:
     @pytest.mark.parametrize("measured", [True, False, None])
     def test_finalize_regress_stamps_merge_conflict_detected_from_measurement(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         measured: bool | None,
@@ -17077,9 +16692,7 @@ class TestUnconcludedFinalizeRegressMergeGate:
 
     # -- REVIEW-side consumption -----------------------------------------
 
-    def test_finalize_regress_repeat_consumption_clears_both_fields(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_finalize_regress_repeat_consumption_clears_both_fields(self) -> None:
         """#1717's consumer clears the sibling flag with the oracle, so a
         stale merge-caused flag cannot leak into a later regress cycle."""
         from cw.dispatch import _consume_finalize_regress_repeat
@@ -17192,7 +16805,6 @@ class TestReviewHealthAgentsRunGate:
 
     def test_zero_agents_run_parks_through_routing(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -17280,7 +16892,6 @@ class TestUnifiedReentryContractCompose:
 
     def test_finalize_regress_repeat_and_pending_send_back_compose_in_one_pass(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
@@ -17336,7 +16947,6 @@ class TestUnifiedReentryContractCompose:
 
     def test_non_finalize_regress_stamps_only_the_send_back_marker(
         self,
-        tmp_dispatch_dirs: Path,
     ) -> None:
         """The two stamps carry independent gates: a REVIEW-origin regress
         raises #1730's marker but must NOT stamp #1717's branch-head oracle,
@@ -17354,7 +16964,6 @@ class TestUnifiedReentryContractCompose:
 
     def test_compose_send_back_marker_survives_self_heal_impl_spawn(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -17393,7 +17002,6 @@ class TestUnifiedReentryContractCompose:
 
     def test_compose_review_spawn_consumes_send_back_without_touching_oracle(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -17431,7 +17039,6 @@ class TestUnifiedReentryContractCompose:
 
     def test_branch_staleness_park_composes_with_both_reentry_markers(
         self,
-        tmp_dispatch_dirs: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capture_events: Callable[..., list[CapturedEvent]],
@@ -17539,9 +17146,7 @@ class TestPersistCarriedContext:
             "test-client": ClientConfig(name="test-client", workspace_path=tmp_path)
         }
 
-    def test_route_staged_decision_persists_plan_source(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_route_staged_decision_persists_plan_source(self, tmp_path: Path) -> None:
         """Stage-matched stage_complete sentinel stamps plan_source + tier."""
         from cw.dispatch import apply_staged_decision
 
@@ -17560,7 +17165,7 @@ class TestPersistCarriedContext:
         assert task.computed_scope_tier == "small"
 
     def test_route_staged_decision_persists_from_blocked_sentinel(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Stage-matched blocked finalize sentinel still carries plan_source/tier."""
         from cw.dispatch import apply_staged_decision
@@ -17580,7 +17185,7 @@ class TestPersistCarriedContext:
         assert task.computed_scope_tier == "large"
 
     def test_route_staged_decision_does_not_overwrite_with_null_tier(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """A stage-matched sentinel with scope.tier=None never clobbers an
         already-set computed_scope_tier."""
@@ -17602,7 +17207,7 @@ class TestPersistCarriedContext:
         assert task.computed_scope_tier == "large"
 
     def test_route_staged_decision_does_not_overwrite_plan_source_with_none(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """A stage-matched sentinel with plan_source="none" never clobbers an
         already-resolved plan_source."""
@@ -17624,7 +17229,7 @@ class TestPersistCarriedContext:
         assert task.plan_source == "github_issue_existing"
 
     def test_route_staged_decision_skips_persist_on_stage_mismatch(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """A late/replayed sentinel whose stage_reached mismatches task.stage
         is refused by the stage-mismatch guard -- neither field mutates."""
@@ -17669,7 +17274,6 @@ class TestPersistCarriedContext:
 
     def test_route_scope_gated_approval_1091_shaped_small_tier_auto_advances(
         self,
-        tmp_dispatch_dirs: Path,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
@@ -17720,7 +17324,6 @@ class TestPersistCarriedContext:
 
     def test_consume_stamps_carried_context_on_task(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -17780,7 +17383,6 @@ class TestWaveCollisionDetection:
 
     def test_dispatch_tick_accepts_warned_collision_kwarg(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -17804,7 +17406,6 @@ class TestWaveCollisionDetection:
 
     def test_run_dispatch_loop_initializes_warned_collision(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -17939,7 +17540,6 @@ class TestSpawnErrorBackoff:
 
     def test_spawn_error_stamps_next_eligible_at_and_count(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -17964,7 +17564,6 @@ class TestSpawnErrorBackoff:
 
     def test_backedoff_task_not_claimed_on_next_tick(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -17991,7 +17590,6 @@ class TestSpawnErrorBackoff:
 
     def test_backoff_skip_reason_emitted_in_event(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -18020,7 +17618,6 @@ class TestSpawnErrorBackoff:
 
     def test_backoff_grows_exponentially_on_repeated_errors(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -18052,7 +17649,6 @@ class TestSpawnErrorBackoff:
 
     def test_backoff_capped_at_max(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -18082,7 +17678,6 @@ class TestSpawnErrorBackoff:
 
     def test_backoff_resets_after_successful_spawn(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -18109,7 +17704,6 @@ class TestSpawnErrorBackoff:
 
     def test_ever_spawned_stamped_true_after_successful_spawn(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -18139,7 +17733,6 @@ class TestSpawnErrorBackoff:
 
     def test_expired_backoff_allows_reclaim(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -18161,7 +17754,6 @@ class TestSpawnErrorBackoff:
 
     def test_priority_task_in_backoff_is_skipped(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -18200,7 +17792,6 @@ class TestSpawnErrorBackoff:
 
     def test_skip_to_next_skips_backedoff_claims_other(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """skip-to-next: a backedoff task is skipped; the next eligible task
@@ -18274,7 +17865,6 @@ class TestLaneCircuitBreaker:
 
     def test_spawn_error_increments_lane_counter(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
@@ -18292,7 +17882,6 @@ class TestLaneCircuitBreaker:
 
     def test_counter_increments_once_per_tick(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
@@ -18308,7 +17897,6 @@ class TestLaneCircuitBreaker:
 
     def test_breaker_trips_at_threshold_sets_paused(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
@@ -18326,7 +17914,6 @@ class TestLaneCircuitBreaker:
 
     def test_trip_emits_lane_paused_breaker_payload(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
@@ -18353,7 +17940,6 @@ class TestLaneCircuitBreaker:
 
     def test_last_error_empty_string_when_exception_blank(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
@@ -18374,7 +17960,6 @@ class TestLaneCircuitBreaker:
 
     def test_multiline_last_error_collapses_to_one_line(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
@@ -18408,7 +17993,6 @@ class TestLaneCircuitBreaker:
 
     def test_success_resets_lane_counter(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
@@ -18425,7 +18009,6 @@ class TestLaneCircuitBreaker:
 
     def test_reset_short_circuits_when_already_zero(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -18455,7 +18038,6 @@ class TestLaneCircuitBreaker:
 
     def test_paused_lane_skipped_next_tick(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
@@ -18472,7 +18054,6 @@ class TestLaneCircuitBreaker:
 
     def test_circuit_paused_skip_reason_emitted(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
@@ -18495,7 +18076,6 @@ class TestLaneCircuitBreaker:
 
     def test_operator_pause_does_not_report_circuit_paused(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
@@ -18516,7 +18096,6 @@ class TestLaneCircuitBreaker:
 
     def test_spawn_error_precedes_circuit_paused_on_tripping_tick(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
@@ -18537,7 +18116,6 @@ class TestLaneCircuitBreaker:
 
     def test_backoff_unchanged(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
@@ -18554,7 +18132,6 @@ class TestLaneCircuitBreaker:
 
     def test_check_returns_false_when_lane_has_no_override(
         self,
-        tmp_dispatch_dirs: Path,
         breaker_config: OrchestratorConfig,
     ) -> None:
         """A lane paused with no override entry is not a breaker pause."""
@@ -18571,7 +18148,6 @@ class TestLaneCircuitBreaker:
 
     def test_check_returns_false_when_below_threshold(
         self,
-        tmp_dispatch_dirs: Path,
         breaker_config: OrchestratorConfig,
     ) -> None:
         """An override below the threshold is not (yet) a breaker pause."""
@@ -18602,7 +18178,6 @@ class TestLaneCircuitBreaker:
 
     def test_check_returns_true_at_threshold_with_pending(
         self,
-        tmp_dispatch_dirs: Path,
         breaker_config: OrchestratorConfig,
     ) -> None:
         """At/above threshold with pending work in the lane is a breaker pause."""
@@ -18633,7 +18208,6 @@ class TestLaneCircuitBreaker:
 
     def test_check_returns_false_when_tripped_but_no_pending(
         self,
-        tmp_dispatch_dirs: Path,
         breaker_config: OrchestratorConfig,
     ) -> None:
         """A tripped lane with no pending work is not a (reportable) breaker pause."""
@@ -18655,7 +18229,6 @@ class TestLaneCircuitBreaker:
 
     def test_dispatch_loads_overrides_once_with_multiple_paused_lanes(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -18733,7 +18306,6 @@ class TestLaneStarvedAttention:
 
     def test_no_emit_when_paused_lane_has_zero_pending(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
@@ -18752,7 +18324,6 @@ class TestLaneStarvedAttention:
 
     def test_first_occurrence_fires_immediately(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
@@ -18785,7 +18356,6 @@ class TestLaneStarvedAttention:
 
     def test_lane_starved_attention_recurs_after_debounce_interval(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
@@ -18826,7 +18396,6 @@ class TestLaneStarvedAttention:
 
     def test_two_starved_lanes_produce_distinguishable_events(
         self,
-        tmp_dispatch_dirs: Path,
         breaker_config: OrchestratorConfig,
         workspace_dir: Path,
         tmp_path: Path,
@@ -18882,7 +18451,6 @@ class TestLaneStarvedAttention:
 
     def test_lane_starved_attention_recurs_and_survives_dedup_terminal(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
@@ -18926,7 +18494,6 @@ class TestLaneStarvedAttention:
 
     def test_lane_resume_clears_starved_notify_debounce_for_fresh_trip(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
@@ -19029,7 +18596,6 @@ class TestRunDispatchLoopHydrationHook:
 
     def test_hydrate_called_once_per_iteration(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -19046,7 +18612,6 @@ class TestRunDispatchLoopHydrationHook:
 
     def test_hydrate_exception_does_not_crash_loop(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -19107,7 +18672,6 @@ class TestRunDispatchLoopStaleGateHook:
 
     def test_release_stale_gated_tasks_called_once_per_iteration(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -19125,7 +18689,6 @@ class TestRunDispatchLoopStaleGateHook:
 
     def test_release_stale_gated_tasks_exception_does_not_crash_loop(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -19149,7 +18712,6 @@ class TestRunDispatchLoopStaleDispatchWatchHook:
 
     def test_registration_called_once_per_iteration(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -19169,7 +18731,6 @@ class TestRunDispatchLoopStaleDispatchWatchHook:
 
     def test_registration_runs_before_hydration_and_release(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -19196,7 +18757,6 @@ class TestRunDispatchLoopStaleDispatchWatchHook:
 
     def test_registration_exception_does_not_crash_loop(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -19392,7 +18952,7 @@ class TestNotifyStaleClientsWithPending:
         )
 
     def test_first_detection_emits_canonical_payload(
-        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Field-by-field assertion on the emitted attention event."""
         from freezegun import freeze_time
@@ -19441,7 +19001,7 @@ class TestNotifyStaleClientsWithPending:
         }
 
     def test_second_call_within_interval_does_not_reemit(
-        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from freezegun import freeze_time
 
@@ -19468,7 +19028,7 @@ class TestNotifyStaleClientsWithPending:
         assert len(events) == 1
 
     def test_reemits_after_interval_elapses(
-        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from freezegun import freeze_time
 
@@ -19496,7 +19056,7 @@ class TestNotifyStaleClientsWithPending:
         assert len({ev.payload["session_id"] for ev in events}) == 2
 
     def test_recovered_client_clears_its_debounce_stamp(
-        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A recovered client re-notifies immediately on its next episode.
 
@@ -19557,7 +19117,7 @@ class TestNotifyStaleClientsWithPending:
         assert len(events) == 2
 
     def test_executor_blocked_client_is_never_emitted_for(
-        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A live executor-blocked marker suppresses the page (#1742)."""
         self._stub_ticks(
@@ -19581,7 +19141,7 @@ class TestNotifyStaleClientsWithPending:
         )
 
     def test_empty_tick_data_is_a_silent_noop(
-        self, tmp_dispatch_dirs: Path, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._stub_ticks(monkeypatch, {})
         _notify_stale_clients_with_pending(
@@ -19612,7 +19172,6 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
 
     def test_watchdog_runs_on_the_first_tick(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -19634,7 +19193,6 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
 
     def test_watchdog_scans_after_dispatch_tick_records_its_events(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -19659,7 +19217,6 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
 
     def test_second_tick_within_gate_interval_skips_the_scan(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -19679,7 +19236,6 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
 
     def test_tick_after_gate_interval_rescans(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -19710,7 +19266,6 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
 
     def test_watchdog_exception_does_not_crash_loop_and_gate_still_advances(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -19764,7 +19319,6 @@ class TestWarnIfScopedServeStarvesSiblings:
 
     def test_scoped_serve_warns_naming_starved_siblings(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
@@ -19791,7 +19345,6 @@ class TestWarnIfScopedServeStarvesSiblings:
 
     def test_unscoped_serve_never_warns(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
@@ -19805,7 +19358,6 @@ class TestWarnIfScopedServeStarvesSiblings:
 
     def test_scoped_serve_with_no_starved_siblings_never_warns(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
@@ -19825,7 +19377,6 @@ class TestWarnIfScopedServeStarvesSiblings:
 
     def test_scoped_client_never_names_itself_as_starved(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
@@ -19905,7 +19456,6 @@ class TestFreshnessBlockAttentionLatch:
 
     def test_below_threshold_no_emit(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         freshness_breaker_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -19927,7 +19477,6 @@ class TestFreshnessBlockAttentionLatch:
 
     def test_counter_increments_once_per_tick_not_per_ticket(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         freshness_breaker_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -19945,7 +19494,6 @@ class TestFreshnessBlockAttentionLatch:
 
     def test_exact_threshold_emits_full_payload(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         freshness_breaker_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -19979,7 +19527,6 @@ class TestFreshnessBlockAttentionLatch:
 
     def test_no_refire_while_latched(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         freshness_breaker_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20002,7 +19549,6 @@ class TestFreshnessBlockAttentionLatch:
 
     def test_reset_on_non_stale_tick(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         freshness_breaker_config: OrchestratorConfig,
     ) -> None:
@@ -20021,7 +19567,6 @@ class TestFreshnessBlockAttentionLatch:
 
     def test_reset_short_circuits_when_already_zero(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         freshness_breaker_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20053,7 +19598,6 @@ class TestFreshnessBlockAttentionLatch:
 
     def test_no_push_notification_on_threshold_emit(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         freshness_breaker_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20122,7 +19666,6 @@ class TestAvailabilityPreflightGate:
 
     def test_available_spawns_normally(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -20137,7 +19680,6 @@ class TestAvailabilityPreflightGate:
 
     def test_unavailable_holds_task_pending_no_attempt_consumed(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20159,7 +19701,6 @@ class TestAvailabilityPreflightGate:
 
     def test_unavailable_emits_dispatch_tick_availability_gate(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20189,7 +19730,6 @@ class TestAvailabilityPreflightGate:
 
     def test_first_failure_emits_session_needs_attention_once(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20221,7 +19761,6 @@ class TestAvailabilityPreflightGate:
 
     def test_second_consecutive_failure_within_ttl_does_not_re_emit(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20243,7 +19782,6 @@ class TestAvailabilityPreflightGate:
 
     def test_persistent_failure_across_ttl_expiry_does_not_re_emit(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20289,7 +19827,6 @@ class TestAvailabilityPreflightGate:
 
     def test_recovery_resets_latch_silently(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20319,7 +19856,6 @@ class TestAvailabilityPreflightGate:
 
     def test_ttl_cache_suppresses_repeat_probe_within_window(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20344,7 +19880,6 @@ class TestAvailabilityPreflightGate:
 
     def test_reprobes_after_ttl_expiry(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20433,7 +19968,6 @@ class TestAvailabilityPreflightGate:
 
     def test_resolution_error_fails_open(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20455,7 +19989,6 @@ class TestAvailabilityPreflightGate:
 
     def test_no_push_notification_on_first_failure_emit(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20482,7 +20015,6 @@ class TestAvailabilityPreflightGate:
 
     def test_availability_gate_precedes_freshness_gate(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20509,7 +20041,6 @@ class TestAvailabilityPreflightGate:
 
     def test_finalize_stage_task_also_held_pending(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20537,7 +20068,6 @@ class TestAvailabilityPreflightGate:
 
     def test_freshness_helpers_not_called_on_gated_path(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20570,7 +20100,6 @@ class TestAvailabilityPreflightGate:
 
     def test_probe_not_called_when_fleet_dispatch_paused(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20631,7 +20160,6 @@ class TestSshKeyPreflightGate:
 
     def test_available_spawns_normally(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -20646,7 +20174,6 @@ class TestSshKeyPreflightGate:
 
     def test_unavailable_holds_task_pending_no_attempt_consumed(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20668,7 +20195,6 @@ class TestSshKeyPreflightGate:
 
     def test_unavailable_emits_dispatch_tick_ssh_key_gate(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20698,7 +20224,6 @@ class TestSshKeyPreflightGate:
 
     def test_unavailable_emits_operator_error_line_once(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20735,7 +20260,6 @@ class TestSshKeyPreflightGate:
 
     def test_availability_gate_takes_precedence_over_ssh_key_gate(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20758,7 +20282,6 @@ class TestSshKeyPreflightGate:
 
     def test_ssh_key_gate_takes_precedence_over_freshness_gate(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20788,7 +20311,6 @@ class TestSshKeyPreflightGate:
 
     def test_gate_disabled_bypasses_skip_and_emits_bypass_event(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20826,7 +20348,6 @@ class TestSshKeyPreflightGate:
 
     def test_http_remote_skips_probe_and_dispatches(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20864,7 +20385,6 @@ class TestSshKeyPreflightGate:
 
     def test_local_remote_skips_probe_and_dispatches(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20882,7 +20402,6 @@ class TestSshKeyPreflightGate:
 
     def test_unknown_remote_scheme_still_gates(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20913,7 +20432,6 @@ class TestSshKeyPreflightGate:
 
     def test_skip_and_bypass_events_record_remote_scheme(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20946,7 +20464,6 @@ class TestSshKeyPreflightGate:
 
     def test_probe_scope_uses_repo_path_when_set(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -20971,7 +20488,6 @@ class TestSshKeyPreflightGate:
 
     def test_gate_enforced_by_default_still_skips_and_no_bypass_event(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -21040,7 +20556,6 @@ class TestDiskPressurePreflightGate:
 
     def test_available_spawns_normally(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -21055,7 +20570,6 @@ class TestDiskPressurePreflightGate:
 
     def test_low_disk_holds_task_pending_no_attempt_consumed(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -21077,7 +20591,6 @@ class TestDiskPressurePreflightGate:
 
     def test_low_disk_emits_dispatch_tick_disk_pressure_gate(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -21109,7 +20622,6 @@ class TestDiskPressurePreflightGate:
 
     def test_low_disk_emits_operator_warn_line_once_per_client(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -21139,7 +20651,6 @@ class TestDiskPressurePreflightGate:
 
     def test_ssh_key_gate_takes_precedence_over_disk_pressure_gate(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -21162,7 +20673,6 @@ class TestDiskPressurePreflightGate:
 
     def test_disk_pressure_gate_takes_precedence_over_freshness_gate(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -21192,7 +20702,6 @@ class TestDiskPressurePreflightGate:
 
     def test_gate_disabled_bypasses_skip_and_emits_bypass_event(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -21237,7 +20746,6 @@ class TestDiskPressurePreflightGate:
 
     def test_probe_oserror_fails_open_and_dispatches(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -21320,7 +20828,6 @@ class TestHostTmpInodePressureGate:
 
     def test_low_inodes_gate_with_inode_payload(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -21345,7 +20852,6 @@ class TestHostTmpInodePressureGate:
 
     def test_low_inodes_emit_inode_specific_operator_warn_line(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -21370,7 +20876,6 @@ class TestHostTmpInodePressureGate:
 
     def test_attention_latch_is_edge_triggered_and_resets_on_healthy_probe(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -21402,7 +20907,6 @@ class TestHostTmpInodePressureGate:
 
     def test_latch_is_per_client_and_isolated(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         make_git_repo: Callable[[str], Path],
         tmp_path: Path,
@@ -21461,7 +20965,6 @@ class TestHostTmpInodePressureGate:
     )
     def test_threshold_is_max_of_floor_and_fraction(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -21484,7 +20987,6 @@ class TestHostTmpInodePressureGate:
 
     def test_gate_disabled_bypasses_but_still_fires_attention(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -21514,7 +21016,6 @@ class TestHostTmpInodePressureGate:
 
     def test_zero_total_inodes_never_gates(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -21534,7 +21035,6 @@ class TestHostTmpInodePressureGate:
 
     def test_inode_probe_oserror_fails_open(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -21557,7 +21057,6 @@ class TestHostTmpInodePressureGate:
 
     def test_custom_thresholds_thread_from_config(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -21600,7 +21099,6 @@ class TestSpawnInvalidatesStaleContextJson:
 
     def test_deletes_stale_context_json_for_non_local_executor(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
@@ -21679,18 +21177,14 @@ class TestSpawnInvalidatesStaleContextJson:
 class TestRunDispatchLoopSingletonLock:
     """run_dispatch_loop acquires the global singleton lock at entry (#1362)."""
 
-    def test_run_dispatch_loop_once_raises_when_lock_already_held(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_run_dispatch_loop_once_raises_when_lock_already_held(self) -> None:
         """R1: ``--once`` is NOT exempt — a second launch while the lock is
         held (e.g. by a live ``serve``) is refused, not silently allowed
         through as a "quick" single tick."""
         with dispatch_loop_lock(), pytest.raises(DispatchLoopLockedError):
             run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
 
-    def test_run_dispatch_loop_once_acquires_freely_when_unheld(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
+    def test_run_dispatch_loop_once_acquires_freely_when_unheld(self) -> None:
         """R1: ``--once`` acquires and completes when no loop holds the lock."""
         # No prior holder — must complete without raising.
         run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
@@ -21698,7 +21192,7 @@ class TestRunDispatchLoopSingletonLock:
         run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
 
     def test_run_dispatch_loop_force_bypasses_lock_and_warns(
-        self, tmp_dispatch_dirs: Path, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture
     ) -> None:
         """R3: ``force=True`` bypasses an externally-held lock and logs a WARNING."""
         with (
@@ -21749,9 +21243,7 @@ class TestUnproductiveAttemptRouting:
 
     # -- Rule 5: generic block ---------------------------------------------
 
-    def test_same_stage_block_with_no_evidence_is_charged(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_same_stage_block_with_no_evidence_is_charged(self, tmp_path: Path) -> None:
         """The baseline unproductive claim: parked, nothing to show for it."""
         from cw.dispatch import apply_staged_decision
 
@@ -21767,9 +21259,7 @@ class TestUnproductiveAttemptRouting:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.unproductive_attempts == 1
 
-    def test_same_stage_block_with_commits_is_not_charged(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_same_stage_block_with_commits_is_not_charged(self, tmp_path: Path) -> None:
         """Commits pushed — the claim did real work even though it parked."""
         from cw.dispatch import apply_staged_decision
 
@@ -21785,7 +21275,7 @@ class TestUnproductiveAttemptRouting:
         assert task.unproductive_attempts == 0
 
     def test_same_stage_block_with_review_findings_is_not_charged(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """#1727's core case: a review that parked *because* it found MUST_FIXes."""
         from cw.dispatch import apply_staged_decision
@@ -21805,7 +21295,7 @@ class TestUnproductiveAttemptRouting:
     # -- R2: mechanically-rejected MUST_FIX is never chargeable -------------
 
     def test_mechanically_rejected_must_fix_is_never_charged(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """R2 regression: this park is a reviewer malfunction, not a wasted claim.
 
@@ -21831,9 +21321,7 @@ class TestUnproductiveAttemptRouting:
 
     # -- Rules 3b / 4: terminal-ish landings --------------------------------
 
-    def test_merge_pending_with_commits_is_not_charged(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_merge_pending_with_commits_is_not_charged(self, tmp_path: Path) -> None:
         from cw.dispatch import apply_staged_decision
 
         task = self._make_running_task("UP-5", stage=Stage.FINALIZE)
@@ -21849,9 +21337,7 @@ class TestUnproductiveAttemptRouting:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.unproductive_attempts == 0
 
-    def test_no_op_is_never_charged(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_no_op_is_never_charged(self, tmp_path: Path) -> None:
         """Rule 4: pre-flight already satisfied is a genuine terminal success."""
         from cw.dispatch import apply_staged_decision
 
@@ -21866,9 +21352,7 @@ class TestUnproductiveAttemptRouting:
 
     # -- Rule 1: scope-gated approval park ----------------------------------
 
-    def test_scope_gated_park_with_no_evidence_is_charged(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_scope_gated_park_with_no_evidence_is_charged(self, tmp_path: Path) -> None:
         from cw.dispatch import apply_staged_decision
 
         task = self._make_running_task("UP-7", stage=Stage.PLAN, scope_hint="large")
@@ -21884,7 +21368,7 @@ class TestUnproductiveAttemptRouting:
         assert task.unproductive_attempts == 1
 
     def test_scope_gated_park_with_evidence_is_not_charged(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         from cw.dispatch import apply_staged_decision
 
@@ -21903,7 +21387,7 @@ class TestUnproductiveAttemptRouting:
     # -- Rule 3: a stage advance is productive via the lifecycle hardcode ----
 
     def test_stage_advance_is_not_charged_and_does_not_double_charge(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """A forward advance is productive by construction, charged exactly zero times.
 
@@ -21926,7 +21410,7 @@ class TestUnproductiveAttemptRouting:
     # -- end-to-end ticket regressions --------------------------------------
 
     def test_1727_productive_sequence_never_reaches_the_ceiling(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """#1727 replay: five productive claims must charge zero.
 
@@ -21983,7 +21467,7 @@ class TestUnproductiveAttemptRouting:
         assert task.unproductive_attempts == 0
 
     def test_1653_crashloop_sequence_still_reaches_the_ceiling(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """#1653 replay: repeated evidence-free parks still hit the cap.
 
@@ -22009,7 +21493,7 @@ class TestUnproductiveAttemptRouting:
         assert task.unproductive_attempts == ceiling
 
     def test_1896_plan_stage_resolution_sequence_never_reaches_the_ceiling(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """#1896: wired ``resolution_consumed`` keeps a plan-stage clarification
         loop off the ceiling, same shape as #1727's IMPL/REVIEW tail above.
@@ -22059,7 +21543,7 @@ class TestUnproductiveAttemptRouting:
         assert task.unproductive_attempts < 10  # ceiling
 
     def test_1896_plan_stage_pause_without_resolution_evidence_is_charged(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         """Baseline-omission coverage only -- NOT a reclaim/staleness test.
 
@@ -22132,7 +21616,6 @@ class TestClaimNextPendingStalePr:
 
     def test_plan_stage_task_with_open_pr_is_parked_not_claimed(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -22164,7 +21647,6 @@ class TestClaimNextPendingStalePr:
 
     def test_impl_stage_task_with_open_pr_is_parked(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -22191,7 +21673,6 @@ class TestClaimNextPendingStalePr:
 
     def test_review_stage_task_claims_normally(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -22219,7 +21700,6 @@ class TestClaimNextPendingStalePr:
 
     def test_ticket_absent_from_the_gate_set_claims_normally(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -22247,7 +21727,6 @@ class TestClaimNextPendingStalePr:
 
     def test_priority_path_also_parks(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -22280,7 +21759,6 @@ class TestClaimNextPendingStalePr:
 
     def test_park_emits_tick_and_attention_events(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -22323,7 +21801,6 @@ class TestClaimNextPendingStalePr:
 
     def test_gate_resolver_is_called_once_per_client_per_tick(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -22348,7 +21825,6 @@ class TestClaimNextPendingStalePr:
 
     def test_gate_skipped_when_client_has_no_capacity(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -22394,7 +21870,6 @@ class TestClaimNextPendingStalePr:
 
     def test_gate_disabled_by_config_toggle(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -22494,7 +21969,6 @@ class TestClaimNextPendingTrackerMcpGate:
 
     def test_tracker_mcp_gate_blocks_pending_task_when_plugin_unavailable(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -22553,7 +22027,6 @@ class TestClaimNextPendingTrackerMcpGate:
 
     def test_tracker_mcp_gate_allows_dispatch_when_plugin_enabled(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -22573,7 +22046,6 @@ class TestClaimNextPendingTrackerMcpGate:
 
     def test_tracker_mcp_gate_fails_open_and_dispatches_when_settings_file_missing(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -22598,7 +22070,6 @@ class TestClaimNextPendingTrackerMcpGate:
 
     def test_tracker_mcp_gate_disabled_by_default_skips_resolver_entirely(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -22622,7 +22093,6 @@ class TestClaimNextPendingTrackerMcpGate:
 
     def test_tracker_mcp_gate_skipped_when_client_has_no_capacity(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
@@ -22653,7 +22123,6 @@ class TestClaimNextPendingTrackerMcpGate:
 
     def test_tracker_mcp_gate_never_parks_a_review_stage_task(
         self,
-        tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -22710,7 +22179,7 @@ class TestStaleDispatchSentinelRouting:
         }
 
     def test_routes_to_blocked_on_user_with_verbatim_disposition(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         from cw.dispatch import apply_staged_decision
 
@@ -22724,9 +22193,7 @@ class TestStaleDispatchSentinelRouting:
         assert task.blocked_reason == "pr_already_open"
         assert task.pr_url is None
 
-    def test_does_not_charge_an_unproductive_attempt(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_does_not_charge_an_unproductive_attempt(self, tmp_path: Path) -> None:
         """A stale-dispatch report legitimately carries zero commits (#1862).
 
         Without the Rule 5 override it would be evidence-classified as
@@ -22743,7 +22210,7 @@ class TestStaleDispatchSentinelRouting:
         assert task.unproductive_attempts == 0
 
     def test_emits_needs_attention_with_status_paused_status(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
         from cw.dispatch import apply_staged_decision
 
@@ -22765,9 +22232,7 @@ class TestStaleDispatchSentinelRouting:
         # the blocker reason travels verbatim for the attention monitor.
         assert matching[0].payload["breadcrumbs"] == "pr_already_open"
 
-    def test_park_stamps_blocked_on_pr(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_park_stamps_blocked_on_pr(self, tmp_path: Path) -> None:
         """GitHub #1902 fast-follow: stale_dispatch shares the identical
         blocker.details PR-number extraction Variant B's
         prior_pipeline_pr_open already uses (routing/pr_refs.py's
@@ -22785,9 +22250,7 @@ class TestStaleDispatchSentinelRouting:
         assert task.blocked_reason == "pr_already_open"
         assert task.blocked_on_pr == 1899
 
-    def test_malformed_details_leaves_blocked_on_pr_none(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
-    ) -> None:
+    def test_malformed_details_leaves_blocked_on_pr_none(self, tmp_path: Path) -> None:
         """Fail-closed: mirrors
         test_prior_pipeline_pr_open_malformed_details_leaves_blocked_on_pr_none
         for the stale_dispatch producer -- a details string with no
@@ -22843,9 +22306,7 @@ def _legacy_ceiling_count(sessions: list[Session], name: str) -> int:
     )
 
 
-def test_client_tick_snapshot_running_count_matches_legacy_ceiling_oracle(
-    tmp_config_dir: Path,
-) -> None:
+def test_client_tick_snapshot_running_count_matches_legacy_ceiling_oracle() -> None:
     from cw.dispatch.tick import _client_tick_snapshot
 
     sessions = _mixed_ceiling_sessions()
@@ -22860,9 +22321,7 @@ def test_client_tick_snapshot_running_count_matches_legacy_ceiling_oracle(
     assert snapshot.running_count == expected
 
 
-def test_usage_limit_skip_event_running_count_matches_legacy_ceiling_oracle(
-    tmp_config_dir: Path,
-) -> None:
+def test_usage_limit_skip_event_running_count_matches_legacy_ceiling_oracle() -> None:
     from cw.dispatch.gating import _emit_usage_limit_skip_events
 
     sessions = _mixed_ceiling_sessions()
