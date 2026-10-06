@@ -18,10 +18,13 @@ from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     CwState,
     LivenessBucket,
+    LocalLivenessHandle,
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
+    Session,
     SessionOrigin,
+    SessionPurpose,
     SessionStatus,
     Stage,
     TicketTask,
@@ -364,8 +367,11 @@ def test_event_payload_shape_matches_spec(
         "old_bucket",
         "new_bucket",
         "stale_minutes",
+        "staleness_source",
     }
     assert isinstance(event.payload["stale_minutes"], float)
+    # Ordinary transcript-mtime evidence keeps its legacy source label (#2417).
+    assert event.payload["staleness_source"] == "transcript"
 
 
 def test_stage_resolved_via_task_by_ticket_not_session_stage(
@@ -579,6 +585,9 @@ def test_no_spawn_stamp_keeps_generic_unresponsive_reason(
     events = _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
     assert len(events) == 1
     assert events[0]["paused_status"] == _SESSION_UNRESPONSIVE_REASON
+    # Transcript-sourced wording and source label are unchanged (#2417).
+    assert events[0]["staleness_source"] == "transcript"
+    assert str(events[0]["breadcrumbs"]).startswith("transcript flat 60m at stage plan")
 
 
 def test_terminal_sentinel_still_suppresses_past_deadline(
@@ -1117,3 +1126,322 @@ def test_requeue_after_suppressed_crossing_pages_on_next_tick(
     assert len(attention) == 1
     assert attention[0]["paused_status"] == _SESSION_UNRESPONSIVE_REASON
     _deps.fire_push_notification.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# #2417: session-age evidence for an unobservable (no surface, no Claude id, no
+# transcript, no local handle) DAEMON session. The transcript path is never
+# consulted for it, so a reused worktree's older/other transcripts cannot make
+# it look alive (or be mislabelled ``transcript``).
+# ---------------------------------------------------------------------------
+
+_UNOBSERVABLE_BREADCRUMB = (
+    "no surface, no Claude session id, no transcript, no local liveness handle "
+    "(unobservable — never started or unmonitorable); no sentinel; "
+    "session left running"
+)
+
+
+def _mk_unobservable_session(
+    *, tmp_path: Path, **overrides: object
+) -> tuple[Session, Path]:
+    """DAEMON session with null surface_ref, null claude_session_id, no handle."""
+    worktree = tmp_path / "wt"
+    sess = _make_daemon_session(
+        **{
+            "surface_ref": None,
+            "claude_session_id": None,
+            "worktree_path": worktree,
+            "started_at": _STARTED_AT,
+            "name": "client-a/auto-dev/T-1",
+            **overrides,
+        }
+    )
+    return sess, worktree
+
+
+def _age(minutes: float) -> datetime:
+    """A ``now`` that is *minutes* after the fixture session's ``started_at``."""
+    return _STARTED_AT + timedelta(minutes=minutes)
+
+
+def _review_task(**overrides: object) -> TicketTask:
+    kwargs: dict[str, object] = {
+        "ticket_id": "T-1",
+        "client": "client-a",
+        "stage": Stage.REVIEW,
+    }
+    kwargs.update(overrides)
+    return TicketTask.model_validate(kwargs)
+
+
+def test_session_age_below_review_floor_stays_live(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """14m old, REVIEW floor 15m -> still LIVE, no candidate."""
+    sess, _ = _mk_unobservable_session(tmp_path=tmp_path)
+
+    candidates = _detect_liveness_candidates(
+        CwState(sessions=[sess]),
+        now=_age(14),
+        native_live=set(),
+        config=OrchestratorConfig(),
+        task_by_ticket={"T-1": _review_task()},
+    )
+
+    assert candidates == []
+
+
+def test_session_age_at_review_floor_enters_stale_15m_with_source(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """15m old -> STALE_15M from started_at; both source fields say session_age."""
+    sess, _ = _mk_unobservable_session(tmp_path=tmp_path)
+    state = CwState(sessions=[sess])
+
+    candidates = record_session_liveness_changes(
+        state,
+        now=_age(15),
+        native_live=set(),
+        config=OrchestratorConfig(),
+        task_by_ticket={"T-1": _review_task()},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].new_bucket == LivenessBucket.STALE_15M
+    assert candidates[0].staleness_source == "session_age"
+    assert candidates[0].stale_minutes == pytest.approx(15.0)
+    assert candidates[0].distress is False
+    assert sess.liveness_bucket == LivenessBucket.STALE_15M
+    changed = _events_of(OrchestratorEventType.SESSION_LIVENESS_CHANGED)
+    assert len(changed) == 1
+    assert changed[0]["staleness_source"] == "session_age"
+    assert changed[0]["stage"] == "review"
+    assert _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION) == []
+
+
+def test_session_age_top_bucket_pages_with_session_age_breadcrumb(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """46m old -> STALE_45M + needs_attention naming session-age evidence."""
+    sess, _ = _mk_unobservable_session(tmp_path=tmp_path)
+    state = CwState(sessions=[sess])
+
+    candidates = record_session_liveness_changes(
+        state,
+        now=_age(46),
+        native_live=set(),
+        config=OrchestratorConfig(),
+        task_by_ticket={"T-1": _review_task()},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].distress is True
+    changed = _events_of(OrchestratorEventType.SESSION_LIVENESS_CHANGED)
+    assert [e["staleness_source"] for e in changed] == ["session_age"]
+    attention = _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+    assert len(attention) == 1
+    assert attention[0]["staleness_source"] == "session_age"
+    assert attention[0]["paused_status"] == _SESSION_UNRESPONSIVE_REASON
+    assert attention[0]["breadcrumbs"] == (
+        f"session age 46m at stage review; elapsed 2760s; {_UNOBSERVABLE_BREADCRUMB}"
+    )
+    assert "transcript flat" not in str(attention[0]["breadcrumbs"])
+    _deps.fire_push_notification.assert_called_once()
+
+
+def test_session_age_fallback_is_signal_only(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Only the bucket latch / attention debounce change; no disposition."""
+    sess, _ = _mk_unobservable_session(tmp_path=tmp_path)
+    task = _review_task(status=QueueItemStatus.RUNNING, session_id=sess.id)
+    state = CwState(sessions=[sess])
+    latch_fields = {"liveness_bucket", "liveness_attention_next_eligible_at"}
+    session_before = sess.model_dump(exclude=latch_fields)
+    task_before = task.model_dump()
+
+    record_session_liveness_changes(
+        state,
+        now=_age(60),
+        native_live=set(),
+        config=OrchestratorConfig(),
+        task_by_ticket={"T-1": task},
+    )
+
+    assert sess.liveness_bucket == LivenessBucket.STALE_45M
+    assert sess.liveness_attention_next_eligible_at is not None
+    assert sess.model_dump(exclude=latch_fields) == session_before
+    assert task.model_dump() == task_before
+    assert state.sessions == [sess]
+
+
+def test_session_age_honours_non_default_review_floor(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """The configured ladder stays authoritative: REVIEW floor 5m."""
+    sess, _ = _mk_unobservable_session(tmp_path=tmp_path)
+    config = OrchestratorConfig(liveness_first_bucket_by_stage={Stage.REVIEW: 5})
+
+    below = _detect_liveness_candidates(
+        CwState(sessions=[sess]),
+        now=_age(4),
+        native_live=set(),
+        config=config,
+        task_by_ticket={"T-1": _review_task()},
+    )
+    at_floor = _detect_liveness_candidates(
+        CwState(sessions=[sess]),
+        now=_age(5),
+        native_live=set(),
+        config=config,
+        task_by_ticket={"T-1": _review_task()},
+    )
+
+    assert below == []
+    assert [c.new_bucket for c in at_floor] == [LivenessBucket.STALE_15M]
+
+
+def test_session_age_excludes_session_with_local_liveness_handle(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """A local process handle keeps authority with reconcile/local.py (#2388)."""
+    sess, _ = _mk_unobservable_session(
+        tmp_path=tmp_path,
+        local_liveness=LocalLivenessHandle(pid=4242, start_time_ns=1, backend="codex"),
+    )
+
+    candidates = _detect_liveness_candidates(
+        CwState(sessions=[sess]),
+        now=_age(120),
+        native_live=set(),
+        config=OrchestratorConfig(),
+        task_by_ticket={"T-1": _review_task()},
+    )
+
+    assert candidates == []
+
+
+def test_session_age_excludes_orchestrate_purpose(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Mirrors doctor wedge class 9: ORCHESTRATE sessions are never classified."""
+    sess, _ = _mk_unobservable_session(
+        tmp_path=tmp_path, purpose=SessionPurpose.ORCHESTRATE
+    )
+
+    candidates = _detect_liveness_candidates(
+        CwState(sessions=[sess]),
+        now=_age(120),
+        native_live=set(),
+        config=OrchestratorConfig(),
+        task_by_ticket={"T-1": _review_task()},
+    )
+
+    assert candidates == []
+
+
+def test_session_age_requires_both_ids_null(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """A session with a Claude id but no surface keeps the fail-open skip."""
+    sess, _ = _mk_unobservable_session(tmp_path=tmp_path, claude_session_id="c-1")
+
+    candidates = _detect_liveness_candidates(
+        CwState(sessions=[sess]),
+        now=_age(120),
+        native_live=set(),
+        config=OrchestratorConfig(),
+        task_by_ticket={"T-1": _review_task()},
+    )
+
+    assert candidates == []
+
+
+def test_session_age_ignores_sibling_transcripts_in_reused_worktree(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """A fresh post-start *.jsonl in the project dir must not mask the session.
+
+    The widened transcript glob would attribute it to this session (and label
+    the evidence ``transcript``); the fallback never consults it.
+    """
+    sess, worktree = _mk_unobservable_session(tmp_path=tmp_path)
+    sibling = _write_idle_transcript(home, worktree, filename="lingering-impl.jsonl")
+    fresh = _age(59).timestamp()
+    os.utime(str(sibling), (fresh, fresh))
+
+    candidates = _detect_liveness_candidates(
+        CwState(sessions=[sess]),
+        now=_age(60),
+        native_live=set(),
+        config=OrchestratorConfig(),
+        task_by_ticket={"T-1": _review_task()},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].new_bucket == LivenessBucket.STALE_45M
+    assert candidates[0].staleness_source == "session_age"
+    assert candidates[0].stale_minutes == pytest.approx(60.0)
+
+
+@pytest.mark.parametrize("stamp_age_minutes", [5, 55])
+def test_session_age_page_ignores_leftover_spawn_stamp(
+    tmp_config_dir: Path, tmp_path: Path, stamp_age_minutes: int
+) -> None:
+    """A prior stage's unresolved agent_spawn_stamp neither suppresses the page
+    (young stamp) nor reshapes it to fix_loop_await_deadline_exceeded (old)."""
+    sess, worktree = _mk_unobservable_session(tmp_path=tmp_path)
+    _write_spawn_stamp(
+        worktree,
+        unresolved_count=1,
+        stamped_at=_age(60) - timedelta(minutes=stamp_age_minutes),
+    )
+
+    candidates = record_session_liveness_changes(
+        CwState(sessions=[sess]),
+        now=_age(60),
+        native_live=set(),
+        config=OrchestratorConfig(fix_loop_await_deadline_minutes=30),
+        task_by_ticket={"T-1": _review_task()},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].distress is True
+    assert candidates[0].spawn_age_seconds is None
+    assert candidates[0].spawn_deadline_minutes is None
+    attention = _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+    assert len(attention) == 1
+    assert attention[0]["paused_status"] == _SESSION_UNRESPONSIVE_REASON
+
+
+def test_session_age_renotifies_at_top_bucket_like_transcript_path(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Latched at STALE_45M, the debounce re-fires with session_age wording."""
+    sess, _ = _mk_unobservable_session(tmp_path=tmp_path)
+    state = CwState(sessions=[sess])
+    config = OrchestratorConfig(liveness_attention_renotify_interval_minutes=10)
+    first = record_session_liveness_changes(
+        state,
+        now=_age(50),
+        native_live=set(),
+        config=config,
+        task_by_ticket={"T-1": _review_task()},
+    )
+    assert len(first) == 1
+
+    second = record_session_liveness_changes(
+        state,
+        now=_age(61),
+        native_live=set(),
+        config=config,
+        task_by_ticket={"T-1": _review_task()},
+    )
+
+    assert len(second) == 1
+    assert second[0].old_bucket == second[0].new_bucket == LivenessBucket.STALE_45M
+    assert second[0].staleness_source == "session_age"
+    attention = _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+    assert len(attention) == 2
+    assert "session age 61m" in str(attention[1]["breadcrumbs"])
