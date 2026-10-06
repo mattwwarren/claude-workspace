@@ -29,8 +29,8 @@ multiple modules or future tickets — are recorded as ADRs; see
 
 ## §2 State & Locking Model
 
-Two ADRs govern how `cw` mutates its own state, and both close a class of bug
-that showed up as silent, hard-to-reproduce corruption before they landed.
+Three ADRs govern how `cw` mutates its own state and locks it; each closes a
+class of bug that showed up as silent corruption or a hang before it landed.
 
 **ADR-0005 — single state lock.** Every mutation of `sessions.json`
 (`CwState`) MUST go through a `mutate_state()` helper that holds an exclusive
@@ -53,9 +53,20 @@ status and the one hook point for any logic that must fire on a transition
 (e.g. disposition stamping/clearing), so a cross-cutting behavior change is a
 one-site edit instead of an N-site sweep across scattered assignments.
 
-See `docs/adr/0005-single-state-lock.md` and
-`docs/adr/0011-ticket-status-transitions-through-one-seam.md` for the full
-decisions, invariants, and alternatives considered.
+**ADR-0019 — lock hierarchy.** The state-file locks are ranked
+(`sessions_lock`, then the STATE locks such as `dev_queue_lock`, then the
+leaf inbox and history locks) and acquired in non-decreasing rank;
+ADR-0005's "`state_lock` → `dev_queue_lock`" order is the first instance. A
+shared guard (`cw._lock_guard`) turns a same-thread re-entry, which used to
+hang forever in `flock()`, into `CwLockReentrancyError`; rank violations raise
+under `CW_LOCK_DEBUG=1` and log a WARNING otherwise. No subprocess runs under
+`sessions_lock` outside a ticket-tracked allowlist, and a suite-wide test
+harness enforces all three.
+
+See `docs/adr/0005-single-state-lock.md`,
+`docs/adr/0011-ticket-status-transitions-through-one-seam.md` and
+`docs/adr/0019-lock-hierarchy-and-no-subprocess-under-sessions-lock.md` for
+the full decisions, invariants, and alternatives considered.
 
 ## §3 Session/Task Lifecycle
 
@@ -287,6 +298,12 @@ cites one of these.
     worktree; time-based heuristics land as signals only, and a destructive
     act needs evidence or an operator command. — Source:
     `docs/adr/0014-timers-never-destroy-work.md`
+14. Lock discipline: state-file locks are acquired in non-decreasing rank
+    (`sessions_lock`, then STATE locks, then a leaf inbox/history lock, with
+    nothing taken under a leaf), a held lock is never re-entered, and no
+    subprocess runs under `sessions_lock` outside the ticket-tracked
+    allowlist. — Source:
+    `docs/adr/0019-lock-hierarchy-and-no-subprocess-under-sessions-lock.md`
 
 ## §8 Anti-patterns
 
@@ -354,6 +371,12 @@ principle, grounded in the same source document.
     stops a daemon surface, or removes a worktree because a clock ran out
     rather than because evidence arrived. — Source:
     `docs/adr/0014-timers-never-destroy-work.md`
+14. Acquiring a lock against the hierarchy (a STATE lock then
+    `sessions_lock`, anything under an inbox or history lock), calling a
+    function that re-takes a lock the caller already holds, or adding a
+    git/gh/`claude` subprocess under `sessions_lock` without a follow-up
+    ticket and allowlist entry. — Source:
+    `docs/adr/0019-lock-hierarchy-and-no-subprocess-under-sessions-lock.md`
 
 ## Reference Table
 
@@ -374,9 +397,3 @@ new one.
 | [0013](docs/adr/0013-agent-delegated-ticket-work.md) | Provider-portable ticket work is agent work; cw keeps one GitHub-only programmatic client | Accepted |
 | [0015](docs/adr/0015-voided-finding-suppression-is-content-anchored.md) | Voided-finding suppression is content-anchored, never positional | Accepted |
 | [0016](docs/adr/0016-ledger-claim-matching-is-gated-and-measured.md) | Ledger claim matching ships gated and measured, never on by default | Accepted |
-
-**Footnote:** `docs/adr/README.md`'s index table lists ADR-0005 as
-"Proposed", but ADR-0005's own file has `**Status:** Accepted — implemented
-(single state lock + mutate_state, #387/#563; released v1.1.0)`. This
-document treats ADR-0005 as Accepted — the file's own status line is
-authoritative; the index table is stale.

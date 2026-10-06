@@ -271,7 +271,7 @@ cw list
 - **Flat JSON state**: Simple, human-readable. Single-user tool.
 - **Native daemon backend**: Workers are spawned via `claude --bg` and tracked by short hex session id in `~/.claude/daemon/roster.json`. No multiplexer required.
 - **On-demand reconciliation**: `cw status`, `cw list`, `cw start`, and each `dispatch_tick` call `reconcile()` to detect phantoms (sessions in state but absent from the daemon roster). By default (`reap_policy: signal_only`, per ADR-0006) detection emits `SESSION_REAP_PROPOSED` and routes the task to `BLOCKED_ON_USER` — no destructive mutation. Destructive act (RUNNING→PENDING revert, daemon stop, worktree removal) requires `reap_policy: auto` for the lane, or an explicit `cw doctor --reap`. No background daemon needed.
-- **File-based locking**: Prevents concurrent state corruption from parallel session operations.
+- **File-based locking**: Prevents concurrent state corruption from parallel session operations. Locks are ranked and re-entry raises instead of hanging; no subprocess runs under `sessions_lock` outside a ticketed allowlist ([ADR-0019](docs/adr/0019-lock-hierarchy-and-no-subprocess-under-sessions-lock.md)).
 - **Event history**: Audit trail for session lifecycle transitions.
 
 **Operator runbooks:** [`docs/dispatch-runbook.md`](docs/dispatch-runbook.md) — end-to-end `cw dev-queue` dispatch procedure. [`docs/session-disposition.md`](docs/session-disposition.md) — how to read a session's outcome from the transcript sentinel.
