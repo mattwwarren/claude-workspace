@@ -24,6 +24,7 @@ from cw.codex_driver import (
     STAGE_REVIEW,
     run_codex_review_stage,
 )
+from cw.codex_fix_loop.commit import _build_fix_codex_argv
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS, CODEX_REVIEW_UNPARSEABLE
 from cw.codex_runner import FakeCodexRunner
 from cw.config import load_state, save_state
@@ -45,7 +46,7 @@ from cw.models import (
     TicketTask,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests.conftest import _make_daemon_session
+from tests.conftest import _make_daemon_session, _write_global_toggle, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -155,13 +156,22 @@ def _seed(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
 
-def _fix_loop_client(worktree: Path) -> ClientConfig:
+def _fix_loop_client(worktree: Path, *, lane_flag: bool | None = True) -> ClientConfig:
     return ClientConfig(
         name="test",
         workspace_path=worktree,
         default_branch="main",
-        lanes=[LaneConfig(name=_FIX_LOOP_LANE, codex_fix_loop_enabled=True)],
+        lanes=[LaneConfig(name=_FIX_LOOP_LANE, codex_fix_loop_enabled=lane_flag)],
     )
+
+
+def _workspace_write_calls(runner: FakeCodexRunner) -> list[list[str]]:
+    """Runner calls whose argv carries ``workspace-write`` (the fix pass sandbox)."""
+    return [
+        argv
+        for call in runner.calls
+        if isinstance(argv := call["argv"], list) and "workspace-write" in argv
+    ]
 
 
 def _run_stage(runner: FakeCodexRunner) -> None:
@@ -246,6 +256,97 @@ def test_run_codex_review_stage_must_fix_runs_fix_loop_to_cap_and_parks(
     body = post_mock.call_args.args[1]
     assert "BLOCKING" in body
     assert "0 of 1" in body
+
+
+def test_run_codex_review_stage_lane_false_over_global_true_never_builds_fix_argv(
+    tmp_config_dir: Path,
+    make_worktree_with_change: Callable[..., Path],
+) -> None:
+    """#2541: lane ``false`` beats global ``true`` -> zero workspace-write fix passes.
+
+    A blocking cycle-0 verdict parks on CODEX_MUST_FIX_FINDINGS without ever
+    building a fix argv, invoking a workspace-write codex, or moving HEAD.
+    """
+    worktree = _worktree_with_change(make_worktree_with_change, "wt-driver-optout")
+    client = _fix_loop_client(worktree, lane_flag=False)
+    _seed_client(tmp_config_dir=tmp_config_dir, worktree=worktree, client=client)
+    _write_global_toggle(tmp_config_dir, "default_codex_fix_loop_enabled", "true")
+    doc = _reviewer_doc(
+        [_finding(severity="MUST_FIX", file="new.py", line=1, evidence="def broken():")]
+    )
+    runner = FakeCodexRunner(returncode=0, output_file_content=doc)
+    head_before = git_in(worktree, "rev-parse", "HEAD")
+
+    with (
+        patch("cw.codex_driver.get_client", return_value=client),
+        patch("cw.codex_background._post_review_comment") as post_mock,
+        patch(
+            "cw.codex_fix_loop.commit._build_fix_codex_argv",
+            wraps=_build_fix_codex_argv,
+        ) as argv_mock,
+    ):
+        _run_stage(runner)
+
+    argv_mock.assert_not_called()
+    assert _workspace_write_calls(runner) == []
+    result = _persisted_result()
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == CODEX_MUST_FIX_FINDINGS
+    assert result.review.fix_cycles_used == 0
+    assert result.health.fix_loop_escalated is not True
+    assert git_in(worktree, "rev-parse", "HEAD") == head_before
+    post_mock.assert_called_once()
+    assert "BLOCKING" in post_mock.call_args.args[1]
+
+
+@pytest.mark.parametrize(
+    ("lane_flag", "global_flag", "expect_fix"),
+    [
+        (False, "true", False),
+        (None, "true", True),
+        (True, "false", True),
+    ],
+    ids=["lane-false-global-true", "lane-unset-global-true", "lane-true-global-false"],
+)
+def test_run_codex_review_stage_fix_loop_resolution_matrix(
+    tmp_config_dir: Path,
+    make_worktree_with_change: Callable[..., Path],
+    lane_flag: bool | None,
+    global_flag: str,
+    expect_fix: bool,
+) -> None:
+    """#2541: positive controls proving the argv spy is aimed at the real call."""
+    worktree = _worktree_with_change(
+        make_worktree_with_change, f"wt-driver-matrix-{lane_flag}-{global_flag}"
+    )
+    client = _fix_loop_client(worktree, lane_flag=lane_flag)
+    _seed_client(tmp_config_dir=tmp_config_dir, worktree=worktree, client=client)
+    _write_global_toggle(tmp_config_dir, "default_codex_fix_loop_enabled", global_flag)
+    doc = _reviewer_doc(
+        [_finding(severity="MUST_FIX", file="new.py", line=1, evidence="def broken():")]
+    )
+    runner = FakeCodexRunner(returncode=0, output_file_content=doc)
+
+    with (
+        patch("cw.codex_driver.get_client", return_value=client),
+        patch("cw.codex_background._post_review_comment"),
+        patch(
+            "cw.codex_fix_loop.commit._build_fix_codex_argv",
+            wraps=_build_fix_codex_argv,
+        ) as argv_mock,
+    ):
+        _run_stage(runner)
+
+    result = _persisted_result()
+    if expect_fix:
+        assert argv_mock.call_count >= 1
+        assert len(_workspace_write_calls(runner)) >= 1
+        assert result.review.fix_cycles_used == 5
+    else:
+        argv_mock.assert_not_called()
+        assert _workspace_write_calls(runner) == []
+        assert result.review.fix_cycles_used == 0
 
 
 def test_run_codex_review_stage_clean_with_fix_loop_enabled_states_available(

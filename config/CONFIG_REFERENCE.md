@@ -62,7 +62,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `tracker_mcp_gate` | TrackerMcpGateConfig \| null | `null` | Per-client opt-in for the #2442 pre-dispatch tracker-MCP gate. `null` (the default) means the gate never runs for this client and never reads any branch's settings file; there is no fleet-wide `orchestrator.yaml` switch. Sub-fields: `enabled: bool = false` (must be `true` for the gate to run), `plugin_id: str` (required — the exact `enabledPlugins` key your tracker's MCP plugin registers under, e.g. `"linear@acme-marketplace"`; matched verbatim, no `@`-suffix stripping, case-sensitive), `settings_path: str = ".claude/settings.json"` (repo-relative file read from the ticket branch via `git show`). Before a PLAN/IMPL-stage ticket is claimed, a branch whose settings file parses but whose `enabledPlugins` (an object of `"<plugin>@<marketplace>": bool`, or a list of plugin ids) lacks `plugin_id` or sets it `false` is parked `BLOCKED_ON_USER` (disposition `tracker_mcp_gate`) instead of spawned. Fails open — spawn proceeds, reason logged once — when the branch does not exist yet, the file is missing, the JSON is malformed, or `enabledPlugins` is absent or an unrecognized shape. |
 | `repo_path` | path | *none** | Shared repo path (worktree mode) |
 | `branch` | string | *none** | Branch name (worktree mode) |
-| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes (a scheduling boundary for dev-queue tickets; manage with `cw lane add/ls/pause/resume/rm`, target with `cw dev-queue add --lane` / `cw dev-queue move`). Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: "signal_only" | "auto" | null = null` (null inherits the global `reap_policy` from `orchestrator.yaml`), `pipeline: PipelineConfig | null = null` (per-lane per-stage executor override — see [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below), `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below), `review_recipes: dict[str,bool] | null = null` (RFC 0010 Phase 3 — per-lane review-recipe enablement; see [Review Recipe Enablement](#review-recipe-enablement-rfc-0010-phase-3) below), `park_on_abandoned_exit: dict[str,bool] | null = null` (#2135 — per-lane enablement of the Stop-hook abandoned-exit park; see [Abandoned-Exit Park Enablement](#abandoned-exit-park-enablement-github-2135) below), `codex_review_tiers: dict[str,bool] | null = null` (#2210 — per-lane enablement for the codex review ledger's optional matching tiers; the one recognised key is `claim_suppression`; an unrecognised key fails loud at config load; see [Codex Claim-Match Suppression Gate](#codex-claim-match-suppression-gate-2210) below), `codex_fix_loop_enabled: true | null = null` (#1553 — lane override for the codex backend's autonomous MUST_FIX fix loop; `null` defers to the global `default_codex_fix_loop_enabled` in `orchestrator.yaml`; see [Codex Fix-Loop Gate](#codex-fix-loop-gate-1465) below), `attempt_ceiling: int | false | null = null` (#1751 — lane override for the global attempt ceiling; `null` defers to `global_attempt_ceiling` in `orchestrator.yaml`, `false` disables the ceiling for this lane; see [Per-Lane Attempt Ceiling](#per-lane-attempt-ceiling-1751) below), `busy_wait_guard_enabled: bool | null = null` / `busy_wait_guard_repeat_threshold: int | null = null` / `busy_wait_guard_window_seconds: int | null = null` (#1946 — lane overrides for the `cw guard-busy-wait` PreToolUse hook; `null` on any of the three defers to the matching global in `orchestrator.yaml`; see [Busy-Wait Guard](#busy-wait-guard-1946) below), `subagent_spawn_guard_enabled: bool | null = null` (#2211 — lane override for the `cw agent-spawn-pre` spawn-shape policy; `null` defers to the global default in `orchestrator.yaml`; see [Subagent Spawn Guard](#subagent-spawn-guard-2211) below), `background_tool_guard_enabled: bool | null = null` (#2303 — lane override for the `cw background-tool-guard-pre` guard; `null` defers to the global default in `orchestrator.yaml`; see [Background Tool Guard](#background-tool-guard-2303) below), `disposition_drift_check_enabled: bool | null = null` (#2232 — lane override for the review ledger's drift check; `null` defers to the global default in `orchestrator.yaml`; setting it `false` also refuses to arm this lane's claim tier; see [Disposition Drift Check Gate](#disposition-drift-check-gate-2232) below). When no lanes are declared, a single implicit `default` lane is synthesized. |
+| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes (a scheduling boundary for dev-queue tickets; manage with `cw lane add/ls/pause/resume/rm`, target with `cw dev-queue add --lane` / `cw dev-queue move`). Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: "signal_only" | "auto" | null = null` (null inherits the global `reap_policy` from `orchestrator.yaml`), `pipeline: PipelineConfig | null = null` (per-lane per-stage executor override — see [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below), `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below), `review_recipes: dict[str,bool] | null = null` (RFC 0010 Phase 3 — per-lane review-recipe enablement; see [Review Recipe Enablement](#review-recipe-enablement-rfc-0010-phase-3) below), `park_on_abandoned_exit: dict[str,bool] | null = null` (#2135 — per-lane enablement of the Stop-hook abandoned-exit park; see [Abandoned-Exit Park Enablement](#abandoned-exit-park-enablement-github-2135) below), `codex_review_tiers: dict[str,bool] | null = null` (#2210 — per-lane enablement for the codex review ledger's optional matching tiers; the one recognised key is `claim_suppression`; an unrecognised key fails loud at config load; see [Codex Claim-Match Suppression Gate](#codex-claim-match-suppression-gate-2210) below), `codex_fix_loop_enabled: bool | null = null` (#1553, #2541 — lane override for the codex backend's autonomous MUST_FIX fix loop; `true` opts the lane in, `false` opts the lane out of a globally enabled `default_codex_fix_loop_enabled`, `null` defers to the global `default_codex_fix_loop_enabled` in `orchestrator.yaml`; see [Codex Fix-Loop Gate](#codex-fix-loop-gate-1465) below), `attempt_ceiling: int | false | null = null` (#1751 — lane override for the global attempt ceiling; `null` defers to `global_attempt_ceiling` in `orchestrator.yaml`, `false` disables the ceiling for this lane; see [Per-Lane Attempt Ceiling](#per-lane-attempt-ceiling-1751) below), `busy_wait_guard_enabled: bool | null = null` / `busy_wait_guard_repeat_threshold: int | null = null` / `busy_wait_guard_window_seconds: int | null = null` (#1946 — lane overrides for the `cw guard-busy-wait` PreToolUse hook; `null` on any of the three defers to the matching global in `orchestrator.yaml`; see [Busy-Wait Guard](#busy-wait-guard-1946) below), `subagent_spawn_guard_enabled: bool | null = null` (#2211 — lane override for the `cw agent-spawn-pre` spawn-shape policy; `null` defers to the global default in `orchestrator.yaml`; see [Subagent Spawn Guard](#subagent-spawn-guard-2211) below), `background_tool_guard_enabled: bool | null = null` (#2303 — lane override for the `cw background-tool-guard-pre` guard; `null` defers to the global default in `orchestrator.yaml`; see [Background Tool Guard](#background-tool-guard-2303) below), `disposition_drift_check_enabled: bool | null = null` (#2232 — lane override for the review ledger's drift check; `null` defers to the global default in `orchestrator.yaml`; setting it `false` also refuses to arm this lane's claim tier; see [Disposition Drift Check Gate](#disposition-drift-check-gate-2232) below). When no lanes are declared, a single implicit `default` lane is synthesized. |
 | `pipeline` | PipelineConfig | standard 4-stage pipeline, no per-stage models | Per-stage executor configuration (RFC 0005): `stages` (default `[plan, impl, review, finalize]`) and `executors` (default `{}`). See [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below. |
 
 \* Either `workspace_path` OR both `repo_path` + `branch` must be set.
@@ -375,7 +375,10 @@ Recommended models per stage:
 a MUST_FIX finding. The lane-scoped `codex_fix_loop_enabled` gates that loop
 (#1553; see the `lanes` field above), falling through to the global
 `default_codex_fix_loop_enabled` in `orchestrator.yaml` when the lane sets no
-override. Both default to `false` as a fail-safe: turning on `review:
+override. The lane value has three states: `true` (the lane opts in), `false`
+(the lane opts out, even against a global `true`; #2541), and `null` / unset
+(defer to the global). An explicit lane value always wins over the global. The
+global defaults to `false` as a fail-safe: turning on `review:
 {backend: codex}` should not implicitly grant codex the ability to commit
 fixes to the worktree on its own. With the gate off, a blocking cycle-0
 review parks on `CODEX_MUST_FIX_FINDINGS` immediately — the pre-#1392
@@ -394,6 +397,26 @@ clients:
 # orchestrator.yaml — flip the loop on for every lane that sets no override
 default_codex_fix_loop_enabled: true
 ```
+
+A lane can opt out of that global default (#2541):
+
+```yaml
+# orchestrator.yaml
+default_codex_fix_loop_enabled: true
+```
+
+```yaml
+# clients.yaml lane
+- name: incident-repo
+  codex_fix_loop_enabled: false   # never run the workspace-write fix pass here
+```
+
+With the lane opted out, no `codex exec --sandbox workspace-write` fix
+invocation runs for tickets in that lane, and a blocking cycle-0 review parks
+on `CODEX_MUST_FIX_FINDINGS`. Before #2541 this value failed validation at
+config load; existing configs are unaffected. The reap and orphan gates in
+`reconcile` follow the same resolver, so an opted-out lane counts as
+fix-loop-off there too.
 
 **Operator callout (#1553 migration):** `ClientConfig.codex_fix_loop_enabled`
 no longer exists — the gate moved to the lane-scoped
@@ -420,9 +443,9 @@ up. On a metered GPT plan (e.g. a $20/mo trial), that is the number to check
 against remaining quota before enabling the loop.
 
 **Recommended posture:** for operators on a metered codex/GPT plan, leave
-`codex_fix_loop_enabled: false`. This is already the schema default
-(`LaneConfig.codex_fix_loop_enabled` / `default_codex_fix_loop_enabled`),
-but the recommendation here is about invocation cost, not just
+the global `default_codex_fix_loop_enabled: false`. That is already the schema
+default (the lane-level `LaneConfig.codex_fix_loop_enabled` defaults to `null`,
+deferring to the global), but the recommendation here is about invocation cost, not just
 accidental-commit safety — with the gate off, a blocking cycle-0 review
 parks on `CODEX_MUST_FIX_FINDINGS` at 1× review_pass_size codex calls
 instead of up to `6 × review_pass_size + 5`.
@@ -602,9 +625,10 @@ clients:
         attempt_ceiling: 25
 ```
 
-**`false` disables the ceiling — not `null`.** This is the one place the
-lane-override fields do not all read the same way, and the distinction is
-load-bearing:
+**`false` disables the ceiling — not `null`.** Unlike the plain on/off lane
+overrides (e.g. `codex_fix_loop_enabled`, where `false` just means "off"), the
+global here is a number, so `false` is the distinct "no ceiling" token and the
+distinction is load-bearing:
 
 - `attempt_ceiling: false` — this lane has no ceiling. Rows in it are never
   parked with `disposition: attempt_cap_blocked`, however high
