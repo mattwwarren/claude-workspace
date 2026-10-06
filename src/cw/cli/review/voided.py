@@ -63,10 +63,12 @@ _ALLOW_UNMATCHED_VOIDED_HELP = (
 )
 _VOIDED_FINDINGS_OUT_HELP = (
     "Also render the merged voided-findings record to this path, as a "
-    "postable '## Voided Review Findings' ticket comment. Nothing is written "
-    "when there is no void to record. When an unmatched new entry makes the "
-    "command exit 1, the record is still written first and holds the prior "
-    "voids plus only the new entries that matched."
+    "postable '## Voided Review Findings' ticket comment. When there is no "
+    "void to record no file is written and any file already at that path is "
+    "removed, so an earlier run's record is never left behind. When an "
+    "unmatched new entry makes the command exit 1, the record is still "
+    "written first and holds the prior voids plus only the new entries that "
+    "matched."
 )
 #: One stderr line per distinct unmatched anchor. ``summary`` is rendered with
 #: ``!r`` so a multi-line summary stays on one line.
@@ -139,14 +141,22 @@ def _warn_unmatched(unmatched: list[VoidedFinding], *, allowed: bool) -> None:
 
 
 def _write_voided_record(path: Path, entries: list[VoidedFinding]) -> None:
-    """Render *entries* as the postable voided-findings record at *path*."""
+    """Render *entries* as the postable voided-findings record at *path*.
+
+    When there is nothing to record, no file is written and any file already
+    at *path* is removed (#2532).
+    """
     rendered = render_voided_findings_block(entries)
     # "" means there is nothing to record — omit the artifact entirely
-    # rather than leave an empty one behind, same rule as
-    # --deferred-findings-out.
+    # rather than leave an empty one behind, and remove any file an earlier
+    # run left at *path* (#2532): the record is recomputed in full every run
+    # from the live comments, so a stale file would be re-posted as current.
+    # Unlike --deferred-findings-out, which is cumulative and never removed.
     if rendered:
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(path, rendered)
+    else:
+        path.unlink(missing_ok=True)
 
 
 @review.command(name="check-voided")
@@ -199,7 +209,8 @@ def review_check_voided(
     that exit. With --voided-findings-out the record is written before the
     exit: on the refused exit it holds the prior voids plus only the new
     entries that matched; with --allow-unmatched-voided it holds the
-    unmatched ones too.
+    unmatched ones too. When there is nothing to record no file is written
+    and a stale file at that path is removed.
 
     On success: exits 0, prints {"verdict": ..., "adjudications": [...]} to
     stdout. Append the adjudications verbatim to your ADJUDICATIONS array.
