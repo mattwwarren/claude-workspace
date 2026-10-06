@@ -36,7 +36,7 @@ _DOOR_MODULE = "result.py"
 # any new write site trips TestNoLastResultAssignmentOutsideDoor until it is
 # individually classified and added here.
 _ALLOWLIST: dict[str, dict[str, str]] = {
-    "reconcile/_shared.py": {
+    "reconcile/_shared/__init__.py": {
         (
             "session.last_result = {\n"
             "**existing,\n"

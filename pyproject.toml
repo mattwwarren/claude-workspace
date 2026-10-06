@@ -262,7 +262,7 @@ ignore = [
 # reconcile defers the dispatch import inside _apply_sentinel_to_task to
 # break the reconcile ↔ dispatch circular dependency (#698). Inline import
 # at function level is the sanctioned mechanism, not a workaround.
-"src/cw/reconcile/_shared.py" = ["PLC0415"]
+"src/cw/reconcile/_shared/__init__.py" = ["PLC0415"]
 # tasks defers cw.dispatch.routing's _AUTOMERGE_NOT_ARMED_REASON (inside
 # _is_variant_a_gate_task) and _PRIOR_PIPELINE_PR_OPEN_REASON (inside
 # _is_variant_b_gate_task) to break the cw.dispatch ↔ cw.reconcile circular
