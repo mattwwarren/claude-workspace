@@ -109,8 +109,9 @@ class SentinelRouteOutcome(NamedTuple):
     for every ``routed=True`` case. The distinction matters because (a) and
     (c) both leave a still-legitimately-running (or already-handled) worker
     alone, while (b) means the worker backing this task is now leaked --
-    ``routed=False`` alone can't tell them apart. Callers (``signal_stop``)
-    use ``landed_terminal`` to `daemon.stop()` the leaked worker in the (b)
+    ``routed=False`` alone can't tell them apart. Callers (``signal_stop``;
+    and the idle sweep via ``_apply_idle_routed_mutations``, #2482)
+    use ``landed_terminal`` to stop the leaked worker in the (b)
     case without touching a worker refused by the #986 stage-mismatch guard.
 
     GitHub #1406: a catch-all BlockedResult vetoed by the transcript-liveness
