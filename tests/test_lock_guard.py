@@ -646,7 +646,8 @@ def _guard_spans(fn: _FunctionNode) -> list[tuple[int, int]]:
         if not isinstance(node, (ast.With, ast.AsyncWith)):
             continue
         if any(
-            isinstance(item.context_expr, ast.Call) and _is_guard_call(item.context_expr)
+            isinstance(item.context_expr, ast.Call)
+            and _is_guard_call(item.context_expr)
             for item in node.items
         ):
             first, last = node.body[0], node.body[-1]
