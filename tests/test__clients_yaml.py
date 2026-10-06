@@ -250,6 +250,30 @@ class TestAttemptCeilingTriState:
 
 
 # ---------------------------------------------------------------------------
+# Lane codex_fix_loop_enabled tri-state (#2541)
+# ---------------------------------------------------------------------------
+
+
+class TestCodexFixLoopEnabledTriState:
+    @pytest.mark.parametrize("as_model", [True, False], ids=["model", "mapping"])
+    @pytest.mark.parametrize("flag", [None, False, True], ids=["none", "false", "true"])
+    def test_round_trips_each_state(self, as_model: bool, flag: bool | None) -> None:
+        fields: dict[str, object] = {"name": "slow", "codex_fix_loop_enabled": flag}
+        lane: LaneConfig | dict[str, object] = (
+            LaneConfig.model_validate(fields) if as_model else fields
+        )
+        write_clients_yaml(ClientSpec("acme", "/tmp/ws-acme", lanes=[lane]))
+
+        raw_lane = _raw_entries()["acme"]["lanes"]
+        assert isinstance(raw_lane, list)
+        assert raw_lane[0]["codex_fix_loop_enabled"] == flag
+        assert type(raw_lane[0]["codex_fix_loop_enabled"]) is type(flag)
+
+        loaded = load_clients()["acme"].lanes[0].codex_fix_loop_enabled
+        assert loaded is flag
+
+
+# ---------------------------------------------------------------------------
 # ClientSpec.from_config fidelity
 # ---------------------------------------------------------------------------
 
