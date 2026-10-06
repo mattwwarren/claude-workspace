@@ -71,6 +71,10 @@ from cw.reconcile.leaked_workers import (
     sweep_leaked_daemon_workers,
 )
 from cw.reconcile.liveness import _classify_liveness_bucket
+from cw.reconcile.liveness_page import (
+    format_evidence_suffix,
+    summarize_last_transcript_record,
+)
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, DevQueueStore, Session, TicketTask
@@ -616,11 +620,22 @@ def _check_wedge_active_daemon_stale_no_sentinel(
                 wedge_class=_WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL,
                 session_id=session.id,
                 ticket_id=ticket_id,
+                # #2153: the liveness page's evidence suffix ("; evidence
+                # suggests ...; last record ...; flat ...h; if you have
+                # confirmed ..., run: <close> then: <requeue>") joins the
+                # sentence below in place of its old closing period.
                 recipe=(
                     "ACTIVE session is idle in the daemon roster with a stale "
                     "transcript and no terminal sentinel — likely finished but "
                     "never signaled completion. Run: cw doctor --reap to mark "
-                    "COMPLETED and release the worker."
+                    "COMPLETED and release the worker"
+                    + format_evidence_suffix(
+                        summarize_last_transcript_record(session),
+                        session_id=session.id,
+                        ticket_id=ticket_id,
+                        client=session.client,
+                        stale_minutes=age_seconds / 60.0,
+                    )
                 ),
                 state_file=str(state_file()),
             )
