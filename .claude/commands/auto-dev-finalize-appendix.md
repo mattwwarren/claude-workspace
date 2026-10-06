@@ -353,10 +353,10 @@ when `prep_pr_finalize.py verify --require-automerge` reported the
   "blocker": {
     "stage": "stage5_post_create",
     "reason": "automerge_not_armed",
-    "details": "Step 4c re-verification: prep_pr_finalize.py verify --require-automerge reported automerge-enabled check failed (autoMergeRequest read back null) for PR #<N>",
+    "details": "Step 4c re-verification: prep_pr_finalize.py verify --require-automerge reported automerge-enabled check failed (autoMergeRequest read back null) for PR #<N>; arm-automerge: attempts=<k>/<max>, gh exit <code>, gh stderr: <verbatim gh_stderr, or 'none -- gh exited 0 but autoMergeRequest read back null'>",
     "exception_type": null,
-    "message": "gh pr merge --auto reported success but auto-merge was never actually armed",
-    "recovery_hint": "Run `gh pr merge <pr-number> --auto --squash` manually and re-verify, or merge the PR directly",
+    "message": "auto-merge was never armed after bounded retries (see details for gh's error)",
+    "recovery_hint": "Run `prep_pr_finalize.py arm-automerge <pr-number> --repo-path <worktree>` and re-verify, or merge the PR directly",
     "retry_eligible": true,
     "retry_delay_seconds": null
   },

@@ -124,3 +124,65 @@ def test_headless_contract_documents_automerge_not_armed() -> None:
     reason_start = content.index("### 4.2")
     reason_end = content.index("#### Phase B fields")
     assert "automerge_not_armed" in content[reason_start:reason_end]
+
+
+# --- #2576: bounded-retry arm-automerge at every finalize arm site ---
+
+_BARE_SHIP_IT_ARM = 'gh pr merge "$PR_NUMBER" --auto --squash'
+_FINALIZE_RESOLVER = (
+    "for candidate in .claude/scripts/prep_pr_finalize.py "
+    'scripts/prep_pr_finalize.py "$HOME/.claude/scripts/prep_pr_finalize.py"'
+)
+_INVOCATION_ERROR = "arm-automerge invocation error (exit"
+
+
+def _ship_it_step4_section() -> str:
+    content = _cmd("ship-it.md")
+    start = content.index("## Step 4: Enable auto-merge")
+    end = content.index("## Step 5: Register PR monitor")
+    return content[start:end]
+
+
+def test_ship_it_step4_arms_through_arm_automerge() -> None:
+    section = _ship_it_step4_section()
+    assert '"$FINALIZE" arm-automerge "$PR_NUMBER" --repo-path "$REPO_ROOT"' in section
+    assert _BARE_SHIP_IT_ARM not in section
+    assert "arm-automerge invocation error (exit 2, not a gh failure)" in section
+
+
+def test_step4d_arm_uses_arm_automerge_with_resolver() -> None:
+    section = _step4d_enable_automerge_section()
+    assert "arm-automerge <pr-number> --repo-path <worktree>" in section
+    assert _FINALIZE_RESOLVER in section
+    assert "gh pr merge <pr-number> --auto --squash" not in section
+    assert _INVOCATION_ERROR in section
+
+
+def test_step4c_headless_self_heals_with_arm_automerge_and_resolver() -> None:
+    """The reuse path skips Step 4c, so the resolver lives at both arm sites."""
+    section = _step4c_section()
+    assert "arm-automerge <pr_number> --repo-path <worktree>" in section
+    assert _FINALIZE_RESOLVER in section
+    assert _INVOCATION_ERROR in section
+    assert "SOLE failed check" in section
+
+
+def test_automerge_not_armed_sentinel_carries_gh_stderr() -> None:
+    section = _step4c_sentinel_section()
+    assert "gh stderr: <verbatim gh_stderr" in section
+    assert "arm-automerge: attempts=<k>/<max>, gh exit <code>" in section
+    assert "prep_pr_finalize.py arm-automerge <pr-number> --repo-path <worktree>" in (
+        section
+    )
+
+
+def test_headless_contract_documents_arm_automerge() -> None:
+    content = _doc("headless-contract.md")
+
+    gate_start = content.index("## 2. Gate-Collapse Table")
+    gate_end = content.index("## 3. Structured Output")
+    assert "arm-automerge" in content[gate_start:gate_end]
+
+    reason_start = content.index("### 4.2")
+    reason_end = content.index("#### Phase B fields")
+    assert "arm-automerge" in content[reason_start:reason_end]
