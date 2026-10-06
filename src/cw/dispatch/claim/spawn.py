@@ -43,7 +43,10 @@ from cw.exceptions import (
 )
 from cw.executor import resolve_executor, resolve_pipeline_stages
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
-from cw.spawn import emit_spawn_post_launch_attention
+from cw.spawn import (
+    emit_spawn_post_launch_attention,
+    retry_spawn_post_launch_attention,
+)
 from cw.worktree import (
     check_not_main_checkout,
     create_worktree,
@@ -524,6 +527,7 @@ def _spawn_claimed_task(
     :class:`~cw.exceptions.WorkerLaunchedError`) keeps the task RUNNING and
     pages instead, via :func:`_handle_post_launch_failure` (#2502).
     """
+    retry_spawn_post_launch_attention()
     session_id: str | None = None
     worktree_path: Path | None = None
     try:

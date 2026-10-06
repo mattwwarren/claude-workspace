@@ -937,8 +937,10 @@ open enum; consumers MUST tolerate unknown values. Known values:
   running and the row stays RUNNING
   with no `session_id`. Either way the operator inspects the worker and
   requeues the row (`cw dev-queue requeue`); nothing recovers it
-  automatically yet. No push notification is fired (`fire_push_notification`
-  is not called).
+  automatically yet. If the event inbox append fails, a redacted,
+  append-only attention intent is fsynced and retried by the independent spawn
+  attention consumer with an idempotent delivery marker. No push notification
+  is fired (`fire_push_notification` is not called).
 - `"plan_parked"` — A headless worker completed its plan stage with open
   ambiguities or unverified premises (`ambiguities_pending_resolution` or
   `premises_pending_verification` sentinel status). The task is BLOCKED_ON_USER.
