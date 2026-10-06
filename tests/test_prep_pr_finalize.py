@@ -1048,3 +1048,88 @@ def test_cmd_arm_automerge_warns_when_pyyaml_unavailable(
         "treating auto-merge as allowed" in captured.err
     )
     assert json.loads(captured.out)["status"] == "armed"
+
+
+def test_arm_automerge_merged_pre_read_is_noop_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _patch_run(monkeypatch, lambda _cmd: _cp(stdout=_ARM_VIEW_MERGED))
+
+    result = _mod.arm_automerge(
+        42, attempts=2, backoff_seconds=0.0, sleep=lambda _s: None
+    )
+
+    assert (result.status, result.attempts, result.pr_state) == ("merged", 0, "MERGED")
+    assert len(calls) == 1
+
+
+def test_arm_automerge_post_read_armed_returns_after_one_merge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    views = iter([ARM_VIEW_OPEN, ARM_VIEW_ARMED])
+
+    def _handler(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            return _cp(returncode=1, stderr="already queued")
+        return _cp(stdout=next(views))
+
+    _patch_run(monkeypatch, _handler)
+
+    result = _mod.arm_automerge(
+        42, attempts=3, backoff_seconds=0.0, sleep=lambda _s: None
+    )
+
+    assert (result.status, result.attempts) == ("armed", 1)
+    assert result.gh_exit_code == 1
+
+
+def test_arm_automerge_nonzero_exit_with_readback_failure_names_both(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _handler(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            return _cp(returncode=1, stderr="merge boom")
+        return _cp(returncode=1, stderr="view boom")
+
+    _patch_run(monkeypatch, _handler)
+
+    result = _mod.arm_automerge(
+        42, attempts=1, backoff_seconds=0.0, sleep=lambda _s: None
+    )
+
+    assert result.gh_stderr == "merge boom"
+    assert "exited 1" in result.detail
+    assert "read-back failed: view boom" in result.detail
+
+
+def test_arm_automerge_exit_zero_null_readback_detail_in_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_run(monkeypatch, _always_failing_gh(_cp()))
+
+    result = _mod.arm_automerge(
+        42, attempts=1, backoff_seconds=0.0, sleep=lambda _s: None
+    )
+
+    assert result.gh_stderr == ""
+    assert "read back null (#1140)" in result.detail
+
+
+def test_cmd_arm_automerge_reports_failure_and_success_in_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
+    monkeypatch.setattr(_mod.time, "sleep", lambda _s: None)
+    argv = ["arm-automerge", _ARM_PR, "--repo-path", str(tmp_path), "--attempts", "1"]
+
+    _patch_run(monkeypatch, _always_failing_gh(_cp(returncode=1, stderr="nope")))
+    assert _mod.cmd_arm_automerge(_mod.build_parser().parse_args(argv)) == 1
+    captured = capsys.readouterr()
+    assert "failed after 1/1 attempts (exit 1): nope" in captured.err
+    assert json.loads(captured.out)["status"] == "failed"
+
+    _patch_run(monkeypatch, lambda _cmd: _cp(stdout=ARM_VIEW_ARMED))
+    assert _mod.cmd_arm_automerge(_mod.build_parser().parse_args(argv)) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "armed"
