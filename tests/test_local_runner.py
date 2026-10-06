@@ -1499,6 +1499,17 @@ def test_git_facts_and_compute_branch_diff_scope_agree(
 _PRE_IMPL_MARKERS = ("stage1_plan", "stage1_pre_flight")
 
 
+def _next_actions_for(marker: str) -> list[str] | None:
+    """A schema-valid ``next_actions`` override for *marker*, or None for the default.
+
+    A blocked result at ``stage1_pre_flight`` independently restricts
+    ``next_actions`` to ``manual_intervention`` / ``sync_local_main`` (§4.3), so the
+    LocalExecutor default label is invalid there whatever the scope is. That is a
+    separate invariant from the ``lines_actual`` one these tests pin.
+    """
+    return ["manual_intervention"] if marker == "stage1_pre_flight" else None
+
+
 @pytest.mark.parametrize("marker", _PRE_IMPL_MARKERS)
 def test_make_blocked_pre_impl_markers_null_lines_actual(
     marker: StageReached, tmp_path: Path
@@ -1509,6 +1520,7 @@ def test_make_blocked_pre_impl_markers_null_lines_actual(
         worktree=tmp_path,
         reason="unexpected_error",
         stage_reached=marker,
+        next_actions=_next_actions_for(marker),
     )
 
     assert result.scope.lines_actual is None
@@ -1543,6 +1555,7 @@ def test_make_blocked_is_total_over_every_stage_reached(tmp_path: Path) -> None:
             worktree=tmp_path,
             reason="unexpected_error",
             stage_reached=marker,
+            next_actions=_next_actions_for(marker),
         )
 
         AutoDevResult.model_validate(result.model_dump(mode="json"))
