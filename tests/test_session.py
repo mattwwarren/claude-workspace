@@ -1721,20 +1721,20 @@ class TestDoneSession:
 
         return _remove
 
-    def test_cleanup_removes_worktree_with_sessions_lock_free(
+    def test_cleanup_removes_worktree_with_sessions_lock_held(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The git worktree removal runs after the ownership lock releases."""
+        """The git worktree removal runs under the ownership lock."""
         self._seed_cleanup_session(tmp_config_dir, sample_client, sid="done0101")
         probes: list[tuple[bool, dict[str, SessionStatus]]] = []
         monkeypatch.setattr("cw.session.remove_worktree", self._probing_remove(probes))
 
         done_session("test-client/impl", cleanup=True)
 
-        assert [lock_free for lock_free, _ in probes] == [True]
+        assert [lock_free for lock_free, _ in probes] == [False]
 
     def test_cleanup_removal_precedes_completed_stamp(
         self,
