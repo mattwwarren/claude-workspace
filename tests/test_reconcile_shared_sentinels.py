@@ -3613,6 +3613,159 @@ def test_1258_shape_placeholder_then_delayed_real_sentinel(tmp_path: Path) -> No
     assert result.ticket_id == real_payload["ticket_id"]
 
 
+# ---------------------------------------------------------------------------
+# _parse_sentinel_from_blocks — last real block wins WITHIN one text (#2515)
+# ---------------------------------------------------------------------------
+
+_MALFORMED_SENTINEL_BLOCK = "<<<AUTO_DEV_RESULT\n{oops\nAUTO_DEV_RESULT>>>"
+_TRUNCATED_SENTINEL_FRAME = '<<<AUTO_DEV_RESULT\n{"schema_version": 4, "tick'
+
+
+def _sentinel_frame(payload: dict[str, Any]) -> str:
+    return f"<<<AUTO_DEV_RESULT\n{json.dumps(payload)}\nAUTO_DEV_RESULT>>>"
+
+
+def test_parse_sentinel_from_blocks_two_real_blocks_in_one_text_yield_the_last(
+    tmp_path: Path,
+) -> None:
+    """A salvage chunk with two real blocks used to collapse to
+    ``multiple_result_blocks`` (requeued); the last block is now the result.
+    """
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    text = (
+        _sentinel_frame(_shipped_salvage_payload())
+        + "\nand then, finally:\n"
+        + _sentinel_frame(_stage_complete_payload())
+    )
+    _write_raw_sentinel_transcript(path, [text])
+
+    result = _parse_sentinel_from_blocks(path)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "stage_complete"
+
+
+def test_parse_sentinel_from_blocks_example_then_real_in_one_text_returns_real(
+    tmp_path: Path,
+) -> None:
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    text = (
+        _sentinel_frame(_documented_example_salvage_payload())
+        + "\n"
+        + _sentinel_frame(_stage_complete_payload())
+    )
+    _write_raw_sentinel_transcript(path, [text])
+
+    result = _parse_sentinel_from_blocks(path)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "stage_complete"
+
+
+def test_parse_sentinel_from_blocks_real_then_example_in_one_text_returns_real(
+    tmp_path: Path,
+) -> None:
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    text = (
+        _sentinel_frame(_stage_complete_payload())
+        + "\n"
+        + _sentinel_frame(_documented_example_salvage_payload())
+    )
+    _write_raw_sentinel_transcript(path, [text])
+
+    result = _parse_sentinel_from_blocks(path)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "stage_complete"
+
+
+def test_parse_sentinel_from_blocks_placeholder_and_real_in_one_text_returns_real(
+    tmp_path: Path,
+) -> None:
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    text = (
+        _PLACEHOLDER_EXAMPLE_BLOCK + "\n" + _sentinel_frame(_stage_complete_payload())
+    )
+    _write_raw_sentinel_transcript(path, [text])
+
+    result = _parse_sentinel_from_blocks(path)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "stage_complete"
+
+
+def test_parse_sentinel_from_blocks_example_only_in_one_text_returns_none(
+    tmp_path: Path,
+) -> None:
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    text = (
+        _sentinel_frame(_documented_example_salvage_payload())
+        + "\n"
+        + _PLACEHOLDER_EXAMPLE_BLOCK
+    )
+    _write_raw_sentinel_transcript(path, [text])
+
+    assert _parse_sentinel_from_blocks(path) is None
+
+
+def test_parse_sentinel_from_blocks_malformed_last_block_is_the_final_word(
+    tmp_path: Path,
+) -> None:
+    """An unusable LAST block is reported, never replaced by an earlier valid one."""
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    text = _sentinel_frame(_stage_complete_payload()) + "\n" + _MALFORMED_SENTINEL_BLOCK
+    _write_raw_sentinel_transcript(path, [text])
+
+    result = _parse_sentinel_from_blocks(path)
+
+    assert isinstance(result, BlockedResult)
+    assert result.blocker.reason != "multiple_result_blocks"
+
+
+def test_parse_sentinel_from_blocks_malformed_record_after_real_record_wins(
+    tmp_path: Path,
+) -> None:
+    """Cross-record last-wins is preserved: the later record decides."""
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    _write_raw_sentinel_transcript(
+        path, [_sentinel_frame(_stage_complete_payload()), _MALFORMED_SENTINEL_BLOCK]
+    )
+
+    result = _parse_sentinel_from_blocks(path)
+
+    assert isinstance(result, BlockedResult)
+
+
+def test_parse_sentinel_from_blocks_truncated_frame_after_real_block_keeps_real(
+    tmp_path: Path,
+) -> None:
+    """A cut-off trailing frame reads as no sentinel, not as a BlockedResult."""
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    text = _sentinel_frame(_stage_complete_payload()) + "\n" + _TRUNCATED_SENTINEL_FRAME
+    _write_raw_sentinel_transcript(path, [text])
+
+    result = _parse_sentinel_from_blocks(path)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "stage_complete"
+
+
 _TWO_LAYER_SURFACE_REF = "surf1234"
 _TWO_LAYER_STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
@@ -3646,10 +3799,12 @@ def _write_two_layer_no_sentinel_transcript(path: Path) -> None:
     path.write_text(json.dumps(record) + "\n")
 
 
-def _mk_two_layer_fallback_session(worktree: Path, csid: str | None = None) -> Session:
+def _mk_two_layer_fallback_session(
+    worktree: Path, csid: str | None = None, ticket_id: str = "892"
+) -> Session:
     return _make_daemon_session(
         id="892-sess",
-        name="client-a/auto-dev/892",
+        name=f"client-a/auto-dev/{ticket_id}",
         worktree_path=worktree,
         surface_ref=_TWO_LAYER_SURFACE_REF,
         claude_session_id=csid,
@@ -3742,9 +3897,7 @@ class TestParseAnySentinelFromTranscript:
         # csid transcript has sentinel (plan_pending_approval)
         v2_csid = "v2-has-sentinel-892"
         v2_path = project_dir / f"{v2_csid}.jsonl"
-        _write_two_layer_sentinel_transcript(
-            v2_path, "plan_pending_approval", "892-plan"
-        )
+        _write_two_layer_sentinel_transcript(v2_path, "plan_pending_approval", "892")
 
         # surface_ref transcript also has a sentinel (review_pending) — should NOT win
         v1_path = project_dir / f"{_TWO_LAYER_SURFACE_REF}-v1-review.jsonl"
@@ -3772,9 +3925,7 @@ class TestParseAnySentinelFromTranscript:
         project_dir.mkdir(parents=True)
 
         v1_path = project_dir / f"{_TWO_LAYER_SURFACE_REF}-original.jsonl"
-        _write_two_layer_sentinel_transcript(
-            v1_path, "plan_pending_approval", "892-plan"
-        )
+        _write_two_layer_sentinel_transcript(v1_path, "plan_pending_approval", "892")
 
         sess = _mk_two_layer_fallback_session(worktree, csid=None)
         result = _parse_any_sentinel_from_transcript(sess)
@@ -3819,7 +3970,7 @@ class TestSalvageTerminalResultTwoLayerFallback:
         v1_path = project_dir / f"{_TWO_LAYER_SURFACE_REF}-v1original.jsonl"
         _write_two_layer_sentinel_transcript(v1_path, "review_pending_approval", "1353")
 
-        sess = _mk_two_layer_fallback_session(worktree, csid=v2_csid)
+        sess = _mk_two_layer_fallback_session(worktree, csid=v2_csid, ticket_id="1353")
         result = _salvage_terminal_result(sess)
 
         assert result is not None
@@ -3843,12 +3994,12 @@ class TestSalvageTerminalResultTwoLayerFallback:
 
         v2_csid = "v2-has-sentinel-1353"
         v2_path = project_dir / f"{v2_csid}.jsonl"
-        _write_two_layer_sentinel_transcript(v2_path, "merge_gate_blocked", "1353-mgb")
+        _write_two_layer_sentinel_transcript(v2_path, "merge_gate_blocked", "1353")
 
         v1_path = project_dir / f"{_TWO_LAYER_SURFACE_REF}-v1-review.jsonl"
         _write_two_layer_sentinel_transcript(v1_path, "review_pending_approval", "1353")
 
-        sess = _mk_two_layer_fallback_session(worktree, csid=v2_csid)
+        sess = _mk_two_layer_fallback_session(worktree, csid=v2_csid, ticket_id="1353")
         result = _salvage_terminal_result(sess)
 
         assert result is not None
@@ -3877,9 +4028,9 @@ class TestSalvageTerminalResultTwoLayerFallback:
         _write_two_layer_no_sentinel_transcript(v2_path)
 
         v1_path = project_dir / f"{_TWO_LAYER_SURFACE_REF}-v1-stage-complete.jsonl"
-        _write_two_layer_sentinel_transcript(v1_path, "stage_complete", "1353-stage")
+        _write_two_layer_sentinel_transcript(v1_path, "stage_complete", "1353")
 
-        sess = _mk_two_layer_fallback_session(worktree, csid=v2_csid)
+        sess = _mk_two_layer_fallback_session(worktree, csid=v2_csid, ticket_id="1353")
         result = _salvage_terminal_result(sess)
 
         assert result is None
@@ -3898,9 +4049,9 @@ class TestSalvageTerminalResultTwoLayerFallback:
         project_dir.mkdir(parents=True)
 
         v1_path = project_dir / f"{_TWO_LAYER_SURFACE_REF}-original.jsonl"
-        _write_two_layer_sentinel_transcript(v1_path, "no_op", "1353-noop")
+        _write_two_layer_sentinel_transcript(v1_path, "no_op", "1353")
 
-        sess = _mk_two_layer_fallback_session(worktree, csid=None)
+        sess = _mk_two_layer_fallback_session(worktree, csid=None, ticket_id="1353")
         result = _salvage_terminal_result(sess)
 
         assert result is not None
@@ -3948,7 +4099,13 @@ def _parse_scope_guard_sentinel(
     sess = _mk_headless_daemon_session(
         "scope-guard", worktree, datetime(2026, 1, 1, tzinfo=UTC)
     )
-    _write_salvage_transcript(home, worktree, "claude-uuid-scope", payload)
+    sess.name = f"client-a/auto-dev/{payload['ticket_id']}"
+    _write_salvage_transcript(
+        home,
+        worktree,
+        "claude-uuid-scope",
+        payload,
+    )
     parsed = _parse_any_sentinel_from_transcript(sess)
     assert parsed is not None
     result, _csid = parsed

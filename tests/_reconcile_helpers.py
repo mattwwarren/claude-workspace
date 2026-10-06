@@ -318,10 +318,16 @@ def _make_pending_fix_dispatch(**overrides: Any) -> PendingFixDispatch:
     return PendingFixDispatch(**kwargs)
 
 
-def _shipped_salvage_payload() -> dict[str, Any]:
+def _shipped_salvage_payload(ticket_id: str = "salv-1") -> dict[str, Any]:
+    """A shipped sentinel payload claiming *ticket_id*.
+
+    Reconcile's transcript scans skip a sentinel that claims a different ticket
+    than the session's (#2515), so a test whose session is not ``salv-1`` must
+    pass its own ticket id here.
+    """
     return {
         "schema_version": 4,
-        "ticket_id": "salv-1",
+        "ticket_id": ticket_id,
         "status": "shipped",
         "stage_reached": "stage5_post_create",
         "scope": {
@@ -332,8 +338,8 @@ def _shipped_salvage_payload() -> dict[str, Any]:
             "forbidden_touched": False,
         },
         "plan_source": "github_issue_existing",
-        "branch": "auto-dev/salv-1",
-        "worktree_path": "/tmp/wt/salv-1",
+        "branch": f"auto-dev/{ticket_id}",
+        "worktree_path": f"/tmp/wt/{ticket_id}",
         "fork_point_sha": "abc1234",
         "commits": ["sha1"],
         "pr": {

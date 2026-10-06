@@ -141,6 +141,7 @@ def _parse_headless_sentinel(
     session: Session,
     cwd_value: str,
     claude_session_id: object,
+    ticket_id_value: object = None,
 ) -> AutoDevResult | BlockedResult | None:
     """Parse the transcript sentinel for a headless Stop hook.
 
@@ -149,12 +150,24 @@ def _parse_headless_sentinel(
     recorded ``worktree_path`` — the directory whose project dir holds the actual
     transcript. Returns ``None`` when neither location yields a parseable sentinel.
 
+    ``ticket_id_value`` is the Stop hook's own ``cw-context.json`` ticket id. It
+    is forwarded to both scans as the expected identity (#2515) so the
+    ``worktree_path`` fallback does not depend on that directory carrying its
+    own ``cw-context.json`` -- the fallback scan fails closed without an identity.
+
     Extracted out of :func:`signal_stop` (rather than inlined) so the #536
     emit-precedence gate could be added there without pushing the function
     over its PLR0912 branch-count ceiling.
     """
     csid = claude_session_id if isinstance(claude_session_id, str) else None
-    parsed = _parse_sentinel_from_transcript(cwd_value, csid)
+    expected_ticket_id = (
+        ticket_id_value
+        if isinstance(ticket_id_value, str) and ticket_id_value
+        else None
+    )
+    parsed = _parse_sentinel_from_transcript(
+        cwd_value, csid, ticket_id=expected_ticket_id
+    )
     # Rescan only a *different* directory: when the hook cwd already equals the
     # recorded worktree_path, the same transcript was just read (equal strings
     # encode to the same project dir), so a second pass repeats it byte for
@@ -167,7 +180,9 @@ def _parse_headless_sentinel(
         and session.worktree_path is not None
         and str(session.worktree_path) != cwd_value
     ):
-        parsed = _parse_sentinel_from_transcript(str(session.worktree_path), csid)
+        parsed = _parse_sentinel_from_transcript(
+            str(session.worktree_path), csid, ticket_id=expected_ticket_id
+        )
     if isinstance(parsed, AutoDevResult):
         parsed = _verify_headless_scope(parsed, session)
     return parsed
@@ -652,7 +667,7 @@ def _resolve_and_complete_headless_session(
     already_routed = emit_terminal and _sentinel_partial_route_consumed(session)
     if not emit_terminal and is_headless:
         parsed_sentinel = _parse_headless_sentinel(
-            session, cwd_value, claude_session_id
+            session, cwd_value, claude_session_id, ticket_id_value
         )
         if parsed_sentinel is None:
             _handle_headless_no_sentinel()

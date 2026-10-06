@@ -45,11 +45,17 @@ A naive "first match" false-terminates.
 and only trust it after the worker has left the daemon roster.
 
 `_parse_sentinel_from_transcript` now implements exactly this: it walks every
-sentinel-bearing block in transcript order, keeps the **last** one that
-parses, and skips the illustrative example sentinel from the skill prompt
-(`is_documented_example`, #591) so a worker quoting the docs never
-false-terminates. Other fixture blocks a worker writes can still parse — the
-last-wins rule plus the roster check is what protects against those.
+sentinel-bearing transcript block in order and keeps the **last** real result.
+The last real sentinel block wins inside a single transcript block as well as
+across blocks (`parse_last_block_per_chunk`, #2515), so a block that quotes an
+earlier result no longer collapses to `multiple_result_blocks`. Unresolved
+placeholder blocks and the illustrative example sentinel from the skill prompt
+(`is_documented_example`, #591) are skipped before `parse_stdout`, so a worker
+quoting the docs never false-terminates. Blocks naming a different ticket than
+the session's own are skipped too: reconcile passes the session's ticket id, and
+the cli scan reads it from `cw-context.json` (failing closed with no sentinel
+when none is available). Other fixture blocks a worker writes can still parse —
+the last-wins rule plus the roster check is what protects against those.
 
 ### Gotcha 2 — Sentinels are JSON-escaped in the transcript
 
@@ -60,7 +66,8 @@ raw file. A regex over the raw bytes misses sentinels that are valid only
 after decoding.
 
 **Rule:** `json.loads` each transcript line, extract the `text` field, then
-run `extract_block` against the decoded text. `_parse_sentinel_from_transcript`
+parse the decoded text for sentinel blocks (never the raw line).
+`_parse_sentinel_from_transcript`
 does this via `_iter_sentinel_text_blocks` (`cw._util`), which scans both
 assistant text blocks AND `tool_result` blocks — a worker may emit the
 sentinel via `cat <<EOF`, landing it in Bash stdout rather than assistant

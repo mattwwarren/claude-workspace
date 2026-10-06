@@ -300,7 +300,7 @@ def test_detect_fires_on_limit_tail_of_live_session(
 def test_detect_skips_when_any_sentinel_in_transcript(
     tmp_config_dir: Path, tmp_path: Path, home: Path
 ) -> None:
-    body = json.dumps(_shipped_salvage_payload())
+    body = json.dumps(_shipped_salvage_payload(_SID))
     sentinel_text = f"narrative\n<<<AUTO_DEV_RESULT\n{body}\nAUTO_DEV_RESULT>>>\n"
     records = [
         _user_record("implement the plan", _T_USER),

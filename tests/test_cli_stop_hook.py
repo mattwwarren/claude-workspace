@@ -688,16 +688,26 @@ def test_parse_headless_sentinel_scans_transcript_once_when_cwd_is_worktree_path
     scanned: list[str] = []
     real_scan = stop_hook._parse_sentinel_from_transcript
 
-    def _counting_scan(cwd: str, claude_session_id: str | None) -> object:
+    scanned_tickets: list[str | None] = []
+
+    def _counting_scan(
+        cwd: str, claude_session_id: str | None, *, ticket_id: str | None = None
+    ) -> object:
         scanned.append(cwd)
-        return real_scan(cwd, claude_session_id)
+        scanned_tickets.append(ticket_id)
+        return real_scan(cwd, claude_session_id, ticket_id=ticket_id)
 
     monkeypatch.setattr(stop_hook, "_parse_sentinel_from_transcript", _counting_scan)
 
-    parsed = stop_hook._parse_headless_sentinel(session, cwd_value, "uuid-2229")
+    parsed = stop_hook._parse_headless_sentinel(
+        session, cwd_value, "uuid-2229", "ticket-2229"
+    )
 
     assert parsed is None
     assert len(scanned) == expected_scans
+    # #2515: the hook's own ticket identity reaches every scan, so the
+    # worktree_path fallback never depends on a cw-context.json in that dir.
+    assert scanned_tickets == ["ticket-2229"] * expected_scans
     assert scanned[0] == cwd_value
     if nested_cwd:
         assert scanned[1] == str(worktree)

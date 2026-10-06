@@ -73,6 +73,7 @@ from tests._reconcile_helpers import (
     SCOPE_GUARD_LINES,
     _inflate_scope,
     _make_stale_base_repo,
+    _stage_complete_payload,
     _ul_record,
     _write_transcript_records,
 )
@@ -1468,7 +1469,7 @@ class TestSignalStop:
         state = load_state()
         state.sessions.append(session)
         save_state(state)
-        self._write_headless_context(worktree, session_id=session.id)
+        self._write_headless_context(worktree, session_id=session.id, ticket_id="215")
 
         # Write a real Claude-shaped transcript JSONL with an assistant
         # record carrying a parseable sentinel block. The parser walks the
@@ -1559,7 +1560,7 @@ class TestSignalStop:
         state = load_state()
         state.sessions.append(session)
         save_state(state)
-        self._write_headless_context(worktree, session_id=session.id)
+        self._write_headless_context(worktree, session_id=session.id, ticket_id="214")
 
         # Write a real transcript with the preserved #214 sentinel — the
         # exact failure mode that motivated #225.
@@ -1635,9 +1636,13 @@ class TestSignalStop:
         state = load_state()
         state.sessions.append(session)
         save_state(state)
-        self._write_headless_context(worktree, session_id=session.id)
 
         payload = _inflate_scope(_valid_payload())
+        self._write_headless_context(
+            worktree,
+            session_id=session.id,
+            ticket_id=str(payload["ticket_id"]),
+        )
         frame = "<<<AUTO_DEV_RESULT\n" + json.dumps(payload) + "\nAUTO_DEV_RESULT>>>"
         claude_session_id = "uuid-1487"
         fake_home = tmp_path / "fake-home"
@@ -6095,6 +6100,19 @@ class TestSentinelPresentInTranscript:
     See GitHub issue #176 Layer 1.
     """
 
+    @staticmethod
+    def _write_ticket_context(worktree: Path, ticket_id: str) -> None:
+        """Seed the worktree's cw-context.json with the task's ticket identity.
+
+        The transcript scan fails closed without an expected ticket identity
+        (#2515), and direct callers read it from this file.
+        """
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        (claude_dir / "cw-context.json").write_text(
+            json.dumps({"ticket_id": ticket_id})
+        )
+
     def test_returns_true_when_sentinel_embedded_in_jsonl_assistant_text(
         self,
         tmp_path: Path,
@@ -6113,6 +6131,7 @@ class TestSentinelPresentInTranscript:
 
         worktree = tmp_path / "wt" / "auto-dev-170"
         worktree.mkdir(parents=True)
+        self._write_ticket_context(worktree, "170")
         sentinel_text = (
             "Comment posted. Emitting result.\n\n"
             "```\n"
@@ -6145,6 +6164,7 @@ class TestSentinelPresentInTranscript:
 
         worktree = tmp_path / "wt" / "auto-dev-731"
         worktree.mkdir(parents=True)
+        self._write_ticket_context(worktree, "731")
         frame = (
             "<<<AUTO_DEV_RESULT\n"
             '{"schema_version": 2, "ticket_id": "731", "status": "shipped"}\n'
@@ -6274,6 +6294,7 @@ class TestSentinelPresentInTranscript:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         worktree = tmp_path / "wt" / "auto-dev-203"
         worktree.mkdir(parents=True)
+        self._write_ticket_context(worktree, "203")
         encoded = str(worktree).replace("/", "-").replace(".", "-")
         project_dir = fake_home / ".claude" / "projects" / encoded
         project_dir.mkdir(parents=True)
@@ -6853,7 +6874,9 @@ class TestParseSentinelFromTranscript:
             worktree, "uuid-215", _SENTINEL_215_PLAN_PENDING, fake_home
         )
 
-        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-215")
+        parsed = _parse_sentinel_from_transcript(
+            str(worktree), "uuid-215", ticket_id="215"
+        )
         assert isinstance(parsed, AutoDevResult)
         assert parsed.status == "plan_pending_approval"
         assert parsed.ticket_id == "215"
@@ -6874,7 +6897,9 @@ class TestParseSentinelFromTranscript:
         worktree.mkdir(parents=True)
         self._write_transcript(worktree, "uuid-214", _SENTINEL_214_BLOCKED, fake_home)
 
-        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-214")
+        parsed = _parse_sentinel_from_transcript(
+            str(worktree), "uuid-214", ticket_id="214"
+        )
         assert isinstance(parsed, AutoDevResult)
         assert parsed.status == "blocked"
         assert parsed.ticket_id == "214"
@@ -6901,7 +6926,9 @@ class TestParseSentinelFromTranscript:
         bad_sentinel = "<<<AUTO_DEV_RESULT\n{this is not valid JSON\nAUTO_DEV_RESULT>>>"
         self._write_transcript(worktree, "uuid-bad", bad_sentinel, fake_home)
 
-        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-bad")
+        parsed = _parse_sentinel_from_transcript(
+            str(worktree), "uuid-bad", ticket_id="bad"
+        )
         assert isinstance(parsed, BlockedResult)
         assert parsed.status == "blocked"
 
@@ -6931,10 +6958,70 @@ class TestParseSentinelFromTranscript:
         warned_blocks: set[str] = set()
         with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
             parsed1 = _parse_sentinel_from_transcript(
-                str(worktree), "uuid-warn-dedup", warned_blocks=warned_blocks
+                str(worktree),
+                "uuid-warn-dedup",
+                ticket_id="bad",
+                warned_blocks=warned_blocks,
             )
             parsed2 = _parse_sentinel_from_transcript(
-                str(worktree), "uuid-warn-dedup", warned_blocks=warned_blocks
+                str(worktree),
+                "uuid-warn-dedup",
+                ticket_id="bad",
+                warned_blocks=warned_blocks,
+            )
+        assert isinstance(parsed1, BlockedResult)
+        assert isinstance(parsed2, BlockedResult)
+        matching = [
+            rec for rec in caplog.records if "did not parse as JSON" in rec.message
+        ]
+        assert len(matching) == 1
+
+    def test_warned_blocks_dedups_malformed_last_block_after_an_earlier_valid_one(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Two blocks in ONE text: the malformed last block decides, and the
+        shared ``warned_blocks`` set dedups its WARNING across repeated scans
+        (issues #1247, #2515).
+        """
+        import logging
+
+        from cw.auto_dev_result import BlockedResult
+        from cw.cli import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-warn-dedup-multi"
+        worktree.mkdir(parents=True)
+        good_sentinel = (
+            "<<<AUTO_DEV_RESULT\n"
+            + json.dumps(_stage_complete_payload())
+            + "\nAUTO_DEV_RESULT>>>"
+        )
+        bad_sentinel = "<<<AUTO_DEV_RESULT\n{this is not valid JSON\nAUTO_DEV_RESULT>>>"
+        self._write_transcript(
+            worktree,
+            "uuid-warn-dedup-multi",
+            good_sentinel + "\n" + bad_sentinel,
+            fake_home,
+        )
+
+        warned_blocks: set[str] = set()
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            parsed1 = _parse_sentinel_from_transcript(
+                str(worktree),
+                "uuid-warn-dedup-multi",
+                ticket_id="GEN-stage-complete",
+                warned_blocks=warned_blocks,
+            )
+            parsed2 = _parse_sentinel_from_transcript(
+                str(worktree),
+                "uuid-warn-dedup-multi",
+                ticket_id="GEN-stage-complete",
+                warned_blocks=warned_blocks,
             )
         assert isinstance(parsed1, BlockedResult)
         assert isinstance(parsed2, BlockedResult)
@@ -7097,7 +7184,9 @@ class TestParseSentinelFromTranscript:
             extra_records=[example_record],
         )
 
-        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-591a")
+        parsed = _parse_sentinel_from_transcript(
+            str(worktree), "uuid-591a", ticket_id="215"
+        )
         assert isinstance(parsed, AutoDevResult)
         assert parsed.ticket_id == "215"
         assert parsed.status == "plan_pending_approval"
@@ -7160,7 +7249,12 @@ class TestParseSentinelFromTranscript:
         )
         self._write_transcript(worktree, "uuid-591b", example_sentinel, fake_home)
 
-        assert _parse_sentinel_from_transcript(str(worktree), "uuid-591b") is None
+        assert (
+            _parse_sentinel_from_transcript(
+                str(worktree), "uuid-591b", ticket_id="591b"
+            )
+            is None
+        )
 
 
 class TestCompletion:

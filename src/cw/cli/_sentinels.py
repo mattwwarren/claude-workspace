@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from cw._hook_context import _read_cw_context
 from cw._util import (
     _iter_sentinel_text_blocks,
     _iter_sentinel_text_records,
@@ -27,10 +28,7 @@ from cw.auto_dev_result import (
     _OPEN_SENTINEL,
     AutoDevResult,
     BlockedResult,
-    _is_placeholder_sentinel_text,
-    extract_block,
-    is_documented_example,
-    parse_stdout,
+    parse_last_block_per_chunk,
 )
 
 if TYPE_CHECKING:
@@ -41,6 +39,7 @@ def _parse_sentinel_from_transcript(
     cwd: str,
     claude_session_id: str | None,
     *,
+    ticket_id: str | None = None,
     warned_blocks: set[str] | None = None,
 ) -> AutoDevResult | BlockedResult | None:
     """Return the parsed sentinel from the transcript, or None if absent.
@@ -51,12 +50,16 @@ def _parse_sentinel_from_transcript(
     where the encoded path replaces both ``/`` and ``.`` with ``-``. The JSONL
     contains one event per line; ``assistant`` events carry ``message.content``
     blocks whose ``text`` fields hold the model output, JSON-escaped (real
-    newlines become the two-character sequence ``\\n``). Running ``extract_block``
-    against the raw file therefore misses sentinels that are valid in their
-    decoded form, so this scans each candidate block individually after JSON
-    decoding — assistant text blocks AND ``tool_result`` blocks, since a worker
-    may emit the sentinel via ``cat <<EOF`` (landing it in Bash stdout rather
-    than assistant text; GitHub #731). Returns None on any I/O error or when no
+    newlines become the two-character sequence ``\\n``). Scanning the raw file
+    therefore misses sentinels that are valid in their decoded form, so this
+    scans each candidate block individually after JSON decoding — assistant
+    text blocks AND ``tool_result`` blocks, since a worker may emit the sentinel
+    via ``cat <<EOF`` (landing it in Bash stdout rather than assistant text;
+    GitHub #731). Each block goes through
+    :func:`~cw.auto_dev_result.parse_last_block_per_chunk`: the last real
+    sentinel block in a text block decides for it, placeholders and the
+    documented example are skipped, and the last deciding block across the
+    transcript wins (GitHub #2515). Returns None on any I/O error or when no
     complete sentinel pair is found — distinct from a BlockedResult, which means
     the sentinel framing was present but the inner payload was unusable.
 
@@ -64,27 +67,42 @@ def _parse_sentinel_from_transcript(
     be captured here because they bypass session lifecycle tracking entirely.
     See GitHub issue #225 (capture gap) and issue #176 Layer 1 (transcript-walk origin).
 
+    ``ticket_id`` is the current task's expected identity. When omitted, it is
+    read from the worktree's ``cw-context.json`` and must be present there. If
+    an explicit identity is supplied, it must agree with any context identity
+    found at *cwd*. A missing or conflicting identity fails closed and returns
+    ``None``; direct legacy callers never perform an unfiltered salvage.
+
     ``warned_blocks`` (issue #1247) is an optional caller-owned set forwarded
-    unchanged into every ``parse_stdout`` call below, deduping repeated
-    ``_log.warning`` calls for the same malformed block both across repeated
-    calls to this function (e.g. a poll loop rescanning an unresolved
+    unchanged to the shared per-block parse, deduping repeated ``_log.warning``
+    calls for the same malformed block (keyed per block payload) both across
+    repeated calls to this function (e.g. a poll loop rescanning an unresolved
     transcript) and across multiple candidate blocks within one call. Left
     ``None`` (the default), every warning logs independently as before.
     """
     if not claude_session_id:
         return None
     transcript_path = claude_project_dir(cwd) / f"{claude_session_id}.jsonl"
-    last_result: AutoDevResult | BlockedResult | None = None
-    for text in _iter_sentinel_text_blocks(transcript_path):
-        block = extract_block(text)
-        if block is not None:
-            if _is_placeholder_sentinel_text(block):
-                continue
-            result = parse_stdout(text, warned_blocks=warned_blocks)
-            if isinstance(result, AutoDevResult) and is_documented_example(result):
-                continue
-            last_result = result
-    return last_result
+    context = _read_cw_context(cwd)
+    context_ticket_id = context.get("ticket_id") if context is not None else None
+    if not isinstance(context_ticket_id, str) or not context_ticket_id:
+        context_ticket_id = None
+    expected_ticket_id: str | None
+    if ticket_id is not None:
+        if not ticket_id:
+            return None
+        if context_ticket_id is not None and context_ticket_id != ticket_id:
+            return None
+        expected_ticket_id = ticket_id
+    else:
+        expected_ticket_id = context_ticket_id
+    if expected_ticket_id is None:
+        return None
+    return parse_last_block_per_chunk(
+        _iter_sentinel_text_blocks(transcript_path),
+        ticket_id=expected_ticket_id,
+        warned_blocks=warned_blocks,
+    )
 
 
 def _sentinel_present_in_transcript(
@@ -123,7 +141,7 @@ def _sentinel_frame_after(transcript_path: Path, pivot: datetime) -> bool:
     """True iff a sentinel frame marker appears at or after *pivot* (#2135).
 
     Either marker counts, complete pair or not: an open marker with no close
-    never reaches ``parse_stdout`` (``extract_block`` needs the pair), so a
+    never reaches a parse (a block needs the pair), so a
     truncated frame reads to the Stop hook as "no sentinel" — exactly the case
     that must NOT be parked as ``stopped_without_sentinel``, because doing so
     would hide the worker's real blocker reason behind the wrong disposition.
