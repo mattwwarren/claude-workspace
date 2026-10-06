@@ -45,9 +45,23 @@ _PAIRS_PER_THREAD = 50
 _TICKET_RE = re.compile(r"^#\d+$")
 
 # Follow-up tickets that track the in-lock subprocess exceptions documented in
-# ADR-0019 (invariant 3). An allowlist entry must cite one of these.
+# ADR-0019 (invariant 3): the #1232 follow-ups plus the four the #1233 probe
+# filed. An allowlist entry must cite one of these.
 _DOCUMENTED_TICKETS = frozenset(
-    {"#2545", "#2546", "#2547", "#2548", "#2549", "#2550", "#2551", "#2557"}
+    {
+        "#2545",
+        "#2546",
+        "#2547",
+        "#2548",
+        "#2549",
+        "#2550",
+        "#2551",
+        "#2557",
+        "#2563",
+        "#2564",
+        "#2565",
+        "#2566",
+    }
 )
 
 
@@ -82,9 +96,7 @@ def test_swallowed_reentry_is_recorded_and_fails(
 
 
 @pytest.mark.lock_violations_expected("order")
-def test_descending_order_is_recorded(
-    tmp_config_dir: Path, trace: LockTrace
-) -> None:
+def test_descending_order_is_recorded(tmp_config_dir: Path, trace: LockTrace) -> None:
     with dev_queue_lock(), contextlib.suppress(CwLockOrderError), sessions_lock():
         pass
 
@@ -311,6 +323,7 @@ def test_real_fixture_fails_a_seeded_violation(tmp_path: Path) -> None:
             str(inner),
             "-p",
             "no:cacheprovider",
+            "--color=no",
             "-v",
             str(inner / "test_inner.py"),
         ],

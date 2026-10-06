@@ -120,9 +120,13 @@ def test_every_guarded_lock_refuses_same_thread_reentry(
 def test_reentry_message_and_attributes(tmp_config_dir: Path) -> None:
     path = dev_queue_lock_file()
 
-    with sessions_lock(), dev_queue_lock():
-        with pytest.raises(CwLockReentrancyError) as excinfo, dev_queue_lock():
-            pytest.fail("must not reach body")
+    with (
+        sessions_lock(),
+        dev_queue_lock(),
+        pytest.raises(CwLockReentrancyError) as excinfo,
+        dev_queue_lock(),
+    ):
+        pytest.fail("must not reach body")
 
     err = excinfo.value
     assert str(err) == (
@@ -288,12 +292,12 @@ def test_nothing_acquired_under_a_leaf(
 ) -> None:
     monkeypatch.setenv("CW_LOCK_DEBUG", "1")
 
-    with events._inbox_lock():
-        with (
-            pytest.raises(CwLockOrderError, match="lock order violation") as excinfo,
-            _GUARDED_CMS[inner_id](),
-        ):
-            pytest.fail("must not reach body")
+    with (
+        events._inbox_lock(),
+        pytest.raises(CwLockOrderError, match="lock order violation") as excinfo,
+        _GUARDED_CMS[inner_id](),
+    ):
+        pytest.fail("must not reach body")
 
     message = str(excinfo.value)
     assert "while holding leaf lock 'events_inbox'" in message
@@ -458,9 +462,7 @@ def test_observer_sees_acquire_and_release_with_snapshots(
     ]
     assert all(e.enforced is False for e in recorder.events)
     assert {e.thread_id for e in recorder.events} == {threading.get_ident()}
-    assert {e.thread_name for e in recorder.events} == {
-        threading.current_thread().name
-    }
+    assert {e.thread_name for e in recorder.events} == {threading.current_thread().name}
 
 
 @pytest.mark.lock_violations_expected("reentry", "order")
@@ -754,9 +756,7 @@ def test_every_flock_context_manager_is_guarded_or_exempt() -> None:
         ),
     ],
 )
-@pytest.mark.parametrize(
-    "decorator", ["@contextlib.contextmanager", "@contextmanager"]
-)
+@pytest.mark.parametrize("decorator", ["@contextlib.contextmanager", "@contextmanager"])
 def test_predicate_on_synthetic_sources(
     decorator: str, body: str, expected: str | None
 ) -> None:

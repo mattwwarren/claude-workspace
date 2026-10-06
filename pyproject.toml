@@ -89,6 +89,7 @@ tmp_path_retention_count = 1
 markers = [
     "integration: end-to-end tests that shell out to external tools (claude --bg, codex, opencode)",
     "binary_on_path(*names): exempt from the optional-binary absence guard (#1753) for the given binary name(s), e.g. @pytest.mark.binary_on_path('codex')",
+    "lock_violations_expected(*kinds): exempt a deliberate lock-invariant violation ('reentry', 'order', 'subprocess') from the harness teardown check (#1233, ADR-0019); a lock leak cannot be exempted",
 ]
 
 [tool.ruff]

@@ -52,6 +52,7 @@ from cw.review_findings import (
     ReviewerFindingsDocument,
     Severity,
 )
+from tests import _lock_invariants as lock_invariants
 
 if TYPE_CHECKING:
     import types
@@ -1878,6 +1879,23 @@ def _hide_optional_binaries(
         return real_which(cmd, mode, path)
 
     monkeypatch.setattr("shutil.which", _guarded_which)
+
+
+@pytest.fixture(autouse=True)
+def _lock_invariants(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Fail a test that breaks the ADR-0019 lock discipline (#1233).
+
+    Records every guarded lock event and every real subprocess launched under
+    ``sessions_lock``; at teardown fails on a re-entry, an order violation, an
+    unallowlisted in-lock subprocess, or a leaked lock. Opt a deliberate
+    violation out with ``@pytest.mark.lock_violations_expected(...)``. Logic
+    and known limits: ``tests/_lock_invariants.py``.
+    """
+    trace = lock_invariants.install(monkeypatch)
+    yield
+    lock_invariants.finish(trace, request.node)
 
 
 @pytest.fixture(scope="session", autouse=True)
