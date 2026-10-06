@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -10,6 +12,7 @@ import subprocess
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from cw._lock_guard import LockRank, lock_guard
 from cw._text import redact
 from cw.atomic import atomic_write_text
 from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
@@ -57,6 +60,7 @@ from cw.worktree import is_genuinely_live_home_reason, live_home_reason
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import IO
 
     from cw.models import ClientConfig
     from cw.native_daemon import NativeDaemonClient
@@ -165,10 +169,43 @@ SPAWN_POST_LAUNCH_FAILED_REASON = "spawn_post_launch_failed"
 # the same cap as dispatch.tick's ``last_error``.
 _POST_LAUNCH_ERROR_MAX_CHARS = 500
 _SPAWN_POST_LAUNCH_OUTBOX_NAME = "spawn_post_launch_attention.jsonl"
+_SPAWN_POST_LAUNCH_OUTBOX_LOCK_NAME = ".spawn_post_launch_attention.lock"
 
 
 def _spawn_post_launch_outbox_path() -> Path:
     return events_dir() / _SPAWN_POST_LAUNCH_OUTBOX_NAME
+
+
+def _acquire_spawn_post_launch_outbox_lock() -> tuple[IO[str], contextlib.ExitStack]:
+    """Acquire the lock covering an outbox delivery transaction."""
+    lock_path = events_dir() / _SPAWN_POST_LAUNCH_OUTBOX_LOCK_NAME
+    stack = contextlib.ExitStack()
+    fd: IO[str] | None = None
+    try:
+        stack.enter_context(
+            lock_guard("spawn_post_launch_outbox", lock_path, LockRank.STATE)
+        )
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = lock_path.open("w")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except (CwError, OSError):
+        if fd is not None:
+            fd.close()
+        stack.close()
+        raise
+    return fd, stack
+
+
+def _release_spawn_post_launch_outbox_lock(
+    fd: IO[str], stack: contextlib.ExitStack
+) -> None:
+    """Release an outbox delivery lock acquired by the paired helper."""
+    try:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        fd.close()
+        stack.close()
 
 
 def _append_spawn_post_launch_outbox(record: dict[str, object]) -> None:
@@ -197,8 +234,8 @@ def _attention_was_delivered(
         return False
 
 
-def _retry_spawn_post_launch_outbox() -> None:
-    """Retry pending attention intents and append durable delivery markers."""
+def _retry_spawn_post_launch_outbox_locked() -> None:
+    """Retry pending attention intents; the caller holds the outbox lock."""
     path = _spawn_post_launch_outbox_path()
     try:
         records = [
@@ -257,6 +294,19 @@ def _retry_spawn_post_launch_outbox() -> None:
                 )
 
 
+def _retry_spawn_post_launch_outbox() -> None:
+    """Retry pending attention intents and append durable delivery markers."""
+    try:
+        fd, stack = _acquire_spawn_post_launch_outbox_lock()
+    except (CwError, OSError):
+        _log.exception("cannot lock spawn post-launch attention outbox")
+        return
+    try:
+        _retry_spawn_post_launch_outbox_locked()
+    finally:
+        _release_spawn_post_launch_outbox_lock(fd, stack)
+
+
 def retry_spawn_post_launch_attention() -> None:
     """Consume durable post-launch attention intents left by a failed page."""
     _retry_spawn_post_launch_outbox()
@@ -309,28 +359,36 @@ def emit_spawn_post_launch_attention(
             correlation_id=ticket_id,
         )
     except (CwError, OSError, ValueError):
-        record_id = f"{session_id}:{surface_ref}:{ticket_id}"
         try:
-            _append_spawn_post_launch_outbox(
-                {
-                    "record_id": record_id,
-                    "status": "pending",
-                    "operation": "session.needs_attention",
-                    "reason": SPAWN_POST_LAUNCH_FAILED_REASON,
-                    "session_id": session_id,
-                    "surface_ref": surface_ref,
-                    "ticket_id": ticket_id,
-                    "cause": detail,
-                    "payload": payload,
-                    "correlation_id": ticket_id,
-                }
-            )
-        except OSError:
+            fd, stack = _acquire_spawn_post_launch_outbox_lock()
+        except (CwError, OSError):
             _log.exception(
-                "spawn post-launch attention fallback failed for session %s",
+                "spawn post-launch attention outbox lock failed for session %s",
                 session_id,
             )
         else:
+            try:
+                _append_spawn_post_launch_outbox(
+                    {
+                        "record_id": f"{session_id}:{surface_ref}:{ticket_id}",
+                        "status": "pending",
+                        "operation": "session.needs_attention",
+                        "reason": SPAWN_POST_LAUNCH_FAILED_REASON,
+                        "session_id": session_id,
+                        "surface_ref": surface_ref,
+                        "ticket_id": ticket_id,
+                        "cause": detail,
+                        "payload": payload,
+                        "correlation_id": ticket_id,
+                    }
+                )
+            except OSError:
+                _log.exception(
+                    "spawn post-launch attention fallback failed for session %s",
+                    session_id,
+                )
+            finally:
+                _release_spawn_post_launch_outbox_lock(fd, stack)
             retry_spawn_post_launch_attention()
         _log.exception(
             "spawn_post_launch_failed: could not record the operator page for"

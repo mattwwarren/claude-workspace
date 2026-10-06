@@ -996,6 +996,43 @@ def test_run_fix_dispatch_no_candidates_is_a_noop(
     assert stub_dispatch.calls == []
 
 
+def test_run_fix_dispatch_retries_spawn_attention_when_idle(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later reconcile tick delivers a page left by an earlier process."""
+    del acme_client, stub_dispatch
+    from cw.spawn import emit_spawn_post_launch_attention
+
+    def _fail(*_args: object, **_kwargs: object) -> None:
+        msg = "simulated event sink outage"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.spawn.record_event", _fail)
+    emit_spawn_post_launch_attention(
+        session_id="sess-2502",
+        session_name="acme/impl",
+        client="acme",
+        ticket_id="2502",
+        lane="default",
+        claude_session_id=None,
+        surface_ref="00000001",
+        error="event sink outage",
+    )
+    assert (
+        read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]) == []
+    )
+
+    monkeypatch.setattr("cw.spawn.record_event", _real_record_event)
+    assert fix_dispatch.run_fix_dispatch(config=OrchestratorConfig()) == []
+
+    pages = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+    assert len(pages) == 1
+    assert pages[0].payload["session_id"] == "sess-2502"
+
+
 # --- post-launch spawn failure (#2502) ----------------------------------------
 
 
