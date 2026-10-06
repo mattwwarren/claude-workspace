@@ -779,11 +779,15 @@ class CwLockReentrancyError(CwError):
     act phase re-entering ``reconcile()`` from inside its own locked body). The
     guard checks a thread-local held stack before any ``open()`` or ``flock()``
     syscall and raises this instead, so the hang becomes a catchable error.
-    Callers on the historical reentrant paths (``_dispatch_auto_fix_ci``,
-    ``_dispatch_address_review``, ``_reconcile_usage_limited``) already catch
-    ``CwError`` or broad ``Exception``. Another thread waiting on the same lock
-    is not a re-entry and still blocks. Carries the logical ``lock_name``, the
-    lock ``path`` and ``held``, the thread's held lock names, outermost first.
+    The review-recipe dispatchers (``_dispatch_auto_fix_ci``,
+    ``_dispatch_address_review``) no longer re-enter: #1229 moved them to run
+    after ``reconcile()`` releases ``sessions_lock``, so for them this guard is
+    a backstop, not a live path. ``_reconcile_usage_limited`` still tolerates
+    it: it wraps ``reconcile()`` in a broad ``except Exception``, so a
+    re-entry there is logged rather than fatal. Another thread waiting on the
+    same lock is not a re-entry and still blocks. Carries the logical
+    ``lock_name``, the lock ``path`` and ``held``, the thread's held lock
+    names, outermost first.
     """
 
     __slots__ = ("held", "lock_name", "path")
