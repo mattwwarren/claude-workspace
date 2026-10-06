@@ -7150,7 +7150,6 @@ class TestWedgeActiveDaemonStaleNoSentinel:
         """--reap with an invalid-UTF-8 orchestrator.yaml reaps nothing (#2554)."""
         from cw.config import load_state, orchestrator_config_file
         from cw.models import SessionStatus
-        from tests._invalid_utf8 import INVALID_UTF8
 
         _stub_claude_version_ok(monkeypatch)
         self._seed_stuck_session(tmp_path, monkeypatch)
