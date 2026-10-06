@@ -8,7 +8,7 @@ docstring and ADR-0005/ADR-0006 for the invariants.
 Anything whose side effect re-acquires ``sessions_lock`` (a ``spawn_create_impl``
 call, a dispatch tick that re-enters ``reconcile()``) must NOT run inside
 ``_reconcile_locked``: the lock is not reentrant and the second acquisition
-raises ``SessionsLockReentryError`` (#1228), which the callers' ``except
+raises ``CwLockReentrancyError`` (#1228), which the callers' ``except
 CwError`` would silently swallow. Such work is hoisted to ``reconcile()``'s
 post-lock section — ``run_fix_dispatch`` (#2064) is sited there directly, and
 the review recipes' ``address_review`` dispatch (#1229) is prepared under the
@@ -373,7 +373,7 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     # Sited here (#2064), not in _run_terminal_backstops_and_sweeps:
     # dispatch_fix_agent's spawn_create_impl() call re-acquires sessions_lock(),
     # so it cannot run from inside _reconcile_locked's sessions_lock() hold
-    # without a SessionsLockReentryError (#1228). Runs unconditionally (no
+    # without a CwLockReentrancyError (#1228). Runs unconditionally (no
     # gate, by design, #2017) -- must sit BEFORE the completed_ticket_ids
     # early return below, not after.
     #

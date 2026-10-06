@@ -268,8 +268,8 @@ def prune_events(
     so releasing and reacquiring it mid-call would self-deadlock.
 
     Deliberately does not call :func:`record_event`: doing so would require
-    a second, nested ``_inbox_lock()`` acquisition, which self-deadlocks
-    (see above). No audit event is emitted for a prune.
+    a second, nested ``_inbox_lock()`` acquisition, which the lock guard
+    refuses (ADR-0019). No audit event is emitted for a prune.
 
     Args:
         before: Prune events with ``created_at`` earlier than this.

@@ -108,10 +108,8 @@ def _revert_running_tasks_for_sessions(
     edge-trigger: subsequent ticks find the task already BLOCKED_ON_USER (not RUNNING),
     so they skip it and both calls fire exactly once per dirty episode (#763).
 
-    # Why: record_event and fire_push_notification are called outside dev_queue_lock
-    # to preserve the lock-order invariant (record_event acquires _inbox_lock;
-    # holding dev_queue_lock while acquiring _inbox_lock risks deadlock with any
-    # concurrent process that acquires _inbox_lock first — see #765).
+    # Why: record_event and fire_push_notification run after dev_queue_lock
+    # releases, by choice: ADR-0019 permits emitting under it or after it.
     # Sessions to notify are collected inside the lock, emitted after it releases.
 
     # Why: dirtiness is checked before dev_queue_lock is acquired (in the
@@ -168,7 +166,7 @@ def _revert_running_tasks_for_sessions(
             changed = True
         if changed:
             save_dev_queue(store)
-    # Fire notifications after dev_queue_lock releases (lock-order invariant #765).
+    # Fire notifications after dev_queue_lock releases (ADR-0019 permits either).
     for session in notify_sessions:
         reason = session.recovery_reason or dirty.get(session.id, "dirty_worktree")
         breadcrumbs = (
@@ -271,10 +269,8 @@ def _emit_never_claimed_refusals(
     """Emit SESSION_NEEDS_ATTENTION for each refused false-completion.
 
     Called after dev_queue_lock releases, mirroring this module's existing
-    SESSION_COMPLETED emission (Phase 4) -- record_event acquires the
-    events-inbox lock and this function's caller must not hold
-    dev_queue_lock while doing so (see _revert_running_tasks_for_sessions
-    for the same ordering rationale, #765).
+    SESSION_COMPLETED emission (Phase 4); emitting after the queue lock is a
+    choice ADR-0019 permits, not a lock-order requirement.
 
     Emits one of two cause-specific breadcrumb variants, selected by the
     tuple's ``ever_spawned`` element: the two disjuncts of
@@ -720,9 +716,8 @@ def park_terminal_sibling_tasks() -> list[str]:
     A genuine stale PENDING from the enqueue-dedup gap is always NEWER than
     the original COMPLETED/CANCELLED row.
 
-    # Why: event emission is after dev_queue_lock releases (lock-order
-    # invariant #765 — record_event acquires _inbox_lock; holding dev_queue_lock
-    # while acquiring _inbox_lock risks deadlock).
+    # Why: events are collected under dev_queue_lock and emitted after it
+    # releases (ADR-0019 permits either).
     """
     # Cheap pre-read outside the lock to fast-exit when no terminal rows exist.
     pre_store = load_dev_queue()
@@ -780,7 +775,7 @@ def park_terminal_sibling_tasks() -> list[str]:
         if changed:
             save_dev_queue(store)
 
-    # Emit events after dev_queue_lock releases (lock-order invariant #765).
+    # Emit events after dev_queue_lock releases (ADR-0019 permits either).
     for ticket_id, client, lane, session_id in pending_events:
         record_event(
             OrchestratorEventType.SESSION_REAP_PROPOSED,
@@ -1051,8 +1046,8 @@ def release_stale_gated_tasks() -> list[str]:
     )
 
     released_ids: list[str] = []
-    # Snapshot fields needed for event emission after the lock (lock-order
-    # invariant #765 -- record_event acquires _inbox_lock). session_id is
+    # Snapshot fields needed for event emission after the lock (emitting
+    # after release is a choice ADR-0019 permits). session_id is
     # captured BEFORE _release_variant_a/_release_variant_b run (both clear
     # task.session_id under the AUTO branch) -- mirrors
     # park_terminal_sibling_tasks's orig_session_id precedent exactly.
@@ -1151,7 +1146,7 @@ def release_stale_gated_tasks() -> list[str]:
         for event_id in processed_event_ids:
             advance_cursor(_STALE_GATE_CONSUMER, event_id)
 
-    # Emit events after dev_queue_lock releases (lock-order invariant #765).
+    # Emit events after dev_queue_lock releases (ADR-0019 permits either).
     for ticket_id, client, lane, proposed_action, session_id in pending_events:
         record_event(
             OrchestratorEventType.SESSION_REAP_PROPOSED,

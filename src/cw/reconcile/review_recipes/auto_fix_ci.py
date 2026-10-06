@@ -320,7 +320,7 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
     ``skipped_roster_unreadable`` with an empty id list.
 
     (Before #1229 this call site ran under ``reconcile()``'s ``sessions_lock``
-    and its immediate tick always died on ``SessionsLockReentryError``
+    and its immediate tick always died on ``CwLockReentrancyError``
     (GitHub #1228). Merely moving the call post-lock would have left that tick
     always dying on ``DispatchLoopLockedError`` instead, so the tick was
     dropped and only the requeue remains.)

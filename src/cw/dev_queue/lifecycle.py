@@ -495,10 +495,8 @@ def transition_task_status(
     task.codex_orphan_session_id = None
     task.codex_orphan_rescan_next_eligible_at = None
     if old_status != new_status:
-        # Why: emit inline while callers still hold dev_queue_lock. record_event
-        # takes the events-inbox lock (_inbox_lock) *inside* dev_queue_lock; the
-        # reverse nesting never occurs (no path takes _inbox_lock then
-        # dev_queue_lock), so this ordering is deadlock-safe. RFC 0008 W1.
+        # Why: emit inline while callers still hold dev_queue_lock; the
+        # inbox lock nests inside it as a leaf (ADR-0019). RFC 0008 W1.
         record_event(
             OrchestratorEventType.TASK_TRANSITION,
             {
@@ -696,10 +694,8 @@ def _emit_stage_change(
     """
     if old_stage == new_stage:
         return
-    # Why: emit inline while callers still hold dev_queue_lock. record_event
-    # takes the events-inbox lock (_inbox_lock) *inside* dev_queue_lock; the
-    # reverse nesting never occurs (no path takes _inbox_lock then
-    # dev_queue_lock), so this ordering is deadlock-safe. RFC 0008 W1.
+    # Why: emit inline while callers still hold dev_queue_lock; the inbox
+    # lock nests inside it as a leaf (ADR-0019). RFC 0008 W1.
     record_event(
         OrchestratorEventType.TASK_STAGE_CHANGED,
         {

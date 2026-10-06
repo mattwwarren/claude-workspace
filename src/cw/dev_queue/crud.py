@@ -232,9 +232,7 @@ def register_or_adopt_watched_pr(
             if existing.client == watched.client:
                 return "already_active"
             # Why: emit inline under dev_queue_lock, mirroring
-            # _emit_task_deleted's identical precedent below — record_event
-            # nests _inbox_lock INSIDE dev_queue_lock, never the reverse, so
-            # this is deadlock-safe.
+            # _emit_task_deleted below; the inbox lock is a leaf (ADR-0019).
             record_event(
                 OrchestratorEventType.WATCHED_PR_COLLISION,
                 {
@@ -264,8 +262,7 @@ def _emit_task_deleted(
     once per removed row.
     """
     # Why: emit inline under dev_queue_lock — one task.deleted per removed
-    # row (not per API call). record_event nests _inbox_lock INSIDE
-    # dev_queue_lock; the reverse never happens, so this is deadlock-safe.
+    # row (not per API call). The inbox lock is a leaf (ADR-0019).
     record_event(
         OrchestratorEventType.TASK_DELETED,
         {

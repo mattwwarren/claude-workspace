@@ -696,8 +696,8 @@ def apply_pr_state_observation(
     Transitions are diffed against that same freshly-locked baseline, so a
     concurrent writer can't produce a stale diff or a duplicate emit either.
     The durable baseline is written first (at-most-once emit); events fire
-    OUTSIDE the queue lock so ``record_event``'s inbox lock never nests inside
-    ``dev_queue_lock``.
+    after the queue lock releases, a choice ADR-0019 permits (emitting under
+    ``dev_queue_lock`` would be allowed too).
 
     A ``(client, ticket_id)`` with no matching task is a silent no-op (the
     task may have been cancelled/removed between observation and this call).
