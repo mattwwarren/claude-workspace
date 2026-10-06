@@ -212,10 +212,22 @@ project dir, resolution tries (1) exact `claude_session_id` match, (2)
 `surface_ref`-prefix glob with mtime-after-`started_at` stale guard, (3)
 newest `*.jsonl` as a degraded fallback when ids are not yet backfilled.
 
+**Known ID-less sessions get no fallback** (#2417). When the task's Session row
+exists in `CW_STATE` and both `claude_session_id` and `surface_ref` are null,
+peek skips step (3), the legacy ticket-name heuristic, and the newest-`*.jsonl`
+idle scan. In a reused worktree those would hand the current session an
+earlier stage's transcript and its `stage_complete` sentinel. The row is blind
+instead: `PEEK-BLIND`, null `stage`/`status`/`age`/`idle`, null
+`jsonl_idle_min`, and reason `blind — never started`, or `blind — no Claude
+transcript (local process handle present)` when the Session carries a
+`local_liveness` handle (a local process such as codex may be running). Exact
+`claude_session_id` and `surface_ref` matches, the OpenCode log, and the case
+of no matching Session row are unchanged.
+
 **Degraded-signal fallback.** When no worktree path is available for the
 session and the heuristic name search also fails, peek returns null
-`stage`/`status`/`age`/`idle` and a bare `PEEK` ("no transcript timestamps —
-verify session is alive"). That is a **blind** signal, not a stall. If you
+`stage`/`status`/`age`/`idle` and `PEEK-BLIND` ("no resolvable transcript;
+none found"). That is a **blind** signal, not a stall. If you
 encounter it, scan the worktree's claude project dir manually: the newest
 `*.jsonl`, whether its line count is still growing (liveness), and its last
 parseable `AUTO_DEV_RESULT` (progress).
