@@ -63,7 +63,7 @@ class TestLiveSessionWorktreePaths:
     ) -> None:
         live = Path("/live/wt")
         state = CwState(sessions=[_session_at("c/impl", status, live)])
-        monkeypatch.setattr("cw.worktree._refresh.load_state", lambda: state)
+        monkeypatch.setattr("cw.worktree._liveness.load_state", lambda: state)
 
         assert live_session_worktree_paths() == frozenset({live})
 
@@ -76,7 +76,7 @@ class TestLiveSessionWorktreePaths:
                 _session_at("c/nopath", SessionStatus.ACTIVE, None),
             ]
         )
-        monkeypatch.setattr("cw.worktree._refresh.load_state", lambda: state)
+        monkeypatch.setattr("cw.worktree._liveness.load_state", lambda: state)
 
         assert live_session_worktree_paths() == frozenset()
 
@@ -87,7 +87,7 @@ class TestLiveSessionWorktreePaths:
             msg = "corrupt"
             raise ValueError(msg)
 
-        monkeypatch.setattr("cw.worktree._refresh.load_state", _boom)
+        monkeypatch.setattr("cw.worktree._liveness.load_state", _boom)
 
         with caplog.at_level("WARNING", logger="cw.worktree"):
             paths = live_session_worktree_paths()
@@ -135,7 +135,7 @@ class TestLiveSessionWorktreePaths:
             msg = "not a state-read failure"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr("cw.worktree._refresh.load_state", _boom)
+        monkeypatch.setattr("cw.worktree._liveness.load_state", _boom)
 
         with pytest.raises(RuntimeError, match="not a state-read failure"):
             live_session_worktree_paths()
@@ -153,21 +153,21 @@ class TestNonTerminalSessionSurfaceRefs:
     def test_non_terminal_session_surface_ref_included(
         self, monkeypatch: pytest.MonkeyPatch, status: SessionStatus
     ) -> None:
-        from cw.worktree._refresh import _non_terminal_session_surface_refs
+        from cw.worktree._liveness import _non_terminal_session_surface_refs
 
         state = CwState(
             sessions=[
                 _seed_session_with_surface_ref("c/impl", status, "aaaa1111"),
             ]
         )
-        monkeypatch.setattr("cw.worktree._refresh.load_state", lambda: state)
+        monkeypatch.setattr("cw.worktree._liveness.load_state", lambda: state)
 
         assert _non_terminal_session_surface_refs() == frozenset({"aaaa1111"})
 
     def test_terminal_and_refless_sessions_excluded(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from cw.worktree._refresh import _non_terminal_session_surface_refs
+        from cw.worktree._liveness import _non_terminal_session_surface_refs
 
         state = CwState(
             sessions=[
@@ -177,20 +177,20 @@ class TestNonTerminalSessionSurfaceRefs:
                 _seed_session_with_surface_ref("c/noref", SessionStatus.ACTIVE, None),
             ]
         )
-        monkeypatch.setattr("cw.worktree._refresh.load_state", lambda: state)
+        monkeypatch.setattr("cw.worktree._liveness.load_state", lambda: state)
 
         assert _non_terminal_session_surface_refs() == frozenset()
 
     def test_state_load_failure_returns_none_and_warns(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        from cw.worktree._refresh import _non_terminal_session_surface_refs
+        from cw.worktree._liveness import _non_terminal_session_surface_refs
 
         def _boom() -> CwState:
             msg = "corrupt"
             raise ValueError(msg)
 
-        monkeypatch.setattr("cw.worktree._refresh.load_state", _boom)
+        monkeypatch.setattr("cw.worktree._liveness.load_state", _boom)
 
         with caplog.at_level("WARNING", logger="cw.worktree"):
             refs = _non_terminal_session_surface_refs()
@@ -214,10 +214,10 @@ class TestLiveHomeReasonSurfaceRefUnreadable:
         good = tmp_path / "wt"
         good.mkdir()
         monkeypatch.setattr(
-            "cw.worktree._refresh.live_session_worktree_paths", frozenset
+            "cw.worktree._liveness.live_session_worktree_paths", frozenset
         )
         monkeypatch.setattr(
-            "cw.worktree._refresh._non_terminal_session_surface_refs", lambda: None
+            "cw.worktree._liveness._non_terminal_session_surface_refs", lambda: None
         )
 
         reason = live_home_reason(good, daemon=native_daemon.get_native_daemon_client())
@@ -535,7 +535,7 @@ class TestReuseOccupancyRosterAndPaths:
         good.mkdir()
         if side == "session":
             monkeypatch.setattr(
-                "cw.worktree._refresh.live_session_worktree_paths",
+                "cw.worktree._liveness.live_session_worktree_paths",
                 lambda: frozenset({bad}),
             )
         elif side == "worker":
@@ -624,7 +624,7 @@ class TestReuseOccupancyRosterAndPaths:
         good.mkdir()
         if side == "session":
             monkeypatch.setattr(
-                "cw.worktree._refresh.live_session_worktree_paths",
+                "cw.worktree._liveness.live_session_worktree_paths",
                 lambda: frozenset({bad}),
             )
         else:
@@ -653,7 +653,7 @@ class TestReuseOccupancyRosterAndPaths:
         target.mkdir()
         bad_worker = _unnormalizable_path("eloop", tmp_path, monkeypatch)
         monkeypatch.setattr(
-            "cw.worktree._refresh.live_session_worktree_paths",
+            "cw.worktree._liveness.live_session_worktree_paths",
             lambda: frozenset({target}),
         )
         _seed_roster(bad_worker)
@@ -669,7 +669,7 @@ class TestReuseOccupancyRosterAndPaths:
         (tmp_path / "b").mkdir()
         bad_session = _unnormalizable_path("eloop", tmp_path / "b", monkeypatch)
         monkeypatch.setattr(
-            "cw.worktree._refresh.live_session_worktree_paths",
+            "cw.worktree._liveness.live_session_worktree_paths",
             lambda: frozenset({bad_session}),
         )
         _seed_roster(target)
@@ -694,7 +694,7 @@ class TestReuseOccupancyRosterAndPaths:
         (tmp_path / "s").mkdir()
         bad_session = _unnormalizable_path("eloop", tmp_path / "s", monkeypatch)
         monkeypatch.setattr(
-            "cw.worktree._refresh.live_session_worktree_paths",
+            "cw.worktree._liveness.live_session_worktree_paths",
             lambda: frozenset({bad_session}),
         )
         (tmp_path / "w").mkdir()
@@ -722,7 +722,7 @@ class TestReuseOccupancyRosterAndPaths:
         good.mkdir()
         bad = _unnormalizable_path("eloop", tmp_path, monkeypatch)
         monkeypatch.setattr(
-            "cw.worktree._refresh.live_session_worktree_paths",
+            "cw.worktree._liveness.live_session_worktree_paths",
             lambda: frozenset({bad}),
         )
         warned: set[UnresolvablePathWarningKey] = set()
@@ -745,7 +745,7 @@ class TestReuseOccupancyRosterAndPaths:
         good.mkdir()
         bad = _unnormalizable_path("eloop", tmp_path, monkeypatch)
         monkeypatch.setattr(
-            "cw.worktree._refresh.live_session_worktree_paths",
+            "cw.worktree._liveness.live_session_worktree_paths",
             lambda: frozenset({bad}),
         )
         daemon = native_daemon.get_native_daemon_client()
@@ -767,7 +767,7 @@ class TestReuseOccupancyRosterAndPaths:
         good.mkdir()
         bad = _unnormalizable_path("eloop", tmp_path, monkeypatch)
         monkeypatch.setattr(
-            "cw.worktree._refresh.live_session_worktree_paths",
+            "cw.worktree._liveness.live_session_worktree_paths",
             lambda: frozenset({bad}),
         )
         _seed_roster(bad)

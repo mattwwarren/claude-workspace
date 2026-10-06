@@ -26,11 +26,8 @@ from cw.worktree._git import (
     check_not_main_checkout,
 )
 from cw.worktree._paths import worktree_path_for
-from cw.worktree._refresh import (
-    ReuseRefreshReport,
-    _raise_if_occupied,
-    _refresh_reused_worktree,
-)
+from cw.worktree._refresh import _raise_if_occupied, _refresh_reused_worktree
+from cw.worktree._refresh_types import ReuseRefreshReport
 from cw.worktree._unsaved import worktree_has_unsaved_work
 
 if TYPE_CHECKING:

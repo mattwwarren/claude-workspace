@@ -12,7 +12,12 @@ re-exports. Submodules:
 - ``_freshness`` — fetch and freshness vs. origin, for feature and default
   branches.
 - ``_unsaved`` — unsaved-work / dirty-tree detection.
-- ``_refresh`` — reuse refresh and occupancy for reused worktrees (#2213).
+- ``_refresh_types`` — reuse refresh result and report types (#2213).
+- ``_liveness`` — live-session and daemon-worker liveness for a worktree.
+- ``_occupancy`` — occupancy verdict for a reused worktree.
+- ``_fast_forward`` — reused-worktree fast-forward, audit event and
+  submodule sync.
+- ``_refresh`` — reuse refresh orchestration for reused worktrees (#2213).
 - ``_lifecycle`` — ``create_worktree`` / ``remove_worktree``.
 
 Tests that patch a helper imported across submodules (``_run_git``,
@@ -22,6 +27,12 @@ Tests that patch a helper imported across submodules (``_run_git``,
 
 from __future__ import annotations
 
+from cw.worktree._fast_forward import (
+    _SHA_LOG_CHARS,
+    _ff_reused_worktree,
+    _record_fast_forward,
+    _sync_reused_submodules,
+)
 from cw.worktree._freshness import (
     _MISSING_REMOTE_REF_MARKER,
     FetchOutcome,
@@ -59,6 +70,19 @@ from cw.worktree._lifecycle import (
     create_worktree,
     remove_worktree,
 )
+from cw.worktree._liveness import (
+    _NON_TERMINAL_SESSION_STATUSES,
+    _STATE_READ_ERRORS,
+    UnresolvablePathWarningKey,
+    _home_match_reason,
+    _normalize_path,
+    _normalize_records,
+    _warn_unresolvable_path_once,
+    is_genuinely_live_home_reason,
+    live_home_reason,
+    live_session_worktree_paths,
+)
+from cw.worktree._occupancy import _Occupancy, _occupancy_verdict, _reuse_occupancy
 from cw.worktree._paths import (
     _HASH_BASE_SEGMENTS,
     _WORKSPACE_HASH_CHARS,
@@ -73,33 +97,14 @@ from cw.worktree._paths import (
     worktree_path_for,
 )
 from cw.worktree._refresh import (
-    _NON_TERMINAL_SESSION_STATUSES,
-    _SHA_LOG_CHARS,
-    _STATE_READ_ERRORS,
-    RefreshOutcome,
-    RefreshResult,
-    ReuseRefreshReport,
-    UnresolvablePathWarningKey,
     _fetch_gate,
-    _ff_reused_worktree,
     _handle_branch_absent,
-    _home_match_reason,
-    _normalize_path,
-    _normalize_records,
-    _Occupancy,
-    _occupancy_verdict,
     _raise_if_occupied,
-    _record_fast_forward,
     _refresh_from_tracking_ref,
     _refresh_reused_worktree,
     _refresh_reused_worktree_steps,
-    _reuse_occupancy,
-    _sync_reused_submodules,
-    _warn_unresolvable_path_once,
-    is_genuinely_live_home_reason,
-    live_home_reason,
-    live_session_worktree_paths,
 )
+from cw.worktree._refresh_types import RefreshOutcome, RefreshResult, ReuseRefreshReport
 from cw.worktree._scope import (
     _NUMSTAT_MIN_COLS,
     _SCOPE_MISMATCH_RATIO_THRESHOLD,

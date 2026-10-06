@@ -3187,7 +3187,7 @@ def _seed_occupied_ticket_worktree(
         # reads before the claim is reached, so make only the occupancy
         # probe's state read indeterminate.
         monkeypatch.setattr(
-            "cw.worktree._refresh.live_session_worktree_paths", lambda: None
+            "cw.worktree._liveness.live_session_worktree_paths", lambda: None
         )
     else:
         occupy_worktree(client, worktree, source, daemon=daemon)
@@ -3966,7 +3966,7 @@ class TestStaleWorktreeYieldsToLiveOccupant:
             # reads before the claim is reached, so make only the liveness
             # probe's state read indeterminate.
             monkeypatch.setattr(
-                "cw.worktree._refresh.live_session_worktree_paths", lambda: None
+                "cw.worktree._liveness.live_session_worktree_paths", lambda: None
             )
         else:
             occupy_worktree(client, stale_tree, source, daemon=daemon)

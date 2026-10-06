@@ -461,7 +461,7 @@ class TestFastForwardAuditEvent:
             msg = "disk full"
             raise OSError(msg)
 
-        monkeypatch.setattr("cw.worktree._refresh.record_event", boom)
+        monkeypatch.setattr("cw.worktree._fast_forward.record_event", boom)
         report = ReuseRefreshReport()
 
         caplog.clear()  # drop seed-phase records

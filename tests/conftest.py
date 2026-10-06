@@ -2439,7 +2439,7 @@ def _vouch_for_roster_worker(client: ClientConfig, short_id: str) -> None:
 
     ``status=BACKGROUNDED`` (not ``ACTIVE``) deliberately: BACKGROUNDED is
     still non-terminal for occupancy purposes (``_NON_TERMINAL_SESSION_
-    STATUSES`` in ``cw.worktree._refresh`` includes it), but unlike ACTIVE/
+    STATUSES`` in ``cw.worktree._liveness`` includes it), but unlike ACTIVE/
     IDLE it is NOT counted by dispatch's ``running_count`` (session-based
     client slot budget, ``cw.dispatch.tick``) -- an ACTIVE vouch session here
     would silently consume the client's entire slot budget in a

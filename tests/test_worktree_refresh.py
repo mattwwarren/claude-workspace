@@ -291,7 +291,7 @@ class TestCreateWorktreeReuseRefresh:
         # ``cw.worktree`` imports the function lazily (import cycle), so the
         # patch target is its home module.
         monkeypatch.setattr(
-            "cw.worktree._refresh.live_session_worktree_paths", lambda: None
+            "cw.worktree._liveness.live_session_worktree_paths", lambda: None
         )
         fetched = _spy_fetch(monkeypatch)
 
@@ -536,7 +536,7 @@ class TestCreateWorktreeReuseRefresh:
             lambda *_args, **_kw: FetchResult(FetchOutcome.FETCHED),
         )
         monkeypatch.setattr(
-            "cw.worktree._refresh._reuse_occupancy",
+            "cw.worktree._occupancy._reuse_occupancy",
             lambda *_args, **_kw: _Occupancy(
                 live=None, branch_mismatch=None, local=None
             ),
@@ -941,7 +941,7 @@ class TestCreateWorktreeReuseRefresh:
         local_sha = git_in(wt2, "rev-parse", "HEAD")
         push_commit_to_origin(origin, "main", tmp_path / "side-main", "advance.txt")
         monkeypatch.setattr(
-            "cw.worktree._refresh._reuse_occupancy",
+            "cw.worktree._occupancy._reuse_occupancy",
             lambda *_args, **_kw: _Occupancy(
                 live=None, branch_mismatch=None, local=None
             ),

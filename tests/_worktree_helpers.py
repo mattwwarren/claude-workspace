@@ -5,11 +5,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cw.worktree import (
+    _fast_forward,
     _freshness,
     _git,
     _lifecycle,
+    _liveness,
+    _occupancy,
     _paths,
     _refresh,
+    _refresh_types,
     _scope,
     _unsaved,
 )
@@ -17,7 +21,19 @@ from cw.worktree import (
 if TYPE_CHECKING:
     import pytest
 
-_SUBMODULES = (_git, _paths, _scope, _freshness, _unsaved, _refresh, _lifecycle)
+_SUBMODULES = (
+    _git,
+    _paths,
+    _scope,
+    _freshness,
+    _unsaved,
+    _refresh_types,
+    _liveness,
+    _occupancy,
+    _fast_forward,
+    _refresh,
+    _lifecycle,
+)
 
 
 def patch_worktree(monkeypatch: pytest.MonkeyPatch, name: str, value: object) -> None:
