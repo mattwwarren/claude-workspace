@@ -930,10 +930,10 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `sessions.json`: the leaked-worker sweep stops the unrecorded worker on the
   next reconcile tick, the row stays RUNNING bound to that id, and
   `cw dev-queue tasks` shows the `?session_mismatch` advisory. For a fix-loop
-  handoff, the next reconcile instead treats that unrecorded session as
-  finished and unparks the row for a fresh REVIEW round; with a readable
-  roster the same reconcile stops the worker first, but an unreadable roster
-  or a failed stop can leave both workers running. When only the
+  handoff, the row remains latched and RUNNING until the launched worker is
+  confirmed stopped; the automatic recovery path is tracked in #2591. If the
+  event inbox append fails, the emitter keeps a durable append-only attention
+  intent with the worker, ticket, operation and cause for retry. When only the
   dev-queue stamp failed, the worker keeps running and the row stays RUNNING
   with no `session_id`. Either way the operator inspects the worker and
   requeues the row (`cw dev-queue requeue`); nothing recovers it

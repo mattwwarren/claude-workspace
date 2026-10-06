@@ -846,10 +846,10 @@ def _act_on_fix_dispatch_completions(
 ) -> list[str]:
     """Unpark rows whose fix session has gone terminal; return their ticket_ids.
 
-    A session cw cannot resolve at all counts as finished: the fix agent is a
-    first-class DAEMON session, so an unresolvable id means it is gone. Leaving
-    the row RUNNING on that evidence would strand the ticket forever, since
-    nothing else clears this field.
+    A session id that is absent from state is deliberately not treated as
+    finished: a post-launch state-write failure leaves a live worker with no
+    session record. Keep the handoff latched and the row RUNNING until the
+    leaked-worker sweep has confirmed the worker is gone (#2502, #2590).
     """
     if not candidates:
         return []
@@ -862,7 +862,16 @@ def _act_on_fix_dispatch_completions(
             if task is None or task.fix_dispatch_session_id is None:
                 continue
             session = state.find_by_name_or_id(task.fix_dispatch_session_id)
-            if session is not None and session.status not in TERMINAL_SESSION_STATUSES:
+            if session is None:
+                _log.error(
+                    "fix_dispatch: session %s is absent from state; keeping "
+                    "ticket %s RUNNING until the launched worker is confirmed "
+                    "stopped",
+                    task.fix_dispatch_session_id,
+                    task.ticket_id,
+                )
+                continue
+            if session.status not in TERMINAL_SESSION_STATUSES:
                 continue
             task.fix_dispatch_session_id = None
             if task.status == QueueItemStatus.RUNNING:
