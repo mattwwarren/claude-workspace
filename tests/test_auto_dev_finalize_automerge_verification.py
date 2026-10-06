@@ -158,6 +158,21 @@ def test_step4d_arm_uses_arm_automerge_with_resolver() -> None:
     assert _INVOCATION_ERROR in section
 
 
+def test_step4d_ui_evidence_precondition_precedes_the_arm() -> None:
+    """The UI Evidence Gate exemption must be read before the runnable arm.
+
+    On a repo without branch protection, arming a held PR merges it at once, so
+    the skip condition cannot trail the ``arm-automerge`` block.
+    """
+    section = _step4d_enable_automerge_section()
+    precondition = (
+        'Precondition: if the UI Evidence Gate above resolved to "Hold" '
+        "(interactive) or fired in headless, skip this entire item"
+    )
+    assert precondition in section
+    assert section.index(precondition) < section.index(_FINALIZE_RESOLVER)
+
+
 def test_step4c_headless_self_heals_with_arm_automerge_and_resolver() -> None:
     """The reuse path skips Step 4c, so the resolver lives at both arm sites."""
     section = _step4c_section()
