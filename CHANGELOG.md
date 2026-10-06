@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A worker launched before a later spawn step failed is no longer reverted to PENDING or spawned a second time (#2502).** A failure in `spawn_create_impl` after `daemon.spawn_bg` returned (the transcript lookup, the parent lookup, the `sessions.json` write) propagated as a plain error, and dispatch's broad spawn-failure handler reverted the row to PENDING with the spawn-error backoff and a lane circuit-breaker count, so a later tick spawned a second worker for the ticket. A failure after `executor.spawn` returned (the dev-queue stamp, the `session.spawned` event, the console line) took the same path. `spawn_create_impl` now raises the new `WorkerLaunchedError` (a `CwError` carrying `session_id` and `surface_ref`) for those failures. Dispatch keeps the row RUNNING, retries the stamp once, charges no backoff and no breaker count, and pages `session.needs_attention` with `paused_status: spawn_post_launch_failed` (once per failure, no push notification). The `fix_dispatch` and `address_review` guards record the launched session and page instead of reporting a failed spawn. When the `sessions.json` write is what failed, the worker is recorded and paged, not kept running: the leaked-worker sweep stops it on the next reconcile tick, and the row stays RUNNING bound to a session id that `sessions.json` does not have (a fix-loop handoff is instead unparked for a fresh REVIEW round). Not covered: only failures after a worker exists are exempt from the backoff and the breaker; pre-launch local errors and `SpawnUnregisteredError` keep today's revert, backoff and breaker count (#TBD-a). Only the claude-native executor path is covered; codex, opencode and aider workers started through `_spawn_fire_and_forget` can still be duplicated (#TBD-c). Nothing recovers a RUNNING row whose `session_id` is missing or names an unrecorded session automatically (#TBD-b), and a fix-loop worker can overlap the fresh REVIEW round when the roster is unreadable or its stop fails (#TBD-d).
+
 ## [1.67.0] - 2026-10-06
 
 ### Fixed
