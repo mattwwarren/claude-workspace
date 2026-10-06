@@ -42,7 +42,7 @@ from cw.models import (
     SessionStatus,
 )
 from cw.reconcile._shared import SentinelRouteOutcome
-from tests._reconcile_helpers import _stage_complete_payload
+from tests._reconcile_helpers import LockProbeDaemon, _stage_complete_payload
 from tests.conftest import (
     _STAMP_ABSENT,
     _invoke_hook_command,
@@ -622,6 +622,40 @@ def test_signal_stop_terminal_session_is_noop_and_leaves_clear_stamp_untouched(
         event_types=[OrchestratorEventType.SESSION_COMPLETED],
     )
     assert not any(e.payload.get("session_id") == session.id for e in events)
+
+
+def test_stops_native_bg_session_on_daemon_origin_with_sessions_lock_free(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1232: signal-stop's ``daemon.stop()`` runs after ``sessions_lock`` releases.
+
+    Sibling of ``tests/test_cli.py::TestSignalStop::
+    test_stops_native_bg_session_on_daemon_origin``. The payload's Claude
+    session id starts with the seeded ``surface_ref`` so the stale-hook guard
+    accepts it; the probe then records the lock state at the stop and that
+    the COMPLETED stamp was already persisted.
+    """
+    session = _seed_session(tmp_path)
+    assert session.worktree_path is not None
+    worktree = session.worktree_path
+    daemon = LockProbeDaemon()
+    surface_ref = daemon.spawn_bg(cwd=worktree, prompt="seed")
+    state = load_state()
+    next(s for s in state.sessions if s.id == session.id).surface_ref = surface_ref
+    save_state(state)
+    _write_hook_context_file(worktree, workspace_path=session.workspace_path)
+    monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+
+    result = _invoke_hook_command(
+        "signal-stop",
+        _stop_payload(worktree, session_id=f"{surface_ref}-full-uuid"),
+    )
+
+    assert result.exit_code == 0, result.output
+    assert daemon.stop_calls == [surface_ref]
+    assert daemon.probes == [("free", {session.id: SessionStatus.COMPLETED})]
 
 
 @pytest.mark.parametrize(

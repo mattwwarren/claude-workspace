@@ -1075,8 +1075,8 @@ def _resolve_stop_under_lock(
     USER-origin session (marked IDLE here). Extracted from ``signal_stop``
     (#2458) to keep it under the branch/return caps.
     """
-    # Why not mutate_state: dual-lock (dev_queue_lock nested at the TIMED_OUT path)
-    # and daemon.stop() network call inside the lock window (criteria 1 and 2).
+    # Why not mutate_state: dual-lock (dev_queue_lock nested at the TIMED_OUT path).
+    # The daemon.stop() network call runs in signal_stop after this lock releases.
     with sessions_lock():
         state = load_state()
         session = next((s for s in state.sessions if s.id == cw_session_id), None)
