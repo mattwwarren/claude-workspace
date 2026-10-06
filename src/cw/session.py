@@ -22,6 +22,7 @@ from cw.config import (
 from cw.exceptions import CwError
 from cw.history import EventType, HistoryEvent, record_event
 from cw.models import (
+    TERMINAL_SESSION_STATUSES,
     ClientConfig,
     CompletionReason,
     CwState,
@@ -549,17 +550,8 @@ def resume_session(
         _attach_session(new_short_id)
 
 
-def _remove_worktree_before_lock(session_name: str | None, *, force: bool) -> str:
-    """Remove the session's worktree for ``cw done --cleanup``, lock-free (#1232).
-
-    Returns the resolved session id so :func:`done_session` re-resolves the
-    same session under ``sessions_lock``. Skipped for an already-COMPLETED
-    session. A ``WorktreeError`` propagates before the lock is taken, leaving
-    the session open. Accepted race: the path can be reused concurrently
-    between this removal and the COMPLETED stamp, as before #1232 (removal
-    already preceded the stamp).
-    """
-    session = _resolve_session(load_state(), session_name)
+def _remove_worktree_locked(session: Session, *, force: bool) -> None:
+    """Remove *session*'s worktree while its ownership is synchronized."""
     if (
         session.status != SessionStatus.COMPLETED
         and session.worktree_path
@@ -569,7 +561,6 @@ def _remove_worktree_before_lock(session_name: str | None, *, force: bool) -> st
         click.echo(f"Removing worktree for branch '{session.branch}'...")
         remove_worktree(client, session.branch, force=force)
         click.echo("Worktree removed.")
-    return session.id
 
 
 def done_session(
@@ -593,14 +584,24 @@ def done_session(
     :meth:`~cw.native_daemon.NativeDaemonClient.stop` swallows a missing or
     already-gone surface.
 
-    With *cleanup*, the worktree is removed before ``sessions_lock`` is taken
-    (#1232); the lock then only re-resolves the session by id and stamps it.
+    With *cleanup*, the worktree removal and completion stamp are serialized
+    under ``sessions_lock`` so a reused worktree cannot be removed after its
+    ownership changes (#1232).
     """
+    cleanup_identity: tuple[str, str, str | None, Path | None] | None = None
     if cleanup:
-        session_name = _remove_worktree_before_lock(session_name, force=force)
+        initial = _resolve_session(load_state(), session_name)
+        session_name = initial.id
+        cleanup_identity = (
+            initial.id,
+            initial.client,
+            initial.branch,
+            initial.worktree_path,
+        )
 
     # Why not mutate_state: the post-lock tail needs `session` and
-    # `already_completed`; no subprocess runs in the lock.
+    # `already_completed`, and cleanup must be serialized with the ownership
+    # revalidation and worktree removal.
     # bounded=True (#2491): a timeout leaves the session open, and a retry is
     # clean -- remove_worktree returns early once the path is gone.
     with sessions_lock(bounded=True):
@@ -609,6 +610,31 @@ def done_session(
         already_completed = session.status == SessionStatus.COMPLETED
 
         if not already_completed:
+            if cleanup_identity is not None:
+                current_identity = (
+                    session.id,
+                    session.client,
+                    session.branch,
+                    session.worktree_path,
+                )
+                if current_identity != cleanup_identity:
+                    msg = (
+                        "Session ownership changed during worktree cleanup; "
+                        "refusing to remove the worktree"
+                    )
+                    raise CwError(msg)
+                if any(
+                    other.id != session.id
+                    and other.worktree_path == session.worktree_path
+                    and other.status not in TERMINAL_SESSION_STATUSES
+                    for other in state.sessions
+                ):
+                    msg = (
+                        "Worktree ownership changed during cleanup; refusing "
+                        "to remove the worktree"
+                    )
+                    raise CwError(msg)
+                _remove_worktree_locked(session, force=force)
             session.status = SessionStatus.COMPLETED
             session.completed_reason = CompletionReason.USER
             session.completed_at = datetime.now(UTC)
