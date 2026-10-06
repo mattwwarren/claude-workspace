@@ -36,7 +36,14 @@ from typing import Any
 
 import yaml
 
-from tests.conftest import _clean_git_env, _gh_calls, _stub_gh_recording, git_in
+from tests.conftest import (
+    _assert_gh_calls,
+    _clean_git_env,
+    _gh_calls,
+    _shim_env,
+    _stub_gh_recording,
+    git_in,
+)
 
 ROOT = Path(__file__).parent.parent
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "release-tag.yml"
@@ -1068,20 +1075,9 @@ RELEASE_NOT_EXISTS_GATE = "steps.release.outputs.exists == 'false'"
 NOT_DRY_RUN_GATE = "inputs.dry_run != true"
 
 
-def _shim_env(fake_bin: Path, **extra: str) -> dict[str, str]:
-    """`extra_env` putting `fake_bin` ahead of the system `gh` on `PATH`."""
-    return {"PATH": f"{fake_bin}:/usr/bin:/bin", **extra}
-
-
 def _create_release_script() -> str:
     script: str = _steps()[_step_index_by_name(CREATE_RELEASE_STEP_NAME)]["run"]
     return script
-
-
-def _assert_gh_calls(fake_bin: Path, expected: list[list[str]]) -> None:
-    calls = _gh_calls(fake_bin)
-    assert calls, "the gh shim recorded no calls -- is it first on PATH?"
-    assert calls == expected
 
 
 def _run_release_guard(

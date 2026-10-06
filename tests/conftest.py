@@ -602,6 +602,70 @@ def _gh_calls(fake_bin: Path) -> list[list[str]]:
     return [record.split(GH_ARG_SEPARATOR)[:-1] for record in records]
 
 
+def _shim_env(fake_bin: Path, **extra: str) -> dict[str, str]:
+    """`extra_env` putting `fake_bin` ahead of the system `gh` on `PATH`."""
+    return {"PATH": f"{fake_bin}:/usr/bin:/bin", **extra}
+
+
+def _assert_gh_calls(fake_bin: Path, expected: list[list[str]]) -> None:
+    calls = _gh_calls(fake_bin)
+    assert calls, "the gh shim recorded no calls -- is it first on PATH?"
+    assert calls == expected
+
+
+# One scripted ``gh pr merge`` outcome for ``_stub_gh_arm``: (exit code,
+# stderr text, ``gh pr view`` JSON the PR reads back as once this merge has
+# run -- ``None`` leaves the read-back unchanged).
+ArmStep = tuple[int, str, str | None]
+
+ARM_VIEW_OPEN = '{"state":"OPEN","autoMergeRequest":null}'
+ARM_VIEW_ARMED = '{"state":"OPEN","autoMergeRequest":{"mergeMethod":"SQUASH"}}'
+
+
+def _stub_gh_arm(
+    tmp_path: Path, steps: Sequence[ArmStep], *, initial_view: str = ARM_VIEW_OPEN
+) -> Path:
+    """Write a stateful ``gh`` stub for ``arm-automerge`` tests (#2576).
+
+    Records argv exactly like ``_stub_gh_recording`` (read back with
+    ``_gh_calls``). Each ``pr merge`` bumps a counter file and replays step N
+    of ``steps`` (the last step repeats once they run out): it prints the
+    step's stderr, copies the step's view JSON over ``view.json`` when it has
+    one, and exits with the step's code. ``pr view`` cats ``view.json``
+    (``initial_view`` until a merge step replaces it); any other subcommand
+    exits 0.
+    """
+    assert steps, "_stub_gh_arm needs at least one scripted pr merge step"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    for index, (exit_code, stderr, view) in enumerate(steps, start=1):
+        (fake_bin / f"step{index}.exit").write_text(str(exit_code))
+        (fake_bin / f"step{index}.stderr").write_text(stderr)
+        if view is not None:
+            (fake_bin / f"step{index}.view").write_text(view)
+    (fake_bin / "view.json").write_text(initial_view)
+    lines = [
+        "#!/bin/sh",
+        'DIR=$(dirname "$0")',
+        f'for a in "$@"; do printf \'%s\\037\' "$a"; done >> "$DIR/{GH_CALLS_FILE}"',
+        f"printf '\\n' >> \"$DIR/{GH_CALLS_FILE}\"",
+        'case "$1 $2" in',
+        '  "pr view") cat "$DIR/view.json"; exit 0;;',
+        '  "pr merge")',
+        '    n=$(cat "$DIR/merge.count" 2>/dev/null || echo 0)',
+        "    n=$((n + 1))",
+        '    printf \'%s\' "$n" > "$DIR/merge.count"',
+        f'    if [ "$n" -gt {len(steps)} ]; then n={len(steps)}; fi',
+        '    cat "$DIR/step$n.stderr" >&2',
+        '    if [ -f "$DIR/step$n.view" ]; then'
+        ' cp "$DIR/step$n.view" "$DIR/view.json"; fi',
+        '    exit "$(cat "$DIR/step$n.exit")";;',
+        "  *) exit 0;;",
+        "esac",
+    ]
+    return _write_bin_stub(tmp_path, "gh", "\n".join(lines) + "\n")
+
+
 def _stub_cw(
     tmp_path: Path,
     *,
