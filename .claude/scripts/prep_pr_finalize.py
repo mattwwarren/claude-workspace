@@ -736,6 +736,19 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 1 if failed_required else 0
 
 
+def _warn_if_automerge_config_unreadable(config_path: Path) -> None:
+    """Warn when PyYAML is missing and a config exists whose seam can't be read.
+
+    Shared by `check-automerge-allowed` and `arm-automerge`: the latter
+    re-checks the same seam (#2046), so the two must warn identically.
+    """
+    if yaml is None and config_path.exists():
+        sys.stderr.write(
+            "WARNING: could not read pr.auto_merge: PyYAML unavailable; "
+            "treating auto-merge as allowed\n"
+        )
+
+
 def cmd_check_automerge_allowed(args: argparse.Namespace) -> int:
     """Print "true"/"false" for whether pr.auto_merge permits `gh pr merge --auto`.
 
@@ -752,11 +765,7 @@ def cmd_check_automerge_allowed(args: argparse.Namespace) -> int:
         if args.repo_path
         else PROJECT_CONFIG_PATH
     )
-    if yaml is None and config_path.exists():
-        sys.stderr.write(
-            "WARNING: could not read pr.auto_merge: PyYAML unavailable; "
-            "treating auto-merge as allowed\n"
-        )
+    _warn_if_automerge_config_unreadable(config_path)
     allowed = automerge_allowed(config_path)
     print("true" if allowed else "false")
     return 0 if allowed else 1
@@ -802,11 +811,7 @@ def cmd_arm_automerge(args: argparse.Namespace) -> int:
         return _arm_invocation_error(f"--repo-path is not a directory: {repo_path}")
 
     config_path = repo_path / PROJECT_CONFIG_PATH
-    if yaml is None and config_path.exists():
-        sys.stderr.write(
-            "WARNING: could not read pr.auto_merge: PyYAML unavailable; "
-            "treating auto-merge as allowed\n"
-        )
+    _warn_if_automerge_config_unreadable(config_path)
     if not automerge_allowed(config_path):
         skipped = ArmResult(
             pr_number=args.pr_number,
