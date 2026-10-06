@@ -4647,6 +4647,45 @@ class TestCheckProjectConfigs:
         names = [c.name for c in report.checks]
         assert "agent-spec-drift/client-a" in names
 
+    def test_run_doctor_includes_codex_fix_loop_checks(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        from cw.config import orchestrator_config_file
+        from cw.models import (
+            CODEX_BACKEND,
+            ClientConfig,
+            Stage,
+            StageExecutorConfig,
+            StagePipelineConfig,
+        )
+
+        _stub_claude_version_ok(monkeypatch)
+        pipeline = StagePipelineConfig(
+            executors={Stage.REVIEW: StageExecutorConfig(backend=CODEX_BACKEND)}
+        )
+        client = ClientConfig(
+            name="client-a", workspace_path=tmp_path, pipeline=pipeline
+        )
+        monkeypatch.setattr(
+            "cw.doctor._deps.load_clients", lambda: {"client-a": client}
+        )
+        orchestrator_config_file().parent.mkdir(parents=True, exist_ok=True)
+        orchestrator_config_file().write_text(
+            "default_codex_fix_loop_enabled: true\n", encoding="utf-8"
+        )
+
+        report = run_doctor()
+
+        (check,) = [c for c in report.checks if c.name.startswith("codex-fix-loop")]
+        assert check.name == "codex-fix-loop/client-a/default"
+        assert check.ok is True
+        assert check.warn is True
+        assert report.ok is True
+        assert report.clean is False
+
     def test_gh_on_path_true_when_which_resolves(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
