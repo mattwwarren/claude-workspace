@@ -30,7 +30,7 @@ from cw.reconcile._shared import (
     _apply_sentinel_to_task_audited,
     _foreign_result_target_queue_status,
     _resolve_routed_sentinel,
-    stamp_stage_refusal,
+    page_and_latch_stage_refusal,
 )
 
 if TYPE_CHECKING:
@@ -93,7 +93,10 @@ def _apply_stalled_routed_mutations(
     -- but only when the route was accepted. A stage-mismatch refusal leaves
     the task untouched and the session live (not completed/torn down): the
     session is a still-registered-live headless worker, not a phantom, so
-    refusing here must not orphan it.
+    refusing here must not orphan it. #2513: that refusal pages once
+    (``paused_status=sentinel_stage_mismatch_live_session``) before it is
+    latched, and is latched only if the page landed, so a failed page is
+    re-offered and re-paged next tick.
 
     Returns only the candidates actually routed, so the caller's event
     emission fires solely for those.
@@ -123,8 +126,18 @@ def _apply_stalled_routed_mutations(
             # merge (never clobber) the refusal flag into the pre-existing
             # last_result dict -- stalled's precondition guarantees it is
             # always already a dict here (it is the terminal sentinel that made
-            # this a candidate in the first place).
-            stamp_stage_refusal(session)
+            # this a candidate in the first place). #2513: page it first (live
+            # wording -- the worker is still registered) and latch only once
+            # the page landed; a non-stage refusal is latched silently.
+            page_and_latch_stage_refusal(
+                session,
+                outcome,
+                ticket_id=candidate.ticket_id,
+                lane=candidate.lane,
+                sentinel=routed_sentinel,
+                subject="live worker",
+                live=True,
+            )
             continue
         # Shared completion path for the ordinary routed=True success arm and
         # the #2140-shape task_already_terminal race (another authority
