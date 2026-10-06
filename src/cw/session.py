@@ -22,7 +22,6 @@ from cw.config import (
 from cw.exceptions import CwError
 from cw.history import EventType, HistoryEvent, record_event
 from cw.models import (
-    TERMINAL_SESSION_STATUSES,
     ClientConfig,
     CompletionReason,
     CwState,
@@ -550,48 +549,6 @@ def resume_session(
         _attach_session(new_short_id)
 
 
-def _remove_worktree_locked(session: Session, *, force: bool) -> None:
-    """Remove *session*'s worktree while its ownership is synchronized."""
-    if (
-        session.status != SessionStatus.COMPLETED
-        and session.worktree_path
-        and session.branch
-    ):
-        client = get_client(session.client)
-        click.echo(f"Removing worktree for branch '{session.branch}'...")
-        remove_worktree(client, session.branch, force=force)
-        click.echo("Worktree removed.")
-
-
-def _cleanup_identity(session: Session) -> tuple[str, str, str | None, Path | None]:
-    return session.id, session.client, session.branch, session.worktree_path
-
-
-def _validate_cleanup_ownership(
-    state: CwState,
-    session: Session,
-    expected_identity: tuple[str, str, str | None, Path | None],
-) -> None:
-    if _cleanup_identity(session) != expected_identity:
-        msg = "Session ownership changed during worktree cleanup"
-        raise CwError(msg)
-    if session.worktree_path is not None and any(
-        other.id != session.id
-        and other.worktree_path == session.worktree_path
-        and other.status not in TERMINAL_SESSION_STATUSES
-        for other in state.sessions
-    ):
-        msg = "Worktree ownership changed during cleanup"
-        raise CwError(msg)
-
-
-def _stamp_session_completed(state: CwState, session: Session) -> None:
-    session.status = SessionStatus.COMPLETED
-    session.completed_reason = CompletionReason.USER
-    session.completed_at = datetime.now(UTC)
-    save_state(state)
-
-
 def done_session(
     session_name: str | None = None,
     *,
@@ -612,30 +569,32 @@ def done_session(
     :func:`cw.cli.spawn._spawn_close_impl`'s stop-then-return. Idempotent:
     :meth:`~cw.native_daemon.NativeDaemonClient.stop` swallows a missing or
     already-gone surface.
-
-    With *cleanup*, ownership validation, worktree removal, and the completion
-    stamp are serialized under ``sessions_lock`` (#1232).
     """
-    cleanup_identity: tuple[str, str, str | None, Path | None] | None = None
-    if cleanup:
-        initial = _resolve_session(load_state(), session_name)
-        session_name = initial.id
-        cleanup_identity = _cleanup_identity(initial)
-
-    # Why not mutate_state: the post-lock tail needs `session` and
-    # `already_completed`, and cleanup must keep ownership validation,
-    # worktree removal, and completion stamping in one serialized protocol.
-    # bounded=True (#2491): a timeout before any side effect is a clean retry.
+    # Why not mutate_state: remove_worktree (git subprocess) deliberately runs
+    # inside sessions_lock on the --cleanup path. Ownership validation, worktree
+    # removal and the completion stamp must be serialized: no reservation is
+    # persisted between lock windows, so removing outside the lock would not
+    # exclude a concurrent resume, a second `cw done --cleanup`, or other state
+    # changes in the gap. A lock-free version needs a persisted reservation on
+    # the Session model and is tracked in #2557.
+    # bounded=True (#2491): `cw done` takes the lock before any side effect
+    # (worktree removal happens inside it), so a timeout is a clean retry.
     with sessions_lock(bounded=True):
         state = load_state()
         session = _resolve_session(state, session_name)
         already_completed = session.status == SessionStatus.COMPLETED
 
         if not already_completed:
-            if cleanup_identity is not None:
-                _validate_cleanup_ownership(state, session, cleanup_identity)
-                _remove_worktree_locked(session, force=force)
-            _stamp_session_completed(state, session)
+            if cleanup and session.worktree_path and session.branch:
+                client = get_client(session.client)
+                click.echo(f"Removing worktree for branch '{session.branch}'...")
+                remove_worktree(client, session.branch, force=force)
+                click.echo("Worktree removed.")
+
+            session.status = SessionStatus.COMPLETED
+            session.completed_reason = CompletionReason.USER
+            session.completed_at = datetime.now(UTC)
+            save_state(state)
 
     # Daemon stop is a network/subprocess call (bounded 10s timeout,
     # best-effort) -- outside sessions_lock, mirroring the completion-path
