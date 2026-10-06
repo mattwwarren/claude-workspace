@@ -3026,10 +3026,11 @@ class TestDispatchTickSpawnErrors:
 
         monkeypatch.setattr("cw.reconcile._deps.checked_out_branch", lambda _p: branch)
         monkeypatch.setattr(
-            "cw.reconcile._shared.get_client", lambda _name: sample_client_config
+            "cw.reconcile._shared._worktree_evidence.get_client",
+            lambda _name: sample_client_config,
         )
         monkeypatch.setattr(
-            "cw.reconcile._shared.unsaved_work_reason",
+            "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
             lambda _c, _b, **_kw: None,
         )
 

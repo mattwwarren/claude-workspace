@@ -241,9 +241,13 @@ _PKG = "cw.reconcile._shared"
 # intercepting -- and a no-op assertion like ``saves == []`` then passes
 # vacuously. Each extraction commit repoints the rows whose function it moves.
 PATCH_OWNERSHIP = [
-    ("_worktree_dirty_reason_by_path", "get_client", _PKG),
-    ("_worktree_dirty_reason_by_path", "unsaved_work_reason", _PKG),
-    ("_worktree_dirty_reason_by_path", "_deps", _PKG),
+    ("_worktree_dirty_reason_by_path", "get_client", f"{_PKG}._worktree_evidence"),
+    (
+        "_worktree_dirty_reason_by_path",
+        "unsaved_work_reason",
+        f"{_PKG}._worktree_evidence",
+    ),
+    ("_worktree_dirty_reason_by_path", "_deps", f"{_PKG}._worktree_evidence"),
     ("_blocked_result_requeue_enabled", "get_client", _PKG),
     ("_claude_agents_json", "subprocess", _PKG),
     (

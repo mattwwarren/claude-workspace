@@ -2551,11 +2551,11 @@ def test_dirty_worktree_push_fires_once_not_per_tick_timed_out(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/storm-to"
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason",
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
@@ -2602,11 +2602,11 @@ def test_dirty_worktree_push_silent_for_already_blocked_task(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/storm-ab"
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason",
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
@@ -2642,11 +2642,11 @@ def test_dirty_worktree_push_silent_for_no_task_terminal_session(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/storm-nt"
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason",
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
@@ -2697,11 +2697,11 @@ def test_dirty_worktree_push_fires_once_not_per_tick_completed_silent(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/storm-cs"
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason",
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
@@ -2826,11 +2826,11 @@ class TestWorktreeDirtyReasonByPath:
             lambda _p: "auto-dev/reason-dirty",
         )
         monkeypatch.setattr(
-            "cw.reconcile._shared.get_client",
+            "cw.reconcile._shared._worktree_evidence.get_client",
             lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
         )
         monkeypatch.setattr(
-            "cw.reconcile._shared.unsaved_work_reason",
+            "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
             lambda _c, _b, **_kw: "2 uncommitted path(s)",
         )
 
@@ -2851,11 +2851,11 @@ class TestWorktreeDirtyReasonByPath:
             lambda _p: "auto-dev/reason-clean",
         )
         monkeypatch.setattr(
-            "cw.reconcile._shared.get_client",
+            "cw.reconcile._shared._worktree_evidence.get_client",
             lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
         )
         monkeypatch.setattr(
-            "cw.reconcile._shared.unsaved_work_reason",
+            "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
             lambda _c, _b, **_kw: None,
         )
 
