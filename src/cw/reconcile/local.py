@@ -45,7 +45,7 @@ import contextlib
 import logging
 import subprocess
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from cw.codex_background import _resolve_codex_fix_loop_enabled
 from cw.config import load_effective_config, save_state
@@ -62,6 +62,7 @@ from cw.models import (
     CODEX_BACKEND,
     DEFAULT_LANE,
     OCCUPIED_LANE_STATUSES,
+    OPENCODE_BACKEND,
     CodexHarvestOutcome,
     CompletionReason,
     LastResultSource,
@@ -140,7 +141,6 @@ _CODEX_HARVEST_BREADCRUMBS = (
 SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON = "sentinel_stage_mismatch_dead_session"
 
 AIDER_BACKEND: LocalLivenessBackend = "aider"
-OPENCODE_BACKEND: LocalLivenessBackend = "opencode"
 
 
 def _refusal_latch_binds(
@@ -377,7 +377,7 @@ _HARVEST_SYNTHESIZERS: dict[
     Callable[[TicketTask, Path, str, str], AutoDevResult],
 ] = {
     AIDER_BACKEND: _harvest_via_git,
-    OPENCODE_BACKEND: _harvest_via_opencode_log,
+    cast("LocalLivenessBackend", OPENCODE_BACKEND): _harvest_via_opencode_log,
 }
 
 
@@ -426,7 +426,7 @@ def _resolve_harvest_backend(
             session.id,
             task.ticket_id,
         )
-        return OPENCODE_BACKEND
+        return cast("LocalLivenessBackend", OPENCODE_BACKEND)
     if has_aider_log and not has_opencode_log:
         return AIDER_BACKEND
     return AIDER_BACKEND if (session.stage or task.stage) is Stage.IMPL else None
@@ -482,7 +482,11 @@ def _synthesize_harvest_sentinel(
             backend,
             exc_info=True,
         )
-        blocked = make_opencode_blocked if backend == OPENCODE_BACKEND else make_blocked
+        blocked = (
+            make_opencode_blocked
+            if backend == cast("LocalLivenessBackend", OPENCODE_BACKEND)
+            else make_blocked
+        )
         return blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
