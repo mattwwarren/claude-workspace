@@ -6,13 +6,13 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 from unittest.mock import MagicMock, patch
 
 import pathspec
 import pytest
 
-from cw.auto_dev_result import AutoDevResult
+from cw.auto_dev_result import AutoDevResult, StageReached
 from cw.executor_diagnostics import (
     ExecutorFailure,
     diagnostics_bundle_dir,
@@ -35,6 +35,7 @@ from cw.local_runner import (
     build_argv,
     build_env,
     build_task_message,
+    make_blocked,
     read_process_start_time_ns,
     synthesize_git_result,
 )
@@ -1489,3 +1490,62 @@ def test_git_facts_and_compute_branch_diff_scope_agree(
         measured["files"],
         measured["lines_actual"],
     )
+
+
+# ---------------------------------------------------------------------------
+# make_blocked scope per stage marker (#2512)
+# ---------------------------------------------------------------------------
+
+_PRE_IMPL_MARKERS = ("stage1_plan", "stage1_pre_flight")
+
+
+@pytest.mark.parametrize("marker", _PRE_IMPL_MARKERS)
+def test_make_blocked_pre_impl_markers_null_lines_actual(
+    marker: StageReached, tmp_path: Path
+) -> None:
+    """A pre-impl marker needs null lines_actual (§3.3); it must not raise."""
+    result = make_blocked(
+        ticket_id="T-PRE",
+        worktree=tmp_path,
+        reason="unexpected_error",
+        stage_reached=marker,
+    )
+
+    assert result.scope.lines_actual is None
+    assert result.stage_reached == marker
+    assert result.blocker is not None
+    assert result.blocker.stage == marker
+    if marker == "stage1_pre_flight":
+        assert result.next_actions == ["manual_intervention"]
+    AutoDevResult.model_validate(result.model_dump(mode="json"))
+
+
+@pytest.mark.parametrize(
+    "marker", ["stage2_impl", "stage3_review", "stage4a_merge_gate"]
+)
+def test_make_blocked_post_impl_markers_keep_zero_lines_actual(
+    marker: StageReached, tmp_path: Path
+) -> None:
+    result = make_blocked(
+        ticket_id="T-POST",
+        worktree=tmp_path,
+        reason="unexpected_error",
+        stage_reached=marker,
+    )
+
+    assert result.scope.lines_actual == 0
+    assert result.stage_reached == marker
+
+
+def test_make_blocked_is_total_over_every_stage_reached(tmp_path: Path) -> None:
+    """Every StageReached value builds a valid blocked result (#2512)."""
+    for marker in get_args(StageReached):
+        result = make_blocked(
+            ticket_id="T-ALL",
+            worktree=tmp_path,
+            reason="unexpected_error",
+            stage_reached=marker,
+        )
+
+        AutoDevResult.model_validate(result.model_dump(mode="json"))
+        assert (result.scope.lines_actual is None) is (marker in _PRE_IMPL_MARKERS)

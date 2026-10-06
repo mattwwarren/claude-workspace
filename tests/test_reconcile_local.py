@@ -17,6 +17,8 @@ from pathlib import Path
 import freezegun
 import pytest
 
+from cw._config_migrate import migrate_cw_state
+from cw._git import run_git
 from cw.auto_dev_result import AutoDevResult
 from cw.config import (
     load_state,
@@ -24,12 +26,14 @@ from cw.config import (
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
+from cw.local_runner import AIDER_LOG_RELATIVE_PATH
 from cw.models import (
     ClientConfig,
     CompletionReason,
     CwState,
     DevQueueStore,
     LastResultSource,
+    LocalLivenessBackend,
     LocalLivenessHandle,
     OrchestratorEventType,
     QueueItemStatus,
@@ -52,10 +56,12 @@ from cw.reconcile import (
     _detect_local_harvest_candidates,
     reconcile,
 )
+from cw.reconcile.local import _resolve_harvest_backend
 from tests._clients_yaml import staged_client, write_clients_yaml
 from tests._opencode_helpers import (
     earlier_stage_then_final_log,
     framed,
+    text_event,
     write_opencode_log,
 )
 from tests._reconcile_helpers import _stage_complete_payload
@@ -1304,12 +1310,18 @@ def test_local_harvest_aider_backend_ignores_stray_opencode_log(
     make_git_repo: Callable[[str], Path],
 ) -> None:
     """backend=aider with a stray .cw/opencode.log still routes through git
-    synthesis — the file's presence no longer drives dispatch."""
+    synthesis — the file's presence no longer drives dispatch.
+
+    ``.cw/aider.log`` is also present: the state a real aider run always leaves
+    (the launch opens it before ``Popen``), which is what makes the stray
+    opencode log mere noise rather than evidence of an opencode launch (#2512).
+    """
     worktree = _local_git_worktree(make_git_repo, "wt-aider-stray", with_commit=False)
     write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     log_path = worktree / OPENCODE_LOG_RELATIVE_PATH
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text("stale opencode output\n", encoding="utf-8")
+    _touch_aider_log(worktree)
 
     session = _harvest_single("ses-aider-stray", "T-aider-stray", worktree, "aider")
 
@@ -1327,28 +1339,63 @@ def test_local_harvest_aider_backend_ignores_stray_opencode_log(
 # ---------------------------------------------------------------------------
 
 
-def _save_dead_opencode_finalize(
-    worktree: Path, ticket_id: str, stage: Stage
+def _touch_aider_log(worktree: Path) -> None:
+    """Leave the empty ``.cw/aider.log`` a real aider launch always leaves (#2512)."""
+    log_path = worktree / AIDER_LOG_RELATIVE_PATH
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+
+def _legacy_handle_state(sess: Session) -> CwState:
+    """*sess* as a pre-#2369 on-disk record run through the real v18->v19 migration.
+
+    The handle has no ``backend`` on disk (schema 18); the migration writes an
+    explicit ``"aider"`` that is byte-identical to a genuine aider handle -- the
+    incident shape of #2512.
+    """
+    raw = CwState(sessions=[sess]).model_dump(mode="json")
+    raw["schema_version"] = 18
+    del raw["sessions"][0]["local_liveness"]["backend"]
+    migrated = migrate_cw_state(raw)
+    assert migrated["sessions"][0]["local_liveness"]["backend"] == "aider"
+    return CwState.model_validate(migrated)
+
+
+def _save_dead_local_session(
+    worktree: Path,
+    ticket_id: str,
+    *,
+    backend: str | None,
+    session_stage: Stage | None,
+    row_stage: Stage,
+    row_client: str = "client-a",
 ) -> dict[str, TicketTask]:
-    """Save a dead opencode session + RUNNING row at *stage*; session id == ticket id.
+    """Save a dead local session + RUNNING row at *row_stage*; session id == ticket id.
 
     The session name is what ties a harvest candidate to its row
-    (``ticket_id_for_session``), so the two ids must match.
+    (``ticket_id_for_session``), so the two ids must match. *backend* ``None``
+    persists a LEGACY handle (see :func:`_legacy_handle_state`); otherwise the
+    handle records *backend* explicitly. *session_stage* is the spawn stage
+    ``Session.stage`` stamps, *row_stage* the dev-queue row's current stage. The
+    client is written first (stage list + ``sentinel_mismatch_veto``) so the stage
+    position resolves; ``client-unconfigured`` skips it so the position does not.
     """
+    if row_client == "client-a":
+        write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
     sid = ticket_id
-    dead_handle = LocalLivenessHandle(
-        pid=2_000_000_000, start_time_ns=1, backend="opencode"
+    dead_handle = LocalLivenessHandle.model_validate(
+        {"pid": 2_000_000_000, "start_time_ns": 1, "backend": backend or "aider"}
     )
     sess = _mk_local_session(sid, worktree, dead_handle)
-    sess.stage = stage
-    save_state(CwState(sessions=[sess]))
+    sess.stage = session_stage
+    save_state(CwState(sessions=[sess]) if backend else _legacy_handle_state(sess))
     save_dev_queue(
         DevQueueStore(
             tasks=[
                 TicketTask(
                     ticket_id=ticket_id,
-                    client="client-a",
-                    stage=stage,
+                    client=row_client,
+                    stage=row_stage,
                     status=QueueItemStatus.RUNNING,
                     session_id=sid,
                 )
@@ -1356,6 +1403,19 @@ def _save_dead_opencode_finalize(
         )
     )
     return {t.ticket_id: t for t in load_dev_queue().tasks}
+
+
+def _save_dead_opencode_finalize(
+    worktree: Path, ticket_id: str, stage: Stage
+) -> dict[str, TicketTask]:
+    """Save a dead opencode session + RUNNING row at *stage* (id == ticket id)."""
+    return _save_dead_local_session(
+        worktree,
+        ticket_id,
+        backend="opencode",
+        session_stage=stage,
+        row_stage=stage,
+    )
 
 
 def _attention_events(consumer: str, ticket_id: str) -> list[dict[str, object]]:
@@ -1988,3 +2048,638 @@ def test_latch_is_dropped_when_the_row_is_bound_to_a_newer_session(
     candidates = _detect_local_harvest_candidates(load_state(), [rebound])
 
     assert [c.session_id for c in candidates] == ["lt-newer"]
+
+
+# ---------------------------------------------------------------------------
+# #2512 -- a recorded "aider" backend is verified at harvest, not trusted
+#
+# A pre-#2369 handle migrates to an explicit "aider" byte-identical to a genuine
+# aider handle, so only the launch logs and the session's spawn stage can tell
+# them apart. A backend that cannot be proven parks the row; it is never guessed.
+# ---------------------------------------------------------------------------
+
+_UNEXPECTED_ERROR = "unexpected_error"
+_LOCAL_NEXT_ACTIONS = ["user_resolve_local_executor_failure"]
+_OPENCODE_NEXT_ACTIONS = ["user_resolve_opencode_executor_failure"]
+# row/spawn stage -> the entry marker a failure sentinel must carry.
+_PARK_STAGES = [
+    pytest.param(Stage.FINALIZE, "stage4a_merge_gate", id="finalize"),
+    pytest.param(Stage.REVIEW, "stage3_review", id="review"),
+    pytest.param(Stage.PLAN, "stage1_plan", id="plan"),
+]
+
+
+def _last_result(sid: str) -> AutoDevResult:
+    return AutoDevResult.model_validate(_session(sid).last_result)
+
+
+def _row(ticket_id: str) -> TicketTask:
+    return next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+
+
+def _stage_mismatch_events(ticket_id: str) -> list[dict[str, object]]:
+    return [
+        e.payload
+        for e in read_events(
+            consumer=f"test-mismatch-{ticket_id}",
+            event_types=[OrchestratorEventType.SENTINEL_STAGE_MISMATCH],
+        )
+        if e.payload.get("ticket_id") == ticket_id
+    ]
+
+
+def _override_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        r
+        for r in caplog.records
+        if r.name == "cw.reconcile.local"
+        and "harvest_backend_overridden" in r.getMessage()
+    ]
+
+
+def _fallback_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        r
+        for r in caplog.records
+        if r.name == "cw.reconcile.local"
+        and "harvest_synthesis_failed" in r.getMessage()
+    ]
+
+
+def _forbid_synthesis_call(**_kwargs: object) -> object:
+    msg = "this result synthesizer must not run for this harvest"
+    raise AssertionError(msg)
+
+
+def _forbid_synthesis(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make either result synthesizer fail the test if it is ever called."""
+    monkeypatch.setattr(
+        "cw.reconcile.local.synthesize_opencode_result", _forbid_synthesis_call
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.local.synthesize_git_result", _forbid_synthesis_call
+    )
+
+
+def _decoy_opencode_log(worktree: Path, ticket_id: str) -> None:
+    """An opencode log whose parseable sentinel must NOT be consulted."""
+    decoy = make_opencode_blocked(
+        ticket_id=ticket_id,
+        worktree=worktree,
+        reason="decoy_opencode_result",
+        stage_reached="stage4a_merge_gate",
+    ).model_copy(update={"status": "merge_gate_blocked"})
+    write_opencode_log(worktree, [text_event(framed(decoy))])
+
+
+def _arrange_launch_logs(worktree: Path, logs: str, ticket_id: str) -> None:
+    """Leave the launch logs *logs* names: aider_only, opencode_only, both, neither."""
+    if logs in ("opencode_only", "both"):
+        _decoy_opencode_log(worktree, ticket_id)
+    if logs in ("aider_only", "both"):
+        _touch_aider_log(worktree)
+
+
+def _assert_parked_unproven(
+    ticket_id: str, stage: Stage, marker: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The unproven-backend outcome: blocked at the row's marker, parked and paged."""
+    result = _last_result(ticket_id)
+    assert result.status == "blocked"
+    assert result.stage_reached == marker
+    assert result.stage_reached != "stage2_impl" or stage is Stage.IMPL
+    assert result.blocker is not None
+    assert result.blocker.stage == marker
+    assert result.blocker.reason == _UNEXPECTED_ERROR
+    assert "could not be proven" in result.blocker.details
+    assert result.blocker.retry_eligible is None
+    assert result.next_actions == _LOCAL_NEXT_ACTIONS
+    assert result.scope.lines_actual == (None if marker == "stage1_plan" else 0)
+    row = _row(ticket_id)
+    assert row.status == QueueItemStatus.BLOCKED_ON_USER
+    assert row.disposition == "blocked"
+    assert row.blocked_reason == _UNEXPECTED_ERROR
+    assert row.stage == stage
+    assert _session(ticket_id).status == SessionStatus.COMPLETED
+    assert _stage_mismatch_events(ticket_id) == []
+    pages = _attention_events(f"test-park-{ticket_id}", ticket_id)
+    assert [p["paused_status"] for p in pages] == ["blocked"]
+    assert _UNEXPECTED_ERROR in str(pages[0]["breadcrumbs"])
+    assert _override_warnings(caplog) == []
+
+
+def test_legacy_handle_only_opencode_log_harvests_via_opencode_not_git(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The #2512 incident: a legacy handle + only .cw/opencode.log is an opencode run.
+
+    Before the fix the migrated ``"aider"`` sent it down git synthesis, which
+    stamped ``stage2_impl`` on a FINALIZE row; the stage guard refused it and the
+    worker's real merge-gate result was dropped.
+    """
+    worktree = make_git_repo("wt-leg-oc")
+    final = make_opencode_blocked(
+        ticket_id="T-LEG-OC",
+        worktree=worktree,
+        reason="prior_pipeline_pr_open",
+        details="blocked by PR #2468 which is still open",
+        retry_eligible=True,
+        stage_reached="stage4a_merge_gate",
+    ).model_copy(update={"status": "merge_gate_blocked"})
+    write_opencode_log(worktree, [text_event(framed(final))])
+    tbt = _save_dead_local_session(
+        worktree,
+        "T-LEG-OC",
+        backend=None,
+        session_stage=Stage.FINALIZE,
+        row_stage=Stage.FINALIZE,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="cw.reconcile.local"):
+        _harvest_tick(tbt)
+
+    result = _last_result("T-LEG-OC")
+    assert result.stage_reached == "stage4a_merge_gate"
+    assert result.stage_reached != "stage2_impl"
+    assert result.status == "merge_gate_blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == "prior_pipeline_pr_open"
+    row = _row("T-LEG-OC")
+    assert row.status == QueueItemStatus.BLOCKED_ON_USER
+    assert row.disposition == "merge_gate_blocked"
+    assert row.blocked_on_pr == 2468
+    assert _session("T-LEG-OC").status == SessionStatus.COMPLETED
+    assert _stage_mismatch_events("T-LEG-OC") == []
+    pages = _attention_events("test-leg-oc", "T-LEG-OC")
+    assert [p["paused_status"] for p in pages] == ["merge_gate_blocked"]
+    warnings = _override_warnings(caplog)
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "T-LEG-OC" in message
+    assert "#2512" in message
+
+
+@pytest.mark.parametrize("logs", ["aider_only", "both", "neither"])
+def test_legacy_handle_impl_spawn_stage_git_synthesizes(
+    logs: str,
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An IMPL spawn keeps git synthesis whatever the logs say (stage-correct there)."""
+    ticket = f"T-LEG-IMPL-{logs}"
+    worktree = _local_git_worktree(make_git_repo, f"wt-{ticket}", with_commit=True)
+    _arrange_launch_logs(worktree, logs, ticket)
+    tbt = _save_dead_local_session(
+        worktree,
+        ticket,
+        backend=None,
+        session_stage=Stage.IMPL,
+        row_stage=Stage.IMPL,
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.local.synthesize_opencode_result",
+        _forbid_synthesis_call,
+    )
+
+    _harvest_tick(tbt)
+
+    result = _last_result(ticket)
+    assert result.status == "stage_complete"
+    assert result.stage_reached == "stage2_impl"
+    assert result.commits
+    assert _session(ticket).status == SessionStatus.COMPLETED
+    assert _stage_mismatch_events(ticket) == []
+    assert _override_warnings(caplog) == []
+
+
+def test_legacy_handle_only_aider_log_non_impl_session_still_refused_and_paged(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Only aider.log on a FINALIZE spawn keeps git synthesis and is refused + paged.
+
+    Pins that this PR does not silently reroute a misconfigured ``local`` backend:
+    the stage guard still refuses the ``stage2_impl`` claim, exactly as before.
+    """
+    worktree = _local_git_worktree(make_git_repo, "wt-leg-aider", with_commit=True)
+    _touch_aider_log(worktree)
+    tbt = _save_dead_local_session(
+        worktree,
+        "T-LEG-AIDER",
+        backend=None,
+        session_stage=Stage.FINALIZE,
+        row_stage=Stage.FINALIZE,
+    )
+
+    _harvest_tick(tbt)
+
+    mismatches = _stage_mismatch_events("T-LEG-AIDER")
+    assert len(mismatches) == 1
+    assert mismatches[0]["sentinel_stage_reached"] == "stage2_impl"
+    pages = _attention_events("test-leg-aider", "T-LEG-AIDER")
+    assert len(pages) == 1
+    assert pages[0]["paused_status"] == "sentinel_stage_mismatch_dead_session"
+    breadcrumbs = str(pages[0]["breadcrumbs"])
+    assert "dead aider process" in breadcrumbs
+    assert "stage_complete at stage2_impl" in breadcrumbs
+    assert _row("T-LEG-AIDER").status == QueueItemStatus.RUNNING
+    assert _row("T-LEG-AIDER").stage == Stage.FINALIZE
+    session = _session("T-LEG-AIDER")
+    assert session.status == SessionStatus.ACTIVE
+    assert session.last_result == {"paused_status": "sentinel_stage_mismatch_refused"}
+    assert _override_warnings(caplog) == []
+
+
+@pytest.mark.parametrize("logs", ["both", "neither"])
+@pytest.mark.parametrize(("stage", "marker"), _PARK_STAGES)
+def test_legacy_handle_unproven_backend_parks_at_row_stage(
+    logs: str,
+    stage: Stage,
+    marker: str,
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Both-or-neither logs on a non-IMPL spawn: backend unproven, so the row parks.
+
+    Neither synthesizer runs (so no log contents are consulted) and the blocked
+    result carries the row's own entry marker -- never a later one that would walk
+    the pointer, never ``stage2_impl`` that the guard would refuse.
+    """
+    ticket = f"T-PARK-{logs}-{stage.value}"
+    worktree = _local_git_worktree(make_git_repo, f"wt-{ticket}", with_commit=True)
+    _arrange_launch_logs(worktree, logs, ticket)
+    tbt = _save_dead_local_session(
+        worktree,
+        ticket,
+        backend=None,
+        session_stage=stage,
+        row_stage=stage,
+    )
+    _forbid_synthesis(monkeypatch)
+
+    _harvest_tick(tbt)
+
+    _assert_parked_unproven(ticket, stage, marker, caplog)
+
+
+@pytest.mark.parametrize(
+    ("logs", "row_stage", "marker"),
+    [
+        pytest.param("both", Stage.FINALIZE, "stage4a_merge_gate", id="both-fin"),
+        pytest.param("neither", Stage.REVIEW, "stage3_review", id="none-rev"),
+        pytest.param("neither", Stage.PLAN, "stage1_plan", id="none-plan"),
+        pytest.param("both", Stage.IMPL, "stage2_impl", id="both-impl"),
+    ],
+)
+def test_legacy_handle_session_stage_none_decides_by_row_stage(
+    logs: str,
+    row_stage: Stage,
+    marker: str,
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With no spawn stage on the session the row's stage is the fallback.
+
+    An IMPL row keeps git synthesis; any other row parks, exactly as when the
+    session carries the spawn stage.
+    """
+    expect_git = row_stage is Stage.IMPL
+    ticket = f"T-NOSTAGE-{logs}-{row_stage.value}"
+    worktree = _local_git_worktree(make_git_repo, f"wt-{ticket}", with_commit=True)
+    _arrange_launch_logs(worktree, logs, ticket)
+    tbt = _save_dead_local_session(
+        worktree,
+        ticket,
+        backend=None,
+        session_stage=None,
+        row_stage=row_stage,
+    )
+    if expect_git:
+        monkeypatch.setattr(
+            "cw.reconcile.local.synthesize_opencode_result", _forbid_synthesis_call
+        )
+    else:
+        _forbid_synthesis(monkeypatch)
+
+    _harvest_tick(tbt)
+
+    if expect_git:
+        result = _last_result(ticket)
+        assert result.status == "stage_complete"
+        assert result.stage_reached == marker
+    else:
+        _assert_parked_unproven(ticket, row_stage, marker, caplog)
+
+
+def test_legacy_handle_session_stage_none_synthetic_impl_task_git_synthesizes(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """No queue row + no spawn stage: the synthetic task is IMPL, so git synthesis."""
+    worktree = _local_git_worktree(make_git_repo, "wt-synth-impl", with_commit=True)
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
+    sess = _mk_local_session(
+        "T-SYNTH",
+        worktree,
+        LocalLivenessHandle(pid=2_000_000_000, start_time_ns=1),
+    )
+    sess.stage = None
+    save_state(_legacy_handle_state(sess))
+
+    state = load_state()
+    candidates = _detect_local_harvest_candidates(state)
+    _act_on_local_harvest_candidates(state, candidates, now=_NOW, task_by_ticket={})
+
+    last_result = _session("T-SYNTH").last_result
+    assert last_result is not None
+    assert last_result["status"] == "stage_complete"
+    assert last_result["stage_reached"] == "stage2_impl"
+
+
+def test_recorded_opencode_with_both_logs_non_impl_still_uses_opencode_log(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A recorded opencode backend is trusted: both logs on FINALIZE change nothing."""
+    worktree = make_git_repo("wt-rec-oc")
+    _touch_aider_log(worktree)
+    final = make_opencode_blocked(
+        ticket_id="T-REC-OC",
+        worktree=worktree,
+        reason="prior_pipeline_pr_open",
+        details="blocked by PR #2468 which is still open",
+        retry_eligible=True,
+        stage_reached="stage4a_merge_gate",
+    ).model_copy(update={"status": "merge_gate_blocked"})
+    write_opencode_log(worktree, [text_event(framed(final))])
+    tbt = _save_dead_local_session(
+        worktree,
+        "T-REC-OC",
+        backend="opencode",
+        session_stage=Stage.FINALIZE,
+        row_stage=Stage.FINALIZE,
+    )
+
+    _harvest_tick(tbt)
+
+    result = _last_result("T-REC-OC")
+    assert result.status == "merge_gate_blocked"
+    assert result.stage_reached == "stage4a_merge_gate"
+    assert _override_warnings(caplog) == []
+
+
+@pytest.mark.parametrize("backend", ["opencode", "codex"])
+def test_resolve_harvest_backend_passes_non_aider_through(
+    backend: LocalLivenessBackend, tmp_path: Path
+) -> None:
+    """opencode / codex are returned as recorded, without touching the worktree."""
+    worktree = tmp_path / "nonexistent"
+    sess = _mk_local_session(
+        "s-pass",
+        worktree,
+        LocalLivenessHandle(pid=1, start_time_ns=1, backend=backend),
+    )
+    task = TicketTask(ticket_id="T-PASS", client="client-a", stage=Stage.FINALIZE)
+
+    assert _resolve_harvest_backend(backend, sess, task, worktree) == backend
+
+
+# (opencode.log, aider.log, session stage, row stage, expected effective backend)
+_RULE_TABLE = [
+    pytest.param(True, False, Stage.IMPL, Stage.IMPL, "opencode", id="oc-only-impl"),
+    pytest.param(
+        True, False, Stage.FINALIZE, Stage.FINALIZE, "opencode", id="oc-only-fin"
+    ),
+    pytest.param(
+        False, True, Stage.FINALIZE, Stage.FINALIZE, "aider", id="aider-only-fin"
+    ),
+    pytest.param(False, True, Stage.IMPL, Stage.IMPL, "aider", id="aider-only-impl"),
+    pytest.param(True, True, Stage.IMPL, Stage.IMPL, "aider", id="both-impl"),
+    pytest.param(True, True, Stage.IMPL, Stage.FINALIZE, "aider", id="both-spawn-impl"),
+    pytest.param(False, False, Stage.IMPL, Stage.IMPL, "aider", id="none-impl"),
+    pytest.param(
+        False, False, Stage.IMPL, Stage.REVIEW, "aider", id="none-spawn-impl-row-rev"
+    ),
+    pytest.param(True, True, Stage.PLAN, Stage.PLAN, None, id="both-plan"),
+    pytest.param(True, True, Stage.REVIEW, Stage.REVIEW, None, id="both-review"),
+    pytest.param(True, True, Stage.FINALIZE, Stage.FINALIZE, None, id="both-final"),
+    pytest.param(True, True, Stage.HARDEN, Stage.HARDEN, None, id="both-harden"),
+    pytest.param(False, False, Stage.PLAN, Stage.PLAN, None, id="none-plan"),
+    pytest.param(False, False, Stage.REVIEW, Stage.REVIEW, None, id="none-review"),
+    pytest.param(False, False, Stage.FINALIZE, Stage.FINALIZE, None, id="none-final"),
+    pytest.param(False, False, Stage.HARDEN, Stage.HARDEN, None, id="none-harden"),
+    pytest.param(True, True, None, Stage.FINALIZE, None, id="both-nostage-final"),
+    pytest.param(False, False, None, Stage.REVIEW, None, id="none-nostage-review"),
+    pytest.param(True, True, None, Stage.IMPL, "aider", id="both-nostage-impl"),
+    pytest.param(False, False, None, Stage.IMPL, "aider", id="none-nostage-impl"),
+]
+
+
+@pytest.mark.parametrize(
+    ("opencode_log", "aider_log", "session_stage", "row_stage", "expected"),
+    _RULE_TABLE,
+)
+def test_resolve_harvest_backend_rule_table(
+    opencode_log: bool,
+    aider_log: bool,
+    session_stage: Stage | None,
+    row_stage: Stage,
+    expected: str | None,
+    tmp_path: Path,
+) -> None:
+    """Every row of the recorded-``aider`` behavior matrix (#2512)."""
+    logs = {
+        (True, False): "opencode_only",
+        (False, True): "aider_only",
+        (True, True): "both",
+        (False, False): "neither",
+    }[(opencode_log, aider_log)]
+    _arrange_launch_logs(tmp_path, logs, "T-RT")
+    sess = _mk_local_session(
+        "s-rt", tmp_path, LocalLivenessHandle(pid=1, start_time_ns=1)
+    )
+    sess.stage = session_stage
+    task = TicketTask(ticket_id="T-RT", client="client-a", stage=row_stage)
+
+    assert _resolve_harvest_backend("aider", sess, task, tmp_path) == expected
+
+
+def test_resolve_harvest_backend_oserror_probe_reads_as_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A probe that raises ``OSError`` counts as 'log absent', never as a crash."""
+
+    def _boom(*_args: object, **_kwargs: object) -> bool:
+        msg = "permission denied"
+        raise OSError(msg)
+
+    monkeypatch.setattr(Path, "exists", _boom)
+    sess = _mk_local_session(
+        "s-oserr", tmp_path, LocalLivenessHandle(pid=1, start_time_ns=1)
+    )
+    impl = TicketTask(ticket_id="T-OS", client="client-a", stage=Stage.IMPL)
+    plan = TicketTask(ticket_id="T-OS", client="client-a", stage=Stage.PLAN)
+
+    sess.stage = Stage.IMPL
+    assert _resolve_harvest_backend("aider", sess, impl, tmp_path) == "aider"
+    sess.stage = Stage.PLAN
+    assert _resolve_harvest_backend("aider", sess, plan, tmp_path) is None
+
+
+def test_legacy_handle_override_refusal_page_names_effective_backend(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A refused overridden harvest pages as the opencode process it really was.
+
+    The row's client is not configured, so the stage position is unresolvable and
+    the ``blocked`` sentinel is refused (same shape as
+    ``test_local_harvest_opencode_refused_result_pages_with_blocker_and_recovery``).
+    The page must not call the dead worker an aider process.
+    """
+    worktree = make_git_repo("wt-leg-refused")
+    reported = make_opencode_blocked(
+        ticket_id="T-LEG-REF",
+        worktree=worktree,
+        reason="merge_conflict_post_push",
+        stage_reached="stage2_impl",
+    )
+    write_opencode_log(worktree, [text_event(framed(reported))])
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
+    tbt = _save_dead_local_session(
+        worktree,
+        "T-LEG-REF",
+        backend=None,
+        session_stage=Stage.FINALIZE,
+        row_stage=Stage.FINALIZE,
+        row_client="client-unconfigured",
+    )
+
+    _harvest_tick(tbt)
+
+    pages = _attention_events("test-leg-refused", "T-LEG-REF")
+    assert len(pages) == 1
+    assert pages[0]["paused_status"] == "sentinel_stage_mismatch_dead_session"
+    breadcrumbs = str(pages[0]["breadcrumbs"])
+    assert "dead opencode process" in breadcrumbs
+    assert "dead aider process" not in breadcrumbs
+
+
+def _raise_oserror(**_kwargs: object) -> object:
+    msg = "worktree vanished"
+    raise OSError(msg)
+
+
+@pytest.mark.parametrize(("stage", "marker"), _PARK_STAGES)
+def test_harvest_exception_fallback_opencode_handle_stages_at_row(
+    stage: Stage,
+    marker: str,
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed opencode harvest stages at the row's marker, never ``stage2_impl``."""
+    ticket = f"T-FB-OC-{stage.value}"
+    worktree = make_git_repo(f"wt-{ticket}")
+    tbt = _save_dead_local_session(
+        worktree,
+        ticket,
+        backend="opencode",
+        session_stage=stage,
+        row_stage=stage,
+    )
+    monkeypatch.setattr("cw.reconcile.local.synthesize_opencode_result", _raise_oserror)
+
+    _harvest_tick(tbt)
+
+    result = _last_result(ticket)
+    assert result.stage_reached == marker
+    assert result.stage_reached != "stage2_impl"
+    assert result.scope.lines_actual == (None if marker == "stage1_plan" else 0)
+    assert result.next_actions == _OPENCODE_NEXT_ACTIONS
+    assert result.blocker is not None
+    assert result.blocker.reason == _UNEXPECTED_ERROR
+    row = _row(ticket)
+    assert row.status == QueueItemStatus.BLOCKED_ON_USER
+    assert row.stage == stage
+    warnings = _fallback_warnings(caplog)
+    assert len(warnings) == 1
+    assert warnings[0].exc_info is not None
+    assert _stage_mismatch_events(ticket) == []
+
+
+@pytest.mark.parametrize(("stage", "marker"), _PARK_STAGES)
+def test_harvest_exception_fallback_aider_handle_non_repo_worktree_stages_at_row(
+    stage: Stage,
+    marker: str,
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed git harvest of an advanced row stages at the row's marker too.
+
+    The spawn stage is IMPL (so the backend resolves to ``aider``) while the row
+    has advanced; the worktree is not a repo, so real git synthesis raises. No
+    monkeypatch: the handler runs for real and exercises the pre-impl scope flip.
+    """
+    ticket = f"T-FB-AIDER-{stage.value}"
+    worktree = tmp_path / "not-a-repo"
+    with pytest.raises(subprocess.CalledProcessError):
+        run_git(
+            ["-C", str(worktree), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            check=True,
+        )
+    tbt = _save_dead_local_session(
+        worktree,
+        ticket,
+        backend="aider",
+        session_stage=Stage.IMPL,
+        row_stage=stage,
+    )
+
+    _harvest_tick(tbt)
+
+    result = _last_result(ticket)
+    assert result.stage_reached == marker
+    assert result.scope.lines_actual == (None if marker == "stage1_plan" else 0)
+    assert result.next_actions == _LOCAL_NEXT_ACTIONS
+    assert result.blocker is not None
+    assert result.blocker.reason == _UNEXPECTED_ERROR
+    row = _row(ticket)
+    assert row.status == QueueItemStatus.BLOCKED_ON_USER
+    assert row.stage == stage
+    assert len(_fallback_warnings(caplog)) == 1
+
+
+def test_harvest_exception_fallback_aider_impl_row_keeps_stage2_impl(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """An IMPL row's fallback result still stages at ``stage2_impl`` (unchanged)."""
+    worktree = tmp_path / "not-a-repo"
+    tbt = _save_dead_local_session(
+        worktree,
+        "T-FB-IMPL",
+        backend="aider",
+        session_stage=Stage.IMPL,
+        row_stage=Stage.IMPL,
+    )
+
+    _harvest_tick(tbt)
+
+    result = _last_result("T-FB-IMPL")
+    assert result.stage_reached == "stage2_impl"
+    assert result.scope.lines_actual == 0
+    assert result.next_actions == _LOCAL_NEXT_ACTIONS

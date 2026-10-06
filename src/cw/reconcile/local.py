@@ -12,6 +12,11 @@ Mirrors the detect/act split of ``phantom.py``/``idle.py``: ``_detect_*`` is
 pure classification (zero writes); ``_act_*`` performs the mutations,
 save_state, and event emission. See GitHub #888, ADR-0006.
 
+A recorded ``aider`` backend is not trusted: a handle that predates the
+``backend`` field migrates to an explicit ``"aider"`` (#2369), so
+``_resolve_harvest_backend`` verifies it against the worktree's launch logs and
+the session's spawn stage, and parks the row when it cannot (#2512).
+
 A ``codex``-backend handle (RFC 0014 A1, #2387) is detected the same way but
 never harvested through a result synthesizer: a crashed codex review leaves no
 sentinel to synthesize. ``_act_on_local_harvest_candidates`` branches it out
@@ -36,15 +41,18 @@ re-derives what happened from state.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import subprocess
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from cw.codex_background import _resolve_codex_fix_loop_enabled
 from cw.config import load_effective_config, save_state
 from cw.events import record_event
 from cw.local_runner import (
+    AIDER_LOG_RELATIVE_PATH,
+    LOCAL_EXECUTOR_FAILURE_ACTION,
     UNEXPECTED_ERROR,
     make_blocked,
     read_process_start_time_ns,
@@ -54,6 +62,7 @@ from cw.models import (
     CODEX_BACKEND,
     DEFAULT_LANE,
     OCCUPIED_LANE_STATUSES,
+    OPENCODE_BACKEND,
     CodexHarvestOutcome,
     CompletionReason,
     LastResultSource,
@@ -64,7 +73,14 @@ from cw.models import (
     Stage,
     TicketTask,
 )
-from cw.opencode_runner import synthesize_opencode_result
+from cw.opencode_runner import (
+    OPENCODE_LOG_RELATIVE_PATH,
+    stage_entry_marker,
+    synthesize_opencode_result,
+)
+from cw.opencode_runner import (
+    make_blocked as make_opencode_blocked,
+)
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
     ProposedAction,
@@ -123,6 +139,8 @@ _CODEX_HARVEST_BREADCRUMBS = (
 # SESSION_NEEDS_ATTENTION ``paused_status`` for a dead LOCAL process whose
 # harvested sentinel the shared staged-advance guard refused (#2490).
 SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON = "sentinel_stage_mismatch_dead_session"
+
+AIDER_BACKEND: LocalLivenessBackend = "aider"
 
 
 def _refusal_latch_binds(
@@ -358,9 +376,69 @@ _HARVEST_SYNTHESIZERS: dict[
     LocalLivenessBackend,
     Callable[[TicketTask, Path, str, str], AutoDevResult],
 ] = {
-    "aider": _harvest_via_git,
-    "opencode": _harvest_via_opencode_log,
+    AIDER_BACKEND: _harvest_via_git,
+    cast("LocalLivenessBackend", OPENCODE_BACKEND): _harvest_via_opencode_log,
 }
+
+
+def _log_exists(worktree: Path, relative_path: Path) -> bool:
+    """True iff *relative_path* exists under *worktree*; ``OSError`` reads as absent."""
+    with contextlib.suppress(OSError):
+        return (worktree / relative_path).exists()
+    return False
+
+
+def _resolve_harvest_backend(
+    backend: LocalLivenessBackend,
+    session: Session,
+    task: TicketTask,
+    worktree: Path,
+) -> LocalLivenessBackend | None:
+    """The backend that really launched *session*, or ``None`` if it cannot be proven.
+
+    A ``local_liveness`` handle written before the ``backend`` field existed
+    (#2369) migrates to an explicit ``"aider"`` that is byte-identical to a genuine
+    aider handle, so a recorded ``"aider"`` is verified here, from facts outside
+    the handle (GitHub #2512). Log *contents* are never read; only presence is
+    probed. Rules, in order:
+
+    1. Recorded ``opencode`` / ``codex``: returned unchanged.
+    2. Recorded ``aider``. ``.cw/aider.log`` is opened before ``Popen`` by a
+       genuine aider launch, so it is always left behind:
+
+       - only ``.cw/opencode.log``: it was an opencode run -> ``"opencode"``;
+       - only ``.cw/aider.log``: ``"aider"`` (a misconfigured ``local`` backend on
+         a non-IMPL stage is still refused and paged by the stage guard);
+       - both or neither: the spawn stage decides. ``session.stage`` is the stage
+         the executor was chosen for (``_create_executor_session``); the row's
+         stage may have advanced since, so it is only the fallback when the
+         session carries none. IMPL -> ``"aider"`` (git synthesis is
+         stage-correct there); any other stage -> ``None``.
+    """
+    if backend != AIDER_BACKEND:
+        return backend
+    has_opencode_log = _log_exists(worktree, OPENCODE_LOG_RELATIVE_PATH)
+    has_aider_log = _log_exists(worktree, AIDER_LOG_RELATIVE_PATH)
+    if has_opencode_log and not has_aider_log:
+        _log.warning(
+            "harvest_backend_overridden: session=%s ticket=%s recorded=aider"
+            " effective=opencode (only .cw/opencode.log present; GitHub #2512)",
+            session.id,
+            task.ticket_id,
+        )
+        return cast("LocalLivenessBackend", OPENCODE_BACKEND)
+    if has_aider_log and not has_opencode_log:
+        return AIDER_BACKEND
+    return AIDER_BACKEND if (session.stage or task.stage) is Stage.IMPL else None
+
+
+# Operator hint on the blocked result parked for a backend that could not be proven.
+_UNPROVEN_BACKEND_NEXT_ACTIONS: list[str] = [LOCAL_EXECUTOR_FAILURE_ACTION]
+# Under the 200-char cap the blocked-reason breadcrumb renders (#2512).
+_UNPROVEN_BACKEND_DETAILS = (
+    "The executor backend could not be proven from the liveness handle or the"
+    " worktree launch logs, so no result was synthesized."
+)
 
 
 def _synthesize_harvest_sentinel(
@@ -368,24 +446,52 @@ def _synthesize_harvest_sentinel(
     task: TicketTask,
     default_branch: str,
     session_id: str,
-    backend: LocalLivenessBackend,
+    backend: LocalLivenessBackend | None,
 ) -> AutoDevResult:
     """Synthesize the harvest sentinel with the synthesizer for *backend*.
 
-    Dispatches through ``_HARVEST_SYNTHESIZERS`` on the handle's recorded
-    backend (opencode → JSONL log parse, aider → git-fact synthesis); an
-    unregistered backend falls back to git synthesis. A git/opencode failure on
-    one candidate must not abort the entire harvest sweep — returns a blocked
-    result on exception.
+    Dispatches through ``_HARVEST_SYNTHESIZERS`` on the resolved backend
+    (opencode → JSONL log parse, aider → git-fact synthesis); an unregistered
+    backend falls back to git synthesis. ``None`` (backend unproven, see
+    :func:`_resolve_harvest_backend`) never synthesizes: it returns a blocked
+    ``unexpected_error`` result at the row's own entry marker, which the
+    existing routing parks BLOCKED_ON_USER and pages. A git/opencode failure on
+    one candidate must not abort the entire harvest sweep — the fallback returns a
+    blocked result at the row's entry marker (never a later one, which would walk
+    the pointer, never ``stage2_impl`` on a non-IMPL row) and logs the exception.
     """
-    synthesize = _HARVEST_SYNTHESIZERS.get(backend, _harvest_via_git)
-    try:
-        return synthesize(task, worktree, default_branch, session_id)
-    except (OSError, subprocess.CalledProcessError):
+    stage_reached = stage_entry_marker(task.stage.value)
+    if backend is None:
         return make_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=UNEXPECTED_ERROR,
+            details=_UNPROVEN_BACKEND_DETAILS,
+            stage_reached=stage_reached,
+            next_actions=_UNPROVEN_BACKEND_NEXT_ACTIONS.copy(),
+        )
+    synthesize = _HARVEST_SYNTHESIZERS.get(backend, _harvest_via_git)
+    try:
+        return synthesize(task, worktree, default_branch, session_id)
+    except (OSError, subprocess.CalledProcessError):
+        _log.warning(
+            "harvest_synthesis_failed: session=%s ticket=%s backend=%s;"
+            " parking at the row's stage (GitHub #2512)",
+            session_id,
+            task.ticket_id,
+            backend,
+            exc_info=True,
+        )
+        blocked = (
+            make_opencode_blocked
+            if backend == cast("LocalLivenessBackend", OPENCODE_BACKEND)
+            else make_blocked
+        )
+        return blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=UNEXPECTED_ERROR,
+            stage_reached=stage_reached,
         )
 
 
@@ -780,12 +886,17 @@ def _act_on_local_harvest_candidates(
             )
             continue
 
+        # A recorded "aider" is verified against the launch logs and spawn stage
+        # (#2512); None = unproven, which parks the row instead of guessing.
+        backend = _resolve_harvest_backend(
+            session.local_liveness.backend, session, task, candidate.worktree_path
+        )
         sentinel = _synthesize_harvest_sentinel(
             worktree=candidate.worktree_path,
             task=task,
             default_branch=default_branch,
             session_id=candidate.session_id,
-            backend=session.local_liveness.backend,
+            backend=backend,
         )
         # Task first (before the session status change) so the task is in its
         # terminal/advanced state when revert_completed_silent_tasks runs.
@@ -805,7 +916,11 @@ def _act_on_local_harvest_candidates(
             task_already_terminal = outcome.task_already_terminal
         if not routed and not task_already_terminal:
             refusal_page = _stage_refusal_page(
-                session, task, sentinel, session.local_liveness.backend, outcome
+                session,
+                task,
+                sentinel,
+                backend or session.local_liveness.backend,
+                outcome,
             )
             if refusal_page is not None:
                 refusal_pages.append(refusal_page)

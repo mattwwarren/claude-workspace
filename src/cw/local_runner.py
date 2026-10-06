@@ -46,7 +46,10 @@ if TYPE_CHECKING:
 _SCHEMA_VERSION: Literal[4] = 4
 
 # --- Reason-string constants (exported for tests and callers) ---
-_AIDER_LOG_RELATIVE_PATH: Path = Path(".cw", "aider.log")
+# Public (like TASK_CONTEXT_RELATIVE_PATH): cw.reconcile.local probes it to verify
+# a recorded aider backend. _launch_logged_subprocess opens it ("w") before
+# Popen, so a genuine aider launch always leaves it behind (#2512).
+AIDER_LOG_RELATIVE_PATH: Path = Path(".cw", "aider.log")
 _AIDER_LOG_TAIL_CHARS = 4000  # matches codex_runner.py's stderr[-4000:] convention
 
 ENDPOINT_NOT_CONFIGURED = "endpoint_not_configured"
@@ -136,7 +139,12 @@ _FIXED_HEALTH = Health(
     recommendation="EXIT_FOR_HUMAN_REVIEW",
 )
 _FIXED_REVIEW = Review(must_fix_initial=0, should_fix=0, fix_cycles_used=0)
-_FIXED_NEXT_ACTIONS: list[str] = ["user_resolve_local_executor_failure"]
+LOCAL_EXECUTOR_FAILURE_ACTION = "user_resolve_local_executor_failure"
+_FIXED_NEXT_ACTIONS: list[str] = [LOCAL_EXECUTOR_FAILURE_ACTION]
+# §3.3 stage-coupled invariant (auto_dev_result/schema): a pre-impl
+# stage_reached requires scope.lines_actual to be null, a post-impl one
+# requires it non-null, so make_blocked flips the fixed scope for these (#2512).
+_PRE_IMPL_STAGE_MARKERS: tuple[StageReached, ...] = ("stage1_plan", "stage1_pre_flight")
 
 
 def aider_available() -> bool:
@@ -172,7 +180,7 @@ class RealAiderRunner:
         argv: list[str],
         env: dict[str, str],
     ) -> subprocess.Popen[bytes]:
-        return _launch_logged_subprocess(worktree, argv, env, _AIDER_LOG_RELATIVE_PATH)
+        return _launch_logged_subprocess(worktree, argv, env, AIDER_LOG_RELATIVE_PATH)
 
 
 def read_process_start_time_ns(pid: int) -> int | None:
@@ -565,13 +573,24 @@ def make_blocked(
 
     ``next_actions`` defaults to the LocalExecutor label but callers outside
     that subsystem should pass their own (#1835).
+
+    The ``stage2_impl`` default is correct only for IMPL-stage callers (aider is
+    IMPL-only); a multi-stage caller must pass
+    ``opencode_runner.stage_entry_marker(...)`` or it mis-stages the failure
+    (#2512). A pre-impl marker nulls ``scope.lines_actual`` (§3.3), mirroring
+    ``opencode_runner.make_blocked``.
     """
+    scope = (
+        _blocked_scope.model_copy(update={"lines_actual": None})
+        if stage_reached in _PRE_IMPL_STAGE_MARKERS
+        else _blocked_scope
+    )
     return AutoDevResult(
         schema_version=_SCHEMA_VERSION,
         ticket_id=ticket_id,
         status="blocked",
         stage_reached=stage_reached,
-        scope=_blocked_scope,
+        scope=scope,
         plan_source="none",
         review=_FIXED_REVIEW,
         health=_FIXED_HEALTH,
@@ -582,7 +601,15 @@ def make_blocked(
             retry_eligible=retry_eligible,
             retry_delay_seconds=retry_delay_seconds,
         ),
-        next_actions=next_actions if next_actions is not None else _FIXED_NEXT_ACTIONS,
+        next_actions=(
+            next_actions
+            if next_actions is not None
+            else (
+                ["manual_intervention"]
+                if stage_reached == "stage1_pre_flight"
+                else _FIXED_NEXT_ACTIONS.copy()
+            )
+        ),
         worktree_path=str(worktree),
     )
 
@@ -657,7 +684,7 @@ def synthesize_git_result(
 
     if not facts["commits"]:
         log_text = ""
-        log_path = worktree / _AIDER_LOG_RELATIVE_PATH
+        log_path = worktree / AIDER_LOG_RELATIVE_PATH
         with contextlib.suppress(OSError):
             log_text = log_path.read_text(encoding="utf-8", errors="replace")
         # Classify against the whole log, but keep reporting only the tail.
