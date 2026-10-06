@@ -191,10 +191,9 @@ def test_resolve_project_config_auto_merge_non_dict_root(tmp_path: Path) -> None
     [
         pytest.param(None, id="absent"),
         pytest.param("pr:\n  auto_merge: true\n", id="explicit-true"),
-        pytest.param("pr:\n  auto_merge: [unterminated\n", id="malformed"),
     ],
 )
-def test_automerge_allowed_true_when_absent_or_true_or_malformed(
+def test_automerge_allowed_true_when_absent_or_true(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, config_content: str | None
 ) -> None:
     monkeypatch.chdir(tmp_path)
@@ -330,6 +329,219 @@ def test_cmd_verify_downgrades_automerge_when_config_disabled(
     warnings = payload["warnings"]
     assert isinstance(warnings, list)
     assert any("pr.auto_merge: false" in w for w in warnings)
+
+
+# --- fail-closed pr.auto_merge gate (#2581) ---
+
+_UNTERMINATED_YAML = "pr:\n  auto_merge: [unterminated\n"
+# yaml.safe_load raises a bare ValueError (not a YAMLError) on this date scalar.
+_BAD_DATE_YAML = "a: 2001-13-45\n"
+
+
+def _config_path(root: Path) -> Path:
+    return root / ".claude" / "project-config.yaml"
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_reason"),
+    [
+        pytest.param(_UNTERMINATED_YAML, "invalid YAML in", id="invalid-yaml"),
+        pytest.param(_BAD_DATE_YAML, "invalid YAML in", id="bare-value-error"),
+        pytest.param("- one\n- two\n", "is not a YAML mapping", id="list-root"),
+        pytest.param("pr: [a, b]\n", "is not a mapping", id="list-pr"),
+        pytest.param(
+            'pr:\n  auto_merge: "false"\n',
+            "is not a boolean: 'false'",
+            id="string-false",
+        ),
+        pytest.param("pr:\n  auto_merge:\n", "is not a boolean: None", id="null"),
+        pytest.param(b"pr:\n  auto_merge: \xff\xfe\n", "cannot read", id="bad-utf8"),
+    ],
+)
+def test_read_automerge_gate_refuses_untrustworthy_config(
+    tmp_path: Path, content: str | bytes, expected_reason: str
+) -> None:
+    config_path = _config_path(tmp_path)
+    config_path.parent.mkdir(parents=True)
+    if isinstance(content, bytes):
+        config_path.write_bytes(content)
+    else:
+        config_path.write_text(content, encoding="utf-8")
+
+    gate = _mod.read_automerge_gate(config_path)
+
+    assert gate.allowed is False
+    assert gate.reason is not None
+    assert expected_reason in gate.reason
+    assert str(config_path) in gate.reason
+
+
+def test_read_automerge_gate_refuses_directory_at_config_path(tmp_path: Path) -> None:
+    config_path = _config_path(tmp_path)
+    config_path.mkdir(parents=True)
+
+    gate = _mod.read_automerge_gate(config_path)
+
+    assert gate.allowed is False
+    assert gate.reason is not None
+    assert gate.reason.startswith("cannot read")
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(None, id="absent"),
+        pytest.param("", id="empty"),
+        pytest.param("# only a comment\n", id="comment-only"),
+        pytest.param("tracking:\n  primary: github\n", id="pr-absent"),
+        pytest.param("pr:\n", id="bare-pr"),
+        pytest.param("pr:\n  tool: gh\n", id="key-absent"),
+        pytest.param("pr:\n  auto_merge: true\n", id="explicit-true"),
+    ],
+)
+def test_read_automerge_gate_allows_missing_or_keyless_config(
+    tmp_path: Path, content: str | None
+) -> None:
+    if content is not None:
+        _write_project_config_yaml(tmp_path, content)
+
+    gate = _mod.read_automerge_gate(_config_path(tmp_path))
+
+    assert gate == _mod.AutomergeGate(allowed=True, reason=None)
+
+
+def test_read_automerge_gate_allows_when_dot_claude_is_a_file(tmp_path: Path) -> None:
+    """A regular file where `.claude/` should be is NotADirectoryError: no config."""
+    (tmp_path / ".claude").write_text("not a directory\n", encoding="utf-8")
+
+    gate = _mod.read_automerge_gate(_config_path(tmp_path))
+
+    assert gate == _mod.AutomergeGate(allowed=True, reason=None)
+
+
+def test_read_automerge_gate_explicit_false_is_not_a_refusal(tmp_path: Path) -> None:
+    _write_project_config_yaml(tmp_path, "pr:\n  auto_merge: false\n")
+
+    gate = _mod.read_automerge_gate(_config_path(tmp_path))
+
+    assert gate == _mod.AutomergeGate(allowed=False, reason=None)
+
+
+def test_automerge_allowed_is_fail_closed_wrapper(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert _mod.automerge_allowed() is True
+
+    _write_project_config_yaml(tmp_path, _UNTERMINATED_YAML)
+    assert _mod.automerge_allowed() is False
+
+
+# expected: True / False is an AutomergeGate(<bool>, None) verdict; None is a
+# refusal carrying the no-PyYAML reason.
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        pytest.param(
+            "pr:\n  tool: gh\n  auto_create: false\n", True, id="repo-shaped-no-token"
+        ),
+        pytest.param("", True, id="empty"),
+        pytest.param("# only a comment\n", True, id="comment-only"),
+        pytest.param("pr:\n  # auto_merge: false\n", True, id="commented-out-token"),
+        pytest.param("pr:\n  auto_merge: true\n", True, id="true"),
+        pytest.param("pr:\n  auto_merge: True\n", True, id="True"),
+        pytest.param("pr:\n  auto_merge: TRUE\n", True, id="TRUE"),
+        pytest.param("pr:\n  auto_merge: true  # note\n", True, id="true-comment"),
+        pytest.param(
+            "pr:\n  tool: gh\n  auto_merge: true\n", True, id="true-after-sibling"
+        ),
+        pytest.param("pr:\n  auto_merge: false\n", False, id="false"),
+        pytest.param("pr:\n  auto_merge: False\n", False, id="False"),
+        pytest.param("pr:\n  auto_merge: FALSE\n", False, id="FALSE"),
+        pytest.param("pr:   # c\n  auto_merge: false\n", False, id="pr-header-comment"),
+        pytest.param("pr: {auto_merge: false}\n", None, id="flow-style"),
+        pytest.param("pr:\n  auto_merge: yes\n", None, id="yes"),
+        pytest.param("pr:\n  auto_merge: no\n", None, id="no"),
+        pytest.param('pr:\n  auto_merge: "false"\n', None, id="quoted"),
+        pytest.param("pr:\n  auto_merge: true#x\n", None, id="true-hash-no-space"),
+        pytest.param(
+            "pr:\n  auto_merge: false\n  auto_merge: true\n", None, id="doubled-token"
+        ),
+        pytest.param("other:\n  auto_merge: false\n", None, id="outside-pr"),
+        pytest.param("pr:\n  sub:\n    auto_merge: false\n", None, id="nested-deeper"),
+        pytest.param(
+            "pr:\n  notes: |\n    set auto_merge: false later\n",
+            None,
+            id="block-scalar-mention",
+        ),
+        pytest.param("pr: {\n  auto_merge: false\n}\n", None, id="multiline-flow"),
+        pytest.param("  auto_merge: false\n", None, id="indented-without-parent"),
+        pytest.param("pr:\n\tauto_merge: false\n", None, id="tab-indent"),
+    ],
+)
+def test_read_automerge_gate_without_pyyaml(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    content: str,
+    expected: bool | None,
+) -> None:
+    monkeypatch.setattr(_mod, "yaml", None)
+    _write_project_config_yaml(tmp_path, content)
+
+    gate = _mod.read_automerge_gate(_config_path(tmp_path))
+
+    if expected is None:
+        assert gate == _mod.AutomergeGate(allowed=False, reason=_NO_YAML_REASON)
+    else:
+        assert gate == _mod.AutomergeGate(allowed=expected, reason=None)
+
+
+def test_read_automerge_gate_without_pyyaml_allows_missing_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(_mod, "yaml", None)
+
+    gate = _mod.read_automerge_gate(_config_path(tmp_path))
+
+    assert gate == _mod.AutomergeGate(allowed=True, reason=None)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(_UNTERMINATED_YAML, id="invalid-yaml"),
+        pytest.param('pr:\n  auto_merge: "false"\n', id="string-false"),
+        pytest.param(None, id="directory"),
+    ],
+)
+def test_resolve_effective_automerge_required_ignores_fail_closed_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, content: str | None
+) -> None:
+    """verify must never downgrade --require-automerge on an unreadable config."""
+    monkeypatch.chdir(tmp_path)
+    if content is None:
+        _config_path(tmp_path).mkdir(parents=True)
+    else:
+        _write_project_config_yaml(tmp_path, content)
+
+    assert _mod.automerge_allowed() is False
+    assert _mod.resolve_effective_automerge_required(base_required=True) is True
+
+
+def test_cmd_verify_keeps_automerge_required_on_unparseable_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code, payload = _run_verify_with_pr(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        state="OPEN",
+        auto_merge_request=None,
+        config_yaml=_UNTERMINATED_YAML,
+    )
+
+    assert exit_code == 1
+    assert _find_check(payload, "automerge-enabled")["required"] is True
 
 
 # --- MERGED PR accepted by --require-automerge (#2163) ---
@@ -486,10 +698,12 @@ def test_cmd_check_automerge_allowed_prints_false_and_exits_1_when_config_false(
 
 
 def test_cmd_check_automerge_allowed_reads_requested_repo_path(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    arm_repo: Path,
+    make_git_repo: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    allowed_repo = tmp_path / "allowed"
-    blocked_repo = tmp_path / "blocked"
+    allowed_repo = make_git_repo("allowed")
+    blocked_repo = arm_repo
     _write_project_config_yaml(allowed_repo, "pr:\n  auto_merge: true\n")
     _write_project_config_yaml(blocked_repo, "pr:\n  auto_merge: false\n")
 
@@ -507,9 +721,9 @@ def test_cmd_check_automerge_allowed_reads_requested_repo_path(
 
 
 def test_cmd_check_automerge_allowed_reads_repo_path_outside_cwd(
-    tmp_path: Path,
+    tmp_path: Path, arm_repo: Path
 ) -> None:
-    repo = tmp_path / "repo"
+    repo = arm_repo
     outside_repo = tmp_path / "outside"
     outside_repo.mkdir()
     _write_project_config_yaml(repo, "pr:\n  auto_merge: false\n")
@@ -532,7 +746,22 @@ def test_cmd_check_automerge_allowed_reads_repo_path_outside_cwd(
     assert result.stdout == "false\n"
 
 
-def test_cmd_check_automerge_allowed_warns_on_stderr_when_pyyaml_unavailable(
+def test_check_automerge_allowed_refuses_when_pyyaml_unavailable_and_shape_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_project_config_yaml(tmp_path, "pr: {auto_merge: false}\n")
+    monkeypatch.setattr(_mod, "yaml", None)
+
+    exit_code = _mod.main(["check-automerge-allowed"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert captured.out == "false\n"
+    assert captured.err == _undeterminable_stderr(_NO_YAML_REASON)
+
+
+def test_cmd_check_automerge_allowed_without_pyyaml_reads_canonical_false(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.chdir(tmp_path)
@@ -542,9 +771,79 @@ def test_cmd_check_automerge_allowed_warns_on_stderr_when_pyyaml_unavailable(
     exit_code = _mod.main(["check-automerge-allowed"])
     captured = capsys.readouterr()
 
-    assert exit_code == 0
-    assert captured.out == "true\n"
-    assert "PyYAML unavailable" in captured.err
+    assert exit_code == 1
+    assert captured.out == "false\n"
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(_UNTERMINATED_YAML, id="invalid-yaml"),
+        pytest.param(_BAD_DATE_YAML, id="bare-value-error"),
+    ],
+)
+def test_cmd_check_automerge_allowed_exits_2_on_unparseable_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    content: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_project_config_yaml(tmp_path, content)
+
+    exit_code = _mod.main(["check-automerge-allowed"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert captured.out == "false\n"
+    assert captured.err.startswith(
+        "ERROR: cannot determine pr.auto_merge (invalid YAML in "
+    )
+    assert captured.err.endswith("(fail closed, #2046/#2581)\n")
+
+
+def test_cmd_check_automerge_allowed_repo_path_subdirectory_finds_root_config(
+    arm_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_project_config_yaml(arm_repo, "pr:\n  auto_merge: false\n")
+    sub = arm_repo / "a" / "b"
+    sub.mkdir(parents=True)
+
+    exit_code = _mod.main(["check-automerge-allowed", "--repo-path", str(sub)])
+
+    assert exit_code == 1
+    assert capsys.readouterr().out == "false\n"
+
+
+@pytest.mark.parametrize(
+    ("name", "make_dir", "message"),
+    [
+        pytest.param(
+            "plain", True, "--repo-path is not inside a git work tree", id="non-repo"
+        ),
+        pytest.param("missing", False, "--repo-path is not a directory", id="missing"),
+    ],
+)
+def test_cmd_check_automerge_allowed_rejects_non_repo_and_missing_repo_path(
+    arm_repo: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+    make_dir: bool,
+    message: str,
+) -> None:
+    """`arm_repo` is requested only for its GIT_* env strip."""
+    target = tmp_path / name
+    if make_dir:
+        target.mkdir()
+
+    exit_code = _mod.main(["check-automerge-allowed", "--repo-path", str(target)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert captured.out == ""
+    assert captured.err == f"ERROR: {message}: {target}\n"
 
 
 # --- module-load fallback + config_path fix (#2373) ---
@@ -647,21 +946,57 @@ def test_script_runs_without_cw_importable() -> None:
 # --- arm-automerge: bounded retry + read-back (#2576) ---
 
 _ARM_PR = "42"
+_SHA = "0123456789abcdef0123456789abcdef01234567"
 _VIEW = ["pr", "view", _ARM_PR, "--json", "state,autoMergeRequest"]
-_MERGE = ["pr", "merge", _ARM_PR, "--auto", "--squash"]
+_MERGE = ["pr", "merge", _ARM_PR, "--auto", "--squash", "--match-head-commit", _SHA]
 _ARM_VIEW_MERGED = '{"state":"MERGED","autoMergeRequest":null}'
 _GRAPHQL_ERROR = "GraphQL: Pull request is not mergeable (enablePullRequestAutoMerge)"
+# NOT a captured gh message: no observed `--match-head-commit` mismatch output was
+# available, so this stand-in only pins that gh's stderr passes through verbatim.
+_HEAD_MOVED_STDERR = "stand-in: PR head does not match the --match-head-commit SHA"
 _SEAM_DISALLOWED_DETAIL = (
     "pr.auto_merge: false in .claude/project-config.yaml (#2046) -- no gh call made"
 )
+_NO_YAML_REASON = "PyYAML unavailable and pr.auto_merge could not be read without it"
+
+
+def _undeterminable_stderr(reason: str) -> str:
+    return (
+        f"ERROR: cannot determine pr.auto_merge ({reason}); "
+        "refusing to arm auto-merge (fail closed, #2046/#2581)\n"
+    )
+
+
+def _python(no_site: bool) -> list[str]:
+    """The interpreter argv; ``-S`` hides site-packages (and so PyYAML)."""
+    return [sys.executable, "-S"] if no_site else [sys.executable]
+
+
+@pytest.fixture
+def arm_repo(
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """A real git repo, with every inherited ``GIT_*`` var removed.
+
+    The script runs ``git -C <path> rev-parse --show-toplevel`` with the
+    inherited env, so a ``GIT_DIR`` from a wrapping git hook would redirect it.
+    """
+    for key in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(key)
+    return make_git_repo("repo")
 
 
 def _run_arm(
-    repo: Path, fake_bin: Path, *extra: str
+    repo: Path,
+    fake_bin: Path,
+    *extra: str,
+    head_sha: str | None = _SHA,
+    no_site: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    sha_args = ["--head-sha", head_sha] if head_sha is not None else []
     return subprocess.run(
         [
-            sys.executable,
+            *_python(no_site),
             str(_SCRIPT),
             "arm-automerge",
             _ARM_PR,
@@ -669,6 +1004,7 @@ def _run_arm(
             "0",
             "--repo-path",
             str(repo),
+            *sha_args,
             *extra,
         ],
         capture_output=True,
@@ -678,17 +1014,40 @@ def _run_arm(
     )
 
 
+def _run_check_allowed(
+    repo_path: Path, *, no_site: bool = False
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            *_python(no_site),
+            str(_SCRIPT),
+            "check-automerge-allowed",
+            "--repo-path",
+            str(repo_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _merge_calls(fake_bin: Path) -> list[list[str]]:
+    return [call for call in _gh_calls(fake_bin) if call[:2] == ["pr", "merge"]]
+
+
 def _merge_count(fake_bin: Path) -> int:
-    return sum(1 for call in _gh_calls(fake_bin) if call == _MERGE)
+    return len(_merge_calls(fake_bin))
 
 
-def test_arm_automerge_transient_error_then_success(tmp_path: Path) -> None:
+def test_arm_automerge_transient_error_then_success(
+    tmp_path: Path, arm_repo: Path
+) -> None:
     """Ticket repro: first merge fails with a GraphQL error, the retry arms it."""
     fake_bin = _stub_gh_arm(
         tmp_path, [(1, _GRAPHQL_ERROR, None), (0, "", ARM_VIEW_ARMED)]
     )
 
-    result = _run_arm(tmp_path, fake_bin)
+    result = _run_arm(arm_repo, fake_bin)
 
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
@@ -699,10 +1058,13 @@ def test_arm_automerge_transient_error_then_success(tmp_path: Path) -> None:
     _assert_gh_calls(fake_bin, [_VIEW, _MERGE, _VIEW, _VIEW, _MERGE, _VIEW])
 
 
-def test_arm_automerge_already_armed_is_noop_success(tmp_path: Path) -> None:
+def test_arm_automerge_already_armed_is_noop_success(
+    tmp_path: Path, arm_repo: Path
+) -> None:
+    """The pin applies only to arms this call issues: no merge, so no pin."""
     fake_bin = _stub_gh_arm(tmp_path, [(0, "", None)], initial_view=ARM_VIEW_ARMED)
 
-    result = _run_arm(tmp_path, fake_bin)
+    result = _run_arm(arm_repo, fake_bin)
 
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
@@ -712,11 +1074,13 @@ def test_arm_automerge_already_armed_is_noop_success(tmp_path: Path) -> None:
     assert _merge_count(fake_bin) == 0
 
 
-def test_arm_automerge_exit_zero_null_readback_then_armed(tmp_path: Path) -> None:
+def test_arm_automerge_exit_zero_null_readback_then_armed(
+    tmp_path: Path, arm_repo: Path
+) -> None:
     """#1140 shape: gh exits 0 without arming; the read-back drives the retry."""
     fake_bin = _stub_gh_arm(tmp_path, [(0, "", None), (0, "", ARM_VIEW_ARMED)])
 
-    result = _run_arm(tmp_path, fake_bin)
+    result = _run_arm(arm_repo, fake_bin)
 
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
@@ -725,10 +1089,12 @@ def test_arm_automerge_exit_zero_null_readback_then_armed(tmp_path: Path) -> Non
     assert _merge_count(fake_bin) == 2
 
 
-def test_arm_automerge_persistent_failure_carries_gh_stderr(tmp_path: Path) -> None:
+def test_arm_automerge_persistent_failure_carries_gh_stderr(
+    tmp_path: Path, arm_repo: Path
+) -> None:
     fake_bin = _stub_gh_arm(tmp_path, [(1, _GRAPHQL_ERROR, None)])
 
-    result = _run_arm(tmp_path, fake_bin)
+    result = _run_arm(arm_repo, fake_bin)
 
     assert result.returncode == 1
     out = json.loads(result.stdout)
@@ -744,11 +1110,11 @@ def test_arm_automerge_persistent_failure_carries_gh_stderr(tmp_path: Path) -> N
 
 
 def test_arm_automerge_persistent_exit_zero_null_readback_fails(
-    tmp_path: Path,
+    tmp_path: Path, arm_repo: Path
 ) -> None:
     fake_bin = _stub_gh_arm(tmp_path, [(0, "", None)])
 
-    result = _run_arm(tmp_path, fake_bin, "--attempts", "2")
+    result = _run_arm(arm_repo, fake_bin, "--attempts", "2")
 
     assert result.returncode == 1
     out = json.loads(result.stdout)
@@ -760,14 +1126,14 @@ def test_arm_automerge_persistent_exit_zero_null_readback_fails(
 
 
 def test_arm_automerge_already_queued_nonzero_exit_counts_as_armed(
-    tmp_path: Path,
+    tmp_path: Path, arm_repo: Path
 ) -> None:
     """gh exits 1 ("already queued") but the read-back shows it armed."""
     fake_bin = _stub_gh_arm(
         tmp_path, [(1, "Pull request is already queued", ARM_VIEW_ARMED)]
     )
 
-    result = _run_arm(tmp_path, fake_bin)
+    result = _run_arm(arm_repo, fake_bin)
 
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
@@ -776,10 +1142,12 @@ def test_arm_automerge_already_queued_nonzero_exit_counts_as_armed(
     _assert_gh_calls(fake_bin, [_VIEW, _MERGE, _VIEW])
 
 
-def test_arm_automerge_merged_readback_is_success(tmp_path: Path) -> None:
+def test_arm_automerge_merged_readback_is_success(
+    tmp_path: Path, arm_repo: Path
+) -> None:
     fake_bin = _stub_gh_arm(tmp_path, [(0, "", _ARM_VIEW_MERGED)])
 
-    result = _run_arm(tmp_path, fake_bin)
+    result = _run_arm(arm_repo, fake_bin)
 
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
@@ -788,12 +1156,14 @@ def test_arm_automerge_merged_readback_is_success(tmp_path: Path) -> None:
     assert out["attempts"] == 1
 
 
-def test_arm_automerge_refused_by_seam_makes_zero_gh_calls(tmp_path: Path) -> None:
+def test_arm_automerge_refused_by_seam_makes_zero_gh_calls(
+    tmp_path: Path, arm_repo: Path
+) -> None:
     """#2046: pr.auto_merge: false must never reach `gh pr merge --auto`."""
-    _write_project_config_yaml(tmp_path, "pr:\n  auto_merge: false\n")
+    _write_project_config_yaml(arm_repo, "pr:\n  auto_merge: false\n")
     fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
 
-    result = _run_arm(tmp_path, fake_bin)
+    result = _run_arm(arm_repo, fake_bin)
 
     assert result.returncode == _mod.EXIT_ARM_DISALLOWED == 3
     assert json.loads(result.stdout) == {
@@ -809,10 +1179,12 @@ def test_arm_automerge_refused_by_seam_makes_zero_gh_calls(tmp_path: Path) -> No
     assert _gh_calls(fake_bin) == []
 
 
-def test_arm_automerge_zero_attempts_is_invocation_error(tmp_path: Path) -> None:
+def test_arm_automerge_zero_attempts_is_invocation_error(
+    tmp_path: Path, arm_repo: Path
+) -> None:
     fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
 
-    result = _run_arm(tmp_path, fake_bin, "--attempts", "0")
+    result = _run_arm(arm_repo, fake_bin, "--attempts", "0")
 
     assert result.returncode == 2
     assert "--attempts must be >= 1" in result.stderr
@@ -828,6 +1200,241 @@ def test_arm_automerge_unknown_subcommand_from_stale_copy_exits_two() -> None:
         check=False,
     )
     assert result.returncode == 2
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(_UNTERMINATED_YAML, id="invalid-yaml"),
+        pytest.param(_BAD_DATE_YAML, id="bare-value-error"),
+    ],
+)
+def test_cmd_arm_automerge_undeterminable_config_refuses_before_any_gh_call(
+    tmp_path: Path, arm_repo: Path, content: str
+) -> None:
+    _write_project_config_yaml(arm_repo, content)
+    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+    config_path = _config_path(arm_repo.resolve())
+
+    result = _run_arm(arm_repo, fake_bin)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == _undeterminable_stderr(f"invalid YAML in {config_path}")
+    assert _gh_calls(fake_bin) == []
+
+
+# --- arm-automerge without PyYAML, end to end under `python -S` (#2581) ---
+
+_DOUBLED_KEY_YAML = "pr:\n  auto_merge: false\n  auto_merge: true\n"
+# (id, config or None for no file, check-automerge-allowed exit, arm-automerge exit)
+_NO_YAML_CASES = [
+    ("no-config", None, 0, 0),
+    ("repo-shaped-no-token", "pr:\n  tool: gh\n  auto_create: false\n", 0, 0),
+    ("canonical-true", "pr:\n  auto_merge: true\n", 0, 0),
+    ("canonical-false", "pr:\n  auto_merge: false\n", 1, 3),
+    ("flow-style", "pr: {auto_merge: false}\n", 2, 2),
+    ("yes", "pr:\n  auto_merge: yes\n", 2, 2),
+    ("no", "pr:\n  auto_merge: no\n", 2, 2),
+    ("doubled-token", _DOUBLED_KEY_YAML, 2, 2),
+]
+_NO_YAML_PARAMS = [
+    pytest.param(config, check_exit, arm_exit, id=case_id)
+    for case_id, config, check_exit, arm_exit in _NO_YAML_CASES
+]
+
+
+def test_dash_s_interpreter_cannot_import_pyyaml() -> None:
+    """Sanity: `-S` must hide PyYAML, or the tests below prove nothing."""
+    result = subprocess.run(
+        [sys.executable, "-S", "-c", "import yaml"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "No module named 'yaml'" in result.stderr
+
+
+@pytest.mark.parametrize(("config", "check_exit", "arm_exit"), _NO_YAML_PARAMS)
+def test_check_automerge_allowed_without_pyyaml_subprocess(
+    arm_repo: Path, config: str | None, check_exit: int, arm_exit: int
+) -> None:
+    del arm_exit  # the arm-automerge half of the shared table
+    if config is not None:
+        _write_project_config_yaml(arm_repo, config)
+
+    result = _run_check_allowed(arm_repo, no_site=True)
+
+    assert result.returncode == check_exit, result.stderr
+    if check_exit == 0:
+        assert (result.stdout, result.stderr) == ("true\n", "")
+    elif check_exit == 1:
+        assert (result.stdout, result.stderr) == ("false\n", "")
+    else:
+        assert result.stdout == "false\n"
+        assert result.stderr == _undeterminable_stderr(_NO_YAML_REASON)
+
+
+@pytest.mark.parametrize(("config", "check_exit", "arm_exit"), _NO_YAML_PARAMS)
+def test_arm_automerge_without_pyyaml_subprocess(
+    tmp_path: Path,
+    arm_repo: Path,
+    config: str | None,
+    check_exit: int,
+    arm_exit: int,
+) -> None:
+    del check_exit  # the check-automerge-allowed half of the shared table
+    if config is not None:
+        _write_project_config_yaml(arm_repo, config)
+    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+
+    result = _run_arm(arm_repo, fake_bin, no_site=True)
+
+    assert result.returncode == arm_exit, result.stderr
+    if arm_exit == 0:
+        assert result.stderr == ""
+        assert json.loads(result.stdout)["status"] == "armed"
+        _assert_gh_calls(fake_bin, [_VIEW, _MERGE, _VIEW])
+    elif arm_exit == _mod.EXIT_ARM_DISALLOWED:
+        assert json.loads(result.stdout)["status"] == "skipped"
+        assert _gh_calls(fake_bin) == []
+    else:
+        assert result.stdout == ""
+        assert result.stderr == _undeterminable_stderr(_NO_YAML_REASON)
+        assert _gh_calls(fake_bin) == []
+
+
+def test_checked_in_project_config_is_allowed_without_pyyaml(
+    tmp_path: Path, arm_repo: Path
+) -> None:
+    """This repo's own config never mentions auto_merge: allowed without PyYAML."""
+    checked_in = _REPO_ROOT / ".claude" / "project-config.yaml"
+    _write_project_config_yaml(arm_repo, checked_in.read_text(encoding="utf-8"))
+    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+
+    check = _run_check_allowed(arm_repo, no_site=True)
+    arm = _run_arm(arm_repo, fake_bin, no_site=True)
+
+    assert (check.returncode, check.stdout, check.stderr) == (0, "true\n", "")
+    assert (arm.returncode, arm.stderr) == (0, "")
+    assert json.loads(arm.stdout)["status"] == "armed"
+    _assert_gh_calls(fake_bin, [_VIEW, _MERGE, _VIEW])
+
+
+# --- arm-automerge head pin (#2581) ---
+
+
+def test_arm_automerge_head_mismatch_fails_loudly_with_gh_stderr(
+    tmp_path: Path, arm_repo: Path
+) -> None:
+    fake_bin = _stub_gh_arm(tmp_path, [(1, _HEAD_MOVED_STDERR, None)])
+
+    result = _run_arm(arm_repo, fake_bin)
+
+    assert result.returncode == 1
+    out = json.loads(result.stdout)
+    assert out["status"] == "failed"
+    assert out["gh_stderr"] == _HEAD_MOVED_STDERR
+    assert _HEAD_MOVED_STDERR in result.stderr
+    assert _merge_calls(fake_bin) == [_MERGE] * _mod.ARM_MAX_ATTEMPTS
+
+
+def test_arm_automerge_requires_head_sha(tmp_path: Path, arm_repo: Path) -> None:
+    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+
+    result = _run_arm(arm_repo, fake_bin, head_sha=None)
+
+    assert result.returncode == 2
+    assert "--head-sha" in result.stderr
+    assert _gh_calls(fake_bin) == []
+
+
+def test_arm_automerge_rejects_malformed_head_sha_subprocess(
+    tmp_path: Path, arm_repo: Path
+) -> None:
+    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+
+    result = _run_arm(arm_repo, fake_bin, head_sha="abc123")
+
+    assert result.returncode == 2
+    assert "expected a full 40-character hex commit SHA, got 'abc123'" in (
+        result.stderr
+    )
+    assert _gh_calls(fake_bin) == []
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("abc123", id="abbreviated"),
+        pytest.param("main", id="branch-name"),
+        pytest.param("a" * 39, id="39-hex"),
+        pytest.param("a" * 41, id="41-hex"),
+        pytest.param("g" * 40, id="40-non-hex"),
+    ],
+)
+def test_arm_automerge_rejects_malformed_head_sha(value: str) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        _mod.build_parser().parse_args(["arm-automerge", _ARM_PR, "--head-sha", value])
+
+    assert excinfo.value.code == 2
+
+
+def test_arm_automerge_head_sha_accepts_uppercase_and_lowercases() -> None:
+    args = _mod.build_parser().parse_args(
+        ["arm-automerge", _ARM_PR, "--head-sha", _SHA.upper()]
+    )
+
+    assert args.head_sha == _SHA
+
+
+# --- arm-automerge --repo-path normalization (#2581) ---
+
+
+def test_git_toplevel_resolves_subdirectory_and_rejects_non_repo(
+    tmp_path: Path, arm_repo: Path
+) -> None:
+    sub = arm_repo / "a" / "b"
+    sub.mkdir(parents=True)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    assert _mod._git_toplevel(sub) == arm_repo.resolve()
+    assert _mod._git_toplevel(plain) is None
+
+
+def test_arm_automerge_subdirectory_repo_path_reads_root_config(
+    tmp_path: Path, arm_repo: Path
+) -> None:
+    _write_project_config_yaml(arm_repo, "pr:\n  auto_merge: false\n")
+    sub = arm_repo / "a" / "b"
+    sub.mkdir(parents=True)
+    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+
+    result = _run_arm(sub, fake_bin)
+
+    assert result.returncode == _mod.EXIT_ARM_DISALLOWED, result.stderr
+    assert _gh_calls(fake_bin) == []
+
+
+def test_arm_automerge_repo_path_not_in_git_work_tree_is_invocation_error(
+    tmp_path: Path, arm_repo: Path
+) -> None:
+    """`arm_repo` is requested only for its GIT_* env strip."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+
+    result = _run_arm(plain, fake_bin)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert f"ERROR: --repo-path is not inside a git work tree: {plain}" in (
+        result.stderr
+    )
+    assert _gh_calls(fake_bin) == []
 
 
 # --- arm-automerge in-process (monkeypatched run, injected sleep) ---
@@ -875,6 +1482,48 @@ def _always_failing_gh(
     return _handler
 
 
+def _with_toplevel(
+    root: Path,
+    inner: Callable[[list[str]], subprocess.CompletedProcess[str]],
+) -> Callable[[list[str]], subprocess.CompletedProcess[str]]:
+    """Answer ``git -C <p> rev-parse --show-toplevel`` with ``root``; else ``inner``."""
+
+    def _handler(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        if cmd[:2] == ["git", "-C"] and cmd[3:] == ["rev-parse", "--show-toplevel"]:
+            return _cp(stdout=f"{root}\n")
+        return inner(cmd)
+
+    return _handler
+
+
+def test_arm_automerge_pins_merge_to_head_sha_in_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _patch_run(monkeypatch, _always_failing_gh(_cp(returncode=1)))
+
+    _mod.arm_automerge(
+        42, head_sha=_SHA, attempts=2, backoff_seconds=0.0, sleep=lambda _s: None
+    )
+
+    merges = [c for c in calls if c[:3] == ["gh", "pr", "merge"]]
+    assert (
+        merges
+        == [
+            [
+                "gh",
+                "pr",
+                "merge",
+                "42",
+                "--auto",
+                "--squash",
+                "--match-head-commit",
+                _SHA,
+            ]
+        ]
+        * 2
+    )
+
+
 def test_arm_automerge_backoff_is_linear_with_no_trailing_sleep(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -882,7 +1531,7 @@ def test_arm_automerge_backoff_is_linear_with_no_trailing_sleep(
     sleeps: list[float] = []
 
     result = _mod.arm_automerge(
-        42, attempts=4, backoff_seconds=2.0, sleep=sleeps.append
+        42, head_sha=_SHA, attempts=4, backoff_seconds=2.0, sleep=sleeps.append
     )
 
     assert result.status == "failed"
@@ -897,7 +1546,7 @@ def test_arm_automerge_single_attempt_never_sleeps(
     sleeps: list[float] = []
 
     result = _mod.arm_automerge(
-        42, attempts=1, backoff_seconds=5.0, sleep=sleeps.append
+        42, head_sha=_SHA, attempts=1, backoff_seconds=5.0, sleep=sleeps.append
     )
 
     assert result.attempts == 1
@@ -915,7 +1564,7 @@ def test_arm_automerge_readback_failure_counts_as_not_armed_with_stderr(
     _patch_run(monkeypatch, _handler)
 
     result = _mod.arm_automerge(
-        42, attempts=2, backoff_seconds=0.0, sleep=lambda _s: None
+        42, head_sha=_SHA, attempts=2, backoff_seconds=0.0, sleep=lambda _s: None
     )
 
     assert result.status == "failed"
@@ -929,7 +1578,7 @@ def test_arm_automerge_truncates_gh_stderr(monkeypatch: pytest.MonkeyPatch) -> N
     _patch_run(monkeypatch, _always_failing_gh(_cp(returncode=1, stderr=long_stderr)))
 
     result = _mod.arm_automerge(
-        42, attempts=1, backoff_seconds=0.0, sleep=lambda _s: None
+        42, head_sha=_SHA, attempts=1, backoff_seconds=0.0, sleep=lambda _s: None
     )
 
     assert len(result.gh_stderr) == _mod.GH_STDERR_LIMIT
@@ -968,7 +1617,9 @@ def test_cmd_arm_automerge_gh_missing_is_invocation_error(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(_mod.shutil, "which", lambda _name: None)
-    args = _mod.build_parser().parse_args(["arm-automerge", _ARM_PR])
+    args = _mod.build_parser().parse_args(
+        ["arm-automerge", _ARM_PR, "--head-sha", _SHA]
+    )
 
     assert _mod.cmd_arm_automerge(args) == 2
     assert "`gh` CLI not found" in capsys.readouterr().err
@@ -990,7 +1641,9 @@ def test_cmd_arm_automerge_rejects_out_of_range_options(
 ) -> None:
     monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
     calls = _patch_run(monkeypatch, lambda _cmd: _cp())
-    args = _mod.build_parser().parse_args(["arm-automerge", _ARM_PR, flag, value])
+    args = _mod.build_parser().parse_args(
+        ["arm-automerge", _ARM_PR, "--head-sha", _SHA, flag, value]
+    )
 
     assert _mod.cmd_arm_automerge(args) == 2
     assert message in capsys.readouterr().err
@@ -998,12 +1651,15 @@ def test_cmd_arm_automerge_rejects_out_of_range_options(
 
 
 def test_arm_automerge_parser_defaults() -> None:
-    args = _mod.build_parser().parse_args(["arm-automerge", _ARM_PR])
+    args = _mod.build_parser().parse_args(
+        ["arm-automerge", _ARM_PR, "--head-sha", _SHA]
+    )
 
     assert args.pr_number == int(_ARM_PR)
     assert args.attempts == _mod.ARM_MAX_ATTEMPTS == 4
     assert args.backoff_seconds == _mod.ARM_BACKOFF_SECONDS == 3.0
     assert args.repo_path is None
+    assert args.head_sha == _SHA
     assert args.func is _mod.cmd_arm_automerge
 
 
@@ -1018,7 +1674,9 @@ def test_cmd_arm_automerge_defaults_repo_path_to_git_toplevel(
     monkeypatch.chdir(cwd)
     monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
     calls = _patch_run(monkeypatch, lambda _cmd: _cp(stdout=f"{repo}\n"))
-    args = _mod.build_parser().parse_args(["arm-automerge", _ARM_PR])
+    args = _mod.build_parser().parse_args(
+        ["arm-automerge", _ARM_PR, "--head-sha", _SHA]
+    )
 
     assert _mod.cmd_arm_automerge(args) == _mod.EXIT_ARM_DISALLOWED
     assert calls == [["git", "rev-parse", "--show-toplevel"]]
@@ -1029,32 +1687,34 @@ def test_cmd_arm_automerge_without_repo_path_or_git_toplevel_is_invocation_error
 ) -> None:
     monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
     _patch_run(monkeypatch, lambda _cmd: _cp(returncode=128))
-    args = _mod.build_parser().parse_args(["arm-automerge", _ARM_PR])
+    args = _mod.build_parser().parse_args(
+        ["arm-automerge", _ARM_PR, "--head-sha", _SHA]
+    )
 
     assert _mod.cmd_arm_automerge(args) == 2
     assert "not in a git repository" in capsys.readouterr().err
 
 
-def test_cmd_arm_automerge_warns_when_pyyaml_unavailable(
+def test_cmd_arm_automerge_refuses_when_pyyaml_unavailable_and_shape_unreadable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _write_project_config_yaml(tmp_path, "pr:\n  auto_merge: false\n")
+    _write_project_config_yaml(tmp_path, "pr: {auto_merge: false}\n")
     monkeypatch.setattr(_mod, "yaml", None)
     monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
-    _patch_run(monkeypatch, lambda _cmd: _cp(stdout=ARM_VIEW_ARMED))
+    calls = _patch_run(
+        monkeypatch, _with_toplevel(tmp_path, lambda _cmd: _cp(stdout=ARM_VIEW_ARMED))
+    )
     args = _mod.build_parser().parse_args(
-        ["arm-automerge", _ARM_PR, "--repo-path", str(tmp_path)]
+        ["arm-automerge", _ARM_PR, "--repo-path", str(tmp_path), "--head-sha", _SHA]
     )
 
-    assert _mod.cmd_arm_automerge(args) == 0
+    assert _mod.cmd_arm_automerge(args) == 2
     captured = capsys.readouterr()
-    assert (
-        "WARNING: could not read pr.auto_merge: PyYAML unavailable; "
-        "treating auto-merge as allowed" in captured.err
-    )
-    assert json.loads(captured.out)["status"] == "armed"
+    assert captured.out == ""
+    assert captured.err == _undeterminable_stderr(_NO_YAML_REASON)
+    assert [c for c in calls if c[0] == "gh"] == []
 
 
 def test_arm_automerge_merged_pre_read_is_noop_success(
@@ -1063,7 +1723,7 @@ def test_arm_automerge_merged_pre_read_is_noop_success(
     calls = _patch_run(monkeypatch, lambda _cmd: _cp(stdout=_ARM_VIEW_MERGED))
 
     result = _mod.arm_automerge(
-        42, attempts=2, backoff_seconds=0.0, sleep=lambda _s: None
+        42, head_sha=_SHA, attempts=2, backoff_seconds=0.0, sleep=lambda _s: None
     )
 
     assert (result.status, result.attempts, result.pr_state) == ("merged", 0, "MERGED")
@@ -1083,7 +1743,7 @@ def test_arm_automerge_post_read_armed_returns_after_one_merge(
     _patch_run(monkeypatch, _handler)
 
     result = _mod.arm_automerge(
-        42, attempts=3, backoff_seconds=0.0, sleep=lambda _s: None
+        42, head_sha=_SHA, attempts=3, backoff_seconds=0.0, sleep=lambda _s: None
     )
 
     assert (result.status, result.attempts) == ("armed", 1)
@@ -1101,7 +1761,7 @@ def test_arm_automerge_nonzero_exit_with_readback_failure_names_both(
     _patch_run(monkeypatch, _handler)
 
     result = _mod.arm_automerge(
-        42, attempts=1, backoff_seconds=0.0, sleep=lambda _s: None
+        42, head_sha=_SHA, attempts=1, backoff_seconds=0.0, sleep=lambda _s: None
     )
 
     assert result.gh_stderr == "merge boom"
@@ -1115,7 +1775,7 @@ def test_arm_automerge_exit_zero_null_readback_detail_in_process(
     _patch_run(monkeypatch, _always_failing_gh(_cp()))
 
     result = _mod.arm_automerge(
-        42, attempts=1, backoff_seconds=0.0, sleep=lambda _s: None
+        42, head_sha=_SHA, attempts=1, backoff_seconds=0.0, sleep=lambda _s: None
     )
 
     assert result.gh_stderr == ""
@@ -1129,15 +1789,29 @@ def test_cmd_arm_automerge_reports_failure_and_success_in_process(
 ) -> None:
     monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
     monkeypatch.setattr(_mod.time, "sleep", lambda _s: None)
-    argv = ["arm-automerge", _ARM_PR, "--repo-path", str(tmp_path), "--attempts", "1"]
+    argv = [
+        "arm-automerge",
+        _ARM_PR,
+        "--repo-path",
+        str(tmp_path),
+        "--head-sha",
+        _SHA,
+        "--attempts",
+        "1",
+    ]
 
-    _patch_run(monkeypatch, _always_failing_gh(_cp(returncode=1, stderr="nope")))
+    _patch_run(
+        monkeypatch,
+        _with_toplevel(tmp_path, _always_failing_gh(_cp(returncode=1, stderr="nope"))),
+    )
     assert _mod.cmd_arm_automerge(_mod.build_parser().parse_args(argv)) == 1
     captured = capsys.readouterr()
     assert "failed after 1/1 attempts (exit 1): nope" in captured.err
     assert json.loads(captured.out)["status"] == "failed"
 
-    _patch_run(monkeypatch, lambda _cmd: _cp(stdout=ARM_VIEW_ARMED))
+    _patch_run(
+        monkeypatch, _with_toplevel(tmp_path, lambda _cmd: _cp(stdout=ARM_VIEW_ARMED))
+    )
     assert _mod.cmd_arm_automerge(_mod.build_parser().parse_args(argv)) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "armed"
 
@@ -1160,18 +1834,45 @@ def test_cmd_arm_automerge_binds_gh_calls_to_repo_path(
         return _cp(stdout=next(views))
 
     cwds: list[Path | None] = []
-    calls = _patch_run(monkeypatch, _handler, cwds)
+    calls = _patch_run(monkeypatch, _with_toplevel(repo, _handler), cwds)
     args = _mod.build_parser().parse_args(
-        ["arm-automerge", _ARM_PR, "--repo-path", str(repo)]
+        ["arm-automerge", _ARM_PR, "--repo-path", str(repo), "--head-sha", _SHA]
     )
 
     assert _mod.cmd_arm_automerge(args) == 0
     assert [c[:3] for c in calls] == [
+        ["git", "-C", str(repo)],
         ["gh", "pr", "view"],
         ["gh", "pr", "merge"],
         ["gh", "pr", "view"],
     ]
-    assert cwds == [repo, repo, repo]
+    assert cwds == [None, repo, repo, repo]
+
+
+def test_arm_automerge_subdirectory_repo_path_binds_gh_to_toplevel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A subdirectory --repo-path is normalized: gh runs at the toplevel."""
+    root = tmp_path / "root"
+    sub = root / "a" / "b"
+    sub.mkdir(parents=True)
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
+    views = iter([ARM_VIEW_OPEN, ARM_VIEW_ARMED])
+
+    def _handler(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            return _cp()
+        return _cp(stdout=next(views))
+
+    cwds: list[Path | None] = []
+    calls = _patch_run(monkeypatch, _with_toplevel(root, _handler), cwds)
+    args = _mod.build_parser().parse_args(
+        ["arm-automerge", _ARM_PR, "--repo-path", str(sub), "--head-sha", _SHA]
+    )
+
+    assert _mod.cmd_arm_automerge(args) == 0
+    assert calls[0] == ["git", "-C", str(sub), "rev-parse", "--show-toplevel"]
+    assert cwds == [None, root, root, root]
 
 
 def test_cmd_arm_automerge_nonexistent_repo_path_is_invocation_error(
@@ -1179,11 +1880,14 @@ def test_cmd_arm_automerge_nonexistent_repo_path_is_invocation_error(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """The is_dir() check precedes the git toplevel lookup: no call at all."""
     monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
-    calls = _patch_run(monkeypatch, lambda _cmd: _cp(stdout=ARM_VIEW_ARMED))
+    calls = _patch_run(
+        monkeypatch, _with_toplevel(tmp_path, lambda _cmd: _cp(stdout=ARM_VIEW_ARMED))
+    )
     missing = tmp_path / "missing"
     args = _mod.build_parser().parse_args(
-        ["arm-automerge", _ARM_PR, "--repo-path", str(missing)]
+        ["arm-automerge", _ARM_PR, "--repo-path", str(missing), "--head-sha", _SHA]
     )
 
     assert _mod.cmd_arm_automerge(args) == 2
@@ -1209,11 +1913,11 @@ def test_arm_automerge_stale_post_read_then_armed_pre_read_skips_second_merge(
     calls = _patch_run(monkeypatch, _handler)
 
     result = _mod.arm_automerge(
-        42, attempts=3, backoff_seconds=0.0, sleep=lambda _s: None
+        42, head_sha=_SHA, attempts=3, backoff_seconds=0.0, sleep=lambda _s: None
     )
 
     assert result.status == "armed"
     assert result.attempts == 1
     assert [c for c in calls if c[:3] == ["gh", "pr", "merge"]] == [
-        ["gh", "pr", "merge", "42", "--auto", "--squash"]
+        ["gh", "pr", "merge", "42", "--auto", "--squash", "--match-head-commit", _SHA]
     ]
