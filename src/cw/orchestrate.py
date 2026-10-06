@@ -322,6 +322,21 @@ def _close_session(
     )
 
 
+def _parse_pr_merged_event(event: OrchestratorEvent) -> tuple[str, int] | None:
+    """Return ``(repo, pr_number)`` for a well-formed ``pr.merged`` event.
+
+    Quiet: returns ``None`` for an empty ``repo`` or a ``pr_number`` that
+    ``int()`` rejects, accepting exactly what :func:`retire_merged_prs`'s
+    in-lock parse accepts; that parse owns the warn-and-advance.
+    """
+    repo = str(event.payload.get("repo", ""))
+    try:
+        pr_number = int(event.payload.get("pr_number", 0))
+    except (TypeError, ValueError):
+        return None
+    return (repo, pr_number) if repo else None
+
+
 def retire_merged_prs(
     *,
     runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
@@ -331,7 +346,7 @@ def retire_merged_prs(
     For each unprocessed ``pr.merged`` event:
 
     1. Invoke ``review_monitor.py complete`` to remove the PR from
-       monitoring state.
+       monitoring state -- before ``sessions_lock`` is taken (#1232).
     2. Look up sessions correlated to the PR via :class:`PRDispatchRecord`.
     3. Mark each session ``COMPLETED`` with reason ``HANDOFF`` and emit a
        ``session.completed`` event.
@@ -354,8 +369,17 @@ def retire_merged_prs(
     if not events:
         return []
 
-    # Why not mutate_state: _invoke_review_monitor_complete (subprocess) runs
-    # inside the lock window (criterion 1: no subprocess in lock).
+    # 1. Review-monitor cleanup runs outside sessions_lock (#1232), still before
+    # retirement. Idempotent: a repeat `review_monitor.py complete` is a
+    # documented no-op (completed: False, exit 0), so a SessionsLockTimeoutError
+    # below, which leaves the cursor unadvanced, just replays it next pass.
+    for event in events:
+        parsed = _parse_pr_merged_event(event)
+        if parsed is not None:
+            _invoke_review_monitor_complete(*parsed, runner=runner)
+
+    # Why not mutate_state: the dual save_state + save_dispatch_record write
+    # and the per-event cursor advances; no subprocess runs in the lock.
     # bounded=True (#2491): `cw orchestrate retire`; events are read but their
     # cursor only advances inside the lock, so a timeout re-processes them on
     # the next pass.
@@ -383,9 +407,6 @@ def retire_merged_prs(
                 logger.warning("pr.merged event %s missing repo field", event.id)
                 advance_cursor(_RETIREMENT_CONSUMER, event.id)
                 continue
-
-            # 1. Cleanup review-monitor state.
-            _invoke_review_monitor_complete(repo, pr_number, runner=runner)
 
             # 2-4. Find and retire correlated sessions.
             matches = _sessions_for_pr(dispatch_record, repo, pr_number)

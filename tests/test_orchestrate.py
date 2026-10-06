@@ -9,7 +9,7 @@ import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import NoReturn, cast
 
 import pytest
 from click.testing import CliRunner
@@ -20,7 +20,7 @@ from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket, save_dev_queue
 from cw.dispatch import FRESHNESS_MAIN_BEHIND, FRESHNESS_NON_MAIN_HEAD
 from cw.events import inbox_path, read_events, record_event
-from cw.exceptions import CwError
+from cw.exceptions import CwError, SessionsLockTimeoutError
 from cw.gh import github_pr_url
 from cw.models import (
     DEFAULT_LANE,
@@ -51,6 +51,7 @@ from cw.orchestrate import (
     _aggregate_feed,
     _invoke_review_monitor_complete,
     _load_monitored_prs,
+    _parse_pr_merged_event,
     clear_completed_pr_sessions,
     orchestrator_parent,
     orchestrator_status,
@@ -59,6 +60,7 @@ from cw.orchestrate import (
     save_dispatch_record,
 )
 from cw.reconcile import ProposedAction
+from tests._reconcile_helpers import probe_sessions_lock_free
 from tests.conftest import _make_daemon_session, _make_ticket_task
 
 _RunnerFn = Callable[[list[str]], subprocess.CompletedProcess[str]]
@@ -151,6 +153,11 @@ def _seed_dispatch_record(
 ) -> None:
     record = PRDispatchRecord(active={f"{repo}#{pr_number}|{role}": session_id})
     save_dispatch_record(record)
+
+
+def _orchestrate_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Messages ``cw.orchestrate`` logged, ignoring other loggers' records."""
+    return [r.getMessage() for r in caplog.records if r.name == "cw.orchestrate"]
 
 
 def _seed_pr_merged(repo: str, pr_number: int, *, client: str = "test-client") -> str:
@@ -350,6 +357,228 @@ class TestRetireMergedPRs:
         # Second call is a no-op (cursor advanced).
         retired_second = retire_merged_prs(runner=runner)
         assert retired_second == []
+
+    def test_missing_repo_warns_and_advances_cursor(
+        self,
+        tmp_orchestrate_dirs: Path,
+        fake_runner: tuple[list[list[str]], _RunnerFn],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A pr.merged event without a repo warns in-lock and advances the cursor.
+
+        The quiet pre-lock parse skips it, so the monitor is never invoked.
+        """
+        event_id = record_event(
+            OrchestratorEventType.PR_MERGED,
+            {"client": "test-client", "pr_number": 7},
+        ).id
+
+        calls, runner = fake_runner
+        with caplog.at_level(logging.WARNING, logger="cw.orchestrate"):
+            retired = retire_merged_prs(runner=runner)
+
+        assert retired == []
+        assert calls == []
+        assert _orchestrate_messages(caplog) == [
+            f"pr.merged event {event_id} missing repo field"
+        ]
+
+        caplog.clear()
+        assert retire_merged_prs(runner=runner) == []
+        assert _orchestrate_messages(caplog) == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: retire_merged_prs runs the review-monitor cleanup lock-free (#1232)
+# ---------------------------------------------------------------------------
+
+
+def _probing_runner(
+    probes: list[tuple[bool, dict[str, SessionStatus]]],
+    *,
+    returncode: int = 0,
+) -> _RunnerFn:
+    """Runner recording (lock free?, on-disk statuses) at each invocation."""
+
+    def _runner(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        statuses = {s.id: s.status for s in load_state().sessions}
+        probes.append((probe_sessions_lock_free(), statuses))
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=returncode, stdout="", stderr="boom"
+        )
+
+    return _runner
+
+
+def _seed_merged_pr_session(session_id: str, workspace: Path, pr_number: int) -> None:
+    sess = _make_session(session_id, workspace, surface_ref=None)
+    save_state(CwState(sessions=[sess]))
+    _seed_dispatch_record("owner/repo", pr_number, "fix-ci", session_id)
+    _seed_pr_merged("owner/repo", pr_number)
+
+
+class TestRetireMergedPrsMonitorCleanupOutsideLock:
+    def test_monitor_cleanup_runs_with_sessions_lock_free(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """The review_monitor.py subprocess never runs under sessions_lock."""
+        _seed_merged_pr_session("sess0101", workspace, 101)
+        probes: list[tuple[bool, dict[str, SessionStatus]]] = []
+
+        retired = retire_merged_prs(runner=_probing_runner(probes))
+
+        assert retired == ["sess0101"]
+        assert [lock_free for lock_free, _ in probes] == [True]
+
+    def test_monitor_cleanup_runs_before_retirement(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+    ) -> None:
+        """The cleanup still precedes retirement: the session is ACTIVE at call."""
+        _seed_merged_pr_session("sess0102", workspace, 102)
+        probes: list[tuple[bool, dict[str, SessionStatus]]] = []
+
+        retire_merged_prs(runner=_probing_runner(probes))
+
+        assert [statuses for _, statuses in probes] == [
+            {"sess0102": SessionStatus.ACTIVE}
+        ]
+        updated = next(s for s in load_state().sessions if s.id == "sess0102")
+        assert updated.status == SessionStatus.COMPLETED
+
+    def test_failed_monitor_cleanup_still_retires(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A non-zero review_monitor.py exit is logged and retirement proceeds."""
+        _seed_merged_pr_session("sess0103", workspace, 103)
+        probes: list[tuple[bool, dict[str, SessionStatus]]] = []
+
+        with caplog.at_level(logging.WARNING, logger="cw.orchestrate"):
+            retired = retire_merged_prs(runner=_probing_runner(probes, returncode=1))
+
+        assert retired == ["sess0103"]
+        assert len(probes) == 1
+        assert _orchestrate_messages(caplog) == [
+            "review_monitor complete failed for owner/repo#103: boom"
+        ]
+
+    def test_lock_timeout_leaves_cursor_and_replays_event(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A bounded-lock timeout leaves the cursor unadvanced; the replay retires.
+
+        The cleanup ran before the lock on the timed-out pass and runs again
+        on the replay -- a repeat ``review_monitor.py complete`` is a no-op.
+        """
+        _seed_merged_pr_session("sess0104", workspace, 104)
+        probes: list[tuple[bool, dict[str, SessionStatus]]] = []
+        runner = _probing_runner(probes)
+
+        def _timed_out_lock(**_kwargs: object) -> NoReturn:
+            msg = "sessions lock busy"
+            raise SessionsLockTimeoutError(
+                msg, lock_path=tmp_orchestrate_dirs / "sessions.lock", waited_s=0.0
+            )
+
+        with monkeypatch.context() as patch:
+            patch.setattr("cw.orchestrate.sessions_lock", _timed_out_lock)
+            with pytest.raises(SessionsLockTimeoutError):
+                retire_merged_prs(runner=runner)
+        assert len(probes) == 1
+        assert load_state().sessions[0].status == SessionStatus.ACTIVE
+
+        assert retire_merged_prs(runner=runner) == ["sess0104"]
+        assert len(probes) == 2
+        assert retire_merged_prs(runner=runner) == []
+
+
+# One event per row: (payload, in-lock parse accepts it).
+_PR_MERGED_PARSE_CASES: list[tuple[dict[str, object], bool]] = [
+    ({"repo": "owner/repo", "pr_number": 42}, True),
+    ({"repo": "owner/repo", "pr_number": "43"}, True),
+    ({"repo": "owner/repo", "pr_number": 44.0}, True),
+    ({"repo": "owner/repo"}, True),
+    ({"repo": "owner/repo", "pr_number": "bogus"}, False),
+    ({"repo": "owner/repo", "pr_number": None}, False),
+    ({"repo": "owner/repo", "pr_number": [45]}, False),
+    ({"pr_number": 46}, False),
+    ({"repo": "", "pr_number": 47}, False),
+    ({"pr_number": "bogus"}, False),
+]
+
+
+class TestParsePrMergedEvent:
+    def test_valid_event_returns_repo_and_pr_number(
+        self, tmp_orchestrate_dirs: Path
+    ) -> None:
+        event = record_event(
+            OrchestratorEventType.PR_MERGED, {"repo": "owner/repo", "pr_number": 42}
+        )
+        assert _parse_pr_merged_event(event) == ("owner/repo", 42)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"repo": "owner/repo", "pr_number": "bogus"},
+            {"repo": "owner/repo", "pr_number": None},
+            {"pr_number": 42},
+            {"repo": "", "pr_number": 42},
+        ],
+        ids=["bogus-pr", "none-pr", "missing-repo", "empty-repo"],
+    )
+    def test_malformed_event_returns_none_quietly(
+        self,
+        tmp_orchestrate_dirs: Path,
+        caplog: pytest.LogCaptureFixture,
+        payload: dict[str, object],
+    ) -> None:
+        event = record_event(OrchestratorEventType.PR_MERGED, payload)
+        with caplog.at_level(logging.DEBUG, logger="cw.orchestrate"):
+            assert _parse_pr_merged_event(event) is None
+        assert _orchestrate_messages(caplog) == []
+
+    @pytest.mark.parametrize(("payload", "in_lock_accepts"), _PR_MERGED_PARSE_CASES)
+    def test_parity_with_the_in_lock_parse(
+        self,
+        tmp_orchestrate_dirs: Path,
+        workspace: Path,
+        fake_runner: tuple[list[list[str]], _RunnerFn],
+        caplog: pytest.LogCaptureFixture,
+        payload: dict[str, object],
+        in_lock_accepts: bool,
+    ) -> None:
+        """The quiet pre-lock parse accepts exactly what the in-lock parse does.
+
+        In-lock acceptance is observed end to end: an accepted event retires
+        the session correlated to the helper's ``(repo, pr_number)`` and logs
+        no malformed-event warning; a rejected one warns and retires nothing.
+        """
+        event = record_event(OrchestratorEventType.PR_MERGED, payload)
+        parsed = _parse_pr_merged_event(event)
+        if parsed is not None:
+            save_state(CwState(sessions=[_make_session("sess0200", workspace)]))
+            _seed_dispatch_record(parsed[0], parsed[1], "fix-ci", "sess0200")
+
+        calls, runner = fake_runner
+        with caplog.at_level(logging.WARNING, logger="cw.orchestrate"):
+            retired = retire_merged_prs(runner=runner)
+
+        warned = any(
+            f"pr.merged event {event.id}" in m for m in _orchestrate_messages(caplog)
+        )
+        assert (parsed is not None) is in_lock_accepts
+        assert warned is not in_lock_accepts
+        assert retired == (["sess0200"] if in_lock_accepts else [])
+        assert len(calls) == (1 if in_lock_accepts else 0)
 
 
 # ---------------------------------------------------------------------------
