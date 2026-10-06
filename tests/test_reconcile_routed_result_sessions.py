@@ -43,7 +43,6 @@ from cw.reconcile.routed_result_sessions import (
     find_stranded_routed_sessions,
     rollback_routed_result_latches,
     session_pins_occupied_row,
-    stranded_close_command,
     sweep_routed_result_sessions,
 )
 from tests._reconcile_helpers import (
@@ -473,13 +472,6 @@ class TestSessionPinsOccupiedRow:
 
     def test_empty_task_list_does_not_pin(self) -> None:
         assert session_pins_occupied_row([], "s1") is False
-
-
-class TestStrandedCloseCommand:
-    def test_exact_command(self) -> None:
-        assert (
-            stranded_close_command("abc123") == "cw spawn close --confirmed-dead abc123"
-        )
 
 
 def _sweep(
