@@ -418,6 +418,14 @@ config load; existing configs are unaffected. The reap and orphan gates in
 `reconcile` follow the same resolver, so an opted-out lane counts as
 fix-loop-off there too.
 
+**cw doctor visibility (#2542):** `cw doctor` lists each lane whose review
+executor is codex as `codex-fix-loop/<client>/<lane>`, with the effective
+state and its source: the lane's `codex_fix_loop_enabled` (`lane`) or
+`default_codex_fix_loop_enabled` in `orchestrator.yaml` (`global default`). It
+resolves through the same resolver the runtime uses, marks `[WARN]` only when
+the loop is on (the exit code is unchanged), and never writes
+`orchestrator.yaml`.
+
 **Operator callout (#1553 migration):** `ClientConfig.codex_fix_loop_enabled`
 no longer exists — the gate moved to the lane-scoped
 `LaneConfig.codex_fix_loop_enabled` shown above, with

@@ -26,10 +26,12 @@ from cw.codex_background import (
     _DEFAULT_CODEX_REVIEW_TIER_ENABLED,
     REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
     REVIEW_VERDICT_OWNER_STAMP_FORMAT,
+    CodexFixLoopResolution,
     _default_background,
     _persist_review_verdict,
     _post_review_comment,
     _resolve_claim_tier_enabled,
+    _resolve_codex_fix_loop,
     _resolve_codex_fix_loop_enabled,
     _resolve_disposition_drift_check_enabled,
     _run_codex_review_and_complete,
@@ -916,6 +918,50 @@ def test_resolve_codex_fix_loop_enabled_unmatched_lane_falls_through_to_global()
     config = OrchestratorConfig(default_codex_fix_loop_enabled=True)
 
     assert _resolve_codex_fix_loop_enabled(client, task, config) is True
+
+
+@pytest.mark.parametrize(
+    ("lanes", "task_lane", "global_value", "expected"),
+    [
+        ([True], "trial", False, CodexFixLoopResolution(True, "lane")),
+        ([True], "trial", True, CodexFixLoopResolution(True, "lane")),
+        ([False], "trial", True, CodexFixLoopResolution(False, "lane")),
+        ([False], "trial", False, CodexFixLoopResolution(False, "lane")),
+        ([None], "trial", True, CodexFixLoopResolution(True, "global default")),
+        ([None], "trial", False, CodexFixLoopResolution(False, "global default")),
+        ([True], "no-such-lane", True, CodexFixLoopResolution(True, "global default")),
+        ([], "default", False, CodexFixLoopResolution(False, "global default")),
+    ],
+    ids=[
+        "lane-true-global-false",
+        "lane-true-global-true",
+        "lane-false-global-true",
+        "lane-false-global-false",
+        "lane-unset-global-true",
+        "lane-unset-global-false",
+        "undeclared-lane",
+        "synthesised-default-lane",
+    ],
+)
+def test_resolve_codex_fix_loop_reports_value_and_source(
+    lanes: list[bool | None],
+    task_lane: str,
+    global_value: bool,
+    expected: CodexFixLoopResolution,
+) -> None:
+    """The resolver names the winning source; the bool wrapper agrees (#2542)."""
+    client = ClientConfig(
+        name="test",
+        workspace_path=Path("/tmp/x"),
+        lanes=[LaneConfig(name="trial", codex_fix_loop_enabled=v) for v in lanes],
+    )
+    task = TicketTask(
+        ticket_id="T-1", client="test", stage=Stage.REVIEW, lane=task_lane
+    )
+    config = OrchestratorConfig(default_codex_fix_loop_enabled=global_value)
+
+    assert _resolve_codex_fix_loop(client, task, config) == expected
+    assert _resolve_codex_fix_loop_enabled(client, task, config) is expected.enabled
 
 
 # ---------------------------------------------------------------------------
