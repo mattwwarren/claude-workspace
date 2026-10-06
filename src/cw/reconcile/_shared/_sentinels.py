@@ -37,6 +37,7 @@ from cw.reconcile._shared._constants import (
     _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY,
     _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
 )
+from cw.reconcile._shared._roster import ticket_id_for_session
 from cw.reconcile._shared._transcripts import (
     _newest_surface_ref_transcript,
     _session_project_dir,
@@ -126,7 +127,9 @@ def _foreign_result_target_queue_status(
 _SALVAGE_TERMINAL_STATUSES: frozenset[str] = SALVAGE_TERMINAL_STATUSES
 
 
-def _parse_sentinel_from_blocks(path: Path) -> AutoDevResult | BlockedResult | None:
+def _parse_sentinel_from_blocks(
+    path: Path, *, ticket_id: str | None = None
+) -> AutoDevResult | BlockedResult | None:
     """Parse the LAST real sentinel block in the transcript.
 
     Scans candidate blocks via :func:`_iter_sentinel_text_blocks` — assistant
@@ -140,12 +143,18 @@ def _parse_sentinel_from_blocks(path: Path) -> AutoDevResult | BlockedResult | N
     ``multiple_result_blocks``: its last real block is the result (GitHub
     #2515), so a salvage chunk that used to be requeued can now salvage.
 
+    ``ticket_id`` is the current session's expected identity. Reconcile callers
+    pass it from the session name so a quoted sibling-ticket result is skipped
+    before salvage routing. It remains optional for direct low-level callers.
+
     A worker may emit the sentinel via ``cat <<EOF`` rather than as assistant
     text, landing the frame in a tool_result block; scanning only assistant
     text misses it and the stage stalls (GitHub #731). Returns ``None`` when no
     chunk carries a complete real frame; a truncated frame reads as none.
     """
-    return parse_last_block_per_chunk(_iter_sentinel_text_blocks(path))
+    return parse_last_block_per_chunk(
+        _iter_sentinel_text_blocks(path), ticket_id=ticket_id
+    )
 
 
 def _salvage_terminal_result(
@@ -227,7 +236,9 @@ def _parse_any_sentinel_from_transcript(
     """
 
     def _try(path: Path) -> tuple[AutoDevResult | BlockedResult, str] | None:
-        result = _parse_sentinel_from_blocks(path)
+        result = _parse_sentinel_from_blocks(
+            path, ticket_id=ticket_id_for_session(session.name)
+        )
         if result is None or (
             isinstance(result, BlockedResult)
             and result.blocker.reason == BLOCKER_REASON_NO_RESULT_EMITTED

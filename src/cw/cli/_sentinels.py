@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from cw._hook_context import _read_cw_context
 from cw._util import (
     _iter_sentinel_text_blocks,
     _iter_sentinel_text_records,
@@ -38,6 +39,7 @@ def _parse_sentinel_from_transcript(
     cwd: str,
     claude_session_id: str | None,
     *,
+    ticket_id: str | None = None,
     warned_blocks: set[str] | None = None,
 ) -> AutoDevResult | BlockedResult | None:
     """Return the parsed sentinel from the transcript, or None if absent.
@@ -65,6 +67,12 @@ def _parse_sentinel_from_transcript(
     be captured here because they bypass session lifecycle tracking entirely.
     See GitHub issue #225 (capture gap) and issue #176 Layer 1 (transcript-walk origin).
 
+    ``ticket_id`` is the current task's expected identity. When omitted, it is
+    read from the headless worktree's ``cw-context.json``. A missing identity
+    is retained only for direct legacy callers; production headless scans have
+    the context value and therefore discard sibling-ticket blocks before they
+    can be routed.
+
     ``warned_blocks`` (issue #1247) is an optional caller-owned set forwarded
     unchanged to the shared per-block parse, deduping repeated ``_log.warning``
     calls for the same malformed block (keyed per block payload) both across
@@ -75,8 +83,16 @@ def _parse_sentinel_from_transcript(
     if not claude_session_id:
         return None
     transcript_path = claude_project_dir(cwd) / f"{claude_session_id}.jsonl"
+    expected_ticket_id = ticket_id
+    if expected_ticket_id is None:
+        context = _read_cw_context(cwd)
+        value = context.get("ticket_id") if context is not None else None
+        if isinstance(value, str) and value:
+            expected_ticket_id = value
     return parse_last_block_per_chunk(
-        _iter_sentinel_text_blocks(transcript_path), warned_blocks=warned_blocks
+        _iter_sentinel_text_blocks(transcript_path),
+        ticket_id=expected_ticket_id,
+        warned_blocks=warned_blocks,
     )
 
 

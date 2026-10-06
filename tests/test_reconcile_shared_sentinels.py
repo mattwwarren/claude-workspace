@@ -3799,10 +3799,12 @@ def _write_two_layer_no_sentinel_transcript(path: Path) -> None:
     path.write_text(json.dumps(record) + "\n")
 
 
-def _mk_two_layer_fallback_session(worktree: Path, csid: str | None = None) -> Session:
+def _mk_two_layer_fallback_session(
+    worktree: Path, csid: str | None = None, ticket_id: str = "892"
+) -> Session:
     return _make_daemon_session(
         id="892-sess",
-        name="client-a/auto-dev/892",
+        name=f"client-a/auto-dev/{ticket_id}",
         worktree_path=worktree,
         surface_ref=_TWO_LAYER_SURFACE_REF,
         claude_session_id=csid,
@@ -3895,9 +3897,7 @@ class TestParseAnySentinelFromTranscript:
         # csid transcript has sentinel (plan_pending_approval)
         v2_csid = "v2-has-sentinel-892"
         v2_path = project_dir / f"{v2_csid}.jsonl"
-        _write_two_layer_sentinel_transcript(
-            v2_path, "plan_pending_approval", "892-plan"
-        )
+        _write_two_layer_sentinel_transcript(v2_path, "plan_pending_approval", "892")
 
         # surface_ref transcript also has a sentinel (review_pending) — should NOT win
         v1_path = project_dir / f"{_TWO_LAYER_SURFACE_REF}-v1-review.jsonl"
@@ -3925,9 +3925,7 @@ class TestParseAnySentinelFromTranscript:
         project_dir.mkdir(parents=True)
 
         v1_path = project_dir / f"{_TWO_LAYER_SURFACE_REF}-original.jsonl"
-        _write_two_layer_sentinel_transcript(
-            v1_path, "plan_pending_approval", "892-plan"
-        )
+        _write_two_layer_sentinel_transcript(v1_path, "plan_pending_approval", "892")
 
         sess = _mk_two_layer_fallback_session(worktree, csid=None)
         result = _parse_any_sentinel_from_transcript(sess)
@@ -3972,7 +3970,7 @@ class TestSalvageTerminalResultTwoLayerFallback:
         v1_path = project_dir / f"{_TWO_LAYER_SURFACE_REF}-v1original.jsonl"
         _write_two_layer_sentinel_transcript(v1_path, "review_pending_approval", "1353")
 
-        sess = _mk_two_layer_fallback_session(worktree, csid=v2_csid)
+        sess = _mk_two_layer_fallback_session(worktree, csid=v2_csid, ticket_id="1353")
         result = _salvage_terminal_result(sess)
 
         assert result is not None
@@ -3996,12 +3994,12 @@ class TestSalvageTerminalResultTwoLayerFallback:
 
         v2_csid = "v2-has-sentinel-1353"
         v2_path = project_dir / f"{v2_csid}.jsonl"
-        _write_two_layer_sentinel_transcript(v2_path, "merge_gate_blocked", "1353-mgb")
+        _write_two_layer_sentinel_transcript(v2_path, "merge_gate_blocked", "1353")
 
         v1_path = project_dir / f"{_TWO_LAYER_SURFACE_REF}-v1-review.jsonl"
         _write_two_layer_sentinel_transcript(v1_path, "review_pending_approval", "1353")
 
-        sess = _mk_two_layer_fallback_session(worktree, csid=v2_csid)
+        sess = _mk_two_layer_fallback_session(worktree, csid=v2_csid, ticket_id="1353")
         result = _salvage_terminal_result(sess)
 
         assert result is not None
@@ -4030,9 +4028,9 @@ class TestSalvageTerminalResultTwoLayerFallback:
         _write_two_layer_no_sentinel_transcript(v2_path)
 
         v1_path = project_dir / f"{_TWO_LAYER_SURFACE_REF}-v1-stage-complete.jsonl"
-        _write_two_layer_sentinel_transcript(v1_path, "stage_complete", "1353-stage")
+        _write_two_layer_sentinel_transcript(v1_path, "stage_complete", "1353")
 
-        sess = _mk_two_layer_fallback_session(worktree, csid=v2_csid)
+        sess = _mk_two_layer_fallback_session(worktree, csid=v2_csid, ticket_id="1353")
         result = _salvage_terminal_result(sess)
 
         assert result is None
@@ -4051,9 +4049,9 @@ class TestSalvageTerminalResultTwoLayerFallback:
         project_dir.mkdir(parents=True)
 
         v1_path = project_dir / f"{_TWO_LAYER_SURFACE_REF}-original.jsonl"
-        _write_two_layer_sentinel_transcript(v1_path, "no_op", "1353-noop")
+        _write_two_layer_sentinel_transcript(v1_path, "no_op", "1353")
 
-        sess = _mk_two_layer_fallback_session(worktree, csid=None)
+        sess = _mk_two_layer_fallback_session(worktree, csid=None, ticket_id="1353")
         result = _salvage_terminal_result(sess)
 
         assert result is not None
@@ -4101,7 +4099,13 @@ def _parse_scope_guard_sentinel(
     sess = _mk_headless_daemon_session(
         "scope-guard", worktree, datetime(2026, 1, 1, tzinfo=UTC)
     )
-    _write_salvage_transcript(home, worktree, "claude-uuid-scope", payload)
+    sess.name = f"client-a/auto-dev/{payload['ticket_id']}"
+    _write_salvage_transcript(
+        home,
+        worktree,
+        "claude-uuid-scope",
+        payload,
+    )
     parsed = _parse_any_sentinel_from_transcript(sess)
     assert parsed is not None
     result, _csid = parsed

@@ -1469,7 +1469,7 @@ class TestSignalStop:
         state = load_state()
         state.sessions.append(session)
         save_state(state)
-        self._write_headless_context(worktree, session_id=session.id)
+        self._write_headless_context(worktree, session_id=session.id, ticket_id="215")
 
         # Write a real Claude-shaped transcript JSONL with an assistant
         # record carrying a parseable sentinel block. The parser walks the
@@ -1560,7 +1560,7 @@ class TestSignalStop:
         state = load_state()
         state.sessions.append(session)
         save_state(state)
-        self._write_headless_context(worktree, session_id=session.id)
+        self._write_headless_context(worktree, session_id=session.id, ticket_id="214")
 
         # Write a real transcript with the preserved #214 sentinel — the
         # exact failure mode that motivated #225.
@@ -1636,9 +1636,13 @@ class TestSignalStop:
         state = load_state()
         state.sessions.append(session)
         save_state(state)
-        self._write_headless_context(worktree, session_id=session.id)
 
         payload = _inflate_scope(_valid_payload())
+        self._write_headless_context(
+            worktree,
+            session_id=session.id,
+            ticket_id=str(payload["ticket_id"]),
+        )
         frame = "<<<AUTO_DEV_RESULT\n" + json.dumps(payload) + "\nAUTO_DEV_RESULT>>>"
         claude_session_id = "uuid-1487"
         fake_home = tmp_path / "fake-home"
