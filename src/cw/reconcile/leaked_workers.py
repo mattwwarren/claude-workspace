@@ -22,10 +22,12 @@ call sites that must never disagree about what counts as leaked:
   ``cw.reconcile.core._reconcile_locked`` every tick (mandatory, not gated by
   ``reap_policy`` -- stopping an already-finished worker's surface has no
   queue/session state to protect, unlike the phantom sweep's destructive
-  acts).
+  acts). That call passes ``reconcile()``'s post-lock sink, so each stop is
+  queued and runs after ``sessions_lock`` releases (#1232).
 - ``cw doctor --reap``'s wedge (``cw.doctor.wedge._check_wedge_leaked_daemon_
   worker`` / the matching reap branch), for an operator who wants to see and
-  clear the leak by hand outside the reconcile loop.
+  clear the leak by hand outside the reconcile loop. It holds no lock and
+  stops inline (no sink).
 
 Both are thin callers around :func:`find_leaked_daemon_workers` and
 :func:`stop_leaked_daemon_worker` so the detection predicate and the audit
@@ -35,17 +37,20 @@ payload shape can never drift between them.
 from __future__ import annotations
 
 import logging
+from functools import partial
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.events import record_event
 from cw.models import TERMINAL_SESSION_STATUSES, OrchestratorEventType
 from cw.reconcile._shared import ticket_id_for_session
+from cw.reconcile.deferred import PostLockJob, is_surface_stop_queued
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import CwState, Session
     from cw.native_daemon import NativeDaemonClient
+    from cw.reconcile.deferred import DeferredReconcileJobs
 
 _log = logging.getLogger(__name__)
 
@@ -131,19 +136,44 @@ def stop_leaked_daemon_worker(
 
 
 def sweep_leaked_daemon_workers(
-    state: CwState, *, daemon: NativeDaemonClient
+    state: CwState,
+    *,
+    daemon: NativeDaemonClient,
+    deferred: DeferredReconcileJobs | None = None,
 ) -> list[str]:
-    """Stop every leaked daemon worker found; return the short ids stopped.
+    """Stop every leaked daemon worker found; return the leaked short ids.
 
     Unconditional -- not gated by ``reap_policy`` (ADR-0006): unlike the
     phantom/stalled/idle sweeps, there is no queue row or session state this
     stop could clobber -- the owning session, if any, is already terminal.
     Returns an empty list (no-op) when the roster is unreadable
     (:func:`find_leaked_daemon_workers` returns ``None``) or empty.
+
+    With *deferred* ``None`` (the lock-free ``cw doctor --reap`` path) each
+    worker is stopped and audited inline. With a sink (``reconcile()``, which
+    holds ``sessions_lock`` here) each stop-and-audit is queued as a
+    ``leaked_worker_stop:<short_id>`` job and runs after the lock releases
+    (#1232); a worker whose ``surface_stop`` is already queued this tick (the
+    stalled sweep runs first and queues a stop for every session it
+    completes) is skipped, so it is not stopped twice nor audited as leaked.
+    Either way every leaked short id found is returned, including skipped ones.
+
+    Pre-existing hazard, unchanged here: a worker ``spawn_bg`` has registered
+    on the roster but whose cw session is not yet recorded looks leaked (no
+    session names it) and is stopped; deferring the stop does not change that
+    outcome.
     """
     leaked = find_leaked_daemon_workers(state, daemon=daemon)
     if not leaked:
         return []
     for worker in leaked:
-        stop_leaked_daemon_worker(worker, daemon=daemon)
+        if deferred is None:
+            stop_leaked_daemon_worker(worker, daemon=daemon)
+        elif not is_surface_stop_queued(deferred, worker.short_id):
+            deferred.post_lock.append(
+                PostLockJob(
+                    label=f"leaked_worker_stop:{worker.short_id}",
+                    run=partial(stop_leaked_daemon_worker, worker, daemon=daemon),
+                )
+            )
     return [worker.short_id for worker in leaked]

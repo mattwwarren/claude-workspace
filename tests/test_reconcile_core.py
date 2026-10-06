@@ -47,6 +47,7 @@ from cw.reconcile import (
     revert_timed_out_tasks,
 )
 from cw.reconcile import core as reconcile_core
+from cw.reconcile.deferred import DeferredReconcileJobs
 from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
     RECIPE_AUTO_FIX_CI,
@@ -1156,7 +1157,9 @@ class TestCodexLiveWriterRepark:
         }
 
         with sessions_lock():
-            reconcile_core._reconcile_locked(clients=scope)
+            reconcile_core._reconcile_locked(
+                clients=scope, deferred=DeferredReconcileJobs()
+            )
 
         repark_mock.assert_called_once()
         assert repark_mock.call_args.kwargs["clients"] is scope

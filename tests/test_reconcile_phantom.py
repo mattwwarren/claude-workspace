@@ -54,6 +54,7 @@ from cw.reconcile import (
     reconcile,
 )
 from cw.reconcile._shared import _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -81,6 +82,7 @@ from tests._reconcile_helpers import (
     _write_idle_transcript_with_text,
     _write_salvage_transcript,
     _write_transcript_records,
+    call_and_drain,
 )
 
 
@@ -1673,7 +1675,7 @@ def test_phantom_sentinel_mismatch_veto_end_to_end_ignores_transcript_age(
     cands = _detect_phantom_candidates(
         state, phantom_set={sess.id}, now=now, config=config
     )
-    _act_on_phantom_candidates(state, cands, now=now, config=config)
+    call_and_drain(_act_on_phantom_candidates, state, cands, now=now, config=config)
 
     t = next(t for t in load_dev_queue().tasks if t.ticket_id == sid)
     assert t.status == QueueItemStatus.RUNNING
@@ -1761,7 +1763,7 @@ def test_phantom_dirty_worktree_past_veto_cap_blocks_on_user_regardless_of_age(
     cands = _detect_phantom_candidates(
         state, phantom_set={sess.id}, now=now, config=config
     )
-    _act_on_phantom_candidates(state, cands, now=now, config=config)
+    call_and_drain(_act_on_phantom_candidates, state, cands, now=now, config=config)
 
     t = next(t for t in load_dev_queue().tasks if t.ticket_id == sid)
     assert t.status == QueueItemStatus.BLOCKED_ON_USER
@@ -2257,8 +2259,8 @@ def test_act_on_phantom_candidates_propagates_usage_limited(
         worktree_path=None,
     )
 
-    _, _, usage_limited, _, _, _ = _act_on_phantom_candidates(
-        state, [candidate], now=now, config=_auto_config()
+    _, _, usage_limited, _, _, _ = call_and_drain(
+        _act_on_phantom_candidates, state, [candidate], now=now, config=_auto_config()
     )
 
     assert usage_limited is True
@@ -2294,8 +2296,8 @@ def test_act_on_phantom_candidates_usage_limited_false_without_flag(
         worktree_path=None,
     )
 
-    _, _, usage_limited, _, _, _ = _act_on_phantom_candidates(
-        state, [candidate], now=now, config=_auto_config()
+    _, _, usage_limited, _, _, _ = call_and_drain(
+        _act_on_phantom_candidates, state, [candidate], now=now, config=_auto_config()
     )
 
     assert usage_limited is False
@@ -2338,8 +2340,12 @@ def test_act_on_phantom_candidates_signal_only_still_propagates_usage_limited(
     # OrchestratorConfig() has reap_policy=SIGNAL_ONLY (the default), which
     # routes clean CRASH_COMPLETE candidates to BLOCKED_ON_USER and removes
     # them from the auto-reap list — triggering the early-return on line 538.
-    _, _, usage_limited, _, _, _ = _act_on_phantom_candidates(
-        state, [candidate], now=now, config=OrchestratorConfig()
+    _, _, usage_limited, _, _, _ = call_and_drain(
+        _act_on_phantom_candidates,
+        state,
+        [candidate],
+        now=now,
+        config=OrchestratorConfig(),
     )
 
     assert usage_limited is True
@@ -2376,8 +2382,8 @@ def test_act_on_phantom_crash_routes_pending(
         worktree_path=None,
     )
 
-    result = _act_on_phantom_candidates(
-        state, [candidate], now=now, config=_auto_config()
+    result = call_and_drain(
+        _act_on_phantom_candidates, state, [candidate], now=now, config=_auto_config()
     )
     _, _, _, _, _, _ = result
 
@@ -2468,7 +2474,7 @@ def test_act_on_phantom_dirty_routes_blocked(
         worktree_path=None,
     )
 
-    _act_on_phantom_candidates(state, [candidate], now=now)
+    call_and_drain(_act_on_phantom_candidates, state, [candidate], now=now)
 
     store = load_dev_queue()
     t = next(t for t in store.tasks if t.ticket_id == "phantom-act-dirty-1")
@@ -2515,7 +2521,9 @@ def test_act_on_phantom_crash_payload_carries_provider_overload_detected_clean(
         worktree_path=None,
     )
 
-    _act_on_phantom_candidates(state, [candidate], now=now, config=_auto_config())
+    call_and_drain(
+        _act_on_phantom_candidates, state, [candidate], now=now, config=_auto_config()
+    )
 
     events = read_events(
         consumer="test-phantom-529-payload-clean",
@@ -2559,7 +2567,7 @@ def test_act_on_phantom_crash_payload_carries_provider_overload_detected_dirty(
         worktree_path=None,
     )
 
-    _act_on_phantom_candidates(state, [candidate], now=now)
+    call_and_drain(_act_on_phantom_candidates, state, [candidate], now=now)
 
     events = read_events(
         consumer="test-phantom-529-payload-dirty",
@@ -2608,8 +2616,12 @@ def test_provider_overload_detected_does_not_bypass_signal_only_routing(
         client="client-a",
     )
 
-    reverted, _names, _usage, _salvaged, _results, _ = _act_on_phantom_candidates(
-        state, [candidate], now=now, config=OrchestratorConfig()
+    reverted, _names, _usage, _salvaged, _results, _ = call_and_drain(
+        _act_on_phantom_candidates,
+        state,
+        [candidate],
+        now=now,
+        config=OrchestratorConfig(),
     )
 
     # Not in the auto-reverted-to-PENDING return list; routed to BLOCKED_ON_USER
@@ -2666,8 +2678,8 @@ def test_act_on_phantom_salvage_completion_routes_queue_and_emits_event(
         worktree_path=None,
     )
 
-    _, _, _, salvaged_ids, _, _ = _act_on_phantom_candidates(
-        state, [candidate], now=now
+    _, _, _, salvaged_ids, _, _ = call_and_drain(
+        _act_on_phantom_candidates, state, [candidate], now=now
     )
 
     assert sess.status == SessionStatus.COMPLETED
@@ -2731,7 +2743,7 @@ def test_phantom_salvage_operator_unavailable_stamps_awaiting_operator(
         worktree_path=None,
     )
 
-    _act_on_phantom_candidates(state, [candidate], now=now)
+    call_and_drain(_act_on_phantom_candidates, state, [candidate], now=now)
 
     store = load_dev_queue()
     t = next(t for t in store.tasks if t.ticket_id == "phantom-hold-1")
@@ -2776,7 +2788,7 @@ def test_act_on_phantom_sentinel_mismatch_veto_persists_consecutive_count(
         new_veto_count=7,
     )
 
-    _act_on_phantom_candidates(state, [candidate], now=now)
+    call_and_drain(_act_on_phantom_candidates, state, [candidate], now=now)
 
     store = load_dev_queue()
     t = next(t for t in store.tasks if t.ticket_id == "phantom-veto-act-1")
@@ -3117,7 +3129,7 @@ def test_sentinel_mismatch_veto_cap_end_to_end_via_detect_and_act(
         cands = _detect_phantom_candidates(
             state, phantom_set={sess.id}, now=now, config=config
         )
-        _act_on_phantom_candidates(state, cands, now=now, config=config)
+        call_and_drain(_act_on_phantom_candidates, state, cands, now=now, config=config)
         return cands
 
     # Tick 1 — veto, count -> 1.
@@ -3195,7 +3207,9 @@ def test_sentinel_mismatch_veto_cap_exhaustion_emits_immediate_needs_attention(
         c.proposed_action == ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED
         for c in candidates
     )
-    _act_on_phantom_candidates(state, candidates, now=now, config=config)
+    call_and_drain(
+        _act_on_phantom_candidates, state, candidates, now=now, config=config
+    )
 
     store = load_dev_queue()
     t = next(t for t in store.tasks if t.ticket_id == "veto-attn-1")
@@ -3262,7 +3276,7 @@ def test_sentinel_mismatch_veto_escalation_fires_once_not_every_tick(
         cands = _detect_phantom_candidates(
             state, phantom_set={sess.id}, now=now, config=config
         )
-        _act_on_phantom_candidates(state, cands, now=now, config=config)
+        call_and_drain(_act_on_phantom_candidates, state, cands, now=now, config=config)
 
     events = read_events(
         consumer="test-veto-once-1",
@@ -3317,7 +3331,7 @@ def test_sentinel_mismatch_veto_falls_through_ordinary_first_veto_no_escalation(
     cands = _detect_phantom_candidates(
         state, phantom_set={sess.id}, now=now, config=config
     )
-    _act_on_phantom_candidates(state, cands, now=now, config=config)
+    call_and_drain(_act_on_phantom_candidates, state, cands, now=now, config=config)
 
     attn = read_events(
         consumer="test-first-veto-1",
@@ -3376,7 +3390,7 @@ def test_phantom_salvage_stamps_salvage_transcript_source(
         worktree_path=None,
     )
 
-    _act_on_phantom_candidates(state, [candidate], now=now)
+    call_and_drain(_act_on_phantom_candidates, state, [candidate], now=now)
 
     assert sess.status == SessionStatus.COMPLETED
     assert sess.last_result_source == LastResultSource.SALVAGE_TRANSCRIPT
@@ -3430,8 +3444,8 @@ def test_phantom_salvage_refused_by_door_skips_ticket_and_event(
         worktree_path=None,
     )
 
-    _, _, _, salvaged_ids, _, _ = _act_on_phantom_candidates(
-        state, [candidate], now=now
+    _, _, _, salvaged_ids, _, _ = call_and_drain(
+        _act_on_phantom_candidates, state, [candidate], now=now
     )
 
     # Refused candidate excluded from salvaged ids.
@@ -3497,8 +3511,12 @@ class TestActOnPhantomCandidatesSignalOnly:
             client="client-a",
         )
 
-        reverted, _names, _usage, _salvaged, _results, _ = _act_on_phantom_candidates(
-            state, [candidate], now=now, config=OrchestratorConfig()
+        reverted, _names, _usage, _salvaged, _results, _ = call_and_drain(
+            _act_on_phantom_candidates,
+            state,
+            [candidate],
+            now=now,
+            config=OrchestratorConfig(),
         )
 
         # Return list contains only PENDING-routed; BLOCKED_ON_USER excluded
@@ -3549,8 +3567,12 @@ class TestActOnPhantomCandidatesSignalOnly:
         )
 
         # Both signal_only and auto produce BLOCKED_ON_USER for dirty-worktree
-        reverted, _names, _usage, _salvaged, _results, _ = _act_on_phantom_candidates(
-            state, [candidate], now=now, config=OrchestratorConfig()
+        reverted, _names, _usage, _salvaged, _results, _ = call_and_drain(
+            _act_on_phantom_candidates,
+            state,
+            [candidate],
+            now=now,
+            config=OrchestratorConfig(),
         )
 
         assert "dirty-phantom-1" not in reverted
@@ -3598,8 +3620,12 @@ class TestActOnPhantomCandidatesSignalOnly:
             client="client-a",
         )
 
-        reverted, _names, _usage, _salvaged, _results, _ = _act_on_phantom_candidates(
-            state, [candidate], now=now, config=_auto_config()
+        reverted, _names, _usage, _salvaged, _results, _ = call_and_drain(
+            _act_on_phantom_candidates,
+            state,
+            [candidate],
+            now=now,
+            config=_auto_config(),
         )
 
         assert "auto-phantom-1" in reverted
@@ -3670,8 +3696,12 @@ class TestUnresolvedSubagentSpawnDisposition:
             unresolved_subagent_spawn=True,
         )
 
-        reverted, _names, _usage, _salvaged, _results, _ = _act_on_phantom_candidates(
-            state, [candidate], now=now, config=OrchestratorConfig()
+        reverted, _names, _usage, _salvaged, _results, _ = call_and_drain(
+            _act_on_phantom_candidates,
+            state,
+            [candidate],
+            now=now,
+            config=OrchestratorConfig(),
         )
 
         assert "uss-phantom-1" not in reverted
@@ -3744,8 +3774,12 @@ class TestUnresolvedSubagentSpawnDisposition:
             ),
         ]
 
-        _act_on_phantom_candidates(
-            state, candidates, now=now, config=OrchestratorConfig()
+        call_and_drain(
+            _act_on_phantom_candidates,
+            state,
+            candidates,
+            now=now,
+            config=OrchestratorConfig(),
         )
 
         by_id = {t.ticket_id: t for t in load_dev_queue().tasks}
@@ -3788,8 +3822,12 @@ class TestUnresolvedSubagentSpawnDisposition:
             unresolved_subagent_spawn=True,
         )
 
-        _act_on_phantom_candidates(
-            state, [candidate], now=now, config=OrchestratorConfig()
+        call_and_drain(
+            _act_on_phantom_candidates,
+            state,
+            [candidate],
+            now=now,
+            config=OrchestratorConfig(),
         )
 
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == "uss-dirty-1")
@@ -3824,8 +3862,12 @@ class TestUnresolvedSubagentSpawnDisposition:
             client="client-a",
         )
 
-        _act_on_phantom_candidates(
-            state, [candidate], now=now, config=OrchestratorConfig()
+        call_and_drain(
+            _act_on_phantom_candidates,
+            state,
+            [candidate],
+            now=now,
+            config=OrchestratorConfig(),
         )
 
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == "uss-dirty-plain")
@@ -3868,8 +3910,12 @@ class TestUnresolvedSubagentSpawnDisposition:
             new_veto_count=3,
         )
 
-        _act_on_phantom_candidates(
-            state, [candidate], now=now, config=OrchestratorConfig()
+        call_and_drain(
+            _act_on_phantom_candidates,
+            state,
+            [candidate],
+            now=now,
+            config=OrchestratorConfig(),
         )
 
         # The escalation path persists the bumped counter onto the session.
@@ -3916,8 +3962,12 @@ class TestUnresolvedSubagentSpawnDisposition:
             unresolved_subagent_spawn=True,
         )
 
-        reverted, _names, _usage, _salvaged, _results, _ = _act_on_phantom_candidates(
-            state, [candidate], now=now, config=_auto_config()
+        reverted, _names, _usage, _salvaged, _results, _ = call_and_drain(
+            _act_on_phantom_candidates,
+            state,
+            [candidate],
+            now=now,
+            config=_auto_config(),
         )
 
         # Would be reverted to PENDING under auto without the override.
@@ -3966,7 +4016,13 @@ class TestUnresolvedSubagentSpawnDisposition:
             unresolved_subagent_spawn=True,
         )
 
-        _act_on_phantom_candidates(state, [candidate], now=now, config=_auto_config())
+        call_and_drain(
+            _act_on_phantom_candidates,
+            state,
+            [candidate],
+            now=now,
+            config=_auto_config(),
+        )
 
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == "uss-nopolicy-1")
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
@@ -4004,7 +4060,8 @@ class TestUnresolvedSubagentSpawnDisposition:
             unresolved_subagent_spawn=True,
         )
 
-        _act_on_phantom_candidates(
+        call_and_drain(
+            _act_on_phantom_candidates,
             state,
             [candidate],
             now=now,
@@ -4059,7 +4116,13 @@ class TestUnresolvedSubagentSpawnDisposition:
             unresolved_subagent_spawn=True,
         )
 
-        _act_on_phantom_candidates(state, [candidate], now=now, config=_auto_config())
+        call_and_drain(
+            _act_on_phantom_candidates,
+            state,
+            [candidate],
+            now=now,
+            config=_auto_config(),
+        )
 
         updated = next(s for s in state.sessions if s.id == "uss-noticket-1")
         assert updated.status == SessionStatus.COMPLETED
@@ -4158,7 +4221,13 @@ def test_gone_worktree_still_parks_as_plain_phantom_surface(
         unresolved_subagent_spawn=False,
     )
 
-    _act_on_phantom_candidates(state, [candidate], now=now, config=OrchestratorConfig())
+    call_and_drain(
+        _act_on_phantom_candidates,
+        state,
+        [candidate],
+        now=now,
+        config=OrchestratorConfig(),
+    )
 
     t = next(t for t in load_dev_queue().tasks if t.ticket_id == "uss-gone-wt")
     assert t.status == QueueItemStatus.BLOCKED_ON_USER
@@ -4224,8 +4293,12 @@ class TestActOnPhantomCandidatesPerLane:
             lane="fast",
         )
 
-        reverted, _names, _usage, _salvaged, _results, _ = _act_on_phantom_candidates(
-            state, [candidate], now=now, config=OrchestratorConfig()
+        reverted, _names, _usage, _salvaged, _results, _ = call_and_drain(
+            _act_on_phantom_candidates,
+            state,
+            [candidate],
+            now=now,
+            config=OrchestratorConfig(),
         )
 
         assert "lane-auto-ph-1" in reverted
@@ -4284,8 +4357,12 @@ class TestActOnPhantomCandidatesPerLane:
             lane="slow",
         )
 
-        reverted, _names, _usage, _salvaged, _results, _ = _act_on_phantom_candidates(
-            state, [candidate], now=now, config=_auto_config()
+        reverted, _names, _usage, _salvaged, _results, _ = call_and_drain(
+            _act_on_phantom_candidates,
+            state,
+            [candidate],
+            now=now,
+            config=_auto_config(),
         )
 
         assert "lane-sig-ph-1" not in reverted
@@ -4996,3 +5073,141 @@ def test_apply_phantom_routed_mutations_skips_a_sentinel_less_candidate(
     assert accepted == []
     assert phantom_names == []
     assert sess.status is SessionStatus.ACTIVE
+
+
+# ---------------------------------------------------------------------------
+# #1232: phantom surface stops are queued on the post-lock sink after the
+# SESSION_COMPLETED emit, and run only at the drain.
+# ---------------------------------------------------------------------------
+
+
+class _OrderRecorder:
+    """Records ``record_event`` emits and daemon stops into one ordered log."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.log: list[str] = []
+        recorder = self
+
+        class _Daemon(FakeNativeDaemonClient):
+            def stop(self, short_id: str) -> None:
+                recorder.log.append(f"stop:{short_id}")
+                super().stop(short_id)
+
+        def _record_event(
+            event_type: OrchestratorEventType, *_a: object, **_k: object
+        ) -> None:
+            recorder.log.append(f"emit:{event_type.value}")
+
+        self.daemon = _Daemon()
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", lambda: self.daemon
+        )
+        monkeypatch.setattr("cw.reconcile.phantom._events.record_event", _record_event)
+
+
+def test_merged_phantom_emits_then_queues_stop_until_the_drain(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cw.reconcile import ProposedAction, ReapCandidate
+    from cw.reconcile.phantom import _emit_phantom_terminal_events
+
+    order = _OrderRecorder(monkeypatch)
+    sess = _mk_phantom_daemon_session(
+        "ph-1232-merged", datetime(2026, 1, 1, tzinfo=UTC), surface_ref="merged-ref"
+    )
+    candidate = ReapCandidate(
+        session_id=sess.id,
+        proposed_action=ProposedAction.CRASH_COMPLETE,
+        ticket_id="ph-1232-merged",
+        client="client-a",
+    )
+    sink = DeferredReconcileJobs()
+
+    _emit_phantom_terminal_events({sess.id: sess}, [], [candidate], [], deferred=sink)
+
+    assert order.log == [f"emit:{OrchestratorEventType.SESSION_COMPLETED.value}"]
+    assert [job.label for job in sink.post_lock] == ["surface_stop:merged-ref"]
+
+    run_post_lock_jobs(sink)
+
+    assert order.log == [
+        f"emit:{OrchestratorEventType.SESSION_COMPLETED.value}",
+        "stop:merged-ref",
+    ]
+
+
+def test_routed_phantom_emits_then_queues_stop_until_the_drain(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cw.reconcile import ProposedAction, ReapCandidate
+    from cw.reconcile.phantom import _emit_phantom_routed_events
+
+    order = _OrderRecorder(monkeypatch)
+    sess = _mk_phantom_daemon_session(
+        "ph-1232-routed", datetime(2026, 1, 1, tzinfo=UTC), surface_ref="routed-ref"
+    )
+    candidate = ReapCandidate(
+        session_id=sess.id,
+        proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+        ticket_id="ph-1232-routed",
+        routed_sentinel=AutoDevResult.model_validate(_stage_complete_payload()),
+    )
+    sink = DeferredReconcileJobs()
+
+    _emit_phantom_routed_events({sess.id: sess}, [candidate], deferred=sink)
+
+    assert order.log == [f"emit:{OrchestratorEventType.SESSION_COMPLETED.value}"]
+    assert [job.label for job in sink.post_lock] == ["surface_stop:routed-ref"]
+
+    run_post_lock_jobs(sink)
+
+    assert order.log == [
+        f"emit:{OrchestratorEventType.SESSION_COMPLETED.value}",
+        "stop:routed-ref",
+    ]
+
+
+def test_merged_phantom_act_queues_stop_after_save_and_emit(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the act phase: the session is persisted COMPLETED and announced
+    before the drain, and only the drain stops its surface."""
+    from cw.reconcile import (
+        ProposedAction,
+        ReapCandidate,
+        _act_on_phantom_candidates,
+    )
+
+    daemon = FakeNativeDaemonClient()
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
+    state = _seed_phantom_task("ph-1232-act")
+    candidate = ReapCandidate(
+        session_id="ph-1232-act",
+        proposed_action=ProposedAction.CRASH_COMPLETE,
+        ticket_id="ph-1232-act",
+        worktree_dirty=False,
+        client="client-a",
+    )
+    sink = DeferredReconcileJobs()
+
+    _act_on_phantom_candidates(
+        state,
+        [candidate],
+        now=datetime(2026, 1, 1, 1, tzinfo=UTC),
+        config=OrchestratorConfig(),
+        merged_ticket_ids=frozenset({"ph-1232-act"}),
+        deferred=sink,
+    )
+
+    assert load_state().sessions[0].status is SessionStatus.COMPLETED
+    completed = read_events(
+        consumer="test-1232-phantom-act",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert len(completed) == 1
+    assert daemon.stop_calls == []
+    assert [job.label for job in sink.post_lock] == ["surface_stop:gone-ref"]
+
+    run_post_lock_jobs(sink)
+
+    assert daemon.stop_calls == ["gone-ref"]

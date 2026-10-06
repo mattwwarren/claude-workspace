@@ -32,6 +32,7 @@ from cw.reconcile._shared import (
     _apply_sentinel_to_task,
     _validate_existing_result_for_routing,
 )
+from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 from cw.reconcile.fix_dispatch import FIX_LOOP_PENDING_DISPATCH
 from cw.reconcile.stalled import (
     _act_on_stalled_candidates,
@@ -45,6 +46,7 @@ from tests._reconcile_helpers import (
     _mk_headless_daemon_session,
     _shipped_salvage_payload,
     _stage_complete_payload,
+    call_and_drain,
 )
 
 _STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -149,7 +151,7 @@ def test_act_completes_session_routes_task_and_stops_surface(
     save_dev_queue(store)
     candidates = _detect_stalled_candidates(state, task_by_ticket={})
 
-    _act_on_stalled_candidates(state, candidates, now=_NOW)
+    call_and_drain(_act_on_stalled_candidates, state, candidates, now=_NOW)
 
     session = state.sessions[0]
     assert session.status is SessionStatus.COMPLETED
@@ -159,13 +161,38 @@ def test_act_completes_session_routes_task_and_stops_surface(
     assert stop_recorder.stopped == ["fake-short-id"]
 
 
+def test_act_queues_foreign_result_stop_until_the_drain(
+    tmp_config_dir: Path, tmp_path: Path, stop_recorder: _StopRecorder
+) -> None:
+    """#1232: the session is completed and announced in the act; the surface
+    stop is only queued, and runs at the post-lock drain."""
+    state = _foreign_result_session(tmp_path, _shipped_salvage_payload())
+    candidates = _detect_stalled_candidates(state, task_by_ticket={})
+    sink = DeferredReconcileJobs()
+
+    _act_on_stalled_candidates(state, candidates, now=_NOW, deferred=sink)
+
+    assert state.sessions[0].status is SessionStatus.COMPLETED
+    completed = read_events(
+        consumer="test-stalled-queues-stop",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert len(completed) == 1
+    assert stop_recorder.stopped == []
+    assert [job.label for job in sink.post_lock] == ["surface_stop:fake-short-id"]
+
+    run_post_lock_jobs(sink)
+
+    assert stop_recorder.stopped == ["fake-short-id"]
+
+
 def test_act_with_no_candidates_is_a_noop(
     tmp_config_dir: Path, tmp_path: Path, stop_recorder: _StopRecorder
 ) -> None:
     sess = _mk_headless_daemon_session("T-9", tmp_path / "wt", _STARTED_AT)
     state = CwState(sessions=[sess])
 
-    _act_on_stalled_candidates(state, [], now=_NOW)
+    call_and_drain(_act_on_stalled_candidates, state, [], now=_NOW)
 
     assert sess.status is SessionStatus.ACTIVE
     assert stop_recorder.stopped == []
@@ -191,7 +218,7 @@ def test_foreign_result_completion_uses_evidence_not_same_stage_predicate(
     save_dev_queue(store)
     candidates = _detect_stalled_candidates(state, task_by_ticket={})
 
-    _act_on_stalled_candidates(state, candidates, now=_NOW)
+    call_and_drain(_act_on_stalled_candidates, state, candidates, now=_NOW)
 
     task = load_dev_queue().tasks[0]
     assert task.status is not QueueItemStatus.RUNNING
@@ -215,7 +242,7 @@ def test_foreign_result_with_no_evidence_is_charged(
     save_dev_queue(store)
     candidates = _detect_stalled_candidates(state, task_by_ticket={})
 
-    _act_on_stalled_candidates(state, candidates, now=_NOW)
+    call_and_drain(_act_on_stalled_candidates, state, candidates, now=_NOW)
 
     task = load_dev_queue().tasks[0]
     assert task.unproductive_attempts == 1
@@ -347,7 +374,7 @@ def test_dead_session_stage_complete_still_advances_via_sweep(
     save_dev_queue(store)
     candidates = _detect_stalled_candidates(state, task_by_ticket={})
 
-    _act_on_stalled_candidates(state, candidates, now=_NOW)
+    call_and_drain(_act_on_stalled_candidates, state, candidates, now=_NOW)
 
     task = load_dev_queue().tasks[0]
     assert task.stage == Stage.REVIEW
@@ -387,7 +414,7 @@ def test_stage_complete_at_last_pipeline_stage_still_completes_task(
     save_dev_queue(store)
     candidates = _detect_stalled_candidates(state, task_by_ticket={})
 
-    _act_on_stalled_candidates(state, candidates, now=_NOW)
+    call_and_drain(_act_on_stalled_candidates, state, candidates, now=_NOW)
 
     task = load_dev_queue().tasks[0]
     assert task.status == QueueItemStatus.COMPLETED
@@ -420,7 +447,7 @@ def test_stage_mismatch_refusal_is_not_reoffered(
     save_dev_queue(store)
     candidates = _detect_stalled_candidates(state, task_by_ticket={})
 
-    _act_on_stalled_candidates(state, candidates, now=_NOW)
+    call_and_drain(_act_on_stalled_candidates, state, candidates, now=_NOW)
 
     session = state.sessions[0]
     assert session.status is SessionStatus.ACTIVE
@@ -468,7 +495,7 @@ def test_task_already_terminal_race_completes_session_not_leaked(
     assert len(candidates) == 1
     assert candidates[0].proposed_action is ProposedAction.ROUTE_EMITTED_SENTINEL
 
-    _act_on_stalled_candidates(state, candidates, now=_NOW)
+    call_and_drain(_act_on_stalled_candidates, state, candidates, now=_NOW)
 
     session = state.sessions[0]
     assert session.status is SessionStatus.COMPLETED

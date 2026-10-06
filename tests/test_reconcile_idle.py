@@ -35,6 +35,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile._shared import _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY, ProposedAction
+from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 from cw.reconcile.idle import (
     _act_on_idle_candidates,
     _detect_idle_candidates,
@@ -45,6 +46,7 @@ from tests._reconcile_helpers import (
     _no_op_salvage_payload,
     _shipped_salvage_payload,
     _stage_complete_payload,
+    call_and_drain,
 )
 
 _STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -182,13 +184,49 @@ def test_act_completes_session_on_accepted_route(
     )
     assert len(candidates) == 1
 
-    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+    call_and_drain(_act_on_idle_candidates, state, candidates, now=_NOW_PAST_CHECK)
 
     session = state.sessions[0]
     assert session.status is SessionStatus.COMPLETED
     assert session.claude_session_id == "csid-routed"
     assert session.last_result is not None
     assert session.last_result["status"] == "shipped"
+
+
+def test_act_queues_surface_stop_until_the_drain(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    parsed_sentinel: AutoDevResult,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1232: the accepted route completes and announces the session in the
+    act; the surface stop is only queued, and runs at the post-lock drain."""
+    daemon = FakeNativeDaemonClient()
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
+    state = _state(tmp_path, name="client-a/adhoc")
+    candidates = _detect_idle_candidates(
+        state,
+        now=_NOW_PAST_CHECK,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+    sink = DeferredReconcileJobs()
+
+    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK, deferred=sink)
+
+    assert state.sessions[0].status is SessionStatus.COMPLETED
+    completed = read_events(
+        consumer="test-idle-queues-stop",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert len(completed) == 1
+    assert daemon.stop_calls == []
+    assert [job.label for job in sink.post_lock] == ["surface_stop:fake-short-id"]
+
+    run_post_lock_jobs(sink)
+
+    assert daemon.stop_calls == ["fake-short-id"]
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +332,7 @@ def test_detect_idle_candidates_routes_live_emit_cli_stage_complete(
     assert isinstance(candidate.routed_sentinel, AutoDevResult)
     assert candidate.routed_sentinel.status == "stage_complete"
 
-    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+    call_and_drain(_act_on_idle_candidates, state, candidates, now=_NOW_PAST_CHECK)
 
     assert _reload_row().stage == Stage.REVIEW
     session = state.sessions[0]
@@ -341,7 +379,7 @@ def test_detect_idle_candidates_routes_live_emit_cli_shipped(
     # #2458: the candidate's own source, not a hardcoded SALVAGE_TRANSCRIPT.
     assert candidate.result_source is LastResultSource.EMIT_CLI
 
-    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+    call_and_drain(_act_on_idle_candidates, state, candidates, now=_NOW_PAST_CHECK)
 
     assert _reload_row().status == QueueItemStatus.COMPLETED
     session = state.sessions[0]
@@ -381,7 +419,7 @@ def test_detect_idle_candidates_routes_live_emit_cli_no_op(
     assert isinstance(candidate.routed_sentinel, AutoDevResult)
     assert candidate.routed_sentinel.status == "no_op"
 
-    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+    call_and_drain(_act_on_idle_candidates, state, candidates, now=_NOW_PAST_CHECK)
 
     assert _reload_row().status == QueueItemStatus.COMPLETED
     session = state.sessions[0]
@@ -444,7 +482,7 @@ def test_idle_sweep_holds_off_staged_emit_while_background_work_drains(
         config=OrchestratorConfig(),
         task_by_ticket={},
     )
-    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+    call_and_drain(_act_on_idle_candidates, state, candidates, now=_NOW_PAST_CHECK)
 
     assert candidates == []
     assert state.sessions[0].status is SessionStatus.ACTIVE
@@ -479,7 +517,7 @@ def test_idle_sweep_routes_staged_emit_once_background_stamp_outlives_deadline(
         config=config,
         task_by_ticket={},
     )
-    _act_on_idle_candidates(state, candidates, now=_NOW_HOURS_LATER)
+    call_and_drain(_act_on_idle_candidates, state, candidates, now=_NOW_HOURS_LATER)
 
     assert len(candidates) == 1
     assert _reload_row().stage == Stage.REVIEW
@@ -511,7 +549,7 @@ def test_detect_idle_candidates_skips_emit_cli_already_routed_by_stop_hook(
         config=OrchestratorConfig(),
         task_by_ticket={},
     )
-    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+    call_and_drain(_act_on_idle_candidates, state, candidates, now=_NOW_PAST_CHECK)
 
     assert _reload_row().model_dump() == before
     session = state.sessions[0]
@@ -557,7 +595,7 @@ def test_detect_idle_candidates_skips_partial_route_consumed_live_session(
         config=OrchestratorConfig(),
         task_by_ticket={},
     )
-    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+    call_and_drain(_act_on_idle_candidates, state, candidates, now=_NOW_PAST_CHECK)
 
     assert candidates == []
     assert _reload_row().model_dump() == before
@@ -623,7 +661,7 @@ def test_detect_idle_candidates_routes_live_session_with_sentinel_unroutable_pag
     assert candidate.proposed_action is ProposedAction.ROUTE_EMITTED_SENTINEL
     assert candidate.ticket_id == _EMIT_TICKET
 
-    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+    call_and_drain(_act_on_idle_candidates, state, candidates, now=_NOW_PAST_CHECK)
 
     assert _reload_row().stage == Stage.REVIEW
     session = state.sessions[0]
@@ -679,7 +717,7 @@ def test_detect_idle_candidates_completes_session_for_already_forward_advanced_r
         task_by_ticket={},
     )
     assert len(candidates) == 1
-    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+    call_and_drain(_act_on_idle_candidates, state, candidates, now=_NOW_PAST_CHECK)
 
     assert _reload_row().model_dump() == before
     session = state.sessions[0]
@@ -773,7 +811,7 @@ def test_emit_cli_stage_mismatch_refusal_stamps_marker_and_stops_reoffering(
         task_by_ticket={},
     )
     assert len(candidates) == 1
-    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+    call_and_drain(_act_on_idle_candidates, state, candidates, now=_NOW_PAST_CHECK)
 
     assert _reload_row().model_dump() == before
     session = state.sessions[0]
@@ -839,7 +877,7 @@ def test_detect_idle_candidates_routes_live_emit_cli_blocked_generic_reason(
         config=OrchestratorConfig(),
         task_by_ticket={},
     )
-    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+    call_and_drain(_act_on_idle_candidates, state, candidates, now=_NOW_PAST_CHECK)
 
     assert _reload_row().status is QueueItemStatus.BLOCKED_ON_USER
     attention = read_events(
@@ -908,7 +946,7 @@ def test_detect_idle_candidates_landed_terminal_blocked_tripwire(
         task_by_ticket={},
     )
     assert len(candidates) == 1
-    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK)
+    call_and_drain(_act_on_idle_candidates, state, candidates, now=_NOW_PAST_CHECK)
 
     # Documents the actual (currently-wrong) behavior -- see docstring.
     assert _reload_row().status == QueueItemStatus.FAILED

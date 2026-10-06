@@ -1,8 +1,9 @@
 """Act-phase lifecycle-event emission for the phantom sweep.
 
 Extracted verbatim from the historical flat ``cw.reconcile.phantom`` module
-by the package split. Runs after the caller's ``save_state`` flush. See
-GitHub #552, ADR-0006.
+by the package split. Runs after the caller's ``save_state`` flush. Surface
+stops are queued on the caller's post-lock sink and run after
+``sessions_lock`` releases (#1232). See GitHub #552, ADR-0006.
 """
 
 from __future__ import annotations
@@ -16,10 +17,12 @@ from cw.reconcile._shared import (
     _GH_CHECK_BLOCKED_REASON,
     _PHANTOM_REAP_MERGED_REASON,
 )
+from cw.reconcile.deferred import defer_surface_stop
 
 if TYPE_CHECKING:
     from cw.models import Session
     from cw.reconcile._shared import ReapCandidate
+    from cw.reconcile.deferred import DeferredReconcileJobs
 
 # paused_status written to SESSION_NEEDS_ATTENTION when the phantom sweep's
 # sentinel-stage-mismatch veto cap is exhausted on an already_refused session
@@ -34,10 +37,13 @@ def _emit_phantom_terminal_events(
     crash_candidates: list[ReapCandidate],
     merged_crash_candidates: list[ReapCandidate],
     gh_blocked_crash_candidates: list[ReapCandidate],
+    *,
+    deferred: DeferredReconcileJobs,
 ) -> set[str]:
     """Emit terminal lifecycle events for phantom dispositions (post-save_state).
 
-    Stops surfaces and emits SESSION_COMPLETED for merged phantoms,
+    Emits SESSION_COMPLETED and then queues the surface stop on *deferred*
+    (run after ``sessions_lock`` releases, #1232) for merged phantoms,
     SESSION_NEEDS_ATTENTION for gh-blocked phantoms, and SESSION_PHANTOM_REVERTED
     for DAEMON-origin crashes. Returns the set of dirty-worktree ticket IDs;
     the return value is pre-computed by the caller (dirty_ticket_ids) and the
@@ -46,8 +52,6 @@ def _emit_phantom_terminal_events(
     # SESSION_COMPLETED for merged phantoms (PR already shipped, not CRASHED).
     for candidate in merged_crash_candidates:
         session = session_by_id[candidate.session_id]
-        if session.surface_ref is not None:
-            _deps.get_native_daemon_client().stop(session.surface_ref)
         merged_payload: dict[str, object] = {
             "session_id": session.id,
             "session_name": session.name,
@@ -63,6 +67,8 @@ def _emit_phantom_terminal_events(
             merged_payload,
             correlation_id=candidate.ticket_id,
         )
+        if session.surface_ref is not None:
+            defer_surface_stop(deferred, session.surface_ref)
 
     # SESSION_NEEDS_ATTENTION for gh-blocked phantoms.
     for candidate in gh_blocked_crash_candidates:
@@ -122,23 +128,20 @@ def _emit_phantom_terminal_events(
 def _emit_phantom_routed_events(
     session_by_id: dict[str, Session],
     routed_candidates: list[ReapCandidate],
+    *,
+    deferred: DeferredReconcileJobs,
 ) -> None:
-    """Emit SESSION_COMPLETED + stop surface for routed advance sentinels (#716).
+    """Emit SESSION_COMPLETED + queue surface stop for routed advance sentinels.
 
-    Mirrors ``idle._emit_idle_completion_events``' routed-sentinel loop: a
-    salvaged (constructive) completion, not a crash. Runs after ``save_state``.
+    #716. Mirrors ``idle._emit_idle_completion_events``' routed-sentinel loop:
+    a salvaged (constructive) completion, not a crash. Runs after
+    ``save_state``; the stop is queued on *deferred* after the emit and runs
+    once ``sessions_lock`` releases (#1232).
     """
     for candidate in routed_candidates:
         if candidate.routed_sentinel is None:
             continue
         session = session_by_id[candidate.session_id]
-        # Why: phantom's stop-before-emit order is a deliberate inversion of
-        # idle/stalled's emit-then-stop order (see
-        # cw.reconcile.dispositions.emit_routed_sentinel_completion, #1306) —
-        # a phantom's surface is already dead (absent from the daemon
-        # roster), so there is no live surface for a late emit to race.
-        if session.surface_ref is not None:
-            _deps.get_native_daemon_client().stop(session.surface_ref)
         record_event(
             OrchestratorEventType.SESSION_COMPLETED,
             {
@@ -153,6 +156,14 @@ def _emit_phantom_routed_events(
             },
             correlation_id=candidate.ticket_id,
         )
+        # Why: emit-then-stop, the same order as idle/stalled (see
+        # cw.reconcile.dispositions.emit_routed_sentinel_completion, #1306).
+        # This used to be a deliberate stop-before-emit inversion; with the
+        # stop deferred until after sessions_lock releases (#1232) the order
+        # is uniform, and it stays safe either way because a phantom's
+        # surface is already absent from the daemon roster.
+        if session.surface_ref is not None:
+            defer_surface_stop(deferred, session.surface_ref)
 
 
 def _emit_sentinel_mismatch_veto_escalation_events(

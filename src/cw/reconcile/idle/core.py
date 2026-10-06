@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
     from cw.models import CwState
     from cw.reconcile._shared import ReapCandidate
+    from cw.reconcile.deferred import DeferredReconcileJobs
 
 
 def _act_on_idle_candidates(
@@ -28,6 +29,7 @@ def _act_on_idle_candidates(
     candidates: list[ReapCandidate],
     *,
     now: datetime,
+    deferred: DeferredReconcileJobs,
 ) -> None:
     """Act phase for live DAEMON sessions with an emitted-but-unrouted sentinel.
 
@@ -37,7 +39,9 @@ def _act_on_idle_candidates(
     the completion event. A stage-mismatch refusal (#1031) stamps a
     paused-status marker instead so the doomed candidate stops re-firing.
     Constructive by construction -- no reap-policy routing is needed because
-    nothing here destroys in-flight work.
+    nothing here destroys in-flight work. The accepted sessions' surface
+    stops are queued on *deferred* after ``save_state`` and run once
+    ``sessions_lock`` releases (#1232).
     """
     if not candidates:
         return
@@ -54,4 +58,4 @@ def _act_on_idle_candidates(
     )
     if state_mutated:
         save_state(state)
-    _emit_idle_completion_events(session_by_id, accepted)
+    _emit_idle_completion_events(session_by_id, accepted, deferred=deferred)
