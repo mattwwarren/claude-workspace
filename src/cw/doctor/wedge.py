@@ -37,14 +37,14 @@ from cw.config import load_orchestrator_config, load_state, state_file
 from cw.dev_queue import dev_queue_lock, save_dev_queue, transition_task_status
 from cw.dispatch.claim import _find_running_row
 from cw.doctor import _deps
-from cw.doctor._shared import WedgeFinding
+from cw.doctor._shared import CheckResult, WedgeFinding
 from cw.doctor.loop_health import _gh_pr_states, _reap_session_by_selector
 from cw.doctor.routed_result_wedge import (
     WEDGE_ROUTED_RESULT_STRANDED,
     has_pending_routed_result_audits,
     reap_routed_result_findings,
 )
-from cw.exceptions import CwError
+from cw.exceptions import CwError, SessionsLockTimeoutError
 from cw.executor import resolve_executor_config
 from cw.models import (
     CODEX_BACKEND,
@@ -914,13 +914,133 @@ def _cancel_terminal_sibling_parks(queue: DevQueueStore, ticket_ids: set[str]) -
     return changed
 
 
+_REAP_CHECK_NAME = "wedge-reap"
+
+
+def _reap_daemon_sessions(
+    findings: list[tuple[str, str]],
+) -> tuple[list[str], list[str], list[str], SessionsLockTimeoutError | None]:
+    """Reap each ``(session_id, wedge_class)`` pair under a bounded lock (#2504).
+
+    Returns ``(reaped, not_found, remaining, timeout)``. *reaped* holds every
+    id whose ``_reap_session_by_selector`` call returned without raising
+    (``True`` or ``False`` alike); *not_found* is the subset that returned
+    ``False`` (the selector matched no session). On the first
+    :class:`SessionsLockTimeoutError` the loop stops (fail-fast: each further
+    attempt would wait out the full bound again) and *remaining* names the
+    failing id plus every id after it; the timeout is raised at lock entry,
+    before any mutation, so the failing session is cleanly un-reaped.
+    """
+    reaped: list[str] = []
+    not_found: list[str] = []
+    for index, (session_id, wedge_class) in enumerate(findings):
+        try:
+            found = _reap_session_by_selector(
+                session_id, proposed_action=wedge_class, bounded=True
+            )
+        except SessionsLockTimeoutError as exc:
+            return reaped, not_found, [sid for sid, _ in findings[index:]], exc
+        reaped.append(session_id)
+        if not found:
+            not_found.append(session_id)
+    return reaped, not_found, [], None
+
+
+def _reap_timeout_check(
+    timeout: SessionsLockTimeoutError,
+    *,
+    reaped: list[str],
+    not_found: list[str],
+    remaining: list[str],
+    routed_status: str | None,
+    swept: bool,
+    queue_saved: bool,
+) -> CheckResult:
+    """Describe a bounded-lock timeout during ``--reap`` as a failing check (#2504).
+
+    ``detail`` is ``"; "``-joined segments: the queue-revert note (only when
+    the queue pass saved), ``reaped:`` / ``not found:`` / ``NOT reaped:`` id
+    lists (each only when non-empty), the routed-result close status (only when
+    a close was due), the leaked-worker sweep status, the timeout's
+    operator-facing text verbatim, and the re-run hint. Mirrors
+    :func:`cw.doctor.linkage._check_reconcile`.
+    """
+    segments: list[str] = []
+    if queue_saved:
+        segments.append("queue revert saved")
+    if reaped:
+        segments.append(f"reaped: {', '.join(reaped)}")
+    if not_found:
+        segments.append(f"not found: {', '.join(not_found)}")
+    if remaining:
+        segments.append(f"NOT reaped: {', '.join(remaining)}")
+    if routed_status is not None:
+        segments.append(f"routed-result close: {routed_status}")
+    segments.append(f"leaked-worker sweep: {'ran' if swept else 'n/a'}")
+    segments.append(str(timeout))
+    segments.append("re-run `cw doctor --reap` once the holder releases")
+    return CheckResult(_REAP_CHECK_NAME, ok=False, detail="; ".join(segments))
+
+
+def _reap_sessions_and_sweep(
+    daemon_reap_findings: list[tuple[str, str]],
+    routed_result_findings: list[WedgeFinding],
+    *,
+    run_routed: bool,
+    has_leaked: bool,
+    queue_saved: bool,
+) -> CheckResult | None:
+    """Run the post-queue reap tail; return a failing check on lock timeout (#2504).
+
+    Order: class-6/8 session reaps, the class-11 close, then the class-10
+    sweep. The reaps and the close take a bounded ``sessions_lock``; the sweep
+    is lock-free, so it runs even after a timeout. A timeout during the reaps
+    skips the close (it would wait out the same bound again). Returns ``None``
+    when nothing timed out.
+    """
+    reaped, not_found, remaining, timeout = _reap_daemon_sessions(daemon_reap_findings)
+    routed_status: str | None = None
+    if timeout is not None:
+        routed_status = "not attempted" if run_routed else None
+    elif run_routed:
+        # Class-11 (#2524): session-only close; takes its own bounded lock.
+        try:
+            reap_routed_result_findings(routed_result_findings)
+        except SessionsLockTimeoutError as exc:
+            timeout = exc
+            routed_status = "timed out"
+    # Class-10 (#2480): re-detect fresh (state may have changed since the
+    # findings were collected) and stop every leaked worker still leaked,
+    # via the shared reconcile authority so the audit-event payload matches
+    # the unconditional reconcile-pass sweep exactly.
+    if has_leaked:
+        sweep_leaked_daemon_workers(load_state(), daemon=get_native_daemon_client())
+    if timeout is None:
+        return None
+    return _reap_timeout_check(
+        timeout,
+        reaped=reaped,
+        not_found=not_found,
+        remaining=remaining,
+        routed_status=routed_status,
+        swept=has_leaked,
+        queue_saved=queue_saved,
+    )
+
+
 def _reap_wedge_findings(
     findings: list[WedgeFinding],
     *,
     routed_result_session_ids: set[str] | None = None,
     reap_routed_result: bool = True,
-) -> None:
+) -> CheckResult | None:
     """Apply mutations for actionable wedge classes.
+
+    Returns ``None`` on success. When a bounded ``sessions_lock`` times out
+    during the session reaps or the class-11 close (#2504), the timeout is
+    caught and returned as a failing ``wedge-reap`` :class:`CheckResult`
+    naming what was and was not reaped; the already-saved queue revert is not
+    rolled back and the lock-free class-10 sweep still runs.
 
     Class-2 (task-running-no-session): revert queue task to PENDING.
     Class-3 (task-running-completed-session): revert queue task to PENDING.
@@ -1039,7 +1159,7 @@ def _reap_wedge_findings(
         or routed_result_findings
         or pending_routed_result_audits
     ):
-        return
+        return None
 
     with dev_queue_lock():
         queue = _deps.load_dev_queue()
@@ -1060,28 +1180,24 @@ def _reap_wedge_findings(
                 queue, terminal_sibling_ticket_ids
             )
             changed = changed or sibling_changed
-        if changed:
+        queue_saved = changed
+        if queue_saved:
             save_dev_queue(queue)
 
     # Reap phantom/stale sessions outside the queue lock —
     # _reap_session_by_selector acquires sessions_lock and dev_queue_lock
     # internally (sequential, no deadlock risk since we already released
     # dev_queue_lock above).
-    # Why (#2491): operator `cw doctor --reap`, so bounded=True. Partial-state
-    # window: the queue changes above are already saved, so a
-    # SessionsLockTimeoutError here aborts the remaining reaps and the
-    # leaked-worker sweep below. The findings are re-detected idempotently on
-    # the next `cw doctor --reap`.
-    for session_id, wedge_class in daemon_reap_findings:
-        _reap_session_by_selector(session_id, proposed_action=wedge_class, bounded=True)
-
-    # Class-11 (#2524): session-only close; takes its own bounded lock.
-    if routed_result_findings or pending_routed_result_audits:
-        reap_routed_result_findings(routed_result_findings)
-
-    # Class-10 (#2480): re-detect fresh (state may have changed since the
-    # findings were collected) and stop every leaked worker still leaked,
-    # via the shared reconcile authority so the audit-event payload matches
-    # the unconditional reconcile-pass sweep exactly.
-    if has_leaked_worker_findings:
-        sweep_leaked_daemon_workers(load_state(), daemon=get_native_daemon_client())
+    # Why (#2491, #2504): operator `cw doctor --reap`, so the reaps are
+    # bounded. Partial-state window: the queue changes above are already
+    # saved, so a SessionsLockTimeoutError in the tail below is caught and
+    # reported (not raised) as a failing `wedge-reap` check listing what was
+    # and was not reaped. The findings are re-detected idempotently on the
+    # next `cw doctor --reap`.
+    return _reap_sessions_and_sweep(
+        daemon_reap_findings,
+        routed_result_findings,
+        run_routed=bool(routed_result_findings or pending_routed_result_audits),
+        has_leaked=has_leaked_worker_findings,
+        queue_saved=queue_saved,
+    )

@@ -239,6 +239,73 @@ def test_cw_doctor_cli_reap_flag(
     assert "reconciliation" in result.output
 
 
+_WEDGE_REAP_FAILURE = CheckResult(
+    "wedge-reap",
+    ok=False,
+    detail="NOT reaped: phantom-1; sessions lock held",
+)
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_cw_doctor_cli_reap_timeout_reports_failing_check(
+    monkeypatch: pytest.MonkeyPatch,
+    as_json: bool,
+) -> None:
+    """A reported reap timeout renders in the full report and exits 1 (#2504)."""
+    report = DoctorReport(version="0.0.0", checks=[_WEDGE_REAP_FAILURE])
+    monkeypatch.setattr("cw.cli.maintenance.run_doctor", lambda **_kwargs: report)
+
+    args = ["doctor", "--reap", *(["--json"] if as_json else [])]
+    result = CliRunner().invoke(main, args)
+
+    assert result.exit_code == 1
+    if as_json:
+        payload = json.loads(result.output)
+        assert payload["ok"] is False
+        assert {
+            "name": "wedge-reap",
+            "ok": False,
+            "warn": False,
+            "detail": "NOT reaped: phantom-1; sessions lock held",
+        } in payload["checks"]
+    else:
+        assert "[FAIL] wedge-reap" in result.output
+
+
+def test_run_doctor_reap_appends_the_wedge_reap_failure(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """run_doctor(reap=True) puts the reap's failing check on the report (#2504)."""
+    from cw.config import save_state
+    from cw.models import CwState
+
+    save_state(CwState(sessions=[]))
+    _stub_claude_version_ok(monkeypatch)
+    finding = WedgeFinding(
+        wedge_class="wedge/task-running-no-session",
+        session_id=None,
+        ticket_id="TST-C2",
+        recipe="fix",
+        state_file="",
+    )
+    monkeypatch.setattr(
+        "cw.doctor.core._collect_wedge_findings", lambda *_a, **_k: [finding]
+    )
+    monkeypatch.setattr(
+        "cw.doctor.core._reap_wedge_findings", lambda *_a, **_k: _WEDGE_REAP_FAILURE
+    )
+    monkeypatch.setattr(
+        "cw.doctor.core._check_reconcile",
+        lambda: CheckResult("reconciliation", ok=True, detail="no phantoms"),
+    )
+
+    report = run_doctor(reap=True)
+
+    assert _WEDGE_REAP_FAILURE in report.checks
+    assert report.ok is False
+
+
 # ---------------------------------------------------------------------------
 # Linkage drift detection tests
 # ---------------------------------------------------------------------------
@@ -2367,60 +2434,21 @@ class TestWedgeReapRecipes:
             state_file=str(_sf()),
         )
 
-        _reap_wedge_findings([finding])
+        assert _reap_wedge_findings([finding]) is None
 
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "TST-C2")
         assert t.status == QueueItemStatus.PENDING
 
-    def test_daemon_reaps_are_bounded_and_a_timeout_leaves_documented_partial_state(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_config_dir: Path,
-    ) -> None:
-        """Operator `doctor --reap` bounds each reap; a timeout aborts the rest (#2491).
-
-        Queue changes are saved BEFORE the per-session reaps, so on a lock
-        timeout the class-2 revert persists, the remaining reaps and the
-        leaked-worker sweep do not run, and the next `cw doctor --reap`
-        re-detects them idempotently.
-        """
-        from cw.dev_queue import load_dev_queue, save_dev_queue
-        from cw.doctor import WedgeFinding, _reap_wedge_findings
+    @staticmethod
+    def _timeout_findings(*, with_routed: bool = False) -> list[WedgeFinding]:
+        """Class-2 + two class-6 phantoms + class-10 (+ class-11) findings (#2504)."""
+        from cw.doctor.routed_result_wedge import WEDGE_ROUTED_RESULT_STRANDED
         from cw.doctor.wedge import (
             _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
             _WEDGE_LEAKED_DAEMON_WORKER,
         )
-        from cw.exceptions import SessionsLockTimeoutError
-        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
 
-        save_dev_queue(
-            DevQueueStore(
-                tasks=[
-                    TicketTask(
-                        ticket_id="TST-C2",
-                        client="client-a",
-                        status=QueueItemStatus.RUNNING,
-                        session_id=None,
-                    )
-                ]
-            )
-        )
-        reap_calls: list[tuple[str, dict[str, object]]] = []
-
-        def _timeout_reap(selector: str, **kwargs: object) -> bool:
-            reap_calls.append((selector, kwargs))
-            msg = "sessions lock held"
-            raise SessionsLockTimeoutError(
-                msg, lock_path=tmp_config_dir / ".sessions.lock", waited_s=60.0
-            )
-
-        sweeps: list[object] = []
-        monkeypatch.setattr("cw.doctor.wedge._reap_session_by_selector", _timeout_reap)
-        monkeypatch.setattr(
-            "cw.doctor.wedge.sweep_leaked_daemon_workers",
-            lambda *_a, **_k: sweeps.append(1),
-        )
         findings = [
             WedgeFinding(
                 wedge_class="wedge/task-running-no-session",
@@ -2447,19 +2475,265 @@ class TestWedgeReapRecipes:
                 state_file="",
             ),
         ]
+        if with_routed:
+            findings.append(
+                WedgeFinding(
+                    wedge_class=WEDGE_ROUTED_RESULT_STRANDED,
+                    session_id="routed-1",
+                    ticket_id=None,
+                    recipe="fix",
+                    state_file="",
+                )
+            )
+        return findings
 
-        with pytest.raises(SessionsLockTimeoutError):
-            _reap_wedge_findings(findings)
+    @staticmethod
+    def _lock_timeout(tmp_config_dir: Path) -> Exception:
+        from cw.exceptions import SessionsLockTimeoutError
 
+        msg = "sessions lock held"
+        return SessionsLockTimeoutError(
+            msg, lock_path=tmp_config_dir / ".sessions.lock", waited_s=60.0
+        )
+
+    def _patch_reaps(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+        *,
+        timeout_on: set[str],
+        found: bool = True,
+    ) -> tuple[list[tuple[str, dict[str, object]]], list[int]]:
+        """Patch the per-session reap and the leaked-worker sweep; return spies."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="TST-C2",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id=None,
+                    )
+                ]
+            )
+        )
+        reap_calls: list[tuple[str, dict[str, object]]] = []
+        sweeps: list[int] = []
+
+        def _reap(selector: str, **kwargs: object) -> bool:
+            reap_calls.append((selector, kwargs))
+            if selector in timeout_on:
+                raise self._lock_timeout(tmp_config_dir)
+            return found
+
+        monkeypatch.setattr("cw.doctor.wedge._reap_session_by_selector", _reap)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.sweep_leaked_daemon_workers",
+            lambda *_a, **_k: sweeps.append(1),
+        )
+        return reap_calls, sweeps
+
+    def test_daemon_reap_timeout_is_reported_and_leaked_sweep_still_runs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        """A bounded reap timeout is reported, not raised; the sweep still runs (#2504).
+
+        The queue revert is saved BEFORE the per-session reaps and stays; the
+        first timeout stops the remaining reaps (listed as NOT reaped), the
+        lock-free class-10 sweep still runs, and the failure comes back as a
+        failing ``wedge-reap`` check instead of a bare exception.
+        """
+        from cw.dev_queue import load_dev_queue
+        from cw.doctor import _reap_wedge_findings
+        from cw.doctor.wedge import _WEDGE_ACTIVE_NO_DAEMON_ENTRY
+        from cw.models import QueueItemStatus
+
+        reap_calls, sweeps = self._patch_reaps(
+            monkeypatch, tmp_config_dir, timeout_on={"phantom-1", "phantom-2"}
+        )
+
+        result = _reap_wedge_findings(self._timeout_findings())
+
+        assert result is not None
+        assert result.name == "wedge-reap"
+        assert result.ok is False
         assert reap_calls == [
             (
                 "phantom-1",
                 {"proposed_action": _WEDGE_ACTIVE_NO_DAEMON_ENTRY, "bounded": True},
             )
         ]
-        assert sweeps == []
+        assert sweeps == [1]
         task = next(t for t in load_dev_queue().tasks if t.ticket_id == "TST-C2")
         assert task.status == QueueItemStatus.PENDING
+        segments = result.detail.split("; ")
+        assert "NOT reaped: phantom-1, phantom-2" in segments
+        assert "queue revert saved" in segments
+        assert "leaked-worker sweep: ran" in segments
+        assert "sessions lock held" in segments
+        assert "reaped:" not in result.detail.replace("NOT reaped:", "")
+        assert "cw doctor --reap" in result.detail
+
+    def test_later_reap_timeout_lists_reaped_and_not_reaped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        """First reap lands, second times out: both outcomes are named (#2504)."""
+        from cw.doctor import _reap_wedge_findings
+
+        reap_calls, sweeps = self._patch_reaps(
+            monkeypatch, tmp_config_dir, timeout_on={"phantom-2"}
+        )
+
+        result = _reap_wedge_findings(self._timeout_findings())
+
+        assert result is not None
+        assert result.ok is False
+        assert [sid for sid, _ in reap_calls] == ["phantom-1", "phantom-2"]
+        assert sweeps == [1]
+        segments = result.detail.split("; ")
+        assert "reaped: phantom-1" in segments
+        assert "NOT reaped: phantom-2" in segments
+        assert not any(seg.startswith("not found:") for seg in segments)
+
+    def test_reap_that_matches_no_session_is_listed_as_not_found(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        """A False return (no matching session) counts as reaped and as not found."""
+        from cw.doctor import _reap_wedge_findings
+
+        self._patch_reaps(
+            monkeypatch, tmp_config_dir, timeout_on={"phantom-2"}, found=False
+        )
+
+        result = _reap_wedge_findings(self._timeout_findings())
+
+        assert result is not None
+        segments = result.detail.split("; ")
+        assert "reaped: phantom-1" in segments
+        assert "not found: phantom-1" in segments
+        assert "NOT reaped: phantom-2" in segments
+
+    def test_routed_result_close_is_skipped_after_a_reap_timeout(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        """The class-11 close shares the bounded lock, so it is skipped (#2504)."""
+        from cw.doctor import _reap_wedge_findings
+
+        _reap_calls, sweeps = self._patch_reaps(
+            monkeypatch, tmp_config_dir, timeout_on={"phantom-1"}
+        )
+        routed_calls: list[object] = []
+        monkeypatch.setattr(
+            "cw.doctor.wedge.reap_routed_result_findings",
+            lambda findings: routed_calls.append(findings) or [],
+        )
+
+        result = _reap_wedge_findings(self._timeout_findings(with_routed=True))
+
+        assert result is not None
+        assert routed_calls == []
+        assert sweeps == [1]
+        assert "routed-result close: not attempted" in result.detail.split("; ")
+
+    def test_routed_result_close_timeout_is_reported(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        """A class-11 lock timeout (class-6 fine) is caught and reported (#2504)."""
+        from cw.doctor import _reap_wedge_findings
+
+        _reap_calls, sweeps = self._patch_reaps(
+            monkeypatch, tmp_config_dir, timeout_on=set()
+        )
+
+        def _routed_timeout(_findings: object) -> list[str]:
+            raise self._lock_timeout(tmp_config_dir)
+
+        monkeypatch.setattr(
+            "cw.doctor.wedge.reap_routed_result_findings", _routed_timeout
+        )
+
+        result = _reap_wedge_findings(self._timeout_findings(with_routed=True))
+
+        assert result is not None
+        assert result.name == "wedge-reap"
+        assert result.ok is False
+        assert sweeps == [1]
+        segments = result.detail.split("; ")
+        assert "reaped: phantom-1, phantom-2" in segments
+        assert "routed-result close: timed out" in segments
+        assert not any(seg.startswith("NOT reaped:") for seg in segments)
+
+    def test_no_timeout_returns_none_and_runs_everything(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        """The success path is silent: ``None`` is returned (#2504)."""
+        from cw.doctor import _reap_wedge_findings
+
+        reap_calls, sweeps = self._patch_reaps(
+            monkeypatch, tmp_config_dir, timeout_on=set()
+        )
+        routed_calls: list[object] = []
+        monkeypatch.setattr(
+            "cw.doctor.wedge.reap_routed_result_findings",
+            lambda findings: routed_calls.append(findings) or [],
+        )
+
+        result = _reap_wedge_findings(self._timeout_findings(with_routed=True))
+
+        assert result is None
+        assert [sid for sid, _ in reap_calls] == ["phantom-1", "phantom-2"]
+        assert len(routed_calls) == 1
+        assert sweeps == [1]
+
+    def test_real_held_lock_yields_failing_check_and_session_stays_active(
+        self,
+        held_sessions_lock: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+    ) -> None:
+        """A really held sessions lock times out before any mutation (#2504)."""
+        from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
+        from cw.config import load_state
+        from cw.doctor import _reap_wedge_findings
+        from cw.doctor.wedge import _WEDGE_ACTIVE_NO_DAEMON_ENTRY
+        from cw.models import SessionStatus
+
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.05")
+        _seed_sessions(self._make_session(tmp_path, "phantom-real"))
+        finding = WedgeFinding(
+            wedge_class=_WEDGE_ACTIVE_NO_DAEMON_ENTRY,
+            session_id="phantom-real",
+            ticket_id=None,
+            recipe="fix",
+            state_file="",
+        )
+
+        result = _reap_wedge_findings([finding])
+
+        assert result is not None
+        assert result.name == "wedge-reap"
+        assert result.ok is False
+        assert str(held_sessions_lock) in result.detail
+        assert "NOT reaped: phantom-real" in result.detail.split("; ")
+        session = load_state().find_by_name_or_id("phantom-real")
+        assert session is not None
+        assert session.status == SessionStatus.ACTIVE
 
     def test_class3_reap_reverts_queue_only(
         self,
