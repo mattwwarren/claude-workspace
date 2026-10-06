@@ -30,6 +30,7 @@ from cw.executor import resolve_executor_config
 from cw.models import CODEX_BACKEND, OrchestratorConfig, Stage, TicketTask
 
 if TYPE_CHECKING:
+    from cw.codex_background import CodexFixLoopSource
     from cw.models import ClientConfig
 
 # Check name for the per-lane check ("<name>/<client>/<lane>") and the
@@ -72,7 +73,7 @@ _LOAD_FAILURE = (
 )
 
 # Keyed by (source, enabled) so ``_lane_result`` selects a template without branching.
-_DETAIL_BY_STATE: dict[tuple[str, bool], str] = {
+_DETAIL_BY_STATE: dict[tuple[CodexFixLoopSource, bool], str] = {
     ("global default", True): _GLOBAL_ON,
     ("global default", False): _GLOBAL_OFF,
     ("lane", True): _LANE_ON,
