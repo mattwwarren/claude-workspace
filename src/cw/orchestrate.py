@@ -324,31 +324,19 @@ def _close_session(
 
 def _parse_pr_merged_event(
     event: OrchestratorEvent,
-    *,
-    warn: bool = False,
 ) -> tuple[str, int] | None:
     """Return ``(repo, pr_number)`` for a well-formed ``pr.merged`` event.
 
-    Quiet: returns ``None`` for an empty ``repo`` or a ``pr_number`` that
-    ``int()`` rejects, accepting exactly what :func:`retire_merged_prs`'s
-    in-lock parse accepts. When requested, it preserves that parse's warning
-    behavior; callers still own cursor advancement.
+    Returns ``None`` for an empty ``repo`` or a ``pr_number`` that ``int()``
+    rejects. The locked retirement loop keeps its own warning behavior.
     """
     repo = str(event.payload.get("repo", ""))
     pr_number_raw = event.payload.get("pr_number", 0)
     try:
         pr_number = int(pr_number_raw)
     except (TypeError, ValueError):
-        if warn:
-            logger.warning(
-                "pr.merged event %s missing valid pr_number: %r",
-                event.id,
-                pr_number_raw,
-            )
         return None
     if not repo:
-        if warn:
-            logger.warning("pr.merged event %s missing repo field", event.id)
         return None
     return repo, pr_number
 
@@ -405,11 +393,24 @@ def retire_merged_prs(
         retired: list[str] = []
 
         for event in events:
-            parsed = _parse_pr_merged_event(event, warn=True)
-            if parsed is None:
+            payload = event.payload
+            repo = str(payload.get("repo", ""))
+            pr_number_raw = payload.get("pr_number", 0)
+            try:
+                pr_number = int(pr_number_raw)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "pr.merged event %s missing valid pr_number: %r",
+                    event.id,
+                    pr_number_raw,
+                )
                 advance_cursor(_RETIREMENT_CONSUMER, event.id)
                 continue
-            repo, pr_number = parsed
+
+            if not repo:
+                logger.warning("pr.merged event %s missing repo field", event.id)
+                advance_cursor(_RETIREMENT_CONSUMER, event.id)
+                continue
 
             # 2-4. Find and retire correlated sessions.
             matches = _sessions_for_pr(dispatch_record, repo, pr_number)
