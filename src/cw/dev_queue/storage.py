@@ -15,6 +15,7 @@ import fcntl
 import json
 from typing import TYPE_CHECKING
 
+from cw._lock_guard import LockRank, lock_guard
 from cw.atomic import atomic_write_text, rotate_backup
 from cw.config import (
     dev_plan_file,
@@ -35,15 +36,20 @@ if TYPE_CHECKING:
 
 @contextlib.contextmanager
 def _lock() -> Iterator[None]:
-    """Acquire an exclusive file lock for the dev queue."""
-    dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
-    fd = _dev_queue_lock_file().open("w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
+    """Acquire an exclusive file lock for the dev queue.
+
+    Rank STATE; lock discipline: ADR-0019.
+    """
+    lock_path = _dev_queue_lock_file()
+    with lock_guard("dev_queue", lock_path, LockRank.STATE):
+        dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
+        fd = lock_path.open("w")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
 
 
 # Public alias for callers that need the dev-queue lock directly (e.g. the
@@ -54,15 +60,20 @@ dev_queue_lock = _lock
 
 @contextlib.contextmanager
 def _plan_lock() -> Iterator[None]:
-    """Acquire an exclusive file lock for the dispatch plan."""
-    dev_plan_file().parent.mkdir(parents=True, exist_ok=True)
-    fd = dev_plan_lock().open("w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
+    """Acquire an exclusive file lock for the dispatch plan.
+
+    Rank STATE; lock discipline: ADR-0019.
+    """
+    lock_path = dev_plan_lock()
+    with lock_guard("dev_queue_plan", lock_path, LockRank.STATE):
+        dev_plan_file().parent.mkdir(parents=True, exist_ok=True)
+        fd = lock_path.open("w")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
 
 
 def plan_path() -> Path:

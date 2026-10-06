@@ -13,7 +13,7 @@ from freezegun import freeze_time
 from cw.cli import main
 from cw.config import load_state, sessions_lock, state_dir
 from cw.dev_queue import save_dev_queue
-from cw.exceptions import SessionsLockReentryError
+from cw.exceptions import CwLockReentrancyError
 from cw.models import CwState, DevQueueStore, SessionStatus
 from cw.session_retention import (
     _SESSION_RETENTION_DAYS,
@@ -195,9 +195,10 @@ class TestPruneSessions:
         assert result.archive_path is None
         assert _archive_files() == []
 
+    @pytest.mark.lock_violations_expected("reentry")
     def test_prune_sessions_holds_sessions_lock(self, tmp_config_dir: Path) -> None:
         """prune_sessions takes sessions_lock itself, so nesting is refused."""
-        with sessions_lock(), pytest.raises(SessionsLockReentryError):
+        with sessions_lock(), pytest.raises(CwLockReentrancyError):
             prune_sessions()
 
     def test_prune_sessions_non_terminal_sessions_never_pruned_regardless_of_age(

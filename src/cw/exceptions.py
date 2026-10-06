@@ -769,24 +769,62 @@ class SprintApplyError(CwError):
         self.applied = applied
 
 
-class SessionsLockReentryError(CwError):
-    """Raised when ``sessions_lock()`` is re-entered on the same thread while
-    already held.
+class CwLockReentrancyError(CwError):
+    """Raised when a guarded state-file lock is re-entered by the thread holding it.
 
-    ``sessions_lock`` is a per-open-fd ``fcntl.flock``, which is not
-    reentrant: a second acquisition on the same thread blocks forever in
-    ``flock()`` against the fd already held by the outer acquisition
-    (GitHub #1228 — the review-recipe act phase transitively re-entering
-    ``reconcile()`` from inside its own locked body). Raising here, guarded
-    by a thread-local flag checked before any second ``flock()`` syscall,
-    converts that hang into a catchable error. Existing callers on the
-    reentrant paths (``_dispatch_auto_fix_ci``, ``_dispatch_address_review``,
-    ``_reconcile_usage_limited``) already catch ``CwError`` / broad
-    ``Exception`` around the call that would otherwise re-enter, so no
-    call-site changes are needed elsewhere.
+    Every lock wrapped in :func:`cw._lock_guard.lock_guard` (ADR-0019) is a
+    per-open-fd ``fcntl.flock``, which is not reentrant: a second acquisition
+    by the same thread opens a fresh fd and blocks forever in ``flock()``
+    against the fd the outer acquisition holds (GitHub #1228, the review-recipe
+    act phase re-entering ``reconcile()`` from inside its own locked body). The
+    guard checks a thread-local held stack before any ``open()`` or ``flock()``
+    syscall and raises this instead, so the hang becomes a catchable error.
+    Callers on the historical reentrant paths (``_dispatch_auto_fix_ci``,
+    ``_dispatch_address_review``, ``_reconcile_usage_limited``) already catch
+    ``CwError`` or broad ``Exception``. Another thread waiting on the same lock
+    is not a re-entry and still blocks. Carries the logical ``lock_name``, the
+    lock ``path`` and ``held``, the thread's held lock names, outermost first.
     """
 
-    __slots__ = ()
+    __slots__ = ("held", "lock_name", "path")
+
+    def __init__(
+        self, message: str, *, lock_name: str, path: Path, held: tuple[str, ...]
+    ) -> None:
+        super().__init__(message)
+        self.lock_name = lock_name
+        self.path = path
+        self.held = held
+
+
+class CwLockOrderError(CwError):
+    """Raised when a guarded lock is acquired against the ADR-0019 hierarchy.
+
+    Locks are ranked ``SESSIONS`` < ``STATE`` < ``LEAF`` and a thread must
+    acquire them in non-decreasing rank; nothing may be acquired while a leaf
+    lock (an event inbox, a session inbox, a history file) is held. Raised by
+    :func:`cw._lock_guard.lock_guard` only when ``CW_LOCK_DEBUG=1`` (the test
+    suite sets it); with the variable unset the guard logs a WARNING and
+    proceeds. Carries ``lock_name``, ``path`` and ``rank_name`` of the lock
+    being acquired and ``held``, the thread's held lock names, outermost first.
+    """
+
+    __slots__ = ("held", "lock_name", "path", "rank_name")
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        lock_name: str,
+        path: Path,
+        rank_name: str,
+        held: tuple[str, ...],
+    ) -> None:
+        super().__init__(message)
+        self.lock_name = lock_name
+        self.path = path
+        self.rank_name = rank_name
+        self.held = held
 
 
 class SessionsLockTimeoutError(CwError):

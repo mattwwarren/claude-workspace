@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import TypeAdapter, ValidationError
 
+from cw._lock_guard import LockRank, lock_guard
 from cw.atomic import atomic_write_text
 from cw.config import focus_file, focus_lock_file, refuse_real_state_write
 from cw.models import FocusEntry
@@ -42,15 +43,20 @@ _STORE_ADAPTER: TypeAdapter[dict[str, FocusEntry]] = TypeAdapter(dict[str, Focus
 
 @contextlib.contextmanager
 def _lock() -> Iterator[None]:
-    """Acquire an exclusive file lock for the focus store."""
-    focus_file().parent.mkdir(parents=True, exist_ok=True)
-    fd = focus_lock_file().open("w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
+    """Acquire an exclusive file lock for the focus store.
+
+    Rank STATE; lock discipline: ADR-0019.
+    """
+    lock_path = focus_lock_file()
+    with lock_guard("focus", lock_path, LockRank.STATE):
+        focus_file().parent.mkdir(parents=True, exist_ok=True)
+        fd = lock_path.open("w")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
 
 
 # Public alias, mirroring ``cw.dev_queue.storage.dev_queue_lock``. Prefer the

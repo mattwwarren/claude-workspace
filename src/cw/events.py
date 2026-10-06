@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pydantic import BaseModel, ValidationError
 
+from cw._lock_guard import LockRank, lock_guard
 from cw.atomic import atomic_write_text
 from cw.config import events_dir, load_orchestrator_config
 from cw.exceptions import CwError
@@ -43,17 +44,18 @@ def _lock_path() -> Path:
 
 @contextlib.contextmanager
 def _inbox_lock() -> Iterator[None]:
-    """Acquire an exclusive file lock for the event inbox."""
-    events_dir().mkdir(parents=True, exist_ok=True)
+    """Acquire an exclusive file lock for the event inbox (rank LEAF, ADR-0019)."""
     lock = _lock_path()
-    fd = lock.open("w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        with contextlib.suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
+    with lock_guard("events_inbox", lock, LockRank.LEAF):
+        events_dir().mkdir(parents=True, exist_ok=True)
+        fd = lock.open("w")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
 
 
 # Event types whose payload carries the closed headless-contract §10.2 stage

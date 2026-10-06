@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from cw._lock_guard import LockRank, lock_guard
 from cw.config import history_dir
 
 _logger = logging.getLogger(__name__)
@@ -56,17 +57,21 @@ def _lock_path(client: str) -> Path:
 
 @contextlib.contextmanager
 def _history_lock(client: str) -> Iterator[None]:
-    """Acquire an exclusive file lock for a client's history."""
-    history_dir().mkdir(parents=True, exist_ok=True)
+    """Acquire an exclusive file lock for a client's history.
+
+    Rank LEAF, keyed per client; lock discipline: ADR-0019.
+    """
     lock = _lock_path(client)
-    fd = lock.open("w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        with contextlib.suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
+    with lock_guard("history", lock, LockRank.LEAF):
+        history_dir().mkdir(parents=True, exist_ok=True)
+        fd = lock.open("w")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
 
 
 def append_event(client: str, event: HistoryEvent) -> None:
