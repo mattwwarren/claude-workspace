@@ -246,16 +246,20 @@ def _fill_session_liveness_attention_next_eligible_at_default(
 def _fill_session_local_liveness_backend_default(session_raw: dict[str, Any]) -> None:
     """Fill LocalLivenessHandle.backend (schema v19, #2369).
 
-    ``"aider"`` matches the model default. The raw payload carries nothing
-    that identifies an opencode handle, so an opencode run still in flight
-    across the upgrade is harvested via git synthesis rather than its JSONL
-    log. A None handle is left untouched. Idempotent.
+    ``"aider"`` matches the model default but, for a handle that predates the
+    field, it is a placeholder, not evidence. The raw payload cannot say which
+    executor launched the process and, once saved, the value is
+    indistinguishable from a genuine aider handle, so this pass does not decide:
+    ``cw.reconcile.local._resolve_harvest_backend`` verifies it at harvest
+    against the worktree's launch logs and the session's spawn stage (#2512).
+    A None handle is left untouched. Idempotent.
     """
     handle = session_raw.get("local_liveness")
     if isinstance(handle, dict) and "backend" not in handle:
         logger.warning(
             "session %s: local_liveness.backend missing during v18->v19 "
-            "migration; defaulting to 'aider' (GitHub #2369)",
+            "migration; recorded as 'aider' (unproven for a handle that "
+            "predates the field; verified at harvest, GitHub #2369, #2512)",
             session_raw.get("id", "<unknown>"),
         )
         handle["backend"] = DEFAULT_LOCAL_LIVENESS_BACKEND
