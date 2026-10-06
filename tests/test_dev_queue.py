@@ -2535,24 +2535,35 @@ class TestPruneTickets:
         assert removed == []
         assert [t.ticket_id for t in load_dev_queue().tasks] == ["TKT-PREC"]
 
-    def test_running_blocked_signoff_never_prunable_even_when_named(
-        self, tmp_dev_queue: Path
-    ) -> None:
-        """Every OCCUPIED_LANE_STATUSES member is refused when named, and is
-        untouched by the default (COMPLETED-only) status set."""
+    @pytest.fixture
+    def occupied_lane_rows(self, tmp_dev_queue: Path) -> list[TicketTask]:
+        """One very old row per OCCUPIED_LANE_STATUSES member, saved to disk."""
         tasks = [
             _aged_task(400, ticket_id=f"TKT-{status.value}", status=status)
             for status in sorted(OCCUPIED_LANE_STATUSES)
         ]
         save_dev_queue(DevQueueStore(tasks=tasks))
+        return tasks
 
-        for status in OCCUPIED_LANE_STATUSES:
-            with pytest.raises(CwError, match=status.value):
-                prune_tickets(frozenset([status]), 1, "genhealth")
+    @pytest.mark.parametrize("status", sorted(OCCUPIED_LANE_STATUSES))
+    def test_occupied_lane_status_refused_when_named(
+        self, occupied_lane_rows: list[TicketTask], status: QueueItemStatus
+    ) -> None:
+        """Naming an OCCUPIED_LANE_STATUSES member is refused with no mutation."""
+        with pytest.raises(CwError, match=status.value):
+            prune_tickets(frozenset([status]), 1, "genhealth")
 
+        assert len(load_dev_queue().tasks) == len(occupied_lane_rows)
+
+    def test_default_status_set_leaves_occupied_lane_rows_untouched(
+        self, occupied_lane_rows: list[TicketTask]
+    ) -> None:
+        """The default (COMPLETED-only) status set never sweeps up occupied-lane
+        rows, however old they are."""
         default_set = frozenset([QueueItemStatus.COMPLETED])
+
         assert prune_tickets(default_set, 1, "genhealth") == []
-        assert len(load_dev_queue().tasks) == len(tasks)
+        assert len(load_dev_queue().tasks) == len(occupied_lane_rows)
 
     def test_disallowed_status_raises_cw_error(self, tmp_dev_queue: Path) -> None:
         """A RUNNING status in the set aborts before any mutation."""
