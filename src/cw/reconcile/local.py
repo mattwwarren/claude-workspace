@@ -62,7 +62,6 @@ from cw.models import (
     CODEX_BACKEND,
     DEFAULT_LANE,
     OCCUPIED_LANE_STATUSES,
-    OPENCODE_BACKEND,
     CodexHarvestOutcome,
     CompletionReason,
     LastResultSource,
@@ -141,6 +140,7 @@ _CODEX_HARVEST_BREADCRUMBS = (
 SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON = "sentinel_stage_mismatch_dead_session"
 
 AIDER_BACKEND: LocalLivenessBackend = "aider"
+OPENCODE_BACKEND: LocalLivenessBackend = "opencode"
 
 
 def _refusal_latch_binds(
