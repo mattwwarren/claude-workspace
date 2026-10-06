@@ -355,6 +355,12 @@ def _config_path(root: Path) -> Path:
             id="string-false",
         ),
         pytest.param("pr:\n  auto_merge:\n", "is not a boolean: None", id="null"),
+        pytest.param(
+            "pr:\n  auto_merge:true\n", "is not a mapping", id="no-space-true"
+        ),
+        pytest.param(
+            "pr:\n  auto_merge:false\n", "is not a mapping", id="no-space-false"
+        ),
         pytest.param(b"pr:\n  auto_merge: \xff\xfe\n", "cannot read", id="bad-utf8"),
     ],
 )
@@ -464,6 +470,8 @@ def test_automerge_allowed_is_fail_closed_wrapper(
         pytest.param("pr:\n  auto_merge: no\n", None, id="no"),
         pytest.param('pr:\n  auto_merge: "false"\n', None, id="quoted"),
         pytest.param("pr:\n  auto_merge: true#x\n", None, id="true-hash-no-space"),
+        pytest.param("pr:\n  auto_merge:true\n", None, id="true-no-space"),
+        pytest.param("pr:\n  auto_merge:false\n", None, id="false-no-space"),
         pytest.param(
             "pr:\n  auto_merge: false\n  auto_merge: true\n", None, id="doubled-token"
         ),

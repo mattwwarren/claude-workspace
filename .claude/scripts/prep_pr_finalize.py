@@ -357,7 +357,7 @@ AUTOMERGE_SECTION = "pr"
 # (no space before `#`) is not a trailing comment and refuses.
 _TRAILING_COMMENT = r"(?:[ ]+#.*)?[ ]*"
 _AUTOMERGE_LINE_RE = re.compile(
-    rf"[ ]+{AUTOMERGE_KEY}:[ ]*"
+    rf"[ ]+{AUTOMERGE_KEY}:[ ]+"
     rf"(?P<value>true|True|TRUE|false|False|FALSE){_TRAILING_COMMENT}"
 )
 _PR_SECTION_RE = re.compile(rf"{AUTOMERGE_SECTION}:{_TRAILING_COMMENT}")
