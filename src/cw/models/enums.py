@@ -188,7 +188,11 @@ class Stage(StrEnum):
 
 
 class LivenessBucket(StrEnum):
-    """RFC 0008 W2 transcript-staleness bucket, latched onto ``Session``.
+    """RFC 0008 W2 staleness bucket, latched onto ``Session``.
+
+    The bucketed age is transcript-mtime age for a surface-backed session, or
+    time since ``started_at`` for an unobservable one with no transcript at all
+    (#2417); ``session.liveness_changed`` names which via ``staleness_source``.
 
     Closed 4-value set: per-stage overrides
     (``OrchestratorConfig.liveness_first_bucket_by_stage``) move the

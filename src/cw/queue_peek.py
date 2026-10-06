@@ -109,6 +109,12 @@ RECOMMEND_BLIND = "PEEK-BLIND"
 # returns before recommend() is called at all, with no numeric thresholds.
 RECOMMEND_AWAITING_OPERATOR = "AWAITING_OPERATOR"
 _AWAITING_OPERATOR_FALLBACK_REASON = "parked, no answer yet"
+# Blind reasons for a matched Session with no Claude ids (#2417); only the
+# handle-less one may claim "never started".
+_BLIND_REASON_NEVER_STARTED = "blind — never started"
+_BLIND_REASON_LOCAL_HANDLE = (
+    "blind — no Claude transcript (local process handle present)"
+)
 _SIGNAL_SOURCE_BLIND = "blind"
 _SIGNAL_SOURCE_TRANSCRIPT = "transcript"
 _SIGNAL_SOURCE_PARKED = "parked"
@@ -133,10 +139,10 @@ def _load_session_refs(session_id: str | None) -> dict[str, Any]:
     """Load session lookup fields from CW_STATE for a cw session id.
 
     Returns a dict with ``claude_session_id``, ``surface_ref``,
-    ``started_at``, and ``worktree_path`` (all may be None), or an empty
-    dict when session_id is absent or no match is found. Reads CW_STATE
-    directly so tests can monkeypatch the path without wiring through the
-    full cw.config stack.
+    ``started_at``, ``worktree_path`` and ``local_liveness`` (all may be
+    None) plus ``matched=True``, or an empty dict when session_id is absent
+    or no match is found (``matched`` separates a null-id row from no row,
+    #2417). Reads CW_STATE directly so tests can monkeypatch the path.
     """
     if not session_id or not CW_STATE.exists():
         return {}
@@ -147,12 +153,28 @@ def _load_session_refs(session_id: str | None) -> dict[str, Any]:
     for sess in data.get("sessions", []):
         if sess.get("id") == session_id:
             return {
+                "matched": True,
                 "claude_session_id": sess.get("claude_session_id"),
                 "surface_ref": sess.get("surface_ref"),
                 "started_at": sess.get("started_at"),
                 "worktree_path": sess.get("worktree_path"),
+                "local_liveness": sess.get("local_liveness"),
             }
     return {}
+
+
+def _is_known_idless_session(refs: dict[str, Any]) -> bool:
+    """True iff *refs* is a matched Session row whose Claude ids are both null.
+
+    No unscoped newest-JSONL or ticket-name heuristic may stand in for its
+    transcript: it would surface an earlier stage's sentinel (#2417). An absent
+    row (``refs == {}``) is unknown state, not this case.
+    """
+    return (
+        bool(refs.get("matched"))
+        and refs.get("claude_session_id") is None
+        and refs.get("surface_ref") is None
+    )
 
 
 def load_claude_session_id(session_id: str | None) -> str | None:
@@ -369,6 +391,10 @@ def find_transcript_for_ticket(
     opencode sessions: if the worktree contains ``.cw/opencode.log``, that
     path is returned directly — opencode sessions have no claude-jsonl
     transcript (#1671 R3).
+
+    A matched Session with both Claude ids null returns None after the opencode
+    check, skipping the degraded and legacy fallbacks (#2417); no Session row
+    keeps the legacy behavior.
     """
     refs = _load_session_refs(session_id)
 
@@ -387,6 +413,9 @@ def find_transcript_for_ticket(
         opencode_log = effective_wt / OPENCODE_LOG_RELATIVE_PATH
         if opencode_log.exists():
             return opencode_log
+
+    if _is_known_idless_session(refs):
+        return None
 
     if effective_wt is not None:
         project_dir = claude_project_dir(effective_wt)
@@ -800,7 +829,10 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
     jsonl_idle_min: float | None = info.get("jsonl_idle_min")
 
     if signal_source == _SIGNAL_SOURCE_BLIND:
-        if jsonl_idle_min is not None:
+        blind_reason: str | None = info.get("blind_reason")
+        if blind_reason is not None:
+            reason = blind_reason
+        elif jsonl_idle_min is not None:
             reason = f"no resolvable transcript; newest jsonl {jsonl_idle_min:.0f}m ago"
         else:
             reason = "no resolvable transcript; none found"
@@ -892,8 +924,8 @@ def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]
         transcript = find_transcript_for_ticket(
             str(t.ticket_id), t.session_id, t.worktree_path
         )
+        refs = _load_session_refs(t.session_id)
         if transcript is not None:
-            refs = _load_session_refs(t.session_id)
             if transcript.name == OPENCODE_LOG_RELATIVE_PATH.name:
                 info: dict[str, Any] = parse_opencode_transcript(
                     transcript, str(t.ticket_id)
@@ -906,6 +938,17 @@ def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]
             info["signal_source"] = _SIGNAL_SOURCE_TRANSCRIPT
             info["jsonl_idle_min"] = None
             info["claim_started_at"] = refs.get("started_at")
+        elif _is_known_idless_session(refs):
+            # No mtime scan either: it would report an earlier stage's idle age.
+            info = {
+                "signal_source": _SIGNAL_SOURCE_BLIND,
+                "jsonl_idle_min": None,
+                "blind_reason": (
+                    _BLIND_REASON_LOCAL_HANDLE
+                    if refs.get("local_liveness")
+                    else _BLIND_REASON_NEVER_STARTED
+                ),
+            }
         else:
             info = {
                 "signal_source": _SIGNAL_SOURCE_BLIND,

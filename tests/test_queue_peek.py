@@ -532,10 +532,38 @@ class TestFindTranscriptForTicketDaemonWorktreePath:
         )
         assert result == jsonl
 
-    def test_daemon_task_no_worktree_path_in_session_uses_heuristic(
+    def test_daemon_task_no_worktree_path_no_session_row_uses_heuristic(
         self, patched_peek: None, tmp_path: Path
     ) -> None:
-        """When both task and session lack worktree_path, falls back to heuristic."""
+        """No matching Session row and no worktree_path: legacy heuristic kept.
+
+        With no row at all the session's ID state is unknown, so the name-based
+        project-dir heuristic still applies (#2417 preserves this behavior).
+        """
+        _write_sessions(queue_peek.CW_STATE, [{"id": "other999"}])
+        proj = queue_peek.CLAUDE_PROJECTS / "-home-cw-dev-504"
+        _make_jsonl(
+            proj,
+            "cccc0000-0000-0000-0000-000000000000",
+            "2026-06-01T10:00:00Z",
+            "/auto-dev 504 --headless",
+        )
+        result = queue_peek.find_transcript_for_ticket(
+            "504", session_id="cafe0000", worktree_path=None
+        )
+        assert result is not None
+        assert result.name == "cccc0000-0000-0000-0000-000000000000.jsonl"
+
+    def test_daemon_task_matched_both_null_session_suppresses_heuristic(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        """A matched Session with both Claude IDs null never borrows a transcript.
+
+        Same fixture as the no-row variant above, but the Session row exists
+        with ``claude_session_id`` and ``surface_ref`` both null: the legacy
+        ticket-name heuristic would attribute another run's transcript to it
+        (#2417), so resolution returns None (the row renders blind).
+        """
         session_id = "cafe0000"
         _write_sessions(
             queue_peek.CW_STATE,
@@ -548,11 +576,12 @@ class TestFindTranscriptForTicketDaemonWorktreePath:
             "2026-06-01T10:00:00Z",
             "/auto-dev 504 --headless",
         )
-        result = queue_peek.find_transcript_for_ticket(
-            "504", session_id=session_id, worktree_path=None
+        assert (
+            queue_peek.find_transcript_for_ticket(
+                "504", session_id=session_id, worktree_path=None
+            )
+            is None
         )
-        assert result is not None
-        assert result.name == "cccc0000-0000-0000-0000-000000000000.jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -616,6 +645,18 @@ class TestLoadSessionRefs:
         assert refs["surface_ref"] == "abc12345"
         assert refs["started_at"] == "2026-06-21T00:00:00+00:00"
         assert refs["worktree_path"] == wt
+        assert refs["matched"] is True
+        assert refs["local_liveness"] is None
+
+    def test_exposes_local_liveness_handle(self, patched_peek: None) -> None:
+        handle = {"pid": 4242, "start_time_ns": 7, "backend": "codex"}
+        _write_sessions(
+            queue_peek.CW_STATE,
+            [{"id": "abc12345", "local_liveness": handle}],
+        )
+        refs = queue_peek._load_session_refs("abc12345")
+        assert refs["matched"] is True
+        assert refs["local_liveness"] == handle
 
     def test_returns_empty_dict_when_not_found(
         self, patched_peek: None, tmp_path: Path
@@ -3106,3 +3147,227 @@ def test_build_peek_rows_uses_opencode_parser(
     assert len(rows) == 1
     assert rows[0]["signal_source"] == "transcript"
     assert rows[0]["status"] == "blocked"
+
+
+# ---------------------------------------------------------------------------
+# #2417: a matched Session with both Claude IDs null is blind, never a
+# borrowed transcript from an earlier stage in a reused worktree
+# ---------------------------------------------------------------------------
+
+_BLIND_NEVER_STARTED = "blind \u2014 never started"
+_BLIND_WITH_HANDLE = "blind \u2014 no Claude transcript (local process handle present)"
+_IDLESS_SESSION_ID = "dead0417"
+
+
+def _prior_stage_transcript(worktree: Path) -> Path:
+    """Write the previous implementation stage's transcript for *worktree*.
+
+    It carries a ``stage_complete`` sentinel: if queue peek wrongly selects it
+    for the current review session, the row would show that stage/status.
+    """
+    from cw._util import claude_project_dir
+
+    proj = claude_project_dir(worktree)
+    proj.mkdir(parents=True, exist_ok=True)
+    path = proj / "11110000-0000-0000-0000-000000000000.jsonl"
+    text = _sentinel_text(
+        _sentinel_payload(ticket_id="T-1", status="stage_complete", stage="stage2_impl")
+    )
+    _make_transcript(
+        path,
+        [
+            {
+                "type": "user",
+                "timestamp": "2026-06-20T10:00:00Z",
+                "message": {"content": "/auto-dev T-1 --headless"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-06-20T10:30:00Z",
+                "message": {"content": [{"type": "text", "text": text}]},
+            },
+        ],
+    )
+    return path
+
+
+def _write_idless_session(
+    worktree: Path, *, local_liveness: dict[str, Any] | None = None
+) -> None:
+    row: dict[str, Any] = {
+        "id": _IDLESS_SESSION_ID,
+        "claude_session_id": None,
+        "surface_ref": None,
+        "started_at": "2026-06-20T11:00:00+00:00",
+        "worktree_path": str(worktree),
+    }
+    if local_liveness is not None:
+        row["local_liveness"] = local_liveness
+    _write_sessions(queue_peek.CW_STATE, [row])
+
+
+def _peek_idless_row(worktree: Path) -> dict[str, Any]:
+    task = _make_ticket_task("T-1", session_id=_IDLESS_SESSION_ID, stage=Stage.REVIEW)
+    with patch("cw.queue_peek.load_attention_tasks", return_value=[task]):
+        rows = queue_peek.build_peek_rows(None, _NOW)
+    assert len(rows) == 1
+    return rows[0]
+
+
+class TestIdlessSessionBlind:
+    def test_prior_stage_transcript_is_not_attributed_without_handle(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        worktree = tmp_path / ".cw" / "wt" / "abc" / "dev-1"
+        worktree.mkdir(parents=True)
+        prior = _prior_stage_transcript(worktree)
+        # Precondition: the old sentinel is genuinely parseable, so a wrong
+        # selection would be visible in the row.
+        assert (
+            queue_peek.parse_transcript(prior)["last_sentinel_status"]
+            == "stage_complete"
+        )
+        _write_idless_session(worktree)
+
+        row = _peek_idless_row(worktree)
+
+        assert row["recommend"] == "PEEK-BLIND"
+        assert row["signal_source"] == "blind"
+        assert row["stage"] is None
+        assert row["status"] is None
+        assert row["age_min"] is None
+        assert row["idle_min"] is None
+        assert row["jsonl_idle_min"] is None
+        assert row["reason"] == _BLIND_NEVER_STARTED
+        assert "newest jsonl" not in row["reason"]
+        assert not row["recommend"].startswith("STOP")
+
+    def test_local_handle_stays_blind_without_claiming_never_started(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        worktree = tmp_path / ".cw" / "wt" / "abc" / "dev-1"
+        worktree.mkdir(parents=True)
+        _prior_stage_transcript(worktree)
+        _write_idless_session(
+            worktree,
+            local_liveness={"pid": 4242, "start_time_ns": 7, "backend": "codex"},
+        )
+
+        row = _peek_idless_row(worktree)
+
+        assert row["recommend"] == "PEEK-BLIND"
+        assert row["stage"] is None
+        assert row["status"] is None
+        assert row["jsonl_idle_min"] is None
+        assert row["reason"] == _BLIND_WITH_HANDLE
+        assert "never started" not in row["reason"]
+
+    def test_known_idless_session_skips_jsonl_idle_scan(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        worktree = tmp_path / ".cw" / "wt" / "abc" / "dev-1"
+        worktree.mkdir(parents=True)
+        _write_idless_session(worktree)
+        with patch("cw.queue_peek._compute_jsonl_idle_min") as scan:
+            row = _peek_idless_row(worktree)
+        scan.assert_not_called()
+        assert row["jsonl_idle_min"] is None
+
+    def test_no_session_row_keeps_legacy_blind_idle_scan(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        """No matching Session row: ordinary blind row with the mtime scan."""
+        task = _make_ticket_task("999", session_id="nomatch1")
+        with (
+            patch("cw.queue_peek.load_attention_tasks", return_value=[task]),
+            patch("cw.queue_peek.find_transcript_for_ticket", return_value=None),
+            patch("cw.queue_peek._compute_jsonl_idle_min", return_value=5.0),
+        ):
+            rows = queue_peek.build_peek_rows(None, _NOW)
+        assert rows[0]["jsonl_idle_min"] == 5.0
+        assert rows[0]["reason"] == "no resolvable transcript; newest jsonl 5m ago"
+
+    def test_exact_csid_match_still_resolves(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        from cw._util import claude_project_dir
+
+        worktree = tmp_path / ".cw" / "wt" / "abc" / "dev-1"
+        worktree.mkdir(parents=True)
+        prior = _prior_stage_transcript(worktree)
+        csid = prior.stem
+        _write_sessions(
+            queue_peek.CW_STATE,
+            [
+                {
+                    "id": _IDLESS_SESSION_ID,
+                    "claude_session_id": csid,
+                    "surface_ref": None,
+                    "started_at": "2000-01-01T00:00:00+00:00",
+                    "worktree_path": str(worktree),
+                }
+            ],
+        )
+        assert prior.parent == claude_project_dir(worktree)
+
+        row = _peek_idless_row(worktree)
+
+        assert row["signal_source"] == "transcript"
+        assert row["status"] == "stage_complete"
+
+    def test_surface_ref_only_match_still_resolves(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        from cw._util import claude_project_dir
+
+        worktree = tmp_path / ".cw" / "wt" / "abc" / "dev-1"
+        worktree.mkdir(parents=True)
+        proj = claude_project_dir(worktree)
+        proj.mkdir(parents=True, exist_ok=True)
+        jsonl = proj / "beef0417-0000-0000-0000-000000000000.jsonl"
+        jsonl.write_text("")
+        _write_sessions(
+            queue_peek.CW_STATE,
+            [
+                {
+                    "id": _IDLESS_SESSION_ID,
+                    "claude_session_id": None,
+                    "surface_ref": "beef0417",
+                    "started_at": "2000-01-01T00:00:00+00:00",
+                    "worktree_path": str(worktree),
+                }
+            ],
+        )
+        assert (
+            queue_peek.find_transcript_for_ticket(
+                "T-1", session_id=_IDLESS_SESSION_ID, worktree_path=None
+            )
+            == jsonl
+        )
+
+    def test_opencode_log_still_resolves_for_idless_session(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        from cw.opencode_runner import make_blocked
+
+        worktree = tmp_path / "wt-opencode-idless"
+        worktree.mkdir()
+        blocked = make_blocked(ticket_id="T-1", worktree=worktree, reason="test")
+        text = f"<<<AUTO_DEV_RESULT\n{blocked.model_dump_json()}\nAUTO_DEV_RESULT>>>"
+        _write_opencode_log(worktree, [{"type": "text", "part": {"text": text}}])
+        _write_idless_session(worktree)
+
+        row = _peek_idless_row(worktree)
+
+        assert row["signal_source"] == "transcript"
+        assert row["status"] == "blocked"
+
+    def test_format_row_blind_reason_overrides_default_wording(self) -> None:
+        info: dict[str, Any] = {
+            "signal_source": "blind",
+            "jsonl_idle_min": None,
+            "blind_reason": _BLIND_NEVER_STARTED,
+        }
+        row = queue_peek.format_row(_make_ticket_task(), info, _NOW)
+        assert row["reason"] == _BLIND_NEVER_STARTED
+        assert row["recommend"] == "PEEK-BLIND"

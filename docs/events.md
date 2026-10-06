@@ -807,8 +807,15 @@ open enum; consumers MUST tolerate unknown values. Known values:
   bucket with no sentinel emitted and no pending subagent at the transcript
   tail. Edge-triggered per bucket crossing, fires a push notification, and
   mutates nothing — the session keeps running; the operator decides.
-  `breadcrumbs` carries stale minutes, stage, and elapsed seconds.
-  **Suppressed** (#2135) when the session's ticket task is `BLOCKED_ON_USER`
+  `breadcrumbs` carries stale minutes, stage, and elapsed seconds. For a
+  session with no surface, Claude session id, transcript, or local liveness
+  handle (#2417), the page carries `staleness_source: "session_age"` and the
+  breadcrumb reads `session age <N>m at stage <stage>; elapsed <S>s; no
+  surface, no Claude session id, no transcript, no local liveness handle
+  (unobservable — never started or unmonitorable); no sentinel; session left
+  running` instead of `transcript flat ...`. The worktree-scoped spawn-stamp
+  and transcript-tail checks are skipped for it, so only this reason is
+  reachable. **Suppressed** (#2135) when the session's ticket task is `BLOCKED_ON_USER`
   with `disposition="stopped_without_sentinel"` and that task's `session_id`
   is this session's — a state only reachable once an operator has armed
   `park_on_abandoned_exit_enabled`. That row already paged via its own
@@ -1438,7 +1445,8 @@ Consumers that need to correlate a `ticket.*` event to a ticket must read
   "stage": "harden | plan | impl | review | finalize",
   "old_bucket": "live | stale_15m | stale_30m | stale_45m",
   "new_bucket": "live | stale_15m | stale_30m | stale_45m",
-  "stale_minutes": "<float>"
+  "stale_minutes": "<float>",
+  "staleness_source": "transcript | session_age"
 }
 ```
 **Semantics:** Emitted whenever a live DAEMON session's
@@ -1456,6 +1464,24 @@ already emitted a sentinel this tick can still cross a staleness bucket
 before its task routes. A session whose transcript cannot be located is
 skipped for the tick (fail-open; no bucket assigned without positive
 staleness evidence).
+
+**One exception to that gate (#2417).** A DAEMON session in a live status with
+no `surface_ref`, no `claude_session_id`, no `local_liveness` handle, and a
+purpose other than `ORCHESTRATE` has no transcript to locate, and used to be
+skipped indefinitely (reading as `live` while holding its lane slot). It is
+now classified by its age since `started_at` through the same ladder and the
+same per-stage floor (REVIEW defaults to 15 minutes, so that floor is the
+grace period; no new setting). The transcript-age helpers, including the
+sibling-transcript glob, are never consulted for it, so another worker's
+`*.jsonl` in a reused worktree cannot make it look alive. Elapsed age is
+evidence of unobservability, not proof of death, and the act stays
+signal-only. A session with a `local_liveness` handle stays with the local
+process-liveness path and is not classified here.
+
+`staleness_source` (additive; also on `session.needs_attention` from this
+sweep) says what `stale_minutes` measures: `transcript` for transcript-mtime
+age (every pre-#2417 emission), `session_age` for minutes since `started_at`.
+Consumers MUST tolerate unknown values.
 
 `stage` is resolved via the owning `TicketTask.stage` (looked up through
 `task_by_ticket`), **not** `Session.stage` (RFC 0005 A1, dormant). `stage`
@@ -1485,7 +1511,8 @@ p99 gap so normal idling doesn't cross into `stale_15m`.
 
 `stale_minutes` mirrors the existing `elapsed_seconds` convention (float,
 not integer) used elsewhere in this file, derived from
-`_transcript_age_seconds` divided by 60.
+`_transcript_age_seconds` divided by 60 (or, when `staleness_source` is
+`session_age`, from the seconds since `started_at`).
 
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 
