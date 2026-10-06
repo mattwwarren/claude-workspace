@@ -30,6 +30,9 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING
 
+import yaml
+from pydantic import ValidationError
+
 from cw.config import load_orchestrator_config, load_state, save_state, sessions_lock
 from cw.dev_queue import dev_queue_lock, save_dev_queue, transition_task_status
 from cw.dispatch import TICK_STALE_SECONDS, _stale_pending_clients
@@ -38,6 +41,7 @@ from cw.dispatch_state import load_executor_blocked_markers
 from cw.doctor import _deps
 from cw.doctor._shared import CheckResult
 from cw.events import read_events, record_event
+from cw.exceptions import CwError
 from cw.gh import (
     TIMED_OUT_MERGED_LOOKBACK_DAYS,
     pr_is_merged_for_ticket,
@@ -46,6 +50,7 @@ from cw.gh import (
 from cw.models import (
     CompletionReason,
     DispatchSkipReason,
+    OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
     SessionOrigin,
@@ -227,7 +232,12 @@ def _check_timed_out_merged(
     results: list[CheckResult] = []
     gh_missing = False
 
-    orchestrator_config = load_orchestrator_config()
+    try:
+        orchestrator_config = load_orchestrator_config()
+    except (OSError, yaml.YAMLError, CwError, ValidationError):
+        # Read-only, warn-only checks: fall back to defaults. A bad
+        # orchestrator.yaml is already reported by _check_orchestrator_config.
+        orchestrator_config = OrchestratorConfig()
     task_by_ticket: dict[tuple[str, str], TicketTask] = {
         (t.client, t.ticket_id): t for t in _deps.load_dev_queue().tasks
     }

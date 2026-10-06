@@ -573,8 +573,14 @@ def _check_wedge_active_daemon_stale_no_sentinel(
     exclusion -- a long-lived interactive orchestrator session must never be
     mistaken for a stuck plain spawn.
     """
+    try:
+        config = load_orchestrator_config()
+    except (OSError, yaml.YAMLError, CwError, ValidationError):
+        # Skip rather than detect with default thresholds: these findings feed
+        # `cw doctor --reap`, and the operator's real thresholds are unreadable.
+        # The failed orchestrator.yaml check already reports the cause.
+        return []
     native_live = get_native_daemon_client().list_live_session_short_ids()
-    config = load_orchestrator_config()
     deadline_seconds = config.fix_loop_await_deadline_minutes * 60
     task_by_ticket = {t.ticket_id: t for t in queue.tasks}
     now = datetime.now(UTC)
