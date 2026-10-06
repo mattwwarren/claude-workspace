@@ -22,6 +22,7 @@ from cw.doctor import (
     run_doctor,
 )
 from tests._clients_yaml import review_backend_clients, write_clients_yaml
+from tests._invalid_utf8 import INVALID_UTF8
 from tests._reconcile_helpers import (
     _install_fake_daemon_roster,
     _stamp_transcript_age,
@@ -1509,6 +1510,66 @@ class TestCheckOrchestratorConfigLoaderFailure:
         assert result.ok is False
         assert "parse failed" in result.detail
         assert error_msg in result.detail
+
+
+class TestRunDoctorInvalidUtf8Config:
+    """An invalid-UTF-8 config file is reported, not a traceback (#2554)."""
+
+    @pytest.mark.parametrize("check_name", ["orchestrator.yaml", "clients.yaml"])
+    def test_run_doctor_reports_failed_check_and_completes(
+        self,
+        check_name: str,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        from cw.config import clients_file, orchestrator_config_file
+
+        _stub_claude_version_ok(monkeypatch)
+        target = (
+            orchestrator_config_file()
+            if check_name == "orchestrator.yaml"
+            else clients_file()
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(INVALID_UTF8)
+
+        report = run_doctor()
+
+        check = next(c for c in report.checks if c.name == check_name)
+        assert check.ok is False
+        assert "parse failed" in check.detail
+        assert "not valid UTF-8" in check.detail
+        assert "s3cr3t-marker" not in check.detail
+        assert "0xff" not in check.detail
+        assert report.ok is False
+        names = {c.name for c in report.checks}
+        assert {
+            "sessions.json",
+            "dev_queue.json",
+            "inbox-size",
+            "sessions-size",
+            "claude-version",
+            "codex-capability",
+        } <= names
+        assert report.wedge_findings == []
+
+    def test_cli_doctor_invalid_utf8_orchestrator_fails_without_traceback(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        from cw.config import orchestrator_config_file
+
+        _stub_claude_version_ok(monkeypatch)
+        orchestrator_config_file().parent.mkdir(parents=True, exist_ok=True)
+        orchestrator_config_file().write_bytes(INVALID_UTF8)
+
+        result = CliRunner().invoke(main, ["doctor"])
+
+        assert result.exit_code == 1
+        assert "orchestrator.yaml" in result.output
+        assert "FAIL" in result.output
+        assert "not valid UTF-8" in result.output
+        assert "Traceback" not in result.output
+        assert not isinstance(result.exception, UnicodeDecodeError)
 
 
 class TestCheckDevQueueLoaderFailure:
@@ -4647,6 +4708,45 @@ class TestCheckProjectConfigs:
         names = [c.name for c in report.checks]
         assert "agent-spec-drift/client-a" in names
 
+    def test_run_doctor_includes_codex_fix_loop_checks(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        from cw.config import orchestrator_config_file
+        from cw.models import (
+            CODEX_BACKEND,
+            ClientConfig,
+            Stage,
+            StageExecutorConfig,
+            StagePipelineConfig,
+        )
+
+        _stub_claude_version_ok(monkeypatch)
+        pipeline = StagePipelineConfig(
+            executors={Stage.REVIEW: StageExecutorConfig(backend=CODEX_BACKEND)}
+        )
+        client = ClientConfig(
+            name="client-a", workspace_path=tmp_path, pipeline=pipeline
+        )
+        monkeypatch.setattr(
+            "cw.doctor._deps.load_clients", lambda: {"client-a": client}
+        )
+        orchestrator_config_file().parent.mkdir(parents=True, exist_ok=True)
+        orchestrator_config_file().write_text(
+            "default_codex_fix_loop_enabled: true\n", encoding="utf-8"
+        )
+
+        report = run_doctor()
+
+        (check,) = [c for c in report.checks if c.name.startswith("codex-fix-loop")]
+        assert check.name == "codex-fix-loop/client-a/default"
+        assert check.ok is True
+        assert check.warn is True
+        assert report.ok is True
+        assert report.clean is False
+
     def test_gh_on_path_true_when_which_resolves(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -6985,6 +7085,81 @@ class TestWedgeActiveDaemonStaleNoSentinel:
 
         state = load_state()
         updated = next(s for s in state.sessions if s.id == "degraded-sess-1")
+        assert updated.status == SessionStatus.ACTIVE
+
+    def _seed_stuck_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Seed the #2078 stuck-session shape (stale transcript, RUNNING row)."""
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
+
+        home, _daemon = self._setup_common(tmp_path, monkeypatch)
+        worktree = tmp_path / "wt"
+        self._stamp_transcript(home, worktree, stale_minutes=50)
+        sess = self._make_session(tmp_path, worktree, sid="stuck-sess-1")
+        save_state(CwState(sessions=[sess]))
+        task = _make_ticket_task(
+            ticket_id="stuck-sess-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="stuck-sess-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+    def test_detector_skips_when_orchestrator_yaml_unreadable(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An unreadable orchestrator.yaml skips detection (#2554).
+
+        These findings feed ``cw doctor --reap``, so the detector must not fall
+        back to default thresholds the operator did not set.
+        """
+        from cw.config import load_state
+        from cw.dev_queue import load_dev_queue
+        from cw.doctor.wedge import _check_wedge_active_daemon_stale_no_sentinel
+        from cw.exceptions import ConfigValidationError
+
+        self._seed_stuck_session(tmp_path, monkeypatch)
+
+        control = _check_wedge_active_daemon_stale_no_sentinel(
+            load_state(), load_dev_queue()
+        )
+        assert len(control) == 1
+
+        def boom() -> object:
+            msg = "x"
+            raise ConfigValidationError(msg)
+
+        monkeypatch.setattr("cw.doctor.wedge.load_orchestrator_config", boom)
+        assert (
+            _check_wedge_active_daemon_stale_no_sentinel(load_state(), load_dev_queue())
+            == []
+        )
+
+    def test_run_doctor_reap_with_unreadable_orchestrator_yaml_reaps_nothing(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--reap with an invalid-UTF-8 orchestrator.yaml reaps nothing (#2554)."""
+        from cw.config import load_state, orchestrator_config_file
+        from cw.models import SessionStatus
+
+        _stub_claude_version_ok(monkeypatch)
+        self._seed_stuck_session(tmp_path, monkeypatch)
+        orchestrator_config_file().parent.mkdir(parents=True, exist_ok=True)
+        orchestrator_config_file().write_bytes(INVALID_UTF8)
+
+        report = run_doctor(reap=True)
+
+        assert report.wedge_findings == []
+        updated = next(s for s in load_state().sessions if s.id == "stuck-sess-1")
         assert updated.status == SessionStatus.ACTIVE
 
     def test_reap_audit_event_names_the_wedge_class(

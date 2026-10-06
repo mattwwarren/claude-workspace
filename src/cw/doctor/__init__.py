@@ -29,6 +29,8 @@ re-exports. Submodules:
   ``~/.claude`` drift detection.
 - ``agent_spec_drift`` — per-client reviewer agent-spec resolution (repo /
   global fallback / absent) drift detection.
+- ``codex_fix_loop`` — per-lane effective codex fix-loop state and its source
+  (lane vs global default) for lanes with a codex review executor (#2542).
 - ``user_level_hooks`` — detection of a ``cw signal-stop`` Stop hook installed
   in ``~/.claude/settings{,.local}.json``, where it applies to every Claude
   session instead of just cw's worktrees (#2226).
@@ -40,6 +42,7 @@ from __future__ import annotations
 
 from cw.doctor._shared import CheckResult, DoctorReport, WedgeFinding
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
+from cw.doctor.codex_fix_loop import _check_codex_fix_loop
 from cw.doctor.config_checks import (
     _check_attention_state_census,
     _check_config_file,
@@ -104,6 +107,7 @@ __all__ = [
     "_check_attention_state_census",
     "_check_claude_version",
     "_check_codex_capability",
+    "_check_codex_fix_loop",
     "_check_config_file",
     "_check_cross_repo_rows",
     "_check_cw_deps",

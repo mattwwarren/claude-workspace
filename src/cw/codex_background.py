@@ -30,7 +30,7 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from cw._git import capture_head_sha
 from cw.atomic import atomic_write_text
@@ -250,9 +250,19 @@ def join_outstanding_codex_threads(timeout_seconds: float | None = None) -> int:
         return sum(1 for thread in _outstanding if thread.is_alive())
 
 
-def _resolve_codex_fix_loop_enabled(
+CodexFixLoopSource = Literal["lane", "global default"]
+
+
+class CodexFixLoopResolution(NamedTuple):
+    """The resolved fix-loop gate and which precedence level decided it (#2542)."""
+
+    enabled: bool
+    source: CodexFixLoopSource
+
+
+def _resolve_codex_fix_loop(
     client: ClientConfig, task: TicketTask, config: OrchestratorConfig
-) -> bool:
+) -> CodexFixLoopResolution:
     """Resolve the effective codex_fix_loop_enabled gate for *task* (#1553).
 
     Precedence (highest to lowest):
@@ -263,12 +273,22 @@ def _resolve_codex_fix_loop_enabled(
 
     A task whose lane name is not declared in the client's lanes falls
     through to the global default. Mirrors resolve_reap_policy's lane-then-
-    global fallthrough shape (cw.reconcile._shared).
+    global fallthrough shape (cw.reconcile._shared). The ``source`` names the
+    winning level; ``cw doctor`` reads it (#2542).
     """
     for lane_cfg in client.effective_lanes:
         if lane_cfg.name == task.lane and lane_cfg.codex_fix_loop_enabled is not None:
-            return lane_cfg.codex_fix_loop_enabled
-    return config.default_codex_fix_loop_enabled
+            return CodexFixLoopResolution(lane_cfg.codex_fix_loop_enabled, "lane")
+    return CodexFixLoopResolution(
+        config.default_codex_fix_loop_enabled, "global default"
+    )
+
+
+def _resolve_codex_fix_loop_enabled(
+    client: ClientConfig, task: TicketTask, config: OrchestratorConfig
+) -> bool:
+    """Bool gate for runtime callers; precedence lives in _resolve_codex_fix_loop."""
+    return _resolve_codex_fix_loop(client, task, config).enabled
 
 
 #: The hardcoded-off floor for the codex review tiers (#2210), the shape of

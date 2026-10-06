@@ -452,7 +452,8 @@ class ConfigValidationError(CwError):
     instead of reaching across the pydantic import boundary. The message
     names the offending file and, via the wrapped pydantic error text, the
     specific field/key that failed -- e.g. an ``extra="forbid"`` rejection of
-    a typo'd config key.
+    a typo'd config key. It is also raised when either file is not valid
+    UTF-8, with a fixed message that never includes file bytes (#2554).
     """
 
     __slots__ = ()

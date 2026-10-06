@@ -19,6 +19,7 @@ from cw import __version__
 from cw.doctor import _deps
 from cw.doctor._shared import DoctorReport, WedgeFinding
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
+from cw.doctor.codex_fix_loop import _check_codex_fix_loop
 from cw.doctor.config_checks import (
     _check_attention_state_census,
     _check_config_file,
@@ -130,6 +131,7 @@ def run_doctor(
     report.checks.extend(_check_project_configs(_clients))
     report.checks.extend(_check_review_strategy(_clients))
     report.checks.extend(_check_agent_spec_drift(_clients))
+    report.checks.extend(_check_codex_fix_loop(_clients))
     state_check, link_state = _check_state_file()
     report.checks.append(state_check)
     report.checks.append(_check_dev_queue())
