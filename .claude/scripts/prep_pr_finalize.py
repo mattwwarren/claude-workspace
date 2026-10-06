@@ -36,11 +36,12 @@ Subcommands:
                             .claude/project-config.yaml's pr.auto_merge
                             permits `gh pr merge --auto`: exit 0 allowed, 1
                             explicit pr.auto_merge: false, 2 undeterminable
-                            (fail closed, #2581). The shared seam every
-                            markdown arm site (ship-it.md,
-                            auto-dev-finalize.md, review-monitor.md,
-                            cw-session-watch/SKILL.md) shells out to
-                            before arming auto-merge (#2046).
+                            (fail closed, #2581). The pr.auto_merge seam
+                            ship-it.md and auto-dev-finalize.md shell out
+                            to before arming auto-merge (#2046);
+                            review-monitor.md and cw-session-watch/SKILL.md
+                            call arm-automerge directly, which consults
+                            the same seam.
 
 Exit codes:
   0  all checks passed (arm-automerge: armed, or the PR is already MERGED)
@@ -110,6 +111,9 @@ logger = logging.getLogger(__name__)
 PROTECTED_BRANCHES = {"main", "master"}
 MONITOR_SCRIPT = review_monitor_script_path()
 PROJECT_CONFIG_PATH = Path(".claude") / "project-config.yaml"
+# The pr.auto_merge key path in project-config.yaml (#2046).
+AUTOMERGE_SECTION = "pr"
+AUTOMERGE_KEY = "auto_merge"
 # gh `state` of a merged PR. Kept local (not imported from cw.gh) because this
 # script runs under the shebang interpreter, where `cw` is not importable; a
 # test pins it to cw.gh._GH_PR_STATE_MERGED so the two cannot drift.
@@ -344,15 +348,13 @@ def resolve_project_config_auto_merge(
         return None
     if not isinstance(raw, dict):
         return None
-    pr_block = raw.get("pr")
+    pr_block = raw.get(AUTOMERGE_SECTION)
     if not isinstance(pr_block, dict):
         return None
-    auto_merge = pr_block.get("auto_merge")
+    auto_merge = pr_block.get(AUTOMERGE_KEY)
     return auto_merge if isinstance(auto_merge, bool) else None
 
 
-AUTOMERGE_KEY = "auto_merge"
-AUTOMERGE_SECTION = "pr"
 # One canonical line shape, read without PyYAML. fullmatch only, so `true#x`
 # (no space before `#`) is not a trailing comment and refuses.
 _TRAILING_COMMENT = r"(?:[ ]+#.*)?[ ]*"
@@ -464,8 +466,10 @@ def automerge_allowed(config_path: Path = PROJECT_CONFIG_PATH) -> bool:
     """True unless pr.auto_merge is explicitly false or cannot be determined.
 
     Fail closed for an existing config (#2581); a missing config file is
-    allowed. Thin wrapper over read_automerge_gate; the markdown arm sites
-    reach the same verdict through check-automerge-allowed (#2046).
+    allowed. Thin wrapper over read_automerge_gate; ship-it.md and
+    auto-dev-finalize.md reach the same verdict through check-automerge-allowed
+    (#2046), and review-monitor.md and cw-session-watch/SKILL.md through
+    arm-automerge, which consults the same seam.
     """
     return read_automerge_gate(config_path).allowed
 
@@ -869,14 +873,15 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 1 if failed_required else 0
 
 
-def _arm_invocation_error(message: str) -> int:
+def _invocation_error(message: str) -> int:
+    """Write ``ERROR: <message>`` to stderr and return exit 2 (invocation error)."""
     sys.stderr.write(f"ERROR: {message}\n")
     return 2
 
 
 def _refuse_undeterminable(reason: str) -> int:
     """Exit 2 for a config whose pr.auto_merge cannot be determined (#2581)."""
-    return _arm_invocation_error(UNDETERMINABLE_TEMPLATE.format(reason=reason))
+    return _invocation_error(UNDETERMINABLE_TEMPLATE.format(reason=reason))
 
 
 def _git_toplevel(path: Path) -> Path | None:
@@ -901,10 +906,11 @@ def _normalize_repo_path(repo_path: Path) -> tuple[Path | None, str]:
 def cmd_check_automerge_allowed(args: argparse.Namespace) -> int:
     """Print "true"/"false" for whether pr.auto_merge permits `gh pr merge --auto`.
 
-    The shared seam every markdown arm site shells out to before its own
-    `gh pr merge --auto` call, so .claude/project-config.yaml is read once,
-    not independently by each of ship-it.md, auto-dev-finalize.md,
-    review-monitor.md, and cw-session-watch/SKILL.md (#2046). Exit 0 +
+    The seam ship-it.md and auto-dev-finalize.md shell out to before arming
+    auto-merge, so .claude/project-config.yaml is read once, not
+    independently by each (#2046); review-monitor.md and
+    cw-session-watch/SKILL.md call arm-automerge directly, which consults
+    the same seam. Exit 0 +
     "true" means arming is allowed; exit 1 + "false" means an explicit
     pr.auto_merge: false disallows it and the caller must skip the arm and
     leave the PR open. Exit 2 means an existing config's pr.auto_merge cannot
@@ -916,7 +922,7 @@ def cmd_check_automerge_allowed(args: argparse.Namespace) -> int:
     if args.repo_path is not None:
         root, error = _normalize_repo_path(args.repo_path)
         if root is None:
-            return _arm_invocation_error(error)
+            return _invocation_error(error)
         config_path = root / PROJECT_CONFIG_PATH
     gate = read_automerge_gate(config_path)
     print("true" if gate.allowed else "false")
@@ -959,14 +965,14 @@ def cmd_arm_automerge(args: argparse.Namespace) -> int:
     zero gh calls and exits 2 with no JSON (fail closed, #2581).
     """
     if not shutil.which("gh"):
-        return _arm_invocation_error("`gh` CLI not found on PATH")
+        return _invocation_error("`gh` CLI not found on PATH")
     if args.attempts < 1:
-        return _arm_invocation_error("--attempts must be >= 1")
+        return _invocation_error("--attempts must be >= 1")
     if args.backoff_seconds < 0:
-        return _arm_invocation_error("--backoff-seconds must be >= 0")
+        return _invocation_error("--backoff-seconds must be >= 0")
     repo_path, error = _resolve_arm_repo_path(args.repo_path)
     if repo_path is None:
-        return _arm_invocation_error(error)
+        return _invocation_error(error)
 
     gate = read_automerge_gate(repo_path / PROJECT_CONFIG_PATH)
     if gate.reason is not None:

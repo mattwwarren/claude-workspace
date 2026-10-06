@@ -334,19 +334,16 @@ two copies can't drift.
 # 3. If gates green, open the PR with auto-merge
 gh pr create --base main --head dev/<ticket>-<slug> \
   --title "<commit subject>" --body "<body>" ${EXTRA_LABEL_ARGS}
-if ~/.claude/scripts/prep_pr_finalize.py check-automerge-allowed; then
-  if gh pr merge <PR#> --squash --auto; then
-    if [ "$(gh pr view <PR#> --json state --jq .state)" = "MERGED" ]; then
-      cw dev-queue remove <ticket> -c <client>
-    else
-      echo "auto-merge armed; PR remains open pending merge"
-    fi
-  else
-    echo "auto-merge arm failed — leaving ticket queued"
-  fi
-else
-  echo "auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR open for manual merge"
-fi
+HEAD_SHA=$(git -C <impl-worktree> rev-parse HEAD)
+ARM_JSON=$(~/.claude/scripts/prep_pr_finalize.py arm-automerge <PR#> --repo-path <impl-worktree> --head-sha "$HEAD_SHA")
+arm_status=$?
+echo "$ARM_JSON"
+case "$arm_status" in
+  0) if [ "$(gh pr view <PR#> --json state --jq .state)" = "MERGED" ]; then cw dev-queue remove <ticket> -c <client>; else echo "auto-merge armed; PR remains open pending merge"; fi ;;
+  3) echo "auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR open for manual merge" ;;
+  1) echo "auto-merge arm failed — leaving ticket queued" ;;
+  *) echo "arm-automerge refused (exit $arm_status): reason on stderr above; NOT arming auto-merge, PR left open (this is not a pr.auto_merge: false opt-out)" ;;
+esac
 ```
 
 This pattern fires whenever the dispatch session is in Stage 3 (reviewers
