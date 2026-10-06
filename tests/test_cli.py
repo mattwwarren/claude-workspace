@@ -11067,6 +11067,113 @@ class TestDevQueueTasksPrState:
         assert "ATTENTION" in result.output
         assert "changes_requested" in result.output
 
+    @staticmethod
+    def _seed_paged_row(
+        *,
+        attention_state: str | None = None,
+        **session_overrides: object,
+    ) -> None:
+        """A RUNNING row owned by a STALE_45M session carrying a page key (#2153)."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import (
+            DevQueueStore,
+            LivenessBucket,
+            PrState,
+            QueueItemStatus,
+            TicketTask,
+        )
+        from tests.conftest import _make_daemon_session, _seed_sessions
+
+        session_kwargs: dict[str, object] = {
+            "id": "dead-1",
+            "liveness_bucket": LivenessBucket.STALE_45M,
+            "liveness_attention_evidence_key": "session_unresponsive|none|running",
+            **session_overrides,
+        }
+        _seed_sessions(_make_daemon_session(**session_kwargs))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-2153",
+                        client="attn-client",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="dead-1",
+                        pr_state=(
+                            PrState(attention_state=attention_state)
+                            if attention_state is not None
+                            else None
+                        ),
+                    )
+                ]
+            )
+        )
+
+    def test_tasks_human_shows_dead_session_paged(self, tmp_config_dir: Path) -> None:
+        self._seed_paged_row()
+
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+
+        assert result.exit_code == 0, result.output
+        assert "dead_session_paged" in result.output
+
+    def test_dead_session_state_wins_over_pr_state(self, tmp_config_dir: Path) -> None:
+        self._seed_paged_row(attention_state="changes_requested")
+
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+
+        assert result.exit_code == 0, result.output
+        assert "dead_session_paged" in result.output
+        assert "changes_requested" not in result.output
+
+    @pytest.mark.parametrize(
+        "session_overrides",
+        [
+            pytest.param({"liveness_attention_evidence_key": None}, id="no-key"),
+            pytest.param({"liveness_bucket": "stale_30m"}, id="stale-30m"),
+            pytest.param({"status": "completed"}, id="completed-session"),
+        ],
+    )
+    def test_falls_back_to_pr_state(
+        self, tmp_config_dir: Path, session_overrides: dict[str, object]
+    ) -> None:
+        self._seed_paged_row(attention_state="changes_requested", **session_overrides)
+
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+
+        assert result.exit_code == 0, result.output
+        assert "dead_session_paged" not in result.output
+        assert "changes_requested" in result.output
+
+    def test_corrupt_state_file_fails_open_to_pr_state(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.config import state_file
+
+        self._seed_paged_row(attention_state="changes_requested")
+        state_file().write_text("{not json")
+
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+
+        assert result.exit_code == 0, result.output
+        assert "changes_requested" in result.output
+        assert "dead_session_paged" not in result.output
+
+    def test_json_and_needs_attn_count_unaffected(self, tmp_config_dir: Path) -> None:
+        import json as _json
+
+        from cw.cli.dev_queue.tasks import _count_needs_attn
+        from cw.dev_queue import load_dev_queue
+
+        self._seed_paged_row()
+
+        result = CliRunner().invoke(main, ["dev-queue", "tasks", "--json"])
+
+        assert result.exit_code == 0, result.output
+        assert "dead_session_paged" not in result.output
+        assert _json.loads(result.output)[0]["pr_state"] is None
+        assert _count_needs_attn(load_dev_queue().tasks) == 0
+
     def test_dev_queue_tasks_human_output_shows_stale_gate_column(
         self, tmp_config_dir: Path
     ) -> None:

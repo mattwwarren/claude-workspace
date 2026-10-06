@@ -15583,3 +15583,62 @@ class TestPlanIsReviewedTrackerAware:
             ws, "tracking:\n  primary:\n    system: github-issues\n"
         )
         assert _tracker_allows_github_fetch(cfg) is True
+
+
+class TestSessionAttentionState:
+    """The ATTENTION cell's dead-session state (#2153)."""
+
+    @staticmethod
+    def _paged_session(**overrides: object) -> Session:
+        from cw.models import LivenessBucket
+
+        kwargs: dict[str, object] = {
+            "id": "dead-1",
+            "liveness_bucket": LivenessBucket.STALE_45M,
+            "liveness_attention_evidence_key": "session_unresponsive|none|running",
+            **overrides,
+        }
+        return _make_daemon_session(**kwargs)
+
+    @staticmethod
+    def _task() -> TicketTask:
+        return _make_ticket_task(status=QueueItemStatus.RUNNING, session_id="dead-1")
+
+    def test_constant_fits_attention_column(self) -> None:
+        from cw.dev_queue import DEAD_SESSION_PAGED_STATE
+
+        assert DEAD_SESSION_PAGED_STATE == "dead_session_paged"
+        assert len(DEAD_SESSION_PAGED_STATE) == 18
+
+    @pytest.mark.parametrize("status", ["active", "idle"])
+    def test_paged_live_session_is_dead_session_paged(self, status: str) -> None:
+        from cw.dev_queue import DEAD_SESSION_PAGED_STATE, session_attention_state
+
+        session = self._paged_session(status=status)
+
+        assert session_attention_state(self._task(), session) == (
+            DEAD_SESSION_PAGED_STATE
+        )
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            pytest.param({"id": "other-session"}, id="session-id-mismatch"),
+            pytest.param({"status": "completed"}, id="completed"),
+            pytest.param({"liveness_bucket": "stale_30m"}, id="stale-30m"),
+            pytest.param({"liveness_attention_evidence_key": None}, id="no-key"),
+        ],
+    )
+    def test_each_false_conjunct_returns_none(
+        self, overrides: dict[str, object]
+    ) -> None:
+        from cw.dev_queue import session_attention_state
+
+        session = self._paged_session(**overrides)
+
+        assert session_attention_state(self._task(), session) is None
+
+    def test_no_session_returns_none(self) -> None:
+        from cw.dev_queue import session_attention_state
+
+        assert session_attention_state(self._task(), None) is None
