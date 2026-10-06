@@ -145,7 +145,7 @@ def _run_terminal_backstops_and_sweeps(
     # session (live or unprovable writer). Unconditional, like the boot pass,
     # but scoped to this tick's clients: never another client's session.
     run_codex_live_writer_reparks(now=now, config=config, clients=clients)
-    run_gate_recipes(now=now, config=config)
+    run_gate_recipes(now=now, config=config, deferred=deferred)
     run_review_recipes(config=config, jobs=deferred)
     run_escalation_sweep(now=now)
     return timed_out_ticket_ids, completed_silent_ticket_ids

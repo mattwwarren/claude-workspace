@@ -26,6 +26,7 @@ from cw.models import (
     Stage,
     TicketTask,
 )
+from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 from cw.reconcile.gate_recipes import (
     RECIPE_AUTO_ADOPT_PLAN,
     RECIPE_AUTO_APPROVE_REVIEW,
@@ -45,6 +46,7 @@ from cw.reconcile.gate_recipes import (
     run_gate_recipes,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests._reconcile_helpers import call_and_drain
 from tests._worktree_helpers import patch_worktree
 from tests.conftest import (
     _make_daemon_session,
@@ -615,8 +617,8 @@ class TestMasterSwitch:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
 
-        recovered = run_gate_recipes(
-            now=_NOW, config=_config(gate_recipes_enabled=False)
+        recovered = call_and_drain(
+            run_gate_recipes, now=_NOW, config=_config(gate_recipes_enabled=False)
         )
 
         assert recovered == []
@@ -657,7 +659,7 @@ class TestPerLaneYamlDisablement:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
 
-        recovered = run_gate_recipes(now=_NOW, config=_config())
+        recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert recovered == []
         store = load_dev_queue()
@@ -699,7 +701,7 @@ class TestPerLaneYamlDisablement:
             )
         )
 
-        recovered = run_gate_recipes(now=_NOW, config=_config())
+        recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert recovered == ["GEN-B"]
 
@@ -717,7 +719,7 @@ class TestRunApprove:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
 
-        recovered = run_gate_recipes(now=_NOW, config=_config())
+        recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert recovered == ["GEN-1"]
         store = load_dev_queue()
@@ -764,7 +766,7 @@ class TestRunApprove:
             )
         )
 
-        recovered = run_gate_recipes(now=_NOW, config=_config())
+        recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert sorted(recovered) == ["GEN-1", "GEN-1"]
         store = load_dev_queue()
@@ -788,7 +790,7 @@ class TestRunApprove:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
 
-        run_gate_recipes(now=_NOW, config=_config())
+        call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         events = read_events(
             consumer="test-gate-approve-event",
@@ -823,7 +825,7 @@ class TestRunApprove:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
 
-        run_gate_recipes(now=_NOW, config=_config())
+        call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert len(stub_gh_comment) == 1
         argv = stub_gh_comment[0]
@@ -834,6 +836,36 @@ class TestRunApprove:
         assert "recommendation: PROCEED" in body
         assert "forbidden_touched: False" in body
         assert "agents_run: 1" in body
+
+    def test_comment_is_queued_and_posted_only_when_the_sink_drains(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        stub_gh_comment: list[list[str]],
+    ) -> None:
+        """#1232: the approve lands under the lock but the gh comment is only
+        queued on the caller's post-lock sink; it posts when the sink drains."""
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
+        save_dev_queue(DevQueueStore(tasks=[_make_task()]))
+        save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
+        deferred = DeferredReconcileJobs()
+
+        approved = run_gate_recipes(now=_NOW, config=_config(), deferred=deferred)
+
+        assert approved == ["GEN-1"]
+        assert load_dev_queue().tasks[0].stage == Stage.FINALIZE
+        assert [job.label for job in deferred.post_lock] == [
+            f"gate_comment:{RECIPE_AUTO_APPROVE_REVIEW}:acme:GEN-1"
+        ]
+        assert stub_gh_comment == []
+
+        run_post_lock_jobs(deferred)
+
+        assert [argv[:4] for argv in stub_gh_comment] == [
+            ["gh", "issue", "comment", "GEN-1"]
+        ]
 
     def test_comment_failure_swallowed_and_logged(
         self,
@@ -857,7 +889,7 @@ class TestRunApprove:
         monkeypatch.setattr("cw.gh._sp.run", _boom)
 
         with caplog.at_level("WARNING"):
-            recovered = run_gate_recipes(now=_NOW, config=_config())
+            recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         # Approve still stands despite the comment write failing.
         assert recovered == ["GEN-1"]
@@ -897,7 +929,7 @@ class TestRunApprove:
 
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
 
-        approved = run_gate_recipes(now=_NOW, config=_config())
+        approved = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert approved == ["GEN-1"]
         # _git_dir(acme) == acme's workspace_path, not beta's.
@@ -941,13 +973,21 @@ class TestRunApprove:
             )
         }
 
+        deferred = DeferredReconcileJobs()
+
         with caplog.at_level("WARNING"):
-            approved = _act_auto_approve_review(
-                [candidate], now=_NOW, clients=clients_without_acme
+            approved = call_and_drain(
+                _act_auto_approve_review,
+                [candidate],
+                now=_NOW,
+                clients=clients_without_acme,
+                deferred=deferred,
             )
 
-        # Approve stands (get_client reads acme off disk), comment is skipped.
+        # Approve stands (get_client reads acme off disk), comment is skipped
+        # at defer time: nothing is queued for after the lock (#1232).
         assert approved == ["GEN-1"]
+        assert deferred.post_lock == []
         assert stub_gh_comment == []
         assert any(
             "gate_recipe_comment_skipped" in rec.message for rec in caplog.records
@@ -989,7 +1029,7 @@ class TestActApproveFailure:
         monkeypatch.setattr("cw.reconcile.gate_recipes._approve_ticket_locked", _boom)
 
         with caplog.at_level("WARNING"):
-            recovered = run_gate_recipes(now=_NOW, config=_config())
+            recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert recovered == []
         store = load_dev_queue()
@@ -1052,7 +1092,7 @@ class TestActApproveFailure:
         held.tasks[0].hold_finalize = "manual"
         save_dev_queue(held)
 
-        recovered = _act_auto_approve_review(candidates, now=_NOW)
+        recovered = call_and_drain(_act_auto_approve_review, candidates, now=_NOW)
 
         assert recovered == []
         store = load_dev_queue()
@@ -1110,8 +1150,8 @@ class TestActApproveFailure:
 
         monkeypatch.setattr("cw.reconcile.gate_recipes._approve_ticket_locked", _boom)
 
-        first_tick = run_gate_recipes(now=_NOW, config=_config())
-        second_tick = run_gate_recipes(now=_NOW, config=_config())
+        first_tick = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        second_tick = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert first_tick == []
         assert second_tick == []
@@ -1195,7 +1235,7 @@ class TestActApproveFailure:
 
         monkeypatch.setattr("cw.reconcile.gate_recipes._approve_ticket_locked", _boom)
 
-        run_gate_recipes(now=_NOW, config=_config())
+        call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         store = load_dev_queue()
         by_session = {t.session_id: t for t in store.tasks}
@@ -1235,7 +1275,7 @@ class TestActApproveFailure:
             )
         )
 
-        approved = run_gate_recipes(now=_NOW, config=_config())
+        approved = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         store = load_dev_queue()
         # Key on created_at (stable identity): the approved row's session_id is
@@ -1310,7 +1350,7 @@ class TestActApproveFailure:
             "cw.reconcile.gate_recipes._approve_ticket_locked", _fail_beta_only
         )
 
-        run_gate_recipes(now=_NOW, config=_config())
+        call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         store = load_dev_queue()
         by_client = {t.client: t for t in store.tasks}
@@ -1417,7 +1457,9 @@ class TestActRecheckRace:
             session_id="sess-1",
         )
 
-        recovered = _act_auto_approve_review([stale_candidate], now=_NOW)
+        recovered = call_and_drain(
+            _act_auto_approve_review, [stale_candidate], now=_NOW
+        )
 
         assert recovered == []
         store = load_dev_queue()
@@ -1430,7 +1472,7 @@ class TestActRecheckRace:
         assert events == []
 
     def test_empty_candidates_is_noop(self) -> None:
-        assert _act_auto_approve_review([], now=_NOW) == []
+        assert call_and_drain(_act_auto_approve_review, [], now=_NOW) == []
 
     def _stale_candidate(self) -> GateRecipeCandidate:
         return GateRecipeCandidate(
@@ -1458,7 +1500,12 @@ class TestActRecheckRace:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
 
-        assert _act_auto_approve_review([self._stale_candidate()], now=_NOW) == []
+        assert (
+            call_and_drain(
+                _act_auto_approve_review, [self._stale_candidate()], now=_NOW
+            )
+            == []
+        )
 
     def test_row_deleted_at_act_skips(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -1473,7 +1520,12 @@ class TestActRecheckRace:
         save_dev_queue(DevQueueStore(tasks=[]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
 
-        assert _act_auto_approve_review([self._stale_candidate()], now=_NOW) == []
+        assert (
+            call_and_drain(
+                _act_auto_approve_review, [self._stale_candidate()], now=_NOW
+            )
+            == []
+        )
 
     def test_session_id_cleared_at_act_skips(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -1486,7 +1538,12 @@ class TestActRecheckRace:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
 
-        assert _act_auto_approve_review([self._stale_candidate()], now=_NOW) == []
+        assert (
+            call_and_drain(
+                _act_auto_approve_review, [self._stale_candidate()], now=_NOW
+            )
+            == []
+        )
 
     def test_session_gone_at_act_skips(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -1499,7 +1556,12 @@ class TestActRecheckRace:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[]))
 
-        assert _act_auto_approve_review([self._stale_candidate()], now=_NOW) == []
+        assert (
+            call_and_drain(
+                _act_auto_approve_review, [self._stale_candidate()], now=_NOW
+            )
+            == []
+        )
 
 
 class TestCommentNonZeroReturn:
@@ -1525,7 +1587,7 @@ class TestCommentNonZeroReturn:
         monkeypatch.setattr("cw.gh._sp.run", _fail)
 
         with caplog.at_level("WARNING"):
-            recovered = run_gate_recipes(now=_NOW, config=_config())
+            recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert recovered == ["GEN-1"]  # approve stands despite comment rc!=0
         assert any(
@@ -1987,7 +2049,7 @@ class TestRunAdoptPlan:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
 
-        recovered = run_gate_recipes(now=_NOW, config=_config())
+        recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert recovered == ["GEN-1"]
         store = load_dev_queue()
@@ -2009,7 +2071,7 @@ class TestRunAdoptPlan:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
 
-        run_gate_recipes(now=_NOW, config=_config())
+        call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         events = read_events(
             consumer="test-gate-adopt-event",
@@ -2040,7 +2102,7 @@ class TestRunAdoptPlan:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
 
-        run_gate_recipes(now=_NOW, config=_config())
+        call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert len(stub_gh_comment) == 1
         argv = stub_gh_comment[0]
@@ -2070,7 +2132,7 @@ class TestRunAdoptPlan:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
 
-        recovered = run_gate_recipes(now=_NOW, config=_config())
+        recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert recovered == ["GEN-1"]
         released = load_dev_queue().tasks[0]
@@ -2111,7 +2173,7 @@ class TestRunAdoptPlan:
             )
         )
 
-        recovered = run_gate_recipes(now=_NOW, config=_config())
+        recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert recovered == ["GEN-R", "GEN-P"]
 
@@ -2139,7 +2201,7 @@ class TestRunAdoptPlan:
         monkeypatch.setattr("cw.gh._sp.run", _boom)
 
         with caplog.at_level("WARNING"):
-            recovered = run_gate_recipes(now=_NOW, config=_config())
+            recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert recovered == ["GEN-1"]
         store = load_dev_queue()
@@ -2170,7 +2232,7 @@ class TestRunAdoptPlan:
         monkeypatch.setattr("cw.gh._sp.run", _fail)
 
         with caplog.at_level("WARNING"):
-            recovered = run_gate_recipes(now=_NOW, config=_config())
+            recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert recovered == ["GEN-1"]
         assert any(
@@ -2209,7 +2271,7 @@ class TestActAdoptPlanFailure:
         monkeypatch.setattr("cw.reconcile.gate_recipes._approve_ticket_locked", _boom)
 
         with caplog.at_level("WARNING"):
-            recovered = run_gate_recipes(now=_NOW, config=_config())
+            recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert recovered == []
         store = load_dev_queue()
@@ -2265,8 +2327,8 @@ class TestActAdoptPlanFailure:
 
         monkeypatch.setattr("cw.reconcile.gate_recipes._approve_ticket_locked", _boom)
 
-        first_tick = run_gate_recipes(now=_NOW, config=_config())
-        second_tick = run_gate_recipes(now=_NOW, config=_config())
+        first_tick = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        second_tick = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert first_tick == []
         assert second_tick == []
@@ -2311,7 +2373,10 @@ class TestActAdoptRecheckRace:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
 
-        assert _act_auto_adopt_plan([self._plan_candidate()], now=_NOW) == []
+        assert (
+            call_and_drain(_act_auto_adopt_plan, [self._plan_candidate()], now=_NOW)
+            == []
+        )
 
     def test_last_result_status_changed_at_act_skips(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -2332,7 +2397,10 @@ class TestActAdoptRecheckRace:
             )
         )
 
-        assert _act_auto_adopt_plan([self._plan_candidate()], now=_NOW) == []
+        assert (
+            call_and_drain(_act_auto_adopt_plan, [self._plan_candidate()], now=_NOW)
+            == []
+        )
 
     def test_row_deleted_at_act_skips(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -2343,7 +2411,10 @@ class TestActAdoptRecheckRace:
         save_dev_queue(DevQueueStore(tasks=[]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
 
-        assert _act_auto_adopt_plan([self._plan_candidate()], now=_NOW) == []
+        assert (
+            call_and_drain(_act_auto_adopt_plan, [self._plan_candidate()], now=_NOW)
+            == []
+        )
 
     def test_session_gone_at_act_skips(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -2355,7 +2426,10 @@ class TestActAdoptRecheckRace:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[]))
 
-        assert _act_auto_adopt_plan([self._plan_candidate()], now=_NOW) == []
+        assert (
+            call_and_drain(_act_auto_adopt_plan, [self._plan_candidate()], now=_NOW)
+            == []
+        )
 
     def test_session_id_cleared_at_act_skips(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -2369,7 +2443,10 @@ class TestActAdoptRecheckRace:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
 
-        assert _act_auto_adopt_plan([self._plan_candidate()], now=_NOW) == []
+        assert (
+            call_and_drain(_act_auto_adopt_plan, [self._plan_candidate()], now=_NOW)
+            == []
+        )
 
     def test_fetch_not_recalled_during_act(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2410,7 +2487,9 @@ class TestActAdoptRecheckRace:
             "cw.reconcile.gate_recipes._approve_ticket_locked", _spy_approve
         )
 
-        recovered = _act_auto_adopt_plan([self._plan_candidate()], now=_NOW)
+        recovered = call_and_drain(
+            _act_auto_adopt_plan, [self._plan_candidate()], now=_NOW
+        )
 
         assert recovered == ["GEN-1"]
         assert calls == []
@@ -2459,7 +2538,7 @@ class TestActAdoptRecheckRace:
 
         monkeypatch.setattr("cw.gh._sp.run", _tracking_run)
 
-        run_gate_recipes(now=_NOW, config=_config())
+        call_and_drain(run_gate_recipes, now=_NOW, config=_config())
 
         assert events == ["locked", "unlocked", "comment_posted"]
 
@@ -2486,12 +2565,19 @@ class TestActAdoptRecheckRace:
             )
         }
 
+        deferred = DeferredReconcileJobs()
+
         with caplog.at_level("WARNING"):
-            approved = _act_auto_adopt_plan(
-                [self._plan_candidate()], now=_NOW, clients=clients_without_acme
+            approved = call_and_drain(
+                _act_auto_adopt_plan,
+                [self._plan_candidate()],
+                now=_NOW,
+                clients=clients_without_acme,
+                deferred=deferred,
             )
 
         assert approved == ["GEN-1"]
+        assert deferred.post_lock == []
         assert stub_gh_comment == []
         assert any(
             "gate_recipe_comment_skipped" in rec.message for rec in caplog.records
