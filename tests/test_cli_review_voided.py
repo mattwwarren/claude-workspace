@@ -62,10 +62,12 @@ _ALLOW_HELP = (
 )
 _OUT_HELP = (
     "Also render the merged voided-findings record to this path, as a "
-    "postable '## Voided Review Findings' ticket comment. Nothing is written "
-    "when there is no void to record. When an unmatched new entry makes the "
-    "command exit 1, the record is still written first and holds the prior "
-    "voids plus only the new entries that matched."
+    "postable '## Voided Review Findings' ticket comment. When there is no "
+    "void to record no file is written and any file already at that path is "
+    "removed, so an earlier run's record is never left behind. When an "
+    "unmatched new entry makes the command exit 1, the record is still "
+    "written first and holds the prior voids plus only the new entries that "
+    "matched."
 )
 _SKILL_STEP_3_5 = (
     "- A non-zero exit is a hard pipeline error, same as step 3. This call "
@@ -90,8 +92,9 @@ _SKILL_STEP_5 = (
     "step 3. The full JSON is still printed, and when there is anything to "
     "record `.cw/voided-findings-comment.md` is still written before the exit, "
     "holding the prior voids plus only the entries that matched — post it as "
-    "above. When the prior voids and matched entries are both empty nothing is "
-    "written, so do not post a stale file from an earlier run. Then fix each "
+    "above. When the prior voids and matched entries are both empty no file is "
+    "written and any file an earlier run left at that path is removed, so an "
+    "absent file means there is nothing to post. Then fix each "
     "named entry by copying `severity`/`file`/`summary`/`evidence` verbatim off "
     "the finding it settles and re-run, or re-run with `--allow-unmatched-voided` "
     "only when you are deliberately voiding a finding this verdict does not "
@@ -288,6 +291,21 @@ class TestReviewCheckVoidedCommand:
 
         assert result.exit_code == 0, result.output
         assert not out_path.exists()
+
+    def test_voided_findings_out_removes_a_stale_file_when_there_is_nothing_to_record(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        out_path = tmp_path / "voided-findings-comment.md"
+        stale = "stale voided text from an earlier run\n"
+        out_path.write_text(stale, encoding="utf-8")
+
+        result = _invoke(
+            runner, _check_voided_payload(), "--voided-findings-out", str(out_path)
+        )
+
+        assert result.exit_code == 0, result.output
+        assert not out_path.exists()
+        assert stale.strip() not in result.output
 
     def test_absent_voided_at_is_stamped_by_the_cli(
         self, runner: CliRunner, tmp_path: Path
@@ -623,6 +641,24 @@ class TestCheckVoidedRecordOnRefuse:
         assert not out_path.exists()
         assert not out_path.parent.exists()
 
+    def test_refused_exit_with_nothing_matched_removes_a_stale_file(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        # A dedicated directory: the autouse fixtures populate tmp_path itself.
+        out_dir = tmp_path / "record"
+        out_dir.mkdir()
+        out_path = out_dir / "voided-findings-comment.md"
+        out_path.write_text("stale voided text from an earlier run\n", encoding="utf-8")
+        payload = _check_voided_payload(
+            new_voided_entries=[_voided_payload(summary=_UNMATCHED_SUMMARY)]
+        )
+
+        result = _invoke(runner, payload, "--voided-findings-out", str(out_path))
+
+        assert result.exit_code == 1
+        assert not out_path.exists()
+        assert out_dir.is_dir()
+
     def test_allowed_run_records_the_unmatched_entry_too(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
@@ -694,6 +730,19 @@ class TestWriteVoidedRecord:
 
         assert not path.exists()
         assert not path.parent.exists()
+
+    def test_empty_render_removes_a_stale_file(self, tmp_path: Path) -> None:
+        # A dedicated directory: the autouse fixtures populate tmp_path itself.
+        out_dir = tmp_path / "record"
+        out_dir.mkdir()
+        path = out_dir / "out.md"
+        path.write_text("stale voided text\n", encoding="utf-8")
+
+        _write_voided_record(path, [])
+
+        assert not path.exists()
+        assert out_dir.is_dir()
+        assert list(out_dir.iterdir()) == []
 
     def test_dedupes_via_the_renderer(self, tmp_path: Path) -> None:
         path = tmp_path / "out.md"
