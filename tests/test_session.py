@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 
 from cw.config import load_state, save_state
-from cw.exceptions import CwError, SpawnUnregisteredError, WorktreeError
+from cw.exceptions import (
+    CwError,
+    SessionsLockTimeoutError,
+    SpawnUnregisteredError,
+    WorktreeError,
+)
 from cw.models import (
     ClientConfig,
     CompletionReason,
@@ -27,10 +32,12 @@ from cw.session import (
     start_session,
 )
 from tests._clients_yaml import write_clients_yaml
+from tests._reconcile_helpers import probe_sessions_lock_free
 from tests.conftest import _make_daemon_session
 from tests.test_spawn import _write_orchestrator_disallow
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -1667,6 +1674,199 @@ class TestDoneSession:
 
         updated = load_state()
         assert updated.sessions[0].status == SessionStatus.ACTIVE
+
+    # -- #1232: --cleanup removes the worktree before sessions_lock ---------
+
+    @staticmethod
+    def _seed_cleanup_session(
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        *,
+        sid: str,
+        status: SessionStatus = SessionStatus.ACTIVE,
+    ) -> None:
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            f"clients:\n"
+            f"  test-client:\n"
+            f"    workspace_path: {sample_client.workspace_path}\n"
+        )
+        wt_path = sample_client.workspace_path.parent / ".worktrees" / sid
+        state = load_state()
+        state.sessions.append(
+            Session(
+                id=sid,
+                name="test-client/impl",
+                client="test-client",
+                purpose=SessionPurpose.IMPL,
+                status=status,
+                workspace_path=sample_client.workspace_path,
+                worktree_path=wt_path,
+                branch=f"feat/{sid}",
+            )
+        )
+        save_state(state)
+
+    @staticmethod
+    def _probing_remove(
+        probes: list[tuple[bool, dict[str, SessionStatus]]],
+    ) -> Callable[..., None]:
+        """``remove_worktree`` stub recording (lock free?, on-disk statuses)."""
+
+        def _remove(_client: object, _branch: str, *, force: bool = False) -> None:
+            del force
+            statuses = {s.id: s.status for s in load_state().sessions}
+            probes.append((probe_sessions_lock_free(), statuses))
+
+        return _remove
+
+    def test_cleanup_removes_worktree_with_sessions_lock_free(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The git worktree removal never runs under sessions_lock.
+
+        Running it lock-free means a concurrent reuse of the worktree path
+        between removal and the COMPLETED stamp is possible; that race is
+        accepted -- removal already preceded the stamp before #1232.
+        """
+        self._seed_cleanup_session(tmp_config_dir, sample_client, sid="done0101")
+        probes: list[tuple[bool, dict[str, SessionStatus]]] = []
+        monkeypatch.setattr("cw.session.remove_worktree", self._probing_remove(probes))
+
+        done_session("test-client/impl", cleanup=True)
+
+        assert [lock_free for lock_free, _ in probes] == [True]
+
+    def test_cleanup_removal_precedes_completed_stamp(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._seed_cleanup_session(tmp_config_dir, sample_client, sid="done0102")
+        probes: list[tuple[bool, dict[str, SessionStatus]]] = []
+        monkeypatch.setattr("cw.session.remove_worktree", self._probing_remove(probes))
+
+        done_session("test-client/impl", cleanup=True)
+
+        assert [statuses for _, statuses in probes] == [
+            {"done0102": SessionStatus.ACTIVE}
+        ]
+        assert load_state().sessions[0].status == SessionStatus.COMPLETED
+
+    def test_cleanup_skips_removal_when_already_completed(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._seed_cleanup_session(
+            tmp_config_dir,
+            sample_client,
+            sid="done0103",
+            status=SessionStatus.COMPLETED,
+        )
+        probes: list[tuple[bool, dict[str, SessionStatus]]] = []
+        monkeypatch.setattr("cw.session.remove_worktree", self._probing_remove(probes))
+
+        done_session("test-client/impl", cleanup=True)
+
+        assert probes == []
+        assert "already completed" in capsys.readouterr().out
+
+    def test_no_cleanup_does_not_remove_worktree(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._seed_cleanup_session(tmp_config_dir, sample_client, sid="done0104")
+        probes: list[tuple[bool, dict[str, SessionStatus]]] = []
+        monkeypatch.setattr("cw.session.remove_worktree", self._probing_remove(probes))
+
+        done_session("test-client/impl")
+
+        assert probes == []
+        assert load_state().sessions[0].status == SessionStatus.COMPLETED
+
+    def test_lock_timeout_after_removal_leaves_active_and_retry_completes(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A bounded-lock timeout after the lock-free removal is a clean retry.
+
+        The session stays ACTIVE; the retry re-runs the removal (the real
+        ``remove_worktree`` returns early on an absent path) and stamps it.
+        """
+        self._seed_cleanup_session(tmp_config_dir, sample_client, sid="done0105")
+        probes: list[tuple[bool, dict[str, SessionStatus]]] = []
+        monkeypatch.setattr("cw.session.remove_worktree", self._probing_remove(probes))
+
+        def _timed_out_lock(**_kwargs: object) -> NoReturn:
+            msg = "sessions lock busy"
+            raise SessionsLockTimeoutError(
+                msg, lock_path=tmp_config_dir / "sessions.lock", waited_s=0.0
+            )
+
+        with monkeypatch.context() as patch:
+            patch.setattr("cw.session.sessions_lock", _timed_out_lock)
+            with pytest.raises(SessionsLockTimeoutError):
+                done_session("test-client/impl", cleanup=True)
+
+        assert len(probes) == 1
+        assert load_state().sessions[0].status == SessionStatus.ACTIVE
+
+        done_session("test-client/impl", cleanup=True)
+
+        assert len(probes) == 2
+        assert load_state().sessions[0].status == SessionStatus.COMPLETED
+
+    def test_auto_resolved_cleanup_stamps_by_resolved_id(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``done_session(None, cleanup=True)`` stamps the session it removed for.
+
+        A second ACTIVE session registered while the lock-free removal runs
+        would make a fresh auto-detect ambiguous; the in-lock re-resolve is by
+        the pre-pass's session id, so only that session is stamped.
+        """
+        self._seed_cleanup_session(tmp_config_dir, sample_client, sid="done0106")
+
+        def _remove_while_another_starts(
+            _client: object, _branch: str, *, force: bool = False
+        ) -> None:
+            del force
+            state = load_state()
+            state.sessions.append(
+                Session(
+                    id="done0107",
+                    name="test-client/other",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    status=SessionStatus.ACTIVE,
+                    workspace_path=sample_client.workspace_path,
+                )
+            )
+            save_state(state)
+
+        monkeypatch.setattr("cw.session.remove_worktree", _remove_while_another_starts)
+
+        done_session(None, cleanup=True)
+
+        statuses = {s.id: s.status for s in load_state().sessions}
+        assert statuses == {
+            "done0106": SessionStatus.COMPLETED,
+            "done0107": SessionStatus.ACTIVE,
+        }
 
 
 # ---------------------------------------------------------------------------
