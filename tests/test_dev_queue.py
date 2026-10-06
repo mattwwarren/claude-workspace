@@ -2354,7 +2354,7 @@ class TestClearTickets:
     ) -> None:
         """clear_tickets must not re-derive the candidate set after computing
         it once under ``_lock()`` -- mirrors
-        test_prune_tickets_derives_candidates_exactly_once (#2003)."""
+        test_prune_deletes_only_the_set_it_derived_under_the_lock (#2003)."""
         from cw.dev_queue import crud
 
         real = crud._select_clear_candidates
@@ -2709,38 +2709,51 @@ class TestPruneTickets:
 
         assert len(load_dev_queue().tasks) == 1
 
-    def test_prune_tickets_derives_candidates_exactly_once(
-        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    def test_prune_deletes_only_the_set_it_derived_under_the_lock(
+        self,
+        tmp_dev_queue: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
-        """prune_tickets must not re-derive the candidate set after computing it
-        once under ``_lock()`` -- a second call would reopen the TOCTOU window
-        the single-lock design exists to close (#382 Q3); a row that appeared in
-        the store after this single call would not be picked up, because there
-        is no second call to pick it up."""
+        """The removed/reported set equals the deleted set, and nothing that
+        appears after the single in-lock read is swept up (#382 Q3, #2003).
+
+        A row injected right after the first ``load_dev_queue`` stands in for
+        what a second candidate derivation would observe. It must be absent
+        from the returned set and from the ``task.deleted`` events.
+        """
         from cw.dev_queue import crud
 
-        real = crud._select_prune_candidates
-        calls: list[int] = []
-
-        def _spy(
-            store: DevQueueStore,
-            statuses: frozenset[QueueItemStatus],
-            older_than_days: int,
-            client: str | None,
-            *,
-            all_clients: bool,
-        ) -> list[TicketTask]:
-            calls.append(1)
-            return real(
-                store, statuses, older_than_days, client, all_clients=all_clients
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _aged_task(100, ticket_id="TKT-OLD"),
+                    _aged_task(1, ticket_id="TKT-NEW"),
+                ]
             )
+        )
+        events = capture_events("cw.dev_queue.crud", OrchestratorEventType.TASK_DELETED)
+        real_load = crud.load_dev_queue
+        injected: list[str] = []
 
-        monkeypatch.setattr(crud, "_select_prune_candidates", _spy)
-        save_dev_queue(DevQueueStore(tasks=[_aged_task(100, ticket_id="TKT-ONCE")]))
+        def _load_then_race() -> DevQueueStore:
+            store = real_load()
+            if not injected:
+                injected.append("TKT-LATE")
+                racing = real_load()
+                racing.tasks.append(_aged_task(100, ticket_id="TKT-LATE"))
+                save_dev_queue(racing)
+            return store
 
-        prune_tickets(frozenset([QueueItemStatus.COMPLETED]), 90, "genhealth")
+        monkeypatch.setattr(crud, "load_dev_queue", _load_then_race)
 
-        assert len(calls) == 1
+        removed = prune_tickets(frozenset([QueueItemStatus.COMPLETED]), 90, "genhealth")
+
+        assert [t.ticket_id for t in removed] == ["TKT-OLD"]
+        assert [p["ticket_id"] for _, p, _ in events] == ["TKT-OLD"]
+        on_disk = {t.ticket_id for t in load_dev_queue().tasks}
+        assert "TKT-OLD" not in on_disk
+        assert "TKT-NEW" in on_disk
 
 
 # ---------------------------------------------------------------------------
