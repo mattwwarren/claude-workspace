@@ -890,7 +890,7 @@ class TestRouteEmittedSentinel:
         sess = _mk_headless_daemon_session("578-detect", worktree, started_at)
         sess.last_result = None
         _write_salvage_transcript(
-            home, worktree, "claude-578-uuid-1", _shipped_salvage_payload()
+            home, worktree, "claude-578-uuid-1", _shipped_salvage_payload("578-detect")
         )
         save_state(CwState(sessions=[sess]))
         # B2: apply_staged_decision needs a pipeline to decide COMPLETED vs advance.
@@ -1042,7 +1042,10 @@ class TestRouteEmittedSentinel:
         sess = _mk_headless_daemon_session("578-live", worktree, started_at)
         sess.last_result = None
         _write_salvage_transcript(
-            home, worktree, "claude-578-uuid-4", _no_op_salvage_payload()
+            home,
+            worktree,
+            "claude-578-uuid-4",
+            {**_no_op_salvage_payload(), "ticket_id": "578-live"},
         )
         save_state(CwState(sessions=[sess]))
         save_dev_queue(
@@ -1184,7 +1187,7 @@ class TestRouteEmittedSentinel:
         sess = _mk_headless_daemon_session("578-sigonly", worktree, started_at)
         sess.last_result = None
         _write_salvage_transcript(
-            home, worktree, "claude-578-uuid-6", _shipped_salvage_payload()
+            home, worktree, "claude-578-uuid-6", _shipped_salvage_payload("578-sigonly")
         )
         save_state(CwState(sessions=[sess]))
         # B2: apply_staged_decision needs a pipeline to decide COMPLETED vs advance.
@@ -1237,7 +1240,7 @@ class TestRouteEmittedSentinel:
         sess = _mk_headless_daemon_session("578-event", worktree, started_at)
         sess.last_result = None
         _write_salvage_transcript(
-            home, worktree, "claude-578-uuid-7", _shipped_salvage_payload()
+            home, worktree, "claude-578-uuid-7", _shipped_salvage_payload("578-event")
         )
         save_state(CwState(sessions=[sess]))
         save_dev_queue(

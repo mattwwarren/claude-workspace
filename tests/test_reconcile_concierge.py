@@ -1805,7 +1805,7 @@ def test_close_confirmed_dead_session_corrects_salvaged_scope(
         home,
         worktree,
         "claude-uuid-concierge",
-        _inflate_scope(_shipped_salvage_payload()),
+        _inflate_scope(_shipped_salvage_payload("GEN-1")),
     )
 
     changed, salvage_result, refusal = _close_confirmed_dead_session("sess-scope", _NOW)

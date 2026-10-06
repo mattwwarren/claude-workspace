@@ -6100,6 +6100,19 @@ class TestSentinelPresentInTranscript:
     See GitHub issue #176 Layer 1.
     """
 
+    @staticmethod
+    def _write_ticket_context(worktree: Path, ticket_id: str) -> None:
+        """Seed the worktree's cw-context.json with the task's ticket identity.
+
+        The transcript scan fails closed without an expected ticket identity
+        (#2515), and direct callers read it from this file.
+        """
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        (claude_dir / "cw-context.json").write_text(
+            json.dumps({"ticket_id": ticket_id})
+        )
+
     def test_returns_true_when_sentinel_embedded_in_jsonl_assistant_text(
         self,
         tmp_path: Path,
@@ -6118,6 +6131,7 @@ class TestSentinelPresentInTranscript:
 
         worktree = tmp_path / "wt" / "auto-dev-170"
         worktree.mkdir(parents=True)
+        self._write_ticket_context(worktree, "170")
         sentinel_text = (
             "Comment posted. Emitting result.\n\n"
             "```\n"
@@ -6150,6 +6164,7 @@ class TestSentinelPresentInTranscript:
 
         worktree = tmp_path / "wt" / "auto-dev-731"
         worktree.mkdir(parents=True)
+        self._write_ticket_context(worktree, "731")
         frame = (
             "<<<AUTO_DEV_RESULT\n"
             '{"schema_version": 2, "ticket_id": "731", "status": "shipped"}\n'
@@ -6279,6 +6294,7 @@ class TestSentinelPresentInTranscript:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         worktree = tmp_path / "wt" / "auto-dev-203"
         worktree.mkdir(parents=True)
+        self._write_ticket_context(worktree, "203")
         encoded = str(worktree).replace("/", "-").replace(".", "-")
         project_dir = fake_home / ".claude" / "projects" / encoded
         project_dir.mkdir(parents=True)
