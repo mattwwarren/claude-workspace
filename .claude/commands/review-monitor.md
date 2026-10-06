@@ -645,17 +645,22 @@ WORK:
     # stalled PR is recoverable, a PR merged against the user's wishes is not.
     case "$DIS_ACTOR" in
       ""|*"[bot]"|github-actions|*-bot)
-        if ~/.claude/scripts/prep_pr_finalize.py check-automerge-allowed --repo-path "<repo_path>"; then
-          gh pr merge <N> --repo <repo> --auto --squash
-        else
-          echo "auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR open for manual merge"
-        fi
+        HEAD_SHA=$(git rev-parse HEAD)
+        ARM_JSON=$(~/.claude/scripts/prep_pr_finalize.py arm-automerge <N> --repo-path "<repo_path>" --head-sha "$HEAD_SHA")
+        arm_status=$?
+        echo "$ARM_JSON"
+        case "$arm_status" in
+          0) ;;
+          3) echo "auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR open for manual merge" ;;
+          1) echo "auto-merge arm failed after bounded retries (see gh_stderr in the JSON above) — PR left unarmed; report in Step 5" ;;
+          *) echo "arm-automerge refused (exit $arm_status): the reason is on stderr above; NOT arming auto-merge (this is not a pr.auto_merge: false opt-out)" ;;
+        esac
         ;;
       *) echo "auto-merge disabled by '$DIS_ACTOR' (human) — deliberate hold, NOT re-arming" ;;
     esac
   fi
   ```
-  `gh pr merge --auto` is only a no-op in the narrow case of a PR already queued for auto-merge — there it reports "already queued to merge" and exits non-zero, harmless. On a repo with no required checks to gate a pending merge on, this same command merges immediately (exit 0, no error) instead of arming one — the reason this block now checks `check-automerge-allowed` first (#2046). When the disable was a deliberate human hold, do NOT re-arm — report it in the Step 5 summary so the user knows their fix landed but the PR is intentionally held. Also do NOT re-arm a PR that genuinely needs the user (unresolved human threads, a real CHANGES_REQUESTED you could not address) — for those, report instead.
+  `gh pr merge --auto` is only a no-op in the narrow case of a PR already queued for auto-merge — there it reports "already queued to merge" and exits non-zero, harmless. On a repo with no required checks to gate a pending merge on, this same command merges immediately (exit 0, no error) instead of arming one — the reason this block now arms through `arm-automerge` (#2046), which re-checks the `pr.auto_merge` seam itself before any gh call, so an opted-out repo never reaches `gh pr merge --auto`; it also retries a bounded number of times, reads the result back, and pins the head with `--match-head-commit` so a push that raced the fix is not merged blind. An `arm-automerge` exit 2 does not mean the repo opted out: it means a bad invocation, or that `pr.auto_merge` is undeterminable (the config exists but cannot be read or parsed; the gate fails closed, #2581), and the stderr line names the reason while the PR is left unarmed. Only exit 3 means `pr.auto_merge: false`. When the disable was a deliberate human hold, do NOT re-arm — report it in the Step 5 summary so the user knows their fix landed but the PR is intentionally held. Also do NOT re-arm a PR that genuinely needs the user (unresolved human threads, a real CHANGES_REQUESTED you could not address) — for those, report instead.
 
 CONSTRAINTS:
 - Do NOT amend commits, do NOT --no-verify, do NOT modify CI configs or coverage thresholds
