@@ -44,13 +44,22 @@ headless session nothing will ever resume -- the signal fires as
 ``unconsumed_queue_notification``, naming the notification text. It is checked
 ahead of ``dangling_tool_use`` (most specific signal first). Signal-only like
 every other reason here.
+
+One evidence-source exception (#2417): a DAEMON session with no ``surface_ref``,
+no ``claude_session_id``, no ``local_liveness`` handle, and a purpose other than
+``ORCHESTRATE`` has no transcript to measure and was previously skipped forever
+(reading as LIVE and holding its lane slot). It is now aged from
+``Session.started_at`` through the same ladder, and both events carry
+``staleness_source`` (``transcript`` | ``session_age``) so ``stale_minutes``
+stays interpretable. Still signal-only: elapsed age is evidence of
+unobservability, never proof of death.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from cw.config import save_state
 from cw.dev_queue import load_dev_queue
@@ -61,6 +70,7 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     SessionOrigin,
+    SessionPurpose,
 )
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
@@ -100,6 +110,14 @@ _DEFAULT_LIVENESS_FIRST_BUCKET_MINUTES = 15
 # configured list is shorter than expected.
 _STALE_30M_INDEX = 1
 _STALE_45M_INDEX = 2
+
+# What ``LivenessCandidate.stale_minutes`` measures (#2417). ``transcript`` is
+# the transcript-mtime age of a surface-backed session; ``session_age`` is the
+# time since ``Session.started_at`` for an unobservable session (no surface, no
+# Claude session id, no local handle) that has no transcript to measure at all.
+StalenessSource = Literal["transcript", "session_age"]
+_SOURCE_TRANSCRIPT: StalenessSource = "transcript"
+_SOURCE_SESSION_AGE: StalenessSource = "session_age"
 
 
 @dataclass(frozen=True)
@@ -159,6 +177,12 @@ class LivenessCandidate:
     # future timestamp both stamped onto Session.liveness_attention_next_eligible_at
     # and surfaced as the SESSION_NEEDS_ATTENTION payload's renotify_marker.
     next_renotify_eligible_at: datetime | None = None
+    # #2417 — which evidence ``stale_minutes`` was measured from. Carried into
+    # both liveness events so the number stays interpretable. A ``session_age``
+    # candidate skips every worktree-scoped distress gate (spawn stamp,
+    # transcript-tail scans): a reused worktree's leftovers belong to an
+    # earlier stage, never to a session that has no transcript of its own.
+    staleness_source: StalenessSource = _SOURCE_TRANSCRIPT
 
 
 def _classify_liveness_bucket(
@@ -167,7 +191,11 @@ def _classify_liveness_bucket(
     stage: Stage,
     config: OrchestratorConfig,
 ) -> LivenessBucket:
-    """Classify transcript staleness into a bucket via floor-suppression.
+    """Classify staleness into a bucket via floor-suppression.
+
+    *stale_minutes* is evidence-source-neutral: transcript-mtime age for the
+    ordinary sweep, session age for the unobservable-session fallback (#2417);
+    the other callers pass their own staleness measures.
 
     The per-stage floor (``liveness_first_bucket_by_stage``, falling back to
     ``liveness_buckets_minutes[0]``) is checked FIRST: below it a session is
@@ -280,6 +308,49 @@ def _is_parked_usage_limited_mid_turn(
     )
 
 
+def _is_unobservable_session(session: Session) -> bool:
+    """True iff *session* has no surface, no Claude id, and no local handle.
+
+    The #2417 fallback population: nothing exists to read a transcript from
+    (no ``surface_ref`` / ``claude_session_id``) and no local process handle
+    hands authority to ``reconcile/local.py``. ``ORCHESTRATE`` sessions are
+    excluded, mirroring doctor wedge class 9 (#2237). Handle-less ``codex``
+    rows are deliberately NOT excluded; the act is signal-only.
+    """
+    return (
+        session.surface_ref is None
+        and session.claude_session_id is None
+        and session.local_liveness is None
+        and session.purpose is not SessionPurpose.ORCHESTRATE
+    )
+
+
+def _staleness_evidence(
+    session: Session,
+    *,
+    now: datetime,
+    native_live: set[str],
+) -> tuple[float, StalenessSource] | None:
+    """Return ``(age_seconds, source)`` for *session*, or None to skip it.
+
+    An unobservable session ages from ``started_at`` and NEVER consults
+    ``_transcript_age_seconds``: its widened sibling-transcript glob would
+    attribute any post-start ``*.jsonl`` in a reused worktree (a lingering
+    earlier-stage worker, an operator session) to this session and label that
+    unattributable data ``transcript`` (#2417). Every other session keeps the
+    original gate: ``surface_ref`` present in the daemon roster and a readable
+    transcript, else skipped this tick (fail-open).
+    """
+    if _is_unobservable_session(session):
+        return (now - session.started_at).total_seconds(), _SOURCE_SESSION_AGE
+    if session.surface_ref is None or session.surface_ref not in native_live:
+        return None
+    age_seconds = _transcript_age_seconds(session, now)
+    if age_seconds is None:
+        return None
+    return age_seconds, _SOURCE_TRANSCRIPT
+
+
 def _detect_liveness_candidates(
     state: CwState,
     *,
@@ -309,6 +380,12 @@ def _detect_liveness_candidates(
     routes). A session whose transcript cannot be located is skipped this
     tick (fail-open — no bucket assigned without positive staleness
     evidence). See GitHub #1001.
+
+    The one exception (#2417) is an *unobservable* session — null
+    ``surface_ref``, null ``claude_session_id``, no ``local_liveness`` handle,
+    purpose not ``ORCHESTRATE`` (see :func:`_is_unobservable_session`): it is
+    classified by its age since ``started_at`` through the same ladder, with
+    ``staleness_source="session_age"``, instead of being skipped forever.
     """
     candidates: list[LivenessCandidate] = []
     for session in state.sessions:
@@ -316,11 +393,10 @@ def _detect_liveness_candidates(
             continue
         if session.status not in _LIVE_STATUSES:
             continue
-        if session.surface_ref is None or session.surface_ref not in native_live:
+        evidence = _staleness_evidence(session, now=now, native_live=native_live)
+        if evidence is None:
             continue
-        age_seconds = _transcript_age_seconds(session, now)
-        if age_seconds is None:
-            continue
+        age_seconds, staleness_source = evidence
         stale_minutes = age_seconds / 60.0
         ticket_id = ticket_id_for_session(session.name)
         task = task_by_ticket.get(ticket_id) if ticket_id else None
@@ -381,9 +457,14 @@ def _detect_liveness_candidates(
             and not _has_usage_limit_act_for(task, session)
             and not _is_parked_usage_limited_mid_turn(task, session)
         )
+        # #2417: the spawn-stamp read and both transcript-tail scans are
+        # worktree-scoped. A session_age candidate has no transcript of its
+        # own, and a reused worktree's stamp/transcript belong to an earlier
+        # stage, so none of the three may suppress or reshape its page.
+        scan_worktree = distress_base and staleness_source == _SOURCE_TRANSCRIPT
         spawn_age = (
             _unresolved_subagent_spawn_age_seconds(session.worktree_path, now)
-            if distress_base
+            if scan_worktree
             else None
         )
         # #1482 / #2251 — only scanned when no outstanding subagent spawn
@@ -393,12 +474,12 @@ def _detect_liveness_candidates(
         # when present, skips the dangling_tool_use scan.
         unconsumed_queue_notification = (
             _detect_unconsumed_queue_notification(session)
-            if distress_base and spawn_age is None
+            if scan_worktree and spawn_age is None
             else None
         )
         dangling_tool_use = (
             _detect_dangling_tool_use(session)
-            if distress_base
+            if scan_worktree
             and spawn_age is None
             and unconsumed_queue_notification is None
             else None
@@ -438,6 +519,7 @@ def _detect_liveness_candidates(
                 next_renotify_eligible_at=next_renotify_eligible_at,
                 dangling_tool_use=dangling_tool_use,
                 unconsumed_queue_notification=unconsumed_queue_notification,
+                staleness_source=staleness_source,
             )
         )
     return candidates
@@ -474,7 +556,22 @@ def _distress_signal_text(candidate: LivenessCandidate) -> tuple[str, str]:
     shadow it; and the first two exclude each other (the dangling_tool_use scan
     is skipped when a notification was found). All four are signal-only: the
     session is left running either way (ADR-0014).
+
+    A fifth, source-keyed shape precedes all four (#2417): a ``session_age``
+    candidate (no surface, no Claude id, no transcript, no local handle) has no
+    transcript to call flat, so it reports session-age/unobservable evidence
+    under the same ``session_unresponsive`` paused_status. The worktree-scoped
+    scans are skipped for it, so the four shapes above are unreachable for it.
     """
+    if candidate.staleness_source == _SOURCE_SESSION_AGE:
+        return (
+            _SESSION_UNRESPONSIVE_REASON,
+            f"session age {candidate.stale_minutes:.0f}m at stage "
+            f"{candidate.stage.value}; elapsed {candidate.elapsed_seconds:.0f}s; "
+            "no surface, no Claude session id, no transcript, no local "
+            "liveness handle (unobservable — never started or "
+            "unmonitorable); no sentinel; session left running",
+        )
     common = (
         f"transcript flat {candidate.stale_minutes:.0f}m at stage "
         f"{candidate.stage.value}; elapsed {candidate.elapsed_seconds:.0f}s"
@@ -544,6 +641,7 @@ def _act_on_liveness_candidates(
                     "old_bucket": candidate.old_bucket.value,
                     "new_bucket": candidate.new_bucket.value,
                     "stale_minutes": candidate.stale_minutes,
+                    "staleness_source": candidate.staleness_source,
                 },
                 correlation_id=candidate.ticket_id,
             )
@@ -578,6 +676,7 @@ def _act_on_liveness_candidates(
                     "stage": candidate.stage.value,
                     "stale_minutes": candidate.stale_minutes,
                     "elapsed_seconds": candidate.elapsed_seconds,
+                    "staleness_source": candidate.staleness_source,
                     "renotify_marker": next_eligible_at.isoformat(),
                 },
                 correlation_id=candidate.ticket_id,

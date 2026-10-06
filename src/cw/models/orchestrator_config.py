@@ -882,12 +882,16 @@ class OrchestratorConfig(BaseModel):
     # lane. See cw.codex_background._resolve_claim_tier_enabled and ADR-0016.
     codex_claim_suppression_enabled: bool = False
     # RFC 0008 W2 — global ladder of transcript-staleness thresholds (minutes),
-    # ordered [stale_15m, stale_30m, stale_45m]. A session's transcript-mtime
-    # age is compared against these to classify Session.liveness_bucket.
+    # ordered [stale_15m, stale_30m, stale_45m]. A session's staleness is
+    # compared against these to classify Session.liveness_bucket: its
+    # transcript-mtime age, or -- for an unobservable DAEMON session with no
+    # surface, Claude id, or local handle (#2417) -- its age since started_at.
     # See GitHub #1001.
     liveness_buckets_minutes: list[int] = Field(default_factory=lambda: [15, 30, 45])
     # Per-stage override of the ENTRY-POINT threshold (the effective "floor"
-    # below which a session is LIVE) for the liveness ladder above. Keyed by
+    # below which a session is LIVE) for the liveness ladder above. The floor is
+    # also the grace period before an unobservable session's age pages (#2417:
+    # REVIEW defaults to 15m, so no new knob). Keyed by
     # Stage; a stage absent from this dict uses liveness_buckets_minutes[0] as
     # its floor. Raising a stage's floor above a global threshold makes that
     # threshold unreachable for sessions at that stage (labels keep their
