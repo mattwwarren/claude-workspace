@@ -6858,7 +6858,9 @@ class TestParseSentinelFromTranscript:
             worktree, "uuid-215", _SENTINEL_215_PLAN_PENDING, fake_home
         )
 
-        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-215")
+        parsed = _parse_sentinel_from_transcript(
+            str(worktree), "uuid-215", ticket_id="215"
+        )
         assert isinstance(parsed, AutoDevResult)
         assert parsed.status == "plan_pending_approval"
         assert parsed.ticket_id == "215"
@@ -6879,7 +6881,9 @@ class TestParseSentinelFromTranscript:
         worktree.mkdir(parents=True)
         self._write_transcript(worktree, "uuid-214", _SENTINEL_214_BLOCKED, fake_home)
 
-        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-214")
+        parsed = _parse_sentinel_from_transcript(
+            str(worktree), "uuid-214", ticket_id="214"
+        )
         assert isinstance(parsed, AutoDevResult)
         assert parsed.status == "blocked"
         assert parsed.ticket_id == "214"
@@ -6906,7 +6910,9 @@ class TestParseSentinelFromTranscript:
         bad_sentinel = "<<<AUTO_DEV_RESULT\n{this is not valid JSON\nAUTO_DEV_RESULT>>>"
         self._write_transcript(worktree, "uuid-bad", bad_sentinel, fake_home)
 
-        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-bad")
+        parsed = _parse_sentinel_from_transcript(
+            str(worktree), "uuid-bad", ticket_id="bad"
+        )
         assert isinstance(parsed, BlockedResult)
         assert parsed.status == "blocked"
 
@@ -6936,10 +6942,16 @@ class TestParseSentinelFromTranscript:
         warned_blocks: set[str] = set()
         with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
             parsed1 = _parse_sentinel_from_transcript(
-                str(worktree), "uuid-warn-dedup", warned_blocks=warned_blocks
+                str(worktree),
+                "uuid-warn-dedup",
+                ticket_id="bad",
+                warned_blocks=warned_blocks,
             )
             parsed2 = _parse_sentinel_from_transcript(
-                str(worktree), "uuid-warn-dedup", warned_blocks=warned_blocks
+                str(worktree),
+                "uuid-warn-dedup",
+                ticket_id="bad",
+                warned_blocks=warned_blocks,
             )
         assert isinstance(parsed1, BlockedResult)
         assert isinstance(parsed2, BlockedResult)
@@ -6984,10 +6996,16 @@ class TestParseSentinelFromTranscript:
         warned_blocks: set[str] = set()
         with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
             parsed1 = _parse_sentinel_from_transcript(
-                str(worktree), "uuid-warn-dedup-multi", warned_blocks=warned_blocks
+                str(worktree),
+                "uuid-warn-dedup-multi",
+                ticket_id="GEN-stage-complete",
+                warned_blocks=warned_blocks,
             )
             parsed2 = _parse_sentinel_from_transcript(
-                str(worktree), "uuid-warn-dedup-multi", warned_blocks=warned_blocks
+                str(worktree),
+                "uuid-warn-dedup-multi",
+                ticket_id="GEN-stage-complete",
+                warned_blocks=warned_blocks,
             )
         assert isinstance(parsed1, BlockedResult)
         assert isinstance(parsed2, BlockedResult)
@@ -7150,7 +7168,9 @@ class TestParseSentinelFromTranscript:
             extra_records=[example_record],
         )
 
-        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-591a")
+        parsed = _parse_sentinel_from_transcript(
+            str(worktree), "uuid-591a", ticket_id="215"
+        )
         assert isinstance(parsed, AutoDevResult)
         assert parsed.ticket_id == "215"
         assert parsed.status == "plan_pending_approval"
@@ -7213,7 +7233,12 @@ class TestParseSentinelFromTranscript:
         )
         self._write_transcript(worktree, "uuid-591b", example_sentinel, fake_home)
 
-        assert _parse_sentinel_from_transcript(str(worktree), "uuid-591b") is None
+        assert (
+            _parse_sentinel_from_transcript(
+                str(worktree), "uuid-591b", ticket_id="591b"
+            )
+            is None
+        )
 
 
 class TestCompletion:

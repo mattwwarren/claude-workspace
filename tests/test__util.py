@@ -550,7 +550,9 @@ class TestParseSentinelFromTranscriptToolResult:
             worktree, "uuid-774", self._SENTINEL_TOOL_RESULT, fake_home
         )
 
-        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-774")
+        parsed = _parse_sentinel_from_transcript(
+            str(worktree), "uuid-774", ticket_id="774"
+        )
         assert isinstance(parsed, AutoDevResult)
         assert parsed.ticket_id == "774"
         assert parsed.status == "stage_complete"
@@ -626,7 +628,9 @@ class TestParseSentinelFromTranscriptToolResult:
             fake_home,
         )
 
-        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-1266b")
+        parsed = _parse_sentinel_from_transcript(
+            str(worktree), "uuid-1266b", ticket_id="774"
+        )
         assert isinstance(parsed, AutoDevResult)
         assert parsed.ticket_id == "774"
         assert parsed.status == "stage_complete"
@@ -691,7 +695,7 @@ class TestParseSentinelFromTranscriptToolResult:
         worktree = tmp_path / "wt" / name
         worktree.mkdir(parents=True)
         self._write_transcript_tool_results(worktree, name, texts, fake_home)
-        return _parse_sentinel_from_transcript(str(worktree), name)
+        return _parse_sentinel_from_transcript(str(worktree), name, ticket_id="774")
 
     def test_derived_documented_example_is_recognized_as_the_example(self) -> None:
         """Guards the fixture: it must still be what ``is_documented_example`` skips."""

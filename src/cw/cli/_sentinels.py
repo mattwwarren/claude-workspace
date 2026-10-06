@@ -68,10 +68,10 @@ def _parse_sentinel_from_transcript(
     See GitHub issue #225 (capture gap) and issue #176 Layer 1 (transcript-walk origin).
 
     ``ticket_id`` is the current task's expected identity. When omitted, it is
-    read from the headless worktree's ``cw-context.json``. A missing identity
-    is retained only for direct legacy callers; production headless scans have
-    the context value and therefore discard sibling-ticket blocks before they
-    can be routed.
+    read from the worktree's ``cw-context.json`` and must be present there. If
+    an explicit identity is supplied, it must agree with any context identity
+    found at *cwd*. A missing or conflicting identity fails closed and returns
+    ``None``; direct legacy callers never perform an unfiltered salvage.
 
     ``warned_blocks`` (issue #1247) is an optional caller-owned set forwarded
     unchanged to the shared per-block parse, deduping repeated ``_log.warning``
@@ -83,12 +83,21 @@ def _parse_sentinel_from_transcript(
     if not claude_session_id:
         return None
     transcript_path = claude_project_dir(cwd) / f"{claude_session_id}.jsonl"
-    expected_ticket_id = ticket_id
+    context = _read_cw_context(cwd)
+    context_ticket_id = context.get("ticket_id") if context is not None else None
+    if not isinstance(context_ticket_id, str) or not context_ticket_id:
+        context_ticket_id = None
+    expected_ticket_id: str | None
+    if ticket_id is not None:
+        if not ticket_id:
+            return None
+        if context_ticket_id is not None and context_ticket_id != ticket_id:
+            return None
+        expected_ticket_id = ticket_id
+    else:
+        expected_ticket_id = context_ticket_id
     if expected_ticket_id is None:
-        context = _read_cw_context(cwd)
-        value = context.get("ticket_id") if context is not None else None
-        if isinstance(value, str) and value:
-            expected_ticket_id = value
+        return None
     return parse_last_block_per_chunk(
         _iter_sentinel_text_blocks(transcript_path),
         ticket_id=expected_ticket_id,
