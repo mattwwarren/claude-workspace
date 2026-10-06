@@ -549,6 +549,29 @@ def resume_session(
         _attach_session(new_short_id)
 
 
+def _remove_worktree_before_lock(session_name: str | None, *, force: bool) -> str:
+    """Remove the session's worktree for ``cw done --cleanup``, lock-free (#1232).
+
+    Returns the resolved session id so :func:`done_session` re-resolves the
+    same session under ``sessions_lock``. Skipped for an already-COMPLETED
+    session. A ``WorktreeError`` propagates before the lock is taken, leaving
+    the session open. Accepted race: the path can be reused concurrently
+    between this removal and the COMPLETED stamp, as before #1232 (removal
+    already preceded the stamp).
+    """
+    session = _resolve_session(load_state(), session_name)
+    if (
+        session.status != SessionStatus.COMPLETED
+        and session.worktree_path
+        and session.branch
+    ):
+        client = get_client(session.client)
+        click.echo(f"Removing worktree for branch '{session.branch}'...")
+        remove_worktree(client, session.branch, force=force)
+        click.echo("Worktree removed.")
+    return session.id
+
+
 def done_session(
     session_name: str | None = None,
     *,
@@ -570,23 +593,22 @@ def done_session(
     :meth:`~cw.native_daemon.NativeDaemonClient.stop` swallows a missing or
     already-gone surface.
 
+    With *cleanup*, the worktree is removed before ``sessions_lock`` is taken
+    (#1232); the lock then only re-resolves the session by id and stamps it.
     """
+    if cleanup:
+        session_name = _remove_worktree_before_lock(session_name, force=force)
+
     # Why not mutate_state: the post-lock tail needs `session` and
-    # `already_completed`.
-    # bounded=True (#2491): `cw done` takes the lock before any side effect;
-    # a timeout is a clean retry.
+    # `already_completed`; no subprocess runs in the lock.
+    # bounded=True (#2491): a timeout leaves the session open, and a retry is
+    # clean -- remove_worktree returns early once the path is gone.
     with sessions_lock(bounded=True):
         state = load_state()
         session = _resolve_session(state, session_name)
         already_completed = session.status == SessionStatus.COMPLETED
 
         if not already_completed:
-            if cleanup and session.worktree_path and session.branch:
-                client = get_client(session.client)
-                click.echo(f"Removing worktree for branch '{session.branch}'...")
-                remove_worktree(client, session.branch, force=force)
-                click.echo("Worktree removed.")
-
             session.status = SessionStatus.COMPLETED
             session.completed_reason = CompletionReason.USER
             session.completed_at = datetime.now(UTC)
