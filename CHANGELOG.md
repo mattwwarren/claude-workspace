@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`cw doctor` now reports the effective codex fix-loop state per codex review lane with a new `codex-fix-loop/<client>/<lane>` check (#2542).** Nothing showed an operator whether the `--sandbox workspace-write` fix loop was on for a lane, or whether the value came from the lane's `codex_fix_loop_enabled` or the global `default_codex_fix_loop_enabled` in `orchestrator.yaml`. The check lists only lanes whose review executor is codex, resolves the state through the runtime's own resolver so it cannot drift, and names the source (`lane` or `global default`) and the key to change. It is advisory (`ok=True`, `warn=True` only when the loop is on, so doctor's exit code is unchanged) and read-only: an absent `orchestrator.yaml` is not created, and a load failure prints a fixed message with the exception class name only.
+
 ### Changed
 
 - **A lane can now set `codex_fix_loop_enabled: false` to opt out of a globally enabled `default_codex_fix_loop_enabled` (#2541).** `LaneConfig.codex_fix_loop_enabled` was `Literal[True] | None`, so a lane could only opt in and `false` failed validation at config load. It is now `bool | None` and resolves as the explicit lane value first, with `null` (or unset) deferring to the global default. With `false`, no `--sandbox workspace-write` fix pass runs for the lane and a blocking cycle-0 review parks on `CODEX_MUST_FIX_FINDINGS`. Existing configs are unchanged. An end-to-end test covers the zero-write guarantee. Behavior change for the reap and orphan gates in `codex_boot` and `local`: they follow the same resolver, so an opted-out lane now counts as fix-loop-off there.
