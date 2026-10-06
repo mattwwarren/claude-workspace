@@ -13,6 +13,7 @@ set in the same commit.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 from datetime import UTC, datetime
@@ -212,6 +213,9 @@ class TestPackageExportCompleteness:
     def test_expected_surface_size(self) -> None:
         assert len(EXPECTED_EXPORTS) == 141
 
+    def test_all_matches_full_surface(self) -> None:
+        assert set(_shared.__all__) == EXPECTED_EXPORTS
+
     def test_every_expected_name_is_bound(self) -> None:
         """A dropped re-export must fail here, not at a downstream import site."""
         missing = [name for name in EXPECTED_EXPORTS if not hasattr(_shared, name)]
@@ -227,6 +231,42 @@ class TestPackageExportCompleteness:
             if getattr(cw.reconcile, name) is not getattr(_shared, name)
         ]
         assert mismatched == []
+
+
+_PKG = "cw.reconcile._shared"
+
+# (function, module global it reads, module whose namespace it reads it from).
+# A test that monkeypatches the global must target that module: a patch on any
+# other namespace that also binds the name resolves fine but silently stops
+# intercepting -- and a no-op assertion like ``saves == []`` then passes
+# vacuously. Each extraction commit repoints the rows whose function it moves.
+PATCH_OWNERSHIP = [
+    ("_worktree_dirty_reason_by_path", "get_client", _PKG),
+    ("_worktree_dirty_reason_by_path", "unsaved_work_reason", _PKG),
+    ("_worktree_dirty_reason_by_path", "_deps", _PKG),
+    ("_blocked_result_requeue_enabled", "get_client", _PKG),
+    ("_claude_agents_json", "subprocess", _PKG),
+    ("_widened_transcript_timestamp", "_locate_session_transcript", _PKG),
+    ("_detect_unconsumed_queue_notification", "_locate_session_transcript", _PKG),
+    ("_detect_post_review_clean", "read_events", _PKG),
+    ("_emit_reap_proposed", "record_event", _PKG),
+    ("_emit_reap_proposed", "save_state", _PKG),
+    ("_apply_sentinel_to_task", "save_dev_queue", _PKG),
+    ("_apply_sentinel_to_task", "record_event", _PKG),
+    ("_apply_sentinel_to_task", "_deps", _PKG),
+]
+
+
+class TestPatchOwnership:
+    """Guards that each patched global lives where its reader looks it up."""
+
+    @pytest.mark.parametrize(("function", "global_name", "owner"), PATCH_OWNERSHIP)
+    def test_function_reads_global_from_owner(
+        self, function: str, global_name: str, owner: str
+    ) -> None:
+        namespace = vars(importlib.import_module(owner))
+        assert getattr(_shared, function).__globals__ is namespace
+        assert global_name in namespace
 
 
 # Every record the package emits must carry the pre-split logger name
