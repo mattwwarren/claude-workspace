@@ -452,10 +452,12 @@ Required: parse the JSON. `status` must be `"ok"` and `pr_number` must be non-nu
     if [ -f "$candidate" ]; then FINALIZE="$candidate"; break; fi
   done
   [ -n "$FINALIZE" ] || { echo "prep_pr_finalize.py not found (probed .claude/scripts/, scripts/, ~/.claude/scripts/)" >&2; exit 127; }
-  "$FINALIZE" arm-automerge <pr_number> --repo-path <worktree>
+  "$FINALIZE" arm-automerge <pr_number> --repo-path <worktree> --head-sha <head_sha>
   ```
 
   Dispositions by `arm-automerge` exit: **0** (`armed` / `merged`) → re-run the `verify` above; emit the sentinel only if it still fails. **1** (bounded retries exhausted) → emit the sentinel with the JSON `gh_stderr` (or "none -- gh exited 0 but autoMergeRequest read back null") in `blocker.details`. **2 or any code other than 0/1/3** (127 unset `FINALIZE`, 126, a traceback) → emit the sentinel with `blocker.details` beginning `arm-automerge invocation error (exit <code>, not a gh failure): <stderr>`; never retried, never proceed as armed (a stale script copy lacking the subcommand lands here). **3** (the script saw `pr.auto_merge: false`; no gh call was made) → set the sentinel's `pr.auto_merge` to `false`, leave the PR open, skip the re-verify and the sentinel, and proceed to Step 4c.5.
+
+  `<head_sha>` is the `head_sha` field of the verify JSON just parsed (the local HEAD that `pr-sha-matches` compared to the PR head); `arm-automerge` pins the arm to it with `gh pr merge --match-head-commit`, so a head mismatch surfaces as exit 1 with gh's message in `gh_stderr`. Exit 2 here can also mean `.claude/project-config.yaml` exists but `pr.auto_merge` cannot be determined (fail closed, #2581); the stderr in `blocker.details` names the reason.
 - **Otherwise** (not the sole failed check) emit the `automerge_not_armed` sentinel and stop — do NOT proceed to Step 4c.5.
 
 A failing verify is rare — the exact sentinel template, and why the reason must not join `FINALIZE_REGRESS_BLOCKER_REASONS`, live in `.claude/commands/auto-dev-finalize-appendix.md`, section "Step 4c re-verification failure: the `automerge_not_armed` sentinel". Read it now if the verify reported any failed check; do not improvise the sentinel from this summary alone. Any *other* failed check (PR existence, SHA match, monitor registration) collapses under the "Any other agent BLOCK" gate-collapse row — emit `blocked` with `blocker.reason: "agent_block"`; do not invent a new reason.
@@ -725,19 +727,22 @@ After `/prep-pr` returns with a PR number:
 
    Omit the section for `"clean"`. The section is idempotent across restarts: replace an existing `## Operator override` section rather than appending a second one.
 
-3. **Enable auto-merge:** Precondition: if the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless, skip this entire item — do not run the seam check or `arm-automerge`, set the sentinel's `pr.auto_merge` to `false`, and continue to step 4. Otherwise, first check the shared seam — `~/.claude/scripts/prep_pr_finalize.py check-automerge-allowed` — and record its exit status. Exit `0` permits the arm; exit `1` means `.claude/project-config.yaml` sets `pr.auto_merge: false`, so skip this step, set the sentinel's `pr.auto_merge` to `false`, leave the PR open for manual merge, and skip the verification below. Any other exit status is an unexpected gate failure: BLOCK. When the seam permits it, arm with the bounded-retry `arm-automerge` (#2576), run from the impl worktree and resolving the script in the same Bash call (the reuse path skips Step 4c, so this item cannot rely on a `FINALIZE` defined there):
+3. **Enable auto-merge:** Precondition: if the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless, skip this entire item — do not run the seam check or `arm-automerge`, set the sentinel's `pr.auto_merge` to `false`, and continue to step 4. Otherwise, first check the shared seam — `~/.claude/scripts/prep_pr_finalize.py check-automerge-allowed` — and record its exit status. Exit `0` permits the arm; exit `1` means `.claude/project-config.yaml` sets `pr.auto_merge: false`, so skip this step, set the sentinel's `pr.auto_merge` to `false`, leave the PR open for manual merge, and skip the verification below. Any other exit status is an unexpected gate failure: BLOCK. Exit `2` can also mean `.claude/project-config.yaml` exists but `pr.auto_merge` cannot be determined (fail closed, #2581); the stderr names the reason, so carry it in the BLOCK. When the seam permits it, arm with the bounded-retry `arm-automerge` (#2576), run from the impl worktree and resolving the script in the same Bash call (the reuse path skips Step 4c, so this item cannot rely on a `FINALIZE` defined there):
 
    ```bash
    cd <worktree>
+   HEAD_SHA=$(git rev-parse HEAD)
    FINALIZE=""
    for candidate in .claude/scripts/prep_pr_finalize.py scripts/prep_pr_finalize.py "$HOME/.claude/scripts/prep_pr_finalize.py"; do
      if [ -f "$candidate" ]; then FINALIZE="$candidate"; break; fi
    done
    [ -n "$FINALIZE" ] || { echo "prep_pr_finalize.py not found (probed .claude/scripts/, scripts/, ~/.claude/scripts/)" >&2; exit 127; }
-   "$FINALIZE" arm-automerge <pr-number> --repo-path <worktree>
+   "$FINALIZE" arm-automerge <pr-number> --repo-path <worktree> --head-sha "$HEAD_SHA"
    ```
 
    Carry its JSON into the sentinel. Exit **0** (`armed` / `merged`) → proceed to the verify below. Exit **1** → the arm failed: take the interactive AskUserQuestion / headless sentinel below with the JSON `gh_stderr` (or "gh exited 0 but autoMergeRequest read back null") in `blocker.details`. Exit **2 or any code other than 0/1/3** → same failure branch, with `blocker.details` beginning `arm-automerge invocation error (exit <code>, not a gh failure): <stderr>`; never retried. Exit **3** (the script itself saw `pr.auto_merge: false`; no gh call was made) → treat as the seam-disallowed leave-open case: set the sentinel's `pr.auto_merge` to `false`, leave the PR open, skip the verify, no BLOCK and no `automerge_not_armed` sentinel; continue to step 4. Auto-merge may be enabled on a draft PR — it won't trigger until the PR is marked ready (`/review-monitor` does this when the stack parent merges) AND CI passes. Enable whenever the seam permits it, EXCEPT when the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless: then skip this step and set `pr.auto_merge` to `false` regardless of what the seam said.
+
+   `HEAD_SHA` is the worktree's own `git rev-parse HEAD`, taken in the same Bash call; the reuse path compares it to nothing beforehand, so a mismatch surfaces through the pin as exit 1 with gh's message in `gh_stderr`.
 
    **Verify after arming (#1140 — do not skip):** Skip this sub-step if the arm itself was skipped (Hold / headless UI-evidence-missing branch / seam-disallowed `pr.auto_merge: false`). Otherwise, immediately after `arm-automerge` exits 0, read back whether it took:
 
@@ -753,7 +758,7 @@ After `/prep-pr` returns with a PR number:
    (gh stderr: <gh_stderr from the JSON, or "gh exited 0 but autoMergeRequest read back null">).
 
    Options:
-   1. Retry — re-check `check-automerge-allowed`, then run `"$FINALIZE" arm-automerge <pr-number> --repo-path <worktree>` again (re-run the resolver in the same Bash call) and re-verify
+   1. Retry — re-check `check-automerge-allowed`, then run `"$FINALIZE" arm-automerge <pr-number> --repo-path <worktree> --head-sha "$HEAD_SHA"` again (re-run the resolver and `git rev-parse HEAD` in the same Bash call) and re-verify
    2. Leave open — do not enable auto-merge; human merges manually
    3. Abort — stop pipeline
    ```

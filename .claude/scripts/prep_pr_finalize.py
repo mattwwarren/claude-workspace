@@ -25,15 +25,19 @@ Checks (all required unless flagged optional):
 Subcommands:
   verify                   Run all checks above, exit non-zero if any
                             required check fails.
-  arm-automerge            Arm `gh pr merge --auto --squash` with a bounded
-                            retry, reading `autoMergeRequest` back instead of
-                            trusting gh's exit code (#2576). Prints one JSON
-                            result object; consults the pr.auto_merge seam
-                            itself and makes no gh call when it is false.
-  check-automerge-allowed  Print "true"/"false" (exit 0/1) for whether
+  arm-automerge            Arm `gh pr merge --auto --squash` pinned to a
+                            verified `--head-sha` (`--match-head-commit`)
+                            with a bounded retry, reading `autoMergeRequest`
+                            back instead of trusting gh's exit code (#2576,
+                            #2581). Prints one JSON result object; consults
+                            the pr.auto_merge seam itself and makes no gh
+                            call when it is false or undeterminable.
+  check-automerge-allowed  Print "true"/"false" for whether
                             .claude/project-config.yaml's pr.auto_merge
-                            permits `gh pr merge --auto`. The shared seam
-                            every markdown arm site (ship-it.md,
+                            permits `gh pr merge --auto`: exit 0 allowed, 1
+                            explicit pr.auto_merge: false, 2 undeterminable
+                            (fail closed, #2581). The shared seam every
+                            markdown arm site (ship-it.md,
                             auto-dev-finalize.md, review-monitor.md,
                             cw-session-watch/SKILL.md) shells out to
                             before arming auto-merge (#2046).
@@ -41,7 +45,10 @@ Subcommands:
 Exit codes:
   0  all checks passed (arm-automerge: armed, or the PR is already MERGED)
   1  a required check failed (arm-automerge: arming failed after all retries)
-  2  invocation error (not in a git repo, gh missing, etc.)
+  2  invocation error (not in a git repo, gh missing, etc.); also, for
+     check-automerge-allowed and arm-automerge, an existing
+     .claude/project-config.yaml whose pr.auto_merge cannot be determined
+     (fail closed, #2581)
   3  arm-automerge only: refused because pr.auto_merge is false (no gh call)
 """
 
@@ -51,6 +58,7 @@ import argparse
 import importlib.util
 import json
 import logging
+import re
 import shutil
 import subprocess
 import sys
@@ -115,6 +123,8 @@ ARM_STATUS_ARMED = "armed"
 ARM_STATUS_MERGED = "merged"
 ARM_STATUS_FAILED = "failed"
 ARM_STATUS_SKIPPED = "skipped"
+# arm-automerge --head-sha (#2581): a full SHA only, never a branch or prefix.
+_FULL_SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
 
 
 # --- Data Models ---
@@ -341,17 +351,123 @@ def resolve_project_config_auto_merge(
     return auto_merge if isinstance(auto_merge, bool) else None
 
 
-def automerge_allowed(config_path: Path = PROJECT_CONFIG_PATH) -> bool:
-    """True unless .claude/project-config.yaml explicitly sets pr.auto_merge: false.
+AUTOMERGE_KEY = "auto_merge"
+AUTOMERGE_SECTION = "pr"
+# One canonical line shape, read without PyYAML. fullmatch only, so `true#x`
+# (no space before `#`) is not a trailing comment and refuses.
+_TRAILING_COMMENT = r"(?:[ ]+#.*)?[ ]*"
+_AUTOMERGE_LINE_RE = re.compile(
+    rf"[ ]+{AUTOMERGE_KEY}:[ ]+"
+    rf"(?P<value>true|True|TRUE|false|False|FALSE){_TRAILING_COMMENT}"
+)
+_PR_SECTION_RE = re.compile(rf"{AUTOMERGE_SECTION}:{_TRAILING_COMMENT}")
+NO_YAML_REASON = "PyYAML unavailable and pr.auto_merge could not be read without it"
+UNDETERMINABLE_TEMPLATE = (
+    "cannot determine pr.auto_merge ({reason}); "
+    "refusing to arm auto-merge (fail closed, #2046/#2581)"
+)
 
-    The single shared seam every `gh pr merge --auto` call site — this
-    script's own --require-automerge check, plus the markdown-orchestrated
-    bash arm sites in ship-it.md, auto-dev-finalize.md, review-monitor.md,
-    and cw-session-watch/SKILL.md — must consult before arming, so a
-    project's declared pr.auto_merge: false is honored everywhere instead of
-    re-implemented as N independent YAML reads (#2046).
+
+@dataclass(frozen=True)
+class AutomergeGate:
+    """Verdict of the pr.auto_merge seam; `reason` is set only when undeterminable."""
+
+    allowed: bool
+    reason: str | None
+
+
+_GATE_ALLOWED = AutomergeGate(allowed=True, reason=None)
+
+
+def _gate_refused(reason: str) -> AutomergeGate:
+    return AutomergeGate(allowed=False, reason=reason)
+
+
+def _gate_from_pr_block(
+    pr_block: dict[object, object], config_path: Path
+) -> AutomergeGate:
+    """Absent key allows; a bool decides; anything else refuses."""
+    if AUTOMERGE_KEY not in pr_block:
+        return _GATE_ALLOWED
+    value = pr_block[AUTOMERGE_KEY]
+    if isinstance(value, bool):
+        return AutomergeGate(allowed=value, reason=None)
+    return _gate_refused(f"pr.auto_merge in {config_path} is not a boolean: {value!r}")
+
+
+def _gate_from_parsed(raw: object, config_path: Path) -> AutomergeGate:
+    """Gate verdict for a parsed YAML document (None is an empty file)."""
+    if raw is None:
+        return _GATE_ALLOWED
+    if not isinstance(raw, dict):
+        return _gate_refused(f"{config_path} is not a YAML mapping")
+    pr_block = raw.get(AUTOMERGE_SECTION)
+    if pr_block is None:
+        return _GATE_ALLOWED
+    if not isinstance(pr_block, dict):
+        return _gate_refused(f"{AUTOMERGE_SECTION} in {config_path} is not a mapping")
+    return _gate_from_pr_block(pr_block, config_path)
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _parent_is_pr_section(lines: list[str], index: int) -> bool:
+    """True when the nearest less-indented line above ``index`` is ``pr:``."""
+    indent = _indent(lines[index])
+    for line in reversed(lines[:index]):
+        if _indent(line) < indent:
+            return _PR_SECTION_RE.fullmatch(line) is not None
+    return False
+
+
+def _scan_automerge_gate(text: str) -> AutomergeGate:
+    """Read pr.auto_merge without PyYAML; any non-canonical shape refuses."""
+    lines = [
+        line
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    hits = [index for index, line in enumerate(lines) if AUTOMERGE_KEY in line]
+    if not hits:
+        return _GATE_ALLOWED
+    match = _AUTOMERGE_LINE_RE.fullmatch(lines[hits[0]]) if len(hits) == 1 else None
+    if match is None or not _parent_is_pr_section(lines, hits[0]):
+        return _gate_refused(NO_YAML_REASON)
+    return AutomergeGate(allowed=match["value"].lower() == "true", reason=None)
+
+
+def read_automerge_gate(config_path: Path = PROJECT_CONFIG_PATH) -> AutomergeGate:
+    """Fail-closed pr.auto_merge verdict for `config_path` (#2581).
+
+    A missing file allows. Any other read failure, unparseable YAML or
+    wrong-shaped value refuses with a single-line reason. Without PyYAML a
+    dependency-free scan reads only the canonical `pr:` / `auto_merge:` shape.
     """
-    return resolve_project_config_auto_merge(config_path) is not False
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return _GATE_ALLOWED
+    except (OSError, ValueError) as err:
+        return _gate_refused(f"cannot read {config_path}: {err}")
+    if yaml is None:
+        return _scan_automerge_gate(text)
+    try:
+        raw = yaml.safe_load(text)
+    except (yaml.YAMLError, ValueError):
+        return _gate_refused(f"invalid YAML in {config_path}")
+    return _gate_from_parsed(raw, config_path)
+
+
+def automerge_allowed(config_path: Path = PROJECT_CONFIG_PATH) -> bool:
+    """True unless pr.auto_merge is explicitly false or cannot be determined.
+
+    Fail closed for an existing config (#2581); a missing config file is
+    allowed. Thin wrapper over read_automerge_gate; the markdown arm sites
+    reach the same verdict through check-automerge-allowed (#2046).
+    """
+    return read_automerge_gate(config_path).allowed
 
 
 def resolve_effective_automerge_required(base_required: bool) -> bool:
@@ -365,10 +481,13 @@ def resolve_effective_automerge_required(base_required: bool) -> bool:
     retry `gh pr merge --auto`, forcing an unreviewed, CI-unconfirmed merge
     (#2046). Any other config state (absent file/key, auto_merge: true,
     unparseable YAML, no PyYAML) leaves the caller's own flag untouched.
+    It deliberately does not use the fail-closed read_automerge_gate: verify
+    must never downgrade --require-automerge on a config it cannot read
+    (#2581).
     """
     if not base_required:
         return False
-    return automerge_allowed()
+    return resolve_project_config_auto_merge() is not False
 
 
 def check_automerge(summary: ShipSummary, required: bool) -> CheckResult:
@@ -548,6 +667,7 @@ def _finish_failed(result: ArmResult, read_error: str) -> ArmResult:
 def arm_automerge(
     pr_number: int,
     *,
+    head_sha: str,
     attempts: int = ARM_MAX_ATTEMPTS,
     backoff_seconds: float = ARM_BACKOFF_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
@@ -563,17 +683,30 @@ def arm_automerge(
     failure to retry (#1140). Sleeps ``backoff_seconds * n`` after the n-th
     failed attempt, never after the last one. Every gh call runs in ``cwd`` (the
     process cwd when ``None``) so gh acts on the repo the caller named.
+
+    The arm is pinned to ``head_sha`` with ``--match-head-commit``, tying it
+    to the verified SHA at arm time (closing the verify-to-arm window). The
+    pin applies only to arms this call issues: an already-armed or MERGED PR
+    is a no-op success and is not re-pinned.
     """
     result = ArmResult(pr_number=pr_number, max_attempts=attempts)
+    merge_cmd = [
+        "gh",
+        "pr",
+        "merge",
+        str(pr_number),
+        "--auto",
+        "--squash",
+        "--match-head-commit",
+        head_sha,
+    ]
     while True:
         done, read_error = _poll_armed(result, cwd=cwd)
         if done:
             return result
         if result.attempts >= attempts:
             return _finish_failed(result, read_error)
-        merge = run(
-            ["gh", "pr", "merge", str(pr_number), "--auto", "--squash"], cwd=cwd
-        )
+        merge = run(merge_cmd, cwd=cwd)
         result.attempts += 1
         result.gh_exit_code = merge.returncode
         result.gh_stderr = merge.stderr.strip()[:GH_STDERR_LIMIT]
@@ -736,17 +869,33 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 1 if failed_required else 0
 
 
-def _warn_if_automerge_config_unreadable(config_path: Path) -> None:
-    """Warn when PyYAML is missing and a config exists whose seam can't be read.
+def _arm_invocation_error(message: str) -> int:
+    sys.stderr.write(f"ERROR: {message}\n")
+    return 2
 
-    Shared by `check-automerge-allowed` and `arm-automerge`: the latter
-    re-checks the same seam (#2046), so the two must warn identically.
+
+def _refuse_undeterminable(reason: str) -> int:
+    """Exit 2 for a config whose pr.auto_merge cannot be determined (#2581)."""
+    return _arm_invocation_error(UNDETERMINABLE_TEMPLATE.format(reason=reason))
+
+
+def _git_toplevel(path: Path) -> Path | None:
+    """The git toplevel containing ``path``, or None when it is not in a work tree."""
+    toplevel = git("-C", str(path), "rev-parse", "--show-toplevel")
+    return Path(toplevel) if toplevel else None
+
+
+def _normalize_repo_path(repo_path: Path) -> tuple[Path | None, str]:
+    """Resolve an explicit --repo-path to its git toplevel.
+
+    Returns ``(root, "")`` or ``(None, error)``.
     """
-    if yaml is None and config_path.exists():
-        sys.stderr.write(
-            "WARNING: could not read pr.auto_merge: PyYAML unavailable; "
-            "treating auto-merge as allowed\n"
-        )
+    if not repo_path.is_dir():
+        return None, f"--repo-path is not a directory: {repo_path}"
+    toplevel = _git_toplevel(repo_path)
+    if toplevel is None:
+        return None, f"--repo-path is not inside a git work tree: {repo_path}"
+    return toplevel, ""
 
 
 def cmd_check_automerge_allowed(args: argparse.Namespace) -> int:
@@ -756,36 +905,47 @@ def cmd_check_automerge_allowed(args: argparse.Namespace) -> int:
     `gh pr merge --auto` call, so .claude/project-config.yaml is read once,
     not independently by each of ship-it.md, auto-dev-finalize.md,
     review-monitor.md, and cw-session-watch/SKILL.md (#2046). Exit 0 +
-    "true" means arming is allowed; exit 1 + "false" means pr.auto_merge:
-    false disallows it and the caller must skip the arm and leave the PR
-    open. Never raises on missing/malformed config or absent PyYAML.
+    "true" means arming is allowed; exit 1 + "false" means an explicit
+    pr.auto_merge: false disallows it and the caller must skip the arm and
+    leave the PR open. Exit 2 means an existing config's pr.auto_merge cannot
+    be determined (prints "false", reason on stderr; fail closed, #2581) or
+    --repo-path is not a directory or not inside a git work tree (prints
+    nothing). A missing config file is still "true".
     """
-    config_path = (
-        Path(args.repo_path) / PROJECT_CONFIG_PATH
-        if args.repo_path
-        else PROJECT_CONFIG_PATH
-    )
-    _warn_if_automerge_config_unreadable(config_path)
-    allowed = automerge_allowed(config_path)
-    print("true" if allowed else "false")
-    return 0 if allowed else 1
+    config_path = PROJECT_CONFIG_PATH
+    if args.repo_path is not None:
+        root, error = _normalize_repo_path(args.repo_path)
+        if root is None:
+            return _arm_invocation_error(error)
+        config_path = root / PROJECT_CONFIG_PATH
+    gate = read_automerge_gate(config_path)
+    print("true" if gate.allowed else "false")
+    if gate.reason is not None:
+        return _refuse_undeterminable(gate.reason)
+    return 0 if gate.allowed else 1
 
 
-def _arm_invocation_error(message: str) -> int:
-    sys.stderr.write(f"ERROR: {message}\n")
-    return 2
+def _resolve_arm_repo_path(repo_path: Path | None) -> tuple[Path | None, str]:
+    """The repo whose seam applies: --repo-path's toplevel, else the git toplevel.
 
-
-def _resolve_arm_repo_path(repo_path: Path | None) -> Path | None:
-    """The repo whose seam applies: --repo-path, else the git toplevel.
-
-    Never falls back to a cwd-relative path: gh acts on the repo it runs in,
-    so the seam must be read from that same repo.
+    Returns ``(root, "")`` or ``(None, error)``. Never falls back to a
+    cwd-relative or as-given path: gh acts on the repo it runs in, so the
+    seam must be read from that same repo's root.
     """
     if repo_path is not None:
-        return repo_path
+        return _normalize_repo_path(repo_path)
     toplevel = git("rev-parse", "--show-toplevel")
-    return Path(toplevel) if toplevel else None
+    if not toplevel:
+        return None, "not in a git repository and --repo-path was not given"
+    return Path(toplevel), ""
+
+
+def _full_sha(value: str) -> str:
+    """argparse type for --head-sha: a full 40-character hex SHA, lower-cased."""
+    if _FULL_SHA_RE.fullmatch(value) is None:
+        message = f"expected a full 40-character hex commit SHA, got {value!r}"
+        raise argparse.ArgumentTypeError(message)
+    return value.lower()
 
 
 def cmd_arm_automerge(args: argparse.Namespace) -> int:
@@ -795,6 +955,8 @@ def cmd_arm_automerge(args: argparse.Namespace) -> int:
     does, BEFORE any gh call: when it disallows arming this makes zero gh
     calls and exits 3 (#2046). Prints one JSON result object on stdout; a
     persistent failure also writes gh's last stderr to stderr and exits 1.
+    An existing config whose pr.auto_merge cannot be determined also makes
+    zero gh calls and exits 2 with no JSON (fail closed, #2581).
     """
     if not shutil.which("gh"):
         return _arm_invocation_error("`gh` CLI not found on PATH")
@@ -802,17 +964,14 @@ def cmd_arm_automerge(args: argparse.Namespace) -> int:
         return _arm_invocation_error("--attempts must be >= 1")
     if args.backoff_seconds < 0:
         return _arm_invocation_error("--backoff-seconds must be >= 0")
-    repo_path = _resolve_arm_repo_path(args.repo_path)
+    repo_path, error = _resolve_arm_repo_path(args.repo_path)
     if repo_path is None:
-        return _arm_invocation_error(
-            "not in a git repository and --repo-path was not given"
-        )
-    if not repo_path.is_dir():
-        return _arm_invocation_error(f"--repo-path is not a directory: {repo_path}")
+        return _arm_invocation_error(error)
 
-    config_path = repo_path / PROJECT_CONFIG_PATH
-    _warn_if_automerge_config_unreadable(config_path)
-    if not automerge_allowed(config_path):
+    gate = read_automerge_gate(repo_path / PROJECT_CONFIG_PATH)
+    if gate.reason is not None:
+        return _refuse_undeterminable(gate.reason)
+    if not gate.allowed:
         skipped = ArmResult(
             pr_number=args.pr_number,
             max_attempts=args.attempts,
@@ -827,6 +986,7 @@ def cmd_arm_automerge(args: argparse.Namespace) -> int:
 
     result = arm_automerge(
         args.pr_number,
+        head_sha=args.head_sha,
         attempts=args.attempts,
         backoff_seconds=args.backoff_seconds,
         cwd=repo_path,
@@ -874,20 +1034,28 @@ def build_parser() -> argparse.ArgumentParser:
     check_allowed = sub.add_parser(
         "check-automerge-allowed",
         help=(
-            "Print true/false + exit 0/1 for whether pr.auto_merge "
-            "permits `gh pr merge --auto`"
+            "Print true/false for whether pr.auto_merge permits "
+            "`gh pr merge --auto`: exit 0 allowed, exit 1 explicit "
+            "pr.auto_merge: false, exit 2 undeterminable config or invalid "
+            "--repo-path (fail closed)"
         ),
     )
     check_allowed.add_argument(
         "--repo-path",
         type=Path,
-        help="Repository root whose .claude/project-config.yaml should be read",
+        help=(
+            "Path inside the repository whose .claude/project-config.yaml "
+            "should be read (normalized to the git toplevel)"
+        ),
     )
     check_allowed.set_defaults(func=cmd_check_automerge_allowed)
 
     arm = sub.add_parser(
         "arm-automerge",
-        help="Arm auto-merge on a PR with bounded retry and read-back (#2576)",
+        help=(
+            "Arm auto-merge on a PR, pinned to a verified head SHA, with "
+            "bounded retry and read-back (#2576, #2581)"
+        ),
     )
     arm.add_argument("pr_number", type=int, help="Pull request number to arm")
     arm.add_argument(
@@ -909,8 +1077,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--repo-path",
         type=Path,
         help=(
-            "Repository root whose .claude/project-config.yaml should be read "
-            "(default: the git toplevel of the current directory)"
+            "Path inside the repository (normalized to its git toplevel) whose "
+            ".claude/project-config.yaml should be read (default: the git "
+            "toplevel of the current directory)"
+        ),
+    )
+    arm.add_argument(
+        "--head-sha",
+        required=True,
+        type=_full_sha,
+        help=(
+            "Full 40-character SHA of the verified local HEAD. The arm is "
+            "pinned to it with `gh pr merge --match-head-commit`, so it applies "
+            "only if the PR head still matches at arm time (closes the "
+            "verify-to-arm window); a mismatch fails the arm and gh's stderr "
+            "is reported."
         ),
     )
     arm.set_defaults(func=cmd_arm_automerge)
