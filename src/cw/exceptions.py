@@ -504,6 +504,38 @@ class SpawnUnregisteredError(CwError):
     __slots__ = ()
 
 
+class WorkerLaunchedError(CwError):
+    """A spawn step failed AFTER the daemon worker was launched (#2502).
+
+    Raised by :func:`cw.spawn.spawn_create_impl` when anything after
+    ``daemon.spawn_bg`` returned fails: the cw session-id lookup from the
+    transcript, the parent lookup, or the ``sessions.json`` write.
+    :class:`SpawnUnregisteredError` is the one exception: it stays a backend
+    failure. The worker is live when this is raised, so it is the opposite of
+    that error and of :class:`DisclaimerNotAcceptedError`, which both mean no
+    usable worker exists.
+
+    Contract for every caller: a worker exists. Adopt it (record
+    ``session_id`` wherever a successful spawn would have been recorded), never
+    spawn it again, and never count this as a backend failure (no spawn-error
+    backoff, no lane circuit-breaker increment). The raise site has already
+    paged ``session.needs_attention``; an unrecorded worker is stopped by the
+    leaked-worker sweep, not by the caller.
+
+    ``session_id`` is the cw session id the worker was launched under; it may
+    be absent from ``sessions.json`` when the state write was what failed.
+    ``surface_ref`` is the daemon short id. The message embeds the original
+    error's text so a caller that only logs ``str(exc)`` still shows the cause.
+    """
+
+    __slots__ = ("session_id", "surface_ref")
+
+    def __init__(self, message: str, *, session_id: str, surface_ref: str) -> None:
+        super().__init__(message)
+        self.session_id = session_id
+        self.surface_ref = surface_ref
+
+
 class ApproveGateError(CwError):
     """Raised when a ticket cannot be approved because it is not at an approval gate."""
 
