@@ -353,16 +353,22 @@ when `prep_pr_finalize.py verify --require-automerge` reported the
   "blocker": {
     "stage": "stage5_post_create",
     "reason": "automerge_not_armed",
-    "details": "Step 4c re-verification: prep_pr_finalize.py verify --require-automerge reported automerge-enabled check failed (autoMergeRequest read back null) for PR #<N>",
+    "details": "Step 4c re-verification: prep_pr_finalize.py verify --require-automerge reported automerge-enabled check failed (autoMergeRequest read back null) for PR #<N>; arm-automerge: attempts=<k>/<max>, gh exit <code>, gh stderr: <verbatim gh_stderr, or 'none -- gh exited 0 but autoMergeRequest read back null'>",
     "exception_type": null,
-    "message": "gh pr merge --auto reported success but auto-merge was never actually armed",
-    "recovery_hint": "Run `gh pr merge <pr-number> --auto --squash` manually and re-verify, or merge the PR directly",
+    "message": "auto-merge was never armed after bounded retries (see details for gh's error)",
+    "recovery_hint": "Run `prep_pr_finalize.py arm-automerge <pr-number> --repo-path <worktree>` and re-verify, or merge the PR directly",
     "retry_eligible": true,
     "retry_delay_seconds": null
   },
   "next_actions": ["manual_intervention"]
 }
 ```
+
+**Variants** — the template above is written for the retries-exhausted path. Fill `blocker.details` and `blocker.message` per the path that emitted the sentinel; every other field is unchanged:
+
+- (a) Retries exhausted (`arm-automerge` exit 1): the template above as written.
+- (b) No arm attempted (`automerge-enabled` plus another failed check, or null `pr_number`): `details` are the original verify-only text — `Step 4c re-verification: prep_pr_finalize.py verify --require-automerge reported automerge-enabled check failed (autoMergeRequest read back null) for PR #<N>` with no `arm-automerge:` tail — and `message` is `auto-merge is not armed (no arm attempted: see details)`.
+- (c) Invocation error (exit 2, or any code other than 0/1/3): `details` begin `arm-automerge invocation error (exit <code>, not a gh failure): <stderr>` and `message` is `arm-automerge could not run (invocation error, not a gh failure)`.
 
 **Do not add `automerge_not_armed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`src/cw/auto_dev_result/schema.py:83`, currently `{"agent_block"}`). A failed auto-merge arm is not fixed by re-running implementation; regressing FINALIZE→IMPL would burn `FINALIZE_REGRESS_CAP` attempts against a PR that already exists and just needs re-arming. Park for the operator via the sentinel above.
 

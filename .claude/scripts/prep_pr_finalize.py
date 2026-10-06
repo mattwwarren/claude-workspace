@@ -25,6 +25,11 @@ Checks (all required unless flagged optional):
 Subcommands:
   verify                   Run all checks above, exit non-zero if any
                             required check fails.
+  arm-automerge            Arm `gh pr merge --auto --squash` with a bounded
+                            retry, reading `autoMergeRequest` back instead of
+                            trusting gh's exit code (#2576). Prints one JSON
+                            result object; consults the pr.auto_merge seam
+                            itself and makes no gh call when it is false.
   check-automerge-allowed  Print "true"/"false" (exit 0/1) for whether
                             .claude/project-config.yaml's pr.auto_merge
                             permits `gh pr merge --auto`. The shared seam
@@ -34,9 +39,10 @@ Subcommands:
                             before arming auto-merge (#2046).
 
 Exit codes:
-  0  all checks passed
-  1  a required check failed
+  0  all checks passed (arm-automerge: armed, or the PR is already MERGED)
+  1  a required check failed (arm-automerge: arming failed after all retries)
   2  invocation error (not in a git repo, gh missing, etc.)
+  3  arm-automerge only: refused because pr.auto_merge is false (no gh call)
 """
 
 from __future__ import annotations
@@ -48,12 +54,14 @@ import logging
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass, field
 from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from types import ModuleType
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -98,6 +106,15 @@ PROJECT_CONFIG_PATH = Path(".claude") / "project-config.yaml"
 # script runs under the shebang interpreter, where `cw` is not importable; a
 # test pins it to cw.gh._GH_PR_STATE_MERGED so the two cannot drift.
 PR_STATE_MERGED = "MERGED"
+# arm-automerge (#2576): 4 attempts with linear 3s/6s/9s backoff (18s worst case).
+ARM_MAX_ATTEMPTS = 4
+ARM_BACKOFF_SECONDS = 3.0
+GH_STDERR_LIMIT = 1000
+EXIT_ARM_DISALLOWED = 3
+ARM_STATUS_ARMED = "armed"
+ARM_STATUS_MERGED = "merged"
+ARM_STATUS_FAILED = "failed"
+ARM_STATUS_SKIPPED = "skipped"
 
 
 # --- Data Models ---
@@ -139,18 +156,40 @@ class ShipSummary:
         return asdict(self)
 
 
+@dataclass
+class ArmResult:
+    """Structured result of an arm-automerge run (#2576)."""
+
+    pr_number: int
+    max_attempts: int
+    status: str = ARM_STATUS_FAILED  # armed | merged | failed | skipped
+    attempts: int = 0  # `gh pr merge` calls actually made
+    pr_state: str = ""
+    gh_exit_code: int | None = None
+    gh_stderr: str = ""
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
 # --- Shell helpers ---
 
 
 def run(
-    cmd: list[str], check: bool = False, capture: bool = True
+    cmd: list[str],
+    check: bool = False,
+    capture: bool = True,
+    *,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a shell command. Default: capture, do not raise."""
+    """Run a shell command. Default: capture, do not raise, inherit cwd."""
     return subprocess.run(
         cmd,
         check=check,
         capture_output=capture,
         text=True,
+        cwd=cwd,
     )
 
 
@@ -436,6 +475,115 @@ def check_monitor_registered(summary: ShipSummary, required: bool) -> CheckResul
     )
 
 
+def _read_back_automerge(
+    pr_number: int, *, cwd: Path | None = None
+) -> tuple[str, bool, str]:
+    """Read `state` and `autoMergeRequest` back from gh, run in ``cwd``.
+
+    Returns ``(state, armed, error)``. Any read failure (non-zero exit, bad
+    JSON, non-object payload) is reported as not armed with ``error`` set and
+    ``state`` empty, so the caller treats it like any other un-armed read.
+    """
+    result = run(
+        ["gh", "pr", "view", str(pr_number), "--json", "state,autoMergeRequest"],
+        cwd=cwd,
+    )
+    if result.returncode != 0:
+        error = result.stderr.strip() or f"gh pr view exited {result.returncode}"
+        return "", False, error
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        return "", False, f"could not parse gh pr view output: {e}"
+    if not isinstance(data, dict):
+        return "", False, "gh pr view output was not a JSON object"
+    state = data.get("state")
+    return (
+        state if isinstance(state, str) else "",
+        bool(data.get("autoMergeRequest")),
+        "",
+    )
+
+
+def _poll_armed(result: ArmResult, *, cwd: Path | None = None) -> tuple[bool, str]:
+    """Read back the PR; record success on `result` when armed or MERGED.
+
+    Returns ``(done, read_error)``. A non-null `autoMergeRequest` or a MERGED
+    state is success regardless of how the preceding `gh pr merge` exited.
+    """
+    state, armed, error = _read_back_automerge(result.pr_number, cwd=cwd)
+    if state:
+        result.pr_state = state
+    if state == PR_STATE_MERGED:
+        result.status = ARM_STATUS_MERGED
+        result.detail = "PR already merged -- auto-merge not needed"
+        return True, ""
+    if armed:
+        result.status = ARM_STATUS_ARMED
+        result.detail = "autoMergeRequest read back non-null"
+        return True, ""
+    return False, error
+
+
+def _finish_failed(result: ArmResult, read_error: str) -> ArmResult:
+    """Fill in the failure detail once every attempt has been spent."""
+    result.status = ARM_STATUS_FAILED
+    if result.gh_exit_code == 0:
+        if read_error:
+            result.gh_stderr = read_error[:GH_STDERR_LIMIT]
+            result.detail = (
+                "gh pr merge exited 0 but the autoMergeRequest read-back failed"
+            )
+        else:
+            result.detail = (
+                "gh pr merge exited 0 but autoMergeRequest read back null (#1140)"
+            )
+    else:
+        result.detail = f"gh pr merge --auto exited {result.gh_exit_code}"
+        if read_error:
+            result.detail += f"; read-back failed: {read_error}"
+    return result
+
+
+def arm_automerge(
+    pr_number: int,
+    *,
+    attempts: int = ARM_MAX_ATTEMPTS,
+    backoff_seconds: float = ARM_BACKOFF_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    cwd: Path | None = None,
+) -> ArmResult:
+    """Arm auto-merge with bounded retry, trusting the read-back over gh's exit.
+
+    Each iteration reads the PR first, so an already-armed (or MERGED) PR is a
+    no-op success and a retry after a stale read never re-arms needlessly.
+    After a `gh pr merge --auto --squash` it reads back again: a non-null
+    `autoMergeRequest` or MERGED state is success even when gh exited
+    non-zero ("already queued"), while exit 0 with a null read-back is a
+    failure to retry (#1140). Sleeps ``backoff_seconds * n`` after the n-th
+    failed attempt, never after the last one. Every gh call runs in ``cwd`` (the
+    process cwd when ``None``) so gh acts on the repo the caller named.
+    """
+    result = ArmResult(pr_number=pr_number, max_attempts=attempts)
+    while True:
+        done, read_error = _poll_armed(result, cwd=cwd)
+        if done:
+            return result
+        if result.attempts >= attempts:
+            return _finish_failed(result, read_error)
+        merge = run(
+            ["gh", "pr", "merge", str(pr_number), "--auto", "--squash"], cwd=cwd
+        )
+        result.attempts += 1
+        result.gh_exit_code = merge.returncode
+        result.gh_stderr = merge.stderr.strip()[:GH_STDERR_LIMIT]
+        done, read_error = _poll_armed(result, cwd=cwd)
+        if done:
+            return result
+        if result.attempts < attempts:
+            sleep(backoff_seconds * result.attempts)
+
+
 def collect_diff_stats(summary: ShipSummary, base: str) -> None:
     """Best-effort diff metrics vs base branch. Non-fatal if base is unknown."""
     base_ref = f"origin/{base}"
@@ -588,6 +736,19 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 1 if failed_required else 0
 
 
+def _warn_if_automerge_config_unreadable(config_path: Path) -> None:
+    """Warn when PyYAML is missing and a config exists whose seam can't be read.
+
+    Shared by `check-automerge-allowed` and `arm-automerge`: the latter
+    re-checks the same seam (#2046), so the two must warn identically.
+    """
+    if yaml is None and config_path.exists():
+        sys.stderr.write(
+            "WARNING: could not read pr.auto_merge: PyYAML unavailable; "
+            "treating auto-merge as allowed\n"
+        )
+
+
 def cmd_check_automerge_allowed(args: argparse.Namespace) -> int:
     """Print "true"/"false" for whether pr.auto_merge permits `gh pr merge --auto`.
 
@@ -604,14 +765,81 @@ def cmd_check_automerge_allowed(args: argparse.Namespace) -> int:
         if args.repo_path
         else PROJECT_CONFIG_PATH
     )
-    if yaml is None and config_path.exists():
-        sys.stderr.write(
-            "WARNING: could not read pr.auto_merge: PyYAML unavailable; "
-            "treating auto-merge as allowed\n"
-        )
+    _warn_if_automerge_config_unreadable(config_path)
     allowed = automerge_allowed(config_path)
     print("true" if allowed else "false")
     return 0 if allowed else 1
+
+
+def _arm_invocation_error(message: str) -> int:
+    sys.stderr.write(f"ERROR: {message}\n")
+    return 2
+
+
+def _resolve_arm_repo_path(repo_path: Path | None) -> Path | None:
+    """The repo whose seam applies: --repo-path, else the git toplevel.
+
+    Never falls back to a cwd-relative path: gh acts on the repo it runs in,
+    so the seam must be read from that same repo.
+    """
+    if repo_path is not None:
+        return repo_path
+    toplevel = git("rev-parse", "--show-toplevel")
+    return Path(toplevel) if toplevel else None
+
+
+def cmd_arm_automerge(args: argparse.Namespace) -> int:
+    """Arm auto-merge on a PR with bounded retry and read-back (#2576).
+
+    Re-checks the pr.auto_merge seam exactly as `check-automerge-allowed`
+    does, BEFORE any gh call: when it disallows arming this makes zero gh
+    calls and exits 3 (#2046). Prints one JSON result object on stdout; a
+    persistent failure also writes gh's last stderr to stderr and exits 1.
+    """
+    if not shutil.which("gh"):
+        return _arm_invocation_error("`gh` CLI not found on PATH")
+    if args.attempts < 1:
+        return _arm_invocation_error("--attempts must be >= 1")
+    if args.backoff_seconds < 0:
+        return _arm_invocation_error("--backoff-seconds must be >= 0")
+    repo_path = _resolve_arm_repo_path(args.repo_path)
+    if repo_path is None:
+        return _arm_invocation_error(
+            "not in a git repository and --repo-path was not given"
+        )
+    if not repo_path.is_dir():
+        return _arm_invocation_error(f"--repo-path is not a directory: {repo_path}")
+
+    config_path = repo_path / PROJECT_CONFIG_PATH
+    _warn_if_automerge_config_unreadable(config_path)
+    if not automerge_allowed(config_path):
+        skipped = ArmResult(
+            pr_number=args.pr_number,
+            max_attempts=args.attempts,
+            status=ARM_STATUS_SKIPPED,
+            detail=(
+                "pr.auto_merge: false in .claude/project-config.yaml (#2046) "
+                "-- no gh call made"
+            ),
+        )
+        print(json.dumps(skipped.to_dict(), indent=2))
+        return EXIT_ARM_DISALLOWED
+
+    result = arm_automerge(
+        args.pr_number,
+        attempts=args.attempts,
+        backoff_seconds=args.backoff_seconds,
+        cwd=repo_path,
+    )
+    print(json.dumps(result.to_dict(), indent=2))
+    if result.status == ARM_STATUS_FAILED:
+        sys.stderr.write(
+            f"ERROR: gh pr merge --auto failed after {result.attempts}/"
+            f"{result.max_attempts} attempts (exit {result.gh_exit_code}): "
+            f"{result.gh_stderr}\n"
+        )
+        return 1
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -656,6 +884,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Repository root whose .claude/project-config.yaml should be read",
     )
     check_allowed.set_defaults(func=cmd_check_automerge_allowed)
+
+    arm = sub.add_parser(
+        "arm-automerge",
+        help="Arm auto-merge on a PR with bounded retry and read-back (#2576)",
+    )
+    arm.add_argument("pr_number", type=int, help="Pull request number to arm")
+    arm.add_argument(
+        "--attempts",
+        type=int,
+        default=ARM_MAX_ATTEMPTS,
+        help=f"Max gh pr merge --auto calls (default: {ARM_MAX_ATTEMPTS})",
+    )
+    arm.add_argument(
+        "--backoff-seconds",
+        type=float,
+        default=ARM_BACKOFF_SECONDS,
+        help=(
+            "Linear backoff base; sleeps backoff * n after the n-th failed "
+            f"attempt (default: {ARM_BACKOFF_SECONDS})"
+        ),
+    )
+    arm.add_argument(
+        "--repo-path",
+        type=Path,
+        help=(
+            "Repository root whose .claude/project-config.yaml should be read "
+            "(default: the git toplevel of the current directory)"
+        ),
+    )
+    arm.set_defaults(func=cmd_arm_automerge)
 
     return parser
 

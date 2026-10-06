@@ -209,12 +209,21 @@ If PR creation fails, BLOCK with the `gh` error verbatim.
 PR_NUMBER=$(gh pr view --json number -q .number)
 REPO_ROOT=$(git rev-parse --show-toplevel)
 if [ -f "$REPO_ROOT/.claude/scripts/prep_pr_finalize.py" ]; then
-  AUTOMERGE_CHECK="$REPO_ROOT/.claude/scripts/prep_pr_finalize.py"
+  FINALIZE="$REPO_ROOT/.claude/scripts/prep_pr_finalize.py"
 else
-  AUTOMERGE_CHECK="$HOME/.claude/scripts/prep_pr_finalize.py"
+  FINALIZE="$HOME/.claude/scripts/prep_pr_finalize.py"
 fi
-if "$AUTOMERGE_CHECK" check-automerge-allowed --repo-path "$REPO_ROOT"; then
-  gh pr merge "$PR_NUMBER" --auto --squash
+if "$FINALIZE" check-automerge-allowed --repo-path "$REPO_ROOT"; then
+  ARM_JSON=$("$FINALIZE" arm-automerge "$PR_NUMBER" --repo-path "$REPO_ROOT")
+  arm_status=$?
+  echo "$ARM_JSON"
+  # 0 armed/merged | 1 failed after bounded retries | 2 invocation error | 3 seam refused
+  case "$arm_status" in
+    0) ;;
+    3) echo "Auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR #$PR_NUMBER open for manual merge." ;;
+    1) echo "BLOCK: gh pr merge --auto failed after bounded retries for PR #$PR_NUMBER (arm-automerge exit 1): see gh_stderr in the JSON above (empty means gh exited 0 but autoMergeRequest read back null)" >&2; exit 1 ;;
+    *) echo "BLOCK: arm-automerge invocation error (exit $arm_status, not a gh failure): not retried" >&2; exit 1 ;;
+  esac
 else
   GATE_STATUS=$?
   if [ "$GATE_STATUS" -ne 1 ]; then
@@ -225,7 +234,12 @@ else
 fi
 ```
 
-If `check-automerge-allowed` permits arming and the `gh pr merge --auto` call itself fails, BLOCK — the PR exists but auto-merge isn't on; don't silently leave it unset. If `check-automerge-allowed` reports disallowed, this is expected, deliberate repo state, not a failure — do not BLOCK.
+`arm-automerge` retries `gh pr merge --auto --squash` with bounded linear backoff (4 attempts) and reads `autoMergeRequest` back instead of trusting gh's exit code (#2576). When it exits non-zero, BLOCK with the wording for its exit code:
+
+- Exit 1: `BLOCK: gh pr merge --auto failed after bounded retries for PR #<N> (arm-automerge exit 1): <gh_stderr verbatim from the JSON, or 'none -- gh exited 0 but autoMergeRequest read back null'>`
+- Exit 2 (`arm_status` 2): `BLOCK: arm-automerge invocation error (exit 2, not a gh failure): <stderr>` (never retried; usually a stale `prep_pr_finalize.py` copy lacking the subcommand)
+
+If `check-automerge-allowed` permits arming and `arm-automerge` exits 1 after its bounded retries, BLOCK with the wording above — the PR exists but auto-merge isn't on; don't silently leave it unset. Quote the JSON `gh_stderr` verbatim; when it is empty, say gh exited 0 but `autoMergeRequest` read back null. Exit 2 is an invocation error, not a gh failure: BLOCK with the invocation-error wording and do not retry. Exit 3 means the script itself saw `pr.auto_merge: false`: leave PR #$PR_NUMBER open and do not BLOCK. If `check-automerge-allowed` reports disallowed, this is expected, deliberate repo state, not a failure — do not BLOCK.
 
 ## Step 5: Register PR monitor
 

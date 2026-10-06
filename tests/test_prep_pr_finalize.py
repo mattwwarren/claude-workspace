@@ -12,11 +12,20 @@ import os
 import subprocess
 import sys
 import types
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
-from tests.conftest import _write_project_config_yaml
+from tests.conftest import (
+    ARM_VIEW_ARMED,
+    ARM_VIEW_OPEN,
+    _assert_gh_calls,
+    _gh_calls,
+    _shim_env,
+    _stub_gh_arm,
+    _write_project_config_yaml,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "prep_pr_finalize.py"
@@ -633,3 +642,578 @@ def test_script_runs_without_cw_importable() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "verify" in result.stdout
+
+
+# --- arm-automerge: bounded retry + read-back (#2576) ---
+
+_ARM_PR = "42"
+_VIEW = ["pr", "view", _ARM_PR, "--json", "state,autoMergeRequest"]
+_MERGE = ["pr", "merge", _ARM_PR, "--auto", "--squash"]
+_ARM_VIEW_MERGED = '{"state":"MERGED","autoMergeRequest":null}'
+_GRAPHQL_ERROR = "GraphQL: Pull request is not mergeable (enablePullRequestAutoMerge)"
+_SEAM_DISALLOWED_DETAIL = (
+    "pr.auto_merge: false in .claude/project-config.yaml (#2046) -- no gh call made"
+)
+
+
+def _run_arm(
+    repo: Path, fake_bin: Path, *extra: str
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "arm-automerge",
+            _ARM_PR,
+            "--backoff-seconds",
+            "0",
+            "--repo-path",
+            str(repo),
+            *extra,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **_shim_env(fake_bin)},
+    )
+
+
+def _merge_count(fake_bin: Path) -> int:
+    return sum(1 for call in _gh_calls(fake_bin) if call == _MERGE)
+
+
+def test_arm_automerge_transient_error_then_success(tmp_path: Path) -> None:
+    """Ticket repro: first merge fails with a GraphQL error, the retry arms it."""
+    fake_bin = _stub_gh_arm(
+        tmp_path, [(1, _GRAPHQL_ERROR, None), (0, "", ARM_VIEW_ARMED)]
+    )
+
+    result = _run_arm(tmp_path, fake_bin)
+
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["status"] == "armed"
+    assert out["attempts"] == 2
+    assert out["pr_number"] == int(_ARM_PR)
+    # pre-read, merge 1 (fails), post-read, [sleep], pre-read, merge 2, post-read
+    _assert_gh_calls(fake_bin, [_VIEW, _MERGE, _VIEW, _VIEW, _MERGE, _VIEW])
+
+
+def test_arm_automerge_already_armed_is_noop_success(tmp_path: Path) -> None:
+    fake_bin = _stub_gh_arm(tmp_path, [(0, "", None)], initial_view=ARM_VIEW_ARMED)
+
+    result = _run_arm(tmp_path, fake_bin)
+
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["status"] == "armed"
+    assert out["attempts"] == 0
+    _assert_gh_calls(fake_bin, [_VIEW])
+    assert _merge_count(fake_bin) == 0
+
+
+def test_arm_automerge_exit_zero_null_readback_then_armed(tmp_path: Path) -> None:
+    """#1140 shape: gh exits 0 without arming; the read-back drives the retry."""
+    fake_bin = _stub_gh_arm(tmp_path, [(0, "", None), (0, "", ARM_VIEW_ARMED)])
+
+    result = _run_arm(tmp_path, fake_bin)
+
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["status"] == "armed"
+    assert out["attempts"] == 2
+    assert _merge_count(fake_bin) == 2
+
+
+def test_arm_automerge_persistent_failure_carries_gh_stderr(tmp_path: Path) -> None:
+    fake_bin = _stub_gh_arm(tmp_path, [(1, _GRAPHQL_ERROR, None)])
+
+    result = _run_arm(tmp_path, fake_bin)
+
+    assert result.returncode == 1
+    out = json.loads(result.stdout)
+    assert out["status"] == "failed"
+    assert out["attempts"] == out["max_attempts"] == _mod.ARM_MAX_ATTEMPTS
+    assert out["gh_exit_code"] == 1
+    assert out["gh_stderr"] == _GRAPHQL_ERROR
+    assert (
+        f"ERROR: gh pr merge --auto failed after 4/4 attempts (exit 1): "
+        f"{_GRAPHQL_ERROR}" in result.stderr
+    )
+    assert _merge_count(fake_bin) == _mod.ARM_MAX_ATTEMPTS
+
+
+def test_arm_automerge_persistent_exit_zero_null_readback_fails(
+    tmp_path: Path,
+) -> None:
+    fake_bin = _stub_gh_arm(tmp_path, [(0, "", None)])
+
+    result = _run_arm(tmp_path, fake_bin, "--attempts", "2")
+
+    assert result.returncode == 1
+    out = json.loads(result.stdout)
+    assert out["status"] == "failed"
+    assert out["gh_exit_code"] == 0
+    assert out["gh_stderr"] == ""
+    assert "autoMergeRequest read back null (#1140)" in out["detail"]
+    assert _merge_count(fake_bin) == 2
+
+
+def test_arm_automerge_already_queued_nonzero_exit_counts_as_armed(
+    tmp_path: Path,
+) -> None:
+    """gh exits 1 ("already queued") but the read-back shows it armed."""
+    fake_bin = _stub_gh_arm(
+        tmp_path, [(1, "Pull request is already queued", ARM_VIEW_ARMED)]
+    )
+
+    result = _run_arm(tmp_path, fake_bin)
+
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["status"] == "armed"
+    assert out["attempts"] == 1
+    _assert_gh_calls(fake_bin, [_VIEW, _MERGE, _VIEW])
+
+
+def test_arm_automerge_merged_readback_is_success(tmp_path: Path) -> None:
+    fake_bin = _stub_gh_arm(tmp_path, [(0, "", _ARM_VIEW_MERGED)])
+
+    result = _run_arm(tmp_path, fake_bin)
+
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["status"] == "merged"
+    assert out["pr_state"] == "MERGED"
+    assert out["attempts"] == 1
+
+
+def test_arm_automerge_refused_by_seam_makes_zero_gh_calls(tmp_path: Path) -> None:
+    """#2046: pr.auto_merge: false must never reach `gh pr merge --auto`."""
+    _write_project_config_yaml(tmp_path, "pr:\n  auto_merge: false\n")
+    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+
+    result = _run_arm(tmp_path, fake_bin)
+
+    assert result.returncode == _mod.EXIT_ARM_DISALLOWED == 3
+    assert json.loads(result.stdout) == {
+        "status": "skipped",
+        "pr_number": int(_ARM_PR),
+        "attempts": 0,
+        "max_attempts": _mod.ARM_MAX_ATTEMPTS,
+        "pr_state": "",
+        "gh_exit_code": None,
+        "gh_stderr": "",
+        "detail": _SEAM_DISALLOWED_DETAIL,
+    }
+    assert _gh_calls(fake_bin) == []
+
+
+def test_arm_automerge_zero_attempts_is_invocation_error(tmp_path: Path) -> None:
+    fake_bin = _stub_gh_arm(tmp_path, [(0, "", ARM_VIEW_ARMED)])
+
+    result = _run_arm(tmp_path, fake_bin, "--attempts", "0")
+
+    assert result.returncode == 2
+    assert "--attempts must be >= 1" in result.stderr
+    assert _gh_calls(fake_bin) == []
+
+
+def test_arm_automerge_unknown_subcommand_from_stale_copy_exits_two() -> None:
+    """A stale script copy lacking the subcommand fails in argparse with exit 2."""
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPT), "no-such-subcommand", _ARM_PR],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+
+
+# --- arm-automerge in-process (monkeypatched run, injected sleep) ---
+
+
+def _cp(
+    returncode: int = 0, stdout: str = "", stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=[], returncode=returncode, stdout=stdout, stderr=stderr
+    )
+
+
+def _patch_run(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Callable[[list[str]], subprocess.CompletedProcess[str]],
+    cwds: list[Path | None] | None = None,
+) -> list[list[str]]:
+    """Patch ``run``; ``cwds``, when given, receives each call's ``cwd`` in order."""
+    calls: list[list[str]] = []
+
+    def _fake_run(
+        cmd: list[str],
+        check: bool = False,
+        capture: bool = True,
+        cwd: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(list(cmd))
+        if cwds is not None:
+            cwds.append(cwd)
+        return handler(cmd)
+
+    monkeypatch.setattr(_mod, "run", _fake_run)
+    return calls
+
+
+def _always_failing_gh(
+    merge: subprocess.CompletedProcess[str],
+) -> Callable[[list[str]], subprocess.CompletedProcess[str]]:
+    def _handler(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            return merge
+        return _cp(stdout=ARM_VIEW_OPEN)
+
+    return _handler
+
+
+def test_arm_automerge_backoff_is_linear_with_no_trailing_sleep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_run(monkeypatch, _always_failing_gh(_cp(returncode=1, stderr="nope")))
+    sleeps: list[float] = []
+
+    result = _mod.arm_automerge(
+        42, attempts=4, backoff_seconds=2.0, sleep=sleeps.append
+    )
+
+    assert result.status == "failed"
+    assert result.attempts == 4
+    assert sleeps == [2.0, 4.0, 6.0]
+
+
+def test_arm_automerge_single_attempt_never_sleeps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_run(monkeypatch, _always_failing_gh(_cp(returncode=1, stderr="nope")))
+    sleeps: list[float] = []
+
+    result = _mod.arm_automerge(
+        42, attempts=1, backoff_seconds=5.0, sleep=sleeps.append
+    )
+
+    assert result.attempts == 1
+    assert sleeps == []
+
+
+def test_arm_automerge_readback_failure_counts_as_not_armed_with_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _handler(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            return _cp()
+        return _cp(returncode=1, stderr="HTTP 502 from gh pr view")
+
+    _patch_run(monkeypatch, _handler)
+
+    result = _mod.arm_automerge(
+        42, attempts=2, backoff_seconds=0.0, sleep=lambda _s: None
+    )
+
+    assert result.status == "failed"
+    assert result.gh_exit_code == 0
+    assert result.gh_stderr == "HTTP 502 from gh pr view"
+    assert "read-back failed" in result.detail
+
+
+def test_arm_automerge_truncates_gh_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    long_stderr = "x" * (_mod.GH_STDERR_LIMIT * 2)
+    _patch_run(monkeypatch, _always_failing_gh(_cp(returncode=1, stderr=long_stderr)))
+
+    result = _mod.arm_automerge(
+        42, attempts=1, backoff_seconds=0.0, sleep=lambda _s: None
+    )
+
+    assert len(result.gh_stderr) == _mod.GH_STDERR_LIMIT
+
+
+@pytest.mark.parametrize(
+    ("view", "expected_error"),
+    [
+        (_cp(returncode=1, stderr=""), "gh pr view exited 1"),
+        (_cp(stdout="not json"), "could not parse gh pr view output"),
+        (_cp(stdout="[]"), "not a JSON object"),
+    ],
+)
+def test_read_back_automerge_failure_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+    view: subprocess.CompletedProcess[str],
+    expected_error: str,
+) -> None:
+    _patch_run(monkeypatch, lambda _cmd: view)
+
+    state, armed, error = _mod._read_back_automerge(42)
+
+    assert (state, armed) == ("", False)
+    assert expected_error in error
+
+
+def test_read_back_automerge_ignores_non_string_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_run(monkeypatch, lambda _cmd: _cp(stdout='{"state": 7}'))
+
+    assert _mod._read_back_automerge(42) == ("", False, "")
+
+
+def test_cmd_arm_automerge_gh_missing_is_invocation_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: None)
+    args = _mod.build_parser().parse_args(["arm-automerge", _ARM_PR])
+
+    assert _mod.cmd_arm_automerge(args) == 2
+    assert "`gh` CLI not found" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "message"),
+    [
+        ("--attempts", "0", "--attempts must be >= 1"),
+        ("--backoff-seconds", "-1", "--backoff-seconds must be >= 0"),
+    ],
+)
+def test_cmd_arm_automerge_rejects_out_of_range_options(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+    value: str,
+    message: str,
+) -> None:
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
+    calls = _patch_run(monkeypatch, lambda _cmd: _cp())
+    args = _mod.build_parser().parse_args(["arm-automerge", _ARM_PR, flag, value])
+
+    assert _mod.cmd_arm_automerge(args) == 2
+    assert message in capsys.readouterr().err
+    assert calls == []
+
+
+def test_arm_automerge_parser_defaults() -> None:
+    args = _mod.build_parser().parse_args(["arm-automerge", _ARM_PR])
+
+    assert args.pr_number == int(_ARM_PR)
+    assert args.attempts == _mod.ARM_MAX_ATTEMPTS == 4
+    assert args.backoff_seconds == _mod.ARM_BACKOFF_SECONDS == 3.0
+    assert args.repo_path is None
+    assert args.func is _mod.cmd_arm_automerge
+
+
+def test_cmd_arm_automerge_defaults_repo_path_to_git_toplevel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With no --repo-path the seam is read from the repo gh acts on, not cwd."""
+    repo = tmp_path / "repo"
+    _write_project_config_yaml(repo, "pr:\n  auto_merge: false\n")
+    cwd = tmp_path / "elsewhere"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
+    calls = _patch_run(monkeypatch, lambda _cmd: _cp(stdout=f"{repo}\n"))
+    args = _mod.build_parser().parse_args(["arm-automerge", _ARM_PR])
+
+    assert _mod.cmd_arm_automerge(args) == _mod.EXIT_ARM_DISALLOWED
+    assert calls == [["git", "rev-parse", "--show-toplevel"]]
+
+
+def test_cmd_arm_automerge_without_repo_path_or_git_toplevel_is_invocation_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
+    _patch_run(monkeypatch, lambda _cmd: _cp(returncode=128))
+    args = _mod.build_parser().parse_args(["arm-automerge", _ARM_PR])
+
+    assert _mod.cmd_arm_automerge(args) == 2
+    assert "not in a git repository" in capsys.readouterr().err
+
+
+def test_cmd_arm_automerge_warns_when_pyyaml_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_project_config_yaml(tmp_path, "pr:\n  auto_merge: false\n")
+    monkeypatch.setattr(_mod, "yaml", None)
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
+    _patch_run(monkeypatch, lambda _cmd: _cp(stdout=ARM_VIEW_ARMED))
+    args = _mod.build_parser().parse_args(
+        ["arm-automerge", _ARM_PR, "--repo-path", str(tmp_path)]
+    )
+
+    assert _mod.cmd_arm_automerge(args) == 0
+    captured = capsys.readouterr()
+    assert (
+        "WARNING: could not read pr.auto_merge: PyYAML unavailable; "
+        "treating auto-merge as allowed" in captured.err
+    )
+    assert json.loads(captured.out)["status"] == "armed"
+
+
+def test_arm_automerge_merged_pre_read_is_noop_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _patch_run(monkeypatch, lambda _cmd: _cp(stdout=_ARM_VIEW_MERGED))
+
+    result = _mod.arm_automerge(
+        42, attempts=2, backoff_seconds=0.0, sleep=lambda _s: None
+    )
+
+    assert (result.status, result.attempts, result.pr_state) == ("merged", 0, "MERGED")
+    assert len(calls) == 1
+
+
+def test_arm_automerge_post_read_armed_returns_after_one_merge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    views = iter([ARM_VIEW_OPEN, ARM_VIEW_ARMED])
+
+    def _handler(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            return _cp(returncode=1, stderr="already queued")
+        return _cp(stdout=next(views))
+
+    _patch_run(monkeypatch, _handler)
+
+    result = _mod.arm_automerge(
+        42, attempts=3, backoff_seconds=0.0, sleep=lambda _s: None
+    )
+
+    assert (result.status, result.attempts) == ("armed", 1)
+    assert result.gh_exit_code == 1
+
+
+def test_arm_automerge_nonzero_exit_with_readback_failure_names_both(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _handler(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            return _cp(returncode=1, stderr="merge boom")
+        return _cp(returncode=1, stderr="view boom")
+
+    _patch_run(monkeypatch, _handler)
+
+    result = _mod.arm_automerge(
+        42, attempts=1, backoff_seconds=0.0, sleep=lambda _s: None
+    )
+
+    assert result.gh_stderr == "merge boom"
+    assert "exited 1" in result.detail
+    assert "read-back failed: view boom" in result.detail
+
+
+def test_arm_automerge_exit_zero_null_readback_detail_in_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_run(monkeypatch, _always_failing_gh(_cp()))
+
+    result = _mod.arm_automerge(
+        42, attempts=1, backoff_seconds=0.0, sleep=lambda _s: None
+    )
+
+    assert result.gh_stderr == ""
+    assert "read back null (#1140)" in result.detail
+
+
+def test_cmd_arm_automerge_reports_failure_and_success_in_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
+    monkeypatch.setattr(_mod.time, "sleep", lambda _s: None)
+    argv = ["arm-automerge", _ARM_PR, "--repo-path", str(tmp_path), "--attempts", "1"]
+
+    _patch_run(monkeypatch, _always_failing_gh(_cp(returncode=1, stderr="nope")))
+    assert _mod.cmd_arm_automerge(_mod.build_parser().parse_args(argv)) == 1
+    captured = capsys.readouterr()
+    assert "failed after 1/1 attempts (exit 1): nope" in captured.err
+    assert json.loads(captured.out)["status"] == "failed"
+
+    _patch_run(monkeypatch, lambda _cmd: _cp(stdout=ARM_VIEW_ARMED))
+    assert _mod.cmd_arm_automerge(_mod.build_parser().parse_args(argv)) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "armed"
+
+
+def test_cmd_arm_automerge_binds_gh_calls_to_repo_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """gh acts on the repo whose seam was read, not on the process cwd."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
+    views = iter([ARM_VIEW_OPEN, ARM_VIEW_ARMED])
+
+    def _handler(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            return _cp()
+        return _cp(stdout=next(views))
+
+    cwds: list[Path | None] = []
+    calls = _patch_run(monkeypatch, _handler, cwds)
+    args = _mod.build_parser().parse_args(
+        ["arm-automerge", _ARM_PR, "--repo-path", str(repo)]
+    )
+
+    assert _mod.cmd_arm_automerge(args) == 0
+    assert [c[:3] for c in calls] == [
+        ["gh", "pr", "view"],
+        ["gh", "pr", "merge"],
+        ["gh", "pr", "view"],
+    ]
+    assert cwds == [repo, repo, repo]
+
+
+def test_cmd_arm_automerge_nonexistent_repo_path_is_invocation_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
+    calls = _patch_run(monkeypatch, lambda _cmd: _cp(stdout=ARM_VIEW_ARMED))
+    missing = tmp_path / "missing"
+    args = _mod.build_parser().parse_args(
+        ["arm-automerge", _ARM_PR, "--repo-path", str(missing)]
+    )
+
+    assert _mod.cmd_arm_automerge(args) == 2
+    assert f"--repo-path is not a directory: {missing}" in capsys.readouterr().err
+    assert calls == []
+
+
+def test_arm_automerge_stale_post_read_then_armed_pre_read_skips_second_merge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale post-merge read followed by an armed loop-top read is a no-op.
+
+    The pre-poll at the top of the next iteration sees the PR armed, so no
+    second `gh pr merge` runs even though the first one exited 1.
+    """
+    views = iter([ARM_VIEW_OPEN, ARM_VIEW_OPEN, ARM_VIEW_ARMED])
+
+    def _handler(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            return _cp(returncode=1, stderr="already queued")
+        return _cp(stdout=next(views))
+
+    calls = _patch_run(monkeypatch, _handler)
+
+    result = _mod.arm_automerge(
+        42, attempts=3, backoff_seconds=0.0, sleep=lambda _s: None
+    )
+
+    assert result.status == "armed"
+    assert result.attempts == 1
+    assert [c for c in calls if c[:3] == ["gh", "pr", "merge"]] == [
+        ["gh", "pr", "merge", "42", "--auto", "--squash"]
+    ]
