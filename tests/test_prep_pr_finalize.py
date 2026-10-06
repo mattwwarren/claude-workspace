@@ -1189,3 +1189,31 @@ def test_cmd_arm_automerge_nonexistent_repo_path_is_invocation_error(
     assert _mod.cmd_arm_automerge(args) == 2
     assert f"--repo-path is not a directory: {missing}" in capsys.readouterr().err
     assert calls == []
+
+
+def test_arm_automerge_stale_post_read_then_armed_pre_read_skips_second_merge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale post-merge read followed by an armed loop-top read is a no-op.
+
+    The pre-poll at the top of the next iteration sees the PR armed, so no
+    second `gh pr merge` runs even though the first one exited 1.
+    """
+    views = iter([ARM_VIEW_OPEN, ARM_VIEW_OPEN, ARM_VIEW_ARMED])
+
+    def _handler(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            return _cp(returncode=1, stderr="already queued")
+        return _cp(stdout=next(views))
+
+    calls = _patch_run(monkeypatch, _handler)
+
+    result = _mod.arm_automerge(
+        42, attempts=3, backoff_seconds=0.0, sleep=lambda _s: None
+    )
+
+    assert result.status == "armed"
+    assert result.attempts == 1
+    assert [c for c in calls if c[:3] == ["gh", "pr", "merge"]] == [
+        ["gh", "pr", "merge", "42", "--auto", "--squash"]
+    ]
