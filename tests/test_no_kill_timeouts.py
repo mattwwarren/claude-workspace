@@ -499,18 +499,33 @@ def test_no_distress_below_top_bucket(
 # ---------------------------------------------------------------------------
 
 
-def test_distress_renotifies_after_debounce_interval_elapses(
+def test_distress_does_not_renotify_when_evidence_unchanged(
     tmp_config_dir: Path, tmp_path: Path, home: Path, push_calls: list[tuple[str, str]]
 ) -> None:
+    """#2153: the interval is a re-evaluation cadence, not a re-page cadence."""
     sess = _mk_headless_daemon_session("T-1", tmp_path / "wt", _STARTED_AT)
     _stale_transcript(home, tmp_path / "wt", stale_minutes=46)
     state = CwState(sessions=[sess])
 
     _run_liveness(state, now=_NOW)
-    _run_liveness(state, now=_NOW + timedelta(minutes=61))
+    second = _NOW + timedelta(minutes=61)
+    _run_liveness(state, now=second)
 
-    assert len(_distress_events()) == 2
-    assert len(push_calls) == 2
+    assert len(_distress_events()) == 1
+    assert len(push_calls) == 1
+    assert sess.liveness_attention_next_eligible_at == second + timedelta(minutes=60)
+
+
+def _changed_evidence_second_fire(home: Path, worktree: Path, state: CwState) -> None:
+    """Page at ``_NOW``, then re-page at ``_NOW+61m`` on changed evidence.
+
+    Re-stamping the timestamp-less transcript's mtime to ``_NOW+15m`` moves the
+    evidence key's timestamp leg while the age at the second sweep (46m) keeps
+    the session latched at STALE_45M (#2153).
+    """
+    _run_liveness(state, now=_NOW)
+    _stale_transcript(home, worktree, stale_minutes=-15)
+    _run_liveness(state, now=_NOW + timedelta(minutes=61))
 
 
 def test_distress_does_not_renotify_partway_through_interval(
@@ -534,8 +549,7 @@ def test_renotify_marker_present_and_distinct_across_fires(
     _stale_transcript(home, tmp_path / "wt", stale_minutes=46)
     state = CwState(sessions=[sess])
 
-    _run_liveness(state, now=_NOW)
-    _run_liveness(state, now=_NOW + timedelta(minutes=61))
+    _changed_evidence_second_fire(home, tmp_path / "wt", state)
 
     events = _distress_events()
     assert len(events) == 2
@@ -545,6 +559,7 @@ def test_renotify_marker_present_and_distinct_across_fires(
         assert isinstance(marker, str)
         datetime.fromisoformat(marker)
     assert markers[0] != markers[1]
+    assert events[0]["evidence_key"] != events[1]["evidence_key"]
 
 
 def test_renotify_suppressed_once_terminal_sentinel_lands(
@@ -568,6 +583,7 @@ def test_liveness_attention_next_eligible_at_cleared_on_recovery(
     sess = _mk_headless_daemon_session("T-1", tmp_path / "wt", _STARTED_AT)
     sess.liveness_bucket = LivenessBucket.STALE_45M
     sess.liveness_attention_next_eligible_at = _NOW + timedelta(minutes=60)
+    sess.liveness_attention_evidence_key = "session_unresponsive|none|none"
     _stale_transcript(home, tmp_path / "wt", stale_minutes=1)
     state = CwState(sessions=[sess])
 
@@ -575,6 +591,7 @@ def test_liveness_attention_next_eligible_at_cleared_on_recovery(
 
     assert sess.liveness_bucket is LivenessBucket.LIVE
     assert sess.liveness_attention_next_eligible_at is None
+    assert sess.liveness_attention_evidence_key is None
 
 
 def test_liveness_renotify_survives_dedup_terminal(
@@ -586,8 +603,7 @@ def test_liveness_renotify_survives_dedup_terminal(
     _stale_transcript(home, tmp_path / "wt", stale_minutes=46)
     state = CwState(sessions=[sess])
 
-    _run_liveness(state, now=_NOW)
-    _run_liveness(state, now=_NOW + timedelta(minutes=61))
+    _changed_evidence_second_fire(home, tmp_path / "wt", state)
 
     events = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
     assert len(events) == 2

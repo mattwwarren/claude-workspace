@@ -11,10 +11,12 @@ import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from cw.models import (
+    DEFAULT_STAGE,
     HOOK_CONTEXT_RELATIVE_PATH,
     CwState,
     LivenessBucket,
@@ -39,14 +41,27 @@ from cw.reconcile._shared import (
     _USAGE_LIMITED_MID_TURN_REASON,
 )
 from cw.reconcile.liveness import (
+    LivenessCandidate,
+    _act_on_liveness_candidates,
     _classify_liveness_bucket,
     _detect_liveness_candidates,
     record_session_liveness_changes,
+)
+from tests._reconcile_helpers import (
+    _API_ERROR_TEXT,
+    _api_error_then_cost_state_records,
+    _ul_record,
+    _write_transcript_records,
 )
 from tests.conftest import _make_daemon_session, _write_idle_transcript
 
 _STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 _NOW = datetime(2026, 1, 2, 0, 0, 0, tzinfo=UTC)
+# The #2153 page suffix pieces for the fixture session (sess-1, T-1, client-a).
+_LEAD = "; evidence suggests this session is dead (confirm before closing)"
+_CLOSE = "cw spawn close --confirmed-dead sess-1"
+_REQUEUE = "cw dev-queue requeue T-1 -c client-a --from-cancelled"
+_REMEDY = f"; if you have confirmed the session is dead, run: {_CLOSE} then: {_REQUEUE}"
 
 
 def _mk_liveness_session(
@@ -1243,10 +1258,14 @@ def test_session_age_top_bucket_pages_with_session_age_breadcrumb(
     assert len(attention) == 1
     assert attention[0]["staleness_source"] == "session_age"
     assert attention[0]["paused_status"] == _SESSION_UNRESPONSIVE_REASON
-    assert attention[0]["breadcrumbs"] == (
+    breadcrumbs = str(attention[0]["breadcrumbs"])
+    assert breadcrumbs.startswith(
         f"session age 46m at stage review; elapsed 2760s; {_UNOBSERVABLE_BREADCRUMB}"
     )
-    assert "transcript flat" not in str(attention[0]["breadcrumbs"])
+    assert breadcrumbs.endswith(
+        f"{_LEAD}; unobserved for 0.8h (session age, no transcript){_REMEDY}"
+    )
+    assert "transcript flat" not in breadcrumbs
     _deps.fire_push_notification.assert_called_once()
 
 
@@ -1257,7 +1276,11 @@ def test_session_age_fallback_is_signal_only(
     sess, _ = _mk_unobservable_session(tmp_path=tmp_path)
     task = _review_task(status=QueueItemStatus.RUNNING, session_id=sess.id)
     state = CwState(sessions=[sess])
-    latch_fields = {"liveness_bucket", "liveness_attention_next_eligible_at"}
+    latch_fields = {
+        "liveness_bucket",
+        "liveness_attention_next_eligible_at",
+        "liveness_attention_evidence_key",
+    }
     session_before = sess.model_dump(exclude=latch_fields)
     task_before = task.model_dump()
 
@@ -1415,10 +1438,14 @@ def test_session_age_page_ignores_leftover_spawn_stamp(
     assert attention[0]["paused_status"] == _SESSION_UNRESPONSIVE_REASON
 
 
-def test_session_age_renotifies_at_top_bucket_like_transcript_path(
+def test_session_age_pages_once_then_dedups(
     tmp_config_dir: Path, tmp_path: Path
 ) -> None:
-    """Latched at STALE_45M, the debounce re-fires with session_age wording."""
+    """Latched at STALE_45M, an unchanged session_age key re-arms but never re-pages.
+
+    The page carries the ``unobserved for`` suffix and null ``last_record_*``
+    keys: a session_age candidate has no transcript to summarize (#2153).
+    """
     sess, _ = _mk_unobservable_session(tmp_path=tmp_path)
     state = CwState(sessions=[sess])
     config = OrchestratorConfig(liveness_attention_renotify_interval_minutes=10)
@@ -1442,6 +1469,415 @@ def test_session_age_renotifies_at_top_bucket_like_transcript_path(
     assert len(second) == 1
     assert second[0].old_bucket == second[0].new_bucket == LivenessBucket.STALE_45M
     assert second[0].staleness_source == "session_age"
+    assert second[0].deduped is True
+    assert second[0].distress is False
+    attention = _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+    assert len(attention) == 1
+    assert str(attention[0]["breadcrumbs"]).endswith(
+        f"{_LEAD}; unobserved for 0.8h (session age, no transcript){_REMEDY}"
+    )
+    for key in ("last_record_type", "last_record_ts", "last_record_is_error"):
+        assert attention[0][key] is None
+    assert sess.liveness_attention_evidence_key == "session_unresponsive|none|none"
+    _deps.fire_push_notification.assert_called_once()
+
+
+def test_session_age_task_status_change_repages(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """The owned row's status is a key leg even with no transcript (#2153)."""
+    sess, _ = _mk_unobservable_session(tmp_path=tmp_path)
+    state = CwState(sessions=[sess])
+    config = OrchestratorConfig(liveness_attention_renotify_interval_minutes=10)
+    record_session_liveness_changes(
+        state,
+        now=_age(50),
+        native_live=set(),
+        config=config,
+        task_by_ticket={
+            "T-1": _review_task(status=QueueItemStatus.RUNNING, session_id=sess.id)
+        },
+    )
+
+    second = record_session_liveness_changes(
+        state,
+        now=_age(61),
+        native_live=set(),
+        config=config,
+        task_by_ticket={
+            "T-1": _review_task(
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                disposition="gh_check_blocked",
+                session_id=sess.id,
+            )
+        },
+    )
+
+    assert second[0].distress is True
     attention = _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
     assert len(attention) == 2
-    assert "session age 61m" in str(attention[1]["breadcrumbs"])
+    assert attention[0]["evidence_key"] == "session_unresponsive|none|running"
+    assert attention[1]["evidence_key"] == "session_unresponsive|none|blocked_on_user"
+    assert attention[0]["renotify_marker"] != attention[1]["renotify_marker"]
+
+
+# ---------------------------------------------------------------------------
+# #2153: the dead-session page fires once per evidence key; the renotify
+# interval is only a re-evaluation cadence.
+# ---------------------------------------------------------------------------
+
+_PRE_2153_ATTENTION_KEYS = {
+    "session_id",
+    "session_name",
+    "client",
+    "ticket_id",
+    "claude_session_id",
+    "paused_status",
+    "breadcrumbs",
+    "crashed",
+    "stage",
+    "stale_minutes",
+    "elapsed_seconds",
+    "staleness_source",
+    "renotify_marker",
+}
+_EVIDENCE_KEYS = {
+    "last_record_type",
+    "last_record_ts",
+    "last_record_is_error",
+    "close_command",
+    "requeue_command",
+    "evidence_key",
+}
+_ERROR_TS = _NOW - timedelta(minutes=50)
+_COST_TS = _NOW - timedelta(minutes=49)
+
+
+def _write_api_error_transcript(
+    home: Path, worktree: Path, *extra: dict[str, object]
+) -> None:
+    """A 50m-flat (at ``_NOW``) API Error then cost-state transcript, plus *extra*."""
+    _write_transcript_records(
+        home,
+        worktree,
+        [*_api_error_then_cost_state_records(_ERROR_TS, _COST_TS), *extra],
+    )
+
+
+def _sweep(
+    state: CwState,
+    now: datetime,
+    *,
+    task_by_ticket: dict[str, TicketTask] | None = None,
+    config: OrchestratorConfig | None = None,
+) -> list[LivenessCandidate]:
+    return record_session_liveness_changes(
+        state,
+        now=now,
+        native_live={"fake-short-id"},
+        config=config or OrchestratorConfig(),
+        task_by_ticket=task_by_ticket or {},
+    )
+
+
+def _attention() -> list[dict[str, object]]:
+    return _events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+
+
+def test_three_sweeps_over_flat_transcript_emit_one_needs_attention(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """Acceptance (#2153): T, T+61m, T+122m over one death -> one page, one push."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _write_api_error_transcript(home, worktree)
+    state = CwState(sessions=[sess])
+
+    _sweep(state, _NOW)
+    stored_key = sess.liveness_attention_evidence_key
+    for minutes in (61, 122):
+        now = _NOW + timedelta(minutes=minutes)
+        _sweep(state, now)
+        assert sess.liveness_attention_next_eligible_at == now + timedelta(minutes=60)
+
+    attention = _attention()
+    assert len(attention) == 1
+    assert _deps.fire_push_notification.call_count == 1
+    assert stored_key is not None
+    assert attention[0]["evidence_key"] == stored_key
+    assert sess.liveness_attention_evidence_key == stored_key
+
+
+def test_page_carries_evidence_suffix_and_payload_fields(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """The base breadcrumb is unchanged; the suffix and six keys are appended."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _write_api_error_transcript(home, worktree)
+    state = CwState(sessions=[sess])
+
+    _sweep(state, _NOW)
+
+    (page,) = _attention()
+    base = (
+        f"transcript flat 50m at stage {DEFAULT_STAGE.value}; elapsed 86400s; "
+        "no sentinel, no pending subagent; session left running"
+    )
+    assert page["breadcrumbs"] == (
+        f"{base}{_LEAD}; last record cost-state at {_COST_TS.isoformat()} "
+        f"(API error: {_API_ERROR_TEXT}); flat 0.8h{_REMEDY}"
+    )
+    assert set(page) == _PRE_2153_ATTENTION_KEYS | _EVIDENCE_KEYS
+    assert "flat_hours" not in page
+    assert page["renotify_marker"] is not None
+    assert page["last_record_type"] == "cost-state"
+    assert page["last_record_ts"] == _COST_TS.isoformat()
+    assert page["last_record_is_error"] is True
+    assert page["close_command"] == _CLOSE
+    assert page["requeue_command"] == _REQUEUE
+    assert page["evidence_key"] == (
+        f"{_SESSION_UNRESPONSIVE_REASON}|{_ERROR_TS.isoformat()}|none"
+    )
+
+
+def test_paused_status_change_repages(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """A spawn stamp past its deadline reshapes the page -> a new key re-fires."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _write_api_error_transcript(home, worktree)
+    state = CwState(sessions=[sess])
+    config = OrchestratorConfig(fix_loop_await_deadline_minutes=30)
+
+    _sweep(state, _NOW, config=config)
+    _write_spawn_stamp(worktree, unresolved_count=1, stamped_at=_NOW)
+    _sweep(state, _NOW + timedelta(minutes=61), config=config)
+
+    attention = _attention()
+    assert [a["paused_status"] for a in attention] == [
+        _SESSION_UNRESPONSIVE_REASON,
+        _FIX_LOOP_AWAIT_DEADLINE_EXCEEDED_REASON,
+    ]
+    assert attention[0]["renotify_marker"] != attention[1]["renotify_marker"]
+    assert _deps.fire_push_notification.call_count == 2
+
+
+def test_task_status_change_repages(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """The owned row moving RUNNING -> BLOCKED_ON_USER changes the key."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _write_api_error_transcript(home, worktree)
+    state = CwState(sessions=[sess])
+    running = _parked_task(sess.id, status=QueueItemStatus.RUNNING, disposition=None)
+    blocked = _parked_task(sess.id, disposition="gh_check_blocked")
+
+    _sweep(state, _NOW, task_by_ticket={"T-1": running})
+    _sweep(state, _NOW + timedelta(minutes=61), task_by_ticket={"T-1": blocked})
+
+    attention = _attention()
+    assert len(attention) == 2
+    assert str(attention[0]["evidence_key"]).endswith("|running")
+    assert str(attention[1]["evidence_key"]).endswith("|blocked_on_user")
+    assert attention[0]["renotify_marker"] != attention[1]["renotify_marker"]
+
+
+def test_content_record_change_still_stale_repages(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """A newer content record that leaves the session at STALE_45M re-fires."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _write_api_error_transcript(home, worktree)
+    state = CwState(sessions=[sess])
+
+    _sweep(state, _NOW)
+    retry_ts = (_NOW + timedelta(minutes=10)).isoformat()
+    _write_api_error_transcript(home, worktree, _ul_record("retrying", retry_ts))
+    second = _sweep(state, _NOW + timedelta(minutes=61))
+
+    assert second[0].old_bucket == second[0].new_bucket == LivenessBucket.STALE_45M
+    attention = _attention()
+    assert len(attention) == 2
+    assert attention[1]["evidence_key"] == (
+        f"{_SESSION_UNRESPONSIVE_REASON}|{retry_ts}|none"
+    )
+    assert attention[0]["renotify_marker"] != attention[1]["renotify_marker"]
+
+
+def test_metadata_only_append_does_not_repage(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """A trailing cost-state record cannot move the key's timestamp leg."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _write_api_error_transcript(home, worktree)
+    state = CwState(sessions=[sess])
+
+    _sweep(state, _NOW)
+    later = (_NOW + timedelta(minutes=30)).isoformat()
+    _write_api_error_transcript(
+        home, worktree, {"type": "cost-state", "timestamp": later}
+    )
+    _sweep(state, _NOW + timedelta(minutes=61))
+
+    assert len(_attention()) == 1
+    assert _deps.fire_push_notification.call_count == 1
+
+
+def test_deduped_sweep_skips_summary_scan_and_only_rearms(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """A deduped candidate is returned, re-armed, carries no summary, emits nothing."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _write_api_error_transcript(home, worktree)
+    state = CwState(sessions=[sess])
+    _sweep(state, _NOW)
+
+    now = _NOW + timedelta(minutes=61)
+    with patch("cw.reconcile.liveness.summarize_last_transcript_record") as summarize:
+        second = _sweep(state, now)
+
+    summarize.assert_not_called()
+    (candidate,) = second
+    assert candidate.distress is False
+    assert candidate.deduped is True
+    assert candidate.next_renotify_eligible_at == now + timedelta(minutes=60)
+    assert candidate.last_record is None
+    assert candidate.evidence_key == sess.liveness_attention_evidence_key
+    assert len(_attention()) == 1
+
+
+def test_evidence_key_cleared_on_recovery_and_next_death_pages(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """Leaving STALE_45M resets the latch, so a later death pages again."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    _write_api_error_transcript(home, worktree)
+    state = CwState(sessions=[sess])
+    _sweep(state, _NOW)
+    assert sess.liveness_attention_evidence_key is not None
+
+    alive_ts = (_NOW + timedelta(minutes=60)).isoformat()
+    _write_api_error_transcript(home, worktree, _ul_record("back", alive_ts))
+    _sweep(state, _NOW + timedelta(minutes=61))
+    assert sess.liveness_bucket is LivenessBucket.LIVE
+    assert sess.liveness_attention_evidence_key is None
+    assert sess.liveness_attention_next_eligible_at is None
+
+    _sweep(state, _NOW + timedelta(minutes=111))
+
+    assert sess.liveness_bucket is LivenessBucket.STALE_45M
+    assert len(_attention()) == 2
+
+
+def test_latched_session_without_key_pages_once_then_dedups(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """Upgrade path: latched at STALE_45M with a due stamp and no key."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    sess.liveness_bucket = LivenessBucket.STALE_45M
+    sess.liveness_attention_next_eligible_at = _NOW - timedelta(minutes=1)
+    _write_api_error_transcript(home, worktree)
+    state = CwState(sessions=[sess])
+
+    _sweep(state, _NOW)
+    _sweep(state, _NOW + timedelta(minutes=61))
+
+    assert len(_attention()) == 1
+    assert sess.liveness_attention_evidence_key is not None
+
+
+def test_ticketless_session_page_has_no_requeue(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """No ticket -> close command only; requeue_command present and null."""
+    worktree = tmp_path / "wt"
+    sess = _make_daemon_session(
+        surface_ref="fake-short-id",
+        worktree_path=worktree,
+        started_at=_STARTED_AT,
+        name="client-a/impl",
+    )
+    _write_api_error_transcript(home, worktree)
+
+    _sweep(CwState(sessions=[sess]), _NOW)
+
+    (page,) = _attention()
+    assert page["close_command"] == _CLOSE
+    assert "requeue_command" in page
+    assert page["requeue_command"] is None
+    assert "then:" not in str(page["breadcrumbs"])
+    assert str(page["breadcrumbs"]).endswith(
+        f"; if you have confirmed the session is dead, run: {_CLOSE}"
+    )
+
+
+def test_sibling_only_transcript_pages_without_last_record(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """Staleness from a sibling transcript alone: the session's own transcript is
+    missing, so the page still fires with null ``last_record_*`` keys."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    sibling = _write_idle_transcript(home, worktree, filename="lingering-sub.jsonl")
+    stale = (_NOW - timedelta(minutes=50)).timestamp()
+    os.utime(str(sibling), (stale, stale))
+
+    _sweep(CwState(sessions=[sess]), _NOW)
+
+    (page,) = _attention()
+    for key in ("last_record_type", "last_record_ts", "last_record_is_error"):
+        assert page[key] is None
+    assert str(page["breadcrumbs"]).endswith(f"{_LEAD}; flat 0.8h{_REMEDY}")
+
+
+def test_recordless_transcript_pages_without_last_record(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """A located transcript that yields no records -> last_record None."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    transcript = _write_transcript_records(home, worktree, [])
+    transcript.write_text("\n\n")
+    stale = (_NOW - timedelta(minutes=50)).timestamp()
+    os.utime(str(transcript), (stale, stale))
+
+    candidates = _sweep(CwState(sessions=[sess]), _NOW)
+
+    assert candidates[0].distress is True
+    assert candidates[0].last_record is None
+    (page,) = _attention()
+    assert page["last_record_type"] is None
+    assert page["last_record_is_error"] is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        pytest.param(
+            {"evidence_key": "k"}, "next_renotify_eligible_at", id="no-next-eligible"
+        ),
+        pytest.param(
+            {"next_renotify_eligible_at": _NOW}, "evidence_key", id="no-evidence-key"
+        ),
+    ],
+)
+def test_act_phase_fails_loud_on_broken_distress_invariant(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    """A distress candidate missing either latch value is a detect-phase bug."""
+    sess, _ = _mk_liveness_session(tmp_path=tmp_path)
+    candidate = LivenessCandidate(
+        session_id=sess.id,
+        ticket_id="T-1",
+        client="client-a",
+        stage=Stage.PLAN,
+        old_bucket=LivenessBucket.STALE_45M,
+        new_bucket=LivenessBucket.STALE_45M,
+        stale_minutes=50.0,
+        distress=True,
+        **overrides,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        _act_on_liveness_candidates(CwState(sessions=[sess]), [candidate])
+    assert _attention() == []

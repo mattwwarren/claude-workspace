@@ -53,11 +53,19 @@ no ``claude_session_id``, no ``local_liveness`` handle, and a purpose other than
 ``staleness_source`` (``transcript`` | ``session_age``) so ``stale_minutes``
 stays interpretable. Still signal-only: elapsed age is evidence of
 unobservability, never proof of death.
+
+Once per page (#2153): the distress page fires once per *evidence key*
+(``paused_status``, the staleness-basis transcript timestamp, the owned row's
+status), stamped onto ``Session.liveness_attention_evidence_key``. The renotify
+interval is only a re-evaluation cadence: a due re-evaluation with an unchanged
+key re-arms the cadence and emits nothing. The page carries the last-record
+evidence and the operator's close/requeue commands, built in the
+:mod:`cw.reconcile.liveness_page` leaf module. Still signal-only.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Literal
 
@@ -89,11 +97,18 @@ from cw.reconcile._shared import (
     _unresolved_subagent_spawn_age_seconds,
     ticket_id_for_session,
 )
+from cw.reconcile.liveness_page import (
+    compute_evidence_key,
+    evidence_payload_fields,
+    format_evidence_suffix,
+    summarize_last_transcript_record,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
 
     from cw.models import CwState, OrchestratorConfig, Session, Stage, TicketTask
+    from cw.reconcile.liveness_page import LastRecordSummary
 
 # Unit conversion for fix_loop_await_deadline_minutes, which is compared
 # against a seconds-valued spawn age (#2012).
@@ -173,9 +188,11 @@ class LivenessCandidate:
     # mutually exclusive by construction.
     unconsumed_queue_notification: str | None = None
     elapsed_seconds: float = 0.0
-    # RFC 0008 W2 re-fire cadence (#1858). Set only when distress is True; the
-    # future timestamp both stamped onto Session.liveness_attention_next_eligible_at
-    # and surfaced as the SESSION_NEEDS_ATTENTION payload's renotify_marker.
+    # RFC 0008 W2 re-evaluation cadence (#1858, #2153). Set whenever the
+    # distress gate held (a page OR a deduped re-evaluation); the next time this
+    # session is re-evaluated, stamped onto
+    # Session.liveness_attention_next_eligible_at. On a page it is also the
+    # payload's renotify_marker -- once per page, not once per interval.
     next_renotify_eligible_at: datetime | None = None
     # #2417 — which evidence ``stale_minutes`` was measured from. Carried into
     # both liveness events so the number stays interpretable. A ``session_age``
@@ -183,6 +200,14 @@ class LivenessCandidate:
     # transcript-tail scans): a reused worktree's leftovers belong to an
     # earlier stage, never to a session that has no transcript of its own.
     staleness_source: StalenessSource = _SOURCE_TRANSCRIPT
+    # #2153 — the page's dedup key (liveness_page.compute_evidence_key), set
+    # whenever the distress gate held; the last-record summary, set only on a
+    # page (never on a deduped re-evaluation or a session_age candidate); and
+    # whether the key equalled the stored one, which turns distress off so the
+    # act phase only re-arms the cadence.
+    evidence_key: str | None = None
+    last_record: LastRecordSummary | None = None
+    deduped: bool = False
 
 
 def _classify_liveness_bucket(
@@ -364,9 +389,11 @@ def _detect_liveness_candidates(
     Returns a list of :class:`LivenessCandidate` objects: one per session
     whose newly-classified bucket differs from its persisted
     ``liveness_bucket`` (a bucket crossing), plus one per session that stays
-    latched at ``STALE_45M`` with no crossing but whose renotify debounce
-    window has elapsed (a level-detect renotify, #1858). Makes zero writes
-    to state, queue, or event bus.
+    latched at ``STALE_45M`` with no crossing but whose re-evaluation cadence
+    is due (a level-detect re-evaluation, #1858). A distress candidate whose
+    evidence key equals the stored one comes back ``deduped`` with
+    ``distress=False``: once per page, the interval only re-evaluates
+    (#2153). Makes zero writes to state, queue, or event bus.
 
     The ``distress`` flag additionally carves out a row parked by the #2135
     abandoned-exit park (see :func:`_is_parked_stopped_without_sentinel`); the
@@ -488,41 +515,69 @@ def _detect_liveness_candidates(
         deadline_exceeded = spawn_age is not None and spawn_age >= deadline_seconds
         distress = distress_base and (spawn_age is None or deadline_exceeded)
         if is_renotify and not distress:
-            # Debounce window elapsed but no longer distress-eligible this
-            # tick (e.g. a terminal sentinel landed since the last check). No
+            # Re-evaluation due but no longer distress-eligible this tick
+            # (e.g. a terminal sentinel landed since the last check). No
             # candidate, no mutation -- next_eligible_at is left as-is so
             # this is re-checked (cheaply) on every subsequent tick without
-            # needing a separate rearm.
+            # needing a separate rearm. A distress re-evaluation whose key is
+            # unchanged is NOT skipped here: _page_evidence marks it deduped.
             continue
         next_renotify_eligible_at = (
             now + timedelta(minutes=config.liveness_attention_renotify_interval_minutes)
             if distress
             else None
         )
-        candidates.append(
-            LivenessCandidate(
-                session_id=session.id,
-                ticket_id=ticket_id,
-                client=session.client,
-                stage=stage,
-                old_bucket=session.liveness_bucket,
-                new_bucket=new_bucket,
-                stale_minutes=stale_minutes,
-                distress=distress,
-                spawn_age_seconds=spawn_age,
-                spawn_deadline_minutes=(
-                    config.fix_loop_await_deadline_minutes
-                    if distress and deadline_exceeded
-                    else None
-                ),
-                elapsed_seconds=(now - session.started_at).total_seconds(),
-                next_renotify_eligible_at=next_renotify_eligible_at,
-                dangling_tool_use=dangling_tool_use,
-                unconsumed_queue_notification=unconsumed_queue_notification,
-                staleness_source=staleness_source,
-            )
+        candidate = LivenessCandidate(
+            session_id=session.id,
+            ticket_id=ticket_id,
+            client=session.client,
+            stage=stage,
+            old_bucket=session.liveness_bucket,
+            new_bucket=new_bucket,
+            stale_minutes=stale_minutes,
+            distress=distress,
+            spawn_age_seconds=spawn_age,
+            spawn_deadline_minutes=(
+                config.fix_loop_await_deadline_minutes
+                if distress and deadline_exceeded
+                else None
+            ),
+            elapsed_seconds=(now - session.started_at).total_seconds(),
+            next_renotify_eligible_at=next_renotify_eligible_at,
+            dangling_tool_use=dangling_tool_use,
+            unconsumed_queue_notification=unconsumed_queue_notification,
+            staleness_source=staleness_source,
         )
+        # #2153: a deduped distress candidate is still appended -- the act
+        # phase re-arms its cadence -- so the skip above stays the only one.
+        if distress:
+            candidate = _page_evidence(candidate, session, task)
+        candidates.append(candidate)
     return candidates
+
+
+def _page_evidence(
+    candidate: LivenessCandidate, session: Session, task: TicketTask | None
+) -> LivenessCandidate:
+    """Attach the #2153 evidence key, deduping against the stored one.
+
+    The cheap key comes first; the full-transcript summary scan runs only when
+    the key changed (never for a ``session_age`` candidate, which has no
+    transcript of its own). An equal key turns ``distress`` off and marks the
+    candidate ``deduped`` so the act phase only re-arms the cadence.
+    """
+    paused_status, _ = _distress_signal_text(candidate)
+    session_age = candidate.staleness_source == _SOURCE_SESSION_AGE
+    key = compute_evidence_key(
+        session, paused_status=paused_status, task=task, session_age=session_age
+    )
+    if key == session.liveness_attention_evidence_key:
+        return replace(candidate, distress=False, deduped=True, evidence_key=key)
+    return replace(
+        candidate,
+        evidence_key=key,
+        last_record=None if session_age else summarize_last_transcript_record(session),
+    )
 
 
 def _distress_signal_text(candidate: LivenessCandidate) -> tuple[str, str]:
@@ -615,10 +670,12 @@ def _act_on_liveness_candidates(
     events.
 
     Every candidate here represents either a bucket crossing (mutates state
-    and emits ``SESSION_LIVENESS_CHANGED``) or a debounce-elapsed renotify at
-    an already-latched top bucket (bucket untouched, only the distress signal
-    re-fires, #1858). Calls ``save_state(state)`` once when any candidates
-    are present, mirroring the other reconcile act phases. See GitHub #1001.
+    and emits ``SESSION_LIVENESS_CHANGED``) or a due re-evaluation at an
+    already-latched top bucket (bucket untouched, #1858). A ``distress``
+    candidate pages once (:func:`_fire_dead_session_page`); a ``deduped`` one
+    only re-arms the re-evaluation cadence -- no event, no push (#2153).
+    Calls ``save_state(state)`` once when any candidates are present,
+    mirroring the other reconcile act phases. See GitHub #1001.
     """
     if not candidates:
         return
@@ -647,46 +704,89 @@ def _act_on_liveness_candidates(
             )
             if candidate.new_bucket is not LivenessBucket.STALE_45M:
                 session.liveness_attention_next_eligible_at = None
+                session.liveness_attention_evidence_key = None
         if candidate.distress:
-            # next_renotify_eligible_at is always set alongside distress in
-            # the detect phase (see _detect_liveness_candidates); narrow it
-            # explicitly here (rather than trust the invariant silently) so
-            # .isoformat() below is both mypy-safe and fail-loud if the
-            # invariant is ever broken.
-            next_eligible_at = candidate.next_renotify_eligible_at
-            if next_eligible_at is None:
-                msg = (
-                    "liveness candidate has distress=True but no "
-                    "next_renotify_eligible_at (detect-phase invariant violated)"
-                )
-                raise ValueError(msg)
-            session.liveness_attention_next_eligible_at = next_eligible_at
-            paused_status, breadcrumbs = _distress_signal_text(candidate)
-            record_event(
-                OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-                {
-                    "session_id": session.id,
-                    "session_name": session.name,
-                    "client": session.client,
-                    "ticket_id": candidate.ticket_id,
-                    "claude_session_id": session.claude_session_id,
-                    "paused_status": paused_status,
-                    "breadcrumbs": breadcrumbs,
-                    "crashed": False,
-                    "stage": candidate.stage.value,
-                    "stale_minutes": candidate.stale_minutes,
-                    "elapsed_seconds": candidate.elapsed_seconds,
-                    "staleness_source": candidate.staleness_source,
-                    "renotify_marker": next_eligible_at.isoformat(),
-                },
-                correlation_id=candidate.ticket_id,
+            _fire_dead_session_page(session, candidate)
+        elif candidate.deduped:
+            session.liveness_attention_next_eligible_at = _require_next_eligible_at(
+                candidate
             )
-            # fire_push_notification lives inside this same distress block for
-            # both the initial crossing fire and every steady-state renotify
-            # (#1858) -- intentional: the operator is meant to get paged
-            # again on every re-fire, not just the first one.
-            _deps.fire_push_notification(session.name, session.client)
     save_state(state)
+
+
+def _require_next_eligible_at(candidate: LivenessCandidate) -> datetime:
+    """Narrow ``next_renotify_eligible_at``, failing loud if it is missing.
+
+    It is always set alongside distress (and therefore on a deduped
+    candidate) in the detect phase; narrowing explicitly rather than trusting
+    the invariant silently keeps ``.isoformat()`` mypy-safe and fail-loud.
+    """
+    next_eligible_at = candidate.next_renotify_eligible_at
+    if next_eligible_at is None:
+        msg = (
+            "liveness candidate has distress=True but no "
+            "next_renotify_eligible_at (detect-phase invariant violated)"
+        )
+        raise ValueError(msg)
+    return next_eligible_at
+
+
+def _fire_dead_session_page(session: Session, candidate: LivenessCandidate) -> None:
+    """Emit the once-per-evidence-key dead-session page (#1858, #2153).
+
+    Stamps the re-evaluation cadence and the evidence key together, then
+    emits ``SESSION_NEEDS_ATTENTION`` -- the historical breadcrumb
+    byte-identical plus the evidence/remedy suffix, and the additive payload
+    keys -- and one push. Signal-only: nothing is closed or requeued.
+    """
+    next_eligible_at = _require_next_eligible_at(candidate)
+    evidence_key = candidate.evidence_key
+    if evidence_key is None:
+        msg = (
+            "liveness candidate has distress=True but no evidence_key "
+            "(detect-phase invariant violated)"
+        )
+        raise ValueError(msg)
+    session.liveness_attention_next_eligible_at = next_eligible_at
+    session.liveness_attention_evidence_key = evidence_key
+    paused_status, breadcrumbs = _distress_signal_text(candidate)
+    suffix = format_evidence_suffix(
+        candidate.last_record,
+        session_id=session.id,
+        ticket_id=candidate.ticket_id,
+        client=session.client,
+        stale_minutes=candidate.stale_minutes,
+        session_age=candidate.staleness_source == _SOURCE_SESSION_AGE,
+    )
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": candidate.ticket_id,
+            "claude_session_id": session.claude_session_id,
+            "paused_status": paused_status,
+            "breadcrumbs": breadcrumbs + suffix,
+            "crashed": False,
+            "stage": candidate.stage.value,
+            "stale_minutes": candidate.stale_minutes,
+            "elapsed_seconds": candidate.elapsed_seconds,
+            "staleness_source": candidate.staleness_source,
+            "renotify_marker": next_eligible_at.isoformat(),
+            **evidence_payload_fields(
+                candidate.last_record,
+                session_id=session.id,
+                ticket_id=candidate.ticket_id,
+                client=session.client,
+                evidence_key=evidence_key,
+            ),
+        },
+        correlation_id=candidate.ticket_id,
+    )
+    # One push per page, never per re-evaluation: a deduped candidate never
+    # reaches here (#2153).
+    _deps.fire_push_notification(session.name, session.client)
 
 
 def record_session_liveness_changes(
