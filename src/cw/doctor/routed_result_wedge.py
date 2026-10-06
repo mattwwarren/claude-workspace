@@ -416,11 +416,14 @@ def reap_routed_result_findings(findings: list[WedgeFinding]) -> list[str]:
         tasks = _deps.load_dev_queue().tasks
     # Why (#2491, operator decision D3): bounded=True because this is reached
     # only from `cw doctor --reap`, never from an unattended loop, and only
-    # reads precede the acquisition here. Earlier steps of
-    # _reap_wedge_findings may already have saved queue changes before this
-    # lock -- the same partial-state window classes 6/8 accept (#2504) -- so
-    # a SessionsLockTimeoutError leaves a state the next `cw doctor --reap`
-    # re-detects idempotently.
+    # reads precede the acquisition here. On the _reap_wedge_findings path,
+    # earlier steps may already have saved queue changes before this lock --
+    # the partial-state window classes 6/8 share (#2504) -- and a
+    # SessionsLockTimeoutError there is caught and reported as a failing
+    # `wedge-reap` check, so the window is reported rather than aborted. The
+    # direct caller cli/maintenance.py::_reap_routed_report does NOT catch it,
+    # so the error propagates there. Either way the next `cw doctor --reap`
+    # re-detects the state idempotently.
     with sessions_lock(bounded=True):
         state = load_state()
         now = datetime.now(UTC)
