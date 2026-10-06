@@ -2354,7 +2354,7 @@ class TestClearTickets:
     ) -> None:
         """clear_tickets must not re-derive the candidate set after computing
         it once under ``_lock()`` -- mirrors
-        test_prune_tickets_derives_candidates_exactly_once (#2003)."""
+        test_prune_deletes_only_the_set_it_derived_under_the_lock (#2003)."""
         from cw.dev_queue import crud
 
         real = crud._select_clear_candidates
@@ -2535,24 +2535,35 @@ class TestPruneTickets:
         assert removed == []
         assert [t.ticket_id for t in load_dev_queue().tasks] == ["TKT-PREC"]
 
-    def test_running_blocked_signoff_never_prunable_even_when_named(
-        self, tmp_dev_queue: Path
-    ) -> None:
-        """Every OCCUPIED_LANE_STATUSES member is refused when named, and is
-        untouched by the default (COMPLETED-only) status set."""
+    @pytest.fixture
+    def occupied_lane_rows(self, tmp_dev_queue: Path) -> list[TicketTask]:
+        """One very old row per OCCUPIED_LANE_STATUSES member, saved to disk."""
         tasks = [
             _aged_task(400, ticket_id=f"TKT-{status.value}", status=status)
             for status in sorted(OCCUPIED_LANE_STATUSES)
         ]
         save_dev_queue(DevQueueStore(tasks=tasks))
+        return tasks
 
-        for status in OCCUPIED_LANE_STATUSES:
-            with pytest.raises(CwError, match=status.value):
-                prune_tickets(frozenset([status]), 1, "genhealth")
+    @pytest.mark.parametrize("status", sorted(OCCUPIED_LANE_STATUSES))
+    def test_occupied_lane_status_refused_when_named(
+        self, occupied_lane_rows: list[TicketTask], status: QueueItemStatus
+    ) -> None:
+        """Naming an OCCUPIED_LANE_STATUSES member is refused with no mutation."""
+        with pytest.raises(CwError, match=status.value):
+            prune_tickets(frozenset([status]), 1, "genhealth")
 
+        assert len(load_dev_queue().tasks) == len(occupied_lane_rows)
+
+    def test_default_status_set_leaves_occupied_lane_rows_untouched(
+        self, occupied_lane_rows: list[TicketTask]
+    ) -> None:
+        """The default (COMPLETED-only) status set never sweeps up occupied-lane
+        rows, however old they are."""
         default_set = frozenset([QueueItemStatus.COMPLETED])
+
         assert prune_tickets(default_set, 1, "genhealth") == []
-        assert len(load_dev_queue().tasks) == len(tasks)
+        assert len(load_dev_queue().tasks) == len(occupied_lane_rows)
 
     def test_disallowed_status_raises_cw_error(self, tmp_dev_queue: Path) -> None:
         """A RUNNING status in the set aborts before any mutation."""
@@ -2709,38 +2720,51 @@ class TestPruneTickets:
 
         assert len(load_dev_queue().tasks) == 1
 
-    def test_prune_tickets_derives_candidates_exactly_once(
-        self, tmp_dev_queue: Path, monkeypatch: pytest.MonkeyPatch
+    def test_prune_deletes_only_the_set_it_derived_under_the_lock(
+        self,
+        tmp_dev_queue: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
-        """prune_tickets must not re-derive the candidate set after computing it
-        once under ``_lock()`` -- a second call would reopen the TOCTOU window
-        the single-lock design exists to close (#382 Q3); a row that appeared in
-        the store after this single call would not be picked up, because there
-        is no second call to pick it up."""
+        """The removed/reported set equals the deleted set, and nothing that
+        appears after the single in-lock read is swept up (#382 Q3, #2003).
+
+        A row injected right after the first ``load_dev_queue`` stands in for
+        what a second candidate derivation would observe. It must be absent
+        from the returned set and from the ``task.deleted`` events.
+        """
         from cw.dev_queue import crud
 
-        real = crud._select_prune_candidates
-        calls: list[int] = []
-
-        def _spy(
-            store: DevQueueStore,
-            statuses: frozenset[QueueItemStatus],
-            older_than_days: int,
-            client: str | None,
-            *,
-            all_clients: bool,
-        ) -> list[TicketTask]:
-            calls.append(1)
-            return real(
-                store, statuses, older_than_days, client, all_clients=all_clients
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _aged_task(100, ticket_id="TKT-OLD"),
+                    _aged_task(1, ticket_id="TKT-NEW"),
+                ]
             )
+        )
+        events = capture_events("cw.dev_queue.crud", OrchestratorEventType.TASK_DELETED)
+        real_load = crud.load_dev_queue
+        injected: list[str] = []
 
-        monkeypatch.setattr(crud, "_select_prune_candidates", _spy)
-        save_dev_queue(DevQueueStore(tasks=[_aged_task(100, ticket_id="TKT-ONCE")]))
+        def _load_then_race() -> DevQueueStore:
+            store = real_load()
+            if not injected:
+                injected.append("TKT-LATE")
+                racing = real_load()
+                racing.tasks.append(_aged_task(100, ticket_id="TKT-LATE"))
+                save_dev_queue(racing)
+            return store
 
-        prune_tickets(frozenset([QueueItemStatus.COMPLETED]), 90, "genhealth")
+        monkeypatch.setattr(crud, "load_dev_queue", _load_then_race)
 
-        assert len(calls) == 1
+        removed = prune_tickets(frozenset([QueueItemStatus.COMPLETED]), 90, "genhealth")
+
+        assert [t.ticket_id for t in removed] == ["TKT-OLD"]
+        assert [p["ticket_id"] for _, p, _ in events] == ["TKT-OLD"]
+        on_disk = {t.ticket_id for t in load_dev_queue().tasks}
+        assert "TKT-OLD" not in on_disk
+        assert "TKT-NEW" in on_disk
 
 
 # ---------------------------------------------------------------------------
@@ -3453,6 +3477,37 @@ class TestCLIDevQueuePrune:
         assert result.exit_code == 0, result.output
         assert "Pruned 1 dev-queue task(s)." in result.output
         assert load_dev_queue().tasks == []
+
+    @pytest.mark.parametrize(
+        "extra_flags",
+        [[], ["--confirm"]],
+        ids=["preview", "confirm"],
+    )
+    def test_negative_older_than_errors_cli(
+        self, tmp_dev_queue: Path, extra_flags: list[str]
+    ) -> None:
+        """A negative --older-than surfaces as a CLI error on both the preview
+        path (select_prunable_tickets) and the --confirm path (prune_tickets),
+        and deletes nothing."""
+        save_dev_queue(DevQueueStore(tasks=[_aged_task(100, ticket_id="CLI-NEG")]))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "prune",
+                "--client",
+                "genhealth",
+                "--older-than",
+                "-1",
+                *extra_flags,
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "--older-than must be >= 0" in result.output
+        assert len(load_dev_queue().tasks) == 1
 
     def test_nothing_to_prune_message(self, tmp_dev_queue: Path) -> None:
         save_dev_queue(DevQueueStore(tasks=[_aged_task(1, ticket_id="CLI-FRESH")]))
