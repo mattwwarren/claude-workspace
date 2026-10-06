@@ -249,7 +249,7 @@ PATCH_OWNERSHIP = [
     ),
     ("_worktree_dirty_reason_by_path", "_deps", f"{_PKG}._worktree_evidence"),
     ("_blocked_result_requeue_enabled", "get_client", _PKG),
-    ("_claude_agents_json", "subprocess", _PKG),
+    ("_claude_agents_json", "subprocess", f"{_PKG}._roster"),
     (
         "_widened_transcript_timestamp",
         "_locate_session_transcript",
@@ -440,7 +440,7 @@ class TestLoggerNamePinned:
 
 # Submodules that log. Each binds its own ``_log`` to the pinned name via
 # ``_constants._LOGGER_NAME``, never ``__name__``.
-LOGGING_SUBMODULES = ["_transcripts"]
+LOGGING_SUBMODULES = ["_roster", "_transcripts"]
 
 
 class TestLoggerObjectsPinned:

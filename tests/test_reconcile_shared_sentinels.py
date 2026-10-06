@@ -94,7 +94,7 @@ def test_claude_agents_json_parses_subprocess_output(
 
         return _Result()
 
-    monkeypatch.setattr("cw.reconcile._shared.subprocess.run", _fake_run)
+    monkeypatch.setattr("cw.reconcile._shared._roster.subprocess.run", _fake_run)
     result = _claude_agents_json()
     assert result == [{"sessionId": "abc12345"}, {"sessionId": "def67890"}]
 
@@ -112,7 +112,7 @@ def test_claude_agents_json_returns_empty_on_non_list(
 
         return _Result()
 
-    monkeypatch.setattr("cw.reconcile._shared.subprocess.run", _fake_run)
+    monkeypatch.setattr("cw.reconcile._shared._roster.subprocess.run", _fake_run)
     result = _claude_agents_json()
     assert result == []
 
@@ -136,7 +136,7 @@ def test_claude_agents_json_passes_timeout(
 
         return _Result()
 
-    monkeypatch.setattr("cw.reconcile._shared.subprocess.run", _fake_run)
+    monkeypatch.setattr("cw.reconcile._shared._roster.subprocess.run", _fake_run)
     _claude_agents_json()
     assert "timeout" in captured_kwargs
     assert captured_kwargs["timeout"] == 15
