@@ -588,6 +588,17 @@ def _call_name(call: ast.Call) -> str | None:
     return None
 
 
+def _is_guard_call(call: ast.Call) -> bool:
+    if isinstance(call.func, ast.Name):
+        return call.func.id == _GUARD_NAME
+    return (
+        isinstance(call.func, ast.Attribute)
+        and call.func.attr == _GUARD_NAME
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "_lock_guard"
+    )
+
+
 def _is_context_manager(fn: _FunctionNode) -> bool:
     for decorator in fn.decorator_list:
         target = decorator.func if isinstance(decorator, ast.Call) else decorator
@@ -635,8 +646,7 @@ def _guard_spans(fn: _FunctionNode) -> list[tuple[int, int]]:
         if not isinstance(node, (ast.With, ast.AsyncWith)):
             continue
         if any(
-            isinstance(item.context_expr, ast.Call)
-            and _call_name(item.context_expr) == _GUARD_NAME
+            isinstance(item.context_expr, ast.Call) and _is_guard_call(item.context_expr)
             for item in node.items
         ):
             first, last = node.body[0], node.body[-1]
@@ -742,6 +752,12 @@ def test_every_flock_context_manager_is_guarded_or_exempt() -> None:
             "        acquire_sessions_flock(fd, p, bounded=True)\n"
             "        yield",
             "guarded",
+        ),
+        (
+            "with unrelated.lock_guard('n', p, r):\n"
+            "        fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "        yield",
+            "unguarded",
         ),
         (
             "with lock_guard('n', p, r):\n"
