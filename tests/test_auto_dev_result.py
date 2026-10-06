@@ -48,6 +48,7 @@ from cw.auto_dev_result import (
     is_known_blocker_reason,
     parse_last_block,
     parse_last_block_in_chunks,
+    parse_last_block_per_chunk,
     parse_stdout,
     queue_status_for_terminal_sentinel,
 )
@@ -5641,3 +5642,165 @@ def test_chunks_loose_fenced_block_for_another_ticket_is_skipped() -> None:
     chunks = [_fenced(_merge_gate_payload())]
 
     assert parse_last_block_in_chunks(chunks, ticket_id="GEN-7") is None
+
+
+# ---------------------------------------------------------------------------
+# parse_last_block warned_blocks passthrough + parse_last_block_per_chunk
+# (GitHub #2515)
+# ---------------------------------------------------------------------------
+
+_MALFORMED_BLOCK = "<<<AUTO_DEV_RESULT\n{oops\nAUTO_DEV_RESULT>>>"
+_JSON_PARSE_WARNING = "did not parse as JSON"
+
+
+def _json_parse_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [rec.message for rec in caplog.records if _JSON_PARSE_WARNING in rec.message]
+
+
+def test_parse_last_block_warned_blocks_dedups_a_repeated_malformed_block(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A caller-owned set dedups the malformed block's WARNING across calls."""
+    warned: set[str] = set()
+
+    with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+        first = parse_last_block(_MALFORMED_BLOCK, warned_blocks=warned)
+        second = parse_last_block(_MALFORMED_BLOCK, warned_blocks=warned)
+
+    assert isinstance(first, BlockedResult)
+    assert isinstance(second, BlockedResult)
+    assert len(_json_parse_warnings(caplog)) == 1
+    assert warned
+
+
+def test_parse_last_block_without_warned_blocks_warns_on_every_call(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+        parse_last_block(_MALFORMED_BLOCK)
+        parse_last_block(_MALFORMED_BLOCK)
+
+    assert len(_json_parse_warnings(caplog)) == 2
+
+
+def test_parse_last_block_earlier_valid_block_adds_no_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Only the deciding (last) block is parsed, so the earlier one is silent."""
+    text = _wrap_sentinel(_blocked_payload()) + _MALFORMED_BLOCK
+
+    with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+        result = parse_last_block(text, warned_blocks=set())
+
+    assert isinstance(result, BlockedResult)
+    assert len(_json_parse_warnings(caplog)) == 1
+
+
+def test_per_chunk_last_non_none_chunk_wins() -> None:
+    chunks = [
+        _wrap_sentinel(_blocked_payload()),
+        "plain prose",
+        _wrap_sentinel(_merge_gate_payload()),
+    ]
+
+    result = parse_last_block_per_chunk(chunks)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "merge_gate_blocked"
+
+
+def test_per_chunk_a_chunk_with_two_blocks_yields_its_last_block() -> None:
+    """The multi-block chunk no longer collapses to ``multiple_result_blocks``."""
+    chunk = _wrap_two(_blocked_payload("earlier_stage"), _merge_gate_payload())
+
+    result = parse_last_block_per_chunk([chunk])
+
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "merge_gate_blocked"
+
+
+def test_per_chunk_a_malformed_chunk_after_a_real_one_is_the_final_word() -> None:
+    """No resurrection: a later unusable chunk beats an earlier valid one."""
+    result = parse_last_block_per_chunk([_real_block(), _MALFORMED_BLOCK])
+
+    assert isinstance(result, BlockedResult)
+    assert result.blocker.reason == BLOCKER_REASON_NO_RESULT_EMITTED
+
+
+@pytest.mark.parametrize(
+    "later_chunk",
+    [
+        _wrap_sentinel(_placeholder_payload()),
+        _wrap_sentinel(_documented_example_payload()),
+    ],
+    ids=["placeholder", "documented-example"],
+)
+def test_per_chunk_a_later_placeholder_or_example_chunk_keeps_the_real_result(
+    later_chunk: str,
+) -> None:
+    result = parse_last_block_per_chunk([_real_block(), later_chunk])
+
+    assert isinstance(result, AutoDevResult)
+    assert result.ticket_id == "GEN-7"
+
+
+def test_per_chunk_example_only_is_none() -> None:
+    chunks = [_wrap_sentinel(_documented_example_payload())]
+
+    assert parse_last_block_per_chunk(chunks) is None
+
+
+def test_per_chunk_empty_iterable_is_none() -> None:
+    assert parse_last_block_per_chunk([]) is None
+
+
+def test_per_chunk_does_not_join_a_frame_split_across_chunks() -> None:
+    """Intentional difference from ``parse_last_block_in_chunks``: no joining."""
+    body = json.dumps(_merge_gate_payload())
+    chunks = ["narrative\n<<<AUTO_DEV_RESULT\n", f"{body}\nAUTO_DEV_RESULT>>>\n"]
+
+    assert parse_last_block_per_chunk(chunks) is None
+    assert isinstance(parse_last_block_in_chunks(chunks, ticket_id=None), AutoDevResult)
+
+
+def test_per_chunk_an_unclosed_trailing_frame_reads_as_none() -> None:
+    """Unlike ``parse_last_block_in_chunks``, no ``BlockedResult`` for a cut frame."""
+    truncated = '<<<AUTO_DEV_RESULT\n{"schema_version": 4, "tick'
+
+    assert parse_last_block_per_chunk([truncated]) is None
+    assert isinstance(
+        parse_last_block_in_chunks([truncated], ticket_id=None), BlockedResult
+    )
+
+
+def test_per_chunk_an_unclosed_trailing_frame_keeps_the_earlier_real_result() -> None:
+    truncated = '<<<AUTO_DEV_RESULT\n{"schema_version": 4, "tick'
+
+    result = parse_last_block_per_chunk([_real_block(), truncated])
+
+    assert isinstance(result, AutoDevResult)
+    assert result.ticket_id == "GEN-7"
+
+
+def test_per_chunk_ticket_id_filtering_is_honored() -> None:
+    chunks = [_real_block(), _wrap_sentinel(_merge_gate_payload())]
+
+    filtered = parse_last_block_per_chunk(chunks, ticket_id="GEN-7")
+    unfiltered = parse_last_block_per_chunk(chunks)
+
+    assert isinstance(filtered, AutoDevResult)
+    assert filtered.ticket_id == "GEN-7"
+    assert isinstance(unfiltered, AutoDevResult)
+    assert unfiltered.ticket_id == "GEN-4"
+
+
+def test_per_chunk_forwards_warned_blocks(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    warned: set[str] = set()
+
+    with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+        parse_last_block_per_chunk([_MALFORMED_BLOCK], warned_blocks=warned)
+        parse_last_block_per_chunk([_MALFORMED_BLOCK], warned_blocks=warned)
+
+    assert len(_json_parse_warnings(caplog)) == 1

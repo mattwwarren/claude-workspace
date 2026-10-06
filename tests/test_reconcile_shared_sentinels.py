@@ -3613,6 +3613,159 @@ def test_1258_shape_placeholder_then_delayed_real_sentinel(tmp_path: Path) -> No
     assert result.ticket_id == real_payload["ticket_id"]
 
 
+# ---------------------------------------------------------------------------
+# _parse_sentinel_from_blocks — last real block wins WITHIN one text (#2515)
+# ---------------------------------------------------------------------------
+
+_MALFORMED_SENTINEL_BLOCK = "<<<AUTO_DEV_RESULT\n{oops\nAUTO_DEV_RESULT>>>"
+_TRUNCATED_SENTINEL_FRAME = '<<<AUTO_DEV_RESULT\n{"schema_version": 4, "tick'
+
+
+def _sentinel_frame(payload: dict[str, Any]) -> str:
+    return f"<<<AUTO_DEV_RESULT\n{json.dumps(payload)}\nAUTO_DEV_RESULT>>>"
+
+
+def test_parse_sentinel_from_blocks_two_real_blocks_in_one_text_yield_the_last(
+    tmp_path: Path,
+) -> None:
+    """A salvage chunk with two real blocks used to collapse to
+    ``multiple_result_blocks`` (requeued); the last block is now the result.
+    """
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    text = (
+        _sentinel_frame(_shipped_salvage_payload())
+        + "\nand then, finally:\n"
+        + _sentinel_frame(_stage_complete_payload())
+    )
+    _write_raw_sentinel_transcript(path, [text])
+
+    result = _parse_sentinel_from_blocks(path)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "stage_complete"
+
+
+def test_parse_sentinel_from_blocks_example_then_real_in_one_text_returns_real(
+    tmp_path: Path,
+) -> None:
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    text = (
+        _sentinel_frame(_documented_example_salvage_payload())
+        + "\n"
+        + _sentinel_frame(_stage_complete_payload())
+    )
+    _write_raw_sentinel_transcript(path, [text])
+
+    result = _parse_sentinel_from_blocks(path)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "stage_complete"
+
+
+def test_parse_sentinel_from_blocks_real_then_example_in_one_text_returns_real(
+    tmp_path: Path,
+) -> None:
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    text = (
+        _sentinel_frame(_stage_complete_payload())
+        + "\n"
+        + _sentinel_frame(_documented_example_salvage_payload())
+    )
+    _write_raw_sentinel_transcript(path, [text])
+
+    result = _parse_sentinel_from_blocks(path)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "stage_complete"
+
+
+def test_parse_sentinel_from_blocks_placeholder_and_real_in_one_text_returns_real(
+    tmp_path: Path,
+) -> None:
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    text = (
+        _PLACEHOLDER_EXAMPLE_BLOCK + "\n" + _sentinel_frame(_stage_complete_payload())
+    )
+    _write_raw_sentinel_transcript(path, [text])
+
+    result = _parse_sentinel_from_blocks(path)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "stage_complete"
+
+
+def test_parse_sentinel_from_blocks_example_only_in_one_text_returns_none(
+    tmp_path: Path,
+) -> None:
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    text = (
+        _sentinel_frame(_documented_example_salvage_payload())
+        + "\n"
+        + _PLACEHOLDER_EXAMPLE_BLOCK
+    )
+    _write_raw_sentinel_transcript(path, [text])
+
+    assert _parse_sentinel_from_blocks(path) is None
+
+
+def test_parse_sentinel_from_blocks_malformed_last_block_is_the_final_word(
+    tmp_path: Path,
+) -> None:
+    """An unusable LAST block is reported, never replaced by an earlier valid one."""
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    text = _sentinel_frame(_stage_complete_payload()) + "\n" + _MALFORMED_SENTINEL_BLOCK
+    _write_raw_sentinel_transcript(path, [text])
+
+    result = _parse_sentinel_from_blocks(path)
+
+    assert isinstance(result, BlockedResult)
+    assert result.blocker.reason != "multiple_result_blocks"
+
+
+def test_parse_sentinel_from_blocks_malformed_record_after_real_record_wins(
+    tmp_path: Path,
+) -> None:
+    """Cross-record last-wins is preserved: the later record decides."""
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    _write_raw_sentinel_transcript(
+        path, [_sentinel_frame(_stage_complete_payload()), _MALFORMED_SENTINEL_BLOCK]
+    )
+
+    result = _parse_sentinel_from_blocks(path)
+
+    assert isinstance(result, BlockedResult)
+
+
+def test_parse_sentinel_from_blocks_truncated_frame_after_real_block_keeps_real(
+    tmp_path: Path,
+) -> None:
+    """A cut-off trailing frame reads as no sentinel, not as a BlockedResult."""
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    text = _sentinel_frame(_stage_complete_payload()) + "\n" + _TRUNCATED_SENTINEL_FRAME
+    _write_raw_sentinel_transcript(path, [text])
+
+    result = _parse_sentinel_from_blocks(path)
+
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "stage_complete"
+
+
 _TWO_LAYER_SURFACE_REF = "surf1234"
 _TWO_LAYER_STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 

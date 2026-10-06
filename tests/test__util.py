@@ -5,8 +5,14 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import pytest
+
+from tests._reconcile_helpers import _stage_complete_payload
+
+if TYPE_CHECKING:
+    from cw.auto_dev_result import AutoDevResult, BlockedResult
 
 
 class TestIterAssistantTextBlocks:
@@ -624,6 +630,195 @@ class TestParseSentinelFromTranscriptToolResult:
         assert isinstance(parsed, AutoDevResult)
         assert parsed.ticket_id == "774"
         assert parsed.status == "stage_complete"
+
+    # -- GitHub #2515: last real block wins inside ONE transcript block too ----
+
+    _MALFORMED_BLOCK = "<<<AUTO_DEV_RESULT\n{oops\nAUTO_DEV_RESULT>>>"
+    _TRUNCATED_FRAME = '<<<AUTO_DEV_RESULT\n{"schema_version": 4, "tick'
+
+    @staticmethod
+    def _frame(payload: dict[str, Any]) -> str:
+        return f"<<<AUTO_DEV_RESULT\n{json.dumps(payload)}\nAUTO_DEV_RESULT>>>"
+
+    @classmethod
+    def _real_payload(cls) -> dict[str, Any]:
+        """The 774 stage_complete result, derived from the shared helper."""
+        return {**_stage_complete_payload(), "ticket_id": "774"}
+
+    @classmethod
+    def _blocked_earlier_payload(cls) -> dict[str, Any]:
+        return {
+            **_stage_complete_payload(),
+            "ticket_id": "774",
+            "status": "blocked",
+            "blocker": {
+                "stage": "stage2_impl",
+                "reason": "impl_failed",
+                "details": "an earlier stage failed",
+            },
+        }
+
+    @classmethod
+    def _documented_example_payload(cls) -> dict[str, Any]:
+        """The skill prompt's illustrative example (PROJ-1234, pr 42)."""
+        return {
+            **_stage_complete_payload(),
+            "ticket_id": "PROJ-1234",
+            "status": "shipped",
+            "stage_reached": "stage5_post_create",
+            "branch": "dev/proj-1234-fix-login",
+            "pr": {
+                "number": 42,
+                "url": "https://github.com/.../pull/42",
+                "auto_merge": True,
+                "base": "main",
+            },
+            "next_actions": ["wait_for_ci"],
+        }
+
+    def _scan(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        texts: list[str],
+        name: str,
+    ) -> AutoDevResult | BlockedResult | None:
+        """Write one tool_result record per *texts* entry, then scan it."""
+        from cw.cli._sentinels import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
+        worktree = tmp_path / "wt" / name
+        worktree.mkdir(parents=True)
+        self._write_transcript_tool_results(worktree, name, texts, fake_home)
+        return _parse_sentinel_from_transcript(str(worktree), name)
+
+    def test_derived_documented_example_is_recognized_as_the_example(self) -> None:
+        """Guards the fixture: it must still be what ``is_documented_example`` skips."""
+        from cw.auto_dev_result import AutoDevResult, is_documented_example
+
+        example = AutoDevResult.model_validate(self._documented_example_payload())
+
+        assert is_documented_example(example)
+
+    def test_two_real_blocks_in_one_text_yield_the_last(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Was ``multiple_result_blocks``; the last block is the worker's word."""
+        from cw.auto_dev_result import AutoDevResult
+
+        text = (
+            self._frame(self._blocked_earlier_payload())
+            + "\nand then, finally:\n"
+            + self._frame(self._real_payload())
+        )
+
+        parsed = self._scan(tmp_path, monkeypatch, [text], "two-real")
+
+        assert isinstance(parsed, AutoDevResult)
+        assert parsed.ticket_id == "774"
+        assert parsed.status == "stage_complete"
+
+    def test_documented_example_then_real_in_one_text_returns_real(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.auto_dev_result import AutoDevResult
+
+        text = (
+            self._frame(self._documented_example_payload())
+            + "\n"
+            + self._frame(self._real_payload())
+        )
+
+        parsed = self._scan(tmp_path, monkeypatch, [text], "example-then-real")
+
+        assert isinstance(parsed, AutoDevResult)
+        assert parsed.ticket_id == "774"
+
+    def test_real_then_documented_example_in_one_text_returns_real(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.auto_dev_result import AutoDevResult
+
+        text = (
+            self._frame(self._real_payload())
+            + "\n"
+            + self._frame(self._documented_example_payload())
+        )
+
+        parsed = self._scan(tmp_path, monkeypatch, [text], "real-then-example")
+
+        assert isinstance(parsed, AutoDevResult)
+        assert parsed.ticket_id == "774"
+
+    def test_documented_example_only_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        text = self._frame(self._documented_example_payload())
+
+        assert self._scan(tmp_path, monkeypatch, [text], "example-only") is None
+
+    def test_placeholder_and_real_in_one_text_returns_real(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Was ``multiple_result_blocks`` for a quoted template beside a real block."""
+        from cw.auto_dev_result import AutoDevResult
+
+        text = self._PLACEHOLDER_TOOL_RESULT + "\n" + self._SENTINEL_TOOL_RESULT
+
+        parsed = self._scan(tmp_path, monkeypatch, [text], "placeholder-and-real")
+
+        assert isinstance(parsed, AutoDevResult)
+        assert parsed.ticket_id == "774"
+
+    def test_valid_then_malformed_in_one_text_is_the_final_word(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An earlier valid block never resurrects over an unusable last one."""
+        from cw.auto_dev_result import (
+            BLOCKER_REASON_MULTIPLE_RESULT_BLOCKS,
+            BlockedResult,
+        )
+
+        text = self._frame(self._real_payload()) + "\n" + self._MALFORMED_BLOCK
+
+        parsed = self._scan(tmp_path, monkeypatch, [text], "valid-then-malformed")
+
+        assert isinstance(parsed, BlockedResult)
+        assert parsed.blocker.reason != BLOCKER_REASON_MULTIPLE_RESULT_BLOCKS
+
+    def test_real_record_then_malformed_record_is_the_final_word(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cross-record last-wins is preserved: the later record decides."""
+        from cw.auto_dev_result import BlockedResult
+
+        texts = [self._frame(self._real_payload()), self._MALFORMED_BLOCK]
+
+        parsed = self._scan(tmp_path, monkeypatch, texts, "record-malformed")
+
+        assert isinstance(parsed, BlockedResult)
+
+    def test_truncated_trailing_frame_after_a_real_block_keeps_the_real_block(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A cut-off frame reads as "no sentinel" (#2135), never as a BlockedResult."""
+        from cw.auto_dev_result import AutoDevResult
+
+        text = self._frame(self._real_payload()) + "\n" + self._TRUNCATED_FRAME
+
+        parsed = self._scan(tmp_path, monkeypatch, [text], "truncated-after-real")
+
+        assert isinstance(parsed, AutoDevResult)
+        assert parsed.ticket_id == "774"
+
+    def test_truncated_frame_alone_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert (
+            self._scan(tmp_path, monkeypatch, [self._TRUNCATED_FRAME], "truncated-only")
+            is None
+        )
 
 
 class TestLastContentEntryTimestamp:

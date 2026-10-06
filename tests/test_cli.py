@@ -73,6 +73,7 @@ from tests._reconcile_helpers import (
     SCOPE_GUARD_LINES,
     _inflate_scope,
     _make_stale_base_repo,
+    _stage_complete_payload,
     _ul_record,
     _write_transcript_records,
 )
@@ -6935,6 +6936,54 @@ class TestParseSentinelFromTranscript:
             )
             parsed2 = _parse_sentinel_from_transcript(
                 str(worktree), "uuid-warn-dedup", warned_blocks=warned_blocks
+            )
+        assert isinstance(parsed1, BlockedResult)
+        assert isinstance(parsed2, BlockedResult)
+        matching = [
+            rec for rec in caplog.records if "did not parse as JSON" in rec.message
+        ]
+        assert len(matching) == 1
+
+    def test_warned_blocks_dedups_malformed_last_block_after_an_earlier_valid_one(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Two blocks in ONE text: the malformed last block decides, and the
+        shared ``warned_blocks`` set dedups its WARNING across repeated scans
+        (issues #1247, #2515).
+        """
+        import logging
+
+        from cw.auto_dev_result import BlockedResult
+        from cw.cli import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-warn-dedup-multi"
+        worktree.mkdir(parents=True)
+        good_sentinel = (
+            "<<<AUTO_DEV_RESULT\n"
+            + json.dumps(_stage_complete_payload())
+            + "\nAUTO_DEV_RESULT>>>"
+        )
+        bad_sentinel = "<<<AUTO_DEV_RESULT\n{this is not valid JSON\nAUTO_DEV_RESULT>>>"
+        self._write_transcript(
+            worktree,
+            "uuid-warn-dedup-multi",
+            good_sentinel + "\n" + bad_sentinel,
+            fake_home,
+        )
+
+        warned_blocks: set[str] = set()
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            parsed1 = _parse_sentinel_from_transcript(
+                str(worktree), "uuid-warn-dedup-multi", warned_blocks=warned_blocks
+            )
+            parsed2 = _parse_sentinel_from_transcript(
+                str(worktree), "uuid-warn-dedup-multi", warned_blocks=warned_blocks
             )
         assert isinstance(parsed1, BlockedResult)
         assert isinstance(parsed2, BlockedResult)
