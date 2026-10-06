@@ -15,6 +15,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **`SessionsLockReentryError` is renamed `CwLockReentrancyError` and now covers every guarded lock (#1233).** It is still a `CwError`, so existing `except CwError` handlers are unaffected, and it now carries `lock_name`, `path` and `held` (the thread's held lock names, outermost first). There is no alias for the old name. `cw.config._sessions_lock_state` is removed; `cw._lock_guard.held_locks()` and `is_rank_held()` report the calling thread's held locks.
+### Fixed
+
+- **`cw review check-voided --voided-findings-out` no longer leaves a stale record behind when there is nothing to record (#2532).** When the merged record rendered empty the command wrote no file but also left whatever an earlier run had written at that path, so `/auto-dev-review` step 5 could post an outdated `## Voided Review Findings` comment as current. The empty-render case now removes any file at the path, on both the success path and the refused exit for an unmatched new entry (#2319); a missing file or parent directory is not an error and no directory is created. `--deferred-findings-out` is unchanged because it is cumulative across rounds. A run that fails before the write (for example a malformed payload) still leaves the existing file untouched. The `--voided-findings-out` help text and step 5 of `/auto-dev-review` now describe the removal.
 
 ## [1.65.0] - 2026-10-06
 
