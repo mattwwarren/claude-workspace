@@ -4,7 +4,8 @@ Package split (#1317-#1318, complete). The historical flat ``cw.dev_queue``
 module is now a package of focused submodules:
 
 * ``attention`` — the shared ``task_attention_state`` predicate backing every
-  "needs attention" count (CLI ``NEEDS_ATTN``, statusline ``!N``).
+  "needs attention" count (CLI ``NEEDS_ATTN``, statusline ``!N``), plus the
+  session-derived ``session_attention_state`` ATTENTION cell (#2153).
 * ``migrate`` — the pure dict-in / dict-out schema-normalisation layer.
 * ``storage`` — the on-disk persistence layer (file locks + plan/queue
   load & save).
@@ -33,7 +34,11 @@ from cw.dev_queue.approval import (
     approve_ticket,
     revoke_plan_approval,
 )
-from cw.dev_queue.attention import task_attention_state
+from cw.dev_queue.attention import (
+    DEAD_SESSION_PAGED_STATE,
+    session_attention_state,
+    task_attention_state,
+)
 from cw.dev_queue.crud import (
     DEFAULT_PRUNE_OLDER_THAN_DAYS,
     _find_ticket,
@@ -117,6 +122,7 @@ __all__ = [
     "AWAITING_OPERATOR_DISPOSITION",
     "BODY_DRIFT_WARNING_KEY",
     "BRANCH_STALENESS_GATE_DISPOSITION",
+    "DEAD_SESSION_PAGED_STATE",
     "DEFAULT_PRUNE_OLDER_THAN_DAYS",
     "DRAIN_DISPOSITIONS",
     "EMPTY_DIFF_GATE_DISPOSITION",
@@ -184,6 +190,7 @@ __all__ = [
     "select_clearable_tickets",
     "select_held_tickets",
     "select_prunable_tickets",
+    "session_attention_state",
     "task_attention_state",
     "transition_task_status",
     "unblock_ticket",

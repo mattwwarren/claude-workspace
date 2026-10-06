@@ -58,10 +58,8 @@ from cw.models import (
 )
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile._shared import ProposedAction, _sentinel_partial_route_consumed
-from cw.reconcile.routed_result_sessions import (
-    find_stranded_routed_sessions,
-    stranded_close_command,
-)
+from cw.reconcile.liveness_page import close_command
+from cw.reconcile.routed_result_sessions import find_stranded_routed_sessions
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -121,7 +119,7 @@ def _routed_result_recipe(hit: StrandedRoutedSession) -> str:
         f"completed; ticket {hit.ticket_id}'s row is {row}. It holds a ceiling "
         "slot and its worktree, and nothing acts on it automatically. Run: "
         "cw doctor --reap (closes every session of this class, never a queue "
-        f"row), or {stranded_close_command(hit.session.id)} to close just this one."
+        f"row), or {close_command(hit.session.id)} to close just this one."
     )
 
 

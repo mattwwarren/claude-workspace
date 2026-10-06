@@ -904,12 +904,13 @@ class OrchestratorConfig(BaseModel):
     liveness_first_bucket_by_stage: dict[Stage, int] = Field(
         default_factory=lambda: {Stage.IMPL: 35}
     )
-    # RFC 0008 W2 re-fire cadence (#1858) — fixed interval (minutes) on which
-    # the top-bucket operator distress signal (SESSION_NEEDS_ATTENTION) re-fires
-    # while a session stays latched at STALE_45M with no bucket crossing.
-    # Mirrors lane_starved_notify_interval_minutes's fixed-interval shape
-    # (#1630) rather than an exponential backoff -- the operator wants "page me
-    # again in N minutes while this is still stuck," not a growing delay.
+    # RFC 0008 W2 re-evaluation cadence (#1858, #2153) — fixed interval
+    # (minutes) on which a session latched at STALE_45M with no bucket crossing
+    # is re-evaluated for the dead-session page (SESSION_NEEDS_ATTENTION). The
+    # page re-fires only when its evidence key changed (paused_status, the
+    # staleness-basis transcript timestamp, or the owned row's status), so one
+    # death pages once, not once per interval. Fixed-interval shape like
+    # lane_starved_notify_interval_minutes (#1630); the name is kept.
     liveness_attention_renotify_interval_minutes: int = 60
     # #2012 — age bound on the liveness sweep's subagent-await suppression.
     # Before this field, an outstanding `agent_spawn_stamp` entry suppressed

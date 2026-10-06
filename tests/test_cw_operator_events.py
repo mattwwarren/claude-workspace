@@ -13,7 +13,8 @@ import json
 import queue
 import threading
 from collections.abc import Generator
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -32,6 +33,7 @@ from cw.cw_operator_events import (
 )
 from cw.events import load_cursor, record_event
 from cw.models import (
+    CwState,
     LivenessBucket,
     OperatorChannelForward,
     OrchestratorConfig,
@@ -39,9 +41,12 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from cw.reconcile.liveness import record_session_liveness_changes
+from tests._reconcile_helpers import (
+    _api_error_then_cost_state_records,
+    _mk_headless_daemon_session,
+    _write_transcript_records,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -438,6 +443,63 @@ class TestPollAndForwardOperatorChannel:
         config = OrchestratorConfig()
         poll_and_forward_operator_channel(config)
         assert load_cursor(_OPERATOR_BRIDGE_CONSUMER) == last.id
+
+    def test_dead_session_page_forwards_once_with_commands(
+        self, tmp_events_dir: Path, tmp_path: Path
+    ) -> None:
+        """One death -> one forwarded page carrying the remedy fields (#2153).
+
+        No queue row exists for the ticket, so ``_classify_event`` cannot
+        digest-batch it (a HOLD_DISPOSITIONS row would). The deduped second
+        sweep emits nothing, so a second poll forwards nothing.
+        """
+        now = datetime(2026, 1, 2, tzinfo=UTC)
+        worktree = tmp_path / "wt"
+        sess = _mk_headless_daemon_session(
+            "T-1", worktree, datetime(2026, 1, 1, tzinfo=UTC)
+        )
+        _write_transcript_records(
+            Path.home(),
+            worktree,
+            _api_error_then_cost_state_records(
+                now - timedelta(minutes=50), now - timedelta(minutes=49)
+            ),
+        )
+        state = CwState(sessions=[sess])
+        config = OrchestratorConfig()
+
+        def sweep(at: datetime) -> None:
+            record_session_liveness_changes(
+                state,
+                now=at,
+                native_live={"fake-short-id"},
+                config=config,
+                task_by_ticket={},
+            )
+
+        q = subscribe()
+        try:
+            sweep(now)
+            poll_and_forward_operator_channel(config)
+            forwarded = [
+                json.loads(q.get_nowait()["message"]) for _ in range(q.qsize())
+            ]
+            pages = [d for d in forwarded if d["event"] == "session.needs_attention"]
+            assert len(pages) == 1
+            assert pages[0]["close_command"] == "cw spawn close --confirmed-dead T-1"
+            assert pages[0]["requeue_command"] == (
+                "cw dev-queue requeue T-1 -c client-a --from-cancelled"
+            )
+            assert pages[0]["evidence_key"] == sess.liveness_attention_evidence_key
+            assert pages[0]["last_record_type"] == "cost-state"
+            assert pages[0]["last_record_is_error"] is True
+            assert pages[0]["last_record_ts"] is not None
+
+            sweep(now + timedelta(minutes=61))
+            poll_and_forward_operator_channel(config)
+            assert q.empty()
+        finally:
+            unsubscribe(q)
 
 
 # ---------------------------------------------------------------------------

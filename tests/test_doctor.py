@@ -24,10 +24,13 @@ from cw.doctor import (
 from tests._clients_yaml import review_backend_clients, write_clients_yaml
 from tests._invalid_utf8 import INVALID_UTF8
 from tests._reconcile_helpers import (
+    _API_ERROR_TEXT,
+    _api_error_then_cost_state_records,
     _install_fake_daemon_roster,
     _stamp_transcript_age,
     _write_agent_spawn_stamp,
     _write_fake_roster,
+    _write_transcript_records,
 )
 from tests.conftest import (
     _make_daemon_session,
@@ -6990,6 +6993,125 @@ class TestWedgeActiveDaemonStaleNoSentinel:
 
         wedge_classes = [f["wedge_class"] for f in rendered["wedge_findings"]]
         assert "wedge/active-daemon-stale-no-sentinel" in wedge_classes
+
+    # #2153: the class-8 recipe reuses the liveness page's evidence suffix. The
+    # base sentence loses its trailing period so the join reads "worker; ...".
+    _RECIPE_BASE = (
+        "ACTIVE session is idle in the daemon roster with a stale transcript "
+        "and no terminal sentinel — likely finished but never signaled "
+        "completion. Run: cw doctor --reap to mark COMPLETED and release the "
+        "worker"
+    )
+    _RECIPE_REMEDY = (
+        "; if you have confirmed the session is dead, run: cw spawn close "
+        "--confirmed-dead stuck-sess-1 then: cw dev-queue requeue stuck-sess-1 "
+        "-c client-a --from-cancelled"
+    )
+    _RECIPE_LEAD = "; evidence suggests this session is dead (confirm before closing)"
+
+    def _write_api_error_transcript(self, home: Path, worktree: Path) -> datetime:
+        """Timestamped 50m-flat (real clock) API Error transcript; returns cost ts."""
+        from datetime import timedelta
+
+        error_ts = datetime.now(UTC) - timedelta(minutes=50)
+        cost_ts = error_ts + timedelta(minutes=1)
+        _write_transcript_records(
+            home, worktree, _api_error_then_cost_state_records(error_ts, cost_ts)
+        )
+        return cost_ts
+
+    def _class8_findings(self, report: DoctorReport) -> list[WedgeFinding]:
+        return [
+            f
+            for f in report.wedge_findings
+            if f.wedge_class == "wedge/active-daemon-stale-no-sentinel"
+        ]
+
+    def test_recipe_carries_page_evidence_and_commands(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No --reap: the recipe names the last record and both commands."""
+        from cw.config import load_state, save_state
+        from cw.models import CwState, SessionStatus
+
+        home, _daemon = self._setup_common(tmp_path, monkeypatch)
+        worktree = tmp_path / "wt"
+        cost_ts = self._write_api_error_transcript(home, worktree)
+        save_state(CwState(sessions=[self._make_session(tmp_path, worktree)]))
+
+        report = run_doctor(reap=False)
+
+        assert [f.wedge_class for f in report.wedge_findings] == [
+            "wedge/active-daemon-stale-no-sentinel"
+        ]
+        (finding,) = self._class8_findings(report)
+        assert finding.recipe == (
+            f"{self._RECIPE_BASE}{self._RECIPE_LEAD}; last record cost-state at "
+            f"{cost_ts.isoformat()} (API error: {_API_ERROR_TEXT}); flat 0.8h"
+            f"{self._RECIPE_REMEDY}"
+        )
+        updated = next(s for s in load_state().sessions if s.id == "stuck-sess-1")
+        assert updated.status == SessionStatus.ACTIVE
+
+    def test_json_recipe_carries_page_evidence(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """format_report_json carries the extended recipe verbatim."""
+        from cw.config import save_state
+        from cw.doctor import format_report_json
+        from cw.models import CwState
+
+        home, _daemon = self._setup_common(tmp_path, monkeypatch)
+        worktree = tmp_path / "wt"
+        self._write_api_error_transcript(home, worktree)
+        save_state(CwState(sessions=[self._make_session(tmp_path, worktree)]))
+
+        report = run_doctor(reap=False)
+        rendered = json.loads(format_report_json(report))
+
+        (finding,) = self._class8_findings(report)
+        (rendered_finding,) = [
+            f
+            for f in rendered["wedge_findings"]
+            if f["wedge_class"] == "wedge/active-daemon-stale-no-sentinel"
+        ]
+        assert rendered_finding["recipe"] == finding.recipe
+        assert "cw spawn close --confirmed-dead stuck-sess-1" in finding.recipe
+
+    def test_recipe_fails_open_without_transcript_records(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A blank-line-only transcript: both commands, no last-record clause."""
+        import os
+        from datetime import timedelta
+
+        from cw.config import save_state
+        from cw.models import CwState
+
+        home, _daemon = self._setup_common(tmp_path, monkeypatch)
+        worktree = tmp_path / "wt"
+        transcript = _write_transcript_records(home, worktree, [])
+        transcript.write_text("\n\n")
+        stale = (datetime.now(UTC) - timedelta(minutes=50)).timestamp()
+        os.utime(str(transcript), (stale, stale))
+        save_state(CwState(sessions=[self._make_session(tmp_path, worktree)]))
+
+        report = run_doctor(reap=False)
+
+        (finding,) = self._class8_findings(report)
+        assert finding.recipe == (
+            f"{self._RECIPE_BASE}{self._RECIPE_LEAD}; flat 0.8h{self._RECIPE_REMEDY}"
+        )
+        assert "last record" not in finding.recipe
 
     def test_per_stage_floor_suppresses_false_positive(
         self,

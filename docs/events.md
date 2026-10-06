@@ -805,8 +805,9 @@ open enum; consumers MUST tolerate unknown values. Known values:
 - `"session_unresponsive"` — signal-only distress from the liveness sweep
   (ADR-0014): a roster-present DAEMON session crossed the top staleness
   bucket with no sentinel emitted and no pending subagent at the transcript
-  tail. Edge-triggered per bucket crossing, fires a push notification, and
-  mutates nothing — the session keeps running; the operator decides.
+  tail. Fires once per evidence key (see **Liveness dead-session page**
+  below), one push notification per page, and mutates nothing — the session
+  keeps running; the operator decides.
   `breadcrumbs` carries stale minutes, stage, and elapsed seconds. For a
   session with no surface, Claude session id, transcript, or local liveness
   handle (#2417), the page carries `staleness_source: "session_age"` and the
@@ -1153,7 +1154,62 @@ its push — is skipped entirely for a row parked with
 `stopped_without_sentinel`. This mirrors the existing `gh_check_blocked`
 paused_status (verified: its `_emit_phantom_terminal_events` call site,
 `cw.reconcile.phantom._events`, does not call `fire_push_notification`
-either).
+either). The liveness sweep pushes once per page: a re-evaluation whose
+evidence key is unchanged emits neither the event nor the push (#2153).
+
+**Liveness dead-session page (#2153):** the liveness sweep's distress page
+(`session_unresponsive`, `fix_loop_await_deadline_exceeded`,
+`dangling_tool_use`, `unconsumed_queue_notification`) fires **once per
+evidence key**, not once per interval. The key is
+`<paused_status>|<staleness-basis transcript timestamp or none>|<owned row
+status or none>`, stamped onto `Session.liveness_attention_evidence_key` with
+the page and cleared when the bucket leaves `stale_45m`.
+`OrchestratorConfig.liveness_attention_renotify_interval_minutes` is a
+**re-evaluation cadence**: a session latched at `stale_45m` is re-evaluated
+every interval, and a re-evaluation pages again only when the key changed (the
+reason changed, a newer content-bearing transcript record landed without
+reviving the session, or the owned queue row changed status). A trailing
+metadata record (`cost-state`, `ai-title`) cannot move the key. A
+`session_age` page's timestamp leg is always `none`.
+
+The wording is "evidence suggests dead; confirm first": `breadcrumbs` is the
+historical text above, byte-identical, followed by a suffix that opens
+`; evidence suggests this session is dead (confirm before closing)`, then
+`; last record <type> at <ts>[ (API error: <snippet>)]; flat <H.h>h` (or just
+`; flat <H.h>h` when the session's own transcript yields no record, or
+`; unobserved for <H.h>h (session age, no transcript)` for a `session_age`
+page), and closes `; if you have confirmed the session is dead, run: cw spawn
+close --confirmed-dead <session_id>[ then: cw dev-queue requeue <ticket> -c
+<client> --from-cancelled]`. cw never asserts `--confirmed-dead` itself and no
+timer acts on the page.
+
+Additive payload keys on this sweep's page (every pre-#2153 key keeps its
+name and type):
+
+- `last_record_type` (`str | null`) — the final record's `type`; null with no
+  summary, for `session_age`, or when that record has no `type`.
+- `last_record_ts` (ISO-8601 `str | null`) — that record's timestamp; null
+  likewise, or when the record has none.
+- `last_record_is_error` (`bool | null`) — true iff the last content-bearing
+  record is an assistant `API Error` record; null with no summary or for
+  `session_age`.
+- `close_command` (`str`) — always present.
+- `requeue_command` (`str | null`) — always present; null when the session
+  has no ticket.
+- `evidence_key` (`str`) — the key this page fired on.
+
+Two measurement bases: `last_record_*` describe the final record of the
+session's **own** transcript file (`_locate_session_transcript`), while
+`stale_minutes` and the suffix's flat hours use the widened staleness basis
+(the max over that file and sibling transcripts in the project dir). They
+can therefore name different files. `renotify_marker` is still set on every
+liveness page; because pages are once per evidence key, no two pages for one
+death share a marker, so `cw event tail --dedup-terminal` keeps each.
+
+A page whose ticket row sits in a hold disposition (`HOLD_DISPOSITIONS`) is
+digest-batched on the operator channel (see below): its 3-key digest entry
+(`ticket_id`, `client`, `breadcrumbs` from the row's `blocked_reason`) does
+not carry `close_command`/`requeue_command` or the page's suffix.
 
 **Operator-channel forward may be buffered (RFC 0011 A6, #1162):** the event
 itself is always recorded exactly as above, on every emission — the

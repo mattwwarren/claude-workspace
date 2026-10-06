@@ -928,10 +928,13 @@ liveness_buckets_minutes: [15, 30, 45]
 liveness_first_bucket_by_stage:
   impl: 35
 
-# Re-fire interval (minutes) for session.needs_attention while a session
-# stays latched at the top liveness bucket (stale_45m) with no bucket
-# crossing (#1858). Without this, the one-shot crossing signal above is the
-# only alert a saturated session ever gets, even if it stays flat for hours.
+# Re-evaluation cadence (minutes) for the dead-session page
+# (session.needs_attention) while a session stays latched at the top liveness
+# bucket (stale_45m) with no bucket crossing (#1858). The page fires once per
+# evidence key (#2153): a re-evaluation pages again only when the reason, the
+# last content-bearing transcript timestamp, or the owned queue row's status
+# changed. An unchanged death pages once, not once per interval. The name is
+# kept for compatibility with existing orchestrator.yaml files.
 liveness_attention_renotify_interval_minutes: 60
 
 # Age bound (minutes) on the liveness sweep's subagent-await suppression
@@ -981,8 +984,9 @@ freshness_block_attention_threshold: 5
 # scanning more often than the debounce cannot produce an extra page, and
 # scanning less often silently caps the page rate below the configured
 # debounce. Same fixed-interval shape as
-# lane_starved_notify_interval_minutes and
-# liveness_attention_renotify_interval_minutes above — not exponential.
+# lane_starved_notify_interval_minutes and the
+# liveness_attention_renotify_interval_minutes re-evaluation cadence above —
+# not exponential.
 dispatch_stale_notify_interval_minutes: 15
 
 # Maximum consecutive sentinel-stage-mismatch vetoes the phantom sweep grants a
