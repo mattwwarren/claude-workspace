@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **A lane can now set `codex_fix_loop_enabled: false` to opt out of a globally enabled `default_codex_fix_loop_enabled` (#2541).** `LaneConfig.codex_fix_loop_enabled` was `Literal[True] | None`, so a lane could only opt in and `false` failed validation at config load. It is now `bool | None` and resolves as the explicit lane value first, with `null` (or unset) deferring to the global default. With `false`, no `--sandbox workspace-write` fix pass runs for the lane and a blocking cycle-0 review parks on `CODEX_MUST_FIX_FINDINGS`. Existing configs are unchanged. An end-to-end test covers the zero-write guarantee. Behavior change for the reap and orphan gates in `codex_boot` and `local`: they follow the same resolver, so an opted-out lane now counts as fix-loop-off there.
+
 ## [1.64.0] - 2026-10-05
 
 ### Added

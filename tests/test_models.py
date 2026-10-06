@@ -1578,11 +1578,9 @@ class TestCodexFixLoopEnabledGate:
         lane = LaneConfig(name="default", codex_fix_loop_enabled=True)
         assert lane.codex_fix_loop_enabled is True
 
-    def test_lane_config_rejects_codex_fix_loop_enabled_false(self) -> None:
-        import pydantic
-
-        with pytest.raises(pydantic.ValidationError):
-            LaneConfig(name="default", codex_fix_loop_enabled=False)  # type: ignore[arg-type]
+    def test_lane_config_carries_codex_fix_loop_enabled_false(self) -> None:
+        lane = LaneConfig(name="default", codex_fix_loop_enabled=False)
+        assert lane.codex_fix_loop_enabled is False
 
     def test_orchestrator_config_default_codex_fix_loop_enabled_is_false(self) -> None:
         assert OrchestratorConfig().default_codex_fix_loop_enabled is False

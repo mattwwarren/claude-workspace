@@ -854,6 +854,30 @@ def test_resolve_codex_fix_loop_enabled_lane_true_wins_regardless_of_global() ->
     assert _resolve_codex_fix_loop_enabled(client, task, config) is True
 
 
+def test_resolve_codex_fix_loop_enabled_lane_false_overrides_global_true() -> None:
+    client = ClientConfig(
+        name="test",
+        workspace_path=Path("/tmp/x"),
+        lanes=[LaneConfig(name="trial", codex_fix_loop_enabled=False)],
+    )
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW, lane="trial")
+    config = OrchestratorConfig(default_codex_fix_loop_enabled=True)
+
+    assert _resolve_codex_fix_loop_enabled(client, task, config) is False
+
+
+def test_resolve_codex_fix_loop_enabled_lane_false_global_false() -> None:
+    client = ClientConfig(
+        name="test",
+        workspace_path=Path("/tmp/x"),
+        lanes=[LaneConfig(name="trial", codex_fix_loop_enabled=False)],
+    )
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW, lane="trial")
+    config = OrchestratorConfig(default_codex_fix_loop_enabled=False)
+
+    assert _resolve_codex_fix_loop_enabled(client, task, config) is False
+
+
 def test_resolve_codex_fix_loop_enabled_lane_unset_global_true() -> None:
     client = ClientConfig(
         name="test",
