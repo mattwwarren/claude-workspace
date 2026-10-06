@@ -1167,13 +1167,13 @@ class TestResultEmit:
         assert sess.last_result is None
 
     def test_validate_or_exit_rejects_bare_blocked_result_shape(self) -> None:
-        """#2458: pins the cross-module invariant ``_validate_or_exit`` and
-        ``_apply_idle_routed_mutations`` both document -- ``cw result emit``
-        never stages a ``BlockedResult``, so the idle sweep's missing
-        ``landed_terminal`` arm (#2482) stays unreachable. The payload is a
-        genuine ``BlockedResult``, so a failure here means the gate itself
-        was widened (as #1457 widened the harvest door), not that the
-        fixture drifted."""
+        """#2458: pins the CLI gate contract ``_validate_or_exit`` documents --
+        ``cw result emit`` stages ``AutoDevResult`` only, never a bare
+        ``BlockedResult``. The idle sweep now handles ``landed_terminal``
+        (#2482) defensively if the gate is widened. The payload is a genuine
+        ``BlockedResult``, so a failure here means the gate itself was
+        widened (as #1457 widened the harvest door), not that the fixture
+        drifted."""
         blocked_payload = {
             "status": "blocked",
             "blocker": {"stage": "s1", "reason": "validation_failed", "details": "x"},
