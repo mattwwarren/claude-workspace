@@ -186,3 +186,15 @@ def test_headless_contract_documents_arm_automerge() -> None:
     reason_start = content.index("### 4.2")
     reason_end = content.index("#### Phase B fields")
     assert "arm-automerge" in content[reason_start:reason_end]
+
+
+def test_automerge_not_armed_sentinel_documents_non_arm_variants() -> None:
+    """The retries-exhausted template is untrue on the no-arm and error paths."""
+    section = _step4c_sentinel_section()
+    assert "**Variants**" in section
+    assert "auto-merge is not armed (no arm attempted: see details)" in section
+    assert (
+        "arm-automerge invocation error (exit <code>, not a gh failure): <stderr>"
+        in section
+    )
+    assert "arm-automerge could not run (invocation error, not a gh failure)" in section
