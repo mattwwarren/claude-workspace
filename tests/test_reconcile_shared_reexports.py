@@ -246,7 +246,11 @@ PATCH_OWNERSHIP = [
     ("_worktree_dirty_reason_by_path", "_deps", _PKG),
     ("_blocked_result_requeue_enabled", "get_client", _PKG),
     ("_claude_agents_json", "subprocess", _PKG),
-    ("_widened_transcript_timestamp", "_locate_session_transcript", _PKG),
+    (
+        "_widened_transcript_timestamp",
+        "_locate_session_transcript",
+        f"{_PKG}._transcripts",
+    ),
     ("_detect_unconsumed_queue_notification", "_locate_session_transcript", _PKG),
     ("_detect_post_review_clean", "read_events", _PKG),
     ("_emit_reap_proposed", "record_event", _PKG),
@@ -424,3 +428,21 @@ class TestLoggerNamePinned:
         assert count == 1
         assert load_state().sessions[0].claude_session_id == "pinref01-full-csid"
         assert _names_of(caplog, "Backfilled claude_session_id") == [PINNED_LOGGER_NAME]
+
+
+# Submodules that log. Each binds its own ``_log`` to the pinned name via
+# ``_constants._LOGGER_NAME``, never ``__name__``.
+LOGGING_SUBMODULES = ["_transcripts"]
+
+
+class TestLoggerObjectsPinned:
+    """Every ``_log`` in the package is the one pinned-name Logger."""
+
+    def test_package_logger_uses_pinned_name(self) -> None:
+        assert _shared._log.name == PINNED_LOGGER_NAME
+
+    @pytest.mark.parametrize("submodule", LOGGING_SUBMODULES)
+    def test_submodule_logger_is_the_package_logger(self, submodule: str) -> None:
+        module_log = vars(importlib.import_module(f"{_PKG}.{submodule}"))["_log"]
+        assert module_log.name == PINNED_LOGGER_NAME
+        assert module_log is _shared._log

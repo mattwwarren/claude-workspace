@@ -14181,7 +14181,7 @@ class TestDevQueueWaitSentinelAware:
 
         fake_path = worktree / "fake.jsonl"
         monkeypatch.setattr(
-            "cw.reconcile._shared._locate_session_transcript",
+            "cw.reconcile._shared._transcripts._locate_session_transcript",
             lambda *_a, **_kw: fake_path,
         )
 

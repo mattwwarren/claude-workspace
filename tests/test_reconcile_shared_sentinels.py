@@ -2502,7 +2502,7 @@ def test_widened_transcript_timestamp_survives_primary_transcript_oserror(
     # (tests/test_cli.py).
     fake_path = worktree / "does-not-exist.jsonl"
     monkeypatch.setattr(
-        "cw.reconcile._shared._locate_session_transcript",
+        "cw.reconcile._shared._transcripts._locate_session_transcript",
         lambda *_a, **_kw: fake_path,
     )
 
