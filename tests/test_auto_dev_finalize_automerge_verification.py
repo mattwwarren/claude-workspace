@@ -198,3 +198,18 @@ def test_automerge_not_armed_sentinel_documents_non_arm_variants() -> None:
         in section
     )
     assert "arm-automerge could not run (invocation error, not a gh failure)" in section
+
+
+def test_ship_it_step4_bash_case_separates_exit_1_from_invocation_error() -> None:
+    """The executable block, not just the prose, must carry the distinction."""
+    section = _ship_it_step4_section()
+    block = section[
+        section.index("```bash") : section.index("```\n", section.index("```bash") + 7)
+    ]
+    assert (
+        "arm-automerge invocation error (exit $arm_status, not a gh failure)" in block
+    )
+    assert (
+        "failed after bounded retries for PR #$PR_NUMBER (arm-automerge exit 1)"
+        in block
+    )

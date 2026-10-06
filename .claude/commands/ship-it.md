@@ -221,7 +221,8 @@ if "$FINALIZE" check-automerge-allowed --repo-path "$REPO_ROOT"; then
   case "$arm_status" in
     0) ;;
     3) echo "Auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR #$PR_NUMBER open for manual merge." ;;
-    *) echo "Auto-merge arm failed (arm-automerge exit $arm_status) — BLOCK." >&2; exit 1 ;;
+    1) echo "BLOCK: gh pr merge --auto failed after bounded retries for PR #$PR_NUMBER (arm-automerge exit 1): see gh_stderr in the JSON above (empty means gh exited 0 but autoMergeRequest read back null)" >&2; exit 1 ;;
+    *) echo "BLOCK: arm-automerge invocation error (exit $arm_status, not a gh failure): not retried" >&2; exit 1 ;;
   esac
 else
   GATE_STATUS=$?
