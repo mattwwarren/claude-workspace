@@ -844,13 +844,20 @@ def _cp(
 def _patch_run(
     monkeypatch: pytest.MonkeyPatch,
     handler: Callable[[list[str]], subprocess.CompletedProcess[str]],
+    cwds: list[Path | None] | None = None,
 ) -> list[list[str]]:
+    """Patch ``run``; ``cwds``, when given, receives each call's ``cwd`` in order."""
     calls: list[list[str]] = []
 
     def _fake_run(
-        cmd: list[str], check: bool = False, capture: bool = True
+        cmd: list[str],
+        check: bool = False,
+        capture: bool = True,
+        cwd: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         calls.append(list(cmd))
+        if cwds is not None:
+            cwds.append(cwd)
         return handler(cmd)
 
     monkeypatch.setattr(_mod, "run", _fake_run)
@@ -1133,3 +1140,52 @@ def test_cmd_arm_automerge_reports_failure_and_success_in_process(
     _patch_run(monkeypatch, lambda _cmd: _cp(stdout=ARM_VIEW_ARMED))
     assert _mod.cmd_arm_automerge(_mod.build_parser().parse_args(argv)) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "armed"
+
+
+def test_cmd_arm_automerge_binds_gh_calls_to_repo_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """gh acts on the repo whose seam was read, not on the process cwd."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
+    views = iter([ARM_VIEW_OPEN, ARM_VIEW_ARMED])
+
+    def _handler(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            return _cp()
+        return _cp(stdout=next(views))
+
+    cwds: list[Path | None] = []
+    calls = _patch_run(monkeypatch, _handler, cwds)
+    args = _mod.build_parser().parse_args(
+        ["arm-automerge", _ARM_PR, "--repo-path", str(repo)]
+    )
+
+    assert _mod.cmd_arm_automerge(args) == 0
+    assert [c[:3] for c in calls] == [
+        ["gh", "pr", "view"],
+        ["gh", "pr", "merge"],
+        ["gh", "pr", "view"],
+    ]
+    assert cwds == [repo, repo, repo]
+
+
+def test_cmd_arm_automerge_nonexistent_repo_path_is_invocation_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
+    calls = _patch_run(monkeypatch, lambda _cmd: _cp(stdout=ARM_VIEW_ARMED))
+    missing = tmp_path / "missing"
+    args = _mod.build_parser().parse_args(
+        ["arm-automerge", _ARM_PR, "--repo-path", str(missing)]
+    )
+
+    assert _mod.cmd_arm_automerge(args) == 2
+    assert f"--repo-path is not a directory: {missing}" in capsys.readouterr().err
+    assert calls == []

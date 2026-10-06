@@ -177,14 +177,19 @@ class ArmResult:
 
 
 def run(
-    cmd: list[str], check: bool = False, capture: bool = True
+    cmd: list[str],
+    check: bool = False,
+    capture: bool = True,
+    *,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a shell command. Default: capture, do not raise."""
+    """Run a shell command. Default: capture, do not raise, inherit cwd."""
     return subprocess.run(
         cmd,
         check=check,
         capture_output=capture,
         text=True,
+        cwd=cwd,
     )
 
 
@@ -470,15 +475,18 @@ def check_monitor_registered(summary: ShipSummary, required: bool) -> CheckResul
     )
 
 
-def _read_back_automerge(pr_number: int) -> tuple[str, bool, str]:
-    """Read `state` and `autoMergeRequest` back from gh.
+def _read_back_automerge(
+    pr_number: int, *, cwd: Path | None = None
+) -> tuple[str, bool, str]:
+    """Read `state` and `autoMergeRequest` back from gh, run in ``cwd``.
 
     Returns ``(state, armed, error)``. Any read failure (non-zero exit, bad
     JSON, non-object payload) is reported as not armed with ``error`` set and
     ``state`` empty, so the caller treats it like any other un-armed read.
     """
     result = run(
-        ["gh", "pr", "view", str(pr_number), "--json", "state,autoMergeRequest"]
+        ["gh", "pr", "view", str(pr_number), "--json", "state,autoMergeRequest"],
+        cwd=cwd,
     )
     if result.returncode != 0:
         error = result.stderr.strip() or f"gh pr view exited {result.returncode}"
@@ -497,13 +505,13 @@ def _read_back_automerge(pr_number: int) -> tuple[str, bool, str]:
     )
 
 
-def _poll_armed(result: ArmResult) -> tuple[bool, str]:
+def _poll_armed(result: ArmResult, *, cwd: Path | None = None) -> tuple[bool, str]:
     """Read back the PR; record success on `result` when armed or MERGED.
 
     Returns ``(done, read_error)``. A non-null `autoMergeRequest` or a MERGED
     state is success regardless of how the preceding `gh pr merge` exited.
     """
-    state, armed, error = _read_back_automerge(result.pr_number)
+    state, armed, error = _read_back_automerge(result.pr_number, cwd=cwd)
     if state:
         result.pr_state = state
     if state == PR_STATE_MERGED:
@@ -543,6 +551,7 @@ def arm_automerge(
     attempts: int = ARM_MAX_ATTEMPTS,
     backoff_seconds: float = ARM_BACKOFF_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
+    cwd: Path | None = None,
 ) -> ArmResult:
     """Arm auto-merge with bounded retry, trusting the read-back over gh's exit.
 
@@ -552,20 +561,23 @@ def arm_automerge(
     `autoMergeRequest` or MERGED state is success even when gh exited
     non-zero ("already queued"), while exit 0 with a null read-back is a
     failure to retry (#1140). Sleeps ``backoff_seconds * n`` after the n-th
-    failed attempt, never after the last one.
+    failed attempt, never after the last one. Every gh call runs in ``cwd`` (the
+    process cwd when ``None``) so gh acts on the repo the caller named.
     """
     result = ArmResult(pr_number=pr_number, max_attempts=attempts)
     while True:
-        done, read_error = _poll_armed(result)
+        done, read_error = _poll_armed(result, cwd=cwd)
         if done:
             return result
         if result.attempts >= attempts:
             return _finish_failed(result, read_error)
-        merge = run(["gh", "pr", "merge", str(pr_number), "--auto", "--squash"])
+        merge = run(
+            ["gh", "pr", "merge", str(pr_number), "--auto", "--squash"], cwd=cwd
+        )
         result.attempts += 1
         result.gh_exit_code = merge.returncode
         result.gh_stderr = merge.stderr.strip()[:GH_STDERR_LIMIT]
-        done, read_error = _poll_armed(result)
+        done, read_error = _poll_armed(result, cwd=cwd)
         if done:
             return result
         if result.attempts < attempts:
@@ -786,6 +798,8 @@ def cmd_arm_automerge(args: argparse.Namespace) -> int:
         return _arm_invocation_error(
             "not in a git repository and --repo-path was not given"
         )
+    if not repo_path.is_dir():
+        return _arm_invocation_error(f"--repo-path is not a directory: {repo_path}")
 
     config_path = repo_path / PROJECT_CONFIG_PATH
     if yaml is None and config_path.exists():
@@ -810,6 +824,7 @@ def cmd_arm_automerge(args: argparse.Namespace) -> int:
         args.pr_number,
         attempts=args.attempts,
         backoff_seconds=args.backoff_seconds,
+        cwd=repo_path,
     )
     print(json.dumps(result.to_dict(), indent=2))
     if result.status == ARM_STATUS_FAILED:
