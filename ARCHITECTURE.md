@@ -227,7 +227,7 @@ public surface (`cw.cli` and `cw.reconcile` follow this shape) rather than
 letting individual functions or a single file grow unbounded. The same
 section carries the carve-out that a reviewer must apply with the ceiling:
 **cohesion beats raw count** — do not split a cohesive module just to clear
-the number (its own example is `reconcile/_shared.py`, which is large but is
+the number (its own example is `events.py`, which is large but is
 shared infrastructure for a single concern), and conversely a smaller module
 mixing unrelated concerns is still a smell. A module-size finding against a
 cohesive shared-infrastructure module is a false positive, not a §7/§8
@@ -263,7 +263,7 @@ cites one of these.
 6. Module-size / package-split convention: modules stay under ~1000 lines;
    exceeding it means splitting into a package with an `__init__.py` that
    re-exports the public surface — except that a cohesive module serving a
-   single concern (e.g. `reconcile/_shared.py`) is not split just to clear
+   single concern (e.g. `events.py`) is not split just to clear
    the number. — Source: `CLAUDE.md`
 7. cw never grants a GitHub review approval; there is no escape hatch
    without a superseding ADR. — Source:
@@ -338,7 +338,7 @@ principle, grounded in the same source document.
    split — accreting unrelated concerns into one file instead of
    extracting helpers or splitting into a package with a re-exporting
    `__init__.py`. (Flagging a cohesive single-concern module such as
-   `reconcile/_shared.py` purely on line count is the inverse error, not
+   `events.py` purely on line count is the inverse error, not
    this anti-pattern.) — Source: `CLAUDE.md`
 7. `gh pr review --approve` / GraphQL `addPullRequestReview(APPROVE)` /
    REST approve call anywhere in `src/` — reintroducing an

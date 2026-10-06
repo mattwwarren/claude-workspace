@@ -68,7 +68,7 @@ _TERMINAL_DISPOSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
 # either dispatch's staged-decision routing (RFC 0007 Phase 3, dispatch.py) or
 # approve_ticket's own REVIEW-stage re-check below. Imported by dispatch.py via
 # a function-level import to break the dev_queue<->dispatch circularity
-# (mirrors reconcile/_shared.py's precedent for the same import shape).
+# (mirrors reconcile/_shared/_routing.py's precedent for the same import shape).
 SIGNOFF_GATE_DISPOSITION = "signoff_gate"
 
 # Disposition stamped when a park is a *hold* -- "we could not reach the

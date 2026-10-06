@@ -506,11 +506,11 @@ def test_revert_timed_out_dirty_worktree_routes_to_blocked_on_user(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/to-dirty"
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason",
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
@@ -560,11 +560,12 @@ def test_revert_timed_out_clean_worktree_routes_to_pending(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/to-clean"
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
+        lambda _c, _b, **_kw: None,
     )
 
     reverted = revert_timed_out_tasks()
@@ -605,11 +606,12 @@ def test_revert_timed_out_does_not_touch_regressed_into_stage(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/to-clean-marker"
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
+        lambda _c, _b, **_kw: None,
     )
 
     reverted = revert_timed_out_tasks()
@@ -646,11 +648,11 @@ def test_revert_completed_silent_dirty_worktree_routes_to_blocked_on_user(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/cs-dirty"
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason",
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
@@ -695,11 +697,12 @@ def test_revert_completed_silent_clean_worktree_routes_to_pending(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/cs-clean"
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
+        lambda _c, _b, **_kw: None,
     )
 
     reverted = revert_completed_silent_tasks()
@@ -742,7 +745,7 @@ def test_revert_completed_silent_tasks_within_grace_window_skips_dirty_check(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/grace-dirty"
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     call_count = 0
@@ -752,7 +755,9 @@ def test_revert_completed_silent_tasks_within_grace_window_skips_dirty_check(
         call_count += 1
         return "2 uncommitted path(s)"
 
-    monkeypatch.setattr("cw.reconcile._shared.unsaved_work_reason", _record_call)
+    monkeypatch.setattr(
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason", _record_call
+    )
 
     with freezegun.freeze_time(completed_at + timedelta(seconds=10)):
         reverted = revert_completed_silent_tasks()
@@ -799,11 +804,12 @@ def test_revert_completed_silent_tasks_within_grace_window_skips_clean_revert(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/grace-clean"
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
+        lambda _c, _b, **_kw: None,
     )
 
     with freezegun.freeze_time(completed_at + timedelta(seconds=10)):
@@ -845,11 +851,11 @@ def test_revert_completed_silent_tasks_past_grace_window_dirty_still_parks(
         lambda _p: "auto-dev/grace-dirty-past",
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason",
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
@@ -897,11 +903,12 @@ def test_revert_completed_silent_tasks_past_grace_window_clean_still_reverts(
         lambda _p: "auto-dev/grace-clean-past",
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
+        lambda _c, _b, **_kw: None,
     )
 
     with freezegun.freeze_time(completed_at + timedelta(seconds=61)):
@@ -941,11 +948,11 @@ def test_revert_completed_silent_tasks_missing_completed_at_gets_no_grace(
         lambda _p: "auto-dev/grace-no-completed-at",
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason",
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
@@ -986,7 +993,7 @@ def test_revert_timed_out_tasks_within_grace_window_skips_dirty_check(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/grace-to-dirty"
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     call_count = 0
@@ -996,7 +1003,9 @@ def test_revert_timed_out_tasks_within_grace_window_skips_dirty_check(
         call_count += 1
         return "2 uncommitted path(s)"
 
-    monkeypatch.setattr("cw.reconcile._shared.unsaved_work_reason", _record_call)
+    monkeypatch.setattr(
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason", _record_call
+    )
 
     with freezegun.freeze_time(completed_at + timedelta(seconds=10)):
         reverted = revert_timed_out_tasks()
@@ -1039,11 +1048,11 @@ def test_build_dirty_session_ids_and_notify_returns_reason_dict(
         lambda p: "auto-dev/bd-dirty" if p == wt_dirty else "auto-dev/bd-clean",
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason",
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
         lambda _c, branch, **_kw: (
             "2 uncommitted path(s)" if branch == "auto-dev/bd-dirty" else None
         ),

@@ -608,7 +608,7 @@ class TestSweepRoutedResultSessions:
             msg = "proposal write failed"
             raise OSError(msg)
 
-        monkeypatch.setattr("cw.reconcile._shared.record_event", _boom)
+        monkeypatch.setattr("cw.reconcile._shared._reap.record_event", _boom)
 
         paged = _sweep(state, tasks, now)
 
@@ -677,7 +677,7 @@ class TestSweepRoutedResultSessions:
     ) -> None:
         state, tasks, now = _world(tmp_path, home, stale_minutes=2.0)
         saves: list[CwState] = []
-        monkeypatch.setattr("cw.reconcile._shared.save_state", saves.append)
+        monkeypatch.setattr("cw.reconcile._shared._reap.save_state", saves.append)
 
         assert _sweep(state, tasks, now) == []
 

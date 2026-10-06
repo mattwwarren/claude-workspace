@@ -462,7 +462,7 @@ def test_local_harvest_queue_save_failure_keeps_audit_event(
         msg = "queue file unwritable"
         raise OSError(msg)
 
-    monkeypatch.setattr("cw.reconcile._shared.save_dev_queue", _raise_save)
+    monkeypatch.setattr("cw.reconcile._shared._routing.save_dev_queue", _raise_save)
     with pytest.raises(OSError, match="queue file unwritable"):
         _act_on_local_harvest_candidates(
             load_state(),

@@ -163,11 +163,11 @@ def test_incident_421_phantom_dirty_worktree(
         lambda _p: "auto-dev/TICKET-421",
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason",
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 

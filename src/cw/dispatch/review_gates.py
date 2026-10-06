@@ -382,7 +382,7 @@ def resolve_signoff(
     """Resolve the effective operator-signoff policy for *task* (RFC 0007 Phase 3).
 
     Precedence (highest to lowest), mirroring ``resolve_reap_policy``
-    (reconcile/_shared.py) but with a 3rd tier for the per-ticket override:
+    (reconcile/_shared/_reap.py) but with a 3rd tier for the per-ticket override:
       1. ``TicketTask.signoff`` -- per-ticket override (``cw dev-queue add
          --signoff operator``).
       2. ``LaneConfig.signoff`` in the task's client config.

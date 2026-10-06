@@ -76,7 +76,7 @@ _SENTINEL_UNROUTABLE_REASON = "sentinel_unroutable"
 # leaves rescued/task_already_terminal at their init-False defaults even
 # when the first (partial-route) call's outcome was rescued=True (a #918
 # late-parked-task rescue) -- silently dropping that fact from the eventual
-# SESSION_COMPLETED payload. Local to this module (not reconcile/_shared.py,
+# SESSION_COMPLETED payload. Local to this module (not reconcile/_shared/,
 # out of this cycle's approved scope): only this function reads or writes
 # them.
 _STAGED_ROUTE_RESCUED_KEY = "sentinel_partial_route_rescued"
@@ -970,12 +970,12 @@ def signal_stop() -> None:
         #
         # #2229: skipped when the stamp is already the resolved shape -- no
         # lock, no rewrite. Safe because (a) ``last_stamped_at`` is unread at
-        # count 0 (``reconcile/_shared.py`` returns early on a zero count),
-        # and (b) the decision uses the unlocked read from above, which is
-        # linearizable: an ``agent-spawn-pre`` increment landing after that
-        # read is equivalent to "this Stop cleared first, then the spawn
-        # incremented". The write path re-reads under the lock and must never
-        # be handed ``context``.
+        # count 0 (``reconcile/_shared/_worktree_evidence.py`` returns early
+        # on a zero count), and (b) the decision uses the unlocked read from
+        # above, which is linearizable: an ``agent-spawn-pre`` increment
+        # landing after that read is equivalent to "this Stop cleared first,
+        # then the spawn incremented". The write path re-reads under the lock
+        # and must never be handed ``context``.
         _write_cw_context_locked(cwd_value, _clear_agent_spawn_stamp)
 
     locked = _resolve_stop_under_lock(

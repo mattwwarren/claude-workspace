@@ -1159,7 +1159,7 @@ def _inject(
     elif point == "reap-proposed":
         _fail_once(
             monkeypatch,
-            "cw.reconcile._shared.record_event",
+            "cw.reconcile._shared._reap.record_event",
             real_record_event,
             match=_is_event(OrchestratorEventType.SESSION_REAP_PROPOSED),
         )

@@ -539,11 +539,11 @@ def test_phantom_reverted_event_emitted_with_dirty_worktree(
         lambda _p: "auto-dev/TICK-PD",
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason",
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
@@ -605,11 +605,12 @@ def test_phantom_reverted_event_emitted_with_clean_worktree(
         lambda _p: "auto-dev/TICK-PC",
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
+        lambda _c, _b, **_kw: None,
     )
     monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
 
@@ -695,11 +696,11 @@ def test_phantom_dirty_worktree_routes_to_blocked_on_user(
         lambda _p: "auto-dev/TICK-421D",
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason",
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
@@ -760,11 +761,12 @@ def test_phantom_clean_worktree_routes_to_pending(
         lambda _p: "auto-dev/TICK-421C",
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
+        lambda _c, _b, **_kw: None,
     )
     monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
 
@@ -822,11 +824,11 @@ def test_dirty_phantom_task_not_re_claimable(
         lambda _p: "auto-dev/TICK-421N",
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason",
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
@@ -879,11 +881,11 @@ def test_phantom_reverted_event_carries_queue_status_blocked(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/TICK-QSD"
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason",
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
     reconcile()
@@ -935,11 +937,12 @@ def test_phantom_reverted_event_carries_queue_status_pending(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/TICK-QSC"
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
+        lambda _c, _b, **_kw: None,
     )
     monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
     reconcile()
@@ -4889,11 +4892,12 @@ def _non_headless_terminal_phantom_fixture(
         lambda _tid, **_kw: (False, True),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.get_client",
+        "cw.reconcile._shared._worktree_evidence.get_client",
         lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
     )
     monkeypatch.setattr(
-        "cw.reconcile._shared.unsaved_work_reason", lambda _c, _b, **_kw: None
+        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
+        lambda _c, _b, **_kw: None,
     )
     return started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
 
