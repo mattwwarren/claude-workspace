@@ -688,6 +688,57 @@ is still `RUNNING`, so `cw dev-queue requeue` does not accept it yet. For an
 unreconstructable result, `cw spawn close` cancels the row as before; then
 `cw dev-queue requeue --from-cancelled` re-runs the stage.
 
+### 6e. The liveness dead-session page (#2153)
+
+The liveness sweep's distress signal (`session_unresponsive` and its sibling
+reasons in [`docs/events.md`](events.md)) pages a quiet session **once per
+death**, not once an hour. The first time a roster-present (or unobservable,
+#2417) session sits at the top staleness bucket with no sentinel and no
+in-deadline subagent, it emits one `session.needs_attention` and one push, and
+stamps an evidence key on the session. Every
+`liveness_attention_renotify_interval_minutes` the sweep re-evaluates it; it
+pages again only if the evidence changed: a different reason, a newer
+content-bearing transcript record that did not revive the session, or a change
+in the owned queue row's status. Trailing metadata records do not count.
+Recovery below the top bucket clears the key, so the next death pages again.
+
+**The wording is evidence, not a verdict.** The page says "evidence suggests
+this session is dead (confirm before closing)", names the last record of the
+session's own transcript (its type, timestamp and, for an `API Error`, a
+redacted snippet) and how long the transcript has been flat, then hands over
+the remedy:
+
+```bash
+# Only after you have confirmed the session is dead:
+cw spawn close --confirmed-dead <session_id>
+cw dev-queue requeue <ticket> -c <client> --from-cancelled
+```
+
+The same two steps fold into one command: `cw spawn close --confirmed-dead
+--requeue <session_id>`. A session with no ticket gets only the close command.
+`--confirmed-dead` is the operator's assertion; cw never makes it. **No timer
+acts on the page**: nothing closes, requeues or reaps the session
+automatically (ADR-0014).
+
+**Where the page stays visible.** After the board's and the orchestrate
+digest's 24-hour event window ends, two surfaces still show the condition,
+each for a narrower set of sessions than the sweep pages:
+
+- `cw dev-queue tasks` shows `dead_session_paged` in the ATTENTION column for a
+  row whose own session is ACTIVE or IDLE, latched at the top bucket, with a
+  stamped key. It covers ticket-owned sessions only. The cell is display only
+  and can outlast the page's distress (for example a sentinel landing while
+  the session stays at the top bucket).
+- `cw doctor` (wedge class `wedge/active-daemon-stale-no-sentinel`) carries
+  the same evidence and commands in its recipe, but lists only **ACTIVE**,
+  roster-present sessions whose transcript it can locate. The sweep also
+  pages IDLE sessions and unobservable (`session_age`) sessions, which doctor
+  does not list.
+
+IDLE sessions with no ticket row, unobservable sessions without one, and
+ticket-less daemon sessions have no surface after the 24-hour window; the
+event log still holds the page.
+
 ---
 
 ## 7. Cross-references
@@ -695,6 +746,7 @@ unreconstructable result, `cw spawn close` cancels the row as before; then
 - [`docs/dispatch-runbook.md`](dispatch-runbook.md) — full end-to-end dispatch procedure.
 - [`docs/headless-contract.md`](headless-contract.md) — `AUTO_DEV_RESULT` schema, status enum, `ReapReason` taxonomy, `queue.session_reaped` event.
 - [`docs/events.md`](events.md) — `session.park_vetoed` and the full orchestrator event-bus reference.
+- [`docs/events.md`](events.md) **Liveness dead-session page** — the §6e page's evidence key, suffix and payload keys (#2153).
 - `src/cw/cli/_sentinels.py:_parse_sentinel_from_transcript` — transcript sentinel reader.
 - `src/cw/cli/_sentinels.py:_sentinel_frame_after` — the §6c false-park guard (negative evidence only).
 - `src/cw/cli/signal_park.py` — `cw signal-park`, the §6c park-marker writer.
