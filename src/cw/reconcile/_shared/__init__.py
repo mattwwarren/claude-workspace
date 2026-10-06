@@ -28,6 +28,8 @@ re-exports. Submodules, in dependency order:
 - ``_reap`` -- reap policy and reap-proposed emission. Imports
   ``_transcripts`` and ``_types``.
 - ``_routing`` -- sentinel-to-dev-queue routing. Imports ``_constants``.
+- ``_stage_refusal`` -- stage-refusal page, payload and latch emit. Imports
+  ``_constants`` and ``_sentinels``.
 
 Every submodule logs under the pinned name ``cw.reconcile._shared`` (never
 ``__name__``), so the emitted logger name is unchanged by the split.
@@ -167,6 +169,14 @@ from cw.reconcile._shared._sentinels import (
     stage_refusal_latched,
     stamp_stage_refusal,
 )
+from cw.reconcile._shared._stage_refusal import (
+    SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON,
+    SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON,
+    StageRefusalPage,
+    emit_stage_refusal_pages,
+    page_and_latch_stage_refusal,
+    stage_refusal_page,
+)
 from cw.reconcile._shared._transcripts import (
     _csid_from_transcript,
     _effective_transcript_timestamp,
@@ -215,6 +225,8 @@ read_unresolved_subagent_spawn = _read_unresolved_subagent_spawn
 
 __all__ = [
     "AUTO_DEV_LABEL_PREFIX",
+    "SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON",
+    "SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON",
     "SPAWN_GRACE_SECONDS",
     "TRANSCRIPT_LIVENESS_WINDOW_SECONDS",
     "USAGE_LIMIT_BACKOFF_WINDOW_SECONDS",
@@ -276,6 +288,7 @@ __all__ = [
     "ReconcileReport",
     "SentinelRouteOutcome",
     "SessionLivenessForTask",
+    "StageRefusalPage",
     "UsageLimitDetection",
     "_TaskLookupResult",
     "_TranscriptRecordIterator",
@@ -339,10 +352,12 @@ __all__ = [
     "compute_drift",
     "detect_provider_overload",
     "detect_usage_limit",
+    "emit_stage_refusal_pages",
     "feature_branch_key",
     "find_live_sessions_for_ticket",
     "find_running_task_for_session",
     "holds_staged_emit_result",
+    "page_and_latch_stage_refusal",
     "read_unresolved_subagent_spawn",
     "resolve_attempt_ceiling",
     "resolve_reap_policy",
@@ -351,6 +366,7 @@ __all__ = [
     "salvage_terminal_result",
     "session_daemon_liveness",
     "stage_refusal_latched",
+    "stage_refusal_page",
     "stamp_stage_refusal",
     "ticket_id_for_session",
     "usage_limit_is_recent",

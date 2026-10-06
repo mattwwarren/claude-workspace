@@ -53,20 +53,27 @@ from cw.reconcile import (
     _has_terminal_sentinel,
     reconcile,
 )
-from cw.reconcile._shared import _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+from cw.reconcile._shared import (
+    _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
+    SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON,
+)
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from cw.reconcile import ProposedAction
 
 from tests._clients_yaml import staged_client, write_clients_yaml
 from tests._reconcile_helpers import (
     PROVIDER_OVERLOAD_TEXT,
     SCOPE_GUARD_FILES,
     SCOPE_GUARD_LINES,
+    _attention_events,
     _auto_config,
     _blocked_result_payload,
     _client_with_lane,
+    _failing_record_event,
     _inflate_scope,
     _make_pending_fix_dispatch,
     _make_stale_base_repo,
@@ -2131,6 +2138,17 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     )
 
     assert accepted == []
+    # #2513: the exited worker's refusal pages once, dead wording.
+    assert (
+        len(
+            _attention_events(
+                "test-phantom-2513-preserve",
+                "phantom-preserve-1",
+                paused_status=SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON,
+            )
+        )
+        == 1
+    )
     reloaded = session_by_id["phantom-preserve-1"]
     # The pre-existing idle-watchdog park marker must survive the refusal --
     # not be overwritten -- with the refusal flag merged in alongside it.
@@ -5000,6 +5018,222 @@ def test_reconcile_unparseable_terminal_phantom_falls_through_to_crash(
 
     task = next(t for t in load_dev_queue().tasks if t.ticket_id == "ph-1762-junk")
     assert task.status == QueueItemStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# #2513: a stage-mismatch refusal of an exited worker's result pages once
+# ---------------------------------------------------------------------------
+
+_STAGE_REFUSAL_RECORD_EVENT = "cw.reconcile._shared._stage_refusal.record_event"
+_CANONICAL_PAGE_KEYS = {
+    "session_id",
+    "session_name",
+    "client",
+    "ticket_id",
+    "claude_session_id",
+    "paused_status",
+    "breadcrumbs",
+    "crashed",
+    "lane",
+}
+
+
+def _dead_pages(consumer: str, ticket_id: str) -> list[dict[str, object]]:
+    """Only the first-refusal pages; the veto-cap page has another status."""
+    return _attention_events(
+        consumer, ticket_id, paused_status=SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON
+    )
+
+
+def _set_row(
+    ticket_id: str,
+    *,
+    status: QueueItemStatus = QueueItemStatus.RUNNING,
+    stage: Stage = Stage.REVIEW,
+) -> TicketTask:
+    task = TicketTask(
+        ticket_id=ticket_id,
+        client="client-a",
+        status=status,
+        session_id=ticket_id,
+        stage=stage,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    return task
+
+
+def _staged_stage2_impl(ticket_id: str) -> dict[str, object]:
+    payload = _stage_complete_payload()  # stage_reached="stage2_impl" (IMPL)
+    payload["ticket_id"] = ticket_id
+    return payload
+
+
+def _phantom_refusal_scenario(
+    tmp_path: Path,
+    sid: str,
+    *,
+    row_status: QueueItemStatus = QueueItemStatus.RUNNING,
+) -> tuple[CwState, TicketTask]:
+    """An exited worker's transcript sentinel at stage2_impl, its row at REVIEW."""
+    worktree = tmp_path / f"wt-{sid}"
+    sess = _mk_phantom_daemon_session(
+        sid,
+        datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+        surface_ref="fake-short-id",
+        worktree_path=worktree,
+    )
+    _write_salvage_transcript(
+        Path.home(), worktree, f"csid-{sid}", _staged_stage2_impl(sid)
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
+    return state, _set_row(sid, status=row_status)
+
+
+def _phantom_route_pass(state: CwState, task: TicketTask) -> list[ProposedAction]:
+    """One detect + routed-mutation pass; returns the candidates' actions."""
+    from cw.reconcile import ProposedAction as Action
+    from cw.reconcile import _detect_phantom_candidates
+    from cw.reconcile.phantom import _apply_phantom_routed_mutations
+
+    candidates = _detect_phantom_candidates(
+        state,
+        phantom_set={s.id for s in state.sessions},
+        task_by_ticket={task.ticket_id: task},
+        now=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+    )
+    routed = [
+        c for c in candidates if c.proposed_action is Action.ROUTE_EMITTED_SENTINEL
+    ]
+    _apply_phantom_routed_mutations(
+        {s.id: s for s in state.sessions},
+        routed,
+        now=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+        phantom_names=[],
+    )
+    return [c.proposed_action for c in candidates]
+
+
+def test_reconcile_phantom_stage_mismatch_refusal_pages_once_across_ticks(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2513 end to end: the exited worker's refusal pages once, dead wording."""
+    ticket_id = "ph-2513-e2e"
+    now = _non_headless_terminal_phantom_fixture(
+        tmp_config_dir,
+        tmp_path,
+        monkeypatch,
+        ticket_id=ticket_id,
+        last_result=_staged_stage2_impl(ticket_id),
+    )
+    _set_row(ticket_id)
+
+    for tick in range(3):
+        with freezegun.freeze_time(now + timedelta(seconds=60 * tick)):
+            reconcile()
+
+    pages = _dead_pages("test-phantom-2513-e2e", ticket_id)
+    assert len(pages) == 1
+    page = pages[0]
+    assert set(page) == _CANONICAL_PAGE_KEYS
+    assert page["client"] == "client-a"
+    breadcrumbs = str(page["breadcrumbs"])
+    assert breadcrumbs.startswith(
+        "exited worker reported stage_complete at stage2_impl"
+    )
+    assert "the row is at stage review" in breadcrumbs
+    assert f"cw spawn close --confirmed-dead --requeue {ticket_id}" in breadcrumbs
+    reloaded = next(s for s in load_state().sessions if s.id == ticket_id)
+    assert reloaded.status is SessionStatus.ACTIVE
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+    assert task.status not in (QueueItemStatus.PENDING, QueueItemStatus.CANCELLED)
+    assert task.stage == Stage.REVIEW
+
+
+def test_phantom_stage_mismatch_page_failure_leaves_unlatched_and_repages(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cw.reconcile import ProposedAction
+
+    state, task = _phantom_refusal_scenario(tmp_path, "ph-2513-fail")
+    writes_fail = {"on": True}
+    failures = _failing_record_event(
+        monkeypatch,
+        target=_STAGE_REFUSAL_RECORD_EVENT,
+        event_type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        fail_for=lambda _payload: writes_fail["on"],
+    )
+
+    _phantom_route_pass(state, task)
+
+    assert failures == [1]
+    assert state.sessions[0].last_result is None
+    assert _dead_pages("test-phantom-2513-fail-a", "ph-2513-fail") == []
+
+    writes_fail["on"] = False
+    actions = _phantom_route_pass(state, task)
+
+    assert actions == [ProposedAction.ROUTE_EMITTED_SENTINEL]
+    assert len(_dead_pages("test-phantom-2513-fail-b", "ph-2513-fail")) == 1
+    assert state.sessions[0].last_result == {
+        "paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+    }
+
+
+def test_phantom_non_stage_refusal_latches_without_paging(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """A PENDING row still carrying this session id: latched, never paged."""
+    state, task = _phantom_refusal_scenario(
+        tmp_path, "ph-2513-pending", row_status=QueueItemStatus.PENDING
+    )
+
+    _phantom_route_pass(state, task)
+
+    assert _attention_events("test-phantom-2513-pending", "ph-2513-pending") == []
+    assert state.sessions[0].last_result == {
+        "paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+    }
+
+
+def test_phantom_already_latched_session_is_not_offered_and_never_pages(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2513 upgrade case: a session latched before the change is never paged.
+
+    ``already_refused`` still routes it to the veto-cap path, whose page carries
+    a different ``paused_status`` and is not counted here.
+    """
+    from cw.reconcile import ProposedAction
+
+    ticket_id = "ph-2513-upgrade"
+    latched = {**_staged_stage2_impl(ticket_id), "sentinel_advance_refused": True}
+    now = _non_headless_terminal_phantom_fixture(
+        tmp_config_dir,
+        tmp_path,
+        monkeypatch,
+        ticket_id=ticket_id,
+        last_result=latched,
+    )
+    task = _set_row(ticket_id)
+    state = load_state()
+    assert ProposedAction.ROUTE_EMITTED_SENTINEL not in _phantom_route_pass(
+        CwState(sessions=[s for s in state.sessions if s.id == ticket_id]), task
+    )
+
+    for tick in range(3):
+        with freezegun.freeze_time(now + timedelta(seconds=60 * tick)):
+            reconcile()
+
+    assert _dead_pages("test-phantom-2513-upgrade", ticket_id) == []
 
 
 def test_compute_drift_ignores_ticket_task_session_id(

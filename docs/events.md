@@ -767,8 +767,10 @@ without task revert).
 **Emitter:** `revert_timed_out_tasks`, `revert_completed_silent_tasks`, the
 liveness sweep's distress check (`record_session_liveness_changes`), and the
 Stop hook's abandoned-exit park (`_route_stopped_without_sentinel`, invoked
-from `cw signal-stop`, #2135) and the local dead-process harvest's
-stage-mismatch refusal (`_act_on_local_harvest_candidates`, #2490) in
+from `cw signal-stop`, #2135), the local dead-process harvest's
+stage-mismatch refusal (`_act_on_local_harvest_candidates`, #2490) and the
+idle, stalled and phantom sweeps' stage-mismatch refusals (via
+`emit_stage_refusal_pages` in `cw.reconcile._shared`, #2513) in
 `cw.reconcile`; `apply_staged_decision`,
 `dispatch_tick` (via `_record_client_freshness_block`), and the dispatch
 loop's per-tick staleness watchdog (via `_notify_stale_clients_with_pending`)
@@ -1069,6 +1071,26 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `cw spawn close --confirmed-dead --requeue <session-id>` (the close cancels the
   `RUNNING` row, `--requeue` puts it back to `PENDING` at its current stage).
   The operator can inspect the worktree log (`.cw/opencode.log`) first.
+  Also emitted by the phantom sweep (`cw.reconcile.phantom`, #2513) for an
+  exited worker (absent from the daemon roster) whose routed sentinel the
+  guard refused: the same 9 fields and recovery command, with "exited worker"
+  in place of the backend in `breadcrumbs`. Paged once, before the existing
+  refusal latch, at-least-once as above; nothing is closed, requeued or reaped
+  automatically, and the later `sentinel_mismatch_veto_cap_exhausted`
+  escalation is unchanged.
+- `"sentinel_stage_mismatch_live_session"` — the idle or stalled sweep
+  (`cw.reconcile.idle`, `cw.reconcile.stalled`, #2513) refused a result from a
+  worker that is still in the daemon roster: the shared staged-advance guard
+  emitted `sentinel.stage_mismatch`, the result was **not** applied and the row
+  is unchanged. Same 9 fields as the dead-session page. `breadcrumbs` names the
+  status, stage, blocker reason and recovery hint reported, the row's live
+  stage, and says the worker may yet report a result for the row's current
+  stage; its recovery command is `cw spawn close --requeue <session-id>` (no
+  `--confirmed-dead`, and the word "dead" never appears). **At-least-once**:
+  the page is emitted before the sweep's existing refusal latch and the latch is
+  stamped only once the page write succeeded, so a failed write is re-paged
+  next tick. A session latched before this page existed is never re-offered and
+  never paged. Nothing is closed, requeued or reaped automatically.
 - `"merge_gate_blocked"` — Rule 5: the merge/CI gate rejected the PR
   (optionally `blocker.reason` in `breadcrumbs`, e.g.
   `"prior_pipeline_pr_open"` per issue #777; empty otherwise). See #1117.
@@ -1860,6 +1882,10 @@ the session is provably dead, so no later sentinel can arrive. A single
 `paused_status=sentinel_stage_mismatch_dead_session` is emitted, and only after
 it the refusal is latched on the session (so this event no longer repeats every
 tick); a failed page write leaves the session un-latched and it is retried.
+The idle, stalled and phantom sweeps do the same since #2513: the phantom
+sweep pages `sentinel_stage_mismatch_dead_session` (the worker has exited), and
+the idle and stalled sweeps page `sentinel_stage_mismatch_live_session` (the
+worker is still in the daemon roster).
 
 `correlation_id` is the `ticket_id`.
 

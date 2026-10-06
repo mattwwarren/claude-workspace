@@ -111,18 +111,28 @@ BLOCKER_REASON_PAUSED_STATUSES = frozenset(
 # is a composite "attempts=... branch_head=..." string, always worth showing.
 FINALIZE_REGRESS_REPEAT_PAUSED_STATUS = "finalize_regress_repeat"
 # Another companion diagnostic (#2490), hand-copy of
-# cw.reconcile.local.SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON: a dead local
-# process's result the staged-advance guard refused. Its breadcrumbs carry what
-# the worker reported, the row's live stage and the exact recovery command, so
-# the page alone is actionable.
+# cw.reconcile._shared.SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON: a dead local
+# process's (or, since #2513, an exited phantom worker's) result the
+# staged-advance guard refused. Its breadcrumbs carry what the worker reported,
+# the row's live stage and the exact recovery command, so the page alone is
+# actionable.
 SENTINEL_STAGE_MISMATCH_DEAD_SESSION_PAUSED_STATUS = (
     "sentinel_stage_mismatch_dead_session"
+)
+# Its live-worker sibling (#2513), hand-copy of
+# cw.reconcile._shared.SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON: the idle or
+# stalled sweep refused a result from a worker still in the daemon roster. Its
+# breadcrumbs carry the same detail and a recovery command without
+# --confirmed-dead.
+SENTINEL_STAGE_MISMATCH_LIVE_SESSION_PAUSED_STATUS = (
+    "sentinel_stage_mismatch_live_session"
 )
 # Statuses whose breadcrumbs are shown regardless of the blocker.reason gate.
 DIAGNOSTIC_BREADCRUMB_PAUSED_STATUSES = frozenset(
     {
         FINALIZE_REGRESS_REPEAT_PAUSED_STATUS,
         SENTINEL_STAGE_MISMATCH_DEAD_SESSION_PAUSED_STATUS,
+        SENTINEL_STAGE_MISMATCH_LIVE_SESSION_PAUSED_STATUS,
     }
 )
 

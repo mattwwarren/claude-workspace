@@ -48,7 +48,8 @@ from tests.conftest import (
 
 # The complete importable surface: every top-level name the flat
 # ``reconcile/_shared.py`` bound before the split (134 definitions, the six
-# public aliases, and ``_log``). Third-party/stdlib names the old module merely
+# public aliases, and ``_log``), plus the six ``_stage_refusal`` names added
+# since (#2513). Third-party/stdlib names the old module merely
 # imported (``get_client``, ``subprocess``, ...) are deliberately NOT part of
 # the surface: no consumer imports them through ``_shared``.
 EXPECTED_EXPORTS = {
@@ -155,6 +156,13 @@ EXPECTED_EXPORTS = {
     "holds_staged_emit_result",
     "stage_refusal_latched",
     "stamp_stage_refusal",
+    # Stage-refusal page, payload and latch emit (_stage_refusal)
+    "SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON",
+    "SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON",
+    "StageRefusalPage",
+    "emit_stage_refusal_pages",
+    "page_and_latch_stage_refusal",
+    "stage_refusal_page",
     # Sentinel -> dev-queue routing (_routing)
     "AuditedSentinelRouteOutcome",
     "SentinelRouteOutcome",
@@ -211,7 +219,7 @@ class TestPackageExportCompleteness:
     """Guards that ``cw.reconcile._shared`` keeps its full pre-split surface."""
 
     def test_expected_surface_size(self) -> None:
-        assert len(EXPECTED_EXPORTS) == 141
+        assert len(EXPECTED_EXPORTS) == 147
 
     def test_all_matches_full_surface(self) -> None:
         assert set(_shared.__all__) == EXPECTED_EXPORTS
@@ -266,6 +274,7 @@ PATCH_OWNERSHIP = [
     ("_apply_sentinel_to_task", "save_dev_queue", f"{_PKG}._routing"),
     ("_apply_sentinel_to_task", "record_event", f"{_PKG}._routing"),
     ("_apply_sentinel_to_task", "_deps", f"{_PKG}._routing"),
+    ("emit_stage_refusal_pages", "record_event", f"{_PKG}._stage_refusal"),
 ]
 
 
@@ -283,7 +292,7 @@ class TestPatchOwnership:
     def test_package_binds_no_patched_global(self) -> None:
         """A stale ``cw.reconcile._shared.<global>`` target fails loudly.
 
-        The package re-exports only its own 141 names, never a third-party
+        The package re-exports only its own 147 names, never a third-party
         global a submodule imports, so a patch left on the package raises
         instead of resolving and silently not intercepting.
         ``_locate_session_transcript`` is itself part of the surface, so the
@@ -455,7 +464,7 @@ class TestLoggerNamePinned:
 
 # Submodules that log. Each binds its own ``_log`` to the pinned name via
 # ``_constants._LOGGER_NAME``, never ``__name__``.
-LOGGING_SUBMODULES = ["_roster", "_routing", "_transcripts"]
+LOGGING_SUBMODULES = ["_roster", "_routing", "_stage_refusal", "_transcripts"]
 
 
 class TestLoggerObjectsPinned:

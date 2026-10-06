@@ -35,7 +35,7 @@ from cw.reconcile._shared import (
     _apply_sentinel_to_task_audited,
     _queue_status_for_salvaged,
     _resolve_routed_sentinel,
-    stamp_stage_refusal,
+    page_and_latch_stage_refusal,
 )
 from cw.result import reconstruct_staged_sentinel
 
@@ -246,6 +246,9 @@ def _apply_phantom_routed_mutations(
     session here would strand a live/reapable surface with no owning task.
     Returns only the candidates that were actually routed, so the caller's
     ``_emit_phantom_routed_events`` (SESSION_COMPLETED) fires solely for those.
+    GitHub #2513: a stage-mismatch refusal pages once
+    (``paused_status=sentinel_stage_mismatch_dead_session``) before its latch
+    is stamped, and is latched only if the page landed.
 
     GitHub #2140: a ``not routed`` outcome can also mean
     ``task_already_terminal`` — the dev-queue task was raced to a genuinely
@@ -328,7 +331,19 @@ def _apply_phantom_routed_mutations(
             # None` precondition: a session already parked by another sweep
             # can reach here, so the shared stamp merges rather than
             # overwrites (see stamp_stage_refusal).
-            stamp_stage_refusal(session)
+            #
+            # #2513: a stage mismatch pages first (dead wording -- the worker
+            # is gone from the roster) and is latched only once the page
+            # landed; any other refusal is latched silently, as before.
+            page_and_latch_stage_refusal(
+                session,
+                outcome,
+                ticket_id=candidate.ticket_id,
+                lane=candidate.lane,
+                sentinel=routed_sentinel,
+                subject="exited worker",
+                live=False,
+            )
             continue
         session.status = SessionStatus.COMPLETED
         session.completed_at = now

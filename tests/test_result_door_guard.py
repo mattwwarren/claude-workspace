@@ -71,11 +71,10 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     },
     "reconcile/idle/_mutations.py": {
         (
-            "session.last_result = {\n"
-            "_PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON\n"
-            "}"
+            "session.last_result = "
+            "{_PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON}"
         ): (
-            "idle/_mutations.py (_apply_idle_routed_mutations) — park marker, "
+            "idle/_mutations.py (_stamp_idle_stage_refusal) — park marker, "
             "stage-mismatch-refused; no 'status' key so has_terminal_result() "
             "stays False"
         ),

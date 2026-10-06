@@ -619,7 +619,11 @@ authorities can route that staged result to the dev-queue row:
   stamps the #1149 refusal marker (`paused_status=sentinel_stage_mismatch_refused`)
   in place of the staged result so the candidate is not re-offered; only the
   emit's `session.result_emitted` audit event (status and payload digest)
-  remains of the staged result. That audit trace is best-effort since #2465: if
+  remains of the staged result. Since #2513 that refusal first pages once
+  (`session.needs_attention`, `paused_status=sentinel_stage_mismatch_live_session`,
+  recovery `cw spawn close --requeue <id>`), as the stalled and phantom sweeps'
+  refusals do; the marker is stamped only after the page landed, so a failed
+  page is retried next tick. That audit trace is best-effort since #2465: if
 the event inbox is unwritable the append is skipped and only the logged
 `payload_digest` records the staged result.
 - **A stranded routed session (#2524).** Once the Stop hook has routed a

@@ -21,11 +21,13 @@ import pytest
 
 from cw._lock_guard import LockRank, is_rank_held
 from cw.config import load_state
+from cw.events import read_events
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     ClientConfig,
     LastResultSource,
     OrchestratorConfig,
+    OrchestratorEventType,
     PendingFixDispatch,
     ReapPolicy,
     Session,
@@ -924,3 +926,57 @@ def _inflate_scope(payload: dict[str, Any]) -> dict[str, Any]:
         "forbidden_touched": False,
     }
     return payload
+
+
+def _attention_events(
+    consumer: str, ticket_id: str, *, paused_status: str | None = None
+) -> list[dict[str, object]]:
+    """``session.needs_attention`` payloads for *ticket_id*, read as *consumer*.
+
+    *paused_status*, when set, keeps only the payloads carrying that value, so
+    a test can count one page kind while another (e.g. phantom's
+    ``sentinel_mismatch_veto_cap_exhausted``) shares the ticket (#2513).
+    """
+    return [
+        e.payload
+        for e in read_events(
+            consumer=consumer,
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        if e.payload.get("ticket_id") == ticket_id
+        and (paused_status is None or e.payload.get("paused_status") == paused_status)
+    ]
+
+
+def _failing_record_event(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    target: str,
+    event_type: OrchestratorEventType,
+    fail_for: Callable[[dict[str, object]], bool],
+) -> list[int]:
+    """Make the ``record_event`` bound at *target* raise OSError on matching calls.
+
+    *target* is the dotted path of the ``record_event`` name the code under
+    test looks up (e.g. ``"cw.reconcile._shared._stage_refusal.record_event"``):
+    a patch anywhere else resolves but never intercepts. Returns a
+    one-element-per-failure list so a test can count the failures.
+    """
+    from cw.events import record_event as real_record_event
+
+    failures: list[int] = []
+
+    def flaky(
+        etype: OrchestratorEventType,
+        payload: dict[str, object] | None = None,
+        *,
+        correlation_id: str | None = None,
+    ) -> object:
+        if etype is event_type and fail_for(payload or {}):
+            failures.append(1)
+            msg = "disk full"
+            raise OSError(msg)
+        return real_record_event(etype, payload, correlation_id=correlation_id)
+
+    monkeypatch.setattr(target, flaky)
+    return failures

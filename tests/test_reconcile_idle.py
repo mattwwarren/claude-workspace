@@ -35,14 +35,22 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from cw.reconcile._shared import _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY, ProposedAction
+from cw.reconcile._shared import (
+    _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY,
+    SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON,
+    ProposedAction,
+    ReapCandidate,
+)
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 from cw.reconcile.idle import (
     _act_on_idle_candidates,
+    _apply_idle_routed_mutations,
     _detect_idle_candidates,
 )
 from cw.reconcile.idle import _detect as idle_detect
 from tests._reconcile_helpers import (
+    _attention_events,
+    _failing_record_event,
     _mk_headless_daemon_session,
     _no_op_salvage_payload,
     _shipped_salvage_payload,
@@ -842,6 +850,160 @@ def test_emit_cli_stage_mismatch_refusal_stamps_marker_and_stops_reoffering(
         )
         == []
     )
+
+
+# ---------------------------------------------------------------------------
+# #2513: a stage-mismatch refusal of a live worker's result pages exactly once
+# ---------------------------------------------------------------------------
+
+_STAGE_REFUSAL_RECORD_EVENT = "cw.reconcile._shared._stage_refusal.record_event"
+_IDLE_REFUSAL_MARKER = {"paused_status": "sentinel_stage_mismatch_refused"}
+_CANONICAL_PAGE_KEYS = {
+    "session_id",
+    "session_name",
+    "client",
+    "ticket_id",
+    "claude_session_id",
+    "paused_status",
+    "breadcrumbs",
+    "crashed",
+    "lane",
+}
+
+
+def _idle_candidates(state: CwState) -> list[ReapCandidate]:
+    return _detect_idle_candidates(
+        state,
+        now=_NOW_PAST_CHECK,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+
+
+def _idle_tick(state: CwState) -> None:
+    """One detect + act pass over *state*, as reconcile() runs it."""
+    candidates = _idle_candidates(state)
+    call_and_drain(_act_on_idle_candidates, state, candidates, now=_NOW_PAST_CHECK)
+
+
+def test_idle_stage_mismatch_refusal_pages_once_across_ticks(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    no_transcript_parse: None,
+    idle_daemon: FakeNativeDaemonClient,
+) -> None:
+    """#2513: the refusal pages once with live wording, then latches as before."""
+    _write_staged_client()
+    _seed_row(QueueItemStatus.RUNNING, Stage.REVIEW)
+    before = _reload_row().model_dump()
+    state = _emit_cli_state(tmp_path, _impl_stage_complete())
+
+    for _tick in range(3):
+        _idle_tick(state)
+
+    pages = _attention_events("test-idle-2513-once", _EMIT_TICKET)
+    assert len(pages) == 1
+    page = pages[0]
+    assert page["paused_status"] == SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON
+    assert set(page) == _CANONICAL_PAGE_KEYS
+    breadcrumbs = str(page["breadcrumbs"])
+    assert "stage_complete at stage2_impl" in breadcrumbs
+    assert "the row is at stage review" in breadcrumbs
+    assert "cw spawn close --requeue salv-1" in breadcrumbs
+    assert "--confirmed-dead" not in breadcrumbs
+    assert "dead" not in breadcrumbs
+    session = state.sessions[0]
+    assert session.status is SessionStatus.ACTIVE
+    assert session.last_result == _IDLE_REFUSAL_MARKER
+    assert idle_daemon.stop_calls == []
+    assert _reload_row().model_dump() == before
+    assert _idle_candidates(state) == []
+
+
+def test_idle_stage_mismatch_page_failure_leaves_staged_result_and_repages(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    no_transcript_parse: None,
+    idle_daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2513: a failed page latches nothing, so the next tick pages again."""
+    _write_staged_client()
+    _seed_row(QueueItemStatus.RUNNING, Stage.REVIEW)
+    payload = _impl_stage_complete()
+    state = _emit_cli_state(tmp_path, payload)
+    writes_fail = {"on": True}
+    failures = _failing_record_event(
+        monkeypatch,
+        target=_STAGE_REFUSAL_RECORD_EVENT,
+        event_type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        fail_for=lambda _payload: writes_fail["on"],
+    )
+    candidates = _idle_candidates(state)
+    assert len(candidates) == 1
+
+    accepted, state_mutated = _apply_idle_routed_mutations(
+        {s.id: s for s in state.sessions}, candidates, now=_NOW_PAST_CHECK
+    )
+
+    assert failures == [1]
+    assert accepted == []
+    assert state_mutated is False
+    assert state.sessions[0].last_result == payload
+    assert _attention_events("test-idle-2513-fail-a", _EMIT_TICKET) == []
+    assert len(_idle_candidates(state)) == 1
+
+    writes_fail["on"] = False
+    _idle_tick(state)
+    _idle_tick(state)
+
+    assert len(_attention_events("test-idle-2513-fail-b", _EMIT_TICKET)) == 1
+    assert state.sessions[0].last_result == _IDLE_REFUSAL_MARKER
+    assert _idle_candidates(state) == []
+
+
+def test_idle_non_stage_refusal_latches_without_paging(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    no_transcript_parse: None,
+    idle_daemon: FakeNativeDaemonClient,
+) -> None:
+    """A PENDING row still carrying this session id refuses for a non-stage cause.
+
+    No page (it is not a stage mismatch), but the existing silent latch still
+    stops the candidate re-firing.
+    """
+    _write_staged_client()
+    _seed_row(QueueItemStatus.PENDING, Stage.IMPL)
+    state = _emit_cli_state(tmp_path, _impl_stage_complete())
+
+    _idle_tick(state)
+
+    assert _attention_events("test-idle-2513-pending", _EMIT_TICKET) == []
+    session = state.sessions[0]
+    assert session.status is SessionStatus.ACTIVE
+    assert session.last_result == _IDLE_REFUSAL_MARKER
+    assert _idle_candidates(state) == []
+
+
+def test_idle_already_latched_session_is_not_offered_and_never_pages(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    no_transcript_parse: None,
+    idle_daemon: FakeNativeDaemonClient,
+) -> None:
+    """#2513 upgrade case: a session latched before the change is never paged."""
+    _write_staged_client()
+    _seed_row(QueueItemStatus.RUNNING, Stage.REVIEW)
+    state = _emit_cli_state(tmp_path, dict(_IDLE_REFUSAL_MARKER))
+
+    for _tick in range(3):
+        assert _idle_candidates(state) == []
+        _idle_tick(state)
+
+    assert _attention_events("test-idle-2513-upgrade", _EMIT_TICKET) == []
+    assert state.sessions[0].last_result == _IDLE_REFUSAL_MARKER
 
 
 def test_detect_idle_candidates_skips_unreconstructable_emit_cli_result(
