@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.65.0] - 2026-10-06
+
 ### Added
 
 - **`cw doctor` now reports the effective codex fix-loop state per codex review lane with a new `codex-fix-loop/<client>/<lane>` check (#2542).** Nothing showed an operator whether the `--sandbox workspace-write` fix loop was on for a lane, or whether the value came from the lane's `codex_fix_loop_enabled` or the global `default_codex_fix_loop_enabled` in `orchestrator.yaml`. The check lists only lanes whose review executor is codex, resolves the state through the runtime's own resolver so it cannot drift, and names the source (`lane` or `global default`) and the key to change. It is advisory (`ok=True`, `warn=True` only when the loop is on, so doctor's exit code is unchanged) and read-only: an absent `orchestrator.yaml` is not created, and a load failure prints a fixed message with the exception class name only.
