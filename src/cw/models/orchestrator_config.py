@@ -302,10 +302,11 @@ class LaneConfig(BaseModel):
     description: str = ""
     reap_policy: ReapPolicy | None = None
     # Lane-level overrides for the `cw guard-busy-wait` PreToolUse guard
-    # (#1946). Shaped on reap_policy above, NOT on codex_fix_loop_enabled's
-    # opt-in-only Literal[True]: a lane must be able to turn the guard OFF
-    # against an enabled global (a lane whose workers legitimately poll) and
-    # ON against a disabled one, so the override is bidirectional. None on any
+    # (#1946). Shaped on reap_policy and codex_fix_loop_enabled below, not on
+    # the opt-in-only Literal[True] fields (signoff, finalize_gate): a lane must
+    # be able to turn the guard OFF against an enabled global (a lane whose
+    # workers legitimately poll) and ON against a disabled one, so the override
+    # is bidirectional. None on any
     # of the three = inherit the OrchestratorConfig default. Resolved by
     # cw.cli.guard_busy_wait._resolve_settings, which mirrors
     # resolve_reap_policy's lane-then-global fallthrough rather than importing
@@ -349,11 +350,11 @@ class LaneConfig(BaseModel):
     # (#1553, superseding the removed ClientConfig.codex_fix_loop_enabled from
     # #1465). None defers to OrchestratorConfig.default_codex_fix_loop_enabled.
     # Resolved by cw.codex_background._resolve_codex_fix_loop_enabled, mirroring
-    # resolve_reap_policy's lane-then-global fallthrough shape. Literal[True]
-    # (not bool): a lane can only opt IN to the fix loop, never opt a client's
-    # global-True default back OUT -- the same asymmetry finalize_gate/signoff
-    # already encode for their own gates.
-    codex_fix_loop_enabled: Literal[True] | None = None
+    # resolve_reap_policy's lane-then-global fallthrough shape. A plain bool
+    # override (#2541): True opts the lane IN, False opts the lane OUT against a
+    # globally enabled default_codex_fix_loop_enabled (no workspace-write fix
+    # pass ever runs on that lane), and None defers to the global.
+    codex_fix_loop_enabled: bool | None = None
     # Lane-level override for the global attempt ceiling (#1751, scoping the
     # flat #786 bound that #1750 re-pointed at unproductive_attempts).
     # Precedence: lane > OrchestratorConfig.global_attempt_ceiling. Resolved by
@@ -362,22 +363,18 @@ class LaneConfig(BaseModel):
     # the number or the concierge would refuse a requeue the claim path would
     # have allowed (the drift #1750's own comments warn against).
     #
-    # Tri-state, and NOT the Literal[True] | None shape its three sibling
-    # lane-override fields use: this one genuinely needs a "disable" state that
-    # none of them do. `None` = the lane sets no override (defer to global) --
-    # the meaning every sibling already assigns to None, which is exactly why
-    # `False`, not `None`, is the disable token here: a lane that wants to
+    # Tri-state, and NOT a plain `bool | None` override like
+    # codex_fix_loop_enabled above: the global here is a number, not an on/off
+    # flag, so the lane needs a distinct "disable" token. `None` = the lane
+    # sets no override (defer to global) -- the meaning every sibling already
+    # assigns to None, which is exactly why `False`, not `None`, is the
+    # disable token here: a lane that wants to
     # inherit whatever the global ceiling later becomes and a lane that wants
     # no ceiling ever are different intents that must stay distinguishable, and
     # Pydantic collapses "key absent" and "key present: null" to the same None.
     # `False` = the lane explicitly disables the ceiling (a supervised lane
     # whose operator answers every park IS the rate limiter, so an automated
     # bound buys nothing). A positive int = the lane's own ceiling.
-    #
-    # `False` is free to reuse for this meaning precisely because
-    # codex_fix_loop_enabled above reserves it as "cannot be used" -- the
-    # opt-in-only asymmetry that makes Literal[True] valid there is what
-    # leaves False unclaimed here.
     attempt_ceiling: Literal[False] | int | None = None
     # Lane-level gate-recipe enablement map (RFC 0009 P4, #1067). Middle tier in
     # resolve_gate_recipe_enabled's 3-tier precedence: consulted when the ticket
@@ -866,8 +863,9 @@ class OrchestratorConfig(BaseModel):
     default_finalize_gate: Literal["auto", "manual"] = "auto"
     # Global default for the codex backend's autonomous MUST_FIX fix loop
     # (#1553), used when the ticket's lane (LaneConfig.codex_fix_loop_enabled)
-    # sets no override. Default False, mirroring concierge_enabled's
-    # fail-safe default: enabling `review: {backend:
+    # sets no override; a lane may override in either direction (True opts in,
+    # False opts out of a global True, #2541). Default False, mirroring
+    # concierge_enabled's fail-safe default: enabling `review: {backend:
     # codex}` must not implicitly enable autonomous fix commits. Superseded
     # the removed ClientConfig.codex_fix_loop_enabled (#1465) with a 2-tier
     # (lane -> global) resolver -- see

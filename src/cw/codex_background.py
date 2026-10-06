@@ -257,6 +257,8 @@ def _resolve_codex_fix_loop_enabled(
 
     Precedence (highest to lowest):
       1. Lane-level LaneConfig.codex_fix_loop_enabled in *client*'s config.
+         An explicit ``False`` wins over a global ``True`` (lane opt-out,
+         #2541); ``None`` falls through.
       2. Global OrchestratorConfig.default_codex_fix_loop_enabled.
 
     A task whose lane name is not declared in the client's lanes falls
