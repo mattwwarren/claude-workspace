@@ -835,7 +835,7 @@ def test_detect_unconsumed_queue_notification_returns_none_on_read_error(
     )
     fake_path = worktree / "does-not-exist.jsonl"
     monkeypatch.setattr(
-        "cw.reconcile._shared._locate_session_transcript",
+        "cw.reconcile._shared._detectors._locate_session_transcript",
         lambda *_a, **_kw: fake_path,
     )
 
@@ -2792,7 +2792,7 @@ class TestDetectPostReviewClean:
             msg = "disk error"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr("cw.reconcile._shared.read_events", _raise)
+        monkeypatch.setattr("cw.reconcile._shared._detectors.read_events", _raise)
 
         sess = Session(
             id="sess-exc",
