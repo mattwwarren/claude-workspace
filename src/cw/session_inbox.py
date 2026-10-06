@@ -30,6 +30,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from cw._lock_guard import LockRank, lock_guard
 from cw.atomic import atomic_write_text
 from cw.config import state_dir
 from cw.exceptions import CwError
@@ -83,16 +84,21 @@ def _lock_path(session_id: str) -> Path:
 
 @contextlib.contextmanager
 def _inbox_lock(session_id: str) -> Iterator[None]:
-    """Acquire an exclusive file lock for one session's inbox."""
-    session_inbox_dir(session_id).mkdir(parents=True, exist_ok=True)
-    fd = _lock_path(session_id).open("w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        with contextlib.suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
+    """Acquire an exclusive file lock for one session's inbox.
+
+    Rank LEAF, keyed per session; lock discipline: ADR-0019.
+    """
+    lock_path = _lock_path(session_id)
+    with lock_guard("session_inbox", lock_path, LockRank.LEAF):
+        session_inbox_dir(session_id).mkdir(parents=True, exist_ok=True)
+        fd = lock_path.open("w")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
 
 
 def append_message(session_id: str, *, author: str, body: str) -> SessionInboxMessage:

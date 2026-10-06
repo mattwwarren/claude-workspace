@@ -10,7 +10,6 @@ import re
 import shlex
 import shutil
 import sys
-import threading
 from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -24,12 +23,12 @@ from ruamel.yaml.comments import CommentedMap
 from cw import _config_migrate
 from cw._flock import acquire_sessions_flock
 from cw._git import run_git
+from cw._lock_guard import LockRank, lock_guard
 from cw.atomic import atomic_write_text
 from cw.exceptions import (
     ConfigValidationError,
     CwError,
     DispatchLoopLockedError,
-    SessionsLockReentryError,
 )
 from cw.models import (
     CW_STATE_SCHEMA_VERSION,
@@ -275,46 +274,30 @@ def refuse_real_state_write(path: Path) -> None:
 def concurrency_override_lock() -> Iterator[None]:
     """Acquire an exclusive file lock over the concurrency_overrides.json write window.
 
-    Mirror of ``sessions_lock``. Hold this across every load→mutate→write
-    sequence for concurrency overrides so concurrent processes cannot clobber
-    each other's edits. The lock is advisory (``fcntl.flock``) and per-open-fd,
-    so sequential re-acquisitions in the same process are safe.
-    Do NOT nest: acquiring while already holding will deadlock.
+    Hold it across every load→mutate→write of the overrides. Rank STATE;
+    lock discipline (re-entry, order): ADR-0019.
     """
-    state_dir().mkdir(parents=True, exist_ok=True)
     lock_path = concurrency_override_lock_file()
-    fd = lock_path.open("w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
-
-
-_sessions_lock_state = threading.local()
+    with lock_guard("concurrency_override", lock_path, LockRank.STATE):
+        state_dir().mkdir(parents=True, exist_ok=True)
+        fd = lock_path.open("w")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
 
 
 @contextlib.contextmanager
 def sessions_lock(*, bounded: bool = False) -> Iterator[None]:
     """Acquire an exclusive file lock over the sessions.json write window.
 
-    Mirror of ``_queue_lock`` in ``cw.queue``. Hold this across every
-    load_state → mutate → save_state sequence so concurrent ``cw``
-    processes cannot clobber each other's mutations (last-writer-wins
-    data loss). The lock is advisory (``fcntl.flock``) and per-open-fd,
-    so sequential re-acquisitions in the same process (non-nested) are
-    safe.
-
-    Not reentrant: a same-thread nested acquisition raises
-    :class:`~cw.exceptions.SessionsLockReentryError` instead of opening a
-    second fd and deadlocking in ``flock()`` (GitHub #1228). The check is
-    synchronous and runs before any file I/O or ``flock`` syscall, so it
-    is hang-safe by construction. Callers that would otherwise re-enter
-    (e.g. the RFC 0010 P4 review-recipe act phase calling back into
-    ``reconcile()``) must already tolerate a ``CwError``-shaped failure on
-    this path; see the callers of ``_dispatch_auto_fix_ci`` /
-    ``_dispatch_address_review`` / ``_reconcile_usage_limited``.
+    Hold this across every load_state → mutate → save_state sequence so
+    concurrent ``cw`` processes cannot clobber each other's mutations. Rank
+    SESSIONS, the outermost lock. Lock discipline: ADR-0019. A same-thread
+    nested acquisition raises :class:`~cw.exceptions.CwLockReentrancyError`
+    before any I/O instead of deadlocking in ``flock()`` (#1228).
 
     Unbounded by default, bounded by opt-in (GitHub #2491). The default
     (``bounded=False``) blocks until the lock is free and never raises
@@ -332,27 +315,20 @@ def sessions_lock(*, bounded: bool = False) -> Iterator[None]:
     ``bounded=True`` callers only. Which files may opt in is pinned by an
     allowlist test (``tests/test_config.py``).
     """
-    if getattr(_sessions_lock_state, "held", False):
-        msg = (
-            "sessions_lock() re-entered on the same thread while already "
-            "held; this would deadlock in flock() (GitHub #1228)"
-        )
-        raise SessionsLockReentryError(msg)
-    state_dir().mkdir(parents=True, exist_ok=True)
     lock_path = sessions_lock_file()
-    fd = lock_path.open("w")
-    try:
-        acquire_sessions_flock(fd, lock_path, bounded=bounded)
-    except BaseException:
-        fd.close()
-        raise
-    _sessions_lock_state.held = True
-    try:
-        yield
-    finally:
-        _sessions_lock_state.held = False
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
+    with lock_guard("sessions", lock_path, LockRank.SESSIONS):
+        state_dir().mkdir(parents=True, exist_ok=True)
+        fd = lock_path.open("w")
+        try:
+            acquire_sessions_flock(fd, lock_path, bounded=bounded)
+        except BaseException:
+            fd.close()
+            raise
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
 
 
 def mutate_state(fn: Callable[[CwState], None], *, bounded: bool = False) -> CwState:
@@ -362,12 +338,10 @@ def mutate_state(fn: Callable[[CwState], None], *, bounded: bool = False) -> CwS
     default) unless the caller has no irreversible side effect before this
     call.
 
-    Not reentrant: calling this while the caller already holds
-    ``sessions_lock`` raises :class:`~cw.exceptions.SessionsLockReentryError`
-    (GitHub #1228) instead of self-deadlocking. Code running inside a
-    ``with sessions_lock():`` block (e.g. anything called from
-    ``reconcile._reconcile_locked``) must mutate the loaded state and
-    ``save_state`` directly instead.
+    Not reentrant (ADR-0019): code already inside a ``with sessions_lock():``
+    block (e.g. ``reconcile._reconcile_locked``) gets
+    :class:`~cw.exceptions.CwLockReentrancyError` and must mutate the loaded
+    state and ``save_state`` directly instead.
 
     Invariant: every ``save_state`` call outside ``config.py`` is either
     inside a ``with sessions_lock():`` block **or** in a helper whose
@@ -388,22 +362,20 @@ def mutate_state(fn: Callable[[CwState], None], *, bounded: bool = False) -> CwS
 def clients_lock() -> Iterator[None]:
     """Acquire an exclusive file lock over the clients.yaml write window.
 
-    Mirror of ``sessions_lock``. Hold this across every load→mutate→write
-    sequence in ``init_client`` (and any future client-mutating command) so
-    concurrent ``cw client add`` processes cannot clobber each other's edits
-    (last-writer-wins data loss). The lock is advisory (``fcntl.flock``) and
-    per-open-fd, so sequential re-acquisitions in the same process are safe.
-    Do NOT nest: acquiring while already holding will deadlock.
+    Hold it across every load→mutate→write in ``init_client`` (and any future
+    client-mutating command) so concurrent ``cw client add`` processes cannot
+    clobber each other's edits. Rank STATE; lock discipline: ADR-0019.
     """
-    config_dir().mkdir(parents=True, exist_ok=True)
     lock_path = clients_lock_file()
-    fd = lock_path.open("w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
+    with lock_guard("clients", lock_path, LockRank.STATE):
+        config_dir().mkdir(parents=True, exist_ok=True)
+        fd = lock_path.open("w")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
 
 
 def _current_command_str() -> str:

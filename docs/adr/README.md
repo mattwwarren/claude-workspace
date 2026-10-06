@@ -47,7 +47,7 @@ When an ADR is superseded, edit the old one's status line — don't delete it.
 | [0002](0002-blocker-retry-policy-pair.md) | Blocker carries an explicit retry policy | Accepted |
 | [0003](0003-stop-hook-canonical-completion-signal.md) | Stop hook is the canonical worker-completion signal | Accepted |
 | [0004](0004-stage-events-on-orchestrator-bus.md) | Stage-transition events on the orchestrator event bus | Accepted |
-| [0005](0005-single-state-lock.md) | All `sessions.json` mutations go through a single state lock | Proposed |
+| [0005](0005-single-state-lock.md) | All `sessions.json` mutations go through a single state lock | Accepted |
 | [0006](0006-reaping-is-gated-by-an-authority.md) | Reaping is gated by an authority, not automatic | Accepted |
 | [0007](0007-reconcile-cadence-and-ownership.md) | Reconcile cadence and ownership: on-demand, ticker, or daemon primary runner | Proposed |
 | [0008](0008-tracker-resolution-is-a-typed-seam.md) | Tracker resolution is a declared descriptor, not bespoke code | Proposed |
@@ -61,6 +61,7 @@ When an ADR is superseded, edit the old one's status line — don't delete it.
 | [0016](0016-ledger-claim-matching-is-gated-and-measured.md) | Ledger claim matching ships gated and measured, never on by default | Accepted |
 | [0017](0017-session-inbox-and-resume-trigger.md) | A session's inbound channel is a durable mailbox plus a paused-only resume trigger | Accepted |
 | [0018](0018-codex-runs-as-a-detached-local-liveness-job.md) | Codex runs as a detached, local-liveness-tracked job, not an in-process thread | Accepted |
+| [0019](0019-lock-hierarchy-and-no-subprocess-under-sessions-lock.md) | Locks form a ranked hierarchy, re-entry is an error, and nothing runs a subprocess under `sessions_lock` | Accepted |
 
 ADR-0000 is the foundational record — the trajectory it captures is
 assumed as ground truth by every subsequent ADR.

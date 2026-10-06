@@ -1781,9 +1781,9 @@ def _apply_sentinel_to_task(
             )
             if already_terminal:
                 # #1692: durable trace alongside the log line -- record_event
-                # nests _inbox_lock inside dev_queue_lock here, the same safe
-                # nesting order this module's SENTINEL_BLOCKED_RESULT_REQUEUED
-                # call (below) already relies on. No queue/session mutation
+                # nests the leaf inbox lock inside dev_queue_lock (ADR-0019), as
+                # this module's SENTINEL_BLOCKED_RESULT_REQUEUED call (below)
+                # does. No queue/session mutation
                 # precedes this in this branch, so there is nothing for a
                 # failed write to leave half-applied.
                 record_event(

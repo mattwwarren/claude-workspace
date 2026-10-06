@@ -42,7 +42,7 @@ from cw.config import (
 )
 from cw.exceptions import (
     CwError,
-    SessionsLockReentryError,
+    CwLockReentrancyError,
     SessionsLockTimeoutError,
 )
 from cw.models import (
@@ -2023,6 +2023,7 @@ class TestMutateState:
 class TestSessionsLockReentrancy:
     """Tests for sessions_lock()'s same-thread reentrancy guard (GitHub #1228)."""
 
+    @pytest.mark.lock_violations_expected("reentry")
     def test_nested_sessions_lock_raises_reentry_error(
         self, tmp_config_dir: Path
     ) -> None:
@@ -2032,8 +2033,16 @@ class TestSessionsLockReentrancy:
         time here would HANG the whole test run (not just fail an
         assertion) — the guard must raise before any second flock() syscall.
         """
-        with sessions_lock(), pytest.raises(SessionsLockReentryError), sessions_lock():
+        with (
+            sessions_lock(),
+            pytest.raises(CwLockReentrancyError) as excinfo,
+            sessions_lock(),
+        ):
             pytest.fail("must not reach body")
+
+        # Still CwError-shaped, so existing ``except CwError`` handlers hold.
+        assert isinstance(excinfo.value, CwError)
+        assert excinfo.value.lock_name == "sessions"
 
     def test_sessions_lock_sequential_reacquire_still_succeeds(
         self, tmp_config_dir: Path
@@ -2257,13 +2266,14 @@ class TestSessionsLockAcquire:
         with lock_path.open("w") as probe:
             fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
+    @pytest.mark.lock_violations_expected("reentry")
     @pytest.mark.parametrize("bounded", [False, True], ids=["default", "bounded"])
     def test_reentry_still_raises_reentry_not_timeout_or_hang(
         self, tmp_config_dir: Path, bounded: bool
     ) -> None:
         with (
             sessions_lock(),
-            pytest.raises(SessionsLockReentryError),
+            pytest.raises(CwLockReentrancyError),
             sessions_lock(bounded=bounded),
         ):
             pytest.fail("must not reach body")

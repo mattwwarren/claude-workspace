@@ -40,9 +40,9 @@ from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events, record_event
 from cw.exceptions import (
     CwError,
+    CwLockReentrancyError,
     HookContextConflictError,
     RemoteRefUnresolvedError,
-    SessionsLockReentryError,
     WorktreeOccupiedError,
 )
 from cw.models import (
@@ -897,6 +897,7 @@ def test_no_self_deadlock_under_dev_queue_lock(
     ) == [task.ticket_id]
 
 
+@pytest.mark.lock_violations_expected("reentry")
 def test_reconcile_reentry_guard_fires_and_is_swallowed(
     tmp_config_dir: Path,
     make_git_repo: Any,
@@ -914,7 +915,7 @@ def test_reconcile_reentry_guard_fires_and_is_swallowed(
     _dispatch_address_review -> spawn_create_impl -> a nested sessions_lock()
     acquisition on the same thread. The outer ``with sessions_lock():`` below
     stands in for reconcile()'s own lock hold. Before the #1228 fix this
-    scenario hangs forever in flock(); after the fix, SessionsLockReentryError
+    scenario hangs forever in flock(); after the fix, CwLockReentrancyError
     propagates out of the nested acquisition, into _dispatch_address_review's
     ``except CwError``, and is converted to a logged PR_ACTION_FAILED
     correction instead of a call-site change.
@@ -942,7 +943,7 @@ def test_reconcile_reentry_guard_fires_and_is_swallowed(
         try:
             with sessions_lock():
                 pass
-        except SessionsLockReentryError as exc:
+        except CwLockReentrancyError as exc:
             # Record the exact exception raised (not just "some CwError")
             # before letting it propagate into _dispatch_address_review's
             # `except CwError` handler, so the outer assertions below can
@@ -963,7 +964,7 @@ def test_reconcile_reentry_guard_fires_and_is_swallowed(
     assert acted == []
     assert probed["lock_held"] is True
     assert len(captured) == 1
-    assert isinstance(captured[0], SessionsLockReentryError)
+    assert isinstance(captured[0], CwLockReentrancyError)
     failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
     assert len(failed) == 1
     assert failed[0].correlation_id == task.ticket_id

@@ -1006,7 +1006,7 @@ def test_run_fix_dispatch_spawns_real_fix_session_through_sessions_lock(
     Exercises the REAL ``dispatch_fix_agent`` -> ``spawn_create_impl`` path
     (only the native daemon is faked), so the spawn's own ``sessions_lock()``
     acquisition genuinely runs. On the pre-fix tree this dies with
-    ``SessionsLockReentryError`` inside ``spawn_create_impl``, is caught by
+    ``CwLockReentrancyError`` inside ``spawn_create_impl``, is caught by
     ``_act_on_pending_fix_dispatches``'s broad ``except CwError``, and no fix
     session is ever spawned.
     """

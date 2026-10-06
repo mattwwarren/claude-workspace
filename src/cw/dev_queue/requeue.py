@@ -661,8 +661,8 @@ def requeue_ticket(
         # _apply_requeue_stage already codifies (impl hard-exits on a missing
         # plan; review/finalize degrade). Emitted inline while dev_queue_lock is
         # still held, mirroring _emit_stage_change's chokepoint convention --
-        # record_event takes _inbox_lock *inside* dev_queue_lock and the reverse
-        # nesting never occurs, so the ordering is deadlock-safe (RFC 0008 W1).
+        # the inbox lock nests inside dev_queue_lock as a leaf (ADR-0019,
+        # RFC 0008 W1).
         # Inline rather than per-caller because requeue_ticket's other
         # production caller (dev_queue/drain.py) builds no events of its own.
         if to_stage == Stage.REVIEW:

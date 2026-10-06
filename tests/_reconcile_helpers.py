@@ -19,8 +19,8 @@ from typing import Any
 
 import pytest
 
-from cw.config import load_state, sessions_lock
-from cw.exceptions import SessionsLockReentryError
+from cw._lock_guard import LockRank, is_rank_held
+from cw.config import load_state
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     ClientConfig,
@@ -52,15 +52,10 @@ _FAKE_SURFACE_REF = "fake-short-id"
 def probe_sessions_lock_free() -> bool:
     """Return True iff this thread does NOT hold ``sessions_lock`` right now.
 
-    Uses the lock's public re-entry contract rather than its private
-    thread-local flag: a same-thread acquisition raises
-    ``SessionsLockReentryError`` exactly when the lock is already held.
+    Reads the lock guard's per-thread held stack (ADR-0019). Probing by
+    re-acquiring the lock would itself be a recorded re-entry.
     """
-    try:
-        with sessions_lock(bounded=True):
-            return True
-    except SessionsLockReentryError:
-        return False
+    return not is_rank_held(LockRank.SESSIONS)
 
 
 class LockProbeDaemon(FakeNativeDaemonClient):

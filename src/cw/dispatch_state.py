@@ -22,6 +22,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from cw._lock_guard import LockRank, lock_guard
 from cw.atomic import atomic_write_text
 from cw.config import STATE_DIR, refuse_real_state_write, state_dir
 from cw.events import record_event
@@ -170,37 +171,23 @@ def _open_pr_probe_key(client: str, ticket_id: str) -> str:
 def dispatch_state_lock() -> Iterator[None]:
     """Acquire an exclusive file lock over the DISPATCH_STATE_FILE write window.
 
-    Mirror of ``concurrency_override_lock()``/``clients_lock()``. Hold this
-    across every load→mutate→write sequence in
+    Hold this across every load→mutate→write sequence in
     ``merge_and_save_usage_limited_until``, ``save_availability_probe_cache``,
     and ``save_main_drift_latches`` so concurrent ``cw`` processes cannot
-    clobber each other's edits (lost update, #1256). The lock is advisory
-    (``fcntl.flock``) and per-open-fd,
-    so sequential re-acquisitions in the same process are safe.
-    Do NOT nest: acquiring while already holding will deadlock.
-
-    Lock ordering: ``sessions_lock()`` → ``dispatch_state_lock()`` is
-    permitted and occurs today, via ``save_main_drift_latches`` called from
-    inside ``reconcile/core.py``'s ``with sessions_lock():`` block through
-    ``_act_on_main_drift_candidates`` (``main_drift.py:162``). The reverse
-    ordering is forbidden and never occurs in the current call graph. The one
-    historical cross-lock path (the RFC 0010 P4 review-recipe act phase
-    re-entering ``reconcile()`` from inside ``sessions_lock()``) was fixed by
-    #1229: review-recipe dispatches now run post-lock, after ``reconcile()``
-    releases ``sessions_lock``. The ``SessionsLockReentryError`` guard (#1228)
-    remains as a backstop, so a regression of that shape fails at its own
-    ``reconcile()`` call, before it can reach any ``dispatch_state_lock()``
-    acquisition.
+    clobber each other's edits (lost update, #1256). Rank STATE, so
+    ``sessions_lock()`` → ``dispatch_state_lock()`` is permitted (reconcile's
+    main-drift act takes it) and the reverse is not. Lock discipline: ADR-0019.
     """
-    state_dir().mkdir(parents=True, exist_ok=True)
     lock_path = dispatch_state_lock_file()
-    fd = lock_path.open("w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
+    with lock_guard("dispatch_state", lock_path, LockRank.STATE):
+        state_dir().mkdir(parents=True, exist_ok=True)
+        fd = lock_path.open("w")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
 
 
 def _load_dispatch_state_raw() -> dict[str, Any]:

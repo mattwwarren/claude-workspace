@@ -15,6 +15,7 @@ import pytest
 import yaml
 
 from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
+from cw._lock_guard import LockRank, is_rank_held
 from cw.auto_dev_result import IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
 from cw.codex_background import _default_background, join_outstanding_codex_threads
 from cw.config import (
@@ -5092,10 +5093,8 @@ def test_dispatch_tick_runs_diagnostics_cleanup_outside_lock(
     captured: dict[str, object] = {}
 
     def _spy(*, retention_hours: int) -> int:
-        from cw.config import _sessions_lock_state
-
         captured["retention_hours"] = retention_hours
-        captured["lock_held"] = getattr(_sessions_lock_state, "held", False)
+        captured["lock_held"] = is_rank_held(LockRank.SESSIONS)
         captured["calls"] = int(captured.get("calls", 0)) + 1
         return 0
 

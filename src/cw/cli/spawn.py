@@ -470,7 +470,7 @@ def _spawn_complete_impl(
                         )
                         raise CwError(already_done_task_msg)
 
-            # Step 1: Record event (record_event uses _inbox_lock — no deadlock risk)
+            # Step 1: Record event (the leaf inbox lock nests here, ADR-0019)
             event = record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
 
             # Step 2: Apply to queue
@@ -483,7 +483,7 @@ def _spawn_complete_impl(
                 sess.completed_reason = CompletionReason.USER
             save_state(state)
 
-    # Advance cursor after lock (advance_cursor uses inbox lock — safe)
+    # Advance cursor after the lock (advance_cursor takes the leaf inbox lock)
     advance_cursor(_DISPATCH_CONSUMER, event.id)
 
     # daemon.stop outside lock — best-effort, slow (up to 10s timeout)

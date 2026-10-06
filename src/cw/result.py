@@ -539,8 +539,8 @@ def emit_result(
     Thin lock-acquiring wrapper over emit_result_locked() (mirrors
     cw.dev_queue.approval.approve_ticket). Use this from any caller not
     already holding sessions_lock(); use emit_result_locked() directly from
-    inside an existing `with sessions_lock():` block to avoid the
-    non-reentrant flock deadlocking (see SessionsLockReentryError).
+    inside an existing `with sessions_lock():` block: a nested acquisition
+    raises CwLockReentrancyError (ADR-0019).
     """
     with sessions_lock():
         return emit_result_locked(payload, session_id, source=source)

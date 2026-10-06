@@ -97,10 +97,9 @@ def _act_escalate_merge_block(
 
     Stamping/clearing the latch IS a dev-queue write (GitHub #1206: all four
     review-recipe act phases now perform this same kind of write — a latch
-    field, not a status transition; none remain read-only). ``record_event``
-    nests the inbox lock INSIDE
-    ``dev_queue_lock`` (never the reverse), so emitting under the lock is
-    deadlock-safe (same ordering as ``cw.reconcile.escalation``).
+    field, not a status transition; none remain read-only). Emitting under
+    the lock is allowed: the inbox lock is a leaf below ``dev_queue_lock``
+    (ADR-0019; same ordering as ``cw.reconcile.escalation``).
     """
     resolved_now = now if now is not None else datetime.now(UTC)
     by_key = {(c.ticket_id, c.client): c for c in candidates}

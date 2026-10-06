@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from cw import config as config_module
+from cw._lock_guard import LockRank, is_rank_held
 from cw.auto_dev_result import AutoDevResult
 from cw.config import (
     load_state,
@@ -1243,15 +1243,15 @@ class TestFixDispatchRunsPostLock:
 
 
 def _sessions_lock_held() -> bool:
-    """The thread-local flag ``sessions_lock()``'s reentry guard keys on."""
-    return bool(getattr(config_module._sessions_lock_state, "held", False))
+    """Whether this thread holds ``sessions_lock()`` (the guard's held stack)."""
+    return is_rank_held(LockRank.SESSIONS)
 
 
 class TestReviewRecipeDispatchRunsPostLock:
     """#1229: the address_review spawn and the auto_fix_ci dispatch tick both
     re-acquire sessions_lock(), so they must run AFTER reconcile()'s own hold
     releases. Before the deferral they ran inside _reconcile_locked, hit
-    SessionsLockReentryError, and the recipe's ``except CwError`` swallowed it
+    CwLockReentrancyError, and the recipe's ``except CwError`` swallowed it
     -- address_review never spawned."""
 
     @staticmethod
@@ -1297,7 +1297,7 @@ class TestReviewRecipeDispatchRunsPostLock:
         """Regression (#1229): through the REAL spawn_create_impl (fake daemon)
         and a REAL sessions_lock held by reconcile(), the /address-review
         worker is spawned and registered. On the unfixed tree spawn_create_impl's
-        own ``with sessions_lock():`` raised SessionsLockReentryError after the
+        own ``with sessions_lock():`` raised CwLockReentrancyError after the
         daemon spawn, the recipe swallowed it into a PR_ACTION_FAILED, and no
         session row was ever persisted."""
         self._seed_address_review_row(tmp_config_dir, make_git_repo("ar-spawn"))
