@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.66.0] - 2026-10-06
+
 ### Added
 
 - **Every state-file lock now refuses a same-thread re-entry, and lock order is checked (#1233).** A new guard, `cw._lock_guard.lock_guard`, wraps the ten state-file lock context managers: `sessions_lock`, the dev-queue and plan locks, `concurrency_override_lock`, `clients_lock`, `dispatch_state_lock`, the focus lock, and the event inbox, session inbox and history locks. It keeps a per-thread stack of held locks and checks it before any `open()` or `flock()` syscall. Re-entering a lock the thread already holds raises `CwLockReentrancyError` instead of hanging forever in `flock()`; before this only `sessions_lock` had that check. Locks are ranked `SESSIONS` < `STATE` < `LEAF`: taking a lower rank while a higher one is held, or anything while a leaf (inbox or history) lock is held, raises `CwLockOrderError` when `CW_LOCK_DEBUG=1` and otherwise logs one WARNING per violating acquisition on logger `cw._lock_guard` and proceeds. Another thread waiting on the same lock is not a re-entry and still blocks. Five lock context managers stay unguarded by design (`dispatch_loop_lock`, `_hook_context._context_lock`, `_audit_outbox_lock`, `codex_legacy_marker_lock`, `_resume_trigger_lock`), and an AST test fails when a new `flock` context manager is neither guarded nor listed with a reason.
