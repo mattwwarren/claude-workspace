@@ -1349,8 +1349,10 @@ class TestReviewRecipeDispatchRunsPostLock:
         held_at_spawn: list[bool] = []
         real_prepare = reconcile_core.run_review_recipes
 
-        def _prepare_spy(*, config: OrchestratorConfig, deferred: Any) -> Any:
-            result = real_prepare(config=config, deferred=deferred)
+        def _prepare_spy(
+            *, config: OrchestratorConfig, jobs: DeferredReconcileJobs
+        ) -> list[str]:
+            result = real_prepare(config=config, jobs=jobs)
             held_at_prepare.append(_sessions_lock_held())
             return result
 

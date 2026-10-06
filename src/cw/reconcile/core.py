@@ -128,11 +128,12 @@ def _run_terminal_backstops_and_sweeps(
     branch) to keep ``_reconcile_locked``'s statement count under the
     PLR0915 limit.
 
-    *deferred* is ``reconcile()``'s post-lock job sink (#1232). Its review
-    member (#1229), or ``None``, is forwarded to ``run_review_recipes``, which
-    appends the jobs it prepares to it as it goes (the jobs are NOT returned,
-    so a later step raising cannot lose them) and skips the dispatching
-    recipes entirely when it is ``None``.
+    *deferred* is ``reconcile()``'s post-lock job sink (#1232), handed to
+    ``run_review_recipes``, which appends the jobs it prepares to it as it
+    goes (the jobs are NOT returned, so a later step raising cannot lose
+    them): the reviewer request's gh call on ``post_lock``, the dispatching
+    recipes' jobs on its review member (#1229) -- and those recipes are
+    skipped entirely when that member is ``None``.
 
     Returns (timed_out_ticket_ids, completed_silent_ticket_ids).
     """
@@ -145,7 +146,7 @@ def _run_terminal_backstops_and_sweeps(
     # but scoped to this tick's clients: never another client's session.
     run_codex_live_writer_reparks(now=now, config=config, clients=clients)
     run_gate_recipes(now=now, config=config)
-    run_review_recipes(config=config, deferred=deferred.review)
+    run_review_recipes(config=config, jobs=deferred)
     run_escalation_sweep(now=now)
     return timed_out_ticket_ids, completed_silent_ticket_ids
 

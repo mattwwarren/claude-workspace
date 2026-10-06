@@ -10,9 +10,12 @@ no_reviewer row (write-free; no strategy read in detect — that lives in the ac
 phase). ``_act_request_reviewer`` re-validates each candidate under
 ``dev_queue_lock()``, resolves the strategy, emits ``PR_ACTION_TAKEN`` (durably,
 BEFORE the gh call), stamps the one-shot ``request_reviewer_fired_at`` latch
-(GitHub #1206), and — strictly after the lock releases — requests the reviewer. A
-``ci`` mode is a silent policy skip; an unresolvable client / missing handle /
-absent pr_url / failed gh call emits ``PR_ACTION_FAILED`` instead.
+(GitHub #1206), and returns the gh call as a :class:`_ReviewerJob`.
+``run_review_recipes`` queues each job on ``reconcile()``'s post-lock sink, so
+:func:`_dispatch_request_reviewer` requests the reviewer only after
+``sessions_lock`` releases (#1232). A ``ci`` mode is a silent policy skip; an
+unresolvable client / missing handle / absent pr_url / failed gh call emits
+``PR_ACTION_FAILED`` instead.
 
 Shared cross-recipe infrastructure (the pure ``_detect_by_attention_state``
 classifier, the act-phase helpers, and the recipe/attention/payload constants)
@@ -83,6 +86,10 @@ class _ReviewerJob(NamedTuple):
     pr_url: str
     handle: str
     ticket_id: str
+    # The row's client: with ticket_id, names the job on the post-lock sink
+    # (``reviewer_request:<client>:<ticket_id>``, #1232). ticket_id alone is a
+    # per-repo issue number, not unique across clients.
+    client: str
     payload_base: dict[str, object]
     # Client repo dir the deferred gh call is scoped to (GitHub #1269/#1279).
     # Mirrors _DispatchJob.client_cfg: resolved under the lock, carried across
@@ -173,6 +180,7 @@ def _prepare_request_reviewer_job(
         pr_url=task.pr_url,
         handle=strategy.handle,
         ticket_id=task.ticket_id,
+        client=task.client,
         payload_base=payload_base,
         cwd=_git_dir(client_cfg),
     )
@@ -224,8 +232,8 @@ def _act_request_reviewer(
     now: datetime | None = None,
     config: OrchestratorConfig | None = None,
     repeat_fire_counts: dict[tuple[str, str, str], int] | None = None,
-) -> list[str]:
-    """Act phase for request_reviewer: re-validate + resolve strategy, then gh.
+) -> list[_ReviewerJob]:
+    """Act phase for request_reviewer: re-validate + resolve strategy; return jobs.
 
     Mirrors ``_act_address_review``'s lock/re-load/emit-before-action/deferred-
     side-effect shape. Under one ``dev_queue_lock()``:
@@ -241,10 +249,11 @@ def _act_request_reviewer(
     Stamping/clearing the latch IS a dev-queue write (GitHub #1206: all four
     review-recipe act phases now perform this same kind of write — a latch
     field, not a status transition; none remain read-only), saved before the
-    lock releases. The ``add_pr_reviewer`` gh call runs
-    strictly after the lock releases. Returns the ticket_ids for which a
-    reviewer request actually succeeded (a failed gh call is excluded and
-    corrected via ``PR_ACTION_FAILED``).
+    lock releases. Makes no gh call: returns one :class:`_ReviewerJob` per
+    fired candidate, which ``run_review_recipes`` queues on ``reconcile()``'s
+    post-lock sink so :func:`_dispatch_request_reviewer` runs only after
+    ``sessions_lock`` releases (#1232). A failed gh call there is corrected
+    via ``PR_ACTION_FAILED``.
     """
     resolved_now = now if now is not None else datetime.now(UTC)
     by_key = {(c.ticket_id, c.client): c for c in candidates}
@@ -274,9 +283,4 @@ def _act_request_reviewer(
                 changed = True
         if changed:
             save_dev_queue(store)
-    acted: list[str] = []
-    for job in jobs:
-        ticket_id = _dispatch_request_reviewer(job)
-        if ticket_id is not None:
-            acted.append(ticket_id)
-    return acted
+    return jobs

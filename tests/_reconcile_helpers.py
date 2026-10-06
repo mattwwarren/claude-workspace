@@ -36,6 +36,7 @@ from cw.models import (
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile._shared import _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
+from cw.reconcile.review_recipes import ReviewRecipeCandidate
 from tests.conftest import (
     _make_daemon_session,
     _write_idle_transcript,
@@ -99,6 +100,24 @@ def call_and_drain[T](
     result = fn(*args, deferred=sink, **kwargs)
     run_post_lock_jobs(sink)
     return result
+
+
+def act_then_dispatch[J](
+    act: Callable[..., list[J]],
+    dispatch: Callable[[list[J]], list[str]],
+    candidates: list[ReviewRecipeCandidate],
+    **kwargs: object,
+) -> list[str]:
+    """Run a review-recipe act phase, then dispatch the jobs it returned.
+
+    The review-recipe act phases only prepare jobs under ``dev_queue_lock()``
+    (#1229, #1232); ``reconcile()`` runs them after ``sessions_lock``
+    releases. This stands in for that act-then-drain for tests that exercise
+    act + dispatch end to end without a full ``reconcile()``: *act* is called
+    as ``act(candidates, **kwargs)``, its job list goes to *dispatch*, and the
+    acted ticket ids *dispatch* reports are returned.
+    """
+    return dispatch(act(candidates, **kwargs))
 
 
 def _mk_session(

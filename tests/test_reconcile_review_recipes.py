@@ -57,6 +57,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.pr_hydrate import PrAttentionState
+from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 from cw.reconcile.review_recipes import (
     _REPEAT_FIRE_ATTENTION_REASON as _REPEAT_FIRE_REASON,
 )
@@ -88,9 +89,16 @@ from cw.reconcile.review_recipes import (
 from cw.reconcile.review_recipes import (
     _detect_repeat_fire_counts as _real_detect_repeat_fire_counts,
 )
+from cw.reconcile.review_recipes.address_review import _DispatchJob
+from cw.reconcile.review_recipes.auto_fix_ci import _RedispatchJob
+from cw.reconcile.review_recipes.request_reviewer import (
+    _dispatch_request_reviewer,
+    _ReviewerJob,
+)
 from cw.review_strategy import ReviewStrategy
 from cw.worktree import FetchOutcome, FetchResult, create_worktree, worktree_path_for
 from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests._reconcile_helpers import act_then_dispatch
 
 # Reuse the sibling test helpers rather than re-deriving TicketTask / PrState
 # construction: _make_task accepts **kwargs (pr_url / pr_state / session_id /
@@ -151,43 +159,43 @@ def _enabling_clients() -> dict[str, ClientConfig]:
     }
 
 
-def _act_and_dispatch_address_review(
-    candidates: list[ReviewRecipeCandidate], **kwargs: Any
-) -> list[str]:
-    """Act phase + immediate dispatch of the returned jobs; the acted ticket_ids.
+# Dispatch halves for the shared ``act_then_dispatch`` helper
+# (tests/_reconcile_helpers.py). Since #1229/#1232 the review-recipe act phases
+# only prepare jobs; ``reconcile()`` runs them after ``sessions_lock``
+# releases. The tests that exercise act + dispatch end to end (emit-before-
+# dispatch, latch, failure trail) pair each real act phase with the SAME
+# dispatch code ``reconcile()`` reaches. The real act-phase return shapes are
+# pinned directly by tests that call the act phases themselves.
 
-    Since #1229 the real ``_act_address_review`` only prepares jobs
-    (``list[_DispatchJob]``); ``reconcile()`` executes them after
-    ``sessions_lock`` releases. This file-local helper (deliberately NOT named
-    like the production function) serves the tests that exercise act-phase +
-    dispatch behavior end to end (emit-before-dispatch, latch, failure trail)
-    without a full ``reconcile()`` -- it runs the SAME
-    ``dispatch_deferred_review_jobs`` code ``reconcile()`` does. The real
-    act-phase return shape is pinned directly by tests that call
-    ``_act_address_review`` itself.
-    """
-    jobs = _act_address_review(candidates, **kwargs)
+
+def _dispatch_address_review_jobs(jobs: list[_DispatchJob]) -> list[str]:
     return dispatch_deferred_review_jobs(DeferredReviewDispatch(address_review=jobs))
 
 
-def _act_and_dispatch_auto_fix_ci(
-    candidates: list[ReviewRecipeCandidate], **kwargs: Any
-) -> list[str]:
-    """auto_fix_ci twin of :func:`_act_and_dispatch_address_review`."""
-    jobs = _act_auto_fix_ci(candidates, **kwargs)
+def _dispatch_auto_fix_ci_jobs(jobs: list[_RedispatchJob]) -> list[str]:
     return dispatch_deferred_review_jobs(DeferredReviewDispatch(auto_fix_ci=jobs))
 
 
+def _dispatch_reviewer_jobs(jobs: list[_ReviewerJob]) -> list[str]:
+    acted = [_dispatch_request_reviewer(job) for job in jobs]
+    return [ticket_id for ticket_id in acted if ticket_id is not None]
+
+
 def _run_review_recipes_and_dispatch(*, config: OrchestratorConfig) -> list[str]:
-    """``run_review_recipes`` with a sink, then dispatch it; the full acted ids.
+    """``run_review_recipes`` with a sink, then drain it; the full acted ids.
 
     Mirrors what a dispatch-loop ``reconcile()`` does: hand the real
-    ``run_review_recipes`` a sink, then drain it. Order matches the pre-#1229
-    return (address_review, auto_fix_ci, then the inline recipes).
+    ``run_review_recipes`` a sink, then drain it -- the post-lock jobs (the
+    reviewer request, #1232) first, then the review dispatch. The reviewer
+    request's acted id is not reported (its job's return value is discarded,
+    as in ``reconcile()``), so the result is address_review, auto_fix_ci, then
+    escalate_merge_block.
     """
-    sink = DeferredReviewDispatch()
-    acted = run_review_recipes(config=config, deferred=sink)
-    return dispatch_deferred_review_jobs(sink) + acted
+    jobs = DeferredReconcileJobs(review=DeferredReviewDispatch())
+    acted = run_review_recipes(config=config, jobs=jobs)
+    run_post_lock_jobs(jobs)
+    assert jobs.review is not None
+    return dispatch_deferred_review_jobs(jobs.review) + acted
 
 
 @pytest.mark.parametrize(
@@ -298,11 +306,11 @@ def test_run_review_recipes_loads_from_dev_queue(
 
 def test_run_review_recipes_master_switch_off_defers_nothing() -> None:
     """The real entry point with the switch off acts on nothing and leaves the
-    caller's sink empty (#1229)."""
-    sink = DeferredReviewDispatch()
+    caller's sink empty (#1229, #1232)."""
+    jobs = DeferredReconcileJobs(review=DeferredReviewDispatch())
 
-    assert run_review_recipes(config=OrchestratorConfig(), deferred=sink) == []
-    assert sink == DeferredReviewDispatch()
+    assert run_review_recipes(config=OrchestratorConfig(), jobs=jobs) == []
+    assert jobs == DeferredReconcileJobs(review=DeferredReviewDispatch())
 
 
 def test_act_phases_return_jobs_and_dispatch_nothing(
@@ -335,7 +343,9 @@ def test_act_phases_return_jobs_and_dispatch_nothing(
     save_dev_queue(DevQueueStore(tasks=[ar_task, ci_task]))
 
     deferred = DeferredReviewDispatch()
-    acted = run_review_recipes(config=_config(), deferred=deferred)
+    acted = run_review_recipes(
+        config=_config(), jobs=DeferredReconcileJobs(review=deferred)
+    )
 
     assert acted == []
     assert [j.ticket_id for j in deferred.address_review] == ["GEN-1"]
@@ -359,10 +369,10 @@ def test_run_review_recipes_without_a_sink_skips_the_dispatching_recipes(
     make_git_repo: Any,
     stub_spawn: _SpawnRecorder,
 ) -> None:
-    """#1229: ``deferred=None`` (a reconcile() call that will not drain a sink)
-    runs neither address_review nor auto_fix_ci -- no latch stamped, no
-    PR_ACTION_TAKEN -- while the inline recipes (request_reviewer,
-    escalate_merge_block) still run."""
+    """#1229: a sink with no review member (a reconcile() call that will not
+    dispatch review jobs) runs neither address_review nor auto_fix_ci -- no
+    latch stamped, no PR_ACTION_TAKEN -- while request_reviewer and
+    escalate_merge_block still run."""
     write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     ar_task = _cr_task(
         ticket_id="GEN-1",
@@ -383,7 +393,7 @@ def test_run_review_recipes_without_a_sink_skips_the_dispatching_recipes(
     )
     save_dev_queue(DevQueueStore(tasks=[ar_task, ci_task, mb_task]))
 
-    acted = run_review_recipes(config=_config(), deferred=None)
+    acted = run_review_recipes(config=_config(), jobs=DeferredReconcileJobs())
 
     assert acted == ["GEN-3"]
     assert stub_spawn.calls == []
@@ -419,7 +429,7 @@ def test_run_review_recipes_appends_each_recipes_jobs_before_the_next_runs(
     sink = DeferredReviewDispatch()
 
     with pytest.raises(RuntimeError, match="later recipe exploded"):
-        run_review_recipes(config=_config(), deferred=sink)
+        run_review_recipes(config=_config(), jobs=DeferredReconcileJobs(review=sink))
 
     assert [j.ticket_id for j in sink.address_review] == ["GEN-1"]
     assert load_dev_queue().tasks[0].address_review_fired_at is not None
@@ -705,8 +715,11 @@ def test_pr_action_taken_emitted_before_mutation(
 
     stub_spawn.side_effect = _assert_taken_recorded
 
-    acted = _act_and_dispatch_address_review(
-        [_candidate_for(task)], clients=load_effective_clients()
+    acted = act_then_dispatch(
+        _act_address_review,
+        _dispatch_address_review_jobs,
+        [_candidate_for(task)],
+        clients=load_effective_clients(),
     )
 
     assert acted == [task.ticket_id]
@@ -772,7 +785,9 @@ def test_lane_in_needs_attention_payload_matches_task_lane(
         review_recipe_repeat_fire_window_minutes=20,
     )
 
-    acted = _act_and_dispatch_address_review(
+    acted = act_then_dispatch(
+        _act_address_review,
+        _dispatch_address_review_jobs,
         [_candidate_for(task)],
         clients=load_effective_clients(),
         config=cfg,
@@ -825,7 +840,12 @@ def test_stale_attention_state_skips_silently(
     )
 
     assert (
-        _act_and_dispatch_address_review([candidate], clients=load_effective_clients())
+        act_then_dispatch(
+            _act_address_review,
+            _dispatch_address_review_jobs,
+            [candidate],
+            clients=load_effective_clients(),
+        )
         == []
     )
     assert stub_spawn.calls == []
@@ -869,8 +889,11 @@ def test_no_self_deadlock_under_dev_queue_lock(
 
     stub_spawn.side_effect = _probe_lock_released
 
-    assert _act_and_dispatch_address_review(
-        [_candidate_for(task)], clients=load_effective_clients()
+    assert act_then_dispatch(
+        _act_address_review,
+        _dispatch_address_review_jobs,
+        [_candidate_for(task)],
+        clients=load_effective_clients(),
     ) == [task.ticket_id]
 
 
@@ -930,7 +953,9 @@ def test_reconcile_reentry_guard_fires_and_is_swallowed(
     monkeypatch.setattr("cw.spawn.spawn_create_impl", _spawn_reentering_the_lock)
 
     with sessions_lock():
-        acted = _act_and_dispatch_address_review(
+        acted = act_then_dispatch(
+            _act_address_review,
+            _dispatch_address_review_jobs,
             [_candidate(task, RECIPE_ADDRESS_REVIEW, "changes_requested")],
             clients=load_effective_clients(),
         )
@@ -980,7 +1005,9 @@ def test_action_failure_emits_pr_action_failed(
     stub_spawn.side_effect = _raise_for_gen1
 
     with caplog.at_level("WARNING"):
-        acted = _act_and_dispatch_address_review(
+        acted = act_then_dispatch(
+            _act_address_review,
+            _dispatch_address_review_jobs,
             [_candidate_for(task1), _candidate_for(task2)],
             clients=load_effective_clients(),
         )
@@ -1024,8 +1051,11 @@ def test_unparseable_pr_url_emits_pr_action_failed(
 
     with caplog.at_level("WARNING"):
         assert (
-            _act_and_dispatch_address_review(
-                [_candidate_for(task)], clients=load_effective_clients()
+            act_then_dispatch(
+                _act_address_review,
+                _dispatch_address_review_jobs,
+                [_candidate_for(task)],
+                clients=load_effective_clients(),
             )
             == []
         )
@@ -1055,8 +1085,11 @@ def test_missing_client_emits_pr_action_failed(
 
     with caplog.at_level("WARNING"):
         assert (
-            _act_and_dispatch_address_review(
-                [_candidate_for(task)], clients=load_effective_clients()
+            act_then_dispatch(
+                _act_address_review,
+                _dispatch_address_review_jobs,
+                [_candidate_for(task)],
+                clients=load_effective_clients(),
             )
             == []
         )
@@ -1082,8 +1115,11 @@ def test_missing_worktree_emits_pr_action_failed(
 
     with caplog.at_level("WARNING"):
         assert (
-            _act_and_dispatch_address_review(
-                [_candidate_for(task)], clients=load_effective_clients()
+            act_then_dispatch(
+                _act_address_review,
+                _dispatch_address_review_jobs,
+                [_candidate_for(task)],
+                clients=load_effective_clients(),
             )
             == []
         )
@@ -1108,8 +1144,11 @@ def test_address_review_fires_once_per_episode(
     save_dev_queue(DevQueueStore(tasks=[task]))
     candidate = _candidate_for(task)
 
-    acted1 = _act_and_dispatch_address_review(
-        [candidate], clients=load_effective_clients()
+    acted1 = act_then_dispatch(
+        _act_address_review,
+        _dispatch_address_review_jobs,
+        [candidate],
+        clients=load_effective_clients(),
     )
     assert acted1 == [task.ticket_id]
     assert load_dev_queue().tasks[0].address_review_fired_at is not None
@@ -1118,8 +1157,11 @@ def test_address_review_fires_once_per_episode(
     # (simulating hydration lag): detect still yields a candidate every tick,
     # but the latch blocks a re-fire.
     for _ in range(5):
-        acted_n = _act_and_dispatch_address_review(
-            [candidate], clients=load_effective_clients()
+        acted_n = act_then_dispatch(
+            _act_address_review,
+            _dispatch_address_review_jobs,
+            [candidate],
+            clients=load_effective_clients(),
         )
         assert acted_n == []
     taken = [
@@ -1144,8 +1186,11 @@ def test_address_review_latch_clears_on_episode_end(
     save_dev_queue(DevQueueStore(tasks=[task]))
     candidate = _candidate_for(task)
 
-    assert _act_and_dispatch_address_review(
-        [candidate], clients=load_effective_clients()
+    assert act_then_dispatch(
+        _act_address_review,
+        _dispatch_address_review_jobs,
+        [candidate],
+        clients=load_effective_clients(),
     ) == [task.ticket_id]
 
     # Episode ends: hydration moves the PR off changes_requested.
@@ -1154,7 +1199,15 @@ def test_address_review_latch_clears_on_episode_end(
     save_dev_queue(store)
 
     # Clear pass runs even with zero candidates.
-    assert _act_and_dispatch_address_review([], clients=load_effective_clients()) == []
+    assert (
+        act_then_dispatch(
+            _act_address_review,
+            _dispatch_address_review_jobs,
+            [],
+            clients=load_effective_clients(),
+        )
+        == []
+    )
     assert load_dev_queue().tasks[0].address_review_fired_at is None
 
     # Genuine re-entry into changes_requested fires again (episode semantics).
@@ -1163,8 +1216,11 @@ def test_address_review_latch_clears_on_episode_end(
         state="OPEN", attention_state="changes_requested"
     )
     save_dev_queue(store)
-    assert _act_and_dispatch_address_review(
-        [candidate], clients=load_effective_clients()
+    assert act_then_dispatch(
+        _act_address_review,
+        _dispatch_address_review_jobs,
+        [candidate],
+        clients=load_effective_clients(),
     ) == [task.ticket_id]
 
 
@@ -1192,8 +1248,11 @@ def test_repo_mismatch_emits_pr_action_failed(
     task = _cr_task(worktree_path=worktree)  # pr_url -> acme/widgets
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    acted = _act_and_dispatch_address_review(
-        [_candidate_for(task)], clients=load_effective_clients()
+    acted = act_then_dispatch(
+        _act_address_review,
+        _dispatch_address_review_jobs,
+        [_candidate_for(task)],
+        clients=load_effective_clients(),
     )
 
     assert acted == []
@@ -1216,8 +1275,11 @@ def test_repo_match_dispatches_normally(
     task = _cr_task(worktree_path=worktree)
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    acted = _act_and_dispatch_address_review(
-        [_candidate_for(task)], clients=load_effective_clients()
+    acted = act_then_dispatch(
+        _act_address_review,
+        _dispatch_address_review_jobs,
+        [_candidate_for(task)],
+        clients=load_effective_clients(),
     )
 
     assert acted == [task.ticket_id]
@@ -1236,8 +1298,11 @@ def test_repo_unresolvable_dispatches_normally(
     task = _cr_task(worktree_path=worktree)
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    acted = _act_and_dispatch_address_review(
-        [_candidate_for(task)], clients=load_effective_clients()
+    acted = act_then_dispatch(
+        _act_address_review,
+        _dispatch_address_review_jobs,
+        [_candidate_for(task)],
+        clients=load_effective_clients(),
     )
 
     assert acted == [task.ticket_id]
@@ -1259,8 +1324,11 @@ def test_repo_mismatch_override_dispatches_and_logs(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     with caplog.at_level("WARNING"):
-        acted = _act_and_dispatch_address_review(
-            [_candidate_for(task)], clients=load_effective_clients()
+        acted = act_then_dispatch(
+            _act_address_review,
+            _dispatch_address_review_jobs,
+            [_candidate_for(task)],
+            clients=load_effective_clients(),
         )
 
     assert acted == [task.ticket_id]
@@ -1376,7 +1444,9 @@ def test_act_auto_fix_ci_requeues_completed_row_in_place(
 
     monkeypatch.setattr("cw.dev_queue.requeue_ticket", _requeue_after_event_is_durable)
 
-    acted = _act_and_dispatch_auto_fix_ci(
+    acted = act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1419,7 +1489,9 @@ def test_act_auto_fix_ci_existing_blocked_row_is_left_alone(
     save_dev_queue(DevQueueStore(tasks=[task]))
     store_before = load_dev_queue()
 
-    acted = _act_and_dispatch_auto_fix_ci(
+    acted = act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1467,7 +1539,9 @@ def test_act_auto_fix_ci_succeeds_while_the_dispatch_loop_lock_is_held(
     fd = lock_path.open("r+")
     fcntl.flock(fd, fcntl.LOCK_EX)
     try:
-        acted = _act_and_dispatch_auto_fix_ci(
+        acted = act_then_dispatch(
+            _act_auto_fix_ci,
+            _dispatch_auto_fix_ci_jobs,
             [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
             clients=load_effective_clients(),
         )
@@ -1497,7 +1571,9 @@ def test_act_auto_fix_ci_stale_row_silent_skip(
     called: list[Any] = []
     monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: called.append(t) or True)
 
-    acted = _act_and_dispatch_auto_fix_ci(
+    acted = act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1536,7 +1612,9 @@ def test_act_auto_fix_ci_requeue_raises_emits_pr_action_failed(
     monkeypatch.setattr("cw.dev_queue.requeue_ticket", _boom)
 
     with caplog.at_level("WARNING"):
-        acted = _act_and_dispatch_auto_fix_ci(
+        acted = act_then_dispatch(
+            _act_auto_fix_ci,
+            _dispatch_auto_fix_ci_jobs,
             [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
             clients=load_effective_clients(),
         )
@@ -1583,7 +1661,9 @@ def test_auto_fix_ci_live_session_refusal_clears_latch(
     task = _seed_ci_failing_completed_row(tmp_config_dir)
     monkeypatch.setattr("cw.dev_queue.requeue_ticket", _raise_live_session)
 
-    acted = _act_and_dispatch_auto_fix_ci(
+    acted = act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1610,7 +1690,9 @@ def test_auto_fix_ci_roster_unreadable_refusal_clears_latch(
     roster.roster_unreadable = True
     monkeypatch.setattr("cw.dev_queue.requeue.get_native_daemon_client", lambda: roster)
 
-    acted = _act_and_dispatch_auto_fix_ci(
+    acted = act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1647,7 +1729,9 @@ def test_auto_fix_ci_live_session_refusal_keeps_concurrently_changed_latch(
 
     monkeypatch.setattr("cw.dev_queue.requeue_ticket", _race_then_refuse)
 
-    _act_and_dispatch_auto_fix_ci(
+    act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1670,7 +1754,9 @@ def test_auto_fix_ci_live_session_refusal_row_vanished_is_noop(
 
     monkeypatch.setattr("cw.dev_queue.requeue_ticket", _remove_then_refuse)
 
-    acted = _act_and_dispatch_auto_fix_ci(
+    acted = act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1689,7 +1775,12 @@ def test_auto_fix_ci_fires_again_after_live_session_latch_cleared(
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
     monkeypatch.setattr("cw.dev_queue.requeue_ticket", _raise_live_session)
 
-    first = _act_and_dispatch_auto_fix_ci([candidate], clients=load_effective_clients())
+    first = act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
+        [candidate],
+        clients=load_effective_clients(),
+    )
     assert first == []
 
     requeued: list[str] = []
@@ -1700,8 +1791,11 @@ def test_auto_fix_ci_fires_again_after_live_session_latch_cleared(
 
     monkeypatch.setattr("cw.dev_queue.requeue_ticket", _requeue_ok)
 
-    second = _act_and_dispatch_auto_fix_ci(
-        [candidate], clients=load_effective_clients()
+    second = act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
+        [candidate],
+        clients=load_effective_clients(),
     )
 
     assert second == [task.ticket_id]
@@ -1723,7 +1817,9 @@ def test_auto_fix_ci_non_live_session_cwerror_still_latches(
 
     monkeypatch.setattr("cw.dev_queue.requeue_ticket", _boom)
 
-    acted = _act_and_dispatch_auto_fix_ci(
+    acted = act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1744,8 +1840,11 @@ def test_auto_fix_ci_fires_once_per_episode(
     save_dev_queue(DevQueueStore(tasks=[task]))
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
 
-    acted1 = _act_and_dispatch_auto_fix_ci(
-        [candidate], clients=load_effective_clients()
+    acted1 = act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
+        [candidate],
+        clients=load_effective_clients(),
     )
     assert acted1 == [task.ticket_id]
     assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is not None
@@ -1754,8 +1853,11 @@ def test_auto_fix_ci_fires_once_per_episode(
     # hydration lag, per the ticket's acceptance criterion): detect still
     # yields a candidate every tick, but the latch blocks a re-fire.
     for _ in range(5):
-        acted_n = _act_and_dispatch_auto_fix_ci(
-            [candidate], clients=load_effective_clients()
+        acted_n = act_then_dispatch(
+            _act_auto_fix_ci,
+            _dispatch_auto_fix_ci_jobs,
+            [candidate],
+            clients=load_effective_clients(),
         )
         assert acted_n == []
     taken = [
@@ -1774,8 +1876,11 @@ def test_auto_fix_ci_latch_clears_on_episode_end(
     save_dev_queue(DevQueueStore(tasks=[task]))
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
 
-    assert _act_and_dispatch_auto_fix_ci(
-        [candidate], clients=load_effective_clients()
+    assert act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
+        [candidate],
+        clients=load_effective_clients(),
     ) == [task.ticket_id]
 
     # Episode ends: hydration moves the PR off ci_failing.
@@ -1784,15 +1889,26 @@ def test_auto_fix_ci_latch_clears_on_episode_end(
     save_dev_queue(store)
 
     # Clear pass runs even with zero candidates.
-    assert _act_and_dispatch_auto_fix_ci([], clients=load_effective_clients()) == []
+    assert (
+        act_then_dispatch(
+            _act_auto_fix_ci,
+            _dispatch_auto_fix_ci_jobs,
+            [],
+            clients=load_effective_clients(),
+        )
+        == []
+    )
     assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is None
 
     # Genuine re-entry into ci_failing fires again (episode semantics).
     store = load_dev_queue()
     store.tasks[0].pr_state = _pr_state(attention_state="ci_failing")
     save_dev_queue(store)
-    assert _act_and_dispatch_auto_fix_ci(
-        [candidate], clients=load_effective_clients()
+    assert act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
+        [candidate],
+        clients=load_effective_clients(),
     ) == [task.ticket_id]
 
 
@@ -1824,7 +1940,9 @@ def test_auto_fix_ci_repo_mismatch_emits_pr_action_failed(
         lambda _t: pytest.fail("no re-dispatch on repo mismatch"),
     )
 
-    acted = _act_and_dispatch_auto_fix_ci(
+    acted = act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1847,7 +1965,9 @@ def test_auto_fix_ci_repo_match_dispatches_normally(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    acted = _act_and_dispatch_auto_fix_ci(
+    acted = act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1874,7 +1994,9 @@ def test_auto_fix_ci_repo_mismatch_override_dispatches_and_logs(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     with caplog.at_level("WARNING"):
-        acted = _act_and_dispatch_auto_fix_ci(
+        acted = act_then_dispatch(
+            _act_auto_fix_ci,
+            _dispatch_auto_fix_ci_jobs,
             [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
             clients=load_effective_clients(),
         )
@@ -1898,7 +2020,9 @@ def test_auto_fix_ci_unparseable_pr_url_fails_open(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    acted = _act_and_dispatch_auto_fix_ci(
+    acted = act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
         [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
         clients=load_effective_clients(),
     )
@@ -1914,8 +2038,11 @@ def test_auto_fix_ci_unresolvable_client_fails_open(tmp_config_dir: Path) -> Non
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     # clients={} -> client_cfg is None -> guard fails open, dispatch proceeds.
-    acted = _act_and_dispatch_auto_fix_ci(
-        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")], clients={}
+    acted = act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients={},
     )
 
     assert acted == [task.ticket_id]
@@ -1954,7 +2081,9 @@ def test_act_request_reviewer_ci_mode_silent_skip(
     calls: list[Any] = []
     monkeypatch.setattr("cw.gh.add_pr_reviewer", lambda *a, **kw: calls.append((a, kw)))
 
-    acted = _act_request_reviewer(
+    acted = act_then_dispatch(
+        _act_request_reviewer,
+        _dispatch_reviewer_jobs,
         [_candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")],
         clients=load_effective_clients(),
     )
@@ -1993,7 +2122,9 @@ def test_act_request_reviewer_configured_mode_calls_gh_helper(
 
     monkeypatch.setattr("cw.gh.add_pr_reviewer", _fake_add)
 
-    acted = _act_request_reviewer(
+    acted = act_then_dispatch(
+        _act_request_reviewer,
+        _dispatch_reviewer_jobs,
         [_candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")],
         clients=load_effective_clients(),
     )
@@ -2035,7 +2166,9 @@ def test_act_request_reviewer_scopes_gh_call_to_client_cwd(
 
     monkeypatch.setattr("cw.gh.add_pr_reviewer", _fake_add)
 
-    acted = _act_request_reviewer(
+    acted = act_then_dispatch(
+        _act_request_reviewer,
+        _dispatch_reviewer_jobs,
         [_candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")],
         clients=load_effective_clients(),
     )
@@ -2059,7 +2192,9 @@ def test_act_request_reviewer_gh_call_fails_emits_failed(
         ),
     )
 
-    acted = _act_request_reviewer(
+    acted = act_then_dispatch(
+        _act_request_reviewer,
+        _dispatch_reviewer_jobs,
         [_candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")],
         clients=load_effective_clients(),
     )
@@ -2084,7 +2219,9 @@ def test_act_request_reviewer_gh_call_errors_emits_failed(
     _stub_strategy(monkeypatch, ReviewStrategy("repo_owner", "alice"))
     monkeypatch.setattr("cw.gh.add_pr_reviewer", lambda *_a, **_kw: None)
 
-    acted = _act_request_reviewer(
+    acted = act_then_dispatch(
+        _act_request_reviewer,
+        _dispatch_reviewer_jobs,
         [_candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")],
         clients=load_effective_clients(),
     )
@@ -2115,7 +2252,9 @@ def test_act_request_reviewer_misconfigured_mode_missing_handle_emits_failed(
     )
 
     with caplog.at_level("WARNING"):
-        acted = _act_request_reviewer(
+        acted = act_then_dispatch(
+            _act_request_reviewer,
+            _dispatch_reviewer_jobs,
             [_candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")],
             clients=load_effective_clients(),
         )
@@ -2141,7 +2280,9 @@ def test_request_reviewer_fires_once_per_episode(
     clients = load_effective_clients()
     candidate = _candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")
 
-    acted1 = _act_request_reviewer([candidate], clients=clients)
+    acted1 = act_then_dispatch(
+        _act_request_reviewer, _dispatch_reviewer_jobs, [candidate], clients=clients
+    )
     assert acted1 == [task.ticket_id]
     assert load_dev_queue().tasks[0].request_reviewer_fired_at is not None
 
@@ -2149,7 +2290,9 @@ def test_request_reviewer_fires_once_per_episode(
     # (simulating hydration lag, per the ticket's acceptance criterion): detect
     # still yields a candidate every tick, but the latch blocks a re-fire.
     for _ in range(5):
-        acted_n = _act_request_reviewer([candidate], clients=clients)
+        acted_n = act_then_dispatch(
+            _act_request_reviewer, _dispatch_reviewer_jobs, [candidate], clients=clients
+        )
         assert acted_n == []
     taken = [
         e
@@ -2173,7 +2316,9 @@ def test_request_reviewer_latch_clears_on_episode_end(
     clients = load_effective_clients()
     candidate = _candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")
 
-    assert _act_request_reviewer([candidate], clients=clients) == [task.ticket_id]
+    assert act_then_dispatch(
+        _act_request_reviewer, _dispatch_reviewer_jobs, [candidate], clients=clients
+    ) == [task.ticket_id]
 
     # Episode ends: hydration moves the PR off no_reviewer.
     store = load_dev_queue()
@@ -2181,14 +2326,133 @@ def test_request_reviewer_latch_clears_on_episode_end(
     save_dev_queue(store)
 
     # Clear pass runs even with zero candidates.
-    assert _act_request_reviewer([], clients=clients) == []
+    assert (
+        act_then_dispatch(
+            _act_request_reviewer, _dispatch_reviewer_jobs, [], clients=clients
+        )
+        == []
+    )
     assert load_dev_queue().tasks[0].request_reviewer_fired_at is None
 
     # Genuine re-entry into no_reviewer fires again (episode semantics).
     store = load_dev_queue()
     store.tasks[0].pr_state = _pr_state(attention_state="no_reviewer")
     save_dev_queue(store)
-    assert _act_request_reviewer([candidate], clients=clients) == [task.ticket_id]
+    assert act_then_dispatch(
+        _act_request_reviewer, _dispatch_reviewer_jobs, [candidate], clients=clients
+    ) == [task.ticket_id]
+
+
+def _no_reviewer_task(**kwargs: Any) -> TicketTask:
+    """A no_reviewer row that opts the request_reviewer recipe in."""
+    return _make_task(
+        pr_url=_PR_URL,
+        pr_state=_pr_state(attention_state="no_reviewer"),
+        review_recipes={RECIPE_REQUEST_REVIEWER: True},
+        **kwargs,
+    )
+
+
+def test_act_request_reviewer_returns_jobs_and_makes_no_gh_call(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1232: the act phase stamps the latch and emits PR_ACTION_TAKEN under
+    dev_queue_lock, then hands the gh call back as a ``_ReviewerJob`` (with the
+    client it is scoped to) instead of calling gh itself."""
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
+    task = _no_reviewer_task()
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    _stub_strategy(monkeypatch, ReviewStrategy("repo_owner", "alice"))
+    monkeypatch.setattr(
+        "cw.gh.add_pr_reviewer",
+        lambda *_a, **_kw: pytest.fail("the act phase must not call gh"),
+    )
+
+    jobs = _act_request_reviewer(
+        [_candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")],
+        clients=load_effective_clients(),
+    )
+
+    assert [(j.client, j.ticket_id, j.pr_url, j.handle) for j in jobs] == [
+        ("acme", task.ticket_id, _PR_URL, "alice")
+    ]
+    assert jobs[0].cwd == tmp_config_dir
+    assert load_dev_queue().tasks[0].request_reviewer_fired_at is not None
+    taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+    assert [e.correlation_id for e in taken] == [task.ticket_id]
+
+
+def test_run_review_recipes_queues_the_reviewer_request_before_the_next_recipe(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1232: run_review_recipes appends the reviewer request to the post-lock
+    sink, labelled per client and ticket, the moment its act returns -- before
+    escalate_merge_block runs -- and gh is called only when the sink drains."""
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
+    task = _no_reviewer_task()
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    _stub_strategy(monkeypatch, ReviewStrategy("repo_owner", "alice"))
+    gh_calls: list[tuple[str, str]] = []
+
+    def _fake_add(
+        pr_ref: str, reviewer: str, **_kw: Any
+    ) -> subprocess.CompletedProcess[bytes]:
+        gh_calls.append((pr_ref, reviewer))
+        return subprocess.CompletedProcess(args=[], returncode=0)
+
+    monkeypatch.setattr("cw.gh.add_pr_reviewer", _fake_add)
+    jobs = DeferredReconcileJobs()
+    queued_at_next_recipe: list[list[str]] = []
+
+    def _escalate_spy(*_args: object, **_kwargs: object) -> list[str]:
+        queued_at_next_recipe.append([job.label for job in jobs.post_lock])
+        return []
+
+    monkeypatch.setattr(
+        "cw.reconcile.review_recipes.core._act_escalate_merge_block", _escalate_spy
+    )
+
+    acted = run_review_recipes(config=_config(), jobs=jobs)
+
+    assert acted == []
+    assert queued_at_next_recipe == [[f"reviewer_request:acme:{task.ticket_id}"]]
+    assert gh_calls == []
+
+    run_post_lock_jobs(jobs)
+
+    assert gh_calls == [(_PR_URL, "alice")]
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+def test_reviewer_request_job_crash_is_recorded_through_run_isolated(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A reviewer-request job whose gh call raises is isolated by
+    ``_run_isolated``: logged and corrected with PR_ACTION_FAILED, so the
+    post-lock drain never sees it fail."""
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
+    task = _no_reviewer_task()
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    _stub_strategy(monkeypatch, ReviewStrategy("repo_owner", "alice"))
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        msg = "gh binary vanished"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.gh.add_pr_reviewer", _boom)
+    jobs = DeferredReconcileJobs()
+    run_review_recipes(config=_config(), jobs=jobs)
+
+    with caplog.at_level("ERROR"):
+        run_post_lock_jobs(jobs)
+
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert [e.correlation_id for e in failed] == [task.ticket_id]
+    assert "OSError: gh binary vanished" in failed[0].payload["error"]
+    assert f"review_recipe_dispatch_crashed ticket={task.ticket_id}" in caplog.text
+    assert "post_lock_job_failed" not in caplog.text
 
 
 # --- escalate_merge_block --------------------------------------------------
@@ -2372,8 +2636,11 @@ def test_act_auto_fix_ci_vanished_row_silent_skip(
         "cw.dev_queue.add_ticket", lambda _t: pytest.fail("no dispatch for a gone row")
     )
     assert (
-        _act_and_dispatch_auto_fix_ci(
-            [_orphan_candidate(RECIPE_AUTO_FIX_CI, "ci_failing")], clients={}
+        act_then_dispatch(
+            _act_auto_fix_ci,
+            _dispatch_auto_fix_ci_jobs,
+            [_orphan_candidate(RECIPE_AUTO_FIX_CI, "ci_failing")],
+            clients={},
         )
         == []
     )
@@ -2383,7 +2650,9 @@ def test_act_auto_fix_ci_vanished_row_silent_skip(
 def test_act_request_reviewer_vanished_row_silent_skip(tmp_config_dir: Path) -> None:
     write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
     save_dev_queue(DevQueueStore(tasks=[]))
-    acted = _act_request_reviewer(
+    acted = act_then_dispatch(
+        _act_request_reviewer,
+        _dispatch_reviewer_jobs,
         [_orphan_candidate(RECIPE_REQUEST_REVIEWER, "no_reviewer")],
         clients=load_effective_clients(),
     )
@@ -2402,7 +2671,9 @@ def test_act_request_reviewer_stale_row_silent_skip(
     monkeypatch.setattr(
         "cw.gh.add_pr_reviewer", lambda *_a, **_kw: pytest.fail("no gh for a stale row")
     )
-    acted = _act_request_reviewer(
+    acted = act_then_dispatch(
+        _act_request_reviewer,
+        _dispatch_reviewer_jobs,
         [_candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")],
         clients=load_effective_clients(),
     )
@@ -2430,7 +2701,9 @@ def test_act_request_reviewer_missing_client_emits_failed(
         lambda *_a, **_kw: pytest.fail("no gh for an unresolvable client"),
     )
     with caplog.at_level("WARNING"):
-        acted = _act_request_reviewer(
+        acted = act_then_dispatch(
+            _act_request_reviewer,
+            _dispatch_reviewer_jobs,
             [_candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")],
             clients=load_effective_clients(),
         )
