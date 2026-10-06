@@ -52,6 +52,7 @@ from cw.config import load_effective_config, save_state
 from cw.events import record_event
 from cw.local_runner import (
     AIDER_LOG_RELATIVE_PATH,
+    LOCAL_EXECUTOR_FAILURE_ACTION,
     UNEXPECTED_ERROR,
     make_blocked,
     read_process_start_time_ns,
@@ -137,6 +138,9 @@ _CODEX_HARVEST_BREADCRUMBS = (
 # SESSION_NEEDS_ATTENTION ``paused_status`` for a dead LOCAL process whose
 # harvested sentinel the shared staged-advance guard refused (#2490).
 SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON = "sentinel_stage_mismatch_dead_session"
+
+AIDER_BACKEND: LocalLivenessBackend = "aider"
+OPENCODE_BACKEND: LocalLivenessBackend = "opencode"
 
 
 def _refusal_latch_binds(
@@ -372,8 +376,8 @@ _HARVEST_SYNTHESIZERS: dict[
     LocalLivenessBackend,
     Callable[[TicketTask, Path, str, str], AutoDevResult],
 ] = {
-    "aider": _harvest_via_git,
-    "opencode": _harvest_via_opencode_log,
+    AIDER_BACKEND: _harvest_via_git,
+    OPENCODE_BACKEND: _harvest_via_opencode_log,
 }
 
 
@@ -411,7 +415,7 @@ def _resolve_harvest_backend(
          session carries none. IMPL -> ``"aider"`` (git synthesis is
          stage-correct there); any other stage -> ``None``.
     """
-    if backend != "aider":
+    if backend != AIDER_BACKEND:
         return backend
     has_opencode_log = _log_exists(worktree, OPENCODE_LOG_RELATIVE_PATH)
     has_aider_log = _log_exists(worktree, AIDER_LOG_RELATIVE_PATH)
@@ -422,14 +426,14 @@ def _resolve_harvest_backend(
             session.id,
             task.ticket_id,
         )
-        return "opencode"
+        return OPENCODE_BACKEND
     if has_aider_log and not has_opencode_log:
-        return "aider"
-    return "aider" if (session.stage or task.stage) is Stage.IMPL else None
+        return AIDER_BACKEND
+    return AIDER_BACKEND if (session.stage or task.stage) is Stage.IMPL else None
 
 
 # Operator hint on the blocked result parked for a backend that could not be proven.
-_UNPROVEN_BACKEND_NEXT_ACTIONS: list[str] = ["user_resolve_local_executor_failure"]
+_UNPROVEN_BACKEND_NEXT_ACTIONS: list[str] = [LOCAL_EXECUTOR_FAILURE_ACTION]
 # Under the 200-char cap the blocked-reason breadcrumb renders (#2512).
 _UNPROVEN_BACKEND_DETAILS = (
     "The executor backend could not be proven from the liveness handle or the"
@@ -464,7 +468,7 @@ def _synthesize_harvest_sentinel(
             reason=UNEXPECTED_ERROR,
             details=_UNPROVEN_BACKEND_DETAILS,
             stage_reached=stage_reached,
-            next_actions=_UNPROVEN_BACKEND_NEXT_ACTIONS,
+            next_actions=_UNPROVEN_BACKEND_NEXT_ACTIONS.copy(),
         )
     synthesize = _HARVEST_SYNTHESIZERS.get(backend, _harvest_via_git)
     try:
@@ -478,7 +482,7 @@ def _synthesize_harvest_sentinel(
             backend,
             exc_info=True,
         )
-        blocked = make_opencode_blocked if backend == "opencode" else make_blocked
+        blocked = make_opencode_blocked if backend == OPENCODE_BACKEND else make_blocked
         return blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,

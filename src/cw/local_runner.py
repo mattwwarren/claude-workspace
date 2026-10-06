@@ -139,7 +139,8 @@ _FIXED_HEALTH = Health(
     recommendation="EXIT_FOR_HUMAN_REVIEW",
 )
 _FIXED_REVIEW = Review(must_fix_initial=0, should_fix=0, fix_cycles_used=0)
-_FIXED_NEXT_ACTIONS: list[str] = ["user_resolve_local_executor_failure"]
+LOCAL_EXECUTOR_FAILURE_ACTION = "user_resolve_local_executor_failure"
+_FIXED_NEXT_ACTIONS: list[str] = [LOCAL_EXECUTOR_FAILURE_ACTION]
 # §3.3 stage-coupled invariant (auto_dev_result/schema): a pre-impl
 # stage_reached requires scope.lines_actual to be null, a post-impl one
 # requires it non-null, so make_blocked flips the fixed scope for these (#2512).
@@ -600,7 +601,15 @@ def make_blocked(
             retry_eligible=retry_eligible,
             retry_delay_seconds=retry_delay_seconds,
         ),
-        next_actions=next_actions if next_actions is not None else _FIXED_NEXT_ACTIONS,
+        next_actions=(
+            next_actions
+            if next_actions is not None
+            else (
+                ["manual_intervention"]
+                if stage_reached == "stage1_pre_flight"
+                else _FIXED_NEXT_ACTIONS.copy()
+            )
+        ),
         worktree_path=str(worktree),
     )
 
