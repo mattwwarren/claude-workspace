@@ -248,7 +248,7 @@ PATCH_OWNERSHIP = [
         f"{_PKG}._worktree_evidence",
     ),
     ("_worktree_dirty_reason_by_path", "_deps", f"{_PKG}._worktree_evidence"),
-    ("_blocked_result_requeue_enabled", "get_client", _PKG),
+    ("_blocked_result_requeue_enabled", "get_client", f"{_PKG}._routing"),
     ("_claude_agents_json", "subprocess", f"{_PKG}._roster"),
     (
         "_widened_transcript_timestamp",
@@ -263,9 +263,9 @@ PATCH_OWNERSHIP = [
     ("_detect_post_review_clean", "read_events", f"{_PKG}._detectors"),
     ("_emit_reap_proposed", "record_event", f"{_PKG}._reap"),
     ("_emit_reap_proposed", "save_state", f"{_PKG}._reap"),
-    ("_apply_sentinel_to_task", "save_dev_queue", _PKG),
-    ("_apply_sentinel_to_task", "record_event", _PKG),
-    ("_apply_sentinel_to_task", "_deps", _PKG),
+    ("_apply_sentinel_to_task", "save_dev_queue", f"{_PKG}._routing"),
+    ("_apply_sentinel_to_task", "record_event", f"{_PKG}._routing"),
+    ("_apply_sentinel_to_task", "_deps", f"{_PKG}._routing"),
 ]
 
 
@@ -279,6 +279,21 @@ class TestPatchOwnership:
         namespace = vars(importlib.import_module(owner))
         assert getattr(_shared, function).__globals__ is namespace
         assert global_name in namespace
+
+    def test_package_binds_no_patched_global(self) -> None:
+        """A stale ``cw.reconcile._shared.<global>`` target fails loudly.
+
+        The package re-exports only its own 141 names, never a third-party
+        global a submodule imports, so a patch left on the package raises
+        instead of resolving and silently not intercepting.
+        ``_locate_session_transcript`` is itself part of the surface, so the
+        rows above are its only guard.
+        """
+        third_party = {
+            global_name for _fn, global_name, _owner in PATCH_OWNERSHIP
+        } - EXPECTED_EXPORTS
+        assert third_party
+        assert sorted(g for g in third_party if hasattr(_shared, g)) == []
 
 
 # Every record the package emits must carry the pre-split logger name
@@ -440,7 +455,7 @@ class TestLoggerNamePinned:
 
 # Submodules that log. Each binds its own ``_log`` to the pinned name via
 # ``_constants._LOGGER_NAME``, never ``__name__``.
-LOGGING_SUBMODULES = ["_roster", "_transcripts"]
+LOGGING_SUBMODULES = ["_roster", "_routing", "_transcripts"]
 
 
 class TestLoggerObjectsPinned:

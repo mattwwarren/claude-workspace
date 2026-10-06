@@ -260,10 +260,10 @@ ignore = [
 # dependency; inline import is the sanctioned mechanism, not a workaround.
 "src/cw/result.py" = ["PLC0415"]
 # reconcile/_shared defers the dispatch import inside _apply_sentinel_to_task
-# and classify_sentinel_stage_position to break the reconcile ↔ dispatch
-# circular dependency (#698). Inline import at function level is the
-# sanctioned mechanism, not a workaround.
-"src/cw/reconcile/_shared/__init__.py" = ["PLC0415"]
+# (_routing) and classify_sentinel_stage_position (_sentinels) to break the
+# reconcile ↔ dispatch circular dependency (#698). Inline import at function
+# level is the sanctioned mechanism, not a workaround.
+"src/cw/reconcile/_shared/_routing.py" = ["PLC0415"]
 "src/cw/reconcile/_shared/_sentinels.py" = ["PLC0415"]
 # tasks defers cw.dispatch.routing's _AUTOMERGE_NOT_ARMED_REASON (inside
 # _is_variant_a_gate_task) and _PRIOR_PIPELINE_PR_OPEN_REASON (inside
@@ -271,7 +271,7 @@ ignore = [
 # dependency (#1713): cw.dispatch's package __init__ imports cw.reconcile at
 # module top (loop.py/gating.py/lanes.py), so this module's own reach into
 # cw.dispatch.routing must be function-level. Same shape as the #698
-# reconcile/_shared.py entry above. Inline import is the sanctioned
+# reconcile/_shared entries above. Inline import is the sanctioned
 # mechanism, not a workaround.
 "src/cw/reconcile/tasks.py" = ["PLC0415"]
 # phantom/_mutations and stalled/_mutations defer cw.dispatch.productivity's
@@ -299,7 +299,7 @@ ignore = [
 # cw.executor.resolve_executor_config inside reap_orphaned_codex_sessions_at_boot
 # (#1727): cw.executor imports cw.reconcile at module top, so this module (inside
 # the cw.reconcile package) must not reach back at import time. Mirrors
-# _shared.py's own deferred cw.dispatch import (#698).
+# _shared/_routing.py's own deferred cw.dispatch import (#698).
 "src/cw/reconcile/codex_boot.py" = ["PLC0415"]
 # fix_dispatch defers the same cw.dispatch.claim._park_running_task_blocked_on_user
 # inside _park_for_unresolved_ref (#2209), for the identical reason as
