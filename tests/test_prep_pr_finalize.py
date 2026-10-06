@@ -974,15 +974,21 @@ def _python(no_site: bool) -> list[str]:
 
 @pytest.fixture
 def arm_repo(
-    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> Path:
     """A real git repo, with every inherited ``GIT_*`` var removed.
 
     The script runs ``git -C <path> rev-parse --show-toplevel`` with the
     inherited env, so a ``GIT_DIR`` from a wrapping git hook would redirect it.
+    ``GIT_CEILING_DIRECTORIES`` then stops repo discovery at ``tmp_path``, so a
+    plain ``tmp_path`` subdirectory is "not in a work tree" even when the
+    basetemp itself sits inside some checkout (a TMPDIR under a worktree).
     """
     for key in [k for k in os.environ if k.startswith("GIT_")]:
         monkeypatch.delenv(key)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.resolve()))
     return make_git_repo("repo")
 
 
