@@ -19,6 +19,7 @@ from click.testing import CliRunner
 from freezegun import freeze_time
 
 import cw.events
+from cw._git import git_clean_env
 from cw.cli import main
 from cw.cli.review.dispositions import _age_cell
 from cw.dev_queue import add_ticket, load_dev_queue
@@ -1991,12 +1992,23 @@ class TestReviewDispositions:
         assert [row["stale"] for row in json.loads(result.output)] == ["no"]
 
     def test_a_worktree_that_is_not_a_repo_degrades_to_unknown(
-        self, runner: CliRunner, tmp_path: Path
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Showing the ledger matters more than answering the drift question."""
         self._seed(("src/cw/foo.py", "Bug here", {}))
         not_a_repo = tmp_path / "plain"
         not_a_repo.mkdir()
+
+        # git would otherwise ascend out of tmp_path into any repo enclosing TMPDIR.
+        # run_git strips every GIT_* variable, so a setenv would be discarded;
+        # the seam's own env builder is the only place a ceiling survives.
+        def _ceilinged_env() -> dict[str, str]:
+            return {
+                **git_clean_env(),
+                "GIT_CEILING_DIRECTORIES": str(tmp_path.resolve()),
+            }
+
+        monkeypatch.setattr("cw._git.git_clean_env", _ceilinged_env)
 
         result = self._invoke(
             runner,
