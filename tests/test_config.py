@@ -54,6 +54,7 @@ from cw.models import (
     SessionPurpose,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests._invalid_utf8 import INVALID_UTF8
 from tests.conftest import (
     _assert_lock_held,
     _fake_fcntl,
@@ -340,6 +341,23 @@ class TestLoadClients:
         with pytest.raises(ConfigValidationError, match=r"clients\.yaml.*acme"):
             load_clients()
 
+    def test_invalid_utf8_raises_config_validation_error(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A clients.yaml that is not valid UTF-8 raises ConfigValidationError
+        with a fixed message that never carries file bytes or the decoder's
+        own text (#2554)."""
+        from cw.exceptions import ConfigValidationError
+
+        path = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        path.write_bytes(INVALID_UTF8)
+        with pytest.raises(ConfigValidationError) as ei:
+            load_clients()
+        assert str(ei.value) == f"{path}: file is not valid UTF-8"
+        for leaked in ("s3cr3t-marker", "0xff", "\\xff", "codec", "position"):
+            assert leaked not in str(ei.value)
+        assert isinstance(ei.value.__cause__, UnicodeDecodeError)
+
 
 class TestLoadWorktreeClients:
     def test_worktree_client_from_yaml(
@@ -551,6 +569,23 @@ class TestEnsureConfig:
 
         ensure_config()
         assert clients_file.read_text() == original_content
+
+    def test_ensure_config_empty_branch_writes_utf8(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With no example file next to the package, ensure_config writes the
+        empty clients mapping as explicit UTF-8 bytes (#2554)."""
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        if clients_file.exists():
+            clients_file.unlink()
+        # example = Path(__file__).parent.parent.parent / "config" / ...; point
+        # __file__ at a tmp tree that has no config/ directory so it is absent.
+        fake_module = tmp_path / "pkg" / "cw" / "config.py"
+        monkeypatch.setattr(cw.config, "__file__", str(fake_module))
+
+        ensure_config()
+
+        assert clients_file.read_bytes() == b"clients: {}\n"
 
 
 class TestShowConfig:
@@ -1858,6 +1893,51 @@ class TestOrchestratorConfigReapPolicy:
         orchestrator_config_file().write_text("bogus_field: 1\n")
         with pytest.raises(ConfigValidationError, match=r"orchestrator\.yaml"):
             load_orchestrator_config()
+
+
+class TestLoadOrchestratorConfigUndecodable:
+    """load_orchestrator_config() and invalid-UTF-8 bytes (#2554)."""
+
+    def test_invalid_utf8_raises_config_validation_error(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.config import load_orchestrator_config, orchestrator_config_file
+        from cw.exceptions import ConfigValidationError
+
+        path = orchestrator_config_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(INVALID_UTF8)
+        with pytest.raises(ConfigValidationError) as ei:
+            load_orchestrator_config()
+        assert str(ei.value) == f"{path}: file is not valid UTF-8"
+        for leaked in ("s3cr3t-marker", "0xff", "\\xff", "codec", "position"):
+            assert leaked not in str(ei.value)
+        assert isinstance(ei.value.__cause__, UnicodeDecodeError)
+        # The file existed, so the default-creation branch never ran and the
+        # operator's bytes were not overwritten.
+        assert path.read_bytes() == INVALID_UTF8
+
+    def test_missing_file_still_creates_default(self, tmp_config_dir: Path) -> None:
+        from cw.config import (
+            _DEFAULT_ORCHESTRATOR_YAML,
+            load_orchestrator_config,
+            orchestrator_config_file,
+        )
+        from cw.models import OrchestratorConfig
+
+        path = orchestrator_config_file()
+        assert not path.exists()
+        assert isinstance(load_orchestrator_config(), OrchestratorConfig)
+        assert path.read_bytes() == _DEFAULT_ORCHESTRATOR_YAML.encode("utf-8")
+
+    def test_valid_non_ascii_utf8_still_loads(self, tmp_config_dir: Path) -> None:
+        from cw.config import load_orchestrator_config, orchestrator_config_file
+        from cw.models import ReapPolicy
+
+        path = orchestrator_config_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes("# café\nreap_policy: auto\n".encode())
+        assert load_orchestrator_config().reap_policy == ReapPolicy.AUTO
 
 
 class TestMutateState:

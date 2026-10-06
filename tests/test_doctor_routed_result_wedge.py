@@ -38,7 +38,7 @@ from cw.doctor.routed_result_wedge import (
 )
 from cw.doctor.wedge import _reap_wedge_findings
 from cw.events import read_events
-from cw.exceptions import SessionsLockReentryError
+from cw.exceptions import ConfigValidationError, SessionsLockReentryError
 from cw.models import (
     CompletionReason,
     CwState,
@@ -143,6 +143,28 @@ def test_finding_reported_without_reap_and_nothing_mutated(
     assert "review/pending" in finding.recipe
     assert state_file().read_bytes() + dev_queue_file().read_bytes() == before
     assert daemon.stop_calls == []
+
+
+def test_check_skips_detection_when_orchestrator_yaml_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable orchestrator.yaml skips detection instead of aborting (#2554).
+
+    It returns ``[]`` rather than detecting with default thresholds the operator
+    did not set; the failed ``orchestrator.yaml`` check reports the cause.
+    """
+    home, _daemon = _install_fake_daemon_roster(tmp_path, monkeypatch)
+    _seed(tmp_path, home)
+
+    control = _check_wedge_routed_result_session(load_state(), load_dev_queue())
+    assert [f.wedge_class for f in control] == [WEDGE_ROUTED_RESULT_STRANDED]
+
+    def boom() -> object:
+        msg = "x"
+        raise ConfigValidationError(msg)
+
+    monkeypatch.setattr("cw.doctor.routed_result_wedge.load_orchestrator_config", boom)
+    assert _check_wedge_routed_result_session(load_state(), load_dev_queue()) == []
 
 
 def test_reap_closes_session_and_leaves_queue_untouched(

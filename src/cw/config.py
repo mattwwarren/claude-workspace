@@ -496,13 +496,26 @@ def dispatch_loop_lock() -> Iterator[None]:
         fd.close()
 
 
+def _read_config_text(path: Path) -> str:
+    """Read a YAML config file as UTF-8, mapping undecodable bytes to a config error.
+
+    The message is fixed: UnicodeDecodeError's own text carries the offending
+    byte and offset, so it is never interpolated (#2554).
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        msg = f"{path}: file is not valid UTF-8"
+        raise ConfigValidationError(msg) from exc
+
+
 def load_clients() -> dict[str, ClientConfig]:
     """Load client configurations from ~/.config/cw/clients.yaml."""
     path = clients_file()
     if not path.exists():
         return {}
 
-    raw = yaml.safe_load(path.read_text())
+    raw = yaml.safe_load(_read_config_text(path))
     if raw is None:
         return {}
     if not isinstance(raw, dict):
@@ -605,8 +618,8 @@ def load_orchestrator_config() -> OrchestratorConfig:
     path = orchestrator_config_file()
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_DEFAULT_ORCHESTRATOR_YAML)
-    raw = yaml.safe_load(path.read_text())
+        path.write_text(_DEFAULT_ORCHESTRATOR_YAML, encoding="utf-8")
+    raw = yaml.safe_load(_read_config_text(path))
     if not raw:
         return OrchestratorConfig()
     try:
@@ -721,10 +734,12 @@ def ensure_config() -> None:
             Path(__file__).parent.parent.parent / "config" / "clients.example.yaml"
         )
         if example.exists():
-            clients_path.write_text(example.read_text())
+            clients_path.write_text(
+                example.read_text(encoding="utf-8"), encoding="utf-8"
+            )
             click.echo(f"Created default config at {clients_path}")
         else:
-            clients_path.write_text("clients: {}\n")
+            clients_path.write_text("clients: {}\n", encoding="utf-8")
             click.echo(f"Created empty config at {clients_path}")
 
 

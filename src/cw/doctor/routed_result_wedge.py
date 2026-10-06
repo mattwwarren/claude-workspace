@@ -33,6 +33,9 @@ from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import yaml
+from pydantic import ValidationError
+
 from cw.atomic import atomic_write_text
 from cw.config import (
     events_dir,
@@ -46,6 +49,7 @@ from cw.dev_queue import dev_queue_lock
 from cw.doctor import _deps
 from cw.doctor._shared import WedgeFinding
 from cw.events import read_events, record_event
+from cw.exceptions import CwError
 from cw.models import (
     CompletionReason,
     OrchestratorEventType,
@@ -134,13 +138,19 @@ def _check_wedge_routed_result_session(
     """
     if not any(_sentinel_partial_route_consumed(s) for s in state.sessions):
         return []
+    try:
+        config = load_orchestrator_config()
+    except (OSError, yaml.YAMLError, CwError, ValidationError):
+        # Skip rather than detect with default thresholds the operator did not
+        # set; the failed orchestrator.yaml check already reports the cause.
+        return []
     native_live = get_native_daemon_client().list_live_session_short_ids()
     hits = find_stranded_routed_sessions(
         state,
         queue.tasks,
         now=datetime.now(UTC),
         native_live=native_live,
-        config=load_orchestrator_config(),
+        config=config,
     )
     return [
         WedgeFinding(
