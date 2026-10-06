@@ -172,7 +172,7 @@ Keep source modules under **~1000 lines**. This is a review-enforced convention
   with an `__init__.py` that re-exports the public surface so import sites stay
   stable. `cw.cli` and `cw.reconcile` follow this shape.
 - **Cohesion beats raw count.** Do not split a cohesive module just to clear the
-  number (e.g. `reconcile/_shared.py` is large but is shared infrastructure for a
+  number (e.g. `events.py` is large but is shared infrastructure for a
   single concern). Conversely, a smaller module mixing unrelated concerns is
   still a smell.
 - Extract helpers rather than letting individual functions grow unbounded; long

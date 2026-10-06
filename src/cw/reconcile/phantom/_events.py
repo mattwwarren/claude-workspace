@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 # paused_status written to SESSION_NEEDS_ATTENTION when the phantom sweep's
 # sentinel-stage-mismatch veto cap is exhausted on an already_refused session
 # and the pending CRASH_COMPLETE proceeds (#1449, #2405). Defined locally (not
-# in _shared.py, which is outside this ticket's file set) — mirrors the
+# in reconcile/_shared/, which is outside this ticket's file set) — mirrors the
 # retry-cap park's own escalation reason. See docs/events.md.
 _SENTINEL_MISMATCH_VETO_CAP_EXHAUSTED_REASON = "sentinel_mismatch_veto_cap_exhausted"
 

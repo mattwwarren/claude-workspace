@@ -21,7 +21,7 @@ from `cw.auto_dev_result`. Never apply a raw-text regex to the transcript
 file.
 
 Transcript location is resolved by `_locate_session_transcript(session)` in
-`src/cw/reconcile/_shared.py` (surface_ref-prefix glob, #541):
+`src/cw/reconcile/_shared/_transcripts.py` (surface_ref-prefix glob, #541):
 
 1. If `session.claude_session_id` is set: `<project_dir>/<csid>.jsonl` directly.
 2. Else if `session.surface_ref` is set: newest `<project_dir>/<surface_ref>*.jsonl`
@@ -73,7 +73,7 @@ which fires only after the first reconcile tick. Before that tick, the field
 is None.
 
 **Rule:** locate the transcript via `_locate_session_transcript(session)`
-(`src/cw/reconcile/_shared.py`) — it handles `claude_session_id=None` via the
+(`src/cw/reconcile/_shared/_transcripts.py`) — it handles `claude_session_id=None` via the
 surface_ref-prefix glob (§1). Note that `_parse_sentinel_from_transcript`
 takes `(cwd, claude_session_id)` and returns None when the csid is None — so
 for a csid-less session, resolve the path first (or derive the csid from the
@@ -306,7 +306,7 @@ Every operator-facing `BLOCKED_ON_USER` park carries a non-null
 left `disposition=None` on the parked row: the idle watchdog's
 silently-idle park (`idle.py`), and the SIGNAL_ONLY reroute-to-BLOCKED_ON_USER
 path shared by the stalled/idle/phantom sweeps (via `_apply_queue_mutations`
-in `reconcile/_shared.py`). A handful of other sites (`salvage.py`'s
+in `reconcile/_shared/_routing.py`). A handful of other sites (`salvage.py`'s
 LOW-path flag, `tasks.py`'s terminal-sibling park, and two config-error
 fallbacks in `dispatch.py`'s `_stage_advance_unchecked`) had the same bare
 `transition_task_status(task, QueueItemStatus.BLOCKED_ON_USER)` gap.
@@ -683,5 +683,5 @@ unreconstructable result, `cw spawn close` cancels the row as before; then
 - `src/cw/reconcile/idle/_detect.py:_staged_emit_candidate` — the §6d idle-sweep backstop producer.
 - `src/cw/cli/spawn.py:_route_staged_emit_result` — `cw spawn close`'s route-before-cancel.
 - `src/cw/models/park_comment_marker.py` — the marker model and its reader.
-- `src/cw/reconcile/_shared.py:_locate_session_transcript` — transcript path resolver.
-- `src/cw/reconcile/_shared.py:_csid_from_transcript` — claude_session_id derivation.
+- `src/cw/reconcile/_shared/_transcripts.py:_locate_session_transcript` — transcript path resolver.
+- `src/cw/reconcile/_shared/_transcripts.py:_csid_from_transcript` — claude_session_id derivation.

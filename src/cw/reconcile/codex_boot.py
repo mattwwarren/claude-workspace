@@ -714,7 +714,7 @@ def reap_orphaned_codex_sessions_at_boot() -> int:
     """
     # Deferred for import-cycle reasons: cw.executor imports cw.reconcile at
     # module level, so this module (inside the cw.reconcile package) must not
-    # reach into it at import time. Mirrors _shared.py's own deferred
+    # reach into it at import time. Mirrors _shared/_routing.py's own deferred
     # cw.dispatch import (#698).
     from cw.executor import resolve_executor_config
 

@@ -437,7 +437,7 @@ class TicketTask(BaseModel):
     # defaults to charging: a caller must pass unproductive=False to decline,
     # so a crash/phantom/wedge revert with no sentinel counts by construction.
     # Deliberately NOT read by the #756 per-stage validation_failed cap in
-    # reconcile/_shared.py, which stays on raw `attempts`. See GitHub #1750.
+    # reconcile/_shared/_routing.py, which stays on raw `attempts`. See GitHub #1750.
     unproductive_attempts: int = 0
     # Durable proof that a session was genuinely spawned for this row at least
     # once — the state reconcile/tasks.py's _is_never_claimed needs and cannot
