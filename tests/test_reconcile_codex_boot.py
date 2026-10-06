@@ -42,8 +42,8 @@ from cw.models import (
     Stage,
     TicketTask,
 )
-from cw.reconcile import _shared as reconcile_shared
 from cw.reconcile import codex_boot
+from cw.reconcile._shared import _reap as reconcile_reap
 from cw.reconcile.codex_boot import (
     _PARK_REASON_CODEX_PROCESS_RUNNING,
     _PARK_REASON_DIRTY_WORKTREE,
@@ -584,7 +584,7 @@ def test_failed_reap_proposal_leaves_the_stamp_unset_for_a_retry(
     _seed_clean_codex_orphan(tmp_config_dir, tmp_path, make_git_repo)
     _live_writer(monkeypatch, 4242)
     real = _failing_record_event(
-        monkeypatch, reconcile_shared, OrchestratorEventType.SESSION_REAP_PROPOSED
+        monkeypatch, reconcile_reap, OrchestratorEventType.SESSION_REAP_PROPOSED
     )
 
     assert reap_orphaned_codex_sessions_at_boot() == 0
@@ -595,7 +595,7 @@ def test_failed_reap_proposal_leaves_the_stamp_unset_for_a_retry(
     assert task.session_id == load_state().sessions[0].id
     assert _attention_events("test-codex-boot-failed-proposal-attn") == []
 
-    monkeypatch.setattr(reconcile_shared, "record_event", real)
+    monkeypatch.setattr(reconcile_reap, "record_event", real)
 
     assert reap_orphaned_codex_sessions_at_boot() == 1
     assert _assert_session_left_active().reap_proposed_at is not None
