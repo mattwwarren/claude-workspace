@@ -52,7 +52,8 @@ def _apply_idle_routed_mutations(
 
     GitHub #1031 (extends #1019's phantom-path guard): when
     ``_apply_sentinel_to_task`` reports ``routed=False`` (a stage-mismatch
-    refusal, the #986 incident), the session must NOT be completed here --
+    refusal, the #986 incident) and the row is not terminal (#2140, #2482),
+    the session must NOT be completed here --
     ``_detect_idle_candidates`` only builds these candidates when the surface
     is still reported alive by the daemon, so an unconditional completion
     would tear down a live surface, not just orphan a task row.
@@ -65,30 +66,34 @@ def _apply_idle_routed_mutations(
     the stage-mismatch refusal-marker branch, which would otherwise orphan
     this session forever (mirrors the Stop-hook's #1692 carve-out).
 
-    #2458 round 2 (known gap, tracked in #2482): unlike
-    ``task_already_terminal``, ``outcome.landed_terminal`` -- a BlockedResult
-    that itself just landed the task terminal-FAILED via the attempt-cap
-    catch-all -- is never consumed here, only in the Stop hook's
-    ``_handle_unrouted_stop`` (#1273). A candidate whose route lands
-    ``landed_terminal=True`` therefore falls into the stage-mismatch-refusal
-    branch below (``routed=False``, ``task_already_terminal=False``) and is
-    left ACTIVE with no daemon stop, instead of completing. Currently
-    unreachable in production: ``cw result emit``'s ``_validate_or_exit``
-    (``cw.result``) only ever stages an ``AutoDevResult``, never the
-    synthetic ``BlockedResult`` shape that sets ``landed_terminal`` -- see
-    that gate's own docstring for the other half of this cross-reference,
-    and ``tests/test_result.py``'s
-    ``test_validate_or_exit_rejects_bare_blocked_result_shape`` for the test
-    that pins it. If that gate is ever widened the way RFC 0012 A1 / #1457
-    widened the Stop-hook harvest door, this function needs a
-    ``landed_terminal`` arm mirroring the Stop hook's (#2482).
+    GitHub #2482: ``outcome.landed_terminal`` -- a BlockedResult that itself
+    just landed the task terminal-FAILED via the attempt-cap catch-all -- is
+    the second terminal cause, handled like ``task_already_terminal``: the
+    dev-queue row is genuinely terminal under this exact session id, so no
+    dispatch path will give the session another leg and it is completed
+    NORMAL rather than stamped with the refusal marker. This mirrors the Stop
+    hook's #1273 arm (``_handle_unrouted_stop``) but deliberately diverges in
+    shape: this function runs under ``sessions_lock`` (ADR-0019 / #1232 forbid
+    a daemon call there) and holds no daemon handle, so it never stops the
+    surface itself. Appending the candidate to ``accepted`` is what makes
+    ``_emit_idle_completion_events`` queue the deferred surface stop that runs
+    after the lock releases. The Stop hook, which stops directly because it
+    runs after the lock, leaves its session ACTIVE; completing here avoids an
+    ACTIVE session whose surface was stopped (the idle detector only offers
+    live surfaces, so only the phantom sweep could reclaim it). Reachable
+    today via the transcript producer, whose re-parse has no status filter;
+    the staged producer only reaches it if ``cw result emit``'s
+    ``_validate_or_exit`` gate is widened (see that gate's docstring and
+    ``tests/test_result.py``'s
+    ``test_validate_or_exit_rejects_bare_blocked_result_shape``).
 
     Returns ``(accepted, state_mutated)``. ``accepted`` is only the candidates
-    actually routed, so the caller's downstream event emission fires solely for
-    those. ``state_mutated`` is True when any session state changed here --
-    including a refusal-marker stamp with no accepted candidate -- so the caller
-    persists the stamp even on a pure-refusal tick (the marker would otherwise
-    be lost and the candidate re-fire forever, GitHub #1149).
+    actually routed or completed on a terminal row (#2140, #2482), so the
+    caller's downstream event emission fires solely for those.
+    ``state_mutated`` is True when any session state changed here -- including
+    a refusal-marker stamp with no accepted candidate -- so the caller persists
+    the stamp even on a pure-refusal tick (the marker would otherwise be lost
+    and the candidate re-fire forever, GitHub #1149).
     """
     accepted: list[ReapCandidate] = []
     state_mutated = False
@@ -99,6 +104,7 @@ def _apply_idle_routed_mutations(
         session = session_by_id[candidate.session_id]
         routed = True
         task_already_terminal = False
+        landed_terminal = False
         # #2458: the staged-emit producer reconstructs routed_sentinel FROM
         # session.last_result, so a fresh door emit would refuse it as an
         # overwrite of itself (first-writer-wins) -- audit the already-staged
@@ -130,7 +136,12 @@ def _apply_idle_routed_mutations(
         if outcome is not None:
             routed = outcome.routed
             task_already_terminal = outcome.task_already_terminal
-        if not routed and not task_already_terminal:
+            landed_terminal = outcome.landed_terminal
+        # #2482 / #1273: both flags mean the dev-queue row is genuinely terminal
+        # under this session id; they are mutually exclusive and only ever pair
+        # with routed=False.
+        row_terminal = task_already_terminal or landed_terminal
+        if not routed and not row_terminal:
             # #1149: a stage-mismatch refusal (earlier-stage replay / unresolvable
             # position) leaves the task untouched. Stamp a paused_status-only
             # marker so the next tick's `session.last_result is None` unrouted-check
@@ -150,9 +161,17 @@ def _apply_idle_routed_mutations(
             }
             state_mutated = True
             continue
-        if not routed and task_already_terminal:
+        if not routed and row_terminal:
             # #2140: the shared audited seam already accepted and recorded the
             # result after discovering the raced terminal queue row.
+            #
+            # #2482: a BlockedResult that itself landed the row terminal-FAILED
+            # (attempt-cap catch-all) also completes the session. The surface
+            # stop is queued by _emit_idle_completion_events once this candidate
+            # is in `accepted`, and runs after sessions_lock releases. Unlike
+            # the Stop hook, which bails with rescued=None and leaves the
+            # session ACTIVE, the idle sweep completes it so a stopped surface
+            # never sits behind an ACTIVE session.
             session.status = SessionStatus.COMPLETED
             session.completed_at = now
             session.completed_reason = CompletionReason.NORMAL

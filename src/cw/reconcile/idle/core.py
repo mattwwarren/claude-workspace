@@ -38,6 +38,10 @@ def _act_on_idle_candidates(
     staged-advance authority, completes the session on acceptance, and emits
     the completion event. A stage-mismatch refusal (#1031) stamps a
     paused-status marker instead so the doomed candidate stops re-firing.
+    A BlockedResult that landed the dev-queue row terminal-FAILED
+    (``landed_terminal``, #2482) completes the session like
+    ``task_already_terminal`` (#2140); its daemon stop is deferred, never
+    issued under the lock.
     Constructive by construction -- no reap-policy routing is needed because
     nothing here destroys in-flight work. The accepted sessions' surface
     stops are queued on *deferred* after ``save_state`` and run once

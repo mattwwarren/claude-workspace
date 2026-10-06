@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from cw.auto_dev_result import AutoDevResult
+from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.config import clients_file
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
@@ -23,6 +23,7 @@ from cw.models import (
     AGENT_SPAWN_STAMP_KEY,
     AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
     HOOK_CONTEXT_RELATIVE_PATH,
+    CompletionReason,
     CwState,
     DevQueueStore,
     LastResultSource,
@@ -276,7 +277,7 @@ def _emit_cli_state(tmp_path: Path, payload: dict[str, object]) -> CwState:
     return state
 
 
-def _seed_row(status: QueueItemStatus, stage: Stage) -> None:
+def _seed_row(status: QueueItemStatus, stage: Stage, *, attempts: int = 1) -> None:
     save_dev_queue(
         DevQueueStore(
             tasks=[
@@ -286,11 +287,24 @@ def _seed_row(status: QueueItemStatus, stage: Stage) -> None:
                     status=status,
                     session_id="salv-1",
                     stage=stage,
-                    attempts=1,
+                    attempts=attempts,
                 )
             ]
         )
     )
+
+
+# #2482: a staged BlockedResult with an unrecognized reason. At the attempt cap
+# (``_seed_row(..., attempts=3)``) the catch-all lands the row terminal-FAILED,
+# so ``SentinelRouteOutcome.landed_terminal`` is True.
+_LANDED_TERMINAL_PAYLOAD: dict[str, object] = {
+    "status": "blocked",
+    "blocker": {
+        "stage": "unknown",
+        "reason": "unknown_reason_xyz",
+        "details": "parser-synthesized blocker",
+    },
+}
 
 
 def _impl_stage_complete() -> dict[str, object]:
@@ -889,54 +903,28 @@ def test_detect_idle_candidates_routes_live_emit_cli_blocked_generic_reason(
     assert state.sessions[0].status is SessionStatus.COMPLETED
 
 
-def test_detect_idle_candidates_landed_terminal_blocked_tripwire(
+def test_detect_idle_candidates_landed_terminal_blocked_completes_and_stops_daemon(
     tmp_config_dir: Path,
     tmp_path: Path,
     no_transcript_parse: None,
     idle_daemon: FakeNativeDaemonClient,
 ) -> None:
-    """Tripwire, not a passing-behavior assertion (comment 2 / round-2 finding).
+    """#2482: a landed-terminal BlockedResult completes the session, stops daemon.
 
     The idle-sweep twin of the Stop hook's
     ``test_signal_stop_landed_terminal_blocked_stops_daemon_with_bg_tasks_pending``:
     a staged BlockedResult with an unrecognized reason at the attempt cap
     lands the task terminal-FAILED with ``outcome.landed_terminal=True``. The
-    Stop hook consumes that flag (``_handle_unrouted_stop``, #1273) and stops
-    the daemon; ``_apply_idle_routed_mutations`` does not -- see the
-    ``#2458 round 2`` comment on that function. This staging bypasses ``cw
-    result emit``'s CLI validation gate directly at the data layer (the CLI
-    itself would refuse this bare shape, per
-    ``test_result_emit_cli_rejects_bare_blocked_shape_payload``) -- it is a
-    tripwire for the day that gate is widened, not a claim this path is
-    reachable in production today.
-
-    Recorded, tracked in #2482: the row lands FAILED as expected, but the
-    session is left ACTIVE with no daemon stop -- it falls into the
-    stage-mismatch-refusal branch instead of completing.
+    Stop hook consumes that flag (``_handle_unrouted_stop``, #1273); the idle
+    sweep now does too, completing the session like ``task_already_terminal``
+    (#2140) instead of stamping the stage-mismatch refusal marker, and the
+    surface stop is deferred past ``sessions_lock`` via ``defer_surface_stop``.
+    The staging bypasses ``cw result emit``'s CLI validation gate at the data
+    layer (the CLI itself refuses this bare shape, per
+    ``test_result_emit_cli_rejects_bare_blocked_shape_payload``).
     """
-    save_dev_queue(
-        DevQueueStore(
-            tasks=[
-                TicketTask(
-                    ticket_id=_EMIT_TICKET,
-                    client="client-a",
-                    status=QueueItemStatus.RUNNING,
-                    session_id="salv-1",
-                    stage=Stage.PLAN,
-                    attempts=3,  # _VALIDATION_FAILED_MAX_ATTEMPTS
-                )
-            ]
-        )
-    )
-    payload = {
-        "status": "blocked",
-        "blocker": {
-            "stage": "unknown",
-            "reason": "unknown_reason_xyz",
-            "details": "parser-synthesized blocker",
-        },
-    }
-    state = _emit_cli_state(tmp_path, payload)
+    _seed_row(QueueItemStatus.RUNNING, Stage.PLAN, attempts=3)
+    state = _emit_cli_state(tmp_path, _LANDED_TERMINAL_PAYLOAD)
 
     candidates = _detect_idle_candidates(
         state,
@@ -948,8 +936,103 @@ def test_detect_idle_candidates_landed_terminal_blocked_tripwire(
     assert len(candidates) == 1
     call_and_drain(_act_on_idle_candidates, state, candidates, now=_NOW_PAST_CHECK)
 
-    # Documents the actual (currently-wrong) behavior -- see docstring.
-    assert _reload_row().status == QueueItemStatus.FAILED
+    assert _reload_row().status is QueueItemStatus.FAILED
     session = state.sessions[0]
-    assert session.status is SessionStatus.ACTIVE
+    assert session.status is SessionStatus.COMPLETED
+    assert session.completed_reason is CompletionReason.NORMAL
+    assert session.completed_at == _NOW_PAST_CHECK
+    # The refusal marker is NOT stamped: the staged result is left untouched.
+    assert session.last_result == _LANDED_TERMINAL_PAYLOAD
+    assert "paused_status" not in session.last_result
+    assert idle_daemon.stop_calls == ["fake-short-id"]
+    completed = read_events(
+        consumer="t2482-idle-landed-terminal",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert len(completed) == 1
+    assert completed[0].payload["status"] == "blocked"
+    assert completed[0].payload["ticket_id"] == _EMIT_TICKET
+    # A completed session is no longer offered on the next tick.
+    assert (
+        _detect_idle_candidates(
+            state,
+            now=_NOW_PAST_CHECK,
+            native_live={"fake-short-id"},
+            config=OrchestratorConfig(),
+            task_by_ticket={},
+        )
+        == []
+    )
+
+
+def test_landed_terminal_blocked_queues_surface_stop_until_the_drain(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    no_transcript_parse: None,
+    idle_daemon: FakeNativeDaemonClient,
+) -> None:
+    """#2482: the landed-terminal stop is queued under the lock, run at the drain.
+
+    Pins the lock-hierarchy design (ADR-0019 / #1232): ``_apply_idle_routed_mutations``
+    runs under ``sessions_lock`` and must not stop the daemon itself.
+    """
+    _seed_row(QueueItemStatus.RUNNING, Stage.PLAN, attempts=3)
+    state = _emit_cli_state(tmp_path, _LANDED_TERMINAL_PAYLOAD)
+    candidates = _detect_idle_candidates(
+        state,
+        now=_NOW_PAST_CHECK,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+    sink = DeferredReconcileJobs()
+
+    _act_on_idle_candidates(state, candidates, now=_NOW_PAST_CHECK, deferred=sink)
+
+    assert state.sessions[0].status is SessionStatus.COMPLETED
     assert idle_daemon.stop_calls == []
+    assert [job.label for job in sink.post_lock] == ["surface_stop:fake-short-id"]
+
+    run_post_lock_jobs(sink)
+
+    assert idle_daemon.stop_calls == ["fake-short-id"]
+
+
+def test_landed_terminal_blocked_transcript_producer_completes_and_records_csid(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    idle_daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2482: the transcript producer can yield a BlockedResult that lands terminal.
+
+    ``_parse_any_sentinel_from_transcript`` has no status filter, so this arm
+    is reachable today through the transcript re-parse (``last_result is None``,
+    non-``None`` ``salvage_csid``), not only via a widened ``cw result emit`` gate.
+    """
+    _seed_row(QueueItemStatus.RUNNING, Stage.PLAN, attempts=3)
+    blocked = BlockedResult.model_validate(_LANDED_TERMINAL_PAYLOAD)
+    monkeypatch.setattr(
+        idle_detect,
+        "_parse_any_sentinel_from_transcript",
+        lambda _session: (blocked, "csid-blocked"),
+    )
+    state = _state(tmp_path)
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=_NOW_PAST_CHECK,
+        native_live={"fake-short-id"},
+        config=OrchestratorConfig(),
+        task_by_ticket={},
+    )
+    assert len(candidates) == 1
+    call_and_drain(_act_on_idle_candidates, state, candidates, now=_NOW_PAST_CHECK)
+
+    assert _reload_row().status is QueueItemStatus.FAILED
+    session = state.sessions[0]
+    assert session.status is SessionStatus.COMPLETED
+    assert session.completed_reason is CompletionReason.NORMAL
+    assert session.claude_session_id == "csid-blocked"
+    assert session.last_result is None
+    assert idle_daemon.stop_calls == ["fake-short-id"]
