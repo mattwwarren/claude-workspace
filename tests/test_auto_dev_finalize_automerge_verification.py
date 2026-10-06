@@ -228,3 +228,53 @@ def test_ship_it_step4_bash_case_separates_exit_1_from_invocation_error() -> Non
         "failed after bounded retries for PR #$PR_NUMBER (arm-automerge exit 1)"
         in block
     )
+
+
+# --- #2581: arm pinned to the verified head SHA; fail-closed exit 2 ---
+
+_UNDETERMINABLE = "cannot be determined (fail closed, #2581)"
+
+
+def test_ship_it_step4_pins_arm_to_local_head() -> None:
+    section = _ship_it_step4_section()
+    assert "HEAD_SHA=$(git rev-parse HEAD)" in section
+    assert '--repo-path "$REPO_ROOT" --head-sha "$HEAD_SHA"' in section
+    assert section.index("HEAD_SHA=") < section.index("arm-automerge")
+
+
+def test_step4c_self_heal_arm_pins_to_verify_head_sha() -> None:
+    section = _step4c_section()
+    assert (
+        "arm-automerge <pr_number> --repo-path <worktree> --head-sha <head_sha>"
+        in section
+    )
+    assert "`head_sha` field of the verify JSON" in section
+
+
+def test_step4d_arm_and_retry_pin_to_worktree_head() -> None:
+    section = _step4d_enable_automerge_section()
+    assert "HEAD_SHA=$(git rev-parse HEAD)" in section
+    assert section.count('--head-sha "$HEAD_SHA"') == 2
+
+
+def test_sentinel_recovery_hint_carries_head_sha() -> None:
+    section = _step4c_sentinel_section()
+    assert "--repo-path <worktree> --head-sha <head-sha>" in section
+
+
+def test_exit_2_documents_undeterminable_config() -> None:
+    sentinel = _step4c_sentinel_section()
+    variant_c = sentinel[sentinel.index("- (c) Invocation error") :]
+    for section in (
+        _ship_it_step4_section(),
+        _step4c_section(),
+        _step4d_enable_automerge_section(),
+        variant_c,
+    ):
+        assert _UNDETERMINABLE in section
+
+
+def test_headless_contract_documents_head_pin() -> None:
+    content = _doc("headless-contract.md")
+    assert "--head-sha" in content
+    assert "--match-head-commit" in content
