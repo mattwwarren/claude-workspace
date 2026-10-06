@@ -13,9 +13,11 @@ two different shapes rather than a single helper:
   the call site and use this helper only for the payload construction.
 - :func:`emit_routed_sentinel_completion` is SIDE-EFFECTING — it builds the
   same payload (via the pure helper above), calls ``record_event``, and then
-  — only when the session still has a ``surface_ref`` — stops the daemon
-  surface. The emit-before-stop order is binding: it matches every existing
-  routed-sentinel call site in idle.py/stalled.py/phantom.py.
+  — only when the session still has a ``surface_ref`` — queues the daemon
+  surface stop on the caller's post-lock sink (#1232), which ``reconcile()``
+  drains after ``sessions_lock`` releases. The emit-before-stop order is
+  binding: it matches every existing routed-sentinel call site in
+  idle.py/stalled.py/phantom.py.
 
 Both helpers pass ``ticket_id`` through unguarded (no truthiness filter) and
 neither passes a ``correlation_id`` to ``record_event``, matching the
@@ -28,11 +30,12 @@ from typing import TYPE_CHECKING
 
 from cw.events import record_event
 from cw.models import OrchestratorEventType
-from cw.reconcile import _deps
+from cw.reconcile.deferred import defer_surface_stop
 
 if TYPE_CHECKING:
     from cw.auto_dev_result import Status
     from cw.models import Session
+    from cw.reconcile.deferred import DeferredReconcileJobs
 
 
 def build_salvage_completion_payload(
@@ -63,17 +66,20 @@ def emit_routed_sentinel_completion(
     *,
     ticket_id: str | None,
     status: Status,
+    deferred: DeferredReconcileJobs,
 ) -> None:
-    """Emit a salvaged SESSION_COMPLETED, then stop the surface if still live.
+    """Emit a salvaged SESSION_COMPLETED, then queue the surface stop if any.
 
     Emit-before-stop order is binding — matches every existing routed-sentinel
-    call site in idle.py/stalled.py. No ``correlation_id`` is passed, matching
-    those same call sites (phantom.py's analogous call does pass one; that
-    divergence is deliberate and out of scope here — see GitHub #1306).
+    call site in idle.py/stalled.py. The stop itself is queued on *deferred*
+    and runs after ``sessions_lock`` releases (#1232). No ``correlation_id``
+    is passed, matching those same call sites (phantom.py's analogous call
+    does pass one; that divergence is deliberate and out of scope here — see
+    GitHub #1306).
     """
     payload = build_salvage_completion_payload(
         session, ticket_id=ticket_id, status=status
     )
     record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
     if session.surface_ref is not None:
-        _deps.get_native_daemon_client().stop(session.surface_ref)
+        defer_surface_stop(deferred, session.surface_ref)

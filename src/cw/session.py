@@ -570,8 +570,13 @@ def done_session(
     :meth:`~cw.native_daemon.NativeDaemonClient.stop` swallows a missing or
     already-gone surface.
     """
-    # Why not mutate_state: remove_worktree (git subprocess) runs inside the
-    # lock window on the --cleanup path (criterion 1: no subprocess in lock).
+    # Why not mutate_state: remove_worktree (git subprocess) deliberately runs
+    # inside sessions_lock on the --cleanup path. Ownership validation, worktree
+    # removal and the completion stamp must be serialized: no reservation is
+    # persisted between lock windows, so removing outside the lock would not
+    # exclude a concurrent resume, a second `cw done --cleanup`, or other state
+    # changes in the gap. A lock-free version needs a persisted reservation on
+    # the Session model and is tracked in #2557.
     # bounded=True (#2491): `cw done` takes the lock before any side effect
     # (worktree removal happens inside it), so a timeout is a clean retry.
     with sessions_lock(bounded=True):

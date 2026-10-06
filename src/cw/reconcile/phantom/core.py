@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from cw.auto_dev_result import AutoDevResult
     from cw.models import CwState, Session
     from cw.reconcile._shared import ReapCandidate
+    from cw.reconcile.deferred import DeferredReconcileJobs
 
 
 def _route_phantom_by_policy(
@@ -219,8 +220,13 @@ def _act_on_phantom_candidates(
     config: OrchestratorConfig | None = None,
     merged_ticket_ids: frozenset[str] = frozenset(),
     gh_blocked_ticket_ids: frozenset[str] = frozenset(),
+    deferred: DeferredReconcileJobs,
 ) -> tuple[list[str], list[str], bool, list[str], dict[str, AutoDevResult], list[str]]:
     """Act phase for phantom sessions: apply all mutations.
+
+    Surface stops for merged and routed phantoms are queued on *deferred*
+    after ``save_state`` and their ``SESSION_COMPLETED`` emit, and run once
+    ``sessions_lock`` releases (#1232).
 
     Returns (ticket_ids_to_revert, phantom_names, usage_limited,
              salvaged_ticket_ids, salvaged_result_by_ticket, merged_completed_ids).
@@ -384,14 +390,15 @@ def _act_on_phantom_candidates(
         record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
 
     # Return value pre-computed above as dirty_ticket_ids; call for side
-    # effects only (surface stops and event emission).
+    # effects only (event emission and queued surface stops).
     _emit_phantom_terminal_events(
         session_by_id,
         crash_candidates,
         merged_crash_candidates,
         gh_blocked_crash_candidates,
+        deferred=deferred,
     )
-    _emit_phantom_routed_events(session_by_id, routed_candidates)
+    _emit_phantom_routed_events(session_by_id, routed_candidates, deferred=deferred)
     _emit_sentinel_mismatch_veto_escalation_events(session_by_id, escalate_candidates)
 
     return (

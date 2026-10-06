@@ -34,7 +34,12 @@ Lock note: act-phase helpers call ``save_state()`` directly — not
 ``mutate_state()`` (ADR-0005) — because ``_reconcile_locked()`` already
 holds ``sessions_lock`` and re-acquiring the same per-open-fd flock would
 self-deadlock (#387).  Serialisation against concurrent Stop-hook writes
-is enforced by the held lock.
+is enforced by the held lock.  External calls an act phase decides on under
+the lock -- daemon surface stops, review-recipe dispatch, the recipes' gh
+calls (gate audit comments, reviewer request) -- are queued on a
+caller-owned post-lock sink (``deferred``) and run by ``reconcile()`` after
+the lock releases (#1229, #1232); the mid-turn usage-limit stop is the one
+exception (#2549).
 
 Transient-outage guard: ``reconcile`` skips the act phase entirely when
 ``claude agents --json`` fails or returns an empty roster while
@@ -59,6 +64,10 @@ re-exports. Submodules:
   ``reap_policy``-gated revert or BLOCKED_ON_USER park, plus lockout arm).
 - ``phantom`` — phantom (dead-surface) sweep.
 - ``tasks`` — dev-queue revert backstops and timed-out-merged completion.
+- ``deferred`` — the post-lock job sink (``DeferredReconcileJobs``,
+  ``PostLockJob``, ``defer_surface_stop``, ``run_post_lock_jobs``) that
+  carries the act phases' daemon stops and the recipes' gh calls out of
+  ``sessions_lock`` (#1232).
 - ``core`` — ``reconcile`` / ``_reconcile_locked`` orchestration.
 """
 

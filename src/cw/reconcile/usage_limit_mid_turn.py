@@ -566,6 +566,13 @@ def _stop_surface(act: _Act) -> _Stop:
     # re-dispatch spawns a new surface. Every write after the stop
     # (``_persist_completed``, ``_finish``) re-checks ownership under the
     # lock, so a row another writer has since taken is never mutated here.
+    # Why: this is the one reconcile daemon stop that still runs under
+    # sessions_lock rather than being queued on the post-lock sink (#1232).
+    # The act is intent-based and resumable: the roster poll below confirms
+    # the stop before the session is persisted COMPLETED, and that ordering
+    # is what the act's resume logic depends on. Splitting the stop from the
+    # persist is tracked in #2549. tests/test_reconcile_stop_call_sites_guard.py
+    # allowlists exactly this call.
     daemon = _deps.get_native_daemon_client()
     daemon.stop(surface_ref)
     if wait_for_roster_presence(

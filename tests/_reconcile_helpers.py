@@ -19,6 +19,8 @@ from typing import Any
 
 import pytest
 
+from cw.config import load_state, sessions_lock
+from cw.exceptions import SessionsLockReentryError
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     ClientConfig,
@@ -33,6 +35,8 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile._shared import _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY
+from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
+from cw.reconcile.review_recipes import ReviewRecipeCandidate
 from tests.conftest import (
     _make_daemon_session,
     _write_idle_transcript,
@@ -43,6 +47,77 @@ from tests.conftest import (
 # below -- the same "fake-short-id" the transcript writers key their filename
 # prefix on, so ``_locate_session_transcript``'s surface_ref glob finds them.
 _FAKE_SURFACE_REF = "fake-short-id"
+
+
+def probe_sessions_lock_free() -> bool:
+    """Return True iff this thread does NOT hold ``sessions_lock`` right now.
+
+    Uses the lock's public re-entry contract rather than its private
+    thread-local flag: a same-thread acquisition raises
+    ``SessionsLockReentryError`` exactly when the lock is already held.
+    """
+    try:
+        with sessions_lock(bounded=True):
+            return True
+    except SessionsLockReentryError:
+        return False
+
+
+class LockProbeDaemon(FakeNativeDaemonClient):
+    """Fake daemon whose ``stop()`` records lock state and on-disk statuses.
+
+    Each stop appends ``("free" | "held", {session_id: status})`` to
+    :attr:`probes` -- whether ``sessions_lock`` was free at the call, and every
+    session's persisted status at that moment -- then stops as the base fake
+    does (#1232).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.probes: list[tuple[str, dict[str, SessionStatus]]] = []
+
+    def stop(self, short_id: str) -> None:
+        lock = "free" if probe_sessions_lock_free() else "held"
+        statuses = {s.id: s.status for s in load_state().sessions}
+        self.probes.append((lock, statuses))
+        super().stop(short_id)
+
+
+def call_and_drain[T](
+    fn: Callable[..., T],
+    *args: object,
+    deferred: DeferredReconcileJobs | None = None,
+    **kwargs: object,
+) -> T:
+    """Call an act-phase *fn* with a post-lock sink, then drain the sink.
+
+    Stands in for ``reconcile()``'s own create-then-drain (#1232) for tests
+    that drive an act phase directly. Pass *deferred* to own the sink (e.g. to
+    assert on what was queued); otherwise a fresh one is built. Returns
+    *fn*'s result.
+    """
+    sink = deferred if deferred is not None else DeferredReconcileJobs()
+    result = fn(*args, deferred=sink, **kwargs)
+    run_post_lock_jobs(sink)
+    return result
+
+
+def act_then_dispatch[J](
+    act: Callable[..., list[J]],
+    dispatch: Callable[[list[J]], list[str]],
+    candidates: list[ReviewRecipeCandidate],
+    **kwargs: object,
+) -> list[str]:
+    """Run a review-recipe act phase, then dispatch the jobs it returned.
+
+    The review-recipe act phases only prepare jobs under ``dev_queue_lock()``
+    (#1229, #1232); ``reconcile()`` runs them after ``sessions_lock``
+    releases. This stands in for that act-then-drain for tests that exercise
+    act + dispatch end to end without a full ``reconcile()``: *act* is called
+    as ``act(candidates, **kwargs)``, its job list goes to *dispatch*, and the
+    acted ticket ids *dispatch* reports are returned.
+    """
+    return dispatch(act(candidates, **kwargs))
 
 
 def _mk_session(

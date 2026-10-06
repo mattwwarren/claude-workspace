@@ -14,17 +14,21 @@ from cw.reconcile.dispositions import emit_routed_sentinel_completion
 if TYPE_CHECKING:
     from cw.models import Session
     from cw.reconcile._shared import ReapCandidate
+    from cw.reconcile.deferred import DeferredReconcileJobs
 
 
 def _emit_idle_completion_events(
     session_by_id: dict[str, Session],
     routed_sentinel_candidates: list[ReapCandidate],
+    *,
+    deferred: DeferredReconcileJobs,
 ) -> None:
-    """Emit SESSION_COMPLETED + stop surfaces for routed-sentinel completions.
+    """Emit SESSION_COMPLETED + queue surface stops for routed-sentinel completions.
 
-    The surface stop inside ``emit_routed_sentinel_completion`` is
-    evidence-driven: the session emitted a sentinel, so its work is recorded
-    as done -- this is a completed session's teardown, not a timeout.
+    The surface stop ``emit_routed_sentinel_completion`` queues on *deferred*
+    (run after ``sessions_lock`` releases, #1232) is evidence-driven: the
+    session emitted a sentinel, so its work is recorded as done -- this is a
+    completed session's teardown, not a timeout.
     """
     for candidate in routed_sentinel_candidates:
         if candidate.routed_sentinel is None:
@@ -34,4 +38,5 @@ def _emit_idle_completion_events(
             session,
             ticket_id=candidate.ticket_id,
             status=candidate.routed_sentinel.status,
+            deferred=deferred,
         )

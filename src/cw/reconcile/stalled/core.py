@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
     from cw.models import CwState
     from cw.reconcile._shared import ReapCandidate
+    from cw.reconcile.deferred import DeferredReconcileJobs
 
 
 def _act_on_stalled_candidates(
@@ -36,6 +37,7 @@ def _act_on_stalled_candidates(
     candidates: list[ReapCandidate],
     *,
     now: datetime,
+    deferred: DeferredReconcileJobs,
 ) -> None:
     """Act phase for headless DAEMON sessions carrying a foreign result.
 
@@ -46,7 +48,9 @@ def _act_on_stalled_candidates(
     foreign ``INTERMEDIATE_ADVANCE_STATUSES`` result): routes the sentinel
     through the shared stage-aware authority instead of completing the task
     outright. Constructive by construction -- no reap-policy routing is
-    needed because nothing here destroys in-flight work.
+    needed because nothing here destroys in-flight work. Surface stops are
+    queued on *deferred* after ``save_state`` and run once ``sessions_lock``
+    releases (#1232).
     """
     if not candidates:
         return
@@ -79,6 +83,10 @@ def _act_on_stalled_candidates(
     save_state(state)
     if foreign_result_candidates:
         _apply_stalled_queue_mutations(foreign_result_candidates)
-        _emit_stalled_foreign_result_events(session_by_id, foreign_result_candidates)
+        _emit_stalled_foreign_result_events(
+            session_by_id, foreign_result_candidates, deferred=deferred
+        )
     if accepted_routed_candidates:
-        _emit_stalled_routed_events(session_by_id, accepted_routed_candidates)
+        _emit_stalled_routed_events(
+            session_by_id, accepted_routed_candidates, deferred=deferred
+        )

@@ -18,6 +18,10 @@ dispatch, so ``run_review_recipes`` runs those two acts only when handed a
 :class:`DeferredReviewDispatch` sink; operator read commands (``cw status`` /
 ``list`` / ``start`` / ``doctor``) pass none, and the two acts are then skipped
 entirely rather than stamping a one-shot latch nobody will honour.
+``request_reviewer`` runs for every caller, but its ``gh`` call is likewise
+not made under ``sessions_lock``: it is queued as a
+:class:`~cw.reconcile.deferred.PostLockJob` on ``reconcile()``'s post-lock sink
+(#1232), which wraps that review sink.
 
 Shared cross-recipe infrastructure (the pure ``_detect_by_attention_state``
 classifier, the act-phase helpers, and the recipe/attention/payload constants)
@@ -40,6 +44,7 @@ from cw.dev_queue import load_dev_queue
 from cw.events import read_events
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
+from cw.reconcile.deferred import PostLockJob
 from cw.reconcile.review_recipes._shared import (
     _PAYLOAD_KEY_CLIENT,
     _PAYLOAD_KEY_RECIPE,
@@ -70,12 +75,15 @@ from cw.reconcile.review_recipes.escalate_merge_block import (
 from cw.reconcile.review_recipes.request_reviewer import (
     _act_request_reviewer,
     _detect_request_reviewer,
+    _dispatch_request_reviewer,
+    _ReviewerJob,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cw.models import OrchestratorConfig
+    from cw.reconcile.deferred import DeferredReconcileJobs
 
 _log = logging.getLogger("cw.reconcile.review_recipes")
 
@@ -198,6 +206,23 @@ def _run_isolated(
         return None
 
 
+def _reviewer_request_job(job: _ReviewerJob) -> PostLockJob:
+    """Wrap one prepared reviewer request as a post-lock job (#1232).
+
+    The gh call runs through :func:`_run_isolated`, so a crash is logged and
+    corrected with ``PR_ACTION_FAILED`` exactly as a review dispatch job's is.
+    """
+    return PostLockJob(
+        label=f"reviewer_request:{job.client}:{job.ticket_id}",
+        run=partial(
+            _run_isolated,
+            partial(_dispatch_request_reviewer, job),
+            ticket_id=job.ticket_id,
+            payload_base=job.payload_base,
+        ),
+    )
+
+
 def dispatch_deferred_review_jobs(deferred: DeferredReviewDispatch) -> list[str]:
     """Execute the jobs in the sink; return the acted ticket_ids.
 
@@ -234,7 +259,7 @@ def dispatch_deferred_review_jobs(deferred: DeferredReviewDispatch) -> list[str]
 
 
 def run_review_recipes(
-    *, config: OrchestratorConfig, deferred: DeferredReviewDispatch | None
+    *, config: OrchestratorConfig, jobs: DeferredReconcileJobs
 ) -> list[str]:
     """Run all enabled review recipes for one reconcile tick (P2: detect → act).
 
@@ -266,23 +291,29 @@ def run_review_recipes(
     latch field, not a status transition — none remain purely read-only under
     their lock).
 
-    Returns the concatenated ticket_ids the ``request_reviewer`` and
-    ``escalate_merge_block`` recipes report as acted — both finish their action
-    inline, with no ``sessions_lock`` re-entry.
+    Returns the ticket_ids the ``escalate_merge_block`` recipe reports as
+    acted — it finishes its action inline, with no ``sessions_lock``
+    re-entry and no external call.
 
-    *deferred* selects which recipes run (#1229). The ``address_review`` and
-    ``auto_fix_ci`` recipes end in a dispatch that re-acquires ``sessions_lock``
-    (``reconcile()`` still holds it when this runs) and can spawn headless
-    workers that push to PR branches, so they run ONLY when the caller supplies
-    a sink it will drain: with ``deferred=None`` (every ``reconcile()`` caller
-    except the live dispatch loop — ``cw status``/``list``/``start``/``doctor``)
-    their acts are skipped entirely, so they neither stamp their one-shot latch
-    nor emit ``PR_ACTION_TAKEN`` for a dispatch nobody would perform. With a
-    sink, each recipe's prepared jobs are appended to it IMMEDIATELY after that
-    recipe's act returns, before the next recipe runs, so a later exception
-    cannot lose a job whose latch is already stamped; the caller dispatches the
-    sink with :func:`dispatch_deferred_review_jobs` after releasing the lock.
-    ``request_reviewer`` and ``escalate_merge_block`` run for every caller.
+    *jobs* is ``reconcile()``'s post-lock sink (#1232). Every recipe appends
+    the work it prepares to it IMMEDIATELY after that recipe's act returns,
+    before the next recipe runs, so a later exception cannot lose a job whose
+    latch is already stamped; ``reconcile()`` drains the sink after releasing
+    the lock. ``request_reviewer`` runs for every caller: its ``gh pr edit``
+    call becomes a ``reviewer_request:<client>:<ticket_id>``
+    :class:`~cw.reconcile.deferred.PostLockJob` on ``jobs.post_lock``, run
+    through :func:`_run_isolated`. Its acted ids are therefore not returned.
+
+    ``jobs.review`` selects whether the dispatching recipes run (#1229). The
+    ``address_review`` and ``auto_fix_ci`` recipes end in a dispatch that
+    re-acquires ``sessions_lock`` (``reconcile()`` still holds it when this
+    runs) and can spawn headless workers that push to PR branches, so they run
+    ONLY when the caller supplies a review sink it will drain: with
+    ``jobs.review`` ``None`` (every ``reconcile()`` caller except the live
+    dispatch loop — ``cw status``/``list``/``start``/``doctor``) their acts are
+    skipped entirely, so they neither stamp their one-shot latch nor emit
+    ``PR_ACTION_TAKEN`` for a dispatch nobody would perform. The caller
+    dispatches the review sink with :func:`dispatch_deferred_review_jobs`.
     """
     if not config.review_recipes_enabled:
         return []
@@ -292,9 +323,8 @@ def run_review_recipes(
     # dev_queue_lock() — one read_events replay threaded into all four act
     # phases, mirroring how clients/tasks are loaded once and shared.
     repeat_fire_counts = _detect_repeat_fire_counts(config=config)
-    acted: list[str] = []
-    if deferred is not None:
-        deferred.address_review.extend(
+    if jobs.review is not None:
+        jobs.review.address_review.extend(
             _act_address_review(
                 _detect_address_review(tasks, clients=clients, config=config),
                 clients=clients,
@@ -302,7 +332,7 @@ def run_review_recipes(
                 repeat_fire_counts=repeat_fire_counts,
             )
         )
-        deferred.auto_fix_ci.extend(
+        jobs.review.auto_fix_ci.extend(
             _act_auto_fix_ci(
                 _detect_auto_fix_ci(tasks, clients=clients, config=config),
                 clients=clients,
@@ -310,15 +340,15 @@ def run_review_recipes(
                 repeat_fire_counts=repeat_fire_counts,
             )
         )
-    acted += _act_request_reviewer(
+    for reviewer_job in _act_request_reviewer(
         _detect_request_reviewer(tasks, clients=clients, config=config),
         clients=clients,
         config=config,
         repeat_fire_counts=repeat_fire_counts,
-    )
-    acted += _act_escalate_merge_block(
+    ):
+        jobs.post_lock.append(_reviewer_request_job(reviewer_job))
+    return _act_escalate_merge_block(
         _detect_escalate_merge_block(tasks, clients=clients, config=config),
         config=config,
         repeat_fire_counts=repeat_fire_counts,
     )
-    return acted

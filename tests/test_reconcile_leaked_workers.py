@@ -12,9 +12,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from cw.events import read_events
-from cw.models import CwState, OrchestratorEventType, SessionStatus
+from cw.models import (
+    CwState,
+    OrchestratorEvent,
+    OrchestratorEventType,
+    SessionStatus,
+)
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.reconcile.deferred import (
+    DeferredReconcileJobs,
+    defer_surface_stop,
+    run_post_lock_jobs,
+)
 from cw.reconcile.leaked_workers import (
     LeakedWorker,
     find_leaked_daemon_workers,
@@ -206,3 +218,101 @@ class TestSweepLeakedDaemonWorkers:
 
         assert sweep_leaked_daemon_workers(CwState(), daemon=daemon) == []
         assert daemon.stop_calls == []
+
+
+def _leaked_audit_events(consumer: str) -> list[OrchestratorEvent]:
+    return read_events(
+        consumer=consumer,
+        event_types=[OrchestratorEventType.DAEMON_LEAKED_WORKER_STOPPED],
+    )
+
+
+class TestSweepLeakedDaemonWorkersDeferred:
+    """#1232: with reconcile()'s post-lock sink the sweep queues each
+    stop-and-audit instead of running it under sessions_lock."""
+
+    def test_queues_one_job_per_leaked_worker_and_runs_it_at_the_drain(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        daemon = FakeNativeDaemonClient()
+        first = daemon.seed_live_worker(tmp_path / "first")
+        second = daemon.seed_live_worker(tmp_path / "second")
+        live_id = daemon.seed_live_worker(tmp_path / "live")
+        state = CwState(
+            sessions=[
+                _make_daemon_session(
+                    id="s1",
+                    name="client-a/auto-dev/GEN-1",
+                    status=SessionStatus.COMPLETED,
+                    surface_ref=first,
+                ),
+                _make_daemon_session(
+                    id="s2", status=SessionStatus.ACTIVE, surface_ref=live_id
+                ),
+            ]
+        )
+        sink = DeferredReconcileJobs()
+
+        found = sweep_leaked_daemon_workers(state, daemon=daemon, deferred=sink)
+
+        assert sorted(found) == sorted([first, second])
+        assert sorted(job.label for job in sink.post_lock) == sorted(
+            [f"leaked_worker_stop:{first}", f"leaked_worker_stop:{second}"]
+        )
+        assert daemon.stop_calls == []
+        assert _leaked_audit_events("test_deferred_sweep_before_drain") == []
+
+        run_post_lock_jobs(sink)
+
+        assert sorted(daemon.stop_calls) == sorted([first, second])
+        events = _leaked_audit_events("test_deferred_sweep_after_drain")
+        assert sorted(str(e.payload["short_id"]) for e in events) == sorted(
+            [first, second]
+        )
+        assert live_id in daemon.list_live_session_short_ids()
+
+    def test_unreadable_roster_queues_nothing(self, tmp_config_dir: Path) -> None:
+        daemon = FakeNativeDaemonClient()
+        daemon.roster_unreadable = True
+        sink = DeferredReconcileJobs()
+
+        assert (
+            sweep_leaked_daemon_workers(CwState(), daemon=daemon, deferred=sink) == []
+        )
+        assert sink.post_lock == []
+
+    def test_skips_a_worker_whose_surface_stop_is_already_queued(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The stalled sweep runs first in the same tick and queues a stop for
+        every session it completes; the leaked sweep must not stop that worker
+        a second time nor audit it as leaked. It is still reported found."""
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
+        )
+        already = daemon.seed_live_worker(tmp_path / "already")
+        other = daemon.seed_live_worker(tmp_path / "other")
+        state = CwState(
+            sessions=[
+                _make_daemon_session(
+                    id="s1", status=SessionStatus.COMPLETED, surface_ref=already
+                )
+            ]
+        )
+        sink = DeferredReconcileJobs()
+        defer_surface_stop(sink, already)
+
+        found = sweep_leaked_daemon_workers(state, daemon=daemon, deferred=sink)
+
+        assert sorted(found) == sorted([already, other])
+        assert [job.label for job in sink.post_lock] == [
+            f"surface_stop:{already}",
+            f"leaked_worker_stop:{other}",
+        ]
+
+        run_post_lock_jobs(sink)
+
+        assert daemon.stop_calls == [already, other]
+        events = _leaked_audit_events("test_deferred_sweep_skip")
+        assert [e.payload["short_id"] for e in events] == [other]

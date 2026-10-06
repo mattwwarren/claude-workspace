@@ -47,6 +47,7 @@ from tests._reconcile_helpers import (
     _auto_config,
     _mk_headless_daemon_session,
     _mk_phantom_daemon_session,
+    call_and_drain,
 )
 from tests.conftest import (
     _make_ticket_task,
@@ -111,14 +112,13 @@ class TestWorldStateCheckBeforeRevert:
             client="client-a",
         )
 
-        reverted, _names, _limited, _salvaged, _results, merged = (
-            _act_on_phantom_candidates(
-                state,
-                [candidate],
-                now=now,
-                config=_auto_config(),
-                merged_ticket_ids=frozenset({"phantom-merged-1"}),
-            )
+        reverted, _names, _limited, _salvaged, _results, merged = call_and_drain(
+            _act_on_phantom_candidates,
+            state,
+            [candidate],
+            now=now,
+            config=_auto_config(),
+            merged_ticket_ids=frozenset({"phantom-merged-1"}),
         )
 
         assert reverted == []
@@ -178,14 +178,13 @@ class TestWorldStateCheckBeforeRevert:
             lane="phantom-lane",
         )
 
-        reverted, _names, _limited, _salvaged, _results, merged = (
-            _act_on_phantom_candidates(
-                state,
-                [candidate],
-                now=now,
-                config=_auto_config(),
-                gh_blocked_ticket_ids=frozenset({"phantom-ghblock-1"}),
-            )
+        reverted, _names, _limited, _salvaged, _results, merged = call_and_drain(
+            _act_on_phantom_candidates,
+            state,
+            [candidate],
+            now=now,
+            config=_auto_config(),
+            gh_blocked_ticket_ids=frozenset({"phantom-ghblock-1"}),
         )
 
         assert reverted == []

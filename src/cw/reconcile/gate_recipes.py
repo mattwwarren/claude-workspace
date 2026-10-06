@@ -103,12 +103,11 @@ from cw.reconcile.gate_predicates import (
     _predicate_holds,
     _row_eligible,
 )
-from cw.reconcile.tasks import _client_cwd, _is_dangling_client
+from cw.reconcile.gate_recipe_comments import defer_gate_recipe_comment_jobs
 
 if TYPE_CHECKING:
     from datetime import datetime
     from pathlib import Path
-    from typing import Protocol
 
     from cw.models import (
         ClientConfig,
@@ -118,24 +117,7 @@ if TYPE_CHECKING:
         Session,
         TicketTask,
     )
-
-    class _CommentPostFn(Protocol):
-        """Shape shared by ``_post_auto_approve_comment``/``_post_auto_adopt_comment``.
-
-        A plain ``Callable[[str, dict[str, object]], None]`` can't express the
-        keyword-only ``cwd`` parameter both functions share, so mypy --strict
-        wouldn't catch a signature drift at the ``_flush_gate_recipe_comment_jobs``
-        call site (GitHub #1570).
-        """
-
-        def __call__(
-            self,
-            ticket_id: str,
-            snapshot: dict[str, object],
-            *,
-            cwd: Path | None = None,
-        ) -> None: ...
-
+    from cw.reconcile.deferred import DeferredReconcileJobs
 
 _log = logging.getLogger(__name__)
 
@@ -710,46 +692,12 @@ def _handle_gate_recipe_approve_failure(
     _stamp_gate_recipe_failure(task.ticket_id, task.client, now=now)
 
 
-def _log_gate_recipe_comment_skipped(ticket_id: str, client: str) -> None:
-    """Log a dangling-client audit-comment skip (GitHub #1269/#1279 R7).
-
-    Shared by :func:`_act_auto_approve_review` and :func:`_act_auto_adopt_plan`
-    so the two identical skip sites can't drift independently.
-    """
-    _log.warning(
-        "gate_recipe_comment_skipped ticket=%s client=%s: client "
-        "missing from clients.yaml (config drift) -- gh call skipped, "
-        "GitHub #1269",
-        ticket_id,
-        client,
-    )
-
-
-def _flush_gate_recipe_comment_jobs(
-    comment_jobs: list[tuple[str, str, dict[str, object]]],
-    clients: dict[str, ClientConfig] | None,
-    post_fn: _CommentPostFn,
-) -> None:
-    """Post-lock, dangling-client-guarded best-effort comment flush.
-
-    Shared loop body of both act phases' post-``dev_queue_lock()`` comment
-    posting loop (GitHub #1570) — see the dangling-client skip rationale on
-    :func:`_log_gate_recipe_comment_skipped` (#1269/#1279 R7). Caller keeps
-    its own ``return approved``; this helper performs no control-flow beyond
-    its own loop.
-    """
-    for ticket_id, client, snapshot in comment_jobs:
-        if _is_dangling_client(client, clients or {}):
-            _log_gate_recipe_comment_skipped(ticket_id, client)
-            continue
-        post_fn(ticket_id, snapshot, cwd=_client_cwd(client, clients or {}))
-
-
 def _act_auto_approve_review(
     candidates: list[GateRecipeCandidate],
     *,
     now: datetime,
     clients: dict[str, ClientConfig] | None = None,
+    deferred: DeferredReconcileJobs,
 ) -> list[str]:
     """Act phase: re-validate under lock, emit, then approve via the primitive.
 
@@ -761,8 +709,10 @@ def _act_auto_approve_review(
     mutation, then the lock-free :func:`_approve_ticket_locked` advances the
     gate exactly as a human ``approve_ticket`` call would. Event payload
     sources come from the re-loaded row/session, never the (possibly stale)
-    detect-time candidate. The audit comment is posted after the lock releases,
-    best-effort — a comment-write failure never undoes the approve.
+    detect-time candidate. The audit comment is queued on *deferred*, the
+    caller's post-lock sink, and posted after ``reconcile()`` releases
+    ``sessions_lock`` (#1232), best-effort — a comment-write failure never
+    undoes the approve.
 
     A third outcome exists alongside "approved" and "raised" (RFC 0011 A3,
     #1160): the row may carry an armed proactive finalize hold, in which case
@@ -784,11 +734,11 @@ def _act_auto_approve_review(
     # that happen to share a ticket_id collide and silently drop one.
     by_key = {(c.ticket_id, c.client): c for c in candidates}
     approved: list[str] = []
-    # (ticket_id, client, snapshot): client name is carried across the lock
-    # boundary so the R7 dangling check runs against this tick's `clients`
-    # snapshot at comment-post time rather than the detect-time candidate,
-    # matching how every other field here is re-validated post-lock, not
-    # detect-time state (GitHub #1279).
+    # (ticket_id, client, snapshot): client name is carried across the
+    # dev_queue_lock boundary so the R7 dangling check runs against this
+    # tick's `clients` snapshot when the comment is queued rather than the
+    # detect-time candidate, matching how every other field here is
+    # re-validated rather than taken from detect-time state (GitHub #1279).
     comment_jobs: list[tuple[str, str, dict[str, object]]] = []
     with dev_queue_lock():
         # Loaded once: dev_queue_lock() is the exclusive writer lock for this
@@ -860,7 +810,13 @@ def _act_auto_approve_review(
                 continue
             approved.append(task.ticket_id)
             comment_jobs.append((task.ticket_id, task.client, snapshot))
-    _flush_gate_recipe_comment_jobs(comment_jobs, clients, _post_auto_approve_comment)
+    defer_gate_recipe_comment_jobs(
+        comment_jobs,
+        clients,
+        _post_auto_approve_comment,
+        recipe=RECIPE_AUTO_APPROVE_REVIEW,
+        deferred=deferred,
+    )
     return approved
 
 
@@ -869,6 +825,7 @@ def _act_auto_adopt_plan(
     *,
     now: datetime,
     clients: dict[str, ClientConfig] | None = None,
+    deferred: DeferredReconcileJobs,
 ) -> list[str]:
     """Act phase for auto_adopt_clean_plan: in-memory re-check, emit, approve.
 
@@ -883,7 +840,9 @@ def _act_auto_adopt_plan(
     task/session state can change. ``candidate.evidence`` (the detect-time
     snapshot) is reused directly as the event's ``predicate_snapshot`` and
     the audit-comment source, and its ``plan_reviewed`` value selects the
-    release path: advance to IMPL, or the #968 requeue back to PLAN.
+    release path: advance to IMPL, or the #968 requeue back to PLAN. As
+    there, the audit comment is queued on *deferred* and posted after the
+    lock releases (#1232).
     """
     if not candidates:
         return []
@@ -955,11 +914,19 @@ def _act_auto_adopt_plan(
                 continue
             approved.append(task.ticket_id)
             comment_jobs.append((task.ticket_id, task.client, snapshot))
-    _flush_gate_recipe_comment_jobs(comment_jobs, clients, _post_auto_adopt_comment)
+    defer_gate_recipe_comment_jobs(
+        comment_jobs,
+        clients,
+        _post_auto_adopt_comment,
+        recipe=RECIPE_AUTO_ADOPT_PLAN,
+        deferred=deferred,
+    )
     return approved
 
 
-def run_gate_recipes(*, now: datetime, config: OrchestratorConfig) -> list[str]:
+def run_gate_recipes(
+    *, now: datetime, config: OrchestratorConfig, deferred: DeferredReconcileJobs
+) -> list[str]:
     """Run all enabled gate recipes for one reconcile tick.
 
     No-op (returns ``[]`` immediately) unless ``config.gate_recipes_enabled``
@@ -969,7 +936,9 @@ def run_gate_recipes(*, now: datetime, config: OrchestratorConfig) -> list[str]:
     files, so a caller-supplied snapshot would be stale (mirrors
     ``run_concierge_recoveries``). Safe to call while the caller already holds
     ``sessions_lock`` — this function only acquires ``dev_queue_lock`` per act
-    phase, never ``sessions_lock`` itself.
+    phase, never ``sessions_lock`` itself. It makes no gh call under that
+    lock: each released ticket's audit comment is queued on *deferred*, the
+    caller's post-lock sink, and posted after the lock releases (#1232).
 
     Returns the list of ticket IDs auto-approved this tick.
     """
@@ -990,10 +959,12 @@ def run_gate_recipes(*, now: datetime, config: OrchestratorConfig) -> list[str]:
         _detect_auto_approve_review(state, tasks, clients=clients, config=config),
         now=now,
         clients=clients,
+        deferred=deferred,
     )
     approved += _act_auto_adopt_plan(
         _detect_auto_adopt_plan(state, tasks, clients=clients, config=config),
         now=now,
         clients=clients,
+        deferred=deferred,
     )
     return approved

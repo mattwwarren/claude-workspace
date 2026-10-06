@@ -75,6 +75,7 @@ from tests._reconcile_helpers import (
     _state_queue_snapshot,
     _write_salvage_transcript,
     _write_transcript_records,
+    call_and_drain,
 )
 from tests.conftest import _make_daemon_session, _make_ticket_task
 
@@ -865,7 +866,7 @@ def _run_emitted_sentinel_router(
         config=config,
         task_by_ticket=resolved,
     )
-    _act_on_idle_candidates(state, candidates, now=now)
+    call_and_drain(_act_on_idle_candidates, state, candidates, now=now)
 
 
 class TestRouteEmittedSentinel:

@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from cw import config as config_module
+from cw.auto_dev_result import AutoDevResult
 from cw.config import (
     load_state,
     save_state,
@@ -47,25 +48,36 @@ from cw.reconcile import (
     revert_timed_out_tasks,
 )
 from cw.reconcile import core as reconcile_core
+from cw.reconcile._shared import ProposedAction, ReapCandidate
+from cw.reconcile.deferred import DeferredReconcileJobs
 from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
     RECIPE_AUTO_FIX_CI,
+    RECIPE_REQUEST_REVIEWER,
     DeferredReviewDispatch,
 )
+from cw.review_strategy import ReviewStrategy
 from tests._clients_yaml import ClientSpec, staged_client, write_clients_yaml
 from tests._reconcile_helpers import (
+    LockProbeDaemon,
     _auto_config,
     _mk_headless_daemon_session,
     _mk_phantom_daemon_session,
     _mk_routed_session,
     _mk_session,
+    _shipped_salvage_payload,
+    _stage_complete_payload,
     _stamp_transcript_age,
     _ul_record,
     _write_idle_transcript_with_text,
     _write_transcript_records,
+    probe_sessions_lock_free,
 )
 from tests.conftest import _make_daemon_session, _make_ticket_task
 from tests.test_pr_hydrate import _pr_state
+from tests.test_reconcile_gate_recipes import _GATE_LANES, _clean_result
+from tests.test_reconcile_gate_recipes import _make_session as _gate_session
+from tests.test_reconcile_gate_recipes import _make_task as _gate_task
 from tests.test_reconcile_review_recipes import _cr_task
 
 
@@ -1156,7 +1168,9 @@ class TestCodexLiveWriterRepark:
         }
 
         with sessions_lock():
-            reconcile_core._reconcile_locked(clients=scope)
+            reconcile_core._reconcile_locked(
+                clients=scope, deferred=DeferredReconcileJobs()
+            )
 
         repark_mock.assert_called_once()
         assert repark_mock.call_args.kwargs["clients"] is scope
@@ -1341,8 +1355,10 @@ class TestReviewRecipeDispatchRunsPostLock:
         held_at_spawn: list[bool] = []
         real_prepare = reconcile_core.run_review_recipes
 
-        def _prepare_spy(*, config: OrchestratorConfig, deferred: Any) -> Any:
-            result = real_prepare(config=config, deferred=deferred)
+        def _prepare_spy(
+            *, config: OrchestratorConfig, jobs: DeferredReconcileJobs
+        ) -> list[str]:
+            result = real_prepare(config=config, jobs=jobs)
             held_at_prepare.append(_sessions_lock_held())
             return result
 
@@ -1423,12 +1439,17 @@ class TestReviewRecipeDispatchRunsPostLock:
         monkeypatch: pytest.MonkeyPatch,
         completions: list[str],
     ) -> None:
-        """The review dispatch is the FIRST post-lock step: it runs before
-        complete_timed_out_merged_tasks and run_fix_dispatch, whether or not the
-        post-pass finds merged-timed-out completions. Its latch is already
-        stamped, so a job lost to an exception in a later step would never retry
-        this episode (run_fix_dispatch, by contrast, re-detects every tick)."""
+        """The post-lock drain runs first -- queued stops (#1232), then the
+        review dispatch -- before complete_timed_out_merged_tasks and
+        run_fix_dispatch, whether or not the post-pass finds merged-timed-out
+        completions. The review latch is already stamped, so a job lost to an
+        exception in a later step would never retry this episode
+        (run_fix_dispatch, by contrast, re-detects every tick)."""
         order: list[str] = []
+        monkeypatch.setattr(
+            "cw.reconcile.core.run_post_lock_jobs",
+            lambda _jobs: order.append("post_lock_drain"),
+        )
         monkeypatch.setattr(
             "cw.reconcile.core.dispatch_deferred_review_jobs",
             lambda _sink: order.append("review_dispatch"),
@@ -1444,7 +1465,12 @@ class TestReviewRecipeDispatchRunsPostLock:
 
         report = reconcile(dispatch_review_jobs=True)
 
-        assert order == ["review_dispatch", "complete_merged", "fix_dispatch"]
+        assert order == [
+            "post_lock_drain",
+            "review_dispatch",
+            "complete_merged",
+            "fix_dispatch",
+        ]
         assert report.completed_ticket_ids == completions
 
     def test_daemon_outage_early_return_defers_nothing(
@@ -2392,3 +2418,388 @@ def test_reconcile_leaves_running_row_session_alone(
     session = load_state().sessions[0]
     assert session.status is SessionStatus.ACTIVE
     assert session.reap_proposed_at is None
+
+
+# ---------------------------------------------------------------------------
+# #1232: every reconcile daemon stop (bar the mid-turn usage-limit act) runs
+# after sessions_lock releases, on a session already terminal on disk.
+# ---------------------------------------------------------------------------
+
+_STOP_SITE_STARTED_AT = datetime(2026, 1, 1, tzinfo=UTC)
+_DECOY_AGENT = {"sessionId": "decoy000-0000-0000-0000-000000000000"}
+
+
+def _routed_candidate(sid: str) -> ReapCandidate:
+    """A ROUTE_EMITTED_SENTINEL candidate with no ticket, so the route is
+    accepted without dev-queue arbitration."""
+    return ReapCandidate(
+        session_id=sid,
+        proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+        ticket_id=None,
+        routed_sentinel=AutoDevResult.model_validate(_shipped_salvage_payload()),
+    )
+
+
+def _stub_detect(monkeypatch: pytest.MonkeyPatch, name: str, sid: str) -> None:
+    monkeypatch.setattr(
+        f"cw.reconcile.core.{name}",
+        lambda *_a, **_k: [_routed_candidate(sid)],
+    )
+
+
+def _seed_phantom_merged(
+    monkeypatch: pytest.MonkeyPatch, _tmp_path: Path, _daemon: LockProbeDaemon
+) -> str:
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket", lambda _tid, **_kw: (True, True)
+    )
+    sess = _mk_phantom_daemon_session(
+        "ph-merged", _STOP_SITE_STARTED_AT, surface_ref="deadref1"
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="ph-merged",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="ph-merged",
+                )
+            ]
+        )
+    )
+    return sess.id
+
+
+def _seed_phantom_routed(
+    monkeypatch: pytest.MonkeyPatch, _tmp_path: Path, _daemon: LockProbeDaemon
+) -> str:
+    sess = _mk_phantom_daemon_session(
+        "ph-routed", _STOP_SITE_STARTED_AT, surface_ref="deadref2"
+    )
+    sess.name = "client-a/adhoc-ph-routed"
+    save_state(CwState(sessions=[sess]))
+    _stub_detect(monkeypatch, "_detect_phantom_candidates", sess.id)
+    return sess.id
+
+
+def _seed_idle_routed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, daemon: LockProbeDaemon
+) -> str:
+    short_id = daemon.seed_live_worker(tmp_path / "wt-idle")
+    sess = _make_daemon_session(
+        id="idle-routed",
+        name="client-a/adhoc-idle-routed",
+        surface_ref=short_id,
+        started_at=_STOP_SITE_STARTED_AT,
+    )
+    save_state(CwState(sessions=[sess]))
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [_DECOY_AGENT, {"sessionId": short_id}],
+    )
+    _stub_detect(monkeypatch, "_detect_idle_candidates", sess.id)
+    return sess.id
+
+
+def _seed_stalled_foreign(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _daemon: LockProbeDaemon
+) -> str:
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket", lambda _tid, **_kw: (False, True)
+    )
+    sess = _mk_headless_daemon_session(
+        "st-foreign",
+        tmp_path / "wt-stalled",
+        _STOP_SITE_STARTED_AT,
+        surface_ref="stref001",
+    )
+    sess.last_result = _shipped_salvage_payload()
+    save_state(CwState(sessions=[sess]))
+    return sess.id
+
+
+def _seed_stalled_routed(
+    monkeypatch: pytest.MonkeyPatch, _tmp_path: Path, _daemon: LockProbeDaemon
+) -> str:
+    sess = _make_daemon_session(
+        id="st-routed",
+        name="client-a/adhoc-st-routed",
+        surface_ref="stref002",
+        started_at=_STOP_SITE_STARTED_AT,
+    )
+    sess.last_result = _stage_complete_payload()
+    save_state(CwState(sessions=[sess]))
+    _stub_detect(monkeypatch, "_detect_stalled_candidates", sess.id)
+    return sess.id
+
+
+def _seed_leaked_worker(
+    _monkeypatch: pytest.MonkeyPatch, tmp_path: Path, daemon: LockProbeDaemon
+) -> str:
+    short_id = daemon.seed_live_worker(tmp_path / "wt-leaked")
+    sess = _make_daemon_session(
+        id="leaked01",
+        name="client-a/auto-dev/GEN-77",
+        status=SessionStatus.COMPLETED,
+        surface_ref=short_id,
+    )
+    save_state(CwState(sessions=[sess]))
+    return sess.id
+
+
+_STOP_SITE_SEEDERS = {
+    "phantom_merged_auto": _seed_phantom_merged,
+    "phantom_routed": _seed_phantom_routed,
+    "idle_routed": _seed_idle_routed,
+    "stalled_foreign": _seed_stalled_foreign,
+    "stalled_routed": _seed_stalled_routed,
+    "leaked_worker": _seed_leaked_worker,
+}
+
+
+def _install_probe_daemon(monkeypatch: pytest.MonkeyPatch) -> LockProbeDaemon:
+    daemon = LockProbeDaemon()
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", lambda: [_DECOY_AGENT])
+    return daemon
+
+
+@pytest.mark.parametrize("site", list(_STOP_SITE_SEEDERS), ids=list(_STOP_SITE_SEEDERS))
+def test_reconcile_stop_runs_with_lock_free_on_a_terminal_session(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    site: str,
+) -> None:
+    """Each reconcile stop site's surface stop happens after sessions_lock
+    releases, and the session is already COMPLETED on disk when it does."""
+    daemon = _install_probe_daemon(monkeypatch)
+    sid = _STOP_SITE_SEEDERS[site](monkeypatch, tmp_path, daemon)
+
+    reconcile()
+
+    assert daemon.probes == [("free", {sid: SessionStatus.COMPLETED})]
+    assert len(daemon.stop_calls) == 1
+
+
+class _FirstStopRaisesDaemon(LockProbeDaemon):
+    def stop(self, short_id: str) -> None:
+        super().stop(short_id)
+        if len(self.stop_calls) == 1:
+            msg = "daemon socket gone"
+            raise OSError(msg)
+
+
+def _seed_two_leaked_workers(tmp_path: Path, daemon: FakeNativeDaemonClient) -> None:
+    sessions = [
+        _make_daemon_session(
+            id=f"leaked0{n}",
+            status=SessionStatus.COMPLETED,
+            surface_ref=daemon.seed_live_worker(tmp_path / f"wt-{n}"),
+        )
+        for n in (1, 2)
+    ]
+    save_state(CwState(sessions=sessions))
+
+
+def test_a_raising_stop_neither_skips_the_next_stop_nor_fails_reconcile(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    daemon = _FirstStopRaisesDaemon()
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", lambda: [_DECOY_AGENT])
+    _seed_two_leaked_workers(tmp_path, daemon)
+
+    with caplog.at_level("ERROR", logger="cw.reconcile.deferred"):
+        report = reconcile()
+
+    assert isinstance(report, ReconcileReport)
+    assert len(daemon.stop_calls) == 2
+    assert [lock for lock, _ in daemon.probes] == ["free", "free"]
+    assert "post_lock_job_failed label=leaked_worker_stop:" in caplog.text
+
+
+def test_queued_stops_still_drain_when_a_later_in_lock_step_raises(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop queued early in the locked body still runs from reconcile()'s
+    ``finally`` when a later in-lock step raises, and the original exception
+    still propagates."""
+    daemon = _install_probe_daemon(monkeypatch)
+    sid = _seed_leaked_worker(monkeypatch, tmp_path, daemon)
+
+    def _boom(**_kwargs: object) -> None:
+        msg = "later in-lock step exploded"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("cw.reconcile.core.run_escalation_sweep", _boom)
+
+    with pytest.raises(RuntimeError, match="later in-lock step exploded"):
+        reconcile()
+
+    assert daemon.probes == [("free", {sid: SessionStatus.COMPLETED})]
+
+
+def test_two_consecutive_reconciles_issue_exactly_one_stop(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    daemon = _install_probe_daemon(monkeypatch)
+    _seed_leaked_worker(monkeypatch, tmp_path, daemon)
+
+    reconcile()
+    reconcile()
+
+    assert len(daemon.stop_calls) == 1
+
+
+def test_stalled_completion_with_a_live_worker_is_stopped_once_not_as_leaked(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stalled sweep completes the session and queues its stop before the
+    leaked-worker sweep runs in the same tick; the leaked sweep sees the now
+    terminal session's live worker and must skip it -- one stop, and no
+    spurious DAEMON_LEAKED_WORKER_STOPPED audit."""
+    daemon = _install_probe_daemon(monkeypatch)
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket", lambda _tid, **_kw: (False, True)
+    )
+    worktree = tmp_path / "wt-stalled-live"
+    short_id = daemon.seed_live_worker(worktree)
+    sess = _mk_headless_daemon_session(
+        "st-live", worktree, _STOP_SITE_STARTED_AT, surface_ref=short_id
+    )
+    sess.last_result = _shipped_salvage_payload()
+    save_state(CwState(sessions=[sess]))
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [_DECOY_AGENT, {"sessionId": short_id}],
+    )
+
+    reconcile()
+    reconcile()
+
+    assert daemon.probes == [("free", {"st-live": SessionStatus.COMPLETED})]
+    assert daemon.stop_calls == [short_id]
+    leaked = read_events(
+        consumer="test-1232-stalled-live-worker",
+        event_types=[OrchestratorEventType.DAEMON_LEAKED_WORKER_STOPPED],
+    )
+    assert leaked == []
+
+
+def test_review_dispatch_still_runs_when_the_stop_drain_is_interrupted(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review dispatch sits in a nested ``finally``: a KeyboardInterrupt
+    out of the stop drain still lets the already-latched review jobs run, and
+    the interrupt propagates."""
+    order: list[str] = []
+
+    def _interrupted_drain(_jobs: DeferredReconcileJobs) -> None:
+        order.append("post_lock_drain")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("cw.reconcile.core.run_post_lock_jobs", _interrupted_drain)
+    monkeypatch.setattr(
+        "cw.reconcile.core.dispatch_deferred_review_jobs",
+        lambda _sink: order.append("review_dispatch"),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        reconcile(dispatch_review_jobs=True)
+
+    assert order == ["post_lock_drain", "review_dispatch"]
+
+
+def test_reconcile_without_review_flag_still_drains_post_lock_jobs_once(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    drained: list[DeferredReconcileJobs] = []
+    monkeypatch.setattr("cw.reconcile.core.run_post_lock_jobs", drained.append)
+
+    reconcile()
+
+    assert len(drained) == 1
+    assert drained[0].review is None
+
+
+# --- #1232 commit B: the recipes' gh calls run after sessions_lock releases --
+
+
+def _seed_gate_and_reviewer_rows(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GEN-1: a clean review gate the auto-approve recipe releases (one audit
+    comment). GEN-2: a no_reviewer PR the request_reviewer recipe acts on."""
+    write_clients_yaml(
+        ClientSpec("acme", tmp_config_dir, default_branch="main", lanes=_GATE_LANES)
+    )
+    gate_session = _gate_session(last_result=_clean_result())
+    gate_session.status = SessionStatus.COMPLETED
+    save_state(CwState(sessions=[gate_session]))
+    reviewer_row = _gate_task(
+        ticket_id="GEN-2",
+        session_id=None,
+        pr_url="https://github.com/acme/widgets/pull/42",
+        pr_state=_pr_state(attention_state="no_reviewer"),
+        review_recipes={RECIPE_REQUEST_REVIEWER: True},
+    )
+    save_dev_queue(DevQueueStore(tasks=[_gate_task(ticket_id="GEN-1"), reviewer_row]))
+    monkeypatch.setattr(
+        "cw.reconcile.core.load_orchestrator_config",
+        lambda: OrchestratorConfig(review_recipes_enabled=True),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.review_recipes.request_reviewer.resolve_review_strategy",
+        lambda _root: ReviewStrategy("repo_owner", "alice"),
+    )
+
+
+def _record_gh_lock_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[tuple[str, ...], bool]]:
+    """Patch the gh subprocess seam to record (argv head, lock free?) per call."""
+    calls: list[tuple[tuple[str, ...], bool]] = []
+
+    def _fake_run(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        calls.append((tuple(argv[:3]), probe_sessions_lock_free()))
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "dispatch_review_jobs", [True, False], ids=["dispatch_loop", "read_only"]
+)
+def test_reconcile_recipe_gh_calls_run_with_sessions_lock_free(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dispatch_review_jobs: bool,
+) -> None:
+    """A real reconcile(): the gate recipe's audit comment and the reviewer
+    request both reach gh only after sessions_lock releases, in the order the
+    recipes queued them. The reviewer request fires from a read-only call too
+    (no dispatch_review_jobs): its one-shot latch is stamped in-lock either
+    way, so the sink it lands on is always built and drained."""
+    _seed_gate_and_reviewer_rows(tmp_config_dir, monkeypatch)
+    gh_calls = _record_gh_lock_state(monkeypatch)
+
+    reconcile(dispatch_review_jobs=dispatch_review_jobs)
+
+    assert gh_calls == [
+        (("gh", "issue", "comment"), True),
+        (("gh", "pr", "edit"), True),
+    ]
+    rows = {t.ticket_id: t for t in load_dev_queue().tasks}
+    assert rows["GEN-1"].stage == Stage.FINALIZE
+    assert rows["GEN-2"].request_reviewer_fired_at is not None
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
