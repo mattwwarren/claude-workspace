@@ -13,10 +13,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from cw.reconcile.gate_recipe_comments import defer_gate_recipe_comment_jobs
 
 from cw.models import ClientConfig
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
+from cw.reconcile.gate_recipe_comments import defer_gate_recipe_comment_jobs
 from cw.reconcile.gate_recipes import RECIPE_AUTO_ADOPT_PLAN, RECIPE_AUTO_APPROVE_REVIEW
 
 _SNAPSHOT: dict[str, object] = {"recommendation": "PROCEED"}

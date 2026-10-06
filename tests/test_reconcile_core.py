@@ -53,8 +53,10 @@ from cw.reconcile.deferred import DeferredReconcileJobs
 from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
     RECIPE_AUTO_FIX_CI,
+    RECIPE_REQUEST_REVIEWER,
     DeferredReviewDispatch,
 )
+from cw.review_strategy import ReviewStrategy
 from tests._clients_yaml import ClientSpec, staged_client, write_clients_yaml
 from tests._reconcile_helpers import (
     LockProbeDaemon,
@@ -69,9 +71,13 @@ from tests._reconcile_helpers import (
     _ul_record,
     _write_idle_transcript_with_text,
     _write_transcript_records,
+    probe_sessions_lock_free,
 )
 from tests.conftest import _make_daemon_session, _make_ticket_task
 from tests.test_pr_hydrate import _pr_state
+from tests.test_reconcile_gate_recipes import _GATE_LANES, _clean_result
+from tests.test_reconcile_gate_recipes import _make_session as _gate_session
+from tests.test_reconcile_gate_recipes import _make_task as _gate_task
 from tests.test_reconcile_review_recipes import _cr_task
 
 
@@ -2721,3 +2727,79 @@ def test_reconcile_without_review_flag_still_drains_post_lock_jobs_once(
 
     assert len(drained) == 1
     assert drained[0].review is None
+
+
+# --- #1232 commit B: the recipes' gh calls run after sessions_lock releases --
+
+
+def _seed_gate_and_reviewer_rows(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GEN-1: a clean review gate the auto-approve recipe releases (one audit
+    comment). GEN-2: a no_reviewer PR the request_reviewer recipe acts on."""
+    write_clients_yaml(
+        ClientSpec("acme", tmp_config_dir, default_branch="main", lanes=_GATE_LANES)
+    )
+    gate_session = _gate_session(last_result=_clean_result())
+    gate_session.status = SessionStatus.COMPLETED
+    save_state(CwState(sessions=[gate_session]))
+    reviewer_row = _gate_task(
+        ticket_id="GEN-2",
+        session_id=None,
+        pr_url="https://github.com/acme/widgets/pull/42",
+        pr_state=_pr_state(attention_state="no_reviewer"),
+        review_recipes={RECIPE_REQUEST_REVIEWER: True},
+    )
+    save_dev_queue(DevQueueStore(tasks=[_gate_task(ticket_id="GEN-1"), reviewer_row]))
+    monkeypatch.setattr(
+        "cw.reconcile.core.load_orchestrator_config",
+        lambda: OrchestratorConfig(review_recipes_enabled=True),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.review_recipes.request_reviewer.resolve_review_strategy",
+        lambda _root: ReviewStrategy("repo_owner", "alice"),
+    )
+
+
+def _record_gh_lock_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[tuple[str, ...], bool]]:
+    """Patch the gh subprocess seam to record (argv head, lock free?) per call."""
+    calls: list[tuple[tuple[str, ...], bool]] = []
+
+    def _fake_run(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        calls.append((tuple(argv[:3]), probe_sessions_lock_free()))
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "dispatch_review_jobs", [True, False], ids=["dispatch_loop", "read_only"]
+)
+def test_reconcile_recipe_gh_calls_run_with_sessions_lock_free(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dispatch_review_jobs: bool,
+) -> None:
+    """A real reconcile(): the gate recipe's audit comment and the reviewer
+    request both reach gh only after sessions_lock releases, in the order the
+    recipes queued them. The reviewer request fires from a read-only call too
+    (no dispatch_review_jobs): its one-shot latch is stamped in-lock either
+    way, so the sink it lands on is always built and drained."""
+    _seed_gate_and_reviewer_rows(tmp_config_dir, monkeypatch)
+    gh_calls = _record_gh_lock_state(monkeypatch)
+
+    reconcile(dispatch_review_jobs=dispatch_review_jobs)
+
+    assert gh_calls == [
+        (("gh", "issue", "comment"), True),
+        (("gh", "pr", "edit"), True),
+    ]
+    rows = {t.ticket_id: t for t in load_dev_queue().tasks}
+    assert rows["GEN-1"].stage == Stage.FINALIZE
+    assert rows["GEN-2"].request_reviewer_fired_at is not None
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []

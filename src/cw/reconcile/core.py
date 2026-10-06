@@ -17,7 +17,8 @@ creates, hands down through ``_reconcile_locked``, and drains from a ``finally``
 once the lock has released. That review sink is one member of the broader
 post-lock job sink (``cw.reconcile.deferred.DeferredReconcileJobs``, #1232),
 which also carries the bounded external calls the act phases decide on under
-the lock but run after it -- every daemon surface stop.
+the lock but run after it -- every daemon surface stop, the gate recipes'
+audit comments, and the review recipes' reviewer request.
 """
 
 from __future__ import annotations
@@ -128,12 +129,16 @@ def _run_terminal_backstops_and_sweeps(
     branch) to keep ``_reconcile_locked``'s statement count under the
     PLR0915 limit.
 
-    *deferred* is ``reconcile()``'s post-lock job sink (#1232), handed to
-    ``run_review_recipes``, which appends the jobs it prepares to it as it
-    goes (the jobs are NOT returned, so a later step raising cannot lose
-    them): the reviewer request's gh call on ``post_lock``, the dispatching
-    recipes' jobs on its review member (#1229) -- and those recipes are
-    skipped entirely when that member is ``None``.
+    *deferred* is ``reconcile()``'s post-lock job sink (#1232), handed to both
+    recipe families, which append the jobs they prepare to it as they go (the
+    jobs are NOT returned, so a later step raising cannot lose them):
+    ``run_gate_recipes`` queues each audit comment and ``run_review_recipes``
+    the reviewer request's gh call on ``post_lock``, and the dispatching
+    review recipes put their jobs on its review member (#1229) -- those
+    recipes are skipped entirely when that member is ``None``. The reviewer
+    request and the audit comments run for every caller, whatever the review
+    member: their decisions (one-shot latch, gate release) are stamped
+    in-lock either way, and ``reconcile()`` always builds and drains the sink.
 
     Returns (timed_out_ticket_ids, completed_silent_ticket_ids).
     """
@@ -239,11 +244,13 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     lock, and drains it from a ``finally`` after the lock releases. Its review
     member exists only when *dispatch_review_jobs* is True. The act phases
     queue every daemon surface stop on it rather than calling the daemon under
-    ``sessions_lock``. The drain runs the queued stops first, then the review
-    dispatch; a job whose decision is already persisted therefore still runs
-    if a later in-lock step raises (that exception still propagates; per-job
-    failures are isolated and logged or recorded, never raised from the
-    ``finally``).
+    ``sessions_lock``, and the recipes queue their ``gh`` calls (the gate
+    audit comments and the reviewer request) the same way, whatever
+    *dispatch_review_jobs* says. The drain runs those queued jobs first, then
+    the review dispatch; a job whose decision is already persisted therefore
+    still runs if a later in-lock step raises (that exception still
+    propagates; per-job failures are isolated and logged or recorded, never
+    raised from the ``finally``).
 
     Write-ordering: the phantom-reconcile path (phantom.py) writes the
     dev-queue first (task → PENDING) then sessions (session → COMPLETED),
@@ -339,22 +346,24 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
         # Post-lock drain (#1232, #1229). Everything in `jobs` was decided and
         # persisted inside _reconcile_locked but must not run under
         # sessions_lock: a daemon surface stop is an external call (up to 10s
-        # each), and the address_review spawn calls spawn_create_impl, which
-        # re-acquires sessions_lock(). They run here, after the with-block above
-        # has released the lock. A ``finally`` because each decision is already
-        # stamped (session terminal, one-shot latch burned): were a later
-        # in-lock step (another recipe, run_escalation_sweep, save_state) to
-        # raise, the jobs would otherwise be lost for the episode. Both drains
-        # isolate each job (log, plus PR_ACTION_FAILED for review jobs, then the
-        # next job), so neither raises for an ordinary failure and the drain
-        # cannot replace an in-flight exception from the locked body. Stops
-        # drain first, so a finished surface is torn down before the review
-        # dispatch spawns any new worker; review dispatch runs second from a
-        # nested ``finally``, because its latches are already burned and its
-        # jobs must run even if the stop drain is interrupted, whereas a lost
-        # stop is recovered by the next tick's leaked-worker sweep. Both run
-        # before the post-pass steps below, which are not protected the same
-        # way.
+        # each), the gate audit comments and the reviewer request are gh
+        # subprocess calls, and the address_review spawn calls
+        # spawn_create_impl, which re-acquires sessions_lock(). They run here,
+        # after the with-block above has released the lock. A ``finally``
+        # because each decision is already stamped (session terminal, gate
+        # released, one-shot latch burned): were a later in-lock step (another
+        # recipe, run_escalation_sweep, save_state) to raise, the jobs would
+        # otherwise be lost for the episode. Both drains isolate each job (log,
+        # plus PR_ACTION_FAILED for review-recipe jobs, then the next job), so
+        # neither raises for an ordinary failure and the drain cannot replace
+        # an in-flight exception from the locked body. The post-lock jobs
+        # (stops, gh calls) drain first, so a finished surface is torn down
+        # before the review dispatch spawns any new worker; review dispatch
+        # runs second from a nested ``finally``, because its latches are
+        # already burned and its jobs must run even if the first drain is
+        # interrupted, whereas a lost stop is recovered by the next tick's
+        # leaked-worker sweep. Both run before the post-pass steps below,
+        # which are not protected the same way.
         _drain_deferred_jobs(jobs)
 
     # Post-pass: runs AFTER sessions_lock releases so no gh subprocess
@@ -398,12 +407,12 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
 
 
 def _drain_deferred_jobs(jobs: DeferredReconcileJobs) -> None:
-    """Run *jobs*' post-lock work: queued stops first, then review dispatch.
+    """Run *jobs*' post-lock work: queued stops and gh calls, then review dispatch.
 
     Called from ``reconcile()``'s ``finally`` with no ``sessions_lock`` held
     (#1232). The review dispatch sits in a nested ``finally`` so it still runs
-    when the stop drain is interrupted by a ``BaseException`` (which then
-    propagates). A separate function so ``reconcile()`` gains no branch.
+    when the post-lock job drain is interrupted by a ``BaseException`` (which
+    then propagates). A separate function so ``reconcile()`` gains no branch.
     """
     try:
         run_post_lock_jobs(jobs)
@@ -426,10 +435,11 @@ def _reconcile_locked(
 
     *deferred* is the caller-owned post-lock job sink (#1232): the act phases
     (stalled, leaked-worker, idle, phantom) queue their daemon surface stops on
-    it, and its review member (#1229) is forwarded through
-    ``_run_terminal_backstops_and_sweeps`` to the recipes, which append the
-    jobs they prepare under the lock. The caller drains it after releasing the
-    lock. A ``None`` review member means this call may not dispatch, so the
+    it, and it is forwarded through ``_run_terminal_backstops_and_sweeps`` to
+    the gate and review recipes, which append the jobs they prepare under the
+    lock (gh calls on ``post_lock``, review dispatches on its review member,
+    #1229). The caller drains it after releasing the lock. A ``None`` review
+    member means this call may not dispatch, so the
     ``address_review``/``auto_fix_ci`` recipes are skipped. The daemon-outage
     early return never reaches the recipes, but the stalled and leaked-worker
     sweeps before it may already have queued stops.
