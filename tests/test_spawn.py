@@ -4875,6 +4875,36 @@ class TestSpawnCreateImplPostLaunchFailure:
             for r in caplog.records
         )
 
+    def test_outbox_retry_does_not_hold_state_lock_for_inbox_io(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+        fail_state_write_after_launch: None,
+    ) -> None:
+        """The outbox STATE lock is not held during inbox reads or writes."""
+        monkeypatch.setenv("CW_LOCK_DEBUG", "1")
+        observed: list[tuple[object, ...]] = []
+
+        def _fail_inbox_io(*_args: object, **_kwargs: object) -> None:
+            observed.append(held_locks())
+            msg = "inbox unavailable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.spawn.read_events", _fail_inbox_io)
+        monkeypatch.setattr("cw.spawn.record_event", _fail_inbox_io)
+
+        with pytest.raises(WorkerLaunchedError):
+            self._spawn(
+                tmp_path,
+                make_git_repo("wt-2502-lock-debug"),
+                mock_native_daemon,
+            )
+
+        assert observed
+        assert all(not locks for locks in observed)
+
     def test_page_emitted_with_no_lock_held(
         self,
         tmp_path: Path,
