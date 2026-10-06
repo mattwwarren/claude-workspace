@@ -19,7 +19,6 @@ from cw.config import (
     dev_queue_file,
     load_state,
     save_state,
-    sessions_lock,
     state_file,
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
@@ -38,7 +37,6 @@ from cw.doctor.routed_result_wedge import (
 )
 from cw.doctor.wedge import _reap_wedge_findings
 from cw.events import read_events
-from cw.exceptions import SessionsLockReentryError
 from cw.models import (
     CompletionReason,
     CwState,
@@ -56,6 +54,7 @@ from cw.models import (
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile.leaked_workers import sweep_leaked_daemon_workers
 from tests._reconcile_helpers import (
+    LockProbeDaemon,
     _install_fake_daemon_roster,
     _mk_routed_session,
     _routed_last_result,
@@ -208,21 +207,11 @@ def test_reap_stops_daemon_outside_sessions_lock(
 ) -> None:
     home, _daemon = _install_fake_daemon_roster(tmp_path, monkeypatch)
     _seed(tmp_path, home)
-    lock_probe: list[str] = []
-
-    class _LockProbeDaemon(FakeNativeDaemonClient):
-        def stop(self, short_id: str) -> None:
-            try:
-                with sessions_lock(bounded=True):
-                    lock_probe.append("free")
-            except SessionsLockReentryError:
-                lock_probe.append("held")
-            super().stop(short_id)
-
-    _swap_daemon(monkeypatch, _LockProbeDaemon())
+    daemon = LockProbeDaemon()
+    _swap_daemon(monkeypatch, daemon)
 
     assert reap_routed_result_findings(_routed_findings()) == [_SID]
-    assert lock_probe == ["free"]
+    assert [lock for lock, _ in daemon.probes] == ["free"]
 
 
 def test_reap_does_not_revert_running_row_of_same_ticket_claimed_by_new_session(
