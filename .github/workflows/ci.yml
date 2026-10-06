@@ -68,8 +68,19 @@ jobs:
           SKIP: pytest
         run: uv run pre-commit run --all-files --show-diff-on-failure
 
+      # Measures both worker-loaded source trees so the diff-cover step below
+      # sees `.claude/scripts` diffs too (#2249). No --cov-fail-under here: one
+      # blended figure would let src/cw regress behind the scripts tree.
       - name: Test (unit) with coverage
-        run: uv run pytest tests/ -v --tb=short -m 'not integration' --cov=cw --cov-report=term --cov-report=xml --cov-fail-under=88
+        run: uv run pytest tests/ -v --tb=short -m 'not integration' --cov=cw --cov=.claude/scripts --cov-report=term --cov-report=xml
+
+      # One floor per source tree, read from the `.coverage` file the unit step
+      # just wrote (#2249). Ratchet: when a PR lifts `.claude/scripts` coverage,
+      # raise its floor in the same PR to floor(measured) - 2; never lower it.
+      - name: Coverage floors (per source tree)
+        run: |
+          uv run coverage report --include='src/cw/*' --fail-under=88
+          uv run coverage report --include='.claude/scripts/*' --fail-under=50
 
       - name: Test (integration)
         run: uv run pytest tests/ -v --tb=short -m integration

@@ -81,13 +81,15 @@ repos:
         always_run: true
 
       # Mirrors the CI patch-coverage gate so failures surface before push,
-      # not after a wasted CI cycle. Same threshold (90%) and same scope
-      # (`not integration`) as .github/workflows/ci.yml. Same `--extra mcp` as
-      # the pytest hook above (#2242).
+      # not after a wasted CI cycle. Same threshold (90%), same scope
+      # (`not integration`) and same `--cov` measurement targets (`cw` and
+      # `.claude/scripts`, #2249) as .github/workflows/ci.yml. It enforces no
+      # per-tree floor; CI's "Coverage floors" step does. Same `--extra mcp`
+      # as the pytest hook above (#2242).
       - id: diff-cover
         name: diff-cover (vs origin/main, 90%)
         stages: [pre-push]
-        entry: bash -c 'git fetch --quiet origin main && uv run --extra mcp pytest tests/ -q -m "not integration" --cov=cw --cov-report=xml --cov-report=term && uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=90'
+        entry: bash -c 'git fetch --quiet origin main && uv run --extra mcp pytest tests/ -q -m "not integration" --cov=cw --cov=.claude/scripts --cov-report=xml --cov-report=term && uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=90'
         language: system
         pass_filenames: false
         always_run: true
