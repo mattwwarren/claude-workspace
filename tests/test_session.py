@@ -1675,7 +1675,7 @@ class TestDoneSession:
         updated = load_state()
         assert updated.sessions[0].status == SessionStatus.ACTIVE
 
-    # -- #1232: --cleanup removes the worktree before sessions_lock ---------
+    # -- #1232: --cleanup removes the worktree under sessions_lock ----------
 
     @staticmethod
     def _seed_cleanup_session(
@@ -1720,25 +1720,20 @@ class TestDoneSession:
 
         return _remove
 
-    def test_cleanup_removes_worktree_with_sessions_lock_free(
+    def test_cleanup_removes_worktree_with_sessions_lock_held(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The git worktree removal never runs under sessions_lock.
-
-        Running it lock-free means a concurrent reuse of the worktree path
-        between removal and the COMPLETED stamp is possible; that race is
-        accepted -- removal already preceded the stamp before #1232.
-        """
+        """The session and worktree cannot be reused during cleanup."""
         self._seed_cleanup_session(tmp_config_dir, sample_client, sid="done0101")
         probes: list[tuple[bool, dict[str, SessionStatus]]] = []
         monkeypatch.setattr("cw.session.remove_worktree", self._probing_remove(probes))
 
         done_session("test-client/impl", cleanup=True)
 
-        assert [lock_free for lock_free, _ in probes] == [True]
+        assert [lock_free for lock_free, _ in probes] == [False]
 
     def test_cleanup_removal_precedes_completed_stamp(
         self,
@@ -1799,11 +1794,7 @@ class TestDoneSession:
         sample_client: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A bounded-lock timeout after the lock-free removal is a clean retry.
-
-        The session stays ACTIVE; the retry re-runs the removal (the real
-        ``remove_worktree`` returns early on an absent path) and stamps it.
-        """
+        """A bounded-lock timeout happens before cleanup and is a clean retry."""
         self._seed_cleanup_session(tmp_config_dir, sample_client, sid="done0105")
         probes: list[tuple[bool, dict[str, SessionStatus]]] = []
         monkeypatch.setattr("cw.session.remove_worktree", self._probing_remove(probes))
@@ -1819,12 +1810,12 @@ class TestDoneSession:
             with pytest.raises(SessionsLockTimeoutError):
                 done_session("test-client/impl", cleanup=True)
 
-        assert len(probes) == 1
+        assert len(probes) == 0
         assert load_state().sessions[0].status == SessionStatus.ACTIVE
 
         done_session("test-client/impl", cleanup=True)
 
-        assert len(probes) == 2
+        assert len(probes) == 1
         assert load_state().sessions[0].status == SessionStatus.COMPLETED
 
     def test_auto_resolved_cleanup_stamps_by_resolved_id(
@@ -1833,40 +1824,15 @@ class TestDoneSession:
         sample_client: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """``done_session(None, cleanup=True)`` stamps the session it removed for.
-
-        A second ACTIVE session registered while the lock-free removal runs
-        would make a fresh auto-detect ambiguous; the in-lock re-resolve is by
-        the pre-pass's session id, so only that session is stamped.
-        """
+        """``done_session(None, cleanup=True)`` stamps the resolved session."""
         self._seed_cleanup_session(tmp_config_dir, sample_client, sid="done0106")
 
-        def _remove_while_another_starts(
-            _client: object, _branch: str, *, force: bool = False
-        ) -> None:
-            del force
-            state = load_state()
-            state.sessions.append(
-                Session(
-                    id="done0107",
-                    name="test-client/other",
-                    client="test-client",
-                    purpose=SessionPurpose.IMPL,
-                    status=SessionStatus.ACTIVE,
-                    workspace_path=sample_client.workspace_path,
-                )
-            )
-            save_state(state)
-
-        monkeypatch.setattr("cw.session.remove_worktree", _remove_while_another_starts)
+        monkeypatch.setattr("cw.session.remove_worktree", _noop)
 
         done_session(None, cleanup=True)
 
         statuses = {s.id: s.status for s in load_state().sessions}
-        assert statuses == {
-            "done0106": SessionStatus.COMPLETED,
-            "done0107": SessionStatus.ACTIVE,
-        }
+        assert statuses == {"done0106": SessionStatus.COMPLETED}
 
 
 # ---------------------------------------------------------------------------
