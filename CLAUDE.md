@@ -52,7 +52,7 @@ uv run cw --help                    # Run CLI
 uv run pytest tests/ -v             # Run tests
 uv run ruff check src/ tests/       # Lint
 uv run mypy src/                    # Type check
-uv run pytest tests/ --cov=cw      # Coverage report
+uv run pytest tests/ --cov=cw --cov=.claude/scripts   # Coverage report
 ```
 
 ## Quality Gates
@@ -73,7 +73,7 @@ uv run python .claude/scripts/check_changelog_frozen.py          # 7. Freeze rel
 uv run pre-commit run actionlint --all-files                     # 8. Lint workflows (actionlint)
 uv run pre-commit run --all-files                                # 9. Hooks
 uv run --extra mcp pytest tests/ -m 'not integration' \
-  --cov=cw --cov-report=xml --cov-fail-under=88                  # 10. Unit + total cov ≥88%
+  --cov=cw --cov=.claude/scripts --cov-report=xml && uv run coverage report --include='src/cw/*' --fail-under=88 && uv run coverage report --include='.claude/scripts/*' --fail-under=50  # 10. Unit + per-tree cov (src/cw ≥88%, .claude/scripts ≥50%)
 uv run pytest tests/ -m integration                              # 11. Integration
 uv run diff-cover coverage.xml --compare-branch=origin/main \
   --fail-under=90                                                # 12. Patch coverage ≥90%
@@ -133,6 +133,17 @@ CI step to mirror. Its shellcheck pass over `run:` blocks only fires when
 `shellcheck` is installed. It is a `language: golang` hook, so the first run
 bootstraps Go and needs network.
 
+Gate 10 measures both worker-loaded source trees, `src/cw` and
+`.claude/scripts`, and holds each to its own floor (#2249): one blended figure
+would let `src/cw` regress behind the far lower scripts figure. The whole
+`.claude/scripts` tree counts, with no omit list, so a script tested only
+through a subprocess counts as uncovered. Because both trees land in
+`coverage.xml`, gate 12 now checks `.claude/scripts` diffs instead of passing
+them by vacuum; a green gate 12 on a diff that touches neither tree still means
+"not measured", not "covered". Ratchet: when a ticket lifts script coverage,
+raise the scripts floor in the same PR to floor(measured) − 2, here and in
+CI's "Coverage floors" step together; never lower a floor to land a change.
+
 **Requirements:**
 - `uv lock --check` - **ZERO drift**. Any `pyproject.toml` edit that moves the
   project version or its dependencies must carry the regenerated `uv.lock` in
@@ -145,7 +156,7 @@ bootstraps Go and needs network.
 - `ruff format --check` - **ZERO reformats** (run `ruff format` to fix; `ruff check` does NOT enforce formatting)
 - `mypy --strict` - **ZERO type errors allowed**
 - Test suite - **100% pass rate required**
-- Total coverage **≥88%**; new/changed lines (patch coverage) **≥90%** — cover every new branch, including `except`/error paths
+- `src/cw` coverage **≥88%** and `.claude/scripts` coverage **≥50%** (separate floors, never blended); new/changed lines (patch coverage) **≥90%** — cover every new branch, including `except`/error paths
 - No suppressions (`# noqa`, `# type: ignore`) without explicit user approval
 
 Report format: Only actionable problems. Zero praise, zero summaries.
