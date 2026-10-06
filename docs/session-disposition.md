@@ -51,9 +51,11 @@ across blocks (`parse_last_block_per_chunk`, #2515), so a block that quotes an
 earlier result no longer collapses to `multiple_result_blocks`. Unresolved
 placeholder blocks and the illustrative example sentinel from the skill prompt
 (`is_documented_example`, #591) are skipped before `parse_stdout`, so a worker
-quoting the docs never false-terminates. Other fixture blocks a worker writes
-can still parse — the last-wins rule plus the roster check is what protects
-against those.
+quoting the docs never false-terminates. Blocks naming a different ticket than
+the session's own are skipped too: reconcile passes the session's ticket id, and
+the cli scan reads it from `cw-context.json` (failing closed with no sentinel
+when none is available). Other fixture blocks a worker writes can still parse —
+the last-wins rule plus the roster check is what protects against those.
 
 ### Gotcha 2 — Sentinels are JSON-escaped in the transcript
 
