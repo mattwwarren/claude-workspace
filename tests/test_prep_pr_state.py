@@ -387,6 +387,45 @@ class TestTrailingContinuation:
 
 
 # ---------------------------------------------------------------------------
+# #2249: gate 10 chains per-tree coverage floors onto the pytest run
+# ---------------------------------------------------------------------------
+
+# The real gate-10 layout: exactly two physical lines, one `\` continuation.
+# A middle continuation line would keep its leading indent in the joined
+# command (only the last line is fully stripped), so this pins the layout.
+_CHAINED_FLOORS = _gates_section(
+    _bash_block(
+        "uv run --extra mcp pytest tests/ -m 'not integration' \\",
+        "  --cov=cw --cov=.claude/scripts --cov-report=xml"
+        " && uv run coverage report --include='src/cw/*' --fail-under=88"
+        " && uv run coverage report --include='.claude/scripts/*' --fail-under=50"
+        "  # 10. Unit + per-tree cov",
+        "uv run pytest tests/ -m integration          # 11. Integration",
+    )
+)
+
+_CHAINED_FLOORS_GATE_COUNT = 2
+
+
+class TestChainedCoverageFloors:
+    def test_chained_floors_fold_into_one_single_spaced_gate(
+        self, tmp_path: Path
+    ) -> None:
+        path = _write_claude_md(tmp_path, _CHAINED_FLOORS)
+        gates = _parse_claude_md_gates(path)
+        assert len(gates) == _CHAINED_FLOORS_GATE_COUNT
+        unit = gates[0]
+        assert unit.name == "pytest-not-integration"
+        assert (
+            "&& uv run coverage report --include='src/cw/*' --fail-under=88"
+            in unit.command
+        )
+        assert "  " not in unit.command, unit.command
+        assert "\\" not in unit.command
+        assert gates[1].name == "pytest-integration"
+
+
+# ---------------------------------------------------------------------------
 # #2187: prose bullets are not gates
 # ---------------------------------------------------------------------------
 
@@ -780,7 +819,9 @@ EXPECTED_REPO_GATES: list[tuple[str, str]] = [
     (
         "pytest-not-integration",
         "uv run --extra mcp pytest tests/ -m 'not integration' "
-        "--cov=cw --cov-report=xml --cov-fail-under=88",
+        "--cov=cw --cov=.claude/scripts --cov-report=xml "
+        "&& uv run coverage report --include='src/cw/*' --fail-under=88 "
+        "&& uv run coverage report --include='.claude/scripts/*' --fail-under=50",
     ),
     ("pytest-integration", "uv run pytest tests/ -m integration"),
     (
