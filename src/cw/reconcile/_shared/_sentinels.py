@@ -19,10 +19,7 @@ from cw.auto_dev_result import (
     SALVAGE_TERMINAL_STATUSES,
     AutoDevResult,
     BlockedResult,
-    _is_placeholder_sentinel_text,
-    extract_block,
-    is_documented_example,
-    parse_stdout,
+    parse_last_block_per_chunk,
     queue_status_for_terminal_sentinel,
 )
 from cw.models import (
@@ -130,31 +127,25 @@ _SALVAGE_TERMINAL_STATUSES: frozenset[str] = SALVAGE_TERMINAL_STATUSES
 
 
 def _parse_sentinel_from_blocks(path: Path) -> AutoDevResult | BlockedResult | None:
-    """Parse the LAST transcript block carrying a complete sentinel frame.
+    """Parse the LAST real sentinel block in the transcript.
 
     Scans candidate blocks via :func:`_iter_sentinel_text_blocks` — assistant
-    text AND ``tool_result`` (Bash stdout) blocks — returning the parse of the
-    last block whose framing is complete. Last-match mirrors ``extract_block``'s
-    §3.1 "LAST occurrence wins" rule (GitHub #591). Documented-example blocks
-    (the illustrative ``pr=42 / PROJ-1234`` placeholder in the skill prompt)
-    are skipped; if only an example block is present, returns None.
+    text AND ``tool_result`` (Bash stdout) blocks — through
+    :func:`~cw.auto_dev_result.parse_last_block_per_chunk`: the last real
+    sentinel block in a chunk decides for that chunk, and the last chunk that
+    decides wins (§3.1 "the LAST block wins", GitHub #591). Documented-example
+    blocks (the illustrative ``pr=42 / PROJ-1234`` block in the skill prompt)
+    and unresolved placeholder blocks are skipped; if only those are present,
+    returns None. A chunk quoting several blocks no longer collapses to
+    ``multiple_result_blocks``: its last real block is the result (GitHub
+    #2515), so a salvage chunk that used to be requeued can now salvage.
 
     A worker may emit the sentinel via ``cat <<EOF`` rather than as assistant
     text, landing the frame in a tool_result block; scanning only assistant
     text misses it and the stage stalls (GitHub #731). Returns ``None`` when no
-    non-example block carries a complete frame.
+    chunk carries a complete real frame; a truncated frame reads as none.
     """
-    last_result: AutoDevResult | BlockedResult | None = None
-    for text in _iter_sentinel_text_blocks(path):
-        block = extract_block(text)
-        if block is not None:
-            if _is_placeholder_sentinel_text(block):
-                continue
-            result = parse_stdout(text)
-            if isinstance(result, AutoDevResult) and is_documented_example(result):
-                continue
-            last_result = result
-    return last_result
+    return parse_last_block_per_chunk(_iter_sentinel_text_blocks(path))
 
 
 def _salvage_terminal_result(

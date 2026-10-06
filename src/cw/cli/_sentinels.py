@@ -27,10 +27,7 @@ from cw.auto_dev_result import (
     _OPEN_SENTINEL,
     AutoDevResult,
     BlockedResult,
-    _is_placeholder_sentinel_text,
-    extract_block,
-    is_documented_example,
-    parse_stdout,
+    parse_last_block_per_chunk,
 )
 
 if TYPE_CHECKING:
@@ -51,12 +48,16 @@ def _parse_sentinel_from_transcript(
     where the encoded path replaces both ``/`` and ``.`` with ``-``. The JSONL
     contains one event per line; ``assistant`` events carry ``message.content``
     blocks whose ``text`` fields hold the model output, JSON-escaped (real
-    newlines become the two-character sequence ``\\n``). Running ``extract_block``
-    against the raw file therefore misses sentinels that are valid in their
-    decoded form, so this scans each candidate block individually after JSON
-    decoding — assistant text blocks AND ``tool_result`` blocks, since a worker
-    may emit the sentinel via ``cat <<EOF`` (landing it in Bash stdout rather
-    than assistant text; GitHub #731). Returns None on any I/O error or when no
+    newlines become the two-character sequence ``\\n``). Scanning the raw file
+    therefore misses sentinels that are valid in their decoded form, so this
+    scans each candidate block individually after JSON decoding — assistant
+    text blocks AND ``tool_result`` blocks, since a worker may emit the sentinel
+    via ``cat <<EOF`` (landing it in Bash stdout rather than assistant text;
+    GitHub #731). Each block goes through
+    :func:`~cw.auto_dev_result.parse_last_block_per_chunk`: the last real
+    sentinel block in a text block decides for it, placeholders and the
+    documented example are skipped, and the last deciding block across the
+    transcript wins (GitHub #2515). Returns None on any I/O error or when no
     complete sentinel pair is found — distinct from a BlockedResult, which means
     the sentinel framing was present but the inner payload was unusable.
 
@@ -65,26 +66,18 @@ def _parse_sentinel_from_transcript(
     See GitHub issue #225 (capture gap) and issue #176 Layer 1 (transcript-walk origin).
 
     ``warned_blocks`` (issue #1247) is an optional caller-owned set forwarded
-    unchanged into every ``parse_stdout`` call below, deduping repeated
-    ``_log.warning`` calls for the same malformed block both across repeated
-    calls to this function (e.g. a poll loop rescanning an unresolved
+    unchanged to the shared per-block parse, deduping repeated ``_log.warning``
+    calls for the same malformed block (keyed per block payload) both across
+    repeated calls to this function (e.g. a poll loop rescanning an unresolved
     transcript) and across multiple candidate blocks within one call. Left
     ``None`` (the default), every warning logs independently as before.
     """
     if not claude_session_id:
         return None
     transcript_path = claude_project_dir(cwd) / f"{claude_session_id}.jsonl"
-    last_result: AutoDevResult | BlockedResult | None = None
-    for text in _iter_sentinel_text_blocks(transcript_path):
-        block = extract_block(text)
-        if block is not None:
-            if _is_placeholder_sentinel_text(block):
-                continue
-            result = parse_stdout(text, warned_blocks=warned_blocks)
-            if isinstance(result, AutoDevResult) and is_documented_example(result):
-                continue
-            last_result = result
-    return last_result
+    return parse_last_block_per_chunk(
+        _iter_sentinel_text_blocks(transcript_path), warned_blocks=warned_blocks
+    )
 
 
 def _sentinel_present_in_transcript(
@@ -123,7 +116,7 @@ def _sentinel_frame_after(transcript_path: Path, pivot: datetime) -> bool:
     """True iff a sentinel frame marker appears at or after *pivot* (#2135).
 
     Either marker counts, complete pair or not: an open marker with no close
-    never reaches ``parse_stdout`` (``extract_block`` needs the pair), so a
+    never reaches a parse (a block needs the pair), so a
     truncated frame reads to the Stop hook as "no sentinel" — exactly the case
     that must NOT be parked as ``stopped_without_sentinel``, because doing so
     would hide the worker's real blocker reason behind the wrong disposition.

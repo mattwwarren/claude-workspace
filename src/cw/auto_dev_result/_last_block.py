@@ -14,7 +14,8 @@ a stream of chunks (:func:`parse_last_block_in_chunks`: a frame split across
 chunks, a truncated final frame, the bare-fence fallback). ``cw.opencode_runner``
 (harvest and ``queue_peek`` both) only feeds it its event stream. The
 single-text primitive :func:`parse_last_block` is public for callers that hold
-one string.
+one string, and :func:`parse_last_block_per_chunk` for callers that hold a
+stream of independent records (the transcript sentinel scans, GitHub #2515).
 """
 
 from __future__ import annotations
@@ -102,7 +103,10 @@ def _ticket_ids_match(claimed: str, expected: str) -> bool:
 
 
 def _parse_real_block(
-    raw: str, ticket_id: str | None
+    raw: str,
+    ticket_id: str | None,
+    *,
+    warned_blocks: set[str] | None = None,
 ) -> AutoDevResult | BlockedResult | None:
     """Parse one raw sentinel payload, or None when it is not a real result.
 
@@ -116,6 +120,10 @@ def _parse_real_block(
     it cannot be shown to belong to another ticket, so it stays the caller's
     final word and is reported as the :class:`BlockedResult` describing its
     failure.
+
+    *warned_blocks* (GitHub #1247) is forwarded unchanged to
+    :func:`~cw.auto_dev_result.parse.parse_stdout`, which dedups its parse
+    warnings per block payload (the key hashes the reconstructed frame below).
     """
     if _is_placeholder_sentinel_text(raw):
         return None
@@ -132,14 +140,19 @@ def _parse_real_block(
             ticket_id,
         )
         return None
-    result = parse_stdout(f"{_OPEN_SENTINEL}\n{raw}\n{_CLOSE_SENTINEL}")
+    result = parse_stdout(
+        f"{_OPEN_SENTINEL}\n{raw}\n{_CLOSE_SENTINEL}", warned_blocks=warned_blocks
+    )
     if isinstance(result, AutoDevResult) and is_documented_example(result):
         return None
     return result
 
 
 def parse_last_block(
-    text: str, *, ticket_id: str | None = None
+    text: str,
+    *,
+    ticket_id: str | None = None,
+    warned_blocks: set[str] | None = None,
 ) -> AutoDevResult | BlockedResult | None:
     """Parse the LAST real sentinel block in *text*, tolerating earlier ones.
 
@@ -150,12 +163,57 @@ def parse_last_block(
     :class:`BlockedResult` describing why, never swapped for an earlier valid
     block. ``None`` means *text* has no complete real block. An unclosed
     trailing frame is ignored here -- :func:`parse_last_block_in_chunks` owns it.
+
+    *warned_blocks* is an optional caller-owned set (GitHub #1247, #2515) that
+    dedups the parse warnings of the deciding block across repeated calls; see
+    :func:`~cw.auto_dev_result.parse.parse_stdout`. ``None`` logs every warning.
     """
     for match in reversed(list(_BLOCK_RE.finditer(text))):
-        parsed = _parse_real_block(match.group(1), ticket_id)
+        parsed = _parse_real_block(
+            match.group(1), ticket_id, warned_blocks=warned_blocks
+        )
         if parsed is not None:
             return parsed
     return None
+
+
+def parse_last_block_per_chunk(
+    chunks: Iterable[str],
+    *,
+    ticket_id: str | None = None,
+    warned_blocks: set[str] | None = None,
+) -> AutoDevResult | BlockedResult | None:
+    """Return the last real result across *chunks*, each parsed on its own.
+
+    Every chunk goes through :func:`parse_last_block`; the last non-None parse
+    wins. A chunk's own last real block decides for that chunk, so a chunk
+    that quotes an earlier block or the skill's worked example no longer
+    collapses to ``multiple_result_blocks`` (GitHub #2515), and an unusable
+    last chunk is reported rather than replaced by an earlier valid one.
+
+    This is the primitive for callers whose chunks are independent records (a
+    transcript's assistant ``text`` and ``tool_result`` blocks), and it
+    deliberately does LESS than :func:`parse_last_block_in_chunks`:
+
+    - no frame joining: a frame whose markers sit in different records is not
+      reassembled, because unrelated records (a ``cat``-ed skill file next to
+      later prose) could otherwise join into a frame nobody emitted;
+    - no unclosed-frame report: an open marker with no close reads as no
+      sentinel (``None``), as the Stop hook's "truncated frame is not a
+      sentinel" rule (#2135) requires, not as a ``BlockedResult``;
+    - no bare-fence fallback (#337): only marker-framed blocks count.
+
+    ``ticket_id`` ``None`` (the default) disables the identity check.
+    *warned_blocks* is forwarded to every parse (see :func:`parse_last_block`).
+    """
+    last: AutoDevResult | BlockedResult | None = None
+    for text in chunks:
+        parsed = parse_last_block(
+            text, ticket_id=ticket_id, warned_blocks=warned_blocks
+        )
+        if parsed is not None:
+            last = parsed
+    return last
 
 
 def _parse_last_loose_block(
@@ -227,11 +285,7 @@ def parse_last_block_in_chunks(
     tolerates (GitHub #337). ``None`` means no real block anywhere.
     """
     events = list(chunks)
-    last: AutoDevResult | BlockedResult | None = None
-    for text in events:
-        parsed = parse_last_block(text, ticket_id=ticket_id)
-        if parsed is not None:
-            last = parsed
+    last = parse_last_block_per_chunk(events, ticket_id=ticket_id)
     frame = _latest_frame_start(events)
     if frame is not None:
         index, offset, tail = frame
