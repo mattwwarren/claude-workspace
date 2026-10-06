@@ -13,10 +13,14 @@ import click
 
 from cw.auto_dev_result import is_known_blocker_reason
 from cw.cli._base import handle_errors, print_fixed_width_table
-from cw.config import load_clients
-from cw.dev_queue import load_dev_queue, task_attention_state
-from cw.exceptions import MissingWorkspaceError, WorktreeError
-from cw.models import QueueItemStatus, TicketTask
+from cw.config import load_clients, load_state
+from cw.dev_queue import (
+    load_dev_queue,
+    session_attention_state,
+    task_attention_state,
+)
+from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
+from cw.models import QueueItemStatus, Session, TicketTask
 from cw.worktree import fast_forward_main
 
 from ._group import dev_queue
@@ -66,7 +70,29 @@ def _reason_cell(blocked_reason: str | None, advisory_note: str | None) -> str:
     return "—"
 
 
-def _print_tasks_human(tasks: list[TicketTask]) -> None:
+def _sessions_by_id() -> dict[str, Session]:
+    """Every persisted session keyed by id, for the ATTENTION cell (#2153).
+
+    One read-only ``load_state()``; an unreadable state file yields ``{}``
+    so the table falls back to PR state instead of failing (mirrors
+    ``status._unowned_ceiling_sessions``).
+    """
+    try:
+        state = load_state()
+    except (OSError, ValueError, CwError):
+        return {}
+    return {s.id: s for s in state.sessions}
+
+
+def _attention_cell(task: TicketTask, sessions_by_id: dict[str, Session]) -> str:
+    """Dead-session page state first, then the hydrated PR state, else ``—``."""
+    session = sessions_by_id.get(task.session_id) if task.session_id else None
+    return session_attention_state(task, session) or task_attention_state(task) or "—"
+
+
+def _print_tasks_human(
+    tasks: list[TicketTask], sessions_by_id: dict[str, Session]
+) -> None:
     if not tasks:
         click.echo("No tasks found.")
         return
@@ -90,7 +116,7 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
     col_widths = [12, 16, 16, 12, 8, 12, 12, 12, 20, 10, 20, 20, 10, 18, 10]
     rows: list[list[str]] = []
     for t in tasks:
-        attention = task_attention_state(t) or "—"
+        attention = _attention_cell(t, sessions_by_id)
         row = [
             t.ticket_id[:12],
             t.client[:16],
@@ -158,7 +184,7 @@ def dev_queue_tasks(
     if output_json:
         click.echo(json.dumps([_task_to_dict(t) for t in tasks]))
     else:
-        _print_tasks_human(tasks)
+        _print_tasks_human(tasks, _sessions_by_id())
 
 
 @dev_queue.command(name="refresh-all")

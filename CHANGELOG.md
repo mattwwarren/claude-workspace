@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The liveness dead-session page fires once per death, not once an hour (#2153).** A session latched at the top staleness bucket used to re-send `session.needs_attention` and a push every `liveness_attention_renotify_interval_minutes`. That knob is now a re-evaluation cadence: the page fires again only when its evidence key changes (the reason, the last content-bearing transcript timestamp, or the owned queue row's status), and `Session.liveness_attention_evidence_key` holds the key, with no schema bump. The page's breadcrumb keeps its text and appends "evidence suggests this session is dead (confirm before closing)", the last transcript record (with an `API Error` snippet), the flat hours, and the remedy `cw spawn close --confirmed-dead <id>` then `cw dev-queue requeue <ticket> -c <client> --from-cancelled`. Six additive payload keys carry the same: `last_record_type`, `last_record_ts`, `last_record_is_error`, `close_command`, `requeue_command`, `evidence_key`. `cw doctor`'s `wedge/active-daemon-stale-no-sentinel` recipe carries the same suffix, and `cw dev-queue tasks` shows `dead_session_paged` in the ATTENTION column for a row whose session holds a page. Nothing closes, requeues or reaps automatically. `cw.reconcile.routed_result_sessions.stranded_close_command` is replaced by `cw.reconcile.liveness_page.close_command`.
+
 ## [1.66.0] - 2026-10-06
 
 ### Added

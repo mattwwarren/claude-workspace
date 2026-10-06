@@ -599,6 +599,32 @@ def _ul_record(text: str, timestamp: str | None = None) -> dict[str, object]:
     return record
 
 
+# The observed eb87c137 transcript string quoted in #2153's ticket body.
+_API_ERROR_TEXT = "API Error: Server error mid-response"
+
+
+def _api_error_then_cost_state_records(
+    error_ts: datetime,
+    cost_ts: datetime,
+    *,
+    error_text: str = _API_ERROR_TEXT,
+) -> list[dict[str, object]]:
+    """A work record, an API Error assistant record, then a ``cost-state`` (#2153).
+
+    Separate from ``tests/test_reconcile_usage_limit_mid_turn.py``'s
+    ``_limit_tail``/``_trailing_metadata``: those pin the usage-limit capture
+    (with a ``last-prompt`` tail and its own frozen timestamps), while the
+    dead-session page needs caller-chosen timestamps and an API Error text.
+    Only the ``cost-state`` record ``type`` was observed (see that module's
+    ``_trailing_metadata`` docstring); its other fields are filler.
+    """
+    return [
+        _ul_record("working on it", (error_ts - timedelta(minutes=1)).isoformat()),
+        _ul_record(error_text, error_ts.isoformat()),
+        {"type": "cost-state", "timestamp": cost_ts.isoformat()},
+    ]
+
+
 # Verbatim capture, dev-1751 impl worker, session
 # 286032f7-47ee-4985-a45d-e7a946aa1d9d, 2026-08-18T17:27:09.071Z (#1923).
 # Shared by tests/test_reconcile_phantom.py and

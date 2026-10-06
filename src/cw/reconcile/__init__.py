@@ -57,6 +57,9 @@ re-exports. Submodules:
 - ``idle`` — emitted-sentinel router (#578).
 - ``liveness`` — transcript-staleness bucket sweep + operator distress
   signal (RFC 0008 W2; signal-only, no disposition).
+- ``liveness_page`` — leaf helpers for that signal's once-per-evidence-key
+  dead-session page: last-record summary, dedup key, close/requeue commands
+  and breadcrumb suffix, shared with doctor class-8 (#2153).
 - ``routed_result_sessions`` — signal-only, page-once detector for live
   sessions stranded after a #2458 partial route already routed their result
   (#2524; never closes -- the operator does, via ``cw doctor --reap``).

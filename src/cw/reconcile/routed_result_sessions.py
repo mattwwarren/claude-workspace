@@ -63,6 +63,7 @@ from cw.reconcile._shared import (
 )
 from cw.reconcile.idle._detect import _background_work_still_draining
 from cw.reconcile.liveness import _classify_liveness_bucket
+from cw.reconcile.liveness_page import close_command
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -122,11 +123,6 @@ def session_pins_occupied_row(tasks: Iterable[TicketTask], session_id: str) -> b
         task.session_id == session_id and task.status in OCCUPIED_LANE_STATUSES
         for task in tasks
     )
-
-
-def stranded_close_command(session_id: str) -> str:
-    """The exact operator command that closes a stranded routed session."""
-    return f"cw spawn close --confirmed-dead {session_id}"
 
 
 def _live_routed_surface_ref(session: Session, native_live: set[str]) -> str | None:
@@ -266,7 +262,7 @@ def _page_breadcrumbs(hit: StrandedRoutedSession) -> str:
         f"{hit.session.id} still {hit.session.status.value} with transcript flat "
         f"{hit.stale_minutes:.0f}m and no occupied row bound to it -- it holds a "
         "ceiling slot and its worktree. Nothing acts automatically; close it "
-        f"with: {stranded_close_command(hit.session.id)} (or cw doctor --reap)"
+        f"with: {close_command(hit.session.id)} (or cw doctor --reap)"
     )
 
 
