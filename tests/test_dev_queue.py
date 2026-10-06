@@ -3467,6 +3467,37 @@ class TestCLIDevQueuePrune:
         assert "Pruned 1 dev-queue task(s)." in result.output
         assert load_dev_queue().tasks == []
 
+    @pytest.mark.parametrize(
+        "extra_flags",
+        [[], ["--confirm"]],
+        ids=["preview", "confirm"],
+    )
+    def test_negative_older_than_errors_cli(
+        self, tmp_dev_queue: Path, extra_flags: list[str]
+    ) -> None:
+        """A negative --older-than surfaces as a CLI error on both the preview
+        path (select_prunable_tickets) and the --confirm path (prune_tickets),
+        and deletes nothing."""
+        save_dev_queue(DevQueueStore(tasks=[_aged_task(100, ticket_id="CLI-NEG")]))
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "prune",
+                "--client",
+                "genhealth",
+                "--older-than",
+                "-1",
+                *extra_flags,
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "--older-than must be >= 0" in result.output
+        assert len(load_dev_queue().tasks) == 1
+
     def test_nothing_to_prune_message(self, tmp_dev_queue: Path) -> None:
         save_dev_queue(DevQueueStore(tasks=[_aged_task(1, ticket_id="CLI-FRESH")]))
         runner = CliRunner()
