@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The gate recipes' plan-of-record read no longer runs `gh` or `git` under `sessions_lock` (#2545).** The `auto_adopt_clean_plan` recipe read each candidate's plan of record (`gh issue view` and `gh api user`, plus `git branch --show-current` for the `.cw/plan.md` fallback) inside the lock. `reconcile()` now reads it before taking the lock, for only the rows the in-lock recipe would act on, and the recipe only looks the result up under the lock, with no subprocess. The pre-pass reads at most 5 plans per tick within a 30 s budget, and a result older than 120 s is not used. A candidate with no usable result (capped, missing, captured for a different session or plan draft, or stale) stays parked and is retried next tick. The same capture runs for every `reconcile()` caller (`cw status`, `cw list`, `cw start`, `cw doctor` and the dispatch loop). `cw.reconcile.gate_recipes` stays off the lock-invariant allowlist.
+
 ## [1.67.3] - 2026-10-07
 
 ### Changed
