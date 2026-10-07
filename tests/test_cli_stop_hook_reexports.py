@@ -204,7 +204,11 @@ PATCH_OWNERSHIP = [
     ("_park_if_abandoned", "read_park_comment_marker", f"{_PKG}.park"),
     ("_armed_running_task", "find_running_task_for_session", f"{_PKG}.park"),
     ("_armed_running_task", "park_gate_open", f"{_PKG}.park"),
-    ("_maybe_clear_staged_emit_result", "_write_cw_context_locked", _PKG),
+    (
+        "_maybe_clear_staged_emit_result",
+        "_write_cw_context_locked",
+        f"{_PKG}.staged_emit",
+    ),
     ("_resolve_and_complete_headless_session", "_apply_sentinel_to_task", _PKG),
     ("_resolve_and_complete_headless_session", "_write_cw_context_locked", _PKG),
     ("_resolve_stop_under_lock", "load_state", _PKG),
