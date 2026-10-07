@@ -33,7 +33,8 @@ The bounded-acquisition rule (#2501):
   while it waits on the inner one, so it can wait up to 2x the timeout in
   total; the timeout error reports the wait of the acquisition that failed.
 
-Depends only on ``cw.exceptions``; importable from anywhere below ``cw.config``.
+Depends on ``cw.exceptions`` and ``cw._lock_guard``; importable from anywhere
+below ``cw.config``.
 """
 
 from __future__ import annotations
@@ -45,7 +46,12 @@ import os
 import time
 from typing import TYPE_CHECKING, NamedTuple
 
-from cw.exceptions import LockTimeoutError, SessionsLockTimeoutError
+from cw.exceptions import (
+    DEV_QUEUE_LOCK_NAME,
+    SESSIONS_LOCK_NAME,
+    LockTimeoutError,
+    SessionsLockTimeoutError,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -76,7 +82,7 @@ SESSIONS_LOCK_POLL_INTERVAL_S = 0.02
 # Locks ``cw dev-queue serve`` holds across a reconcile/dispatch pass, so a
 # timeout on one of them gets the "typically serve / restart it if wedged"
 # advice. Other locks get only the generic holder guidance.
-SERVE_HELD_LOCKS = frozenset({"sessions", "dev_queue"})
+SERVE_HELD_LOCKS = frozenset({SESSIONS_LOCK_NAME, DEV_QUEUE_LOCK_NAME})
 
 # Raw env values already warned about, so a typo'd knob read on every hot-path
 # acquisition warns once per distinct value rather than once per call.
@@ -226,7 +232,7 @@ def acquire_sessions_flock(fd: IO[str], lock_path: Path, *, bounded: bool) -> No
     if not bounded:
         fcntl.flock(fd, fcntl.LOCK_EX)
         return
-    timeout = _poll_for_lock(fd, lock_path, "sessions")
+    timeout = _poll_for_lock(fd, lock_path, SESSIONS_LOCK_NAME)
     if timeout is None:
         return
     raise SessionsLockTimeoutError(

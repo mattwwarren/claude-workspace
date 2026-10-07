@@ -579,7 +579,7 @@ _GUARDED: frozenset[tuple[str, str]] = frozenset(
 )
 
 type _FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef
-_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
 
 def _call_name(call: ast.Call) -> str | None:
@@ -592,7 +592,11 @@ def _call_name(call: ast.Call) -> str | None:
 
 def _is_guard_call(call: ast.Call) -> bool:
     if isinstance(call.func, ast.Name):
-        return call.func.id == _GUARD_NAME
+        return call.func.id in {
+            _GUARD_NAME,
+            "_guarded_flock",
+            "_guarded_state_lock",
+        }
     return (
         isinstance(call.func, ast.Attribute)
         and call.func.attr == _GUARD_NAME
@@ -652,8 +656,14 @@ def _guard_spans(fn: _FunctionNode) -> list[tuple[int, int]]:
             and _is_guard_call(item.context_expr)
             for item in node.items
         ):
-            first, last = node.body[0], node.body[-1]
-            spans.append((first.lineno, last.end_lineno or last.lineno))
+            first = min(
+                item.context_expr.lineno
+                for item in node.items
+                if isinstance(item.context_expr, ast.Call)
+                and _is_guard_call(item.context_expr)
+            )
+            last = node.body[-1]
+            spans.append((first, last.end_lineno or last.lineno))
     return spans
 
 

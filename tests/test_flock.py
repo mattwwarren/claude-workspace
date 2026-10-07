@@ -62,6 +62,11 @@ def _install_clock(monkeypatch: pytest.MonkeyPatch, clock: _FakeClock) -> None:
     monkeypatch.setattr(_flock, "time", clock)
 
 
+def _assert_bounded_lock_times_out(lock: _StateLock) -> None:
+    with lock.acquire(bounded=True):
+        pytest.fail("must not reach body")
+
+
 class TestTryFlockUntil:
     def test_free_lock_acquired_without_sleeping(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -547,12 +552,8 @@ class TestBoundedStateLocks:
         _install_clock(monkeypatch, _FakeClock())
         lock_path = lock.path()
 
-        with (
-            _hold_flock(lock_path),
-            pytest.raises(LockTimeoutError) as exc_info,
-            lock.acquire(bounded=True),
-        ):
-            pytest.fail("must not reach body")
+        with _hold_flock(lock_path), pytest.raises(LockTimeoutError) as exc_info:
+            _assert_bounded_lock_times_out(lock)
 
         err = exc_info.value
         assert type(err) is LockTimeoutError
@@ -572,12 +573,8 @@ class TestBoundedStateLocks:
         recorder = record_lock_path(lock.patch_target, real)
         monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0")
 
-        with (
-            _hold_flock(real),
-            pytest.raises(LockTimeoutError),
-            lock.acquire(bounded=True),
-        ):
-            pytest.fail("must not reach body")
+        with _hold_flock(real), pytest.raises(LockTimeoutError):
+            _assert_bounded_lock_times_out(lock)
 
         assert [h.closed for h in recorder.handles] == [True]
         with lock.acquire(bounded=True):

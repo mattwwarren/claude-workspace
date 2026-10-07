@@ -26,6 +26,9 @@ from cw._git import run_git
 from cw._lock_guard import LockRank, lock_guard
 from cw.atomic import atomic_write_text
 from cw.exceptions import (
+    CLIENTS_LOCK_NAME,
+    CONCURRENCY_OVERRIDE_LOCK_NAME,
+    SESSIONS_LOCK_NAME,
     ConfigValidationError,
     CwError,
     DispatchLoopLockedError,
@@ -54,6 +57,29 @@ _SAFE_CLIENT_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 _SAFE_BRANCH_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$")
 
 _EMPTY_CLIENTS_DOC = "clients:\n"
+
+
+@contextlib.contextmanager
+def _guarded_state_lock(
+    lock_name: str,
+    lock_path: Path,
+    rank: LockRank,
+    acquire: Callable[[Any], None],
+) -> Iterator[None]:
+    """Guard and hold a state-lock fd using the lock-specific *acquire*."""
+    with lock_guard(lock_name, lock_path, rank):
+        fd = lock_path.open("w")
+        try:
+            acquire(fd)
+        except BaseException:
+            fd.close()
+            raise
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
+
 
 _xdg_config = os.environ.get("XDG_CONFIG_HOME", "")
 _xdg_data = os.environ.get("XDG_DATA_HOME", "")
@@ -281,21 +307,19 @@ def concurrency_override_lock(*, bounded: bool = False) -> Iterator[None]:
     :class:`~cw.exceptions.LockTimeoutError` after the ``cw._flock`` wait.
     """
     lock_path = concurrency_override_lock_file()
-    with lock_guard("concurrency_override", lock_path, LockRank.STATE):
-        state_dir().mkdir(parents=True, exist_ok=True)
-        fd = lock_path.open("w")
-        try:
-            acquire_flock(
-                fd, lock_path, lock_name="concurrency_override", bounded=bounded
-            )
-        except BaseException:
-            fd.close()
-            raise
-        try:
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            fd.close()
+    state_dir().mkdir(parents=True, exist_ok=True)
+    with _guarded_state_lock(
+        CONCURRENCY_OVERRIDE_LOCK_NAME,
+        lock_path,
+        LockRank.STATE,
+        lambda fd: acquire_flock(
+            fd,
+            lock_path,
+            lock_name=CONCURRENCY_OVERRIDE_LOCK_NAME,
+            bounded=bounded,
+        ),
+    ):
+        yield
 
 
 @contextlib.contextmanager
@@ -325,19 +349,14 @@ def sessions_lock(*, bounded: bool = False) -> Iterator[None]:
     allowlist test (``tests/test_config.py``).
     """
     lock_path = sessions_lock_file()
-    with lock_guard("sessions", lock_path, LockRank.SESSIONS):
-        state_dir().mkdir(parents=True, exist_ok=True)
-        fd = lock_path.open("w")
-        try:
-            acquire_sessions_flock(fd, lock_path, bounded=bounded)
-        except BaseException:
-            fd.close()
-            raise
-        try:
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            fd.close()
+    state_dir().mkdir(parents=True, exist_ok=True)
+    with _guarded_state_lock(
+        SESSIONS_LOCK_NAME,
+        lock_path,
+        LockRank.SESSIONS,
+        lambda fd: acquire_sessions_flock(fd, lock_path, bounded=bounded),
+    ):
+        yield
 
 
 def mutate_state(fn: Callable[[CwState], None], *, bounded: bool = False) -> CwState:
@@ -378,19 +397,16 @@ def clients_lock(*, bounded: bool = False) -> Iterator[None]:
     :class:`~cw.exceptions.LockTimeoutError` after the ``cw._flock`` wait.
     """
     lock_path = clients_lock_file()
-    with lock_guard("clients", lock_path, LockRank.STATE):
-        config_dir().mkdir(parents=True, exist_ok=True)
-        fd = lock_path.open("w")
-        try:
-            acquire_flock(fd, lock_path, lock_name="clients", bounded=bounded)
-        except BaseException:
-            fd.close()
-            raise
-        try:
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            fd.close()
+    config_dir().mkdir(parents=True, exist_ok=True)
+    with _guarded_state_lock(
+        CLIENTS_LOCK_NAME,
+        lock_path,
+        LockRank.STATE,
+        lambda fd: acquire_flock(
+            fd, lock_path, lock_name=CLIENTS_LOCK_NAME, bounded=bounded
+        ),
+    ):
+        yield
 
 
 def _current_command_str() -> str:

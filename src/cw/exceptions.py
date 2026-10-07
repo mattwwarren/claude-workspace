@@ -20,6 +20,15 @@ if TYPE_CHECKING:
     from cw.models import Session
     from cw.sprint import AppliedBuildout
 
+
+# Canonical identities for the state locks.  Keep these in the dependency-light
+# lock/error layer so the guard, acquisition helpers, and timeout exceptions
+# all use the same names without importing the configuration module.
+SESSIONS_LOCK_NAME = "sessions"
+DEV_QUEUE_LOCK_NAME = "dev_queue"
+CLIENTS_LOCK_NAME = "clients"
+CONCURRENCY_OVERRIDE_LOCK_NAME = "concurrency_override"
+
 # Usage-limit detection regex. Matches all documented Claude usage-limit phrasings:
 # - "You've hit your session limit · resets 3:45pm"   (verified against errors.md)
 # - "You've hit your weekly limit · resets Mon 12:00am" (verified against errors.md)
@@ -907,7 +916,10 @@ class SessionsLockTimeoutError(LockTimeoutError):
 
     def __init__(self, message: str, *, lock_path: Path, waited_s: float) -> None:
         super().__init__(
-            message, lock_name="sessions", lock_path=lock_path, waited_s=waited_s
+            message,
+            lock_name=SESSIONS_LOCK_NAME,
+            lock_path=lock_path,
+            waited_s=waited_s,
         )
 
 
