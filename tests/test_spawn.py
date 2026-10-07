@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION, Status
 from cw.cli import main
 from cw.codex_review import CODEX_REVIEW_UNPARSEABLE
 from cw.config import load_state, orchestrator_config_file, save_state
+from cw.dev_queue import load_dev_queue
 from cw.exceptions import CwError, SpawnUnregisteredError, WorkerLaunchedError
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
@@ -27,6 +29,7 @@ from cw.models import (
     CwState,
     MustFixOverride,
     OrchestratorEventType,
+    QueueItemStatus,
     Session,
     SessionOrigin,
     SessionPurpose,
@@ -41,7 +44,9 @@ from cw.spawn import (
     emit_spawn_post_launch_attention,
     spawn_create_impl,
 )
+from tests._reconcile_helpers import LockProbeDaemon
 from tests.conftest import (
+    _SRC_ROOT,
     _make_daemon_session,
     _make_ticket_task,
     _seed_completed_session,
@@ -118,6 +123,29 @@ def _seed_running_task(
     store = DevQueueStore(tasks=[task])
     save_dev_queue(store)
     return task
+
+
+class _SpawnStopProbeDaemon(LockProbeDaemon):
+    """``LockProbeDaemon`` plus the dev-queue snapshot and a raise-once knob (#2547).
+
+    Each stop also appends ``{ticket_id: status}`` for every queued task to
+    :attr:`queue_statuses`. With ``raise_first_stop`` the first stop raises
+    ``OSError`` after the base fake has recorded the call and the probe.
+    """
+
+    def __init__(self, *, raise_first_stop: bool = False) -> None:
+        super().__init__()
+        self.queue_statuses: list[dict[str, QueueItemStatus]] = []
+        self.raise_first_stop = raise_first_stop
+
+    def stop(self, short_id: str) -> None:
+        self.queue_statuses.append(
+            {t.ticket_id: t.status for t in load_dev_queue().tasks}
+        )
+        super().stop(short_id)
+        if self.raise_first_stop and len(self.stop_calls) == 1:
+            msg = "daemon socket gone"
+            raise OSError(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -2084,6 +2112,85 @@ class TestSpawnClose:
         assert closed is not None
         assert closed.status == SessionStatus.COMPLETED
 
+    # -- #2547: the daemon stop runs after sessions_lock is released --------
+
+    def test_live_daemon_stop_runs_after_sessions_lock_released(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """The stop is a <=10s subprocess: it must not hold ``sessions_lock``,
+        and the COMPLETED stamp is already persisted when it runs."""
+        from cw.cli import _spawn_close_impl
+
+        sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
+        daemon = LockProbeDaemon()
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=daemon)
+
+        assert daemon.probes == [("free", {sess.id: SessionStatus.COMPLETED})]
+        assert daemon.stop_calls == ["abc12345"]
+        closed = load_state().find_by_name_or_id(sess.id)
+        assert closed is not None
+        assert closed.completed_reason == CompletionReason.USER
+
+    def test_already_completed_stop_runs_after_sessions_lock_released(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2480's repeat-close stop also runs with ``sessions_lock`` free."""
+        from cw.cli import _spawn_close_impl
+
+        sess = _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            status=SessionStatus.COMPLETED,
+            surface_ref="deadbeef",
+        )
+        daemon = LockProbeDaemon()
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=daemon)
+
+        assert daemon.probes == [("free", {sess.id: SessionStatus.COMPLETED})]
+        assert daemon.stop_calls == ["deadbeef"]
+
+    def test_cancel_and_stamp_land_before_stop(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Order is cancel -> stamp -> release -> stop (mirrors ``signal_stop``)."""
+        from cw.cli import _spawn_close_impl
+
+        sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
+        daemon = _SpawnStopProbeDaemon()
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=daemon)
+
+        assert daemon.queue_statuses == [{"GEN-42": QueueItemStatus.CANCELLED}]
+        assert daemon.probes == [("free", {sess.id: SessionStatus.COMPLETED})]
+
+    def test_stop_failure_after_stamp_leaves_session_completed_and_retry_succeeds(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A raising stop no longer strands an un-stamped session: the state is
+        already COMPLETED / CANCELLED, and a repeat close retries only the stop
+        (#2480's already-COMPLETED branch)."""
+        from cw.cli import _spawn_close_impl
+
+        sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
+        daemon = _SpawnStopProbeDaemon(raise_first_stop=True)
+
+        with pytest.raises(OSError, match="daemon socket gone"):
+            _spawn_close_impl(session_id=sess.id, native_daemon=daemon)
+
+        stamped = load_state().find_by_name_or_id(sess.id)
+        assert stamped is not None
+        assert stamped.status == SessionStatus.COMPLETED
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-42")
+        assert task.status == QueueItemStatus.CANCELLED
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=daemon)
+
+        assert daemon.stop_calls == ["abc12345", "abc12345"]
+
     # -- #2458: a staged emit_cli result is routed, not thrown away ---------
 
     _CLOSE_TICKET = "GEN-1234"
@@ -2392,7 +2499,7 @@ class TestSpawnComplete:
     def test_spawn_close_still_waits_out_a_held_dev_queue_lock(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``cancel_task_for_session`` runs after ``daemon.stop``: unbounded."""
+        """``cancel_task_for_session`` runs before the post-lock stop: unbounded."""
         import threading
 
         from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
@@ -2618,6 +2725,57 @@ class TestSpawnComplete:
         )
         assert len(events) == 0
         assert daemon.stop_calls == ["deadbeef"]
+
+    def test_force_noop_stop_runs_after_sessions_lock_released(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2547: the ``--force`` no-op's surface stop runs with the lock free."""
+        from cw.cli import _spawn_complete_impl
+        from cw.events import read_events
+
+        sess = _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            status=SessionStatus.COMPLETED,
+            surface_ref="deadbeef",
+        )
+        daemon = LockProbeDaemon()
+
+        _spawn_complete_impl(
+            session_id=sess.id,
+            status="shipped",
+            ticket_id=None,
+            force=True,
+            native_daemon=daemon,
+        )
+
+        assert daemon.probes == [("free", {sess.id: SessionStatus.COMPLETED})]
+        assert daemon.stop_calls == ["deadbeef"]
+        events = read_events(
+            consumer="_test_force_noop_lock_free",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert events == []
+
+    def test_main_path_stop_runs_with_no_lock_held(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Regression pin: the normal completion path stops after the lock."""
+        from cw.cli import _spawn_complete_impl
+
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir)
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
+        daemon = LockProbeDaemon()
+
+        _spawn_complete_impl(
+            session_id=sess.id,
+            status="shipped",
+            ticket_id=None,
+            force=False,
+            native_daemon=daemon,
+        )
+
+        assert daemon.probes == [("free", {sess.id: SessionStatus.COMPLETED})]
 
     @pytest.mark.parametrize("status_value", list(get_args(Status)))
     def test_status_routing_each_enum_value(
@@ -5650,3 +5808,68 @@ class TestPriorAttemptsSummary:
         assert len(summaries) == 2
         assert summaries[0]["blocker_reason"] == "rb-first"
         assert summaries[1]["blocker_reason"] == "rb-second"
+
+
+# ---------------------------------------------------------------------------
+# Static guard: no daemon stop under sessions_lock (#2547)
+# ---------------------------------------------------------------------------
+
+
+class _StopUnderSessionsLockFinder(ast.NodeVisitor):
+    """Collect ``.stop(`` call lines lexically nested in ``with sessions_lock(...)``.
+
+    ADR-0019's runtime harness only sees real subprocess execs, so a fake
+    daemon stop under the lock is invisible to it; this scan covers that gap.
+    """
+
+    def __init__(self) -> None:
+        self._lock_depth = 0
+        self.locked_blocks = 0
+        self.stop_lines: list[int] = []
+
+    @staticmethod
+    def _takes_sessions_lock(node: ast.With) -> bool:
+        for item in node.items:
+            call = item.context_expr
+            if not isinstance(call, ast.Call):
+                continue
+            func = call.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+            if name == "sessions_lock":
+                return True
+        return False
+
+    def visit_With(self, node: ast.With) -> None:
+        locked = self._takes_sessions_lock(node)
+        if locked:
+            self.locked_blocks += 1
+            self._lock_depth += 1
+        self.generic_visit(node)
+        if locked:
+            self._lock_depth -= 1
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if (
+            self._lock_depth > 0
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "stop"
+        ):
+            self.stop_lines.append(node.lineno)
+        self.generic_visit(node)
+
+
+def test_spawn_cli_never_stops_a_daemon_under_sessions_lock() -> None:
+    """``cw spawn close`` / ``complete`` stop the surface after the lock (#2547)."""
+    path = _SRC_ROOT / "cw" / "cli" / "spawn.py"
+    finder = _StopUnderSessionsLockFinder()
+
+    finder.visit(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+
+    # Non-vacuous: close (1) + complete (1) take the lock; a rename would
+    # otherwise make this scan silently pass.
+    assert finder.locked_blocks >= 2
+    assert finder.stop_lines == [], (
+        f"daemon .stop( under sessions_lock in cw/cli/spawn.py at lines "
+        f"{finder.stop_lines}: capture the surface_ref under the lock and stop "
+        "after it releases (ADR-0019, #2547)"
+    )

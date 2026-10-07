@@ -50,7 +50,9 @@ _TICKET_RE = re.compile(r"^#\d+$")
 # its entry is deleted (#2563's was), since this is the documented universe,
 # not a mirror of the allowlist. #2545 is also closed, by deletion-free means:
 # it never had an entry (the probe never recorded the stubbed in-lock plan
-# read), and its read now runs in a lockless pre-pass.
+# read), and its read now runs in a lockless pre-pass. #2547's ADR row is
+# deleted too; it never had an allowlist entry either (the fake daemon stop
+# launches no real subprocess).
 _DOCUMENTED_TICKETS = frozenset(
     {
         "#2545",
@@ -385,6 +387,13 @@ def test_local_runner_is_not_allowlisted() -> None:
     pre-pass, so no in-lock subprocess under a ``cw.local_runner`` frame is
     forgiven any more."""
     assert "cw.local_runner" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+
+
+def test_cli_spawn_is_not_allowlisted() -> None:
+    """#2547: ``cw spawn close`` / ``complete --force`` stop the daemon surface
+    after ``sessions_lock`` releases, so no in-lock subprocess under a
+    ``cw.cli.spawn`` frame is forgiven."""
+    assert "cw.cli.spawn" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
 
 
 def test_stop_hook_is_not_allowlisted() -> None:
