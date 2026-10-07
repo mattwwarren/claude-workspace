@@ -281,6 +281,14 @@ class OrchestratorEventType(StrEnum):
     TASK_TRANSITION = "task.transition"
     TASK_STAGE_CHANGED = "task.stage_changed"
     TASK_DELETED = "task.deleted"
+    # #2591 -- emitted by cw.reconcile.unowned_running once per RUNNING row it
+    # binds to the recorded session its worktree's cw-context.json ties to
+    # this claim (the row dispatch launched but never stamped). Audit-only:
+    # deliberately NOT in _DEFAULT_OPERATOR_EVENT_TYPES
+    # (orchestrator_config/operator_forward.py), since an adoption is a
+    # mechanical recovery, not an operator page -- the
+    # DAEMON_LEAKED_WORKER_STOPPED convention. See docs/events.md.
+    TASK_SESSION_ADOPTED = "task.session_adopted"
     # RFC 0008 W2 liveness producer (#1001): latched transcript-staleness
     # bucket crossings from the reconcile idle-watchdog pass.
     SESSION_LIVENESS_CHANGED = "session.liveness_changed"
