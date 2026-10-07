@@ -193,7 +193,7 @@ class TestCommandRegistration:
 # commit repoints the rows whose function it moves. ``_write_cw_context_locked``
 # is read at four call sites in three functions, one row per reader.
 PATCH_OWNERSHIP = [
-    ("_resolve_signal_stop_context", "_read_cw_context", _PKG),
+    ("_resolve_signal_stop_context", "_read_cw_context", f"{_PKG}.payload"),
     ("_parse_headless_sentinel", "_parse_sentinel_from_transcript", _PKG),
     ("_harvest_last_result_through_door", "emit_result_locked", _PKG),
     ("_sentinel_frame_follows_marker", "claude_project_dir", _PKG),
@@ -243,6 +243,7 @@ class TestPatchOwnership:
         moved = {g for _fn, g, owner in PATCH_OWNERSHIP if owner != _PKG}
         still_read_here = {g for _fn, g, owner in PATCH_OWNERSHIP if owner == _PKG}
         third_party = moved - still_read_here - EXPECTED_EXPORTS
+        assert third_party
         assert sorted(g for g in third_party if hasattr(stop_hook, g)) == []
 
 

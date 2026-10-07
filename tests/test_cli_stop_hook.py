@@ -501,7 +501,7 @@ def test_signal_stop_skip_arm_does_not_clobber_a_concurrent_increment(
     so the file must be left exactly as it is: same bytes, same inode, no lock
     taken.
     """
-    from cw.cli import stop_hook
+    from cw.cli.stop_hook import payload
 
     worktree = tmp_path / "wt-stale-zero"
     worktree.mkdir()
@@ -518,7 +518,7 @@ def test_signal_stop_skip_arm_does_not_clobber_a_concurrent_increment(
         AGENT_SPAWN_UNRESOLVED_COUNT_KEY: 0,
         AGENT_SPAWN_LAST_STAMPED_AT_KEY: None,
     }
-    monkeypatch.setattr(stop_hook, "_read_cw_context", lambda _cwd: stale)
+    monkeypatch.setattr(payload, "_read_cw_context", lambda _cwd: stale)
 
     result = _invoke_hook_command("signal-stop", _stop_payload(worktree))
 
