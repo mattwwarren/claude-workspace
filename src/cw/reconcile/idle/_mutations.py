@@ -18,6 +18,7 @@ from cw.reconcile._shared import (
     _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     _apply_sentinel_to_task_audited,
     _resolve_routed_sentinel,
+    page_and_latch_stage_refusal,
 )
 from cw.result import reconstruct_staged_sentinel
 
@@ -26,6 +27,24 @@ if TYPE_CHECKING:
 
     from cw.models import Session
     from cw.reconcile._shared import ReapCandidate
+
+
+def _stamp_idle_stage_refusal(session: Session) -> None:
+    """Latch a stage-mismatch refusal the idle sweep's way (#1149, #2458).
+
+    Stamps a paused_status-only marker so the next tick's ``session.last_result
+    is None`` unrouted-check gate (``_detect_idle_candidate_for_session``) stops
+    re-proposing this same doomed candidate forever. No "status" key ->
+    ``_has_terminal_sentinel`` stays False.
+
+    #2458: a staged emit_cli candidate reaches here too, and the stamp replaces
+    its staged result; with no "status" left, ``_holds_staged_emit_result``
+    turns False and the candidate is not re-offered. Only the emit's
+    session.result_emitted audit event (status + payload digest) survives -- a
+    merge-aware stamp would keep the full result but is a new door-guard write
+    site (#2458 follow-up).
+    """
+    session.last_result = {_PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON}
 
 
 def _apply_idle_routed_mutations(
@@ -87,13 +106,21 @@ def _apply_idle_routed_mutations(
     ``tests/test_result.py``'s
     ``test_validate_or_exit_rejects_bare_blocked_result_shape``).
 
+    GitHub #2513: a stage-mismatch refusal now pages once
+    (``session.needs_attention``, ``paused_status=
+    sentinel_stage_mismatch_live_session``) before the refusal marker is
+    stamped, and the marker is stamped only if that page landed. A failed page
+    leaves the staged result in place, so the candidate is re-offered and
+    re-paged next tick.
+
     Returns ``(accepted, state_mutated)``. ``accepted`` is only the candidates
     actually routed or completed on a terminal row (#2140, #2482), so the
     caller's downstream event emission fires solely for those.
     ``state_mutated`` is True when any session state changed here -- including
     a refusal-marker stamp with no accepted candidate -- so the caller persists
     the stamp even on a pure-refusal tick (the marker would otherwise be lost
-    and the candidate re-fire forever, GitHub #1149).
+    and the candidate re-fire forever, GitHub #1149). A refusal whose page
+    failed stamped nothing and does not set it.
     """
     accepted: list[ReapCandidate] = []
     state_mutated = False
@@ -142,24 +169,25 @@ def _apply_idle_routed_mutations(
         # with routed=False.
         row_terminal = task_already_terminal or landed_terminal
         if not routed and not row_terminal:
-            # #1149: a stage-mismatch refusal (earlier-stage replay / unresolvable
-            # position) leaves the task untouched. Stamp a paused_status-only
-            # marker so the next tick's `session.last_result is None` unrouted-check
-            # gate (_detect_idle_candidate_for_session) stops re-proposing this same
-            # doomed candidate forever. No "status" key -> _has_terminal_sentinel
-            # stays False.
-            #
-            # #2458: a staged emit_cli candidate reaches here too, and the
-            # stamp replaces its staged result; with no "status" left,
-            # _holds_staged_emit_result turns False and the candidate is not
-            # re-offered. Only the emit's session.result_emitted audit event
-            # (status + payload digest) survives -- a merge-aware stamp would
-            # keep the full result but is a new door-guard write site (#2458
-            # follow-up).
-            session.last_result = {
-                _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
-            }
-            state_mutated = True
+            # #1149: a stage-mismatch refusal leaves the task untouched and is
+            # latched by _stamp_idle_stage_refusal. #2513: page it first (live
+            # wording -- the surface is alive), latching only once the page
+            # landed; a failed page changes nothing, so the candidate is
+            # re-offered and re-paged next tick. A non-stage refusal (e.g. a
+            # PENDING row) is latched silently, as before.
+            state_mutated = (
+                page_and_latch_stage_refusal(
+                    session,
+                    outcome,
+                    ticket_id=candidate.ticket_id,
+                    lane=candidate.lane,
+                    sentinel=routed_sentinel,
+                    subject="live worker",
+                    live=True,
+                    stamp=_stamp_idle_stage_refusal,
+                )
+                or state_mutated
+            )
             continue
         if not routed and row_terminal:
             # #2140: the shared audited seam already accepted and recorded the

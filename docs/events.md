@@ -767,8 +767,10 @@ without task revert).
 **Emitter:** `revert_timed_out_tasks`, `revert_completed_silent_tasks`, the
 liveness sweep's distress check (`record_session_liveness_changes`), and the
 Stop hook's abandoned-exit park (`_route_stopped_without_sentinel`, invoked
-from `cw signal-stop`, #2135) and the local dead-process harvest's
-stage-mismatch refusal (`_act_on_local_harvest_candidates`, #2490) in
+from `cw signal-stop`, #2135), the local dead-process harvest's
+stage-mismatch refusal (`_act_on_local_harvest_candidates`, #2490) and the
+idle, stalled and phantom sweeps' stage-mismatch refusals (via
+`emit_stage_refusal_pages` in `cw.reconcile._shared`, #2513) in
 `cw.reconcile`; `apply_staged_decision`,
 `dispatch_tick` (via `_record_client_freshness_block`), and the dispatch
 loop's per-tick staleness watchdog (via `_notify_stale_clients_with_pending`)
@@ -1102,6 +1104,26 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `cw spawn close --confirmed-dead --requeue <session-id>` (the close cancels the
   `RUNNING` row, `--requeue` puts it back to `PENDING` at its current stage).
   The operator can inspect the worktree log (`.cw/opencode.log`) first.
+  Also emitted by the phantom sweep (`cw.reconcile.phantom`, #2513) for an
+  exited worker (absent from the daemon roster) whose routed sentinel the
+  guard refused: the same 9 fields and recovery command, with "exited worker"
+  in place of the backend in `breadcrumbs`. Paged once, before the existing
+  refusal latch, at-least-once as above; nothing is closed, requeued or reaped
+  automatically, and the later `sentinel_mismatch_veto_cap_exhausted`
+  escalation is unchanged.
+- `"sentinel_stage_mismatch_live_session"` — the idle or stalled sweep
+  (`cw.reconcile.idle`, `cw.reconcile.stalled`, #2513) refused a result from a
+  worker that is still in the daemon roster: the shared staged-advance guard
+  emitted `sentinel.stage_mismatch`, the result was **not** applied and the row
+  is unchanged. Same 9 fields as the dead-session page. `breadcrumbs` names the
+  status, stage, blocker reason and recovery hint reported, the row's live
+  stage, and says the worker may yet report a result for the row's current
+  stage; its recovery command is `cw spawn close --requeue <session-id>` (no
+  `--confirmed-dead`, and the word "dead" never appears). **At-least-once**:
+  the page is emitted before the sweep's existing refusal latch and the latch is
+  stamped only once the page write succeeded, so a failed write is re-paged
+  next tick. A session latched before this page existed is never re-offered and
+  never paged. Nothing is closed, requeued or reaped automatically.
 - `"merge_gate_blocked"` — Rule 5: the merge/CI gate rejected the PR
   (optionally `blocker.reason` in `breadcrumbs`, e.g.
   `"prior_pipeline_pr_open"` per issue #777; empty otherwise). See #1117.
@@ -1893,6 +1915,10 @@ the session is provably dead, so no later sentinel can arrive. A single
 `paused_status=sentinel_stage_mismatch_dead_session` is emitted, and only after
 it the refusal is latched on the session (so this event no longer repeats every
 tick); a failed page write leaves the session un-latched and it is retried.
+The idle, stalled and phantom sweeps do the same since #2513: the phantom
+sweep pages `sentinel_stage_mismatch_dead_session` (the worker has exited), and
+the idle and stalled sweeps page `sentinel_stage_mismatch_live_session` (the
+worker is still in the daemon roster).
 
 `correlation_id` is the `ticket_id`.
 
@@ -2008,7 +2034,7 @@ from the owning session's `last_result` (that site has no `last_result`
 parameter of its own, unlike the three `routing.py` sites).
 
 Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
-(`orchestrator_config.py`) -- this is an audit/diagnostic trail, not an
+(`orchestrator_config/operator_forward.py`) -- this is an audit/diagnostic trail, not an
 operator alert, and it fires on effectively every stage transition for every
 ticket (Rule 1 and Rule 3 both emit unconditionally on every call, not only
 when a gate fires) -- far higher volume than any currently-forwarded member.
@@ -2421,7 +2447,7 @@ coordinating session recorded when it minted the void; `voided_at` and
 event can find the settling comment without re-fetching the whole thread.
 
 Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
-(`orchestrator_config.py`): a suppression firing is the *expected* outcome of
+(`orchestrator_config/operator_forward.py`): a suppression firing is the *expected* outcome of
 an operator decision they already made, so forwarding it would page them about
 their own instruction being honored. It is an audit trail, consulted when a
 finding's disappearance needs explaining.
@@ -2459,7 +2485,7 @@ delta was taken from, so an operator can reconstruct exactly what the gate
 compared against.
 
 Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
-(`orchestrator_config.py`), for the same reason: a gate refusal is the
+(`orchestrator_config/operator_forward.py`), for the same reason: a gate refusal is the
 expected steady-state outcome on any branch with pre-existing debt, and the
 debt itself is already surfaced on the posted review comment.
 
@@ -2503,7 +2529,7 @@ progress. `cumulative_net_lines_added` never resets. Only `stall_streak`
 resets when a cycle resolves an original finding.
 
 Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
-(`orchestrator_config.py`), matching `review.treadmill_detected`. The park
+(`orchestrator_config/operator_forward.py`), matching `review.treadmill_detected`. The park
 itself already reaches the operator through the `BLOCKED_ON_USER`
 `task.transition` every fix-loop park emits, whatever its `blocker.reason`, and
 the same per-cycle breakdown is appended to `blocker.details`.
@@ -2564,7 +2590,7 @@ already render inline. This event is the durable half of that record; the
 comment is the human-visible half.
 
 Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
-(`orchestrator_config.py`), matching both siblings above: a suppression is the
+(`orchestrator_config/operator_forward.py`), matching both siblings above: a suppression is the
 expected steady-state outcome once an operator has settled a finding, and it is
 already visible on the review comment.
 
@@ -2894,7 +2920,7 @@ existing watch already belongs to someone else.
 `correlation_id` is `client`.
 
 Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
-(`orchestrator_config.py`): the condition requires two dev-queue clients
+(`orchestrator_config/operator_forward.py`): the condition requires two dev-queue clients
 mapped to the same repo colliding on the same PR number, which the codebase's
 `(client, repo)` injectivity premise (#1269) treats as configuration drift
 rather than a steady-state outcome. The event exists as the durable,
@@ -2952,7 +2978,7 @@ path passes the task's ticket id; `dispatch_fix_agent` passes its own), else
 absent (`ticket_id` is `null` in the payload).
 
 Audit-only: **not** forwarded to the operator-attention channel. It is not in
-`_DEFAULT_OPERATOR_EVENT_TYPES` (`orchestrator_config.py`, an allowlist), so
+`_DEFAULT_OPERATOR_EVENT_TYPES` (`orchestrator_config/operator_forward.py`, an allowlist), so
 the default is exclusion; a mechanical, strictly-forward move is not an
 operator alert. It exists as the durable, queryable record
 (`cw event tail --type worktree.fast_forwarded`).

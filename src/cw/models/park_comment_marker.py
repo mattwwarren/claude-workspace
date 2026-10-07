@@ -4,8 +4,9 @@ One on-disk shape with two independent readers, so it lives once here rather
 than beside either of them: ``cw.cli.signal_park`` writes it into the
 worktree's ``.claude/cw-context.json`` and ``cw.cli.stop_hook`` reads it back
 out on the next Stop. That is the same reason ``AGENT_SPAWN_STAMP_KEY`` and its
-accessors sit in ``cw.models.orchestrator_config``; this pair gets its own
-module only because that one is already past the module-size convention.
+accessors sit in ``cw.models.orchestrator_config.constants``; this pair gets
+its own module because that one stays dependency-free, and this one needs
+pydantic.
 
 A pydantic model rather than a hand-rolled dict read because the marker is the
 sole evidence for an automatic dev-queue row mutation. ``extra="forbid"`` plus

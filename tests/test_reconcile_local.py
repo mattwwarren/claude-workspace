@@ -64,7 +64,11 @@ from tests._opencode_helpers import (
     text_event,
     write_opencode_log,
 )
-from tests._reconcile_helpers import _stage_complete_payload
+from tests._reconcile_helpers import (
+    _attention_events,
+    _failing_record_event,
+    _stage_complete_payload,
+)
 from tests.conftest import (
     _audit_failure_logged,
     _fail_audit_append,
@@ -1418,17 +1422,6 @@ def _save_dead_opencode_finalize(
     )
 
 
-def _attention_events(consumer: str, ticket_id: str) -> list[dict[str, object]]:
-    return [
-        e.payload
-        for e in read_events(
-            consumer=consumer,
-            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
-        )
-        if e.payload.get("ticket_id") == ticket_id
-    ]
-
-
 def test_local_harvest_opencode_finalize_keeps_final_blocked_sentinel(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
@@ -1650,43 +1643,6 @@ def _with_recovery_hint(result: AutoDevResult, hint: str) -> AutoDevResult:
     return result.model_copy(update={"blocker": blocker})
 
 
-def test_stage_mismatch_attention_payload_names_the_blocker_reason(
-    tmp_path: Path,
-) -> None:
-    """A refused ``blocked`` result's breadcrumbs carry its blocker reason."""
-    from cw.reconcile.local import _stage_mismatch_attention_payload
-
-    sentinel = _with_recovery_hint(
-        make_opencode_blocked(
-            ticket_id="T-1",
-            worktree=tmp_path,
-            reason="merge_conflict_post_push",
-            stage_reached="stage4b_pr_create",
-        ),
-        "rebase onto main then requeue",
-    )
-    session = _mk_local_session(
-        "ses-payload",
-        tmp_path,
-        LocalLivenessHandle(pid=1, start_time_ns=1, backend="opencode"),
-    )
-    task = TicketTask(ticket_id="T-1", client="client-a", stage=Stage.IMPL)
-
-    payload = _stage_mismatch_attention_payload(
-        session, task, sentinel, "opencode", Stage.FINALIZE
-    )
-
-    breadcrumbs = str(payload["breadcrumbs"])
-    assert "blocked at stage4b_pr_create (merge_conflict_post_push" in breadcrumbs
-    assert "rebase onto main then requeue" in breadcrumbs
-    assert "dead opencode process" in breadcrumbs
-    # The live row stage passed in, not the (stale) snapshot's IMPL.
-    assert "the row is at stage finalize" in breadcrumbs
-    assert "cw spawn close --confirmed-dead --requeue ses-payload" in breadcrumbs
-    assert payload["ticket_id"] == "T-1"
-    assert payload["claude_session_id"] is None
-
-
 # ---------------------------------------------------------------------------
 # #2490 review fixes -- page-before-latch, latch scope, end-to-end opencode
 # ---------------------------------------------------------------------------
@@ -1734,34 +1690,10 @@ def _harvest_tick(task_by_ticket: dict[str, TicketTask]) -> list[str]:
     )
 
 
-def _failing_record_event(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    event_type: OrchestratorEventType,
-    fail_for: Callable[[dict[str, object]], bool],
-) -> list[int]:
-    """Make ``cw.reconcile.local.record_event`` raise OSError on matching calls.
-
-    Returns a one-element-per-failure list so a test can count the failures.
-    """
-    from cw.events import record_event as real_record_event
-
-    failures: list[int] = []
-
-    def flaky(
-        etype: OrchestratorEventType,
-        payload: dict[str, object] | None = None,
-        *,
-        correlation_id: str | None = None,
-    ) -> object:
-        if etype is event_type and fail_for(payload or {}):
-            failures.append(1)
-            msg = "disk full"
-            raise OSError(msg)
-        return real_record_event(etype, payload, correlation_id=correlation_id)
-
-    monkeypatch.setattr("cw.reconcile.local.record_event", flaky)
-    return failures
+# Where each record_event the local harvest reaches is looked up: the page is
+# emitted by the shared _stage_refusal module, SESSION_COMPLETED by local itself.
+_PAGE_RECORD_EVENT = "cw.reconcile._shared._stage_refusal.record_event"
+_LOCAL_RECORD_EVENT = "cw.reconcile.local.record_event"
 
 
 def _session(sid: str) -> Session:
@@ -1784,6 +1716,7 @@ def test_failed_page_leaves_the_session_unlatched_and_repages_next_tick(
     writes_fail = {"on": True}
     failures = _failing_record_event(
         monkeypatch,
+        target=_PAGE_RECORD_EVENT,
         event_type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
         fail_for=lambda _payload: writes_fail["on"],
     )
@@ -1818,6 +1751,7 @@ def test_one_failing_page_does_not_cancel_another_sessions_page(
     )
     _failing_record_event(
         monkeypatch,
+        target=_PAGE_RECORD_EVENT,
         event_type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
         fail_for=lambda payload: payload.get("ticket_id") == "pg-one",
     )
@@ -1845,6 +1779,7 @@ def test_failing_session_completed_write_does_not_suppress_another_sessions_page
     )
     failures = _failing_record_event(
         monkeypatch,
+        target=_LOCAL_RECORD_EVENT,
         event_type=OrchestratorEventType.SESSION_COMPLETED,
         fail_for=lambda _payload: True,
     )

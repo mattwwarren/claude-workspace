@@ -37,7 +37,10 @@ import pytest
 from cw.dispatch import BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
 from cw.dispatch.regress_repeat import _FINALIZE_REGRESS_REPEAT_REASON
 from cw.models import LivenessBucket, OrchestratorEventType
-from cw.reconcile.local import SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON
+from cw.reconcile._shared import (
+    SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON,
+    SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON,
+)
 from tests.conftest import _stub_cw
 
 _SCRIPT = (
@@ -169,6 +172,20 @@ def test_stage_mismatch_dead_session_status_matches_canonical_reason(
     )
     assert (
         aw.SENTINEL_STAGE_MISMATCH_DEAD_SESSION_PAUSED_STATUS
+        in aw.DIAGNOSTIC_BREADCRUMB_PAUSED_STATUSES
+    )
+
+
+def test_stage_mismatch_live_session_status_matches_canonical_reason(
+    aw: ModuleType,
+) -> None:
+    """Hand-copy of the #2513 live-session stage-mismatch reason, pinned."""
+    assert (
+        aw.SENTINEL_STAGE_MISMATCH_LIVE_SESSION_PAUSED_STATUS
+        == SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON
+    )
+    assert (
+        aw.SENTINEL_STAGE_MISMATCH_LIVE_SESSION_PAUSED_STATUS
         in aw.DIAGNOSTIC_BREADCRUMB_PAUSED_STATUSES
     )
 
@@ -561,6 +578,24 @@ def test_stage_mismatch_dead_session_breadcrumbs_surfaced(aw: ModuleType) -> Non
     assert f"reason={breadcrumbs}" in line
     assert "prior_pipeline_pr_open" in line
     assert "cw spawn close --confirmed-dead --requeue sess-1" in line
+
+
+def test_stage_mismatch_live_session_breadcrumbs_surfaced(aw: ModuleType) -> None:
+    """A live worker's refusal page shows its recovery command too (#2513)."""
+    breadcrumbs = (
+        "live worker reported stage_complete at stage2_impl, refused by the"
+        " staged-advance guard: the row is at stage review."
+        " cw spawn close --requeue sess-1"
+    )
+    event = _event(
+        paused_status=SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON,
+        breadcrumbs=breadcrumbs,
+    )
+
+    line = _render(aw, [event])[0]
+
+    assert f"reason={breadcrumbs}" in line
+    assert "cw spawn close --requeue sess-1" in line
 
 
 def test_unknown_type_passthrough(aw: ModuleType) -> None:

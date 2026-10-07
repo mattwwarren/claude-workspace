@@ -172,11 +172,13 @@ def run_doctor(
         queue = _deps.load_dev_queue()
         report.wedge_findings.extend(_collect_wedge_findings(link_state, queue))
         if reap and (report.wedge_findings or has_pending_routed_result_audits()):
-            _reap_wedge_findings(
+            reap_check = _reap_wedge_findings(
                 report.wedge_findings,
                 routed_result_session_ids=routed_result_session_ids,
                 reap_routed_result=reap_routed_result,
             )
+            if reap_check is not None:
+                report.checks.append(reap_check)
 
     if reap:
         report.checks.append(_check_reconcile())

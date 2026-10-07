@@ -19,6 +19,7 @@ from cw.events import read_events
 from cw.models import (
     CompletionReason,
     CwState,
+    DevQueueStore,
     LastResultSource,
     OrchestratorEventType,
     QueueItemStatus,
@@ -28,6 +29,7 @@ from cw.models import (
 )
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
+    SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON,
     ProposedAction,
     _apply_sentinel_to_task,
     _validate_existing_result_for_routing,
@@ -40,7 +42,9 @@ from cw.reconcile.stalled import (
 )
 from tests._clients_yaml import staged_client, write_clients_yaml
 from tests._reconcile_helpers import (
+    _attention_events,
     _blocked_result_payload,
+    _failing_record_event,
     _make_pending_fix_dispatch,
     _make_terminal_payload,
     _mk_headless_daemon_session,
@@ -457,9 +461,160 @@ def test_stage_mismatch_refusal_is_not_reoffered(
     task = load_dev_queue().tasks[0]
     assert task.stage == Stage.REVIEW
     assert task.status == QueueItemStatus.RUNNING
+    # #2513: the refusal pages once, live wording.
+    assert len(_live_pages("test-stalled-2513-first")) == 1
 
     candidates_again = _detect_stalled_candidates(state, task_by_ticket={})
     assert candidates_again == []
+    call_and_drain(_act_on_stalled_candidates, state, candidates_again, now=_NOW)
+    assert len(_live_pages("test-stalled-2513-second")) == 1
+
+
+# ---------------------------------------------------------------------------
+# #2513: a stage-mismatch refusal of a live worker's result pages exactly once
+# ---------------------------------------------------------------------------
+
+_STAGE_REFUSAL_RECORD_EVENT = "cw.reconcile._shared._stage_refusal.record_event"
+_CANONICAL_PAGE_KEYS = {
+    "session_id",
+    "session_name",
+    "client",
+    "ticket_id",
+    "claude_session_id",
+    "paused_status",
+    "breadcrumbs",
+    "crashed",
+    "lane",
+}
+
+
+def _live_pages(consumer: str) -> list[dict[str, object]]:
+    return _attention_events(
+        consumer,
+        "salv-1",
+        paused_status=SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON,
+    )
+
+
+def _seed_refusing_row(
+    tmp_path: Path, status: QueueItemStatus = QueueItemStatus.RUNNING
+) -> CwState:
+    """A live worker's stage2_impl result against a row already at REVIEW."""
+    state = _foreign_result_session(tmp_path, _stage_complete_payload())
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="salv-1",
+                    client="client-a",
+                    status=status,
+                    session_id="salv-1",
+                    stage=Stage.REVIEW,
+                )
+            ]
+        )
+    )
+    return state
+
+
+def _stalled_tick(state: CwState) -> None:
+    candidates = _detect_stalled_candidates(state, task_by_ticket={})
+    call_and_drain(_act_on_stalled_candidates, state, candidates, now=_NOW)
+
+
+def test_stalled_stage_mismatch_page_carries_live_wording(
+    tmp_config_dir: Path, tmp_path: Path, stop_recorder: _StopRecorder
+) -> None:
+    state = _seed_refusing_row(tmp_path)
+
+    _stalled_tick(state)
+
+    pages = _live_pages("test-stalled-2513-content")
+    assert len(pages) == 1
+    page = pages[0]
+    assert set(page) == _CANONICAL_PAGE_KEYS
+    assert page["client"] == "client-a"
+    assert page["ticket_id"] == "salv-1"
+    assert page["lane"] == "default"
+    breadcrumbs = str(page["breadcrumbs"])
+    assert "stage_complete at stage2_impl" in breadcrumbs
+    assert "the row is at stage review" in breadcrumbs
+    assert "cw spawn close --requeue salv-1" in breadcrumbs
+    assert "--confirmed-dead" not in breadcrumbs
+    assert "dead" not in breadcrumbs
+    assert state.sessions[0].status is SessionStatus.ACTIVE
+    assert stop_recorder.stopped == []
+    task = load_dev_queue().tasks[0]
+    assert task.status == QueueItemStatus.RUNNING
+    assert task.stage == Stage.REVIEW
+
+
+def test_stalled_stage_mismatch_page_failure_leaves_unlatched_and_repages(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    stop_recorder: _StopRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _seed_refusing_row(tmp_path)
+    payload = dict(_stage_complete_payload())
+    writes_fail = {"on": True}
+    failures = _failing_record_event(
+        monkeypatch,
+        target=_STAGE_REFUSAL_RECORD_EVENT,
+        event_type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        fail_for=lambda _payload: writes_fail["on"],
+    )
+
+    _stalled_tick(state)
+
+    assert failures == [1]
+    assert state.sessions[0].last_result == payload
+    assert _live_pages("test-stalled-2513-fail-a") == []
+    assert len(_detect_stalled_candidates(state, task_by_ticket={})) == 1
+
+    writes_fail["on"] = False
+    _stalled_tick(state)
+    _stalled_tick(state)
+
+    assert len(_live_pages("test-stalled-2513-fail-b")) == 1
+    assert state.sessions[0].last_result == {
+        **payload,
+        "sentinel_advance_refused": True,
+    }
+    assert _detect_stalled_candidates(state, task_by_ticket={}) == []
+
+
+def test_stalled_non_stage_refusal_latches_without_paging(
+    tmp_config_dir: Path, tmp_path: Path, stop_recorder: _StopRecorder
+) -> None:
+    """A PENDING row still carrying this session id: latched, never paged."""
+    state = _seed_refusing_row(tmp_path, QueueItemStatus.PENDING)
+
+    _stalled_tick(state)
+
+    assert _attention_events("test-stalled-2513-pending", "salv-1") == []
+    last_result = state.sessions[0].last_result
+    assert isinstance(last_result, dict)
+    assert last_result.get("sentinel_advance_refused") is True
+    assert _detect_stalled_candidates(state, task_by_ticket={}) == []
+
+
+def test_stalled_already_latched_session_is_not_offered_and_never_pages(
+    tmp_config_dir: Path, tmp_path: Path, stop_recorder: _StopRecorder
+) -> None:
+    """#2513 upgrade case: a session latched before the change is never paged."""
+    state = _seed_refusing_row(tmp_path)
+    state.sessions[0].last_result = {
+        **_stage_complete_payload(),
+        "sentinel_advance_refused": True,
+    }
+
+    for _tick in range(3):
+        assert _detect_stalled_candidates(state, task_by_ticket={}) == []
+        _stalled_tick(state)
+
+    assert _attention_events("test-stalled-2513-upgrade", "salv-1") == []
 
 
 def test_task_already_terminal_race_completes_session_not_leaked(

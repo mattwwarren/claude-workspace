@@ -208,13 +208,14 @@ If PR creation fails, BLOCK with the `gh` error verbatim.
 ```bash
 PR_NUMBER=$(gh pr view --json number -q .number)
 REPO_ROOT=$(git rev-parse --show-toplevel)
+HEAD_SHA=$(git rev-parse HEAD)
 if [ -f "$REPO_ROOT/.claude/scripts/prep_pr_finalize.py" ]; then
   FINALIZE="$REPO_ROOT/.claude/scripts/prep_pr_finalize.py"
 else
   FINALIZE="$HOME/.claude/scripts/prep_pr_finalize.py"
 fi
 if "$FINALIZE" check-automerge-allowed --repo-path "$REPO_ROOT"; then
-  ARM_JSON=$("$FINALIZE" arm-automerge "$PR_NUMBER" --repo-path "$REPO_ROOT")
+  ARM_JSON=$("$FINALIZE" arm-automerge "$PR_NUMBER" --repo-path "$REPO_ROOT" --head-sha "$HEAD_SHA")
   arm_status=$?
   echo "$ARM_JSON"
   # 0 armed/merged | 1 failed after bounded retries | 2 invocation error | 3 seam refused
@@ -238,6 +239,10 @@ fi
 
 - Exit 1: `BLOCK: gh pr merge --auto failed after bounded retries for PR #<N> (arm-automerge exit 1): <gh_stderr verbatim from the JSON, or 'none -- gh exited 0 but autoMergeRequest read back null'>`
 - Exit 2 (`arm_status` 2): `BLOCK: arm-automerge invocation error (exit 2, not a gh failure): <stderr>` (never retried; usually a stale `prep_pr_finalize.py` copy lacking the subcommand)
+
+`--head-sha` is the local `HEAD` just pushed; `arm-automerge` passes it to `gh pr merge --match-head-commit`, tying the arm to that verified SHA at arm time (closing the verify-to-arm window). If the PR head differs, gh refuses, `arm-automerge` exits 1 and its `gh_stderr` carries gh's message: BLOCK with it verbatim, never treat it as a skip.
+
+Exit 2 from `check-automerge-allowed` or `arm-automerge` can also mean `.claude/project-config.yaml` exists but `pr.auto_merge` cannot be determined (fail closed, #2581): no `gh` call was made and the stderr names the reason, so quote it in the BLOCK.
 
 If `check-automerge-allowed` permits arming and `arm-automerge` exits 1 after its bounded retries, BLOCK with the wording above — the PR exists but auto-merge isn't on; don't silently leave it unset. Quote the JSON `gh_stderr` verbatim; when it is empty, say gh exited 0 but `autoMergeRequest` read back null. Exit 2 is an invocation error, not a gh failure: BLOCK with the invocation-error wording and do not retry. Exit 3 means the script itself saw `pr.auto_merge: false`: leave PR #$PR_NUMBER open and do not BLOCK. If `check-automerge-allowed` reports disallowed, this is expected, deliberate repo state, not a failure — do not BLOCK.
 
