@@ -14,13 +14,12 @@ from cw._text import redact
 from cw.atomic import atomic_write_text
 from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
 from cw.config import (
-    events_dir,
     load_orchestrator_config,
     load_state,
     save_state,
     sessions_lock,
 )
-from cw.events import read_events, record_event
+from cw.events import record_event
 from cw.exceptions import (
     CwError,
     HookContextConflictError,
@@ -164,102 +163,6 @@ SPAWN_POST_LAUNCH_FAILED_REASON = "spawn_post_launch_failed"
 # Characters of the failure text that page's breadcrumb keeps before "…" —
 # the same cap as dispatch.tick's ``last_error``.
 _POST_LAUNCH_ERROR_MAX_CHARS = 500
-_SPAWN_POST_LAUNCH_OUTBOX_NAME = "spawn_post_launch_attention.jsonl"
-
-
-def _spawn_post_launch_outbox_path() -> Path:
-    return events_dir() / _SPAWN_POST_LAUNCH_OUTBOX_NAME
-
-
-def _append_spawn_post_launch_outbox(record: dict[str, object]) -> None:
-    """Persist one redacted attention intent in the append-only ledger."""
-    path = _spawn_post_launch_outbox_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, sort_keys=True) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-
-
-def _attention_was_delivered(
-    payload: dict[str, object], correlation_id: str | None
-) -> bool:
-    """Return whether the exact attention event is already in the inbox."""
-    try:
-        return any(
-            event.correlation_id == correlation_id and event.payload == payload
-            for event in read_events(
-                event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
-            )
-        )
-    except (CwError, OSError, ValueError):
-        _log.exception("could not check delivered spawn attention intent")
-        return False
-
-
-def _retry_spawn_post_launch_outbox() -> None:
-    """Retry pending attention intents and append durable delivery markers."""
-    path = _spawn_post_launch_outbox_path()
-    try:
-        records = [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-    except FileNotFoundError:
-        return
-    except (OSError, json.JSONDecodeError):
-        _log.exception("cannot read spawn post-launch attention outbox")
-        return
-
-    latest: dict[str, dict[str, object]] = {}
-    for record in records:
-        if isinstance(record, dict) and isinstance(record.get("record_id"), str):
-            latest[record["record_id"]] = record
-    for record in latest.values():
-        if record.get("status") != "pending":
-            continue
-        payload = record.get("payload")
-        correlation_id = record.get("correlation_id")
-        if not isinstance(payload, dict) or (
-            correlation_id is not None and not isinstance(correlation_id, str)
-        ):
-            _log.error(
-                "invalid spawn post-launch attention outbox record for session %s",
-                record.get("session_id"),
-            )
-            continue
-        if _attention_was_delivered(payload, correlation_id):
-            delivered = True
-        else:
-            try:
-                record_event(
-                    OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-                    payload,
-                    correlation_id=correlation_id,
-                )
-            except (CwError, OSError, ValueError):
-                _log.exception(
-                    "spawn post-launch attention retry failed for session %s",
-                    record.get("session_id"),
-                )
-                continue
-            delivered = True
-        if delivered:
-            try:
-                _append_spawn_post_launch_outbox(
-                    {**record, "status": "delivered"}
-                )
-            except OSError:
-                _log.exception(
-                    "spawn post-launch attention delivery marker failed for session %s",
-                    record.get("session_id"),
-                )
-
-
-def retry_spawn_post_launch_attention() -> None:
-    """Consume durable post-launch attention intents left by a failed page."""
-    _retry_spawn_post_launch_outbox()
 
 
 def emit_spawn_post_launch_attention(
@@ -282,11 +185,9 @@ def emit_spawn_post_launch_attention(
     collapsed to one line, redacted, then truncated (redact first, so a secret
     straddling the cap cannot survive as a fragment).
 
-    The inbox append is attempted first. If it fails, a redacted append-only
-    intent is fsynced before returning; the independent retry consumer can
-    deliver it later. Call it with no lock held.
+    Best effort: a failed event write is logged and swallowed, so the page can
+    never replace the failure it reports. Call it with no lock held.
     """
-    retry_spawn_post_launch_attention()
     detail = redact(" ".join(error.split()))
     if len(detail) > _POST_LAUNCH_ERROR_MAX_CHARS:
         detail = detail[:_POST_LAUNCH_ERROR_MAX_CHARS] + "…"
@@ -308,30 +209,7 @@ def emit_spawn_post_launch_attention(
             payload,
             correlation_id=ticket_id,
         )
-    except (CwError, OSError, ValueError):
-        record_id = f"{session_id}:{surface_ref}:{ticket_id}"
-        try:
-            _append_spawn_post_launch_outbox(
-                {
-                    "record_id": record_id,
-                    "status": "pending",
-                    "operation": "session.needs_attention",
-                    "reason": SPAWN_POST_LAUNCH_FAILED_REASON,
-                    "session_id": session_id,
-                    "surface_ref": surface_ref,
-                    "ticket_id": ticket_id,
-                    "cause": detail,
-                    "payload": payload,
-                    "correlation_id": ticket_id,
-                }
-            )
-        except OSError:
-            _log.exception(
-                "spawn post-launch attention fallback failed for session %s",
-                session_id,
-            )
-        else:
-            retry_spawn_post_launch_attention()
+    except (CwError, OSError):
         _log.exception(
             "spawn_post_launch_failed: could not record the operator page for"
             " live session %s (ticket=%s)",
@@ -1014,7 +892,6 @@ def spawn_create_impl(
     released), and raised as :class:`~cw.exceptions.WorkerLaunchedError`
     chained to the cause (#2502). The worker is not stopped here.
     """
-    retry_spawn_post_launch_attention()
     _validate_worktree(worktree)
 
     # Validate parent exists before spawning (fail fast, no daemon call yet).
