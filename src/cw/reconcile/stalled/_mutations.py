@@ -171,8 +171,8 @@ def _apply_foreign_result_queue_mutation(
     does NOT clear ``task.session_id`` (kept for operator traceability).
     """
     # Deferred, not module-top: cw.dispatch's package __init__ imports
-    # cw.reconcile (loop.py/gating/lanes.py), so a top-level import of any
-    # cw.dispatch submodule here is a real circular import at package-init
+    # cw.reconcile (loop.py, gating/ and lanes.py), so a top-level import of
+    # any cw.dispatch submodule here is a real circular import at package-init
     # time. Same shape as the #698 reconcile._shared -> cw.dispatch precedent
     # and tasks.py's deferred cw.dispatch.routing import. See #1750.
     from cw.dispatch.productivity import extract_claim_evidence, is_unproductive
