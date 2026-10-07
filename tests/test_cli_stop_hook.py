@@ -557,8 +557,8 @@ def test_signal_stop_deferral_touches_no_session_state_and_refreshes_stamp(
         msg = "the deferral path must not touch session state"
         raise AssertionError(msg)
 
-    monkeypatch.setattr("cw.cli.stop_hook.load_state", _no_state_io)
-    monkeypatch.setattr("cw.cli.stop_hook.sessions_lock", _no_state_io)
+    monkeypatch.setattr("cw.cli.stop_hook.locked.load_state", _no_state_io)
+    monkeypatch.setattr("cw.cli.stop_hook.locked.sessions_lock", _no_state_io)
     tasks = [{"id": "task-1", "description": "still running"}]
     stamps = []
     for frozen in ("2026-03-01T12:00:00+00:00", "2026-03-01T12:00:05+00:00"):

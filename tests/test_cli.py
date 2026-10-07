@@ -5269,7 +5269,7 @@ class TestSignalStop:
             load_state_call_count += 1
             return real_load_state()
 
-        monkeypatch.setattr("cw.cli.stop_hook.load_state", _counting_load_state)
+        monkeypatch.setattr("cw.cli.stop_hook.locked.load_state", _counting_load_state)
 
         self._invoke_stop(
             worktree,

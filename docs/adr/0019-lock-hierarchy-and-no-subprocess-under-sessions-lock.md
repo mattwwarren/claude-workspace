@@ -61,7 +61,7 @@ keeps that order and extends it to every other state-file lock.
    | `reconcile.codex_boot` clean check (`git status`) via `codex_reparks` and `reconcile.local` | #2563 |
    | `pr_hydrate` repo-slug check (`git remote get-url`) in the review-recipe act phase | #2564 |
    | `local_runner.synthesize_git_result` in the local harvest | #2565 |
-   | `cli.stop_hook` headless scope verification (`git merge-base`, `git diff --numstat`) | #2566 |
+   | `cli.stop_hook.locked` headless scope verification (`git merge-base`, `git diff --numstat`) | #2566 |
 
    #2563 to #2566 were found by the #1233 suite probe. #2551 (post-lock drain
    concurrency) is related but is not an in-lock subprocess.
