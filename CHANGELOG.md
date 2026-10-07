@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The review recipes' repo-slug check no longer runs `git` under `sessions_lock` (#2564).** The `address_review` and `auto_fix_ci` cross-repo guard ran `git remote get-url origin` from their act phases inside the lock. `reconcile()` now resolves each candidate's worktree or client-workspace origin slug before taking the lock (within a 30 s budget, with one warning when it runs out) and the act phases only read it. A candidate that was not pre-resolved is skipped for the tick with no event and no latch burn, and retried next tick; an unresolvable remote still fails open. `cw.pr_hydrate` leaves the lock-invariant allowlist.
+
 ## [1.67.3] - 2026-10-07
 
 ### Changed
