@@ -6,9 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`TicketTask.claimed_at` and the `task.session_adopted` event (#2591).** The claim now records its own instant on the row (dev-queue schema 44; older rows load with `claimed_at: null`, no data rewrite). `task.session_adopted` is an audit event, one per row reconcile adopts (see Fixed), carrying `client`, `ticket_id`, `lane`, `session_id`, `session_name`, `attempt` and `claimed_at`. It is not in the default operator-forward set and fires no push notification.
+
 ### Changed
 
 - **The review recipes' repo-slug check no longer runs `git` under `sessions_lock` (#2564).** The `address_review` and `auto_fix_ci` cross-repo guard ran `git remote get-url origin` from their act phases inside the lock. `reconcile()` now resolves each candidate's worktree or client-workspace origin slug before taking the lock (within a 30 s budget, with one warning when it runs out) and the act phases only read it. A candidate that was not pre-resolved is skipped for the tick with no event and no latch burn, and retried next tick; an unresolvable remote still fails open. `cw.pr_hydrate` leaves the lock-invariant allowlist.
+
+### Fixed
+
+- **Reconcile now adopts a RUNNING row whose dev-queue stamp failed after its worker launched (refs #2591).** Since #2502 such a row stays RUNNING with no `session_id`, so no completion could ever route to it. Each reconcile tick now binds it to its recorded session when the worktree's `cw-context.json` names the row's client, ticket and current attempt, that session is recorded for the same client and ticket and owned by no other row, and it did not start before the row's `claimed_at`. The bind writes what dispatch's own stamp writes, runs no git, and reverts, stops or parks nothing, so it is not gated by `reap_policy`. Anything short of that proof leaves the row untouched. Until a row is adopted, release it by hand with `cw dev-queue cancel <ticket> -c <client>` and then `cw dev-queue requeue <ticket> -c <client> --from-cancelled` (plain `cw dev-queue requeue` refuses a RUNNING row). Not covered yet: nothing recovers the row when the `sessions.json` write failed, a live worker with no recorded session is still stopped by the leaked-worker sweep and never adopted, and a row bound to an absent session or one that cannot be tied raises no signal; the #2591 follow-up covers those.
 
 ## [1.67.3] - 2026-10-07
 
