@@ -66,6 +66,7 @@ _DRIFT = f"{_PKG}.drift"
 _PROVENANCE = f"{_PKG}.provenance"
 _MATCH = f"{_PKG}.match"
 _EMIT = f"{_PKG}.emit"
+_PARSE = f"{_PKG}.parse"
 _LOGGER = "cw.review_finding_dispositions"
 _TICKET = "T-2498"
 
@@ -87,17 +88,17 @@ _OWNER: dict[str, str] = {
     "_MATCH_CLAIM": _CONSTANTS_MODULE,
     "_KEY_SEPARATOR": _MODEL,
     "_DIGEST_SUFFIX_RE": _MODEL,
-    "_DISPOSITION_MD_TITLE": _PKG,
-    "_DISPOSITION_SCHEMA_VERSION": _PKG,
-    "_DISPOSITION_BLOCK_RE": _PKG,
+    "_DISPOSITION_MD_TITLE": _PARSE,
+    "_DISPOSITION_SCHEMA_VERSION": _PARSE,
+    "_DISPOSITION_BLOCK_RE": _PARSE,
     "_SUPPRESSION_SIGNAL": _PKG,
     "FindingDisposition": _MODEL,
     "_summary_digest": _MODEL,
     "_disposition_key": _MODEL,
     "split_disposition_key": _MODEL,
-    "render_finding_disposition_block": _PKG,
-    "_parse_one_disposition_block": _PKG,
-    "parse_finding_disposition_block": _PKG,
+    "render_finding_disposition_block": _PARSE,
+    "_parse_one_disposition_block": _PARSE,
+    "parse_finding_disposition_block": _PARSE,
     "merge_finding_dispositions": _PROVENANCE,
     "_is_utc_timestamp": _PROVENANCE,
     "_identity_is_bound": _PROVENANCE,
@@ -132,7 +133,7 @@ _OWNER: dict[str, str] = {
     "disposition_event_payload": _EMIT,
     "_emit_stale": _EMIT,
     "suppress_adjudicated_findings": _PKG,
-    "build_finding_disposition_ledger": _PKG,
+    "build_finding_disposition_ledger": _PARSE,
 }
 
 # Everything in ``_OWNER`` that is not a function or a class. These carry no
