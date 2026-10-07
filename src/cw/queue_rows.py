@@ -10,8 +10,10 @@ at module scope from either side.
 Holds the locked mutators for one already-claimed RUNNING dev-queue row (the
 #2219 identity re-find :func:`_find_running_row`, the revert-to-PENDING and
 park-BLOCKED_ON_USER transitions, and the in-memory spawn-success field
-writes). Every body was moved verbatim from its historical ``cw.dispatch``
-home, which still re-exports it; docstrings keep their original wording.
+writes) and the pure fix-dispatch-hold / backstop-exempt predicates a
+non-sentinel revert consults. Every body was moved verbatim from its
+historical ``cw.dispatch`` home, which still re-exports it; docstrings keep
+their original wording.
 """
 
 from __future__ import annotations
@@ -376,3 +378,43 @@ def _apply_spawn_success_fields(stored_task: TicketTask, *, session_id: str) -> 
     # about to read the delivered comments.
     if stored_task.stage == Stage.REVIEW:
         stored_task.pending_operator_comment = False
+
+
+def _is_fix_dispatch_held(task: TicketTask) -> bool:
+    """True iff *task* is mid-fix-loop handoff and owned by fix_dispatch (#2075).
+
+    A row carrying an unconsumed ``pending_fix_dispatch`` (or a live
+    ``fix_dispatch_session_id``) belongs to ``cw.reconcile.fix_dispatch``. By
+    design such a row stays RUNNING for the whole handoff, but any of the
+    codebase's many non-sentinel RUNNING→PENDING reverts (crash/phantom/stall
+    sweeps) can re-park it with the record untouched. Claiming it then spawns
+    a fresh REVIEW session whose live worktree makes every subsequent
+    ``dispatch_fix_agent`` attempt raise ``HookContextConflictError`` — the
+    silent never-spawns loop #2075 reported. Skipping here leaves the row for
+    the fix-dispatch pass, which (as of #2142) checks ``task.status !=
+    QueueItemStatus.RUNNING`` before dispatching and drops a stale handoff
+    (clearing ``pending_fix_dispatch``, paging via ``SESSION_NEEDS_ATTENTION``)
+    instead of spawning an orphaned session; a healthy RUNNING row still
+    dispatches normally and unparks cleanly when the fix session completes.
+    """
+    return (
+        task.pending_fix_dispatch is not None
+        or task.fix_dispatch_session_id is not None
+    )
+
+
+def _is_backstop_exempt(task: TicketTask) -> bool:
+    """True iff a generic RUNNING->PENDING backstop revert must not touch *task*.
+
+    Composes the two known in-flight write-ahead intents a non-sentinel
+    revert (crash/phantom/stall/timeout sweep) must never clobber: the
+    mid-turn usage-limit act (#2324) and the fix-loop dispatch handoff
+    (#2075/#2204, via _is_fix_dispatch_held). Each owns its own resume/
+    consume seam elsewhere (usage_limit_mid_turn.py, fix_dispatch.py);
+    reverting the row out from under either charges an attempt neither
+    should ever cost, and in the fix-dispatch case strands the handoff --
+    fix_dispatch.py's _build_dispatch_jobs classifies an unconsumed
+    handoff on a non-RUNNING row as a stale handoff and drops it instead
+    of dispatching the fix session.
+    """
+    return task.usage_limit_act is not None or _is_fix_dispatch_held(task)

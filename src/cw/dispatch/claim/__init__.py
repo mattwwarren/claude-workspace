@@ -20,7 +20,9 @@ from elsewhere must target the submodule that looks it up at call time
   (#1238); also holds the ``_SpawnOutcome`` record returned by both the gate
   and the spawn path.
 - ``lane_stats`` — per-lane occupant lists and occupancy counts (ADR-0006).
-- ``screening`` — candidate screening and the atomic claim transaction.
+- ``screening`` — candidate screening and the atomic claim transaction. Its
+  pure fix-dispatch-hold / backstop-exempt predicates moved to the
+  ``cw.queue_rows`` leaf (#2613) and are re-exported here.
 - ``spawn`` — worktree provisioning, the stale/occupied-worktree guards, the
   approved-plan bypass, and the executor spawn for one claimed task.
 """
@@ -56,8 +58,6 @@ from cw.dispatch.claim.screening import (
     _CLAIM_CLAIMED,
     _CLAIM_SKIPPED,
     _claim_next_pending,
-    _is_backstop_exempt,
-    _is_fix_dispatch_held,
     _is_stale_pr_gated,
     _park_stale_pr_task,
     _screen_and_claim,
@@ -77,6 +77,8 @@ from cw.queue_rows import (
     _SPAWN_ERROR_BACKOFF_INITIAL_SECONDS,
     _apply_spawn_success_fields,
     _find_running_row,
+    _is_backstop_exempt,
+    _is_fix_dispatch_held,
     _park_running_task_blocked_on_user,
     _revert_claimed_task_to_pending,
 )

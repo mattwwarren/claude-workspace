@@ -40,7 +40,6 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 _CLAIMED_ROW = "cw.dispatch.claim.claimed_row"
-_SCREENING = "cw.dispatch.claim.screening"
 _REVIEW_GATES = "cw.dispatch.review_gates"
 _PR_REFS = "cw.dispatch.routing.pr_refs"
 _PRODUCTIVITY = "cw.dispatch.productivity"
@@ -57,8 +56,8 @@ _OWNER: dict[str, str] = {
     "_park_running_task_blocked_on_user": _QUEUE_ROWS,
     "_apply_spawn_success_fields": _QUEUE_ROWS,
     "_stamp_spawn_success": _CLAIMED_ROW,
-    "_is_fix_dispatch_held": _SCREENING,
-    "_is_backstop_exempt": _SCREENING,
+    "_is_fix_dispatch_held": _QUEUE_ROWS,
+    "_is_backstop_exempt": _QUEUE_ROWS,
     "resolve_hold_finalize": _REVIEW_GATES,
     "_AUTOMERGE_NOT_ARMED_REASON": _PR_REFS,
     "_PRIOR_PIPELINE_PR_OPEN_REASON": _PR_REFS,
