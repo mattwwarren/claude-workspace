@@ -240,6 +240,8 @@ fi
 - Exit 1: `BLOCK: gh pr merge --auto failed after bounded retries for PR #<N> (arm-automerge exit 1): <gh_stderr verbatim from the JSON, or 'none -- gh exited 0 but autoMergeRequest read back null'>`
 - Exit 2 (`arm_status` 2): `BLOCK: arm-automerge invocation error (exit 2, not a gh failure): <stderr>` (never retried; usually a stale `prep_pr_finalize.py` copy lacking the subcommand)
 
+If the Bash call running the block above is itself denied by the auto-mode permission classifier (#2625), the call never ran and has no `arm_status`, so the ladder cannot see it. BLOCK with `BLOCK: arm-automerge blocked by the auto-mode permission classifier: <verbatim denial>`, naming PR #<N> (from Step 3's `gh pr create` output) as open with auto-merge not armed. No retry, no direct `gh pr merge`. The `case` ladder above is unchanged.
+
 `--head-sha` is the local `HEAD` just pushed; `arm-automerge` passes it to `gh pr merge --match-head-commit`, tying the arm to that verified SHA at arm time (closing the verify-to-arm window). If the PR head differs, gh refuses, `arm-automerge` exits 1 and its `gh_stderr` carries gh's message: BLOCK with it verbatim, never treat it as a skip.
 
 Exit 2 from `check-automerge-allowed` or `arm-automerge` can also mean `.claude/project-config.yaml` exists but `pr.auto_merge` cannot be determined (fail closed, #2581): no `gh` call was made and the stderr names the reason, so quote it in the BLOCK.
