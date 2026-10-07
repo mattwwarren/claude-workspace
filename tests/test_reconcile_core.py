@@ -62,7 +62,9 @@ from cw.reconcile.review_recipes import (
     RECIPE_AUTO_FIX_CI,
     RECIPE_REQUEST_REVIEWER,
     DeferredReviewDispatch,
+    _shared,
 )
+from cw.reconcile.review_recipes._shared import RepoSlugs
 from cw.review_strategy import ReviewStrategy
 from tests._clients_yaml import ClientSpec, staged_client, write_clients_yaml
 from tests._reconcile_helpers import (
@@ -1530,9 +1532,12 @@ class TestReviewRecipeDispatchRunsPostLock:
         real_prepare = reconcile_core.run_review_recipes
 
         def _prepare_spy(
-            *, config: OrchestratorConfig, jobs: DeferredReconcileJobs
+            *,
+            config: OrchestratorConfig,
+            jobs: DeferredReconcileJobs,
+            repo_slugs: RepoSlugs | None = None,
         ) -> list[str]:
-            result = real_prepare(config=config, jobs=jobs)
+            result = real_prepare(config=config, jobs=jobs, repo_slugs=repo_slugs)
             held_at_prepare.append(_sessions_lock_held())
             return result
 
@@ -1985,6 +1990,157 @@ class TestReviewRecipeDispatchRunsPostLock:
         reconcile(dispatch_review_jobs=True)  # the dispatch loop's tick
 
         assert [prompt for _cwd, prompt in daemon.spawn_calls] == ["/address-review 42"]
+
+
+# --- GitHub #2564: review-recipe repo slugs resolved before sessions_lock ----
+
+
+def _spy_slug_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[Path, bool]]:
+    """Wrap the pre-pass's real slug resolver; record (git_dir, lock_held)."""
+    calls: list[tuple[Path, bool]] = []
+    real_resolve = _shared._resolve_repo_slug
+
+    def _spy(git_dir: Path) -> str | None:
+        calls.append((git_dir, _sessions_lock_held()))
+        return real_resolve(git_dir)
+
+    monkeypatch.setattr("cw.reconcile.review_recipes._shared._resolve_repo_slug", _spy)
+    return calls
+
+
+def _set_origin(repo: Path, url: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", url],
+        capture_output=True,
+        check=True,
+    )
+
+
+_PostLock = TestReviewRecipeDispatchRunsPostLock
+
+
+class TestReviewRepoSlugsResolvedBeforeTheLock:
+    """#2564: the address_review / auto_fix_ci cross-repo guard reads each
+    candidate's origin slug from a pre-pass ``reconcile()`` runs before it
+    takes ``sessions_lock``; nothing under the lock runs ``git``."""
+
+    @staticmethod
+    def _seed_both_rows(worktree: Path, workspace: Path) -> None:
+        write_clients_yaml(ClientSpec("acme", workspace, default_branch="main"))
+        ar_task = _cr_task(
+            ticket_id="GEN-1",
+            review_recipes={RECIPE_ADDRESS_REVIEW: True},
+            worktree_path=worktree,
+        )
+        ci_task = _cr_task(
+            ticket_id="GEN-2",
+            review_recipes={RECIPE_AUTO_FIX_CI: True},
+            status=QueueItemStatus.COMPLETED,
+            pr_state=_pr_state(
+                state="OPEN", attention_state="ci_failing", failing_checks=["lint"]
+            ),
+        )
+        save_dev_queue(DevQueueStore(tasks=[ar_task, ci_task]))
+
+    def test_every_slug_resolve_runs_with_the_lock_free(
+        self,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        worktree = make_git_repo("slug-ar")
+        workspace = make_git_repo("slug-ws")
+        self._seed_both_rows(worktree, workspace)
+        _PostLock._enable_recipes(monkeypatch)
+        calls = _spy_slug_resolver(monkeypatch)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
+
+        reconcile(dispatch_review_jobs=True)
+
+        assert {git_dir for git_dir, _held in calls} == {worktree, workspace}
+        assert all(held is False for _git_dir, held in calls)
+        assert [prompt for _cwd, prompt in daemon.spawn_calls] == ["/address-review 42"]
+        rows = {t.ticket_id: t for t in load_dev_queue().tasks}
+        assert rows["GEN-1"].address_review_fired_at is not None
+        assert rows["GEN-2"].auto_fix_ci_fired_at is not None
+        assert rows["GEN-2"].status is QueueItemStatus.PENDING
+        assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+    def test_a_mismatched_origin_still_trips_the_guard_end_to_end(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        worktree = make_git_repo("slug-mismatch")
+        _set_origin(worktree, "https://github.com/other/repo.git")
+        _PostLock._seed_address_review_row(tmp_config_dir, worktree)
+        _PostLock._enable_recipes(monkeypatch)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
+
+        reconcile(dispatch_review_jobs=True)
+
+        assert daemon.spawn_calls == []
+        assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+        failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+        assert [e.correlation_id for e in failed] == ["GEN-1"]
+        assert "repo mismatch" in str(failed[0].payload["error"])
+        assert load_dev_queue().tasks[0].address_review_fired_at is None
+
+    def test_a_non_dispatching_reconcile_resolves_no_slug(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _PostLock._seed_address_review_row(
+            tmp_config_dir, make_git_repo("slug-readonly")
+        )
+        _PostLock._enable_recipes(monkeypatch)
+        calls = _spy_slug_resolver(monkeypatch)
+
+        reconcile()
+
+        assert calls == []
+
+    @pytest.mark.parametrize("phantom", [False, True], ids=["no_phantom", "phantom"])
+    def test_the_captured_slugs_are_threaded_to_the_recipes(
+        self, monkeypatch: pytest.MonkeyPatch, *, phantom: bool
+    ) -> None:
+        """Both ``_run_terminal_backstops_and_sweeps`` call sites hand the
+        recipes the one object the pre-lock capture returned."""
+        save_dev_queue(DevQueueStore(tasks=[]))
+        if phantom:
+            save_state(CwState(sessions=[_mk_session("phantom-1", "missing-ref")]))
+            monkeypatch.setattr(
+                "cw.reconcile.core._claude_agents_json",
+                lambda: [{"sessionId": "unrelated1"}],
+            )
+        else:
+            save_state(CwState(sessions=[]))
+        sentinel = RepoSlugs()
+        captured_with: list[tuple[bool, bool]] = []
+
+        def _fake_capture(
+            *, config: OrchestratorConfig, dispatching: bool
+        ) -> RepoSlugs:
+            del config
+            captured_with.append((dispatching, probe_sessions_lock_free()))
+            return sentinel
+
+        recipes_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(reconcile_core, "capture_review_repo_slugs", _fake_capture)
+        monkeypatch.setattr("cw.reconcile.core.run_review_recipes", recipes_mock)
+
+        report = reconcile(dispatch_review_jobs=True)
+
+        assert report.phantom_session_ids == (["phantom-1"] if phantom else [])
+        assert captured_with == [(True, True)]
+        recipes_mock.assert_called_once()
+        assert recipes_mock.call_args.kwargs["repo_slugs"] is sentinel
 
 
 # --- GitHub #1762: session-id-namespace advisory sweep ------------------------

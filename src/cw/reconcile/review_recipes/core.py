@@ -17,7 +17,10 @@ or the queue. Only the live dispatch loop's ``reconcile()`` call drains that
 dispatch, so ``run_review_recipes`` runs those two acts only when handed a
 :class:`DeferredReviewDispatch` sink; operator read commands (``cw status`` /
 ``list`` / ``start`` / ``doctor``) pass none, and the two acts are then skipped
-entirely rather than stamping a one-shot latch nobody will honour.
+entirely rather than stamping a one-shot latch nobody will honour. Their
+cross-repo guard's ``git remote get-url`` runs in
+:func:`capture_review_repo_slugs`, which ``reconcile()`` calls before taking
+``sessions_lock`` (#2564), so the acts themselves run no git.
 ``request_reviewer`` runs for every caller, but its ``gh`` call is likewise
 not made under ``sessions_lock``: it is queued as a
 :class:`~cw.reconcile.deferred.PostLockJob` on ``reconcile()``'s post-lock sink
@@ -49,7 +52,9 @@ from cw.reconcile.review_recipes._shared import (
     _PAYLOAD_KEY_CLIENT,
     _PAYLOAD_KEY_RECIPE,
     _PAYLOAD_KEY_TICKET_ID,
+    RepoSlugs,
     _emit_pr_action_failed,
+    _find_review_task,
 )
 
 # Sanctioned sibling imports — used only by run_review_recipes (the package's
@@ -58,12 +63,14 @@ from cw.reconcile.review_recipes._shared import (
 # on _shared only; this one entry-point function is the exception.
 from cw.reconcile.review_recipes.address_review import (
     _act_address_review,
+    _address_review_slug_dir,
     _detect_address_review,
     _dispatch_address_review,
     _DispatchJob,
 )
 from cw.reconcile.review_recipes.auto_fix_ci import (
     _act_auto_fix_ci,
+    _auto_fix_ci_guard_target,
     _detect_auto_fix_ci,
     _dispatch_auto_fix_ci,
     _RedispatchJob,
@@ -81,11 +88,89 @@ from cw.reconcile.review_recipes.request_reviewer import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
-    from cw.models import OrchestratorConfig
+    from cw.models import ClientConfig, DevQueueStore, OrchestratorConfig
     from cw.reconcile.deferred import DeferredReconcileJobs
 
 _log = logging.getLogger("cw.reconcile.review_recipes")
+
+# Wall-clock cap on reconcile()'s lockless repo-slug pre-pass (#2564): each
+# capture is one `git remote get-url` (5 s timeout); a dir the budget leaves
+# uncaptured defers its candidate to the next tick.
+SLUG_CAPTURE_BUDGET_SECONDS = 30.0
+
+
+def _review_slug_dirs(
+    store: DevQueueStore,
+    *,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
+) -> list[Path]:
+    """The distinct git dirs the two dispatching recipes' repo guard will read.
+
+    Runs the same detect predicates and row lookup as the act phases, over
+    *store*, so only enabled in-state candidates are probed.
+    """
+    dirs: list[Path] = []
+    for candidate in _detect_address_review(
+        store.tasks, clients=clients, config=config
+    ):
+        task = _find_review_task(store, candidate.ticket_id, candidate.client)
+        worktree = None if task is None else _address_review_slug_dir(task)
+        if worktree is not None:
+            dirs.append(worktree)
+    for candidate in _detect_auto_fix_ci(store.tasks, clients=clients, config=config):
+        task = _find_review_task(store, candidate.ticket_id, candidate.client)
+        target = None if task is None else _auto_fix_ci_guard_target(task, clients)
+        if target is not None:
+            dirs.append(target[1])
+    return list(dict.fromkeys(dirs))
+
+
+def capture_review_repo_slugs(
+    *, config: OrchestratorConfig, dispatching: bool
+) -> RepoSlugs:
+    """Lockless pre-pass: resolve each review candidate's origin slug (#2564).
+
+    ``reconcile()`` calls this before it takes ``sessions_lock`` (beside the
+    codex clean-probe pre-pass, #2563), so the ``address_review`` /
+    ``auto_fix_ci`` cross-repo guard, which runs under the lock, only reads the
+    result. Empty unless *dispatching* (those two acts run only then) and the
+    recipes are enabled. Bounded by ``SLUG_CAPTURE_BUDGET_SECONDS``; running
+    out logs one warning and defers the uncaptured candidates.
+
+    ``reconcile()`` also serves ``cw status``/``cw list``/``cw start``/``cw
+    doctor``, so this must never fail it: a dev-queue or clients read error is
+    logged and yields an empty ``RepoSlugs``, a miss for every candidate.
+    """
+    if not (dispatching and config.review_recipes_enabled):
+        return RepoSlugs()
+    try:
+        store = load_dev_queue()
+        # Not reconcile()'s clients: run_review_recipes loads effective clients
+        # itself, so this sees the same lane view the act phases will.
+        clients = load_effective_clients()
+    except (OSError, ValueError, CwError):
+        _log.warning(
+            "reconcile: review repo-slug pre-pass could not read state;"
+            " deferring all review-recipe candidates this tick",
+            exc_info=True,
+        )
+        return RepoSlugs()
+    slugs = RepoSlugs(budget_seconds=SLUG_CAPTURE_BUDGET_SECONDS)
+    dirs = _review_slug_dirs(store, clients=clients, config=config)
+    for git_dir in dirs:
+        slugs.capture(git_dir)
+    if slugs.budget_exhausted:
+        _log.warning(
+            "reconcile: review repo-slug pre-pass budget (%.0fs) exhausted;"
+            " captured %d dir(s), %d uncaptured; deferring those candidates",
+            SLUG_CAPTURE_BUDGET_SECONDS,
+            len(slugs),
+            sum(1 for git_dir in dirs if git_dir not in slugs),
+        )
+    return slugs
 
 
 def _detect_repeat_fire_counts(
@@ -259,7 +344,10 @@ def dispatch_deferred_review_jobs(deferred: DeferredReviewDispatch) -> list[str]
 
 
 def run_review_recipes(
-    *, config: OrchestratorConfig, jobs: DeferredReconcileJobs
+    *,
+    config: OrchestratorConfig,
+    jobs: DeferredReconcileJobs,
+    repo_slugs: RepoSlugs | None = None,
 ) -> list[str]:
     """Run all enabled review recipes for one reconcile tick (P2: detect → act).
 
@@ -314,6 +402,12 @@ def run_review_recipes(
     skipped entirely, so they neither stamp their one-shot latch nor emit
     ``PR_ACTION_TAKEN`` for a dispatch nobody would perform. The caller
     dispatches the review sink with :func:`dispatch_deferred_review_jobs`.
+
+    *repo_slugs* (#2564) is the output of :func:`capture_review_repo_slugs`,
+    which ``reconcile()`` runs before taking ``sessions_lock``: the two
+    dispatching acts' cross-repo guard reads it and runs no git. ``None``
+    means nothing was captured, so every candidate that needs a slug defers
+    to the next tick (fail closed).
     """
     if not config.review_recipes_enabled:
         return []
@@ -324,10 +418,12 @@ def run_review_recipes(
     # phases, mirroring how clients/tasks are loaded once and shared.
     repeat_fire_counts = _detect_repeat_fire_counts(config=config)
     if jobs.review is not None:
+        slugs = repo_slugs if repo_slugs is not None else RepoSlugs()
         jobs.review.address_review.extend(
             _act_address_review(
                 _detect_address_review(tasks, clients=clients, config=config),
                 clients=clients,
+                repo_slugs=slugs,
                 config=config,
                 repeat_fire_counts=repeat_fire_counts,
             )
@@ -336,6 +432,7 @@ def run_review_recipes(
             _act_auto_fix_ci(
                 _detect_auto_fix_ci(tasks, clients=clients, config=config),
                 clients=clients,
+                repo_slugs=slugs,
                 config=config,
                 repeat_fire_counts=repeat_fire_counts,
             )

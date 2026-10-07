@@ -21,6 +21,7 @@ import pytest
 
 from cw._lock_guard import LockRank, is_rank_held
 from cw.config import load_state
+from cw.dev_queue import load_dev_queue
 from cw.events import read_events
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
@@ -39,6 +40,15 @@ from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile._shared import _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 from cw.reconcile.review_recipes import ReviewRecipeCandidate
+from cw.reconcile.review_recipes._shared import RepoSlugs, _find_review_task
+from cw.reconcile.review_recipes.address_review import (
+    _act_address_review,
+    _address_review_slug_dir,
+)
+from cw.reconcile.review_recipes.auto_fix_ci import (
+    _act_auto_fix_ci,
+    _auto_fix_ci_guard_target,
+)
 from tests.conftest import (
     _make_daemon_session,
     _write_idle_transcript,
@@ -49,6 +59,13 @@ from tests.conftest import (
 # below -- the same "fake-short-id" the transcript writers key their filename
 # prefix on, so ``_locate_session_transcript``'s surface_ref glob finds them.
 _FAKE_SURFACE_REF = "fake-short-id"
+
+# The act phases whose cross-repo guard reads pre-captured repo slugs (#2564);
+# ``act_then_dispatch`` captures a ``repo_slugs`` for these when none is passed.
+_SLUG_GUARDED_ACTS: tuple[Callable[..., object], ...] = (
+    _act_address_review,
+    _act_auto_fix_ci,
+)
 
 
 def probe_sessions_lock_free() -> bool:
@@ -99,6 +116,35 @@ def call_and_drain[T](
     return result
 
 
+def capture_repo_slugs(
+    candidates: list[ReviewRecipeCandidate],
+    *,
+    clients: dict[str, ClientConfig],
+) -> RepoSlugs:
+    """Capture, live, every git dir the review recipes' repo guard reads (#2564).
+
+    Stands in for ``reconcile()``'s pre-lock ``capture_review_repo_slugs`` for
+    tests that drive ``_act_address_review`` / ``_act_auto_fix_ci`` directly:
+    reloads the saved queue, re-finds each candidate's row the way the act
+    phase will (``_find_review_task``), and captures both its address_review
+    worktree and its auto_fix_ci client workspace through the act phases' own
+    guard-dir helpers. Runs git, so call it with no ``sessions_lock`` held.
+    """
+    store = load_dev_queue()
+    slugs = RepoSlugs()
+    for candidate in candidates:
+        task = _find_review_task(store, candidate.ticket_id, candidate.client)
+        if task is None:
+            continue
+        worktree = _address_review_slug_dir(task)
+        if worktree is not None:
+            slugs.capture(worktree)
+        target = _auto_fix_ci_guard_target(task, clients)
+        if target is not None:
+            slugs.capture(target[1])
+    return slugs
+
+
 def act_then_dispatch[J](
     act: Callable[..., list[J]],
     dispatch: Callable[[list[J]], list[str]],
@@ -113,7 +159,16 @@ def act_then_dispatch[J](
     act + dispatch end to end without a full ``reconcile()``: *act* is called
     as ``act(candidates, **kwargs)``, its job list goes to *dispatch*, and the
     acted ticket ids *dispatch* reports are returned.
+
+    For the two acts whose repo guard reads pre-captured slugs (#2564), a
+    ``repo_slugs`` the caller did not pass is captured first with
+    :func:`capture_repo_slugs`, as ``reconcile()`` does before its lock. An
+    explicit ``repo_slugs=`` (an empty ``RepoSlugs()`` included) is used as is.
     """
+    if act in _SLUG_GUARDED_ACTS and "repo_slugs" not in kwargs:
+        clients = kwargs["clients"]
+        assert isinstance(clients, dict)
+        kwargs["repo_slugs"] = capture_repo_slugs(candidates, clients=clients)
     return dispatch(act(candidates, **kwargs))
 
 

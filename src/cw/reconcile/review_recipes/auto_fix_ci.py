@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.exceptions import CwError, RequeueLiveSessionError
 from cw.models import TERMINAL_QUEUE_STATUSES, QueueItemStatus
-from cw.pr_hydrate import _parse_pr_url, _repo_slug_mismatch
+from cw.pr_hydrate import _parse_pr_url
 from cw.reconcile.review_recipes._shared import (
     _ATTENTION_CI_FAILING,
     RECIPE_AUTO_FIX_CI,
@@ -42,13 +42,16 @@ from cw.reconcile.review_recipes._shared import (
     _detect_by_attention_state,
     _emit_pr_action_failed,
     _find_review_task,
-    _guard_cross_repo_mismatch,
     _record_pr_action_taken,
+    _repo_guard_allows,
     _review_payload_base,
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from cw.models import ClientConfig, OrchestratorConfig, TicketTask
+    from cw.reconcile.review_recipes._shared import RepoSlugs
 
 
 _log = logging.getLogger("cw.reconcile.review_recipes")
@@ -127,15 +130,16 @@ class _RedispatchJob(NamedTuple):
     fired_at: datetime
 
 
-def _detect_auto_fix_ci_repo_mismatch(
+def _auto_fix_ci_guard_target(
     task: TicketTask, clients: dict[str, ClientConfig]
-) -> tuple[str, str] | None:
-    """Return ``(pr_repo, client_repo)`` when the row's client workspace resolves
-    to a different github repo than its ``pr_url``, else None (GitHub #1198).
+) -> tuple[str, Path] | None:
+    """Return ``(pr_repo, workspace_path)`` for the cross-repo guard (GitHub #1198).
 
-    Fails open: an unparseable ``pr_url``, an unresolvable client, or an
-    unresolvable workspace remote all yield None (proceed, no anomaly), so the
-    guard introduces no new hard-failure branches beyond the mismatch itself.
+    The single source of truth for both reconcile's lockless repo-slug
+    pre-pass (#2564) and ``_prepare_auto_fix_ci_job``. Fails open: an
+    unparseable ``pr_url`` or an unresolvable client yields None (nothing to
+    guard, proceed), as does an unresolvable workspace remote downstream, so
+    the guard adds no hard-failure branch beyond the mismatch itself.
     """
     parsed = _parse_pr_url(task.pr_url) if task.pr_url is not None else None
     if parsed is None:
@@ -143,10 +147,7 @@ def _detect_auto_fix_ci_repo_mismatch(
     client_cfg = clients.get(task.client)
     if client_cfg is None:
         return None
-    client_repo = _repo_slug_mismatch(parsed[0], client_cfg.workspace_path)
-    if client_repo is None:
-        return None
-    return parsed[0], client_repo
+    return parsed[0], client_cfg.workspace_path
 
 
 def _prepare_auto_fix_ci_job(
@@ -155,6 +156,7 @@ def _prepare_auto_fix_ci_job(
     clients: dict[str, ClientConfig],
     now: datetime,
     *,
+    repo_slugs: RepoSlugs,
     config: OrchestratorConfig | None = None,
     repeat_fire_counts: dict[tuple[str, str, str], int] | None = None,
 ) -> _RedispatchJob | None:
@@ -167,8 +169,11 @@ def _prepare_auto_fix_ci_job(
     already-fired check). An anomaly skip (emits ``PR_ACTION_FAILED``) when the
     row's client resolves to a different repo than its ``pr_url`` (GitHub
     #1198) — both this check and the already-fired check above must pass for
-    the row to fire. Otherwise stamps the row's current ``status`` onto the
-    payload for provenance (GitHub #2100 — the redispatch decision
+    the row to fire. A deferred skip (no event, logged at INFO) when
+    *repo_slugs* holds no slug for the client workspace (#2564), leaving the
+    latch unstamped for the next tick. Otherwise stamps the row's current
+    ``status`` onto the payload for provenance (GitHub #2100 — the redispatch
+    decision
     ``_dispatch_auto_fix_ci`` makes post-lock, so this is the only point at
     which it can land in the durably-recorded event), records
     ``PR_ACTION_TAKEN`` (emit-before-dispatch), stamps the
@@ -190,19 +195,18 @@ def _prepare_auto_fix_ci_job(
     )
     # GitHub #1198 — cross-repo dispatch guard. The client's workspace origin
     # remote can resolve to a different repo than the PR's, so re-dispatching
-    # auto-dev here would run in the wrong repo. local-only read, no network —
-    # safe under dev_queue_lock; do not add network calls here.
-    mismatch = _detect_auto_fix_ci_repo_mismatch(task, clients)
-    if mismatch is not None:
-        pr_repo, client_repo = mismatch
-        if not _guard_cross_repo_mismatch(
-            task,
-            payload_base,
-            pr_repo=pr_repo,
-            client_repo=client_repo,
-            location="client workspace origin",
-        ):
-            return None
+    # auto-dev here would run in the wrong repo. The slug was resolved before
+    # sessions_lock was taken (#2564); this lookup runs no git.
+    target = _auto_fix_ci_guard_target(task, clients)
+    if target is not None and not _repo_guard_allows(
+        task,
+        payload_base,
+        repo_slugs,
+        pr_repo=target[0],
+        git_dir=target[1],
+        location="client workspace origin",
+    ):
+        return None
     existing_status = task.status
     payload_base[_PAYLOAD_KEY_QUEUE_ROW_STATUS] = existing_status.value
     _record_pr_action_taken(
@@ -398,6 +402,7 @@ def _act_auto_fix_ci(
     candidates: list[ReviewRecipeCandidate],
     *,
     clients: dict[str, ClientConfig],
+    repo_slugs: RepoSlugs,
     now: datetime | None = None,
     config: OrchestratorConfig | None = None,
     repeat_fire_counts: dict[tuple[str, str, str], int] | None = None,
@@ -413,8 +418,9 @@ def _act_auto_fix_ci(
        *candidates* is empty.
     2. **Fire** — for each candidate, ``_prepare_auto_fix_ci_job`` re-validates
        both the latch and the cross-repo dispatch guard (GitHub #1198;
-       ``clients`` is threaded through for the guard), emits
-       ``PR_ACTION_TAKEN``, and stamps the latch.
+       ``clients`` is threaded through for the guard, which reads the
+       workspace slug from ``repo_slugs``, resolved before ``sessions_lock``
+       was taken, #2564), emits ``PR_ACTION_TAKEN``, and stamps the latch.
 
     Stamping/clearing the latch IS a dev-queue write (GitHub #1206: all four
     review-recipe act phases now perform this same kind of write — a latch
@@ -450,6 +456,7 @@ def _act_auto_fix_ci(
                 candidate.session_id,
                 clients,
                 resolved_now,
+                repo_slugs=repo_slugs,
                 config=config,
                 repeat_fire_counts=repeat_fire_counts,
             )

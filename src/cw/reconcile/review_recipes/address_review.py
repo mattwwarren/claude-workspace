@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.exceptions import CwError, WorkerLaunchedError
-from cw.pr_hydrate import _parse_pr_url, _repo_slug_mismatch
+from cw.pr_hydrate import _parse_pr_url
 from cw.reconcile.review_recipes._shared import (
     _ATTENTION_CHANGES_REQUESTED,
     _PAYLOAD_KEY_REVIEW_DECISION,
@@ -44,8 +44,8 @@ from cw.reconcile.review_recipes._shared import (
     _detect_by_attention_state,
     _emit_pr_action_failed,
     _find_review_task,
-    _guard_cross_repo_mismatch,
     _record_pr_action_taken,
+    _repo_guard_allows,
     _review_payload_base,
     _skip_with_anomaly,
 )
@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import ClientConfig, OrchestratorConfig, TicketTask
+    from cw.reconcile.review_recipes._shared import RepoSlugs
 
 
 _log = logging.getLogger("cw.reconcile.review_recipes")
@@ -91,12 +92,25 @@ def _detect_address_review(
     )
 
 
+def _address_review_slug_dir(task: TicketTask) -> Path | None:
+    """The worktree the cross-repo guard resolves, or None when missing/absent.
+
+    The single source of truth for both reconcile's lockless repo-slug
+    pre-pass (#2564) and ``_prepare_dispatch_job``'s missing-worktree check.
+    """
+    wt = task.worktree_path
+    if wt is None or not wt.exists():
+        return None
+    return wt
+
+
 def _prepare_dispatch_job(
     task: TicketTask,
     session_id: str | None,
     clients: dict[str, ClientConfig],
     now: datetime,
     *,
+    repo_slugs: RepoSlugs,
     config: OrchestratorConfig | None = None,
     repeat_fire_counts: dict[tuple[str, str, str], int] | None = None,
 ) -> _DispatchJob | None:
@@ -110,8 +124,12 @@ def _prepare_dispatch_job(
       (``address_review_fired_at`` is not None; not an anomaly, mirrors
       ``_prepare_auto_fix_ci_job``'s already-fired check).
     * **Anomaly** (emits ``PR_ACTION_FAILED`` + a warning) when the PR url is
-      unparseable/absent, the client is unresolvable, or the worktree is
-      missing — a fail-safe correction, never a silent drop.
+      unparseable/absent, the client is unresolvable, the worktree is
+      missing, or its origin is another repo — a fail-safe correction,
+      never a silent drop.
+    * **Deferred** (no event, logged at INFO) when *repo_slugs* holds no
+      slug for the worktree (#2564): no latch stamp, so the next tick
+      retries it.
 
     Otherwise records ``PR_ACTION_TAKEN`` (emit-before-dispatch) from the
     RE-LOADED row, stamps the ``address_review_fired_at`` latch to *now*, and
@@ -148,7 +166,7 @@ def _prepare_dispatch_job(
             ticket_id=task.ticket_id,
         )
         return None
-    wt = task.worktree_path
+    wt = _address_review_slug_dir(task)
     # Why fail LOUD on a missing/stale worktree: ported review-monitor lesson
     # (session:8f738500, "Stale git worktrees cause check to fail silently") —
     # review_monitor's git diff/fetch against a deleted worktree failed SILENTLY,
@@ -156,24 +174,23 @@ def _prepare_dispatch_job(
     # Here an absent worktree_path emits a durable PR_ACTION_FAILED correction
     # (never a silent skip). See tests/test_reconcile_review_recipes.py::
     # test_missing_worktree_emits_pr_action_failed.
-    if wt is None or not wt.exists():
+    if wt is None:
         _skip_with_anomaly(
             payload_base,
-            error=f"worktree_path missing or absent: {wt!r}",
+            error=f"worktree_path missing or absent: {task.worktree_path!r}",
             ticket_id=task.ticket_id,
         )
         return None
     # GitHub #1198 — cross-repo dispatch guard. The worktree's origin remote can
     # resolve to a different repo than the PR's, so dispatching /address-review
-    # here would run in the wrong workspace. local-only read, no network — safe
-    # under dev_queue_lock; do not add network calls here.
-    pr_repo = parsed[0]
-    client_repo = _repo_slug_mismatch(pr_repo, wt)
-    if client_repo is not None and not _guard_cross_repo_mismatch(
+    # here would run in the wrong workspace. The slug was resolved before
+    # sessions_lock was taken (#2564); this lookup runs no git.
+    if not _repo_guard_allows(
         task,
         payload_base,
-        pr_repo=pr_repo,
-        client_repo=client_repo,
+        repo_slugs,
+        pr_repo=parsed[0],
+        git_dir=wt,
         location="worktree origin",
     ):
         return None
@@ -273,6 +290,7 @@ def _act_address_review(
     candidates: list[ReviewRecipeCandidate],
     *,
     clients: dict[str, ClientConfig],
+    repo_slugs: RepoSlugs,
     now: datetime | None = None,
     config: OrchestratorConfig | None = None,
     repeat_fire_counts: dict[tuple[str, str, str], int] | None = None,
@@ -305,6 +323,10 @@ def _act_address_review(
     second ``load_effective_clients()`` read taken inside the lock — clients.yaml
     has no locking relationship to the dev-queue store, so re-reading it there
     only extends the flock's hold time for no consistency benefit.
+
+    ``repo_slugs`` holds the worktree origin slugs ``reconcile()`` resolved
+    before taking ``sessions_lock`` (#2564), so the cross-repo guard here runs
+    no git; a worktree it lacks defers that candidate to the next tick.
 
     This function does NOT dispatch (#1229): it returns the deferred jobs and
     ``reconcile()`` runs them via ``_dispatch_address_review`` after
@@ -340,6 +362,7 @@ def _act_address_review(
                 candidate.session_id,
                 clients,
                 resolved_now,
+                repo_slugs=repo_slugs,
                 config=config,
                 repeat_fire_counts=repeat_fire_counts,
             )
