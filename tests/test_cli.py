@@ -5962,7 +5962,7 @@ class TestHarvestLastResultThroughDoor:
             msg = "boom"
             raise EmitValidationError(msg, errors=["status: bad"])
 
-        monkeypatch.setattr("cw.cli.stop_hook.emit_result_locked", _raise)
+        monkeypatch.setattr("cw.cli.stop_hook.sentinel.emit_result_locked", _raise)
 
         with caplog.at_level("WARNING"):
             _harvest_last_result_through_door("sess-does-not-matter", sentinel)
@@ -5986,7 +5986,7 @@ class TestHarvestLastResultThroughDoor:
             msg = "not found"
             raise EmitSessionNotFoundError(msg, session_id="ghost-session")
 
-        monkeypatch.setattr("cw.cli.stop_hook.emit_result_locked", _raise)
+        monkeypatch.setattr("cw.cli.stop_hook.sentinel.emit_result_locked", _raise)
 
         with caplog.at_level("WARNING"):
             _harvest_last_result_through_door("ghost-session", sentinel)
@@ -6010,7 +6010,7 @@ class TestHarvestLastResultThroughDoor:
             message = "state file unwritable"
             raise OSError(message)
 
-        monkeypatch.setattr("cw.cli.stop_hook.emit_result_locked", _raise)
+        monkeypatch.setattr("cw.cli.stop_hook.sentinel.emit_result_locked", _raise)
 
         with caplog.at_level("WARNING"):
             _harvest_last_result_through_door("sess-state-error", sentinel)

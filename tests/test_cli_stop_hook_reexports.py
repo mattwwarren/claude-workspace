@@ -194,8 +194,12 @@ class TestCommandRegistration:
 # is read at four call sites in three functions, one row per reader.
 PATCH_OWNERSHIP = [
     ("_resolve_signal_stop_context", "_read_cw_context", f"{_PKG}.payload"),
-    ("_parse_headless_sentinel", "_parse_sentinel_from_transcript", _PKG),
-    ("_harvest_last_result_through_door", "emit_result_locked", _PKG),
+    (
+        "_parse_headless_sentinel",
+        "_parse_sentinel_from_transcript",
+        f"{_PKG}.sentinel",
+    ),
+    ("_harvest_last_result_through_door", "emit_result_locked", f"{_PKG}.sentinel"),
     ("_sentinel_frame_follows_marker", "claude_project_dir", _PKG),
     ("_park_if_abandoned", "read_park_comment_marker", _PKG),
     ("_armed_running_task", "find_running_task_for_session", _PKG),
@@ -290,7 +294,7 @@ class TestLoggerNamePinned:
             message = "state file unwritable"
             raise OSError(message)
 
-        monkeypatch.setattr("cw.cli.stop_hook.emit_result_locked", _raise)
+        monkeypatch.setattr("cw.cli.stop_hook.sentinel.emit_result_locked", _raise)
 
         with caplog.at_level(logging.DEBUG, logger=PINNED_LOGGER_NAME):
             stop_hook._harvest_last_result_through_door("sess-pin-oserror", _sentinel())
@@ -354,7 +358,7 @@ class TestLoggerNamePinned:
 
 # Submodules that log. Each binds its own ``logger`` to the pinned name via
 # ``_constants._LOGGER_NAME``, never ``__name__``.
-LOGGING_SUBMODULES = ["agent_stamp"]
+LOGGING_SUBMODULES = ["agent_stamp", "sentinel"]
 
 
 class TestLoggerObjectsPinned:

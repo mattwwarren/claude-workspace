@@ -680,13 +680,14 @@ def test_parse_headless_sentinel_scans_transcript_once_when_cwd_is_worktree_path
     fallback``. No transcript exists on disk, so every scan returns ``None``.
     """
     from cw.cli import stop_hook
+    from cw.cli.stop_hook import sentinel
 
     worktree = tmp_path / "wt-scan"
     session = _make_daemon_session(worktree_path=worktree)
     cwd_value = str(worktree / "nested") if nested_cwd else str(worktree)
     monkeypatch.setattr("cw._util.Path.home", lambda: tmp_path / "home")
     scanned: list[str] = []
-    real_scan = stop_hook._parse_sentinel_from_transcript
+    real_scan = sentinel._parse_sentinel_from_transcript
 
     scanned_tickets: list[str | None] = []
 
@@ -697,7 +698,7 @@ def test_parse_headless_sentinel_scans_transcript_once_when_cwd_is_worktree_path
         scanned_tickets.append(ticket_id)
         return real_scan(cwd, claude_session_id, ticket_id=ticket_id)
 
-    monkeypatch.setattr(stop_hook, "_parse_sentinel_from_transcript", _counting_scan)
+    monkeypatch.setattr(sentinel, "_parse_sentinel_from_transcript", _counting_scan)
 
     parsed = stop_hook._parse_headless_sentinel(
         session, cwd_value, "uuid-2229", "ticket-2229"
