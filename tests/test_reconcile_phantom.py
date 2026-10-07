@@ -4654,7 +4654,7 @@ def test_salvaged_completion_with_no_evidence_is_unproductive(
 # ``if _has_terminal_sentinel(session): continue`` -- a phantom whose
 # ``session.last_result`` already carried a terminal-*shaped* dict produced NO
 # candidate of any kind, on every tick, forever. ``session.status`` is flipped
-# to COMPLETED only by the Stop hook (cli/stop_hook.py), which a crashed daemon
+# to COMPLETED only by the Stop hook (cli/stop_hook/), which a crashed daemon
 # never reaches, so the owning dev-queue row stayed RUNNING with no automated
 # recovery path regardless of ``reap_policy``.
 #

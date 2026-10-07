@@ -14,7 +14,7 @@ found that pairing hollow: replaying a live async ``Agent(isolation=
 ``Async agent launched successfully.`` tool_result), not subagent completion
 — the harness's own turn accounting still reported the background agent
 pending ~3.5s after the stamp had already balanced back to 0. The Post half
-is removed; ``cw signal-stop`` (``cli/stop_hook.py``) now owns clearing/
+is removed; ``cw signal-stop`` (``cli/stop_hook/``) now owns clearing/
 snapshotting the counter, driven off the hook payload's own
 ``background_tasks`` list — a signal that reflects the harness's live
 turn-accounting rather than a tool-call return that races ahead of it.

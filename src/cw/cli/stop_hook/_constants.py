@@ -29,7 +29,7 @@ _SENTINEL_UNROUTABLE_REASON = "sentinel_unroutable"
 # leaves rescued/task_already_terminal at their init-False defaults even
 # when the first (partial-route) call's outcome was rescued=True (a #918
 # late-parked-task rescue) -- silently dropping that fact from the eventual
-# SESSION_COMPLETED payload. Local to this module (not reconcile/_shared/,
+# SESSION_COMPLETED payload. Local to this package (not reconcile/_shared/,
 # out of this cycle's approved scope): only this function reads or writes
 # them.
 _STAGED_ROUTE_RESCUED_KEY = "sentinel_partial_route_rescued"
@@ -44,6 +44,6 @@ _STAGED_ROUTE_TASK_ALREADY_TERMINAL_KEY = "sentinel_partial_route_task_already_t
 # two call sites the result had been routed and block them from ever
 # retrying it. This flag only dedups the WARNING + SESSION_NEEDS_ATTENTION
 # sentinel_unroutable page across repeat Stops that land on the same
-# still-unroutable bail; it is local to this module and read only by
+# still-unroutable bail; it is local to this package and read only by
 # _sentinel_unroutable, never by holds_staged_emit_result.
 _SENTINEL_UNROUTABLE_PAGED_KEY = "sentinel_unroutable_paged"

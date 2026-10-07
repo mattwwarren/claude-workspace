@@ -48,7 +48,7 @@ completion notification.
 That is safe in headless: the Stop hook payload lists the in-flight subagent in
 `background_tasks` (`{"type": "subagent", "status": "running", ...}`) and
 `cw signal-stop` defers session completion while that list is non-empty
-(`src/cw/cli/stop_hook.py:364`), so the run is not orphaned.
+(`src/cw/cli/stop_hook/command.py`), so the run is not orphaned.
 
 **Never** hold the turn open with no-op `Bash` calls (`true`, `sleep`, repeated
 polls). Each is a wasted model round-trip, and busy-waiting camouflages a stuck

@@ -338,7 +338,7 @@ def _validate_worktree(path: Path) -> None:
 # `pendingBackgroundAgentCount: 1`. The stamp balanced to 0 while the
 # subagent was, per the harness's own accounting, still running. The
 # PostToolUse wiring for this matcher is removed; `cw signal-stop`
-# (`cli/stop_hook.py`) now snapshots/clears `agent_spawn_stamp.unresolved_count`
+# (`cli/stop_hook/`) now snapshots/clears `agent_spawn_stamp.unresolved_count`
 # off the Stop hook payload's own `background_tasks` list instead -- a signal
 # that tracks the harness's live turn-accounting rather than a tool-call
 # return that races ahead of it. This matcher constant is now read only by

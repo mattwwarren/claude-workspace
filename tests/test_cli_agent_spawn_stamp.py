@@ -8,7 +8,7 @@ call returned. #1947 removed the Post half — replaying a live async
 launch-return (the ``Async agent launched successfully.`` tool_result), not
 subagent completion, so the pair balanced back to 0 while the harness's own
 turn accounting still reported the background agent pending. ``cw
-signal-stop`` (``cli/stop_hook.py``, tested in ``tests/test_cli_stop_hook.py``)
+signal-stop`` (``cli/stop_hook/``, tested in ``tests/test_cli_stop_hook.py``)
 now owns clearing/snapshotting the counter instead, driven off the hook
 payload's own ``background_tasks`` list.
 

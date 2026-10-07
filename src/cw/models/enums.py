@@ -289,7 +289,7 @@ class OrchestratorEventType(StrEnum):
     # only as stderr inside its own transcript; without a durable record a
     # false positive is invisible to the operator and indistinguishable from
     # a worker that simply never made the call. Same emitter class as
-    # `cw signal-stop` (cli/stop_hook.py), which already records from a hook
+    # `cw signal-stop` (cli/stop_hook/command.py), which already records from a hook
     # subprocess. See docs/events.md.
     GUARD_BUSY_WAIT_BLOCKED = "guard.busy_wait_blocked"
     # #2303 -- emitted by the `cw background-tool-guard-pre` PreToolUse hook
