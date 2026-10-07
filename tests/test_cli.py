@@ -770,7 +770,9 @@ class TestSignalStop:
         save_state(state)
         self._write_context(worktree, session_id=session.id)
 
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -811,7 +813,9 @@ class TestSignalStop:
         self._write_context(session.worktree_path, session_id=session.id)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {"session_id": "claude-uuid", "cwd": str(session.worktree_path)}
@@ -850,7 +854,9 @@ class TestSignalStop:
         self._write_context(worktree, session_id=session.id)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         # Snapshot session state pre-call. The deferral path must leave it
         # byte-for-byte unchanged; asserting individual fields would mask
@@ -1031,7 +1037,9 @@ class TestSignalStop:
         self._write_context(worktree, session_id=session.id)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -1078,7 +1086,9 @@ class TestSignalStop:
         self._write_context(worktree, session_id=session.id)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         pre_state = load_state()
         pre_target = next(s for s in pre_state.sessions if s.id == session.id)
@@ -1126,7 +1136,9 @@ class TestSignalStop:
         self._write_context(worktree, session_id=session.id)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         pre_state = load_state()
         pre_target = next(s for s in pre_state.sessions if s.id == session.id)
@@ -1180,7 +1192,9 @@ class TestSignalStop:
         save_state(state)
         self._write_context(worktree, session_id=session.id)
 
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -1234,7 +1248,9 @@ class TestSignalStop:
         target = next(s for s in state.sessions if s.id == session.id)
         target.surface_ref = short_id
         save_state(state)
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         # Production writes an explicit ``"headless": false`` (spawn.py), not an
         # omitted key; the override wins over the helper's ``True`` default.
@@ -1391,7 +1407,9 @@ class TestSignalStop:
         target = next(s for s in state.sessions if s.id == session.id)
         target.surface_ref = short_id
         save_state(state)
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -1495,7 +1513,9 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -1582,7 +1602,9 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -1662,7 +1684,9 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -1796,7 +1820,9 @@ class TestSignalStop:
         self._write_headless_context(worktree, session_id=session.id)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -1903,7 +1929,9 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -1992,7 +2020,9 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -2093,7 +2123,9 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -2163,7 +2195,9 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -2227,7 +2261,9 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -2292,7 +2328,9 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -2370,7 +2408,9 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -2443,7 +2483,9 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -2507,7 +2549,9 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -2581,7 +2625,9 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -2721,7 +2767,9 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         runner = CliRunner()
         r1 = self._invoke_signal_stop(
@@ -2856,7 +2904,9 @@ class TestSignalStop:
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         runner = CliRunner()
         with freeze_time(dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)):
@@ -3097,7 +3147,9 @@ class TestSignalStop:
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         runner = CliRunner()
         with freeze_time(datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)):
@@ -3196,7 +3248,9 @@ class TestSignalStop:
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         runner = CliRunner()
         with freeze_time(datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)):
@@ -3294,7 +3348,9 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -3374,7 +3430,9 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -3513,7 +3571,9 @@ class TestSignalStop:
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         hook_stdin = json.dumps(
             {
@@ -3597,7 +3657,9 @@ class TestSignalStop:
         self._write_headless_context(nested_worktree, session_id=session.id)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         # Stop hook fires with the NESTED worktree as cwd.
         hook_time = dt.datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
@@ -3675,7 +3737,9 @@ class TestSignalStop:
         )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         runner = CliRunner()
         with freeze_time(datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)):
@@ -3817,7 +3881,9 @@ class TestSignalStop:
             )
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
         return session, worktree, daemon
 
     def _invoke_stop(self, cwd: Path, **payload: object) -> Result:
@@ -5056,7 +5122,9 @@ class TestSignalStop:
         fake_home.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
         return worktree, session, daemon
 
     @staticmethod

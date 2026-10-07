@@ -1303,7 +1303,9 @@ class TestResultEmit:
         fake_home.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+        )
 
         monkeypatch.chdir(worktree)
         emit_result_ = CliRunner().invoke(

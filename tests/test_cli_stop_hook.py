@@ -464,12 +464,12 @@ def test_signal_stop_clear_reads_fresh_under_lock_after_concurrent_increment(
     the stale pre-lock context would be a lost-update bug. This is the guard
     against ever memoizing the read-modify-write's read.
     """
-    from cw.cli import stop_hook
+    from cw.cli.stop_hook import command
 
     worktree = tmp_path / "wt-fresh"
     worktree.mkdir()
     _write_hook_context_file(worktree, stamp={AGENT_SPAWN_UNRESOLVED_COUNT_KEY: 1})
-    real_write = stop_hook._write_cw_context_locked
+    real_write = command._write_cw_context_locked
     context_path = worktree / HOOK_CONTEXT_RELATIVE_PATH
 
     def _bump_then_write(
@@ -480,7 +480,7 @@ def test_signal_stop_clear_reads_fresh_under_lock_after_concurrent_increment(
         context_path.write_text(json.dumps(raw), encoding="utf-8")
         return real_write(cwd_value, mutate_fn)
 
-    monkeypatch.setattr(stop_hook, "_write_cw_context_locked", _bump_then_write)
+    monkeypatch.setattr(command, "_write_cw_context_locked", _bump_then_write)
 
     with caplog.at_level("INFO", logger="cw.cli.stop_hook"):
         result = _invoke_hook_command("signal-stop", _stop_payload(worktree))
@@ -609,7 +609,7 @@ def test_signal_stop_terminal_session_is_noop_and_leaves_clear_stamp_untouched(
         msg = "a terminal session must never reach the native daemon"
         raise AssertionError(msg)
 
-    monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", _no_daemon)
+    monkeypatch.setattr("cw.cli.stop_hook.command.get_native_daemon_client", _no_daemon)
 
     result = _invoke_hook_command("signal-stop", _stop_payload(worktree))
 
@@ -646,7 +646,9 @@ def test_stops_native_bg_session_on_daemon_origin_with_sessions_lock_free(
     next(s for s in state.sessions if s.id == session.id).surface_ref = surface_ref
     save_state(state)
     _write_hook_context_file(worktree, workspace_path=session.workspace_path)
-    monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+    monkeypatch.setattr(
+        "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+    )
 
     result = _invoke_hook_command(
         "signal-stop",

@@ -221,9 +221,9 @@ PATCH_OWNERSHIP = [
     ),
     ("_resolve_stop_under_lock", "load_state", f"{_PKG}.locked"),
     ("_resolve_stop_under_lock", "sessions_lock", f"{_PKG}.locked"),
-    ("signal_stop", "get_native_daemon_client", _PKG),
-    ("signal_stop", "_write_cw_context_locked", _PKG),
-    ("_handle_unrouted_stop", "get_native_daemon_client", _PKG),
+    ("signal_stop", "get_native_daemon_client", f"{_PKG}.command"),
+    ("signal_stop", "_write_cw_context_locked", f"{_PKG}.command"),
+    ("_handle_unrouted_stop", "get_native_daemon_client", f"{_PKG}.command"),
 ]
 
 
@@ -345,7 +345,8 @@ class TestLoggerNamePinned:
         session = _make_daemon_session(id="sess-pin-landed", surface_ref="pinref02")
         resolution = stop_hook._HeadlessResolution(rescued=None, landed_terminal=True)
         monkeypatch.setattr(
-            "cw.cli.stop_hook.get_native_daemon_client", lambda: mock_native_daemon
+            "cw.cli.stop_hook.command.get_native_daemon_client",
+            lambda: mock_native_daemon,
         )
 
         with caplog.at_level(logging.DEBUG, logger=PINNED_LOGGER_NAME):
@@ -370,7 +371,7 @@ class TestLoggerNamePinned:
 
 # Submodules that log. Each binds its own ``logger`` to the pinned name via
 # ``_constants._LOGGER_NAME``, never ``__name__``.
-LOGGING_SUBMODULES = ["agent_stamp", "sentinel"]
+LOGGING_SUBMODULES = ["agent_stamp", "command", "sentinel"]
 
 
 class TestLoggerObjectsPinned:
