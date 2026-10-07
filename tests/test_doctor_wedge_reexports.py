@@ -33,6 +33,7 @@ from tests.conftest import _make_ticket_task
 _PKG = "cw.doctor.wedge"
 _CONSTANTS_MOD = f"{_PKG}._constants"
 _TASK_RUNNING = f"{_PKG}.task_running"
+_BLOCKED_ON_USER = f"{_PKG}.blocked_on_user"
 
 # The nine module-level constants the flat module bound at top level.
 _CONSTANTS = {
@@ -96,13 +97,13 @@ EXPECTED_OWNER: dict[str, str] = {
     "_check_wedge_task_running_completed_session": _TASK_RUNNING,
     "_resolve_wedge_branch": _TASK_RUNNING,
     "_check_wedge_repo_ahead": _TASK_RUNNING,
-    "_is_dead_session_task": _PKG,
-    "_is_terminal_sibling_disposition": _PKG,
-    "_check_wedge_dead_session_blocked_on_user": _PKG,
-    "_is_terminal_sibling_park": _PKG,
-    "_check_wedge_terminal_sibling_park": _PKG,
-    "_collapse_blocked_on_user_tasks": _PKG,
-    "_cancel_terminal_sibling_parks": _PKG,
+    "_is_dead_session_task": _BLOCKED_ON_USER,
+    "_is_terminal_sibling_disposition": _BLOCKED_ON_USER,
+    "_check_wedge_dead_session_blocked_on_user": _BLOCKED_ON_USER,
+    "_is_terminal_sibling_park": _BLOCKED_ON_USER,
+    "_check_wedge_terminal_sibling_park": _BLOCKED_ON_USER,
+    "_collapse_blocked_on_user_tasks": _BLOCKED_ON_USER,
+    "_cancel_terminal_sibling_parks": _BLOCKED_ON_USER,
     "_daemon_supervisor_alive": _PKG,
     "_check_wedge_active_no_daemon_entry": _PKG,
     "_check_wedge_active_daemon_stale_no_sentinel": _PKG,
@@ -250,7 +251,11 @@ class TestConsumerContract:
 # the rows whose function it moves.
 PATCH_OWNERSHIP = [
     ("_check_wedge_repo_ahead", "run_git", _TASK_RUNNING),
-    ("_check_wedge_dead_session_blocked_on_user", "get_native_daemon_client", _PKG),
+    (
+        "_check_wedge_dead_session_blocked_on_user",
+        "get_native_daemon_client",
+        _BLOCKED_ON_USER,
+    ),
     ("_check_wedge_active_no_daemon_entry", "get_native_daemon_client", _PKG),
     (
         "_check_wedge_active_daemon_stale_no_sentinel",
@@ -366,12 +371,25 @@ class TestLoggerNamePinned:
         assert wedge._log is logging.getLogger(PINNED_LOGGER_NAME)
 
 
+# Submodules that log. Each binds its own ``_log`` to the pinned name via
+# ``_constants._LOGGER_NAME``, never ``__name__``.
+LOGGING_SUBMODULES = [_BLOCKED_ON_USER]
+
+
+@pytest.mark.parametrize("submodule", LOGGING_SUBMODULES)
+def test_submodule_logger_is_the_package_logger(submodule: str) -> None:
+    module_logger = vars(importlib.import_module(submodule))["_log"]
+    assert module_logger is wedge._log
+    assert module_logger.name == PINNED_LOGGER_NAME
+
+
 # Every extracted submodule, plus the cycle-sensitive ``loop_health`` importer;
 # each must import cold in a fresh isolated interpreter.
 _COLD_IMPORTS = (
     "cw.doctor.loop_health",
     _CONSTANTS_MOD,
     _TASK_RUNNING,
+    _BLOCKED_ON_USER,
 )
 
 

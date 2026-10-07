@@ -5246,7 +5246,9 @@ class TestWedgeDeadSessionBlockedOnUser:
 
         daemon = FakeNativeDaemonClient()
         # surface_ref NOT added to live — it's dead
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client", lambda: daemon
+        )
 
         sess = self._make_session("dead-sess-1", surface_ref="s:dead.1")
         save_state(CwState(sessions=[sess]))
@@ -5275,7 +5277,9 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client", lambda: daemon
+        )
 
         save_state(CwState(sessions=[]))
         task = self._make_blocked_task("TST-590-B", session_id=None)
@@ -5302,7 +5306,9 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client", lambda: daemon
+        )
 
         save_state(CwState(sessions=[]))
         t1 = self._make_blocked_task(
@@ -5351,7 +5357,9 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client", lambda: daemon
+        )
 
         gate_dispositions = [
             "ambiguities_pending_resolution",
@@ -5398,7 +5406,9 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client", lambda: daemon
+        )
         save_state(CwState(sessions=[]))
         task = self._make_blocked_task(
             "TST-2114", session_id=None, disposition="dirty_worktree"
@@ -5433,7 +5443,9 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client", lambda: daemon
+        )
 
         save_state(CwState(sessions=[]))
         gated_oldest = self._make_blocked_task(
@@ -5472,7 +5484,9 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client", lambda: daemon
+        )
 
         save_state(CwState(sessions=[]))
         task = self._make_blocked_task(
@@ -5501,7 +5515,9 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client", lambda: daemon
+        )
 
         save_state(CwState(sessions=[]))
         oldest = self._make_blocked_task(
@@ -5536,7 +5552,9 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client", lambda: daemon
+        )
 
         save_state(CwState(sessions=[]))
         task = self._make_blocked_task("TST-912-C", session_id=None, pr_url=None)
@@ -5563,7 +5581,9 @@ class TestWedgeDeadSessionBlockedOnUser:
         daemon = FakeNativeDaemonClient()
         live_ref = "s:live.1"
         daemon._live.add(live_ref)  # surface IS in the live roster
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client", lambda: daemon
+        )
 
         sess = self._make_session("live-sess-d", surface_ref=live_ref)
         save_state(CwState(sessions=[sess]))
@@ -5698,7 +5718,9 @@ class TestWedgeDeadSessionBlockedOnUser:
 
         daemon = FakeNativeDaemonClient()
         # surface NOT in live
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client", lambda: daemon
+        )
         _stub_claude_version_ok(monkeypatch)
 
         sess = self._make_session("integ-sess", surface_ref="s:gone.1")
@@ -5727,7 +5749,9 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client", lambda: daemon
+        )
 
         sess = self._make_session("no-ref-sess", surface_ref=None)
         save_state(CwState(sessions=[sess]))
@@ -5759,7 +5783,9 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client", lambda: daemon
+        )
 
         save_state(CwState(sessions=[]))
         task = self._make_blocked_task(

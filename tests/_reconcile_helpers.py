@@ -292,6 +292,7 @@ def _install_fake_daemon_roster(
     daemon = FakeNativeDaemonClient()
     daemon._live.add(surface_ref)
     for target in (
+        "cw.doctor.wedge.blocked_on_user.get_native_daemon_client",
         "cw.doctor.wedge.get_native_daemon_client",
         "cw.doctor.loop_health.get_native_daemon_client",
         "cw.doctor.routed_result_wedge.get_native_daemon_client",
