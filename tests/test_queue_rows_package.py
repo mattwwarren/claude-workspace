@@ -44,6 +44,7 @@ _REVIEW_GATES = "cw.dispatch.review_gates"
 _PR_REFS = "cw.dispatch.routing.pr_refs"
 _PRODUCTIVITY = "cw.dispatch.productivity"
 _QUEUE_ROWS = "cw.queue_rows"
+_CLAIM_EVIDENCE = "cw.claim_evidence"
 
 # Owning module for every name #2613 moves, plus ``_stamp_spawn_success``,
 # which stays behind in ``claimed_row``. Each extraction commit edits only the
@@ -61,9 +62,9 @@ _OWNER: dict[str, str] = {
     "resolve_hold_finalize": _REVIEW_GATES,
     "_AUTOMERGE_NOT_ARMED_REASON": _PR_REFS,
     "_PRIOR_PIPELINE_PR_OPEN_REASON": _PR_REFS,
-    "ClaimEvidence": _PRODUCTIVITY,
-    "extract_claim_evidence": _PRODUCTIVITY,
-    "is_unproductive": _PRODUCTIVITY,
+    "ClaimEvidence": _CLAIM_EVIDENCE,
+    "extract_claim_evidence": _CLAIM_EVIDENCE,
+    "is_unproductive": _CLAIM_EVIDENCE,
 }
 
 # Module-level ``str``/``int`` constants: they carry no ``__module__``, so their
@@ -115,7 +116,7 @@ _SEAMS = (
 # The leaf modules created so far. Each extraction commit that creates a leaf
 # adds it here; every leaf must bind no logger and import cold without loading
 # any module of the dispatch/reconcile cycle.
-_LEAVES: tuple[str, ...] = (_QUEUE_ROWS,)
+_LEAVES: tuple[str, ...] = (_QUEUE_ROWS, _CLAIM_EVIDENCE)
 
 # Module prefixes a leaf's cold import must not load (the import cycle).
 _CYCLE_EXACT = ("cw.dispatch", "cw.executor")
