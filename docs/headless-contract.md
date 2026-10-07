@@ -33,6 +33,8 @@ Headless mode replaces every interactive `AskUserQuestion` call with the determi
 
 ## 2. Gate-Collapse Table
 
+<!-- Canonical #2625 marker: arm-automerge blocked by the auto-mode permission classifier -->
+
 All interactive gates in the pipeline collapse to one of: AUTO-SKIP, AUTO-CONTINUE, AUTO-CREATE, AUTO-APPROVE, or EXIT with a status code.
 
 | Stage / gate | Headless behavior |

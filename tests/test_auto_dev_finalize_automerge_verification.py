@@ -288,10 +288,20 @@ def test_headless_contract_documents_head_pin() -> None:
 # (variant (d) of ``automerge_not_armed``) instead of a generic or misleading
 # sentinel, without retrying, working around, or merging directly.
 
+_CANONICAL_MARKER_PREFIX = "<!-- Canonical #2625 marker: "
+
+
+def _canonical_denied_arm_marker() -> str:
+    content = _doc("headless-contract.md")
+    start = content.index(_CANONICAL_MARKER_PREFIX) + len(_CANONICAL_MARKER_PREFIX)
+    end = content.index(" -->", start)
+    return content[start:end]
+
+
 _DENIAL_PHRASE = (
     "Permission for this action was denied by the Claude Code auto mode classifier"
 )
-_DENIED_ARM_MARKER = "arm-automerge blocked by the auto-mode permission classifier"
+_DENIED_ARM_MARKER = _canonical_denied_arm_marker()
 _ARM_COMMAND = "prep_pr_finalize.py arm-automerge"
 _NOT_RETRIED = "not retried and not worked around"
 _OPERATOR_SHELL = "from an operator shell"
@@ -368,6 +378,21 @@ def test_sentinel_documents_classifier_denied_variant() -> None:
         '"reason": "tool_denied"',
     ):
         assert forbidden not in variant
+
+
+def test_denied_arm_marker_matches_the_canonical_contract() -> None:
+    assert (
+        _DENIED_ARM_MARKER
+        == "arm-automerge blocked by the auto-mode permission classifier"
+    )
+    sites = (
+        _cmd("auto-dev-finalize.md"),
+        _appendix("finalize"),
+        _cmd("auto-dev.md"),
+        _cmd("ship-it.md"),
+        _doc("headless-contract.md"),
+    )
+    assert all(_DENIED_ARM_MARKER in site for site in sites)
 
 
 def test_denied_variant_keeps_automerge_not_armed_reason_and_pr_info() -> None:
