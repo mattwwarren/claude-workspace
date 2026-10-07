@@ -52,6 +52,7 @@ from cw.review_findings import (
     ReviewerFindingsDocument,
     Severity,
 )
+from cw.spawn import SPAWN_POST_LAUNCH_FAILED_REASON
 from tests import _lock_invariants as lock_invariants
 
 if TYPE_CHECKING:
@@ -2103,6 +2104,58 @@ def sample_state(sample_client: ClientConfig) -> CwState:
 def mock_native_daemon() -> FakeNativeDaemonClient:
     """A FakeNativeDaemonClient for testing daemon-origin spawn and reconcile."""
     return FakeNativeDaemonClient()
+
+
+# The canonical SESSION_NEEDS_ATTENTION payload keys (docs/events.md), with
+# ``lane`` as the ninth.
+_CANONICAL_ATTENTION_KEYS: frozenset[str] = frozenset(
+    {
+        "session_id",
+        "session_name",
+        "client",
+        "ticket_id",
+        "claude_session_id",
+        "paused_status",
+        "breadcrumbs",
+        "crashed",
+        "lane",
+    }
+)
+
+
+@pytest.fixture
+def fail_state_write_after_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``cw.spawn``'s post-launch ``save_state`` raise ``OSError`` (#2502).
+
+    Opt-in. ``spawn_create_impl`` calls ``save_state`` only inside its
+    post-launch ``sessions_lock`` block, after ``daemon.spawn_bg`` returned, so
+    the raise lands with a live worker and no ``Session`` row.
+    """
+
+    def _raise(_state: object) -> None:
+        msg = "simulated sessions.json write failure"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.spawn.save_state", _raise)
+
+
+def post_launch_attention_payload(events: list[CapturedEvent]) -> dict[str, Any]:
+    """Return the one ``spawn_post_launch_failed`` page in *events* (#2502).
+
+    Asserts there is exactly one ``SESSION_NEEDS_ATTENTION``, that it carries
+    exactly the canonical nine keys, and that it is the post-launch page.
+    """
+    pages = [
+        payload
+        for etype, payload, _ in events
+        if etype == OrchestratorEventType.SESSION_NEEDS_ATTENTION
+    ]
+    assert len(pages) == 1, pages
+    payload = pages[0]
+    assert set(payload) == _CANONICAL_ATTENTION_KEYS
+    assert payload["paused_status"] == SPAWN_POST_LAUNCH_FAILED_REASON
+    assert payload["crashed"] is False
+    return payload
 
 
 @pytest.fixture

@@ -60,6 +60,8 @@ from cw.dispatch import (
     dispatch_tick,
     run_dispatch_loop,
 )
+from cw.dispatch.claim.codex_capability import _SpawnOutcome
+from cw.dispatch.claim.spawn import _handle_post_launch_failure
 from cw.dispatch.gating import _reconcile_usage_limited
 from cw.dispatch.loop import _run_stale_client_watchdog_guarded
 from cw.dispatch_state import (
@@ -118,6 +120,7 @@ from tests.conftest import (
     _vouch_for_roster_worker,
     git_in,
     occupy_worktree,
+    post_launch_attention_payload,
     tree_fingerprint,
 )
 
@@ -18277,6 +18280,452 @@ class TestLaneCircuitBreaker:
 
         assert result.spawned == 0
         assert len(loads) == 2
+
+
+# ---------------------------------------------------------------------------
+# #2502 — a spawn step that fails after the worker was launched
+# ---------------------------------------------------------------------------
+
+
+def _spy_spawn_outcomes(monkeypatch: pytest.MonkeyPatch) -> list[_SpawnOutcome]:
+    """Record every ``_SpawnOutcome`` the lane walk receives (#2502)."""
+    from cw.dispatch import lanes as lanes_mod
+
+    real = lanes_mod._spawn_claimed_task
+    outcomes: list[_SpawnOutcome] = []
+
+    def _spy(task: TicketTask, client: ClientConfig, **kwargs: object) -> _SpawnOutcome:
+        outcome = real(task, client, **kwargs)
+        outcomes.append(outcome)
+        return outcome
+
+    monkeypatch.setattr(lanes_mod, "_spawn_claimed_task", _spy)
+    return outcomes
+
+
+def _raise_oserror(*_args: object, **_kwargs: object) -> None:
+    msg = "dev_queue.json unwritable"
+    raise OSError(msg)
+
+
+class TestSpawnFailureClassification:
+    """#2502 (a): a failure before any worker exists keeps today's handling.
+
+    Pins the unchanged pre-launch path: the row reverts to PENDING with the
+    spawn-error backoff, and the lane breaker counts it.
+    """
+
+    @staticmethod
+    def _assert_backend_failure(outcomes: list[_SpawnOutcome]) -> None:
+        assert [o.spawn_error for o in outcomes] == [True]
+        row = load_dev_queue().tasks[0]
+        assert row.status == QueueItemStatus.PENDING
+        assert row.session_id is None
+        assert row.spawn_error_count == 1
+        assert _lane_override().consecutive_spawn_errors == 1
+
+    def test_launch_raise_is_a_backend_failure(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        write_clients_yaml(sample_client_config)
+        _seed_lane_override(0)
+        add_ticket(TicketTask(ticket_id="GEN-2502A1", client="test-client"))
+        outcomes = _spy_spawn_outcomes(monkeypatch)
+
+        dispatch_tick(
+            breaker_config, native_daemon=_RaisingNativeDaemon(RuntimeError("boom"))
+        )
+
+        self._assert_backend_failure(outcomes)
+
+    def test_unregistered_worker_is_a_backend_failure(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """SpawnUnregisteredError stays a backend failure (R4/R9 carve-out)."""
+        write_clients_yaml(sample_client_config)
+        _seed_lane_override(0)
+        add_ticket(TicketTask(ticket_id="GEN-2502A2", client="test-client"))
+        outcomes = _spy_spawn_outcomes(monkeypatch)
+        # Skip the 10 s default roster poll the executor path does not expose.
+        monkeypatch.setattr(
+            "cw.spawn.wait_for_roster_presence", lambda *_a, **_k: False
+        )
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_unregistered = True
+
+        dispatch_tick(breaker_config, native_daemon=daemon)
+
+        self._assert_backend_failure(outcomes)
+        assert daemon.stop_calls == []
+
+
+class TestPostLaunchSpawnFailure:
+    """#2502: once a worker exists, dispatch keeps the row and never re-spawns.
+
+    Every case starts the lane at 1 of a 2-error breaker, so a failure wrongly
+    counted as a backend error would trip it; a correctly handled one resets
+    the counter to 0.
+    """
+
+    _TICKET = "GEN-2502"
+
+    def _arrange(
+        self,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> tuple[list[_SpawnOutcome], list[CapturedEvent]]:
+        write_clients_yaml(client)
+        _seed_lane_override(1)
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+        pages = capture_events(
+            "cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        return _spy_spawn_outcomes(monkeypatch), pages
+
+    @staticmethod
+    def _assert_kept(
+        outcomes: list[_SpawnOutcome], daemon: FakeNativeDaemonClient
+    ) -> TicketTask:
+        assert len(outcomes) == 1
+        assert outcomes[0].spawned is True
+        assert outcomes[0].spawn_error is False
+        row = load_dev_queue().tasks[0]
+        assert row.status == QueueItemStatus.RUNNING
+        assert row.spawn_error_count == 0
+        assert row.next_eligible_at is None
+        override = _lane_override()
+        assert override.consecutive_spawn_errors == 0
+        assert override.paused is not True
+        assert len(daemon.spawn_calls) == 1
+        assert daemon.stop_calls == []
+        return row
+
+    def _assert_bound_with_one_dispatch_page(
+        self,
+        outcomes: list[_SpawnOutcome],
+        daemon: FakeNativeDaemonClient,
+        pages: list[CapturedEvent],
+    ) -> None:
+        row = self._assert_kept(outcomes, daemon)
+        (session,) = load_state().sessions
+        assert row.session_id == session.id
+        payload = post_launch_attention_payload(pages)
+        assert payload["session_id"] == session.id
+        assert payload["session_name"] == ""
+        assert payload["claude_session_id"] is None
+        assert payload["lane"] == "default"
+
+    def test_state_write_failure_keeps_row_bound(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+        caplog: pytest.LogCaptureFixture,
+        fail_state_write_after_launch: None,
+    ) -> None:
+        """(c1) Real spawn_create_impl, save_state failing after launch."""
+        outcomes, pages = self._arrange(
+            sample_client_config, monkeypatch, capture_events
+        )
+        daemon = FakeNativeDaemonClient()
+        caplog.set_level(logging.ERROR, logger="cw.dispatch")
+
+        result = dispatch_tick(breaker_config, native_daemon=daemon)
+
+        assert result.spawned == 1
+        row = self._assert_kept(outcomes, daemon)
+        assert row.ever_spawned is True
+        # Exactly one page: spawn_create_impl's; the dispatch handler adds none.
+        payload = post_launch_attention_payload(pages)
+        assert row.session_id == payload["session_id"]
+        assert payload["session_name"] == f"test-client/auto-dev/{self._TICKET}"
+        assert payload["lane"] == "default"
+        worktree = str(daemon.spawn_calls[0][0])
+        expected = ("test-client", self._TICKET, payload["session_id"], worktree)
+        assert any(
+            all(part in r.getMessage() for part in expected)
+            for r in caplog.records
+            if r.name == "cw.dispatch" and r.levelno == logging.ERROR
+        )
+
+    def test_page_write_failure_is_swallowed_and_logged(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+        caplog: pytest.LogCaptureFixture,
+        fail_state_write_after_launch: None,
+    ) -> None:
+        """(c1b) The page is best-effort (resolution 6): a failing ``record_event``
+        is swallowed and logged at ERROR, and the row stays RUNNING, spawned."""
+        outcomes, _pages = self._arrange(
+            sample_client_config, monkeypatch, capture_events
+        )
+
+        def _no_inbox(*_args: object, **_kwargs: object) -> None:
+            msg = "inbox unwritable"
+            raise OSError(msg)
+
+        # After _arrange, so this replaces the capturing stub for the page.
+        monkeypatch.setattr("cw.spawn.record_event", _no_inbox)
+        daemon = FakeNativeDaemonClient()
+        caplog.set_level(logging.ERROR, logger="cw.spawn")
+
+        result = dispatch_tick(breaker_config, native_daemon=daemon)
+
+        assert result.spawned == 1
+        self._assert_kept(outcomes, daemon)
+        assert any(
+            "spawn_post_launch_failed" in r.getMessage()
+            and r.name == "cw.spawn"
+            and r.levelno == logging.ERROR
+            and r.exc_info is not None
+            for r in caplog.records
+        )
+
+    def test_stamp_failure_keeps_row_running_unbound(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """(c2) The stamp fails on both attempts: RUNNING, unbound, paged."""
+        outcomes, pages = self._arrange(
+            sample_client_config, monkeypatch, capture_events
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.claim.spawn._stamp_spawn_success", _raise_oserror
+        )
+        daemon = FakeNativeDaemonClient()
+
+        result = dispatch_tick(breaker_config, native_daemon=daemon)
+
+        assert result.spawned == 1
+        row = self._assert_kept(outcomes, daemon)
+        assert row.session_id is None
+        assert outcomes[0].error == "dev_queue.json unwritable"
+        (session,) = load_state().sessions
+        payload = post_launch_attention_payload(pages)
+        assert payload["session_id"] == session.id
+        assert payload["session_name"] == ""
+        assert payload["claude_session_id"] is None
+        assert payload["lane"] == "default"
+
+    def test_stamp_retry_binds_row(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """(c2b) The stamp fails once; the handler's one retry binds the row."""
+        from cw.dispatch.claim import spawn as claim_spawn
+
+        outcomes, pages = self._arrange(
+            sample_client_config, monkeypatch, capture_events
+        )
+        real_stamp = claim_spawn._stamp_spawn_success
+        attempts: list[str] = []
+
+        def _flaky(task: TicketTask, **kwargs: object) -> None:
+            attempts.append(task.ticket_id)
+            if len(attempts) == 1:
+                _raise_oserror()
+            real_stamp(task, **kwargs)
+
+        monkeypatch.setattr(claim_spawn, "_stamp_spawn_success", _flaky)
+        daemon = FakeNativeDaemonClient()
+
+        dispatch_tick(breaker_config, native_daemon=daemon)
+
+        assert attempts == [self._TICKET, self._TICKET]
+        self._assert_bound_with_one_dispatch_page(outcomes, daemon, pages)
+
+    def test_spawned_event_failure_keeps_row(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """(c3) record_event(SESSION_SPAWNED) raising after the stamp."""
+        outcomes, pages = self._arrange(
+            sample_client_config, monkeypatch, capture_events
+        )
+
+        def _no_spawned_event(
+            etype: OrchestratorEventType,
+            payload: dict[str, object] | None = None,
+            *,
+            correlation_id: str | None = None,
+        ) -> None:
+            if etype == OrchestratorEventType.SESSION_SPAWNED:
+                _raise_oserror()
+            record_event(etype, payload, correlation_id=correlation_id)
+
+        monkeypatch.setattr("cw.dispatch.claim.spawn.record_event", _no_spawned_event)
+        daemon = FakeNativeDaemonClient()
+
+        assert dispatch_tick(breaker_config, native_daemon=daemon).spawned == 1
+
+        self._assert_bound_with_one_dispatch_page(outcomes, daemon, pages)
+
+    def test_console_emit_failure_keeps_row(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """(c4) The operator console ``emit`` raising on the SPAWN line."""
+        outcomes, pages = self._arrange(
+            sample_client_config, monkeypatch, capture_events
+        )
+
+        def _emit(line: str) -> None:
+            if line.startswith("SPAWN "):
+                msg = "console closed"
+                raise RuntimeError(msg)
+
+        daemon = FakeNativeDaemonClient()
+
+        assert (
+            dispatch_tick(breaker_config, native_daemon=daemon, emit=_emit).spawned == 1
+        )
+
+        self._assert_bound_with_one_dispatch_page(outcomes, daemon, pages)
+
+    @pytest.mark.parametrize("failure", ["state_write", "stamp"])
+    def test_later_ticks_never_respawn(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+        request: pytest.FixtureRequest,
+        failure: str,
+    ) -> None:
+        """(d) Two later ticks, an hour apart, leave one worker and no revert.
+
+        Each tick runs reconcile first, wired to the same fake roster with
+        ``reap_policy: auto`` (the destructive setting), so a reconcile path
+        that reverted a RUNNING row bound to an unrecorded session, or one
+        left unbound, would show up as a second spawn. ``stop_calls`` is not
+        asserted: the leaked-worker sweep may stop an unrecorded worker.
+        """
+        from freezegun import freeze_time
+
+        from cw.models import ReapPolicy
+
+        self._arrange(sample_client_config, monkeypatch, capture_events)
+        if failure == "state_write":
+            request.getfixturevalue("fail_state_write_after_launch")
+        else:
+            monkeypatch.setattr(
+                "cw.dispatch.claim.spawn._stamp_spawn_success", _raise_oserror
+            )
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [
+                {"sessionId": sid}
+                for sid in {"decoy000", *daemon.list_live_session_short_ids()}
+            ],
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
+            lambda *_a, **_k: (False, True),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.core.load_orchestrator_config",
+            lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+        )
+
+        statuses: list[QueueItemStatus] = []
+        with freeze_time(datetime.now(UTC)) as frozen:
+            for _ in range(3):
+                dispatch_tick(breaker_config, native_daemon=daemon)
+                statuses.append(load_dev_queue().tasks[0].status)
+                frozen.tick(timedelta(hours=1))
+
+        assert len(daemon.spawn_calls) == 1
+        assert statuses == [QueueItemStatus.RUNNING] * 3
+
+    def test_handler_without_worktree_skips_stamp_and_pages(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """No worktree path (unreachable in production): page, skip stamp."""
+        pages = capture_events(
+            "cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        stamps: list[object] = []
+        monkeypatch.setattr(
+            "cw.dispatch.claim.spawn._stamp_spawn_success",
+            lambda *a, **_k: stamps.append(a),
+        )
+        task = TicketTask(ticket_id=self._TICKET, client="test-client", lane="fast")
+
+        outcome = _handle_post_launch_failure(
+            task,
+            sample_client_config,
+            RuntimeError("late"),
+            session_id="sess-9",
+            worktree_path=None,
+        )
+
+        assert outcome == _SpawnOutcome(spawned=True, error="late")
+        assert stamps == []
+        payload = post_launch_attention_payload(pages)
+        assert payload["session_id"] == "sess-9"
+        assert payload["lane"] == "fast"
+
+    def test_stamp_retry_value_error_cannot_suppress_page(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+        tmp_path: Path,
+    ) -> None:
+        """A corrupt queue file cannot suppress the page or abort dispatch."""
+        pages = capture_events(
+            "cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+
+        def _corrupt_queue(*_args: object, **_kwargs: object) -> None:
+            msg = "dev_queue.json is not valid JSON"
+            raise ValueError(msg)
+
+        monkeypatch.setattr(
+            "cw.dispatch.claim.spawn._stamp_spawn_success", _corrupt_queue
+        )
+        task = TicketTask(ticket_id=self._TICKET, client="test-client")
+
+        with pytest.raises(ValueError, match=r"dev_queue\.json is not valid JSON"):
+            _handle_post_launch_failure(
+                task,
+                sample_client_config,
+                OSError("first stamp failed"),
+                session_id="sess-9",
+                worktree_path=tmp_path,
+            )
+
+        assert post_launch_attention_payload(pages)["session_id"] == "sess-9"
 
 
 # ---------------------------------------------------------------------------

@@ -39,7 +39,12 @@ from cw.models.enums import StageIdentifier
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import fix_dispatch, reconcile
 from tests._reconcile_helpers import _make_pending_fix_dispatch
-from tests.conftest import _make_daemon_session, _make_ticket_task, git_in
+from tests.conftest import (
+    _make_daemon_session,
+    _make_ticket_task,
+    git_in,
+    post_launch_attention_payload,
+)
 from tests.test_reconcile_review_recipes import (
     _make_fix_client,
     _seed_origin,
@@ -49,6 +54,8 @@ from tests.test_reconcile_review_recipes import (
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from tests.conftest import CapturedEvent
 
 _TICKET = "2017"
 _CLIENT = "acme"
@@ -989,6 +996,116 @@ def test_run_fix_dispatch_no_candidates_is_a_noop(
 
     assert fix_dispatch.run_fix_dispatch(config=OrchestratorConfig()) == []
     assert stub_dispatch.calls == []
+
+
+# --- post-launch spawn failure (#2502) ----------------------------------------
+
+
+def _seed_fix_handoff_after_failed_session_write(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A RUNNING row with a fix handoff whose spawn will launch a real worker.
+
+    The caller opts into ``fail_state_write_after_launch``, so the worker
+    starts and only its ``sessions.json`` write fails.
+    """
+    client = _make_fix_client(make_git_repo, tmp_path)
+    _seed_origin(client, "dev/2502")
+    monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
+    monkeypatch.setattr(
+        fix_dispatch, "load_effective_clients", lambda: {_CLIENT: client}
+    )
+    task = _make_ticket_task(
+        ticket_id="2502", client=_CLIENT, status=QueueItemStatus.RUNNING
+    )
+    task.pending_fix_dispatch = _pending(label="fix-2502")
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+
+def test_post_launch_failure_records_fix_session_and_pages(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    capture_events: Callable[..., list[CapturedEvent]],
+    caplog: pytest.LogCaptureFixture,
+    fail_state_write_after_launch: None,
+) -> None:
+    """(e) A launched fix worker is recorded on the row and paged, never
+    reported as a failed dispatch (no handoff clear, no STAGE_ERRORED)."""
+    pages = capture_events("cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+    _seed_fix_handoff_after_failed_session_write(
+        make_git_repo, tmp_path, mock_native_daemon, monkeypatch
+    )
+
+    with caplog.at_level(logging.WARNING, logger="cw.reconcile.fix_dispatch"):
+        reconcile()
+
+    payload = post_launch_attention_payload(pages)
+    updated = _only_task()
+    assert updated.pending_fix_dispatch is None
+    assert updated.fix_dispatch_session_id == payload["session_id"]
+    assert updated.status == QueueItemStatus.RUNNING
+    assert read_events(event_types=[OrchestratorEventType.STAGE_ERRORED]) == []
+    assert mock_native_daemon.stop_calls == []
+    assert any(
+        "fix_dispatch_worker_launched" in r.getMessage()
+        and r.levelno == logging.WARNING
+        for r in caplog.records
+    )
+
+
+def test_unrecorded_fix_worker_is_stopped_before_its_row_unparks(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    fail_state_write_after_launch: None,
+) -> None:
+    """#2502 note 4: pins the ordering that bounds the double-worker window.
+
+    The row now names a fix session ``sessions.json`` never received, so the
+    next reconcile treats it as finished and unparks the row for a fresh
+    REVIEW round. With a readable roster, that same reconcile stops the
+    unrecorded worker first: the leaked-worker stop is drained after the
+    sessions lock releases, before ``run_fix_dispatch`` runs. The window stays
+    open when the roster is unreadable or the stop fails; this test does not
+    cover those cases.
+    """
+    _seed_fix_handoff_after_failed_session_write(
+        make_git_repo, tmp_path, mock_native_daemon, monkeypatch
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", lambda: mock_native_daemon
+    )
+    order: list[str] = []
+    real_stop = mock_native_daemon.stop
+    real_unpark = fix_dispatch._act_on_fix_dispatch_completions
+
+    def _stop(short_id: str) -> None:
+        order.append(f"stop {short_id}")
+        real_stop(short_id)
+
+    def _unpark(candidates: list[Any]) -> list[str]:
+        unparked = real_unpark(candidates)
+        order.extend(f"unpark {ticket_id}" for ticket_id in unparked)
+        return unparked
+
+    monkeypatch.setattr(mock_native_daemon, "stop", _stop)
+    monkeypatch.setattr(fix_dispatch, "_act_on_fix_dispatch_completions", _unpark)
+
+    reconcile()
+    assert order == []
+    reconcile()
+
+    assert order == ["stop 00000001", "unpark 2502"]
+    assert _only_task().status == QueueItemStatus.PENDING
+    assert len(mock_native_daemon.spawn_calls) == 1
 
 
 # --- sessions_lock integration (#2064) ---------------------------------------

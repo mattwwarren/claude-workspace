@@ -90,7 +90,12 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.events import record_event
-from cw.exceptions import CwError, HookContextConflictError, RemoteRefUnresolvedError
+from cw.exceptions import (
+    CwError,
+    HookContextConflictError,
+    RemoteRefUnresolvedError,
+    WorkerLaunchedError,
+)
 from cw.models import (
     TERMINAL_SESSION_STATUSES,
     OrchestratorEventType,
@@ -816,6 +821,17 @@ def _act_on_pending_fix_dispatches(
             )
             _park_for_unresolved_ref(job, exc)
             continue
+        except WorkerLaunchedError as exc:
+            # Must precede the broad CwError clause below (#2502): the fix
+            # worker is live and spawn_create_impl already paged, so record
+            # its session like a success instead of clearing the handoff.
+            _log.warning(
+                "fix_dispatch_worker_launched ticket=%s session=%s",
+                job.ticket_id,
+                exc.session_id,
+                exc_info=True,
+            )
+            session_id = exc.session_id
         except CwError as exc:
             _log.warning("fix_dispatch_failed ticket=%s", job.ticket_id, exc_info=True)
             _stamp_dispatch_failure(job, exc)

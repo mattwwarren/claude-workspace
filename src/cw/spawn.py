@@ -10,6 +10,7 @@ import subprocess
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from cw._text import redact
 from cw.atomic import atomic_write_text
 from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
 from cw.config import (
@@ -23,6 +24,7 @@ from cw.exceptions import (
     CwError,
     HookContextConflictError,
     SpawnUnregisteredError,
+    WorkerLaunchedError,
     WorktreeError,
 )
 from cw.models import (
@@ -153,6 +155,69 @@ _ROSTER_POLL_INTERVAL_SECS: float = 1.0
 _ROSTER_POLL_TIMEOUT_SECS: float = 10.0
 _SPAWN_FAIL_REASON_UNREGISTERED = "spawn_unregistered"
 
+# ``paused_status`` of the session.needs_attention page for a worker that was
+# launched before a later spawn step failed (#2502). Deliberately not in
+# BREADCRUMB_ELIGIBLE_PAUSED_STATUSES: no session row carries it.
+SPAWN_POST_LAUNCH_FAILED_REASON = "spawn_post_launch_failed"
+
+# Characters of the failure text that page's breadcrumb keeps before "…" —
+# the same cap as dispatch.tick's ``last_error``.
+_POST_LAUNCH_ERROR_MAX_CHARS = 500
+
+
+def emit_spawn_post_launch_attention(
+    *,
+    session_id: str,
+    session_name: str,
+    client: str,
+    ticket_id: str | None,
+    lane: str | None,
+    claude_session_id: str | None,
+    surface_ref: str | None,
+    error: str,
+) -> None:
+    """Page the operator: a worker is live but a later spawn step failed (#2502).
+
+    The one emitter for both raise sites, :func:`spawn_create_impl` and the
+    dispatch claim path's post-launch handler, so the page has one shape: the
+    canonical nine-field ``SESSION_NEEDS_ATTENTION`` payload. ``breadcrumbs``
+    names the live session (and surface, when known) followed by *error*
+    collapsed to one line, redacted, then truncated (redact first, so a secret
+    straddling the cap cannot survive as a fragment).
+
+    Best effort: a failed event write is logged and swallowed, so the page can
+    never replace the failure it reports. Call it with no lock held.
+    """
+    detail = redact(" ".join(error.split()))
+    if len(detail) > _POST_LAUNCH_ERROR_MAX_CHARS:
+        detail = detail[:_POST_LAUNCH_ERROR_MAX_CHARS] + "…"
+    surface = f", surface {surface_ref}" if surface_ref is not None else ""
+    try:
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": session_id,
+                "session_name": session_name,
+                "client": client,
+                "ticket_id": ticket_id,
+                "claude_session_id": claude_session_id,
+                "paused_status": SPAWN_POST_LAUNCH_FAILED_REASON,
+                "breadcrumbs": (
+                    f"worker live (session {session_id}{surface}): {detail}"
+                ),
+                "crashed": False,
+                "lane": lane,
+            },
+            correlation_id=ticket_id,
+        )
+    except (CwError, OSError):
+        _log.exception(
+            "spawn_post_launch_failed: could not record the operator page for"
+            " live session %s (ticket=%s)",
+            session_id,
+            ticket_id,
+        )
+
 
 # Why: this function's completeness for a given (client, ticket_id) depends
 # entirely on session_retention.prune_sessions()'s dev-queue exemption
@@ -278,6 +343,54 @@ def _verify_roster_registration(
         "The supervisor likely did not adopt the worker; treat spawn as failed."
     )
     raise SpawnUnregisteredError(msg)
+
+
+def _record_launched_session(
+    sess: Session,
+    short_id: str,
+    *,
+    daemon: NativeDaemonClient,
+    parent: str | None,
+    ticket_id: str | None,
+    roster_poll_timeout: float,
+    roster_poll_interval: float,
+) -> None:
+    """Verify, enrich and persist *sess* for a worker that is already live.
+
+    The post-launch half of :func:`spawn_create_impl` (#2502): every statement
+    here runs after ``daemon.spawn_bg`` returned *short_id*, so a raise leaves a
+    live worker behind. The caller turns any raise except
+    :class:`~cw.exceptions.SpawnUnregisteredError` into
+    :class:`~cw.exceptions.WorkerLaunchedError`.
+    """
+    _verify_roster_registration(
+        daemon,
+        short_id,
+        ticket_id,
+        timeout=roster_poll_timeout,
+        interval=roster_poll_interval,
+    )
+
+    csid = _csid_from_transcript(sess)
+    if csid is not None:
+        sess.claude_session_id = csid
+
+    with sessions_lock():
+        state = load_state()
+        if parent is not None:
+            parent_session = find_session_by_id(parent, state=state)
+            if parent_session is None:
+                msg = f"Parent session not found: {parent}"
+                raise CwError(msg)
+            sess.parent_session_id = parent_session.id
+            # An archive-resolved parent is not in state.sessions, so
+            # mutating its worker_session_ids here would never be persisted
+            # by this save_state() call — skip the reverse link rather than
+            # silently no-op it (#2149).
+            if any(s.id == parent_session.id for s in state.sessions):
+                parent_session.worker_session_ids.append(sess.id)
+        state.sessions.append(sess)
+        save_state(state)
 
 
 def _validate_worktree(path: Path) -> None:
@@ -772,6 +885,13 @@ def spawn_create_impl(
     actually adopted. Raises :class:`~cw.exceptions.SpawnUnregisteredError`
     if the short id never appears within *_roster_poll_timeout* seconds.
     The underscore-prefixed poll parameters are injectable for testing only.
+
+    Any other failure after ``daemon.spawn_bg`` returned (the transcript
+    lookup, the parent lookup, the ``sessions.json`` write) leaves a live
+    worker, so it is logged, paged once as ``session.needs_attention`` with
+    ``paused_status: spawn_post_launch_failed`` (after the sessions lock has
+    released), and raised as :class:`~cw.exceptions.WorkerLaunchedError`
+    chained to the cause (#2502). The worker is not stopped here.
     """
     _validate_worktree(worktree)
 
@@ -830,38 +950,49 @@ def spawn_create_impl(
         client.worker_model, explicit=permission_mode
     )
 
-    sess.surface_ref = daemon.spawn_bg(
+    short_id = daemon.spawn_bg(
         cwd=worktree,
         prompt=prompt,
         extra_args=final_extra or None,
         permission_mode=effective_permission_mode,
     )
-    _verify_roster_registration(
-        daemon,
-        sess.surface_ref,
-        ticket_id,
-        timeout=_roster_poll_timeout,
-        interval=_roster_poll_interval,
-    )
-
-    csid = _csid_from_transcript(sess)
-    if csid is not None:
-        sess.claude_session_id = csid
-
-    with sessions_lock():
-        state = load_state()
-        if parent is not None:
-            parent_session = find_session_by_id(parent, state=state)
-            if parent_session is None:
-                msg = f"Parent session not found: {parent}"
-                raise CwError(msg)
-            sess.parent_session_id = parent_session.id
-            # An archive-resolved parent is not in state.sessions, so
-            # mutating its worker_session_ids here would never be persisted
-            # by this save_state() call — skip the reverse link rather than
-            # silently no-op it (#2149).
-            if any(s.id == parent_session.id for s in state.sessions):
-                parent_session.worker_session_ids.append(sess.id)
-        state.sessions.append(sess)
-        save_state(state)
+    sess.surface_ref = short_id
+    # The worker is live from here on (#2502).
+    try:
+        _record_launched_session(
+            sess,
+            short_id,
+            daemon=daemon,
+            parent=parent,
+            ticket_id=ticket_id,
+            roster_poll_timeout=_roster_poll_timeout,
+            roster_poll_interval=_roster_poll_interval,
+        )
+    except SpawnUnregisteredError:
+        raise
+    except Exception as exc:
+        _log.exception(
+            "spawn_post_launch_failed: worker %s (session %s) is live but a"
+            " later spawn step failed (ticket=%s)",
+            short_id,
+            sess.id,
+            ticket_id,
+        )
+        emit_spawn_post_launch_attention(
+            session_id=sess.id,
+            session_name=sess.name,
+            client=client.name,
+            ticket_id=ticket_id,
+            lane=sess.lane,
+            claude_session_id=sess.claude_session_id,
+            surface_ref=short_id,
+            error=str(exc),
+        )
+        msg = (
+            f"Spawned worker {short_id!r} (session {sess.id}) is live, but a"
+            f" later spawn step failed: {exc}. Do not spawn it again."
+        )
+        raise WorkerLaunchedError(
+            msg, session_id=sess.id, surface_ref=short_id
+        ) from exc
     return sess.id

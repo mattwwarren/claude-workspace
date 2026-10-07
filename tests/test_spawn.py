@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, get_args
@@ -10,11 +11,12 @@ from typing import TYPE_CHECKING, Any, cast, get_args
 import pytest
 from click.testing import CliRunner
 
+from cw._lock_guard import held_locks
 from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION, Status
 from cw.cli import main
 from cw.codex_review import CODEX_REVIEW_UNPARSEABLE
 from cw.config import load_state, orchestrator_config_file, save_state
-from cw.exceptions import CwError
+from cw.exceptions import CwError, SpawnUnregisteredError, WorkerLaunchedError
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     MUST_FIX_OVERRIDE_KEY,
@@ -24,6 +26,7 @@ from cw.models import (
     CompletionReason,
     CwState,
     MustFixOverride,
+    OrchestratorEventType,
     Session,
     SessionOrigin,
     SessionPurpose,
@@ -32,18 +35,29 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from cw.spawn import _stop_hook_command, build_disallowed_tools_arg
+from cw.spawn import (
+    _stop_hook_command,
+    build_disallowed_tools_arg,
+    emit_spawn_post_launch_attention,
+    spawn_create_impl,
+)
 from tests.conftest import (
     _make_daemon_session,
     _make_ticket_task,
     _seed_completed_session,
     _seed_daemon_session,
+    post_launch_attention_payload,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cw.native_daemon import NativeDaemonClient
+    from tests.conftest import CapturedEvent
+
+# The post-launch page's breadcrumb keeps this many characters of the error
+# before appending "…" (#2502), the same cap as dispatch.tick's last_error.
+_BREADCRUMB_DETAIL_MAX = 500
 
 
 # ---------------------------------------------------------------------------
@@ -2695,6 +2709,46 @@ class TestSpawnCLI:
         assert "Closed session" in result.output
         assert daemon.stop_calls == ["deadbeef"]
 
+    def test_spawn_post_launch_failure_surfaces_as_cli_error(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+        fail_state_write_after_launch: None,
+    ) -> None:
+        """(f) #2502: WorkerLaunchedError is a CwError, so handle_errors turns
+        it into an ``Error:`` line naming the live session and short id."""
+        events = capture_events(
+            "cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        _write_test_client_yaml(tmp_config_dir, tmp_path)
+        monkeypatch.setattr(
+            "cw.spawn.get_native_daemon_client", lambda: mock_native_daemon
+        )
+        worktree = make_git_repo("wt-2502-cli")
+
+        result = CliRunner().invoke(
+            main,
+            [
+                "spawn",
+                "--client",
+                "test-client",
+                "--worktree",
+                str(worktree),
+                "--prompt-file",
+                str(_make_prompt_file(tmp_path)),
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert result.output.startswith("Error:")
+        assert post_launch_attention_payload(events)["session_id"] in result.output
+        assert "00000001" in result.output
+        assert mock_native_daemon.stop_calls == []
+
 
 class TestSpawnCloseRequeue:
     """Tests for `cw spawn close --requeue` (#1889)."""
@@ -4640,8 +4694,248 @@ class TestRosterRegistrationVerification:
         assert issubclass(SpawnUnregisteredError, CwError)
 
 
-# ---------------------------------------------------------------------------
-# Tests for #838: prior_attempts_summary populated on retry
+class TestSpawnCreateImplPostLaunchFailure:
+    """#2502: a step that fails after ``daemon.spawn_bg`` returned.
+
+    The worker is live by then, so ``spawn_create_impl`` must say so with
+    :class:`WorkerLaunchedError` (never a plain error a caller would retry),
+    page the operator once, and leave the worker alone: the leaked-worker sweep
+    owns stopping a worker that no session names.
+    """
+
+    @staticmethod
+    def _spawn(
+        tmp_path: Path,
+        worktree: Path,
+        daemon: FakeNativeDaemonClient,
+        *,
+        roster_poll_timeout: float = 1.0,
+    ) -> str:
+        return spawn_create_impl(
+            client=_make_client(tmp_path),
+            worktree=worktree,
+            prompt="/auto-dev 2502 --headless",
+            label="auto-dev-2502",
+            native_daemon=daemon,
+            ticket_id="2502",
+            lane="fast",
+            _roster_poll_timeout=roster_poll_timeout,
+        )
+
+    def test_state_write_failure_raises_worker_launched_and_pages(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        mock_native_daemon: FakeNativeDaemonClient,
+        capture_events: Callable[..., list[CapturedEvent]],
+        fail_state_write_after_launch: None,
+    ) -> None:
+        """(b) save_state raising after launch: typed error, one page, no stop."""
+        events = capture_events(
+            "cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+
+        with pytest.raises(WorkerLaunchedError) as excinfo:
+            self._spawn(tmp_path, make_git_repo("wt-2502-state"), mock_native_daemon)
+
+        err = excinfo.value
+        assert err.surface_ref == "00000001"
+        assert isinstance(err.__cause__, OSError)
+        assert "simulated sessions.json write failure" in str(err)
+        assert err.session_id in str(err)
+        assert mock_native_daemon.stop_calls == []
+        assert load_state().sessions == []
+        payload = post_launch_attention_payload(events)
+        assert payload["session_id"] == err.session_id
+        assert payload["session_name"] == "test-client/auto-dev-2502"
+        assert payload["client"] == "test-client"
+        assert payload["ticket_id"] == "2502"
+        assert payload["lane"] == "fast"
+        assert payload["claude_session_id"] is None
+        assert err.session_id in payload["breadcrumbs"]
+        assert "00000001" in payload["breadcrumbs"]
+
+    def test_csid_failure_raises_worker_launched(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        mock_native_daemon: FakeNativeDaemonClient,
+        capture_events: Callable[..., list[CapturedEvent]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A transcript-lookup failure after launch is post-launch too."""
+        events = capture_events(
+            "cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+
+        def _boom(_sess: object) -> None:
+            msg = "transcript unreadable"
+            raise CwError(msg)
+
+        monkeypatch.setattr("cw.spawn._csid_from_transcript", _boom)
+
+        with pytest.raises(WorkerLaunchedError, match="transcript unreadable") as exc:
+            self._spawn(tmp_path, make_git_repo("wt-2502-csid"), mock_native_daemon)
+
+        assert exc.value.surface_ref == "00000001"
+        assert mock_native_daemon.stop_calls == []
+        assert (
+            post_launch_attention_payload(events)["session_id"] == exc.value.session_id
+        )
+
+    def test_parent_vanished_after_launch_raises_worker_launched(
+        self,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+        mock_native_daemon: FakeNativeDaemonClient,
+        capture_events: Callable[..., list[CapturedEvent]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The parent passing the pre-launch check but gone by the state write
+        is post-launch: the worker is already running."""
+        events = capture_events(
+            "cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="parent01")
+        real_spawn_bg = mock_native_daemon.spawn_bg
+
+        def _drop_parent_on_launch(**kwargs: Any) -> str:
+            save_state(CwState(sessions=[]))
+            return real_spawn_bg(**kwargs)
+
+        monkeypatch.setattr(mock_native_daemon, "spawn_bg", _drop_parent_on_launch)
+
+        with pytest.raises(WorkerLaunchedError, match="Parent session not found"):
+            spawn_create_impl(
+                client=_make_client(tmp_path, name="child-client"),
+                worktree=make_git_repo("wt-2502-parent"),
+                prompt="/auto-dev 2502 --headless",
+                label="auto-dev-2502",
+                native_daemon=mock_native_daemon,
+                parent="parent01",
+            )
+
+        assert mock_native_daemon.stop_calls == []
+        assert load_state().sessions == []
+        assert post_launch_attention_payload(events)["ticket_id"] is None
+
+    def test_unregistered_worker_still_raises_spawn_unregistered(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        mock_native_daemon: FakeNativeDaemonClient,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """SpawnUnregisteredError keeps its backend-failure meaning (R4/R9)."""
+        events = capture_events(
+            "cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        mock_native_daemon.raise_unregistered = True
+
+        with pytest.raises(SpawnUnregisteredError) as excinfo:
+            self._spawn(
+                tmp_path,
+                make_git_repo("wt-2502-unreg"),
+                mock_native_daemon,
+                roster_poll_timeout=0.0,
+            )
+
+        assert not isinstance(excinfo.value, WorkerLaunchedError)
+        assert events == []
+        assert mock_native_daemon.stop_calls == []
+
+    def test_page_failure_keeps_worker_launched_error(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        fail_state_write_after_launch: None,
+    ) -> None:
+        """A failed page write is logged and never replaces the original error."""
+
+        def _no_inbox(*_args: object, **_kwargs: object) -> None:
+            msg = "inbox unwritable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.spawn.record_event", _no_inbox)
+
+        with (
+            caplog.at_level(logging.ERROR, logger="cw.spawn"),
+            pytest.raises(WorkerLaunchedError),
+        ):
+            self._spawn(tmp_path, make_git_repo("wt-2502-page"), mock_native_daemon)
+
+        assert any(
+            "spawn_post_launch_failed" in r.getMessage()
+            and r.levelno == logging.ERROR
+            and r.exc_info is not None
+            for r in caplog.records
+        )
+
+    def test_page_emitted_with_no_lock_held(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+        fail_state_write_after_launch: None,
+    ) -> None:
+        """The page is written after sessions_lock released (ADR-0019)."""
+        held_at_emit: list[tuple[object, ...]] = []
+
+        def _record(*_args: object, **_kwargs: object) -> None:
+            held_at_emit.append(held_locks())
+
+        monkeypatch.setattr("cw.spawn.record_event", _record)
+
+        with pytest.raises(WorkerLaunchedError):
+            self._spawn(tmp_path, make_git_repo("wt-2502-lock"), mock_native_daemon)
+
+        assert held_at_emit == [()]
+
+    @pytest.mark.parametrize(
+        ("surface_ref", "prefix"),
+        [
+            ("00000001", "worker live (session sess-1, surface 00000001): "),
+            (None, "worker live (session sess-1): "),
+        ],
+    )
+    def test_breadcrumbs_redacted_single_line_and_truncated(
+        self,
+        capture_events: Callable[..., list[CapturedEvent]],
+        surface_ref: str | None,
+        prefix: str,
+    ) -> None:
+        """The breadcrumb names the live session; the error is made safe."""
+        events = capture_events("cw.spawn")
+        error = "first line\nsecond Bearer abc123 " + "y" * 600
+
+        emit_spawn_post_launch_attention(
+            session_id="sess-1",
+            session_name="",
+            client="test-client",
+            ticket_id="2502",
+            lane=None,
+            claude_session_id=None,
+            surface_ref=surface_ref,
+            error=error,
+        )
+
+        payload = post_launch_attention_payload(events)
+        crumbs = payload["breadcrumbs"]
+        assert crumbs.startswith(prefix)
+        detail = crumbs.removeprefix(prefix)
+        assert "\n" not in crumbs
+        assert "abc123" not in crumbs
+        assert detail.startswith("first line second <redacted>")
+        assert len(detail) == _BREADCRUMB_DETAIL_MAX + 1
+        assert detail.endswith("…")
+        assert events[0][2] == "2502"
+
+
 # ---------------------------------------------------------------------------
 
 

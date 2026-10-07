@@ -43,6 +43,7 @@ from cw.exceptions import (
     CwLockReentrancyError,
     HookContextConflictError,
     RemoteRefUnresolvedError,
+    WorkerLaunchedError,
     WorktreeOccupiedError,
 )
 from cw.models import (
@@ -1035,6 +1036,40 @@ def test_action_failure_emits_pr_action_failed(
     assert after_task2.address_review_fired_at is not None
     assert after_task1.model_copy(update={"address_review_fired_at": None}) == task1
     assert after_task2.model_copy(update={"address_review_fired_at": None}) == task2
+
+
+def test_launched_worker_is_not_a_failed_action(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#2502 (e): a WorkerLaunchedError means the /address-review worker is
+    live, so the job counts as acted and no PR_ACTION_FAILED is emitted."""
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
+    task = _cr_task(ticket_id="GEN-2502", worktree_path=make_git_repo("launched"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    def _launched_then_failed(**_kwargs: Any) -> None:
+        msg = "sessions.json write failed after launch"
+        raise WorkerLaunchedError(msg, session_id="sess-2502", surface_ref="00000001")
+
+    stub_spawn.side_effect = _launched_then_failed
+
+    with caplog.at_level("WARNING", logger="cw.reconcile.review_recipes"):
+        acted = act_then_dispatch(
+            _act_address_review,
+            _dispatch_address_review_jobs,
+            [_candidate_for(task)],
+            clients=load_effective_clients(),
+        )
+
+    assert acted == ["GEN-2502"]
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+    assert any(
+        "review_recipe_worker_launched" in r.getMessage() and r.levelname == "WARNING"
+        for r in caplog.records
+    )
 
 
 def test_unparseable_pr_url_emits_pr_action_failed(
