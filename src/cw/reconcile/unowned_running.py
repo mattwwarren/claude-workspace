@@ -41,23 +41,21 @@ adopted.
 Runs from ``cw.reconcile.core._run_terminal_backstops_and_sweeps``, under
 ``reconcile()``'s ``sessions_lock``, before the TIMED_OUT backstop. It reads
 state and the queue fresh, nests ``dev_queue_lock`` for each bind (ADR-0019
-order), persists a durable audit outbox marker before each bind, and drains
-that marker after releasing the queue lock. A failed queue write leaves the
-row available for the next tick; a failed audit write leaves the marker for a
-later reconcile tick, so a durable bind is never silently unaudited.
+order), persists each bind before releasing the queue lock, and then records
+the ``task.session_adopted`` audit event. A failed queue write leaves the row
+available for the next tick; a failed audit write leaves the durable bind in
+place without claiming that the event was recorded.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from collections import Counter
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from cw._hook_context import _read_cw_context
-from cw.atomic import atomic_write_text
-from cw.config import events_dir, load_state
+from cw.config import load_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import CwError
@@ -67,7 +65,6 @@ from cw.worktree import worktree_path_for
 
 if TYPE_CHECKING:
     from datetime import datetime
-    from pathlib import Path
 
     from cw.models import (
         ClientConfig,
@@ -78,7 +75,6 @@ if TYPE_CHECKING:
     )
 
 _log = logging.getLogger(__name__)
-_ADOPTION_OUTBOX_NAME = "task-session-adopted.outbox.json"
 
 
 @dataclass(frozen=True)
@@ -292,84 +288,11 @@ def _still_adoptable(
     )
 
 
-def _emit_adoption_record(record: dict[str, object]) -> None:
-    """Record one validated adoption outbox entry."""
+def _emit_adopted(candidate: UnownedCandidate) -> None:
+    """Record the audit event after the corresponding bind is persisted."""
     payload: dict[str, object] = {
-        "client": record["client"],
-        "ticket_id": record["ticket_id"],
-        "lane": record["lane"],
-        "session_id": record["session_id"],
-        "session_name": record["session_name"],
-        "attempt": record["attempt"],
-        "claimed_at": record["claimed_at"],
-    }
-    record_event(
-        OrchestratorEventType.TASK_SESSION_ADOPTED,
-        payload,
-        correlation_id=cast("str", record["ticket_id"]),
-    )
-
-
-def _adoption_outbox_path() -> Path:
-    return events_dir() / _ADOPTION_OUTBOX_NAME
-
-
-def _read_adoption_outbox() -> list[dict[str, object]]:
-    path = _adoption_outbox_path()
-    if not path.exists():
-        return []
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, list) or not all(isinstance(entry, dict) for entry in raw):
-        message = "task.session_adopted outbox is not a list of records"
-        raise CwError(message)
-    entries = [cast("dict[str, object]", entry) for entry in raw]
-    required = {
-        "client",
-        "ticket_id",
-        "created_at",
-        "lane",
-        "session_id",
-        "session_name",
-        "attempt",
-        "claimed_at",
-    }
-    if any(
-        not required.issubset(entry)
-        or any(
-            not isinstance(entry[key], str)
-            for key in required - {"attempt", "claimed_at"}
-        )
-        or type(entry["attempt"]) is not int
-        or not (entry["claimed_at"] is None or isinstance(entry["claimed_at"], str))
-        for entry in entries
-    ):
-        message = "task.session_adopted outbox contains an invalid record"
-        raise CwError(message)
-    return entries
-
-
-def _write_adoption_outbox(entries: list[dict[str, object]]) -> None:
-    path = _adoption_outbox_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, json.dumps(entries, sort_keys=True) + "\n")
-
-
-def _outbox_key(record: dict[str, object]) -> tuple[object, ...]:
-    return (
-        record.get("client"),
-        record.get("ticket_id"),
-        record.get("created_at"),
-        record.get("session_id"),
-        record.get("attempt"),
-        record.get("claimed_at"),
-    )
-
-
-def _adoption_record(candidate: UnownedCandidate) -> dict[str, object]:
-    return {
         "client": candidate.client,
         "ticket_id": candidate.ticket_id,
-        "created_at": candidate.created_at.isoformat(),
         "lane": candidate.lane,
         "session_id": candidate.session_id,
         "session_name": candidate.session_name,
@@ -380,91 +303,17 @@ def _adoption_record(candidate: UnownedCandidate) -> dict[str, object]:
             else None
         ),
     }
-
-
-def _stage_adoption(candidate: UnownedCandidate) -> None:
-    """Write the durable marker before the queue bind is allowed."""
-    record = _adoption_record(candidate)
-    entries = _read_adoption_outbox()
-    if not any(_outbox_key(entry) == _outbox_key(record) for entry in entries):
-        entries.append(record)
-        _write_adoption_outbox(entries)
-
-
-def _remove_adoption_record(record: dict[str, object]) -> None:
-    entries = _read_adoption_outbox()
-    remaining = [
-        entry for entry in entries if _outbox_key(entry) != _outbox_key(record)
-    ]
-    if len(remaining) != len(entries):
-        _write_adoption_outbox(remaining)
-
-
-def _drain_adoption_outbox() -> None:
-    """Emit staged adoption events whose binds are present, retaining failures."""
-    try:
-        entries = _read_adoption_outbox()
-    except (CwError, OSError, ValueError):
-        _log.exception("unowned_running: adoption outbox could not be read")
-        return
-    if not entries:
-        return
-    with dev_queue_lock():
-        store = load_dev_queue()
-        ready: list[dict[str, object]] = []
-        stale: list[dict[str, object]] = []
-        for entry in entries:
-            row = next(
-                (
-                    task
-                    for task in store.tasks
-                    if task.client == entry.get("client")
-                    and task.ticket_id == entry.get("ticket_id")
-                    and task.created_at.isoformat() == entry.get("created_at")
-                ),
-                None,
-            )
-            if row is None:
-                stale.append(entry)
-            elif row.status is QueueItemStatus.RUNNING and row.session_id == entry.get(
-                "session_id"
-            ):
-                ready.append(entry)
-            else:
-                stale.append(entry)
-    for entry in stale:
-        try:
-            _remove_adoption_record(entry)
-        except (CwError, OSError, ValueError):
-            _log.exception(
-                "unowned_running: stale adoption outbox entry could not be removed"
-            )
-    for entry in ready:
-        try:
-            _emit_adoption_record(entry)
-            _remove_adoption_record(entry)
-        except (CwError, OSError, ValueError):
-            _log.exception(
-                "unowned_running: task.session_adopted remains queued for %s/%s",
-                entry.get("client"),
-                entry.get("ticket_id"),
-            )
+    record_event(
+        OrchestratorEventType.TASK_SESSION_ADOPTED,
+        payload,
+        correlation_id=candidate.ticket_id,
+    )
 
 
 def _act_adopt(candidate: UnownedCandidate) -> bool:
     """Bind the candidate's row to its session; return whether it was bound."""
     from cw.dispatch.claim import _apply_spawn_success_fields, _find_running_row
 
-    try:
-        _stage_adoption(candidate)
-    except (CwError, OSError, ValueError):
-        _log.exception(
-            "unowned_running: %s/%s adoption deferred because its audit "
-            "outbox was not persisted",
-            candidate.client,
-            candidate.ticket_id,
-        )
-        return False
     with dev_queue_lock():
         store = load_dev_queue()
         row = _find_running_row(
@@ -474,12 +323,6 @@ def _act_adopt(candidate: UnownedCandidate) -> bool:
             created_at=candidate.created_at,
         )
         if row is None or not _still_adoptable(store, row, candidate):
-            try:
-                _remove_adoption_record(_adoption_record(candidate))
-            except (CwError, OSError, ValueError):
-                _log.exception(
-                    "unowned_running: stale adoption outbox entry could not be removed"
-                )
             return False
         try:
             _apply_spawn_success_fields(row, session_id=candidate.session_id)
@@ -492,7 +335,15 @@ def _act_adopt(candidate: UnownedCandidate) -> bool:
                 candidate.ticket_id,
             )
             return False
-    _drain_adoption_outbox()
+    try:
+        _emit_adopted(candidate)
+    except (CwError, OSError):
+        _log.exception(
+            "unowned_running: %s/%s bind persisted but the "
+            "task.session_adopted event was not recorded",
+            candidate.client,
+            candidate.ticket_id,
+        )
     _log.info(
         "unowned_running: adopted %s/%s onto session %s (attempt %d)",
         candidate.client,
@@ -508,7 +359,6 @@ def run_unowned_running_recovery(*, clients: dict[str, ClientConfig]) -> list[st
 
     Returns the adopted ticket ids. *clients* is the tick's client scope.
     """
-    _drain_adoption_outbox()
     if not clients:
         return []
     candidates = detect_unowned_running(load_dev_queue(), load_state(), clients)
