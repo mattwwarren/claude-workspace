@@ -294,6 +294,7 @@ def _install_fake_daemon_roster(
     for target in (
         "cw.doctor.wedge.blocked_on_user.get_native_daemon_client",
         "cw.doctor.wedge.session_liveness.get_native_daemon_client",
+        "cw.doctor.wedge.orphans.get_native_daemon_client",
         "cw.doctor.wedge.get_native_daemon_client",
         "cw.doctor.loop_health.get_native_daemon_client",
         "cw.doctor.routed_result_wedge.get_native_daemon_client",

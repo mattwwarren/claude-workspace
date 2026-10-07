@@ -8057,6 +8057,9 @@ class TestWedgeLeakedDaemonWorker:
         branch (``cw.doctor.wedge.get_native_daemon_client``) and the
         unconditional reconcile-pass sweep ``--reap`` also triggers via
         ``_check_reconcile`` (``cw.reconcile._deps.get_native_daemon_client``)."""
+        monkeypatch.setattr(
+            "cw.doctor.wedge.orphans.get_native_daemon_client", lambda: daemon
+        )
         monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
         monkeypatch.setattr(
             "cw.reconcile._deps.get_native_daemon_client", lambda: daemon

@@ -35,6 +35,7 @@ _CONSTANTS_MOD = f"{_PKG}._constants"
 _TASK_RUNNING = f"{_PKG}.task_running"
 _BLOCKED_ON_USER = f"{_PKG}.blocked_on_user"
 _SESSION_LIVENESS = f"{_PKG}.session_liveness"
+_ORPHANS = f"{_PKG}.orphans"
 
 # The nine module-level constants the flat module bound at top level.
 _CONSTANTS = {
@@ -108,11 +109,11 @@ EXPECTED_OWNER: dict[str, str] = {
     "_daemon_supervisor_alive": _SESSION_LIVENESS,
     "_check_wedge_active_no_daemon_entry": _SESSION_LIVENESS,
     "_check_wedge_active_daemon_stale_no_sentinel": _SESSION_LIVENESS,
-    "_resolve_backend_for_orphan_check": _PKG,
-    "_is_null_liveness_candidate": _PKG,
-    "_null_liveness_orphan_recipe": _PKG,
-    "_check_wedge_active_null_liveness_orphan": _PKG,
-    "_check_wedge_leaked_daemon_worker": _PKG,
+    "_resolve_backend_for_orphan_check": _ORPHANS,
+    "_is_null_liveness_candidate": _ORPHANS,
+    "_null_liveness_orphan_recipe": _ORPHANS,
+    "_check_wedge_active_null_liveness_orphan": _ORPHANS,
+    "_check_wedge_leaked_daemon_worker": _ORPHANS,
     "_REAP_CHECK_NAME": _PKG,
     "_reap_daemon_sessions": _PKG,
     "_reap_timeout_check": _PKG,
@@ -267,7 +268,7 @@ PATCH_OWNERSHIP = [
         "get_native_daemon_client",
         _SESSION_LIVENESS,
     ),
-    ("_check_wedge_leaked_daemon_worker", "get_native_daemon_client", _PKG),
+    ("_check_wedge_leaked_daemon_worker", "get_native_daemon_client", _ORPHANS),
     ("_reap_sessions_and_sweep", "get_native_daemon_client", _PKG),
     ("_daemon_supervisor_alive", "_ROSTER_PATH", _SESSION_LIVENESS),
     (
@@ -396,6 +397,7 @@ _COLD_IMPORTS = (
     _TASK_RUNNING,
     _BLOCKED_ON_USER,
     _SESSION_LIVENESS,
+    _ORPHANS,
 )
 
 
