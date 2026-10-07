@@ -12,12 +12,15 @@ the row alone.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
+from cw.cli import main
 from cw.config import load_state, save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.models import (
@@ -63,6 +66,7 @@ _SID = "sess-2591"
 _CLAIM = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
 # A naive timestamp, as a legacy or hand-edited state file can carry.
 _NAIVE_START = (_CLAIM + timedelta(hours=1)).replace(tzinfo=None)
+_EVENTS_DOC = Path(__file__).resolve().parents[1] / "docs" / "events.md"
 _MODULE = "cw.reconcile.unowned_running"
 
 
@@ -829,3 +833,52 @@ class TestNoOpAndInvariants:
 
         assert ran == ["revert_timed_out_tasks"]
         assert _row().session_id is None
+
+
+def _events_section(heading: str) -> str:
+    text = _EVENTS_DOC.read_text(encoding="utf-8")
+    start = text.index(f"### `{heading}`")
+    end = text.find("\n### ", start + 1)
+    return text[start : end if end != -1 else len(text)]
+
+
+class TestEventDocumented:
+    def test_session_adopted_section_lists_every_payload_key(self) -> None:
+        section = _events_section(OrchestratorEventType.TASK_SESSION_ADOPTED.value)
+
+        for key in (
+            "client",
+            "ticket_id",
+            "lane",
+            "session_id",
+            "session_name",
+            "attempt",
+            "claimed_at",
+        ):
+            assert f"`{key}`" in section
+
+
+class TestDocsNameValidCommands:
+    """The rewritten ``spawn_post_launch_failed`` bullet names real commands."""
+
+    @staticmethod
+    def _bullet() -> str:
+        text = _EVENTS_DOC.read_text(encoding="utf-8")
+        start = text.index('- `"spawn_post_launch_failed"`')
+        return text[start : text.index('\n- `"', start + 1)]
+
+    def test_bullet_names_cancel_then_requeue_from_cancelled(self) -> None:
+        bullet = " ".join(self._bullet().split())
+
+        assert "`task.session_adopted`" in bullet
+        assert "`cw dev-queue cancel <ticket> -c <client>`" in bullet
+        assert "`cw dev-queue requeue <ticket> -c <client> --from-cancelled`" in bullet
+        assert not re.search(r"`cw dev-queue requeue <ticket> -c <client>`", bullet)
+
+    @pytest.mark.parametrize("command", ["cancel", "requeue"])
+    def test_named_commands_exist(self, command: str) -> None:
+        result = CliRunner().invoke(main, ["dev-queue", command, "--help"])
+
+        assert result.exit_code == 0, result.output
+        if command == "requeue":
+            assert "--from-cancelled" in result.output
