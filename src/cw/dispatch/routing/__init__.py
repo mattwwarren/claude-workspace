@@ -109,9 +109,7 @@ from cw.dispatch.review_gates import (
 )
 from cw.dispatch.routing.cost import _accumulate_task_cost
 from cw.dispatch.routing.pr_refs import (
-    _AUTOMERGE_NOT_ARMED_REASON,
     _BLOCKING_PR_NUMBER_RE,
-    _PRIOR_PIPELINE_PR_OPEN_REASON,
     _extract_blocked_on_pr,
 )
 from cw.dispatch.routing.scope_tier import (
@@ -134,6 +132,10 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     Stage,
+)
+from cw.queue_rows import (
+    _AUTOMERGE_NOT_ARMED_REASON,
+    _PRIOR_PIPELINE_PR_OPEN_REASON,
 )
 from cw.reconcile.fix_dispatch import FIX_LOOP_PENDING_DISPATCH
 from cw.unavailability import FAMILY_PROVIDER_OVERLOAD

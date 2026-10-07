@@ -3,9 +3,10 @@
 Extracted from the flat ``dispatch/routing.py`` by #1728. Two Rule 5 blocker
 reasons name another PR that this ticket's fate depends on, and neither is
 carried in a structured sentinel field -- the producer only ever writes them
-into ``blocker.details`` prose. This module owns the reason literals and the
-regex that reads them back out. ``reconcile/tasks.py`` reaches both constants
-through the package facade via its documented deferred import.
+into ``blocker.details`` prose. This module owns the regex that reads them
+back out. The two reason literals themselves moved to the ``cw.queue_rows``
+leaf (#2613) so ``reconcile/tasks.py`` can import them at module scope; the
+routing package ``__init__`` imports them from there.
 
 Imports ``re`` and nothing else: no back-dependency on ``routing/__init__.py``,
 and no ``record_event``/``_stage_regress``/``_stage_advance_unchecked`` call,
@@ -16,18 +17,6 @@ which is why it was safe to move out (see the package ``__init__``'s
 from __future__ import annotations
 
 import re
-
-# Rule 5 blocker.reason literals the routing table reason-keys on directly
-# (GitHub #1713). Deliberately local literals, not an import of
-# cw.auto_dev_result.parse.BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN: that
-# constant is the *parser's* BlockedResult reason code (a synthetic result for
-# a sentinel the parser itself could not extract), a different producer/
-# context from the routing table's read of a well-formed AutoDevResult's
-# blocker.reason -- textually identical value, deliberately separate constant,
-# same precedent as dev_queue.lifecycle._SALVAGE_NO_SENTINEL_DISPOSITION vs.
-# reconcile._shared._NEEDS_SALVAGE_REASON.
-_AUTOMERGE_NOT_ARMED_REASON = "automerge_not_armed"
-_PRIOR_PIPELINE_PR_OPEN_REASON = "prior_pipeline_pr_open"
 
 # Matches "PR #<N>" in a prior_pipeline_pr_open blocker.details string (see
 # .claude/commands/auto-dev-finalize.md's template: "PR #<number>

@@ -10,8 +10,10 @@ at module scope from either side.
 Holds the locked mutators for one already-claimed RUNNING dev-queue row (the
 #2219 identity re-find :func:`_find_running_row`, the revert-to-PENDING and
 park-BLOCKED_ON_USER transitions, and the in-memory spawn-success field
-writes) and the pure fix-dispatch-hold / backstop-exempt predicates a
-non-sentinel revert consults. Every body was moved verbatim from its
+writes), the pure fix-dispatch-hold / backstop-exempt predicates a
+non-sentinel revert consults, the proactive finalize-hold policy resolver
+(:func:`resolve_hold_finalize`), and the two Rule 5 blocker-reason literals
+reconcile's gate-task predicates match. Every body was moved verbatim from its
 historical ``cw.dispatch`` home, which still re-exports it; docstrings keep
 their original wording.
 """
@@ -19,7 +21,7 @@ their original wording.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from cw.dev_queue import (
     dev_queue_lock,
@@ -31,13 +33,30 @@ from cw.events import record_event
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
 
 if TYPE_CHECKING:
-    from cw.models import DevQueueStore, TicketTask
+    from cw.models import (
+        ClientConfig,
+        DevQueueStore,
+        OrchestratorConfig,
+        TicketTask,
+    )
 
 
 _SPAWN_ERROR_BACKOFF_INITIAL_SECONDS: int = 2
 
 
 _SPAWN_ERROR_BACKOFF_CAP_SECONDS: int = 300
+
+# Rule 5 blocker.reason literals the routing table reason-keys on directly
+# (GitHub #1713). Deliberately local literals, not an import of
+# cw.auto_dev_result.parse.BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN: that
+# constant is the *parser's* BlockedResult reason code (a synthetic result for
+# a sentinel the parser itself could not extract), a different producer/
+# context from the routing table's read of a well-formed AutoDevResult's
+# blocker.reason -- textually identical value, deliberately separate constant,
+# same precedent as dev_queue.lifecycle._SALVAGE_NO_SENTINEL_DISPOSITION vs.
+# reconcile._shared._NEEDS_SALVAGE_REASON.
+_AUTOMERGE_NOT_ARMED_REASON = "automerge_not_armed"
+_PRIOR_PIPELINE_PR_OPEN_REASON = "prior_pipeline_pr_open"
 
 
 def _find_running_row(
@@ -418,3 +437,33 @@ def _is_backstop_exempt(task: TicketTask) -> bool:
     of dispatching the fix session.
     """
     return task.usage_limit_act is not None or _is_fix_dispatch_held(task)
+
+
+def resolve_hold_finalize(
+    task: TicketTask,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
+) -> Literal["manual"] | None:
+    """Resolve the effective proactive finalize-hold policy for *task*.
+
+    Precedence (highest to lowest), mirroring ``resolve_signoff`` above:
+      1. ``TicketTask.hold_finalize`` -- per-ticket override (``cw dev-queue
+         add --hold-finalize``).
+      2. ``LaneConfig.finalize_gate`` in the task's client config.
+      3. ``OrchestratorConfig.default_finalize_gate`` -- global default;
+         ``"auto"`` resolves to ``None`` (no hold).
+
+    A task whose client is absent from *clients*, or whose lane name is not
+    declared in that client's lanes, falls through to the global default --
+    identical fall-through semantics to ``resolve_signoff``. See GitHub #1160
+    (RFC 0011 A3).
+    """
+    if task.hold_finalize is not None:
+        return task.hold_finalize
+    client_cfg = clients.get(task.client)
+    if client_cfg is not None:
+        for lane_cfg in client_cfg.effective_lanes:
+            if lane_cfg.name == task.lane and lane_cfg.finalize_gate is not None:
+                return lane_cfg.finalize_gate
+    default = config.default_finalize_gate
+    return default if default != "auto" else None

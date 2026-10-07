@@ -142,7 +142,6 @@ from cw.dispatch.review_gates import (
     _should_gate_for_review_staleness,
     _should_gate_for_scope_hint,
     _should_gate_for_signoff,
-    resolve_hold_finalize,
     resolve_signoff,
 )
 from cw.dispatch.routing import (
@@ -178,6 +177,7 @@ from cw.dispatch.tick import (
     _sweep_expired_diagnostics,
     dispatch_tick,
 )
+from cw.queue_rows import resolve_hold_finalize
 
 __all__ = [
     "BREADCRUMB_ELIGIBLE_PAUSED_STATUSES",

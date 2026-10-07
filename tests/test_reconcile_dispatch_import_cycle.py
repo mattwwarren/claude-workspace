@@ -75,12 +75,6 @@ _DEFERRED_DISPATCH_IMPORTS: Counter[_ImportKey] = Counter(
             ("_park_running_task_blocked_on_user",),
         ): 1,
         (
-            "src/cw/reconcile/gate_recipes.py",
-            "_finalize_hold_armed",
-            "cw.dispatch.review_gates",
-            ("resolve_hold_finalize",),
-        ): 1,
-        (
             "src/cw/reconcile/local.py",
             "_requeue_codex_harvest_orphan",
             "cw.dispatch.claim",
@@ -214,7 +208,6 @@ _RECONCILE_PLC0415_KEYS = frozenset(
         "src/cw/reconcile/tasks.py",
         "src/cw/reconcile/phantom/_mutations.py",
         "src/cw/reconcile/stalled/_mutations.py",
-        "src/cw/reconcile/gate_recipes.py",
         "src/cw/reconcile/codex_boot.py",
         "src/cw/reconcile/fix_dispatch.py",
         "src/cw/reconcile/local.py",

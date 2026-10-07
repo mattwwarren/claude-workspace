@@ -40,8 +40,6 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 _CLAIMED_ROW = "cw.dispatch.claim.claimed_row"
-_REVIEW_GATES = "cw.dispatch.review_gates"
-_PR_REFS = "cw.dispatch.routing.pr_refs"
 _PRODUCTIVITY = "cw.dispatch.productivity"
 _QUEUE_ROWS = "cw.queue_rows"
 _CLAIM_EVIDENCE = "cw.claim_evidence"
@@ -59,9 +57,9 @@ _OWNER: dict[str, str] = {
     "_stamp_spawn_success": _CLAIMED_ROW,
     "_is_fix_dispatch_held": _QUEUE_ROWS,
     "_is_backstop_exempt": _QUEUE_ROWS,
-    "resolve_hold_finalize": _REVIEW_GATES,
-    "_AUTOMERGE_NOT_ARMED_REASON": _PR_REFS,
-    "_PRIOR_PIPELINE_PR_OPEN_REASON": _PR_REFS,
+    "resolve_hold_finalize": _QUEUE_ROWS,
+    "_AUTOMERGE_NOT_ARMED_REASON": _QUEUE_ROWS,
+    "_PRIOR_PIPELINE_PR_OPEN_REASON": _QUEUE_ROWS,
     "ClaimEvidence": _CLAIM_EVIDENCE,
     "extract_claim_evidence": _CLAIM_EVIDENCE,
     "is_unproductive": _CLAIM_EVIDENCE,
