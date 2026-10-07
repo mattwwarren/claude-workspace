@@ -453,7 +453,10 @@ def _spawn_complete_impl(
             **({"ticket_id": effective_ticket_id} if effective_ticket_id else {}),
         }
 
-        with dev_queue_lock():
+        # bounded=True (#2501): taken before the event is recorded or the queue
+        # written, so a timeout is a clean retry. It holds sessions_lock while
+        # it waits (each bounded lock waits up to the timeout on its own).
+        with dev_queue_lock(bounded=True):
             store = load_dev_queue()
 
             # Guard: queue task already COMPLETED (inside lock — authoritative)
