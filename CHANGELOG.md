@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The codex orphan clean check no longer runs `git` under `sessions_lock` (#2563).** The reconcile tick's live-writer re-park sweep, the local harvest sweep's codex branch and `cw codex migrate-legacy` ran `git status --porcelain` and `git rev-parse` per candidate inside the lock. `reconcile()` and the legacy recovery now capture both results per candidate before taking the lock (within a 60 s budget) and only read them under it, with no subprocess. A candidate with no probe, a probe for a changed worktree or baseline, or one older than 120 s is left untouched and retried next tick (the legacy recovery reports it unresolved as `clean_probe_unavailable`); a probe that captured a git error still parks as `git_error`. The serve-boot pass is unchanged. `cw.reconcile.codex_boot` leaves the lock-invariant allowlist. `CodexHarvestOutcome` gains `PROBE_UNAVAILABLE`.
+
 ## [1.67.2] - 2026-10-07
 
 ### Fixed
