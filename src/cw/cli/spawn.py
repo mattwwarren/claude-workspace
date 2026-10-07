@@ -32,6 +32,7 @@ from cw.exceptions import CwError, RequeueStateError
 from cw.models import (
     ClientConfig,
     CompletionReason,
+    OrchestratorEvent,
     OrchestratorEventType,
     QueueItemStatus,
     SessionOrigin,
@@ -121,8 +122,10 @@ def _spawn_close_impl(
     skipped — the multiplexer adapter has been removed. Separated from
     the Click command so tests can inject the daemon client directly.
     """
-    # Why not mutate_state: daemon.stop() network call inside the lock window
-    # (criterion 1: no subprocess/network in lock).
+    surface_to_stop: str | None = None
+    # Why not mutate_state: cancel_task_for_session / _route_staged_emit_result
+    # take dev_queue_lock inside the sessions_lock window (criterion 2: no
+    # dual-lock).
     # bounded=True (#2491): operator recovery command with no side effect
     # before the lock, so a held lock must fail fast, not hang the recovery.
     with sessions_lock(bounded=True):
@@ -141,34 +144,40 @@ def _spawn_close_impl(
             # close outright, so a second `cw spawn close` genuinely clears the
             # leak rather than erroring on the very case it exists to fix.
             if sess.surface_ref is not None and sess.origin is SessionOrigin.DAEMON:
-                daemon = native_daemon or get_native_daemon_client()
-                daemon.stop(sess.surface_ref)
-            return
+                surface_to_stop = sess.surface_ref
+        else:
+            if sess.surface_ref is not None:
+                if sess.origin is SessionOrigin.DAEMON:
+                    surface_to_stop = sess.surface_ref
+                else:
+                    logging.getLogger(__name__).warning(
+                        "Session %s has legacy surface_ref %r; skipping surface close",
+                        sess.id,
+                        sess.surface_ref,
+                    )
 
-        if sess.surface_ref is not None:
-            if sess.origin is SessionOrigin.DAEMON:
-                daemon = native_daemon or get_native_daemon_client()
-                daemon.stop(sess.surface_ref)
-            else:
-                logging.getLogger(__name__).warning(
-                    "Session %s has legacy surface_ref %r; skipping surface close",
-                    sess.id,
-                    sess.surface_ref,
-                )
+            # For DAEMON sessions, atomically cancel any RUNNING TicketTask that
+            # owns this session so revert_completed_silent_tasks cannot revert it
+            # to PENDING and the dispatcher cannot re-spawn the same ticket in
+            # the same tick. (See GitHub issue #317.) A worker that already
+            # emitted its result has that result routed first instead (#2458) --
+            # cancelling would throw away validated work and force a manual
+            # `requeue --from-cancelled`.
+            if sess.origin is SessionOrigin.DAEMON and not _route_staged_emit_result(
+                sess
+            ):
+                cancel_task_for_session(sess.id)
 
-        # For DAEMON sessions, atomically cancel any RUNNING TicketTask that owns
-        # this session so revert_completed_silent_tasks cannot revert it to PENDING
-        # and the dispatcher cannot re-spawn the same ticket in the same tick.
-        # (See GitHub issue #317.) A worker that already emitted its result has
-        # that result routed first instead (#2458) -- cancelling would throw
-        # away validated work and force a manual `requeue --from-cancelled`.
-        if sess.origin is SessionOrigin.DAEMON and not _route_staged_emit_result(sess):
-            cancel_task_for_session(sess.id)
+            sess.status = SessionStatus.COMPLETED
+            sess.completed_at = datetime.now(UTC)
+            sess.completed_reason = CompletionReason.USER
+            save_state(state)
 
-        sess.status = SessionStatus.COMPLETED
-        sess.completed_at = datetime.now(UTC)
-        sess.completed_reason = CompletionReason.USER
-        save_state(state)
+    # daemon.stop is best-effort and slow (up to 10s), so it runs after the lock
+    # releases (#2547, mirrors signal_stop / done_session). A raise leaves the
+    # state already stamped; a repeat close retries just the stop (#2480).
+    if surface_to_stop is not None:
+        (native_daemon or get_native_daemon_client()).stop(surface_to_stop)
 
 
 def _spawn_close_requeue_impl(
@@ -409,6 +418,7 @@ def _spawn_complete_impl(
     Separated from the Click command so tests can inject the daemon client
     directly.
     """
+    event: OrchestratorEvent | None = None
     # Why not mutate_state: dev_queue_lock nested inside the sessions_lock
     # window (criterion 2: no dual-lock).
     # bounded=True (#2491): operator recovery command; the lock is taken before
@@ -427,72 +437,59 @@ def _spawn_complete_impl(
                     " Use --force to no-op."
                 )
                 raise CwError(msg)
-            # #2480: same leak this function's own post-lock stop call closes
-            # for the normal completion path (below) -- a --force no-op on an
-            # already-completed session must still clear a lingering daemon
-            # surface, or the ticket's worktree stays reported occupied
-            # forever. Stopped here (under the lock, unlike the post-lock call
-            # below) rather than restructuring this early-return path to defer
-            # it: mirrors the already-established stop-under-lock precedent in
-            # _spawn_close_impl above, and NativeDaemonClient.stop() is
-            # itself a bounded (10s timeout), best-effort, swallow-failures
-            # call, not the kind of unbounded network op the lock-discipline
-            # comment on the main path below is guarding against.
-            if sess.surface_ref is not None and sess.origin is SessionOrigin.DAEMON:
-                daemon = native_daemon or get_native_daemon_client()
-                daemon.stop(sess.surface_ref)
-            return
+            # --force no-op: falls through to the shared post-lock stop (#2480).
+        else:
+            effective_ticket_id = ticket_id or ticket_id_for_session(sess.name)
 
-        effective_ticket_id = ticket_id or ticket_id_for_session(sess.name)
+            payload: dict[str, object] = {
+                "session_id": sess.id,
+                "client": sess.client,
+                "crashed": False,
+                "status": status,
+                **({"ticket_id": effective_ticket_id} if effective_ticket_id else {}),
+            }
 
-        payload: dict[str, object] = {
-            "session_id": sess.id,
-            "client": sess.client,
-            "crashed": False,
-            "status": status,
-            **({"ticket_id": effective_ticket_id} if effective_ticket_id else {}),
-        }
+            # bounded=True (#2501): taken before the event is recorded or the
+            # queue written, so a timeout is a clean retry. It holds
+            # sessions_lock while it waits (each bounded lock waits up to the
+            # timeout on its own).
+            with dev_queue_lock(bounded=True):
+                store = load_dev_queue()
 
-        # bounded=True (#2501): taken before the event is recorded or the queue
-        # written, so a timeout is a clean retry. It holds sessions_lock while
-        # it waits (each bounded lock waits up to the timeout on its own).
-        with dev_queue_lock(bounded=True):
-            store = load_dev_queue()
+                # Guard: queue task already COMPLETED (inside lock — authoritative)
+                if effective_ticket_id:
+                    for task in store.tasks:
+                        if (
+                            task.ticket_id == effective_ticket_id
+                            and task.status == QueueItemStatus.COMPLETED
+                        ):
+                            already_done_task_msg = (
+                                f"Queue task for '{effective_ticket_id}'"
+                                " is already COMPLETED."
+                                " Use 'cw spawn close' to close the session only."
+                            )
+                            raise CwError(already_done_task_msg)
 
-            # Guard: queue task already COMPLETED (inside lock — authoritative)
-            if effective_ticket_id:
-                for task in store.tasks:
-                    if (
-                        task.ticket_id == effective_ticket_id
-                        and task.status == QueueItemStatus.COMPLETED
-                    ):
-                        already_done_task_msg = (
-                            f"Queue task for '{effective_ticket_id}'"
-                            " is already COMPLETED."
-                            " Use 'cw spawn close' to close the session only."
-                        )
-                        raise CwError(already_done_task_msg)
+                # Step 1: Record event (the leaf inbox lock nests here, ADR-0019)
+                event = record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
 
-            # Step 1: Record event (the leaf inbox lock nests here, ADR-0019)
-            event = record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
+                # Step 2: Apply to queue
+                _apply_events_to_store(store, [event], clients=load_effective_clients())
 
-            # Step 2: Apply to queue
-            _apply_events_to_store(store, [event], clients=load_effective_clients())
-
-            # Step 3: Close session state
-            sess.status = SessionStatus.COMPLETED
-            sess.completed_at = datetime.now(UTC)
-            if sess.completed_reason is None:
-                sess.completed_reason = CompletionReason.USER
-            save_state(state)
+                # Step 3: Close session state
+                sess.status = SessionStatus.COMPLETED
+                sess.completed_at = datetime.now(UTC)
+                if sess.completed_reason is None:
+                    sess.completed_reason = CompletionReason.USER
+                save_state(state)
 
     # Advance cursor after the lock (advance_cursor takes the leaf inbox lock)
-    advance_cursor(_DISPATCH_CONSUMER, event.id)
+    if event is not None:
+        advance_cursor(_DISPATCH_CONSUMER, event.id)
 
     # daemon.stop outside lock — best-effort, slow (up to 10s timeout)
-    daemon = native_daemon or get_native_daemon_client()
     if sess.surface_ref is not None and sess.origin is SessionOrigin.DAEMON:
-        daemon.stop(sess.surface_ref)
+        (native_daemon or get_native_daemon_client()).stop(sess.surface_ref)
 
 
 @spawn.command(name="complete")
