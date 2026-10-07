@@ -34,6 +34,7 @@ _PKG = "cw.doctor.wedge"
 _CONSTANTS_MOD = f"{_PKG}._constants"
 _TASK_RUNNING = f"{_PKG}.task_running"
 _BLOCKED_ON_USER = f"{_PKG}.blocked_on_user"
+_SESSION_LIVENESS = f"{_PKG}.session_liveness"
 
 # The nine module-level constants the flat module bound at top level.
 _CONSTANTS = {
@@ -104,9 +105,9 @@ EXPECTED_OWNER: dict[str, str] = {
     "_check_wedge_terminal_sibling_park": _BLOCKED_ON_USER,
     "_collapse_blocked_on_user_tasks": _BLOCKED_ON_USER,
     "_cancel_terminal_sibling_parks": _BLOCKED_ON_USER,
-    "_daemon_supervisor_alive": _PKG,
-    "_check_wedge_active_no_daemon_entry": _PKG,
-    "_check_wedge_active_daemon_stale_no_sentinel": _PKG,
+    "_daemon_supervisor_alive": _SESSION_LIVENESS,
+    "_check_wedge_active_no_daemon_entry": _SESSION_LIVENESS,
+    "_check_wedge_active_daemon_stale_no_sentinel": _SESSION_LIVENESS,
     "_resolve_backend_for_orphan_check": _PKG,
     "_is_null_liveness_candidate": _PKG,
     "_null_liveness_orphan_recipe": _PKG,
@@ -256,19 +257,23 @@ PATCH_OWNERSHIP = [
         "get_native_daemon_client",
         _BLOCKED_ON_USER,
     ),
-    ("_check_wedge_active_no_daemon_entry", "get_native_daemon_client", _PKG),
+    (
+        "_check_wedge_active_no_daemon_entry",
+        "get_native_daemon_client",
+        _SESSION_LIVENESS,
+    ),
     (
         "_check_wedge_active_daemon_stale_no_sentinel",
         "get_native_daemon_client",
-        _PKG,
+        _SESSION_LIVENESS,
     ),
     ("_check_wedge_leaked_daemon_worker", "get_native_daemon_client", _PKG),
     ("_reap_sessions_and_sweep", "get_native_daemon_client", _PKG),
-    ("_daemon_supervisor_alive", "_ROSTER_PATH", _PKG),
+    ("_daemon_supervisor_alive", "_ROSTER_PATH", _SESSION_LIVENESS),
     (
         "_check_wedge_active_daemon_stale_no_sentinel",
         "load_orchestrator_config",
-        _PKG,
+        _SESSION_LIVENESS,
     ),
     ("_reap_sessions_and_sweep", "reap_routed_result_findings", _PKG),
     ("_reap_daemon_sessions", "_reap_session_by_selector", _PKG),
@@ -390,6 +395,7 @@ _COLD_IMPORTS = (
     _CONSTANTS_MOD,
     _TASK_RUNNING,
     _BLOCKED_ON_USER,
+    _SESSION_LIVENESS,
 )
 
 

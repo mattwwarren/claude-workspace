@@ -994,7 +994,9 @@ class TestRunDoctor10Checks:
             roster_path.write_text(roster_content)
 
         monkeypatch.setattr("cw.doctor.versions._CLAUDE_SETTINGS_PATH", settings_path)
-        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness._ROSTER_PATH", roster_path
+        )
         monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         if fake_run is not None:
@@ -1020,7 +1022,9 @@ class TestRunDoctor10Checks:
         roster_path.write_text(json.dumps({"supervisorPid": 12345, "workers": {}}))
 
         monkeypatch.setattr("cw.doctor.versions._CLAUDE_SETTINGS_PATH", settings_path)
-        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness._ROSTER_PATH", roster_path
+        )
         monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
         monkeypatch.setattr("cw.doctor.versions._sp.run", _make_fake_run_version())
         monkeypatch.setattr("cw.doctor.versions.check_ssh_key_available", lambda: True)
@@ -6563,12 +6567,16 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness._ROSTER_PATH", roster_path
+        )
         monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
         # surface_ref NOT in live — phantom
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness.get_native_daemon_client", lambda: daemon
+        )
         monkeypatch.setattr(
             "cw.doctor.loop_health.get_native_daemon_client", lambda: daemon
         )
@@ -6611,11 +6619,15 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness._ROSTER_PATH", roster_path
+        )
         monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness.get_native_daemon_client", lambda: daemon
+        )
         monkeypatch.setattr(
             "cw.doctor.loop_health.get_native_daemon_client", lambda: daemon
         )
@@ -6647,11 +6659,15 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness._ROSTER_PATH", roster_path
+        )
         monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness.get_native_daemon_client", lambda: daemon
+        )
 
         sess = self._make_session("grace-sess-1", surface_ref="s:grace.1", old=False)
         save_state(CwState(sessions=[sess]))
@@ -6678,12 +6694,16 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness._ROSTER_PATH", roster_path
+        )
         monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
         daemon._live.add("s:live.1")
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness.get_native_daemon_client", lambda: daemon
+        )
 
         sess = self._make_session("live-sess-1", surface_ref="s:live.1")
         save_state(CwState(sessions=[sess]))
@@ -6710,11 +6730,15 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness._ROSTER_PATH", roster_path
+        )
         monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness.get_native_daemon_client", lambda: daemon
+        )
 
         sess = self._make_session(
             "orch-sess-1", surface_ref="s:orch.1", purpose_orchestrate=True
@@ -6749,11 +6773,15 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness._ROSTER_PATH", roster_path
+        )
         monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness.get_native_daemon_client", lambda: daemon
+        )
 
         sess = Session(
             id="no-ref-sess",
@@ -6791,11 +6819,15 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness._ROSTER_PATH", roster_path
+        )
         monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness.get_native_daemon_client", lambda: daemon
+        )
         monkeypatch.setattr(
             "cw.doctor.loop_health.get_native_daemon_client", lambda: daemon
         )
@@ -6830,11 +6862,15 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness._ROSTER_PATH", roster_path
+        )
         monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness.get_native_daemon_client", lambda: daemon
+        )
 
         sess = self._make_session("no-reap-sess", surface_ref="s:noreap.1")
         save_state(CwState(sessions=[sess]))
@@ -6867,11 +6903,15 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness._ROSTER_PATH", roster_path
+        )
         monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness.get_native_daemon_client", lambda: daemon
+        )
         monkeypatch.setattr(
             "cw.doctor.loop_health.get_native_daemon_client", lambda: daemon
         )
@@ -6913,11 +6953,15 @@ class TestWedgeActiveNoDaemonEntry:
         roster_path = tmp_path / "roster.json"
         # Write roster with NO supervisorPid — daemon appears down
         roster_path.write_text(json.dumps({"workers": {}}), encoding="utf-8")
-        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness._ROSTER_PATH", roster_path
+        )
         monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness.get_native_daemon_client", lambda: daemon
+        )
 
         sess = self._make_session("outage-sess", surface_ref="s:outage.1")
         save_state(CwState(sessions=[sess]))
@@ -6948,11 +6992,15 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness._ROSTER_PATH", roster_path
+        )
         monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness.get_native_daemon_client", lambda: daemon
+        )
         monkeypatch.setattr(
             "cw.doctor.loop_health.get_native_daemon_client", lambda: daemon
         )
@@ -7444,7 +7492,7 @@ class TestWedgeActiveDaemonStaleNoSentinel:
         self._stamp_transcript(home, worktree, stale_minutes=50)
 
         monkeypatch.setattr(
-            "cw.doctor.wedge.load_orchestrator_config",
+            "cw.doctor.wedge.session_liveness.load_orchestrator_config",
             lambda: OrchestratorConfig(
                 liveness_first_bucket_by_stage={Stage.IMPL: 100}
             ),
@@ -7493,7 +7541,7 @@ class TestWedgeActiveDaemonStaleNoSentinel:
         self._stamp_transcript(home, worktree, stale_minutes=35)
 
         monkeypatch.setattr(
-            "cw.doctor.wedge.load_orchestrator_config",
+            "cw.doctor.wedge.session_liveness.load_orchestrator_config",
             lambda: OrchestratorConfig(liveness_buckets_minutes=[15, 30]),
         )
 
@@ -7557,7 +7605,9 @@ class TestWedgeActiveDaemonStaleNoSentinel:
             msg = "x"
             raise ConfigValidationError(msg)
 
-        monkeypatch.setattr("cw.doctor.wedge.load_orchestrator_config", boom)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness.load_orchestrator_config", boom
+        )
         assert (
             _check_wedge_active_daemon_stale_no_sentinel(load_state(), load_dev_queue())
             == []
@@ -7743,10 +7793,14 @@ class TestWedgeActiveNullLivenessOrphan:
         roster_path.write_text(
             json.dumps({"supervisorPid": 12345, "workers": {}}), encoding="utf-8"
         )
-        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness._ROSTER_PATH", roster_path
+        )
         monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.session_liveness.get_native_daemon_client", lambda: daemon
+        )
         monkeypatch.setattr(
             "cw.doctor.loop_health.get_native_daemon_client", lambda: daemon
         )
