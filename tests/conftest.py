@@ -1743,7 +1743,9 @@ def _mock_gh_availability(monkeypatch: pytest.MonkeyPatch) -> None:
     stacking lets the test-level patch win. ``test_gh.py`` exercises the real
     helper via ``cw.gh`` directly and is unaffected.
     """
-    monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", lambda **_kw: True)
+    monkeypatch.setattr(
+        "cw.dispatch.gating.availability.check_gh_availability", lambda **_kw: True
+    )
 
 
 @pytest.fixture(autouse=True)

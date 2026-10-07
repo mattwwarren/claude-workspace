@@ -222,7 +222,8 @@ class TestAvailabilityPreflightGate:
             return False
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_gh_availability", _counting_unavailable_probe
+            "cw.dispatch.gating.availability.check_gh_availability",
+            _counting_unavailable_probe,
         )
 
         daemon = FakeNativeDaemonClient()
@@ -285,7 +286,9 @@ class TestAvailabilityPreflightGate:
             calls.append(1)
             return True
 
-        monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", _counting_probe)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.availability.check_gh_availability", _counting_probe
+        )
 
         daemon = FakeNativeDaemonClient()
         dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
@@ -311,7 +314,9 @@ class TestAvailabilityPreflightGate:
             calls.append(1)
             return True
 
-        monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", _counting_probe)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.availability.check_gh_availability", _counting_probe
+        )
 
         daemon = FakeNativeDaemonClient()
         with freeze_time("2026-07-16 12:00:00") as frozen:
@@ -373,7 +378,9 @@ class TestAvailabilityPreflightGate:
             calls.append(1)
             return True
 
-        monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", _counting_probe)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.availability.check_gh_availability", _counting_probe
+        )
 
         config = OrchestratorConfig(default_max_parallel=1)
         daemon = FakeNativeDaemonClient()
@@ -395,7 +402,9 @@ class TestAvailabilityPreflightGate:
             msg = "probe blew up"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", _boom)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.availability.check_gh_availability", _boom
+        )
 
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
@@ -536,7 +545,9 @@ class TestAvailabilityPreflightGate:
             calls.append(1)
             return True
 
-        monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", _counting_probe)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.availability.check_gh_availability", _counting_probe
+        )
 
         paused_config = simple_config.model_copy(update={"max_parallel_clients": 0})
         daemon = FakeNativeDaemonClient()

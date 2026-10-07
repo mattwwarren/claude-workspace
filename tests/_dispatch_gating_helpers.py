@@ -14,9 +14,11 @@ def _force_gh_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force the fleet-wide gh-availability probe to report unavailable.
 
     Overrides the autouse ``_mock_gh_availability`` default (which returns
-    True) on the same ``cw.dispatch.gating.check_gh_availability`` seam.
+    True) on the same ``cw.dispatch.gating.availability.check_gh_availability`` seam.
     """
-    monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", lambda **_kw: False)
+    monkeypatch.setattr(
+        "cw.dispatch.gating.availability.check_gh_availability", lambda **_kw: False
+    )
 
 
 def _force_ssh_key_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:

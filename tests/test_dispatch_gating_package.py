@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 _GATING = "cw.dispatch.gating"
 _CONTEXT_JSON = f"{_GATING}.context_json"
 _USAGE_LIMIT = f"{_GATING}.usage_limit"
+_AVAILABILITY = f"{_GATING}.availability"
 
 # Owning module for each of the 34 historic top-level names of the flat
 # ``gating.py``. Each extraction commit of the split edits only the entries it
@@ -43,14 +44,14 @@ _USAGE_LIMIT = f"{_GATING}.usage_limit"
 _OWNER: dict[str, str] = {
     "_emit_usage_limit_skip_events": _USAGE_LIMIT,
     "_reconcile_usage_limited": _USAGE_LIMIT,
-    "_AVAILABILITY_OUTAGE_REASON": _GATING,
-    "_AVAILABILITY_PROBE_TIMEOUT_SECONDS": _GATING,
-    "_AVAILABILITY_PROBE_TTL_SECONDS": _GATING,
-    "_resolve_availability": _GATING,
-    "_resolve_availability_once": _GATING,
-    "_record_availability_block": _GATING,
-    "_reset_availability_block": _GATING,
-    "_emit_availability_skip": _GATING,
+    "_AVAILABILITY_OUTAGE_REASON": _AVAILABILITY,
+    "_AVAILABILITY_PROBE_TIMEOUT_SECONDS": _AVAILABILITY,
+    "_AVAILABILITY_PROBE_TTL_SECONDS": _AVAILABILITY,
+    "_resolve_availability": _AVAILABILITY,
+    "_resolve_availability_once": _AVAILABILITY,
+    "_record_availability_block": _AVAILABILITY,
+    "_reset_availability_block": _AVAILABILITY,
+    "_emit_availability_skip": _AVAILABILITY,
     "FRESHNESS_NON_MAIN_HEAD": _GATING,
     "FRESHNESS_MAIN_BEHIND": _GATING,
     "FRESHNESS_MAIN_DIRTY_CHECKOUT": _GATING,
@@ -139,10 +140,10 @@ _SEAMS = (
 )
 
 # Every module that defines a ``_log``; each must log on ``cw.dispatch``.
-_LOGGING_MODULES = (_GATING, _CONTEXT_JSON, _USAGE_LIMIT)
+_LOGGING_MODULES = (_GATING, _CONTEXT_JSON, _USAGE_LIMIT, _AVAILABILITY)
 
 # Every extracted gating submodule; each must import cold in a fresh interpreter.
-_SUBMODULES = ("context_json", "usage_limit")
+_SUBMODULES = ("context_json", "usage_limit", "availability")
 
 
 def _owner(name: str) -> ModuleType:
