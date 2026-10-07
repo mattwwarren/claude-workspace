@@ -259,35 +259,18 @@ ignore = [
 # result defers the cli._hook_io import to break the cli <-> result circular
 # dependency; inline import is the sanctioned mechanism, not a workaround.
 "src/cw/result.py" = ["PLC0415"]
-# reconcile/_shared defers the dispatch import inside _apply_sentinel_to_task
-# (_routing) and classify_sentinel_stage_position (_sentinels) to break the
-# reconcile ↔ dispatch circular dependency (#698). Inline import at function
-# level is the sanctioned mechanism, not a workaround.
+# reconcile/_shared defers the cw.dispatch import inside _apply_sentinel_to_task
+# (_routing: _route_staged_decision / apply_staged_decision) and
+# classify_sentinel_stage_position (_sentinels: _classify_sentinel_stage_position).
+# This is a real cycle, not a pure queue-row helper: the dispatch routing engine
+# imports cw.executor (routing/stage_walk.py), cw.executor imports cw.reconcile at
+# module top (executor/core.py), and cw.dispatch's package __init__ imports
+# cw.reconcile (claim/screening.py). Hoisting needs a registration seam or a move
+# of the ~1,800-line routing engine, neither of which is a pure move; the
+# dependency inversion is tracked in #2619. Inline import at function level is the
+# sanctioned mechanism, not a workaround (#698).
 "src/cw/reconcile/_shared/_routing.py" = ["PLC0415"]
 "src/cw/reconcile/_shared/_sentinels.py" = ["PLC0415"]
-# tasks defers cw.dispatch.routing's _AUTOMERGE_NOT_ARMED_REASON (inside
-# _is_variant_a_gate_task) and _PRIOR_PIPELINE_PR_OPEN_REASON (inside
-# _is_variant_b_gate_task) to break the cw.dispatch ↔ cw.reconcile circular
-# dependency (#1713): cw.dispatch's package __init__ imports cw.reconcile at
-# module top (loop.py/gating.py/lanes.py), so this module's own reach into
-# cw.dispatch.routing must be function-level. Same shape as the #698
-# reconcile/_shared entries above. Inline import is the sanctioned
-# mechanism, not a workaround.
-"src/cw/reconcile/tasks.py" = ["PLC0415"]
-# phantom/_mutations and stalled/_mutations defer cw.dispatch.productivity's
-# extract_claim_evidence / is_unproductive (#1750) to break the same
-# cw.dispatch ↔ cw.reconcile cycle as the tasks.py entry above: cw.dispatch's
-# package __init__ imports cw.reconcile at module top (loop.py/gating.py/
-# lanes.py), so these modules' reach into cw.dispatch.productivity must be
-# function-level even though productivity.py itself imports nothing from cw.
-# Inline import is the sanctioned mechanism, not a workaround.
-"src/cw/reconcile/phantom/_mutations.py" = ["PLC0415"]
-"src/cw/reconcile/stalled/_mutations.py" = ["PLC0415"]
-# gate_recipes defers cw.dispatch.review_gates.resolve_hold_finalize inside
-# _finalize_hold_armed for the same cw.dispatch ↔ cw.reconcile cycle as the
-# tasks.py entry above. Inline import is the sanctioned mechanism, not a
-# workaround.
-"src/cw/reconcile/gate_recipes.py" = ["PLC0415"]
 # codex_background defers cw.executor's _complete_session_via_door /
 # _post_review_comment / _resolve_codex_fix_loop_enabled and cw.dispatch.claim's
 # _revert_claimed_task_to_pending inside _run_codex_review_and_complete (#1727):
@@ -295,34 +278,14 @@ ignore = [
 # below executor.py's own import block, so a module-level import here would hit
 # a partially initialized module. Inline import is the sanctioned mechanism.
 "src/cw/codex_background.py" = ["PLC0415"]
-# codex_boot defers cw.dispatch.claim._park_running_task_blocked_on_user and
-# cw.executor.resolve_executor_config inside reap_orphaned_codex_sessions_at_boot
-# (#1727): cw.executor imports cw.reconcile at module top, so this module (inside
-# the cw.reconcile package) must not reach back at import time. Mirrors
-# _shared/_routing.py's own deferred cw.dispatch import (#698).
+# codex_boot defers cw.executor.resolve_executor_config inside
+# reap_orphaned_codex_sessions_at_boot (#1727): cw.executor imports cw.reconcile
+# at module top (executor/core.py) and cw.reconcile imports this module, so a
+# module-level import here would hit a partially initialized cw.executor. Its
+# former cw.dispatch.claim deferrals were hoisted to the cw.queue_rows leaf
+# (#2613); only this cw.executor deferral remains. Inline import at function
+# level is the sanctioned mechanism, not a workaround.
 "src/cw/reconcile/codex_boot.py" = ["PLC0415"]
-# fix_dispatch defers the same cw.dispatch.claim._park_running_task_blocked_on_user
-# inside _park_for_unresolved_ref (#2209), for the identical reason as
-# codex_boot above: claim.py imports cw.executor at module top and cw.executor
-# imports cw.reconcile, so this module must not reach back at import time.
-"src/cw/reconcile/fix_dispatch.py" = ["PLC0415"]
-# local defers cw.dispatch.claim._park_running_task_blocked_on_user and
-# _revert_claimed_task_to_pending inside its codex harvest branch (#2387), for
-# the identical cw.dispatch ↔ cw.reconcile cycle as codex_boot above.
-"src/cw/reconcile/local.py" = ["PLC0415"]
-# usage_limit_mid_turn defers cw.dispatch.claim._find_running_row inside
-# _decide (#2324) for the same cw.dispatch ↔ cw.reconcile cycle as the
-# tasks.py and phantom/_mutations entries above: cw.dispatch's package
-# __init__ imports cw.reconcile at module top, so this module's reach into
-# cw.dispatch.claim must be function-level. Inline import is the sanctioned
-# mechanism, not a workaround.
-"src/cw/reconcile/usage_limit_mid_turn.py" = ["PLC0415"]
-# unowned_running defers cw.dispatch.claim's _is_backstop_exempt (inside
-# detect_unowned_running) and _find_running_row / _apply_spawn_success_fields
-# (inside _act_adopt) (#2591), for the same cw.dispatch ↔ cw.reconcile cycle
-# as the usage_limit_mid_turn entry above. Inline import is the sanctioned
-# mechanism, not a workaround.
-"src/cw/reconcile/unowned_running.py" = ["PLC0415"]
 # claim defers the cw.dispatch.gating import inside _spawn_claimed_task to break
 # the gating ↔ claim circular dependency (#1310): gating imports claim at module
 # top, so claim's own reach back into gating must be function-level. Inline
@@ -360,11 +323,15 @@ ignore = [
 # for the identical reason as address_review.py above (#2017). Inline import at
 # function level is the sanctioned mechanism, not a workaround.
 "src/cw/reconcile/review_recipes/fix_agent.py" = ["PLC0415"]
-# review_recipes.auto_fix_ci defers cw.dev_queue.add_ticket / cw.dispatch
-# .run_dispatch_loop / cw.models.TicketTask inside _dispatch_auto_fix_ci: the
-# add_ticket lock IS dev_queue_lock (nesting would self-deadlock), and dispatch
-# imports cw.reconcile at module top. Inline imports at function level are the
-# sanctioned mechanism, not a workaround.
+# review_recipes.auto_fix_ci defers cw.dev_queue.requeue_ticket (inside
+# _requeue_existing_row) and cw.dev_queue.classify_requeue_live_session_error
+# (inside _dispatch_auto_fix_ci). Not a cycle: the module already imports
+# cw.dev_queue at module scope. The deferral is patch-coupled: tests patch
+# cw.dev_queue.requeue_ticket by string (tests/test_reconcile_review_recipes.py),
+# which a module-level `from cw.dev_queue import requeue_ticket` would bypass by
+# binding the name at import time. The classify import stays beside it so both
+# cw.dev_queue deferrals in this module follow one pattern. Inline imports at
+# function level are the sanctioned mechanism, not a workaround.
 "src/cw/reconcile/review_recipes/auto_fix_ci.py" = ["PLC0415"]
 # review_recipes.request_reviewer defers cw.gh.add_pr_reviewer inside
 # _dispatch_request_reviewer to keep the cw.gh dependency off module import.

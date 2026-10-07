@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cw.claim_evidence import extract_claim_evidence, is_unproductive
 from cw.dev_queue import (
     _extract_pr_url,
     _hold_aware_disposition,
@@ -170,13 +171,6 @@ def _apply_foreign_result_queue_mutation(
     Mirrors ``concierge._route_park_marker_poison_task``'s foreign-result arm;
     does NOT clear ``task.session_id`` (kept for operator traceability).
     """
-    # Deferred, not module-top: cw.dispatch's package __init__ imports
-    # cw.reconcile (loop.py, gating/ and lanes.py), so a top-level import of
-    # any cw.dispatch submodule here is a real circular import at package-init
-    # time. Same shape as the #698 reconcile._shared -> cw.dispatch precedent
-    # and tasks.py's deferred cw.dispatch.routing import. See #1750.
-    from cw.dispatch.productivity import extract_claim_evidence, is_unproductive
-
     dumped = validated.model_dump(mode="json")
     blocker_reason = _result_blocker_reason(validated)
     transition_task_status(

@@ -109,9 +109,7 @@ from cw.dispatch.review_gates import (
 )
 from cw.dispatch.routing.cost import _accumulate_task_cost
 from cw.dispatch.routing.pr_refs import (
-    _AUTOMERGE_NOT_ARMED_REASON,
     _BLOCKING_PR_NUMBER_RE,
-    _PRIOR_PIPELINE_PR_OPEN_REASON,
     _extract_blocked_on_pr,
 )
 from cw.dispatch.routing.scope_tier import (
@@ -135,6 +133,10 @@ from cw.models import (
     QueueItemStatus,
     Stage,
 )
+from cw.queue_rows import (
+    _AUTOMERGE_NOT_ARMED_REASON,
+    _PRIOR_PIPELINE_PR_OPEN_REASON,
+)
 from cw.reconcile.fix_dispatch import FIX_LOOP_PENDING_DISPATCH
 from cw.unavailability import FAMILY_PROVIDER_OVERLOAD
 from cw.worktree import resolve_task_worktree
@@ -147,8 +149,9 @@ if TYPE_CHECKING:
 
 # Re-exported submodule surface. Listed here (rather than left as bare
 # imports) because several names are consumed only by *other* modules --
-# dispatch/__init__.py's facade, dispatch/loop.py, reconcile/tasks.py's
-# deferred imports -- and would otherwise read as unused. Mirrors
+# dispatch/__init__.py's facade, dispatch/loop.py, the historic
+# ``cw.dispatch.routing.<name>`` import paths -- and would otherwise read as
+# unused. Mirrors
 # dispatch/__init__.py's own __all__ convention.
 __all__ = [
     "_AUTOMERGE_NOT_ARMED_REASON",

@@ -403,13 +403,13 @@ def test_failed_task_disposition_after_session_close_preserves_park(
     """The completed-session backstop honors a persisted codex park intent."""
     _seed(tmp_config_dir, tmp_path, make_git_repo)
 
-    from cw.dispatch import claim
-
     def _fail_park(**_kwargs: object) -> None:
         message = "simulated crash after session close"
         raise RuntimeError(message)
 
-    monkeypatch.setattr(claim, "_park_running_task_blocked_on_user", _fail_park)
+    monkeypatch.setattr(
+        reconcile_local, "_park_running_task_blocked_on_user", _fail_park
+    )
     with pytest.raises(RuntimeError, match="simulated crash"):
         _harvest(_SIGNAL_ONLY)
 

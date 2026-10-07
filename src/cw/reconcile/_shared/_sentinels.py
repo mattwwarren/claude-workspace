@@ -288,6 +288,13 @@ def classify_sentinel_stage_position(
     stage position against ``task.stage`` without an inline import at its own call
     site. Returns ``(position, stages, target_idx)``; see
     ``dispatch._classify_sentinel_stage_position`` for the semantics.
+
+    The classifier is part of the dispatch routing engine
+    (``routing/stage_walk.py``), not a pure queue-row helper, so #2613 left it
+    out of ``cw.queue_rows``: the engine imports ``cw.executor``, which imports
+    ``cw.reconcile`` at module top (``executor/core.py``). The dependency
+    inversion that would let this import move to module scope is tracked in
+    #2619.
     """
     from cw.dispatch import _classify_sentinel_stage_position
 

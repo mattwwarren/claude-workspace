@@ -87,6 +87,7 @@ from cw.models import (
     UsageLimitAct,
 )
 from cw.native_daemon import wait_for_roster_presence
+from cw.queue_rows import _find_running_row
 from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
     _LIVE_STATUSES,
@@ -182,7 +183,7 @@ def _owned_running_row(
     That triple is the row's identity (see #2219): a ticket id alone can
     resolve to another client's same-numbered ticket or to a duplicate
     RUNNING row. It is the same predicate as
-    ``cw.dispatch.claim._find_running_row`` with ``session_id``, kept local
+    ``cw.queue_rows._find_running_row`` with ``session_id``, kept local
     for the one caller that cannot use that helper: the lock-free detect
     phase, which reads a bare snapshot of *tasks* with no ``DevQueueStore``
     and no ``dev_queue_lock`` held, and mutates nothing. ``_decide``, which
@@ -281,12 +282,6 @@ def _decide(
     stopped. Otherwise the intent is written to the row in the same lock
     hold, and returned.
     """
-    # Deferred, not module-top: cw.dispatch's package __init__ imports
-    # cw.reconcile, so a top-level cw.dispatch import here is circular at
-    # package-init time (the phantom sweep's cw.dispatch.productivity import
-    # takes the same shape; see #1750).
-    from cw.dispatch.claim import _find_running_row
-
     with dev_queue_lock():
         store = load_dev_queue()
         target = _find_running_row(

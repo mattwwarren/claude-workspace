@@ -58,6 +58,11 @@ from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.queue_rows import (
+    _apply_spawn_success_fields,
+    _find_running_row,
+    _is_backstop_exempt,
+)
 from cw.reconcile._shared import ticket_id_for_session
 from cw.worktree import worktree_path_for
 
@@ -219,12 +224,6 @@ def detect_unowned_running(
     nothing (ADR-0006 invariant 1). *clients* is the tick's client scope: a
     row whose client is not in it (including an empty mapping) is skipped.
     """
-    # Deferred, not module-top: cw.dispatch's package __init__ imports
-    # cw.reconcile, so a top-level import of any cw.dispatch submodule here
-    # is a real circular import at package-init time (same precedent as
-    # cw.reconcile.tasks).
-    from cw.dispatch.claim import _is_backstop_exempt
-
     sessions_by_id = {s.id: s for s in state.sessions}
     bound_session_ids = {t.session_id for t in store.tasks if t.session_id is not None}
     running = Counter(
@@ -323,8 +322,6 @@ def _emit_adopted(candidate: UnownedCandidate) -> None:
 
 def _act_adopt(candidate: UnownedCandidate) -> bool:
     """Bind the candidate's row to its session; return whether it was bound."""
-    from cw.dispatch.claim import _apply_spawn_success_fields, _find_running_row
-
     with dev_queue_lock():
         store = load_dev_queue()
         row = _find_running_row(

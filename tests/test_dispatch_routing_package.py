@@ -83,12 +83,17 @@ def test_scope_tier_submodule_owns_tier_resolution() -> None:
 
 
 def test_pr_refs_submodule_owns_blocked_pr_extraction() -> None:
-    """Blocker PR cross-reference extraction lives in ``pr_refs``."""
+    """Blocker PR cross-reference extraction lives in ``pr_refs``.
+
+    The two Rule 5 reason literals it keys on moved to the ``cw.queue_rows``
+    leaf (#2613) so reconcile can import them at module scope.
+    """
+    from cw import queue_rows
     from cw.dispatch.routing import pr_refs
 
     assert hasattr(pr_refs, "_extract_blocked_on_pr")
-    assert hasattr(pr_refs, "_AUTOMERGE_NOT_ARMED_REASON")
-    assert hasattr(pr_refs, "_PRIOR_PIPELINE_PR_OPEN_REASON")
+    assert hasattr(queue_rows, "_AUTOMERGE_NOT_ARMED_REASON")
+    assert hasattr(queue_rows, "_PRIOR_PIPELINE_PR_OPEN_REASON")
 
 
 def test_cost_submodule_owns_accumulate_task_cost() -> None:

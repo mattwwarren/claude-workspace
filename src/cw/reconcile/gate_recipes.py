@@ -89,6 +89,7 @@ from cw.events import record_event
 from cw.exceptions import CwError
 from cw.gh import fetch_approved_plan_comment, post_issue_comment
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.queue_rows import resolve_hold_finalize
 from cw.reconcile.gate_plan_probes import PlanProbeUnavailableError, lookup_plan_probe
 from cw.reconcile.gate_predicates import (
     _PLAN_PENDING_APPROVAL,
@@ -255,12 +256,10 @@ def _finalize_hold_armed(
     The review recipe's automatic approve always declines on a held row
     (``_approve_ticket_locked`` returns ``finalize_held``), so such a row is
     never "released": routing must page for it, and detect must not pick it up
-    every tick only to emit another ``GATE_AUTO_APPROVE_HELD``. Deferred import:
-    ``cw.dispatch`` reaches back into ``cw.dev_queue``, which this module
-    imports at top level.
+    every tick only to emit another ``GATE_AUTO_APPROVE_HELD``. The policy
+    resolver lives in the ``cw.queue_rows`` leaf (#2613), so it is imported at
+    module scope rather than reached through ``cw.dispatch``.
     """
-    from cw.dispatch.review_gates import resolve_hold_finalize
-
     return resolve_hold_finalize(task, clients, config) is not None
 
 

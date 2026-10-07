@@ -52,6 +52,7 @@ from cw.models import (
 from cw.native_daemon import get_native_daemon_client
 from cw.orchestrate import latest_tick_summary_by_client
 from cw.pr_hydrate import hydrate_pr_states
+from cw.queue_rows import _find_running_row
 from cw.reconcile import (
     _CAUSE_USAGE_LIMIT,
     _USAGE_LIMITED_MID_TURN_REASON,
@@ -72,7 +73,6 @@ if TYPE_CHECKING:
     )
     from cw.native_daemon import NativeDaemonClient
     from cw.worktree import FetchWarningKey, UnresolvablePathWarningKey
-from cw.dispatch.claim import _find_running_row
 from cw.dispatch.lanes import _notify_stale_clients_with_pending
 from cw.dispatch.routing import _accumulate_task_cost, apply_staged_decision
 from cw.dispatch.tick import dispatch_tick
