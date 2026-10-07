@@ -223,6 +223,36 @@ class TestWorktreeOccupiedError:
         assert str(err) == "msg"
 
 
+class TestWorkerLaunchedError:
+    """#2502: a spawn step failed AFTER the daemon worker already existed.
+
+    Modeled on TestWorktreeOccupiedError above. It must stay distinct from the
+    two "no usable worker" errors: those are backend failures a caller retries,
+    this one names a live worker a caller must never spawn again.
+    """
+
+    def test_is_cw_error_carrying_session_and_surface(self) -> None:
+        from cw.exceptions import WorkerLaunchedError
+
+        err = WorkerLaunchedError("msg", session_id="sess-1", surface_ref="00000001")
+
+        assert isinstance(err, CwError)
+        assert err.session_id == "sess-1"
+        assert err.surface_ref == "00000001"
+        assert str(err) == "msg"
+
+    def test_unrelated_to_no_worker_errors(self) -> None:
+        from cw.exceptions import (
+            DisclaimerNotAcceptedError,
+            SpawnUnregisteredError,
+            WorkerLaunchedError,
+        )
+
+        for other in (SpawnUnregisteredError, DisclaimerNotAcceptedError):
+            assert not issubclass(other, WorkerLaunchedError)
+            assert not issubclass(WorkerLaunchedError, other)
+
+
 class TestRemoteRefUnresolvedError:
     """#2209: a typed CwError subclass so fix_dispatch can discriminate the
     unresolvable-remote-ref class without matching message text.

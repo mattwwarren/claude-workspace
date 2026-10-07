@@ -128,7 +128,7 @@ _WEDGE_ACTIVE_NO_DAEMON_ENTRY = "wedge/active-no-daemon-entry"
 # _WEDGE_ACTIVE_NO_DAEMON_ENTRY for the opposite roster shape: that class
 # fires when the daemon entry is ABSENT (crash/SSH failure); this one fires
 # when the entry is PRESENT but the harness never signaled completion (the
-# stop_hook.py background_tasks permanent-defer race) -- see
+# stop_hook/command.py background_tasks permanent-defer race) -- see
 # _check_wedge_active_daemon_stale_no_sentinel's docstring for the mechanism.
 _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL = "wedge/active-daemon-stale-no-sentinel"
 
@@ -545,13 +545,13 @@ def _check_wedge_active_daemon_stale_no_sentinel(
     """Detect ACTIVE DAEMON sessions idle in the roster with no terminal sentinel.
 
     Closes #2078: for a non-headless (plain) DAEMON spawn,
-    ``signal_stop()``'s ``background_tasks`` defer (``stop_hook.py``) can defer
+    ``signal_stop()``'s ``background_tasks`` defer (``stop_hook/command.py``) can defer
     forever if the harness's own "next main-agent turn re-fires Stop" contract
     doesn't hold for one particular turn -- and nothing else in the ordinary
     lifecycle ever completes the session. The daemon only removes a worker
     from ``roster.json`` when ``signal_stop()`` itself calls
     ``native_daemon.stop(surface_ref)`` at the very end of that function
-    (``stop_hook.py:567-572``), which is unreachable on the stuck-deferral
+    (``stop_hook/command.py``), which is unreachable on the stuck-deferral
     path -- so the session's ``surface_ref`` stays in the live roster
     indefinitely and ``compute_drift``'s phantom check
     (``_check_wedge_active_no_daemon_entry``, class-6) never fires: that class

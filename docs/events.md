@@ -774,8 +774,11 @@ idle, stalled and phantom sweeps' stage-mismatch refusals (via
 `cw.reconcile`; `apply_staged_decision`,
 `dispatch_tick` (via `_record_client_freshness_block`), and the dispatch
 loop's per-tick staleness watchdog (via `_notify_stale_clients_with_pending`)
-in `cw.dispatch`. (The former idle-watchdog / salvage / salvage-skip emitters
-were removed with the process-kill timeouts, ADR-0014.) The liveness sweep's
+in `cw.dispatch`; and `spawn_create_impl` in `cw.spawn` plus the dispatch
+claim path's `_handle_post_launch_failure` in `cw.dispatch.claim.spawn`, both
+through `cw.spawn.emit_spawn_post_launch_attention` (#2502). (The former
+idle-watchdog / salvage / salvage-skip emitters were removed with the
+process-kill timeouts, ADR-0014.) The liveness sweep's
 distress check is skipped entirely for a row parked with
 `stopped_without_sentinel` — see that value's bullet below.
 **Payload:**
@@ -908,6 +911,36 @@ open enum; consumers MUST tolerate unknown values. Known values:
   and a lane with `attempt_ceiling: false` never produces this park at all.
   Operator recovery is §7's "Attempt-cap reset" in
   `docs/dispatch-runbook.md`.
+- `"spawn_post_launch_failed"` — a worker is live but its record is not
+  (#2502): a spawn step failed after the worker launched. Two emitters share
+  one shape (`cw.spawn.emit_spawn_post_launch_attention`): `spawn_create_impl`,
+  when its transcript lookup, parent lookup or `sessions.json` write fails
+  after `daemon.spawn_bg` returned (it then raises `WorkerLaunchedError`), and
+  the dispatch claim path, when its dev-queue stamp, `session.spawned` event or
+  console line fails after `executor.spawn` returned. A worker that never
+  appears in the roster (`SpawnUnregisteredError`) is not this case; it stays a
+  spawn failure. The dispatch row is kept RUNNING, never reverted to PENDING,
+  and the failure counts toward neither the spawn-error backoff nor the lane
+  circuit breaker. The fix-loop handoff (`cw.reconcile.fix_dispatch`) and the
+  `address_review` recipe also record the launched session and page instead of
+  reporting a failed spawn. `session_id` is the launched cw session's id.
+  `breadcrumbs` reads `worker live (session <id>[, surface <short id>]):
+  <error>`, with the error collapsed to one line, redacted, then truncated to
+  500 characters plus `…`. Only the `spawn_create_impl` emission sets
+  `session_name` and `claude_session_id`; the dispatch emission leaves them
+  `""`/`null`. When the state write failed, the session id is absent from
+  `sessions.json`: the leaked-worker sweep stops the unrecorded worker on the
+  next reconcile tick, the row stays RUNNING bound to that id, and
+  `cw dev-queue tasks` shows the `?session_mismatch` advisory. For a fix-loop
+  handoff, the next reconcile instead treats that unrecorded session as
+  finished and unparks the row for a fresh REVIEW round; with a readable
+  roster the same reconcile stops the worker first, but an unreadable roster
+  or a failed stop can leave both workers running. When only the
+  dev-queue stamp failed, the worker keeps running and the row stays RUNNING
+  with no `session_id`. Either way the operator inspects the worker and
+  requeues the row (`cw dev-queue requeue`); nothing recovers it
+  automatically yet. No push notification is fired (`fire_push_notification`
+  is not called).
 - `"plan_parked"` — A headless worker completed its plan stage with open
   ambiguities or unverified premises (`ambiguities_pending_resolution` or
   `premises_pending_verification` sentinel status). The task is BLOCKED_ON_USER.
@@ -1168,8 +1201,8 @@ open enum; consumers MUST tolerate unknown values. Known values:
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 A push notification is fired for most emissions (via `fire_push_notification`)
 — **except** `"freshness_gate_blocked"`, `"salvage_skip_escalated"`,
-`"dispatch_loop_stale"`, and `"stopped_without_sentinel"`, which deliberately
-do not push. (`stopped_without_sentinel` is emitted from the short-lived
+`"dispatch_loop_stale"`, `"stopped_without_sentinel"`, and
+`"spawn_post_launch_failed"`, which deliberately do not push. (`stopped_without_sentinel` is emitted from the short-lived
 `cw signal-stop` hook process, whose backgrounded push thread would be
 dropped when it exits.) The liveness sweep's distress fire — and therefore
 its push — is skipped entirely for a row parked with

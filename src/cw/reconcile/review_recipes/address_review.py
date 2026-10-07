@@ -33,7 +33,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
-from cw.exceptions import CwError
+from cw.exceptions import CwError, WorkerLaunchedError
 from cw.pr_hydrate import _parse_pr_url, _repo_slug_mismatch
 from cw.reconcile.review_recipes._shared import (
     _ATTENTION_CHANGES_REQUESTED,
@@ -207,7 +207,10 @@ def _dispatch_address_review(job: _DispatchJob) -> str | None:
     (Resolution 6: no dev-queue correlation) and ``headless=False``: the skill
     emits no sentinel, so a headless session would never complete (#2031). On
     ``CwError`` emits a durable ``PR_ACTION_FAILED`` correction and returns
-    ``None`` — one candidate's failure never aborts the loop.
+    ``None`` — one candidate's failure never aborts the loop. The exception is
+    :class:`~cw.exceptions.WorkerLaunchedError` (#2502): the worker launched
+    and only a later spawn step failed, so it logs a WARNING, emits no
+    ``PR_ACTION_FAILED`` and returns ``ticket_id`` as a success would.
 
     ``sessions_lock`` is a separate lock from ``dev_queue_lock``, and
     ``spawn_create_impl`` acquires it. Since #1229 this function is called only
@@ -237,6 +240,16 @@ def _dispatch_address_review(job: _DispatchJob) -> str | None:
             headless=False,
             ticket_id=job.ticket_id,
             lane=job.lane,
+        )
+    except WorkerLaunchedError as exc:
+        # Must precede ``except CwError`` (#2502): the worker is live and
+        # spawn_create_impl already paged, so this is not a failed action.
+        _log.warning(
+            "review_recipe_worker_launched ticket=%s pr=%s session=%s",
+            job.ticket_id,
+            job.pr_number,
+            exc.session_id,
+            exc_info=True,
         )
     except CwError as exc:
         _log.warning(

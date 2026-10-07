@@ -327,7 +327,7 @@ def test_resolve_and_complete_headless_session_completes_on_task_already_termina
     monkeypatch.setattr("cw._util.Path.home", lambda: home)
 
     monkeypatch.setattr(
-        "cw.cli.stop_hook._apply_sentinel_to_task",
+        "cw.cli.stop_hook.headless._apply_sentinel_to_task",
         lambda *_args, **_kwargs: SentinelRouteOutcome(
             rescued=False,
             routed=False,
@@ -464,12 +464,12 @@ def test_signal_stop_clear_reads_fresh_under_lock_after_concurrent_increment(
     the stale pre-lock context would be a lost-update bug. This is the guard
     against ever memoizing the read-modify-write's read.
     """
-    from cw.cli import stop_hook
+    from cw.cli.stop_hook import command
 
     worktree = tmp_path / "wt-fresh"
     worktree.mkdir()
     _write_hook_context_file(worktree, stamp={AGENT_SPAWN_UNRESOLVED_COUNT_KEY: 1})
-    real_write = stop_hook._write_cw_context_locked
+    real_write = command._write_cw_context_locked
     context_path = worktree / HOOK_CONTEXT_RELATIVE_PATH
 
     def _bump_then_write(
@@ -480,7 +480,7 @@ def test_signal_stop_clear_reads_fresh_under_lock_after_concurrent_increment(
         context_path.write_text(json.dumps(raw), encoding="utf-8")
         return real_write(cwd_value, mutate_fn)
 
-    monkeypatch.setattr(stop_hook, "_write_cw_context_locked", _bump_then_write)
+    monkeypatch.setattr(command, "_write_cw_context_locked", _bump_then_write)
 
     with caplog.at_level("INFO", logger="cw.cli.stop_hook"):
         result = _invoke_hook_command("signal-stop", _stop_payload(worktree))
@@ -501,7 +501,7 @@ def test_signal_stop_skip_arm_does_not_clobber_a_concurrent_increment(
     so the file must be left exactly as it is: same bytes, same inode, no lock
     taken.
     """
-    from cw.cli import stop_hook
+    from cw.cli.stop_hook import payload
 
     worktree = tmp_path / "wt-stale-zero"
     worktree.mkdir()
@@ -518,7 +518,7 @@ def test_signal_stop_skip_arm_does_not_clobber_a_concurrent_increment(
         AGENT_SPAWN_UNRESOLVED_COUNT_KEY: 0,
         AGENT_SPAWN_LAST_STAMPED_AT_KEY: None,
     }
-    monkeypatch.setattr(stop_hook, "_read_cw_context", lambda _cwd: stale)
+    monkeypatch.setattr(payload, "_read_cw_context", lambda _cwd: stale)
 
     result = _invoke_hook_command("signal-stop", _stop_payload(worktree))
 
@@ -557,8 +557,8 @@ def test_signal_stop_deferral_touches_no_session_state_and_refreshes_stamp(
         msg = "the deferral path must not touch session state"
         raise AssertionError(msg)
 
-    monkeypatch.setattr("cw.cli.stop_hook.load_state", _no_state_io)
-    monkeypatch.setattr("cw.cli.stop_hook.sessions_lock", _no_state_io)
+    monkeypatch.setattr("cw.cli.stop_hook.locked.load_state", _no_state_io)
+    monkeypatch.setattr("cw.cli.stop_hook.locked.sessions_lock", _no_state_io)
     tasks = [{"id": "task-1", "description": "still running"}]
     stamps = []
     for frozen in ("2026-03-01T12:00:00+00:00", "2026-03-01T12:00:05+00:00"):
@@ -609,7 +609,7 @@ def test_signal_stop_terminal_session_is_noop_and_leaves_clear_stamp_untouched(
         msg = "a terminal session must never reach the native daemon"
         raise AssertionError(msg)
 
-    monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", _no_daemon)
+    monkeypatch.setattr("cw.cli.stop_hook.command.get_native_daemon_client", _no_daemon)
 
     result = _invoke_hook_command("signal-stop", _stop_payload(worktree))
 
@@ -646,7 +646,9 @@ def test_stops_native_bg_session_on_daemon_origin_with_sessions_lock_free(
     next(s for s in state.sessions if s.id == session.id).surface_ref = surface_ref
     save_state(state)
     _write_hook_context_file(worktree, workspace_path=session.workspace_path)
-    monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+    monkeypatch.setattr(
+        "cw.cli.stop_hook.command.get_native_daemon_client", lambda: daemon
+    )
 
     result = _invoke_hook_command(
         "signal-stop",
@@ -680,13 +682,14 @@ def test_parse_headless_sentinel_scans_transcript_once_when_cwd_is_worktree_path
     fallback``. No transcript exists on disk, so every scan returns ``None``.
     """
     from cw.cli import stop_hook
+    from cw.cli.stop_hook import sentinel
 
     worktree = tmp_path / "wt-scan"
     session = _make_daemon_session(worktree_path=worktree)
     cwd_value = str(worktree / "nested") if nested_cwd else str(worktree)
     monkeypatch.setattr("cw._util.Path.home", lambda: tmp_path / "home")
     scanned: list[str] = []
-    real_scan = stop_hook._parse_sentinel_from_transcript
+    real_scan = sentinel._parse_sentinel_from_transcript
 
     scanned_tickets: list[str | None] = []
 
@@ -697,7 +700,7 @@ def test_parse_headless_sentinel_scans_transcript_once_when_cwd_is_worktree_path
         scanned_tickets.append(ticket_id)
         return real_scan(cwd, claude_session_id, ticket_id=ticket_id)
 
-    monkeypatch.setattr(stop_hook, "_parse_sentinel_from_transcript", _counting_scan)
+    monkeypatch.setattr(sentinel, "_parse_sentinel_from_transcript", _counting_scan)
 
     parsed = stop_hook._parse_headless_sentinel(
         session, cwd_value, "uuid-2229", "ticket-2229"

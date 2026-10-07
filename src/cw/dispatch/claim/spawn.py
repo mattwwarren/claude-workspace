@@ -4,8 +4,10 @@ The path a row takes once :func:`~cw.dispatch.claim.screening._claim_next_pendin
 has claimed it RUNNING: the codex capability gate, worktree creation (with the
 #2213 occupied-worktree deferral and the stale-tree liveness, dirty and removal
 guards), the #1286 approved-plan bypass, the executor spawn, and the failure
-routing back to PENDING. Extracted verbatim from the historical flat
-``cw.dispatch.claim`` module by the package split (#2378).
+routing: back to PENDING for a failure before any worker exists, or, once a
+worker has launched, keeping the row RUNNING and paging the operator (#2502).
+Extracted verbatim from the historical flat ``cw.dispatch.claim`` module by the
+package split (#2378).
 """
 
 from __future__ import annotations
@@ -31,14 +33,17 @@ from cw.dispatch.claim.codex_capability import _codex_capability_gate, _SpawnOut
 from cw.dispatch.claim.events import _emit_worktree_occupied_skip_event
 from cw.events import record_event
 from cw.exceptions import (
+    CwError,
     HookContextConflictError,
     StaleWorktreeError,
     UsageLimitError,
+    WorkerLaunchedError,
     WorktreeError,
     WorktreeOccupiedError,
 )
 from cw.executor import resolve_executor, resolve_pipeline_stages
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.spawn import emit_spawn_post_launch_attention
 from cw.worktree import (
     check_not_main_checkout,
     create_worktree,
@@ -376,6 +381,130 @@ def _raise_if_stale_tree_occupied(
     raise WorktreeOccupiedError(msg, path=stale_tree, reason=occupant)
 
 
+def _launched_session_id(exc: Exception, session_id: str | None) -> str | None:
+    """Return the session id of a worker that is already live, or None (#2502).
+
+    *session_id* is set once ``executor.spawn`` returned. A
+    :class:`~cw.exceptions.WorkerLaunchedError` carries the id of a worker
+    launched before ``spawn_create_impl`` itself failed.
+    """
+    if isinstance(exc, WorkerLaunchedError):
+        return exc.session_id
+    return session_id
+
+
+def _finish_launched_task(
+    task: TicketTask,
+    client: ClientConfig,
+    *,
+    session_id: str,
+    worktree_path: Path,
+    emit: Callable[[str], None] | None,
+) -> _SpawnOutcome:
+    """Record a spawn that returned: stamp the row, then announce it.
+
+    Extracted from :func:`_spawn_claimed_task` for its PLR budget (#2502) and
+    called inside that function's ``try``: a raise here reaches its broad
+    handler with the session id already bound, which routes it to
+    :func:`_handle_post_launch_failure` instead of the revert path.
+    """
+    _stamp_spawn_success(
+        task,
+        client_name=client.name,
+        session_id=session_id,
+        worktree_path=worktree_path,
+    )
+
+    record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {
+            "ticket_id": task.ticket_id,
+            "client": client.name,
+            "session_id": session_id,
+            "lane": task.lane,
+        },
+    )
+
+    if emit is not None:
+        emit(
+            f"SPAWN {client.name}/{task.ticket_id}"
+            f" session={session_id}"
+            f" worktree={worktree_path}"
+        )
+    return _SpawnOutcome(spawned=True)
+
+
+def _handle_post_launch_failure(
+    task: TicketTask,
+    client: ClientConfig,
+    exc: Exception,
+    *,
+    session_id: str,
+    worktree_path: Path | None,
+) -> _SpawnOutcome:
+    """Keep the row of a worker that launched before a later step failed (#2502).
+
+    Called from :func:`_spawn_claimed_task`'s broad handler once
+    :func:`_launched_session_id` says a worker exists. Reverting the row would
+    let the next tick spawn a second worker for the ticket, so this:
+
+    - logs at ERROR with the client, ticket, session and worktree;
+    - pages through :func:`cw.spawn.emit_spawn_post_launch_attention`, unless
+      *exc* is a :class:`~cw.exceptions.WorkerLaunchedError`, whose raise site
+      already paged. The page comes before the stamp because the stamp can
+      raise an error its guard does not catch (a corrupt queue file is a
+      ``ValueError``), and that must not cost the page;
+    - stamps the row once more (:func:`_stamp_spawn_success` is idempotent),
+      logging a ``CwError``/``OSError`` miss. If it still fails, the row stays
+      RUNNING without a ``session_id`` and the page is the recovery signal.
+      A ``None`` *worktree_path* skips the stamp; only a raise before
+      ``create_worktree`` returned leaves it unset, and that is never
+      post-launch.
+
+    It never reverts the row, stamps backoff or stops the worker. The outcome
+    is ``spawned=True`` with ``error`` set and ``spawn_error`` False, so
+    ``lanes.py`` counts the slot as used, resets the lane's spawn-error
+    counter and leaves the circuit breaker alone.
+    """
+    _log.error(
+        "dispatch_tick: spawn for %s/%s failed after worker session %s"
+        " launched (worktree=%s); keeping the task RUNNING, not re-spawning",
+        client.name,
+        task.ticket_id,
+        session_id,
+        worktree_path,
+        exc_info=exc,
+    )
+    if not isinstance(exc, WorkerLaunchedError):
+        emit_spawn_post_launch_attention(
+            session_id=session_id,
+            session_name="",
+            client=client.name,
+            ticket_id=task.ticket_id,
+            lane=task.lane,
+            claude_session_id=None,
+            surface_ref=None,
+            error=str(exc),
+        )
+    if worktree_path is not None:
+        try:
+            _stamp_spawn_success(
+                task,
+                client_name=client.name,
+                session_id=session_id,
+                worktree_path=worktree_path,
+            )
+        except (CwError, OSError):
+            _log.exception(
+                "dispatch_tick: could not record session %s on %s/%s; the"
+                " task stays RUNNING without it",
+                session_id,
+                client.name,
+                task.ticket_id,
+            )
+    return _SpawnOutcome(spawned=True, error=str(exc))
+
+
 def _spawn_claimed_task(
     task: TicketTask,
     client: ClientConfig,
@@ -389,9 +518,14 @@ def _spawn_claimed_task(
 
     Creates the worktree, spawns the session, stamps session_id +
     stage_base_ref, and emits SESSION_SPAWNED. On :class:`UsageLimitError` or
-    any other spawn failure, reverts the task to PENDING and returns an outcome
-    flagging the caller to break out of the slot/lane loops.
+    any other failure before a worker exists, reverts the task to PENDING and
+    returns an outcome flagging the caller to break out of the slot/lane loops.
+    A failure once a worker exists (``executor.spawn`` returned, or raised
+    :class:`~cw.exceptions.WorkerLaunchedError`) keeps the task RUNNING and
+    pages instead, via :func:`_handle_post_launch_failure` (#2502).
     """
+    session_id: str | None = None
+    worktree_path: Path | None = None
     try:
         # Codex capability gate (#1238): a codex-backed stage that cannot reach
         # a usable `codex` CLI parks BLOCKED_ON_USER before any real per-task
@@ -557,30 +691,14 @@ def _spawn_claimed_task(
             parent=parent,
             wall_clock_budget_seconds=None,
         )
-
-        _stamp_spawn_success(
+        # A worker exists from here on (#2502).
+        return _finish_launched_task(
             task,
-            client_name=client.name,
+            client,
             session_id=session_id,
             worktree_path=worktree_path,
+            emit=emit,
         )
-
-        record_event(
-            OrchestratorEventType.SESSION_SPAWNED,
-            {
-                "ticket_id": task.ticket_id,
-                "client": client.name,
-                "session_id": session_id,
-                "lane": task.lane,
-            },
-        )
-
-        if emit is not None:
-            emit(
-                f"SPAWN {client.name}/{task.ticket_id}"
-                f" session={session_id}"
-                f" worktree={worktree_path}"
-            )
     except UsageLimitError as exc:
         # Narrow catch for fleet-wide usage limits. Raised by
         # executor.spawn → NativeDaemonClient.spawn_bg when the
@@ -617,33 +735,40 @@ def _spawn_claimed_task(
         # backoff and trip the circuit breaker). See _defer_occupied_claim.
         return _defer_occupied_claim(task, client, exc, emit=emit)
     except Exception as exc:  # noqa: BLE001
-        # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331.
-        # Paired tests: TestDispatchTickSpawnErrors in
-        # tests/test_dispatch.py:1097+ (asserts the loop survives
-        # spawn failures and the task is reverted to PENDING).
+        # Sanctioned broad catch per PYTHON-PATTERNS.md, "When Bare Exception
+        # Catches Are Acceptable". Paired tests in tests/test_dispatch.py:
+        # TestDispatchTickSpawnErrors (the loop survives a spawn failure and
+        # the task is reverted to PENDING), TestSpawnFailureClassification
+        # and TestPostLaunchSpawnFailure (#2502, the two branches below).
         #
-        # Catch broad like the reconcile guard above: a backend
-        # outage (transient daemon failure,
-        # OSError from the adapter) must NOT kill the loop. The
-        # task was just claimed RUNNING by _claim_next_pending; it
-        # would otherwise be left in a half-state (status=RUNNING,
-        # session_id=None) requiring manual repair. Revert to
-        # PENDING + clear session_id so the next tick (or
-        # reconcile) can retry. Break to skip this client's
-        # remaining slots this tick — re-trying the same failing
-        # backend immediately would just spin. See GitHub issue
-        # #149.
-        _log.exception(
-            "dispatch_tick: spawn failed for %s/%s; reverting task to PENDING",
-            client.name,
-            task.ticket_id,
-        )
-        _revert_claimed_task_to_pending(
-            client.name,
-            task.ticket_id,
-            stamp_backoff=True,
-            created_at=task.created_at,
-        )
-        return _SpawnOutcome(spawn_error=True, error=str(exc))
-
-    return _SpawnOutcome(spawned=True)
+        # A spawn failure (a transient daemon failure, an OSError from the
+        # adapter) must NOT kill the loop. Route on whether a worker exists:
+        #   * It does (executor.spawn returned, or spawn_create_impl raised
+        #     WorkerLaunchedError): keep the row RUNNING and page. Reverting
+        #     it would let the next tick spawn a second worker (#2502).
+        #   * It does not: the task was just claimed RUNNING by
+        #     _claim_next_pending and would otherwise be left half-claimed
+        #     (status=RUNNING, session_id=None). Revert to PENDING with the
+        #     spawn-error backoff so a later tick (or reconcile) can retry, and
+        #     break off this client's remaining slots this tick: retrying the
+        #     same failing backend at once would just spin. See GitHub #149.
+        # One exit keeps this function inside its PLR0911 return budget.
+        launched = _launched_session_id(exc, session_id)
+        if launched is not None:
+            outcome = _handle_post_launch_failure(
+                task, client, exc, session_id=launched, worktree_path=worktree_path
+            )
+        else:
+            _log.exception(
+                "dispatch_tick: spawn failed for %s/%s; reverting task to PENDING",
+                client.name,
+                task.ticket_id,
+            )
+            _revert_claimed_task_to_pending(
+                client.name,
+                task.ticket_id,
+                stamp_backoff=True,
+                created_at=task.created_at,
+            )
+            outcome = _SpawnOutcome(spawn_error=True, error=str(exc))
+        return outcome
