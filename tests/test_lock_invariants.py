@@ -370,6 +370,17 @@ def test_pr_hydrate_is_not_allowlisted() -> None:
     assert "cw.pr_hydrate" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
 
 
+def test_stop_hook_is_not_allowlisted() -> None:
+    """#2566: the Stop hook's headless scope verification runs before
+    sessions_lock, so no in-lock subprocess under any ``cw.cli.stop_hook``
+    frame is forgiven any more."""
+    assert "cw.cli.stop_hook.locked" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+    assert not any(
+        module.startswith("cw.cli.stop_hook")
+        for module in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+    )
+
+
 def test_allowlist_entries_cite_a_documented_ticket() -> None:
     source_lines = _HARNESS_SOURCE.read_text(encoding="utf-8").splitlines()
     for module, ticket in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST.items():

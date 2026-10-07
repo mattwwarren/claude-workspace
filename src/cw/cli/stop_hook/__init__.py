@@ -19,13 +19,16 @@ on ``main``. Submodules, in dependency order:
 - ``agent_stamp`` -- ``agent_spawn_stamp`` snapshot and clear. Imports
   ``_constants``.
 - ``sentinel`` -- headless sentinel parse, scope check, reconstruction and
-  emit-door harvest. Imports ``_constants``.
+  emit-door harvest, plus :class:`_PreparedSentinel` and the pre-lock
+  prepare / in-lock resolve split (#2566). Imports ``_constants``.
 - ``staged_emit`` -- staged ``cw result emit`` bookkeeping. Imports
   ``_constants``.
 - ``headless`` -- :class:`_HeadlessResolution` and the headless resolution.
   Imports ``sentinel``, ``park`` and ``staged_emit``.
-- ``locked`` -- the ``sessions_lock`` window, the only submodule that imports
-  ``sessions_lock`` or ``load_state``. Imports ``headless``.
+- ``locked`` -- the ``sessions_lock`` window and the lockless pre-lock
+  sentinel step that precedes it (#2566); the only submodule that imports
+  ``sessions_lock`` or ``load_state``. Imports ``_constants``, ``headless``
+  and ``sentinel``.
 - ``command`` -- the ``signal-stop`` click command and its post-lock actions.
   Imports ``_constants``, ``payload``, ``agent_stamp``, ``staged_emit`` and
   ``locked``.
@@ -70,6 +73,7 @@ from cw.cli.stop_hook.headless import (
 from cw.cli.stop_hook.locked import (
     _handle_user_origin_stop,
     _LockedStop,
+    _prepare_sentinel_before_lock,
     _resolve_stop_under_lock,
 )
 from cw.cli.stop_hook.park import (
@@ -85,7 +89,10 @@ from cw.cli.stop_hook.sentinel import (
     _handle_headless_no_sentinel,
     _harvest_last_result_through_door,
     _parse_headless_sentinel,
+    _prepare_headless_sentinel,
+    _PreparedSentinel,
     _reconstruct_emitted_sentinel,
+    _resolve_headless_sentinel,
     _verify_headless_scope,
 )
 from cw.cli.stop_hook.staged_emit import (
@@ -107,6 +114,7 @@ __all__ = [
     "_STAGED_ROUTE_TASK_ALREADY_TERMINAL_KEY",
     "_HeadlessResolution",
     "_LockedStop",
+    "_PreparedSentinel",
     "_agent_spawn_stamp_is_clear",
     "_armed_running_task",
     "_build_completed_payload",
@@ -122,9 +130,12 @@ __all__ = [
     "_park_if_abandoned",
     "_parse_headless_sentinel",
     "_peek_staged_emit_result",
+    "_prepare_headless_sentinel",
+    "_prepare_sentinel_before_lock",
     "_read_stop_hook_payload",
     "_reconstruct_emitted_sentinel",
     "_resolve_and_complete_headless_session",
+    "_resolve_headless_sentinel",
     "_resolve_signal_stop_context",
     "_resolve_stop_under_lock",
     "_restore_staged_route_outcome",
