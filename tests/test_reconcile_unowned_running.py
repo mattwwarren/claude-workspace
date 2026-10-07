@@ -425,13 +425,13 @@ class TestAdopt:
         assert _sweep(client_cfg) == []
         assert _row().session_id is None
 
-    def test_failed_event_write_defers_bind_for_retry(
+    def test_failed_event_write_is_swallowed_and_bind_kept(
         self,
         client_cfg: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A failed audit write leaves the adoption available for retry."""
+        """The bind is durable before the audit event; a failed write is logged."""
         failures = _failing_record_event(
             monkeypatch,
             target=f"{_MODULE}.record_event",
@@ -441,10 +441,10 @@ class TestAdopt:
         _arrange(client_cfg)
         caplog.set_level(logging.ERROR, logger=_MODULE)
 
-        assert _sweep(client_cfg) == []
+        assert _sweep(client_cfg) == [_TICKET]
 
         assert failures == [1]
-        assert _row().session_id is None
+        assert _row().session_id == _SID
         assert any(
             r.exc_info is not None and _TICKET in r.getMessage()
             for r in caplog.records
