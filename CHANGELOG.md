@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.68.0] - 2026-10-07
+
 ### Added
 
 - **`TicketTask.claimed_at` and the `task.session_adopted` event (#2591).** The claim now records its own instant on the row (dev-queue schema 44; older rows load with `claimed_at: null`, no data rewrite). `task.session_adopted` is an audit event, one per row reconcile adopts (see Fixed), carrying `client`, `ticket_id`, `lane`, `session_id`, `session_name`, `attempt` and `claimed_at`. It is not in the default operator-forward set and fires no push notification.
