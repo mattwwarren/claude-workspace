@@ -67,6 +67,7 @@ _PROVENANCE = f"{_PKG}.provenance"
 _MATCH = f"{_PKG}.match"
 _EMIT = f"{_PKG}.emit"
 _PARSE = f"{_PKG}.parse"
+_SUPPRESS = f"{_PKG}.suppress"
 _LOGGER = "cw.review_finding_dispositions"
 _TICKET = "T-2498"
 
@@ -91,7 +92,7 @@ _OWNER: dict[str, str] = {
     "_DISPOSITION_MD_TITLE": _PARSE,
     "_DISPOSITION_SCHEMA_VERSION": _PARSE,
     "_DISPOSITION_BLOCK_RE": _PARSE,
-    "_SUPPRESSION_SIGNAL": _PKG,
+    "_SUPPRESSION_SIGNAL": _SUPPRESS,
     "FindingDisposition": _MODEL,
     "_summary_digest": _MODEL,
     "_disposition_key": _MODEL,
@@ -105,7 +106,7 @@ _OWNER: dict[str, str] = {
     "_provenance_gaps": _PROVENANCE,
     "partition_enforceable_dispositions": _PROVENANCE,
     "log_refused_dispositions": _PROVENANCE,
-    "_render_suppression_signal": _PKG,
+    "_render_suppression_signal": _SUPPRESS,
     "_MIN_TOKEN_LEN": _MATCH,
     "_ANCHORED_MIN_SHARED": _MATCH,
     "_ANCHORED_MIN_DICE": _MATCH,
@@ -122,8 +123,8 @@ _OWNER: dict[str, str] = {
     "_best_claim_match": _MATCH,
     "_match_ledger": _MATCH,
     "_ledger_matches": _MATCH,
-    "_CLAIM_NOTE": _PKG,
-    "_stamp_suppressed": _PKG,
+    "_CLAIM_NOTE": _SUPPRESS,
+    "_stamp_suppressed": _SUPPRESS,
     "_emit_suppression": _EMIT,
     "_emit_shadow": _EMIT,
     "_GIT_DIFF_UNCHANGED": _DRIFT,
@@ -132,7 +133,7 @@ _OWNER: dict[str, str] = {
     "disposition_event_type": _EMIT,
     "disposition_event_payload": _EMIT,
     "_emit_stale": _EMIT,
-    "suppress_adjudicated_findings": _PKG,
+    "suppress_adjudicated_findings": _SUPPRESS,
     "build_finding_disposition_ledger": _PARSE,
 }
 

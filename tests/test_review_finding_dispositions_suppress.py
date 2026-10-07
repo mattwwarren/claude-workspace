@@ -23,11 +23,11 @@ from cw.models.enums import OrchestratorEventType
 from cw.review_finding_dispositions import (
     FindingDisposition,
     _disposition_key,
-    _render_suppression_signal,
     build_finding_disposition_ledger,
     merge_finding_dispositions,
     suppress_adjudicated_findings,
 )
+from cw.review_finding_dispositions.suppress import _render_suppression_signal
 from cw.review_findings import AcceptedFinding, Finding, ReviewVerdict
 from tests._cli_review_helpers import CLAIM_ROW1_CANDIDATE, CLAIM_ROW1_RECORDED
 
