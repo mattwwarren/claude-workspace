@@ -11,6 +11,9 @@ legacy state file is cwd-relative).
   script and a real ``utils/`` dir of per-file links to the repo's ``utils``
   (mirroring the operator's install), so the script is launched through a
   symlink in a different directory from the repo copy.
+- E3: the same layout plus a stale/decoy ``review_monitor_lib/`` package and a
+  decoy ``utils/runtime_paths.py`` beside the symlink. The script resolves its
+  own path before touching ``sys.path``, so neither decoy is ever imported.
 """
 
 from __future__ import annotations
@@ -80,3 +83,25 @@ def test_e2_installed_symlink_layout_runs(tmp_path: Path) -> None:
     assert "--repo-path" in help_result.stdout
     assert status_result.returncode == 0, status_result.stderr
     assert json.loads(status_result.stdout) == {"monitored": {}, "completed": {}}
+
+
+_DECOY = 'raise SystemExit("DECOY")\n'
+
+
+def test_e3_decoys_beside_the_symlink_are_never_imported(tmp_path: Path) -> None:
+    launcher = _installed_layout(tmp_path)
+    global_scripts = tmp_path / "global" / "scripts"
+    decoy_lib = global_scripts / "review_monitor_lib"
+    decoy_lib.mkdir()
+    (decoy_lib / "__init__.py").write_text(_DECOY)
+    (decoy_lib / "cli.py").write_text(_DECOY)
+    decoy_paths = global_scripts / "utils" / "runtime_paths.py"
+    decoy_paths.unlink()
+    decoy_paths.write_text(_DECOY)
+
+    result = _run(launcher, tmp_path, "register", "--help")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("usage:")
+    assert "DECOY" not in result.stdout
+    assert "DECOY" not in result.stderr

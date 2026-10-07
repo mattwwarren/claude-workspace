@@ -29,7 +29,7 @@ from zoneinfo import ZoneInfo
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from utils.runtime_paths import desktop_queue_dir, review_monitor_dir
 

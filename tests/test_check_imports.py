@@ -55,7 +55,8 @@ def test_check_changelog_frozen_in_groups() -> None:
 def test_every_enumerated_script_exists_on_disk() -> None:
     for pythonpath, modules in _mod.GROUPS:
         for module in modules:
-            assert (_REPO_ROOT / pythonpath / f"{module}.py").is_file(), (
+            path = _REPO_ROOT / pythonpath / (module.replace(".", "/") + ".py")
+            assert path.is_file(), (
                 f"{pythonpath}/{module}.py enumerated in GROUPS but missing"
             )
 
