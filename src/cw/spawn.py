@@ -170,7 +170,6 @@ SPAWN_POST_LAUNCH_FAILED_REASON = "spawn_post_launch_failed"
 _POST_LAUNCH_ERROR_MAX_CHARS = 500
 _SPAWN_POST_LAUNCH_OUTBOX_NAME = "spawn_post_launch_attention.jsonl"
 _SPAWN_POST_LAUNCH_OUTBOX_LOCK_NAME = ".spawn_post_launch_attention.lock"
-_SPAWN_POST_LAUNCH_OUTBOX_CLAIM_TIMEOUT_SECS = 300.0
 
 
 def _spawn_post_launch_outbox_path() -> Path:
@@ -235,24 +234,8 @@ def _attention_was_delivered(
         return False
 
 
-def _outbox_claim_is_stale(record: dict[str, object]) -> bool:
-    """Return whether an interrupted outbox delivery may be reclaimed."""
-    claimed_at = record.get("claimed_at")
-    if not isinstance(claimed_at, str):
-        return True
-    try:
-        claimed = datetime.fromisoformat(claimed_at)
-    except ValueError:
-        return True
-    if claimed.tzinfo is None:
-        return True
-    return (datetime.now(UTC) - claimed).total_seconds() >= (
-        _SPAWN_POST_LAUNCH_OUTBOX_CLAIM_TIMEOUT_SECS
-    )
-
-
-def _retry_spawn_post_launch_outbox_locked() -> list[dict[str, object]]:
-    """Claim pending attention intents; the caller holds the outbox lock."""
+def _retry_spawn_post_launch_outbox_locked() -> None:
+    """Retry pending attention intents; the caller holds the outbox lock."""
     path = _spawn_post_launch_outbox_path()
     try:
         records = [
@@ -261,109 +244,54 @@ def _retry_spawn_post_launch_outbox_locked() -> list[dict[str, object]]:
             if line.strip()
         ]
     except FileNotFoundError:
-        return []
+        return
     except (OSError, json.JSONDecodeError):
         _log.exception("cannot read spawn post-launch attention outbox")
-        return []
+        return
 
     latest: dict[str, dict[str, object]] = {}
     for record in records:
-        if not isinstance(record, dict) or not isinstance(record.get("record_id"), str):
-            continue
-        record_id = record["record_id"]
-        previous = latest.get(record_id)
-        if previous is not None:
-            previous_status = previous.get("status")
-            if previous_status == "delivered" or (
-                previous_status == "delivering"
-                and record.get("status") != "delivered"
-                and not _outbox_claim_is_stale(previous)
-            ):
-                # A fallback append must not hide an active claim (or a
-                # completed delivery) from another retrying process.
-                continue
-        latest[record_id] = record
-    pending: list[dict[str, object]] = []
+        if isinstance(record, dict) and isinstance(record.get("record_id"), str):
+            latest[record["record_id"]] = record
     for record in latest.values():
-        status = record.get("status")
-        if status == "delivering":
-            if not _outbox_claim_is_stale(record):
-                continue
-        elif status != "pending":
+        if record.get("status") != "pending":
             continue
-        try:
-            _append_spawn_post_launch_outbox(
-                {
-                    **record,
-                    "status": "delivering",
-                    "claimed_at": datetime.now(UTC).isoformat(),
-                }
-            )
-        except OSError:
-            _log.exception(
-                "spawn post-launch attention claim failed for session %s",
+        payload = record.get("payload")
+        correlation_id = record.get("correlation_id")
+        if not isinstance(payload, dict) or (
+            correlation_id is not None and not isinstance(correlation_id, str)
+        ):
+            _log.error(
+                "invalid spawn post-launch attention outbox record for session %s",
                 record.get("session_id"),
             )
             continue
-        pending.append(record)
-    return pending
-
-
-def _mark_spawn_post_launch_outbox(
-    record: dict[str, object], *, delivered: bool
-) -> None:
-    """Append a delivery result without holding the inbox lock."""
-    try:
-        fd, stack = _acquire_spawn_post_launch_outbox_lock()
-    except (CwError, OSError):
-        _log.exception(
-            "cannot lock spawn post-launch attention outbox for session %s",
-            record.get("session_id"),
-        )
-        return
-    try:
-        _append_spawn_post_launch_outbox(
-            {**record, "status": "delivered" if delivered else "pending"}
-        )
-    except OSError:
-        _log.exception(
-            "spawn post-launch attention delivery marker failed for session %s",
-            record.get("session_id"),
-        )
-    finally:
-        _release_spawn_post_launch_outbox_lock(fd, stack)
-
-
-def _deliver_spawn_post_launch_outbox_record(record: dict[str, object]) -> None:
-    """Deliver one claimed attention intent with no outbox lock held."""
-    payload = record.get("payload")
-    correlation_id = record.get("correlation_id")
-    if not isinstance(payload, dict) or (
-        correlation_id is not None and not isinstance(correlation_id, str)
-    ):
-        _log.error(
-            "invalid spawn post-launch attention outbox record for session %s",
-            record.get("session_id"),
-        )
-        _mark_spawn_post_launch_outbox(record, delivered=False)
-        return
-    if _attention_was_delivered(payload, correlation_id):
-        _mark_spawn_post_launch_outbox(record, delivered=True)
-        return
-    try:
-        record_event(
-            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-            payload,
-            correlation_id=correlation_id,
-        )
-    except (CwError, OSError, ValueError):
-        _log.exception(
-            "spawn post-launch attention retry failed for session %s",
-            record.get("session_id"),
-        )
-        _mark_spawn_post_launch_outbox(record, delivered=False)
-        return
-    _mark_spawn_post_launch_outbox(record, delivered=True)
+        if _attention_was_delivered(payload, correlation_id):
+            delivered = True
+        else:
+            try:
+                record_event(
+                    OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+                    payload,
+                    correlation_id=correlation_id,
+                )
+            except (CwError, OSError, ValueError):
+                _log.exception(
+                    "spawn post-launch attention retry failed for session %s",
+                    record.get("session_id"),
+                )
+                continue
+            delivered = True
+        if delivered:
+            try:
+                _append_spawn_post_launch_outbox(
+                    {**record, "status": "delivered"}
+                )
+            except OSError:
+                _log.exception(
+                    "spawn post-launch attention delivery marker failed for session %s",
+                    record.get("session_id"),
+                )
 
 
 def _retry_spawn_post_launch_outbox() -> None:
@@ -374,11 +302,9 @@ def _retry_spawn_post_launch_outbox() -> None:
         _log.exception("cannot lock spawn post-launch attention outbox")
         return
     try:
-        records = _retry_spawn_post_launch_outbox_locked()
+        _retry_spawn_post_launch_outbox_locked()
     finally:
         _release_spawn_post_launch_outbox_lock(fd, stack)
-    for record in records:
-        _deliver_spawn_post_launch_outbox_record(record)
 
 
 def retry_spawn_post_launch_attention() -> None:
