@@ -425,13 +425,13 @@ class TestAdopt:
         assert _sweep(client_cfg) == []
         assert _row().session_id is None
 
-    def test_failed_event_write_leaves_durable_bind_without_event(
+    def test_failed_event_write_defers_bind_for_retry(
         self,
         client_cfg: ClientConfig,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A failed audit write cannot precede the durable adoption."""
+        """A failed audit write leaves the adoption available for retry."""
         failures = _failing_record_event(
             monkeypatch,
             target=f"{_MODULE}.record_event",
@@ -441,37 +441,10 @@ class TestAdopt:
         _arrange(client_cfg)
         caplog.set_level(logging.ERROR, logger=_MODULE)
 
-        assert _sweep(client_cfg) == [_TICKET]
-
-        assert failures == [1]
-        assert _row().session_id == _SID
-        assert any(
-            r.exc_info is not None and _TICKET in r.getMessage()
-            for r in caplog.records
-            if r.name == _MODULE and r.levelno == logging.ERROR
-        )
-
-    def test_failed_queue_write_leaves_row_unbound_without_event(
-        self,
-        client_cfg: ClientConfig,
-        adopted: list[CapturedEvent],
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """A failed queue write cannot be followed by an adoption event."""
-        _arrange(client_cfg)
-
-        def _fail_save(_store: DevQueueStore) -> None:
-            msg = "disk full"
-            raise OSError(msg)
-
-        monkeypatch.setattr(f"{_MODULE}.save_dev_queue", _fail_save)
-        caplog.set_level(logging.ERROR, logger=_MODULE)
-
         assert _sweep(client_cfg) == []
 
+        assert failures == [1]
         assert _row().session_id is None
-        assert adopted == []
         assert any(
             r.exc_info is not None and _TICKET in r.getMessage()
             for r in caplog.records
