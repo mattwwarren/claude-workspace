@@ -2726,3 +2726,24 @@ def simple_config() -> OrchestratorConfig:
         tick_interval_seconds=30,
         per_client_max_parallel={"test-client": 1},
     )
+
+
+@pytest.fixture
+def review_monitor_state_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Path]:
+    """Isolate every path ``.claude/scripts/review_monitor.py`` writes (#2499).
+
+    Points the script's central state dir, legacy state file, ship-it pending
+    inbox and Desktop action queue under *tmp_path* (all are bound at import,
+    so the autouse ``tmp_config_dir`` / ``_isolate_home`` never reach them),
+    empties the canonical repo-path overrides, and clears the
+    ``functools.lru_cache`` on ``_get_our_username`` at setup and teardown so
+    no test sees another's faked GitHub login. Returns the central state dir.
+    Logic: ``tests/_review_monitor_helpers.isolate_state``.
+    """
+    from tests import _review_monitor_helpers as helpers
+
+    central = helpers.isolate_state(monkeypatch, tmp_path)
+    yield central
+    helpers.get("_get_our_username").cache_clear()

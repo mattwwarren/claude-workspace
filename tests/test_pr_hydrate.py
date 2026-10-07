@@ -45,20 +45,10 @@ from cw.pr_hydrate import (
     observe_pushed_event,
     resolve_and_register_review_request,
 )
+from tests._review_monitor_helpers import checkrun as _checkrun
 from tests.conftest import _REPO_ROOT, init_repo_with_remote
 
 _URL = "https://github.com/acme/widgets/pull/42"
-
-
-def _checkrun(status: str, conclusion: str = "", name: str = "check") -> dict[str, Any]:
-    return {
-        "__typename": "CheckRun",
-        "status": status,
-        "conclusion": conclusion,
-        "name": name,
-        "workflowName": "wf",
-        "detailsUrl": "https://ci/1",
-    }
 
 
 def _pr_view_payload(**fields: Any) -> dict[str, Any]:
@@ -471,20 +461,29 @@ class TestAttentionStateVocabularyDrift:
     """
 
     def test_review_monitor_vocabulary_matches_pr_attention_state(self) -> None:
-        script = _REPO_ROOT / ".claude" / "scripts" / "review_monitor.py"
-        tree = ast.parse(script.read_text(encoding="utf-8"), filename=str(script))
-
+        # Layout-agnostic (#2499): the function lives in the entry script
+        # today and in review_monitor_lib/ once the script is split. A missing
+        # package directory simply contributes no files.
+        scripts_dir = _REPO_ROOT / ".claude" / "scripts"
+        sources = [
+            scripts_dir / "review_monitor.py",
+            *sorted((scripts_dir / "review_monitor_lib").glob("*.py")),
+        ]
         func_node = next(
             (
                 node
-                for node in ast.walk(tree)
+                for source in sources
+                for node in ast.walk(
+                    ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+                )
                 if isinstance(node, ast.FunctionDef)
                 and node.name == "_compute_attention_state"
             ),
             None,
         )
         assert func_node is not None, (
-            "_compute_attention_state not found in review_monitor.py -- "
+            "_compute_attention_state not found in review_monitor.py or "
+            "review_monitor_lib/ -- "
             "renamed or removed. This drift guard's extraction target must "
             "be updated (GitHub #1598), not silently skipped."
         )

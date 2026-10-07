@@ -1,0 +1,186 @@
+{
+ "commands": {
+  "ack-delta": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "pr_number", "help": null, "nargs": null, "option_strings": [], "required": true, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "sha", "help": null, "nargs": null, "option_strings": ["--sha"], "required": true, "type": null}
+   ],
+   "help": "Acknowledge the reviewer delta through --sha has been processed (Step 3 close)"
+  },
+  "catchup": {
+   "arguments": [],
+   "help": "Mark every existing author-role attention PR as already notified (no pings fired)"
+  },
+  "check": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "pr_number", "help": null, "nargs": null, "option_strings": [], "required": true, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null}
+   ],
+   "help": "Run one monitoring cycle for a PR"
+  },
+  "complete": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "pr_number", "help": null, "nargs": null, "option_strings": [], "required": true, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": "merged", "dest": "reason", "help": null, "nargs": null, "option_strings": ["--reason"], "required": false, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null}
+   ],
+   "help": "Mark a PR as done"
+  },
+  "confirm-thread": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "pr_number", "help": null, "nargs": null, "option_strings": [], "required": true, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "thread_id", "help": null, "nargs": null, "option_strings": ["--thread"], "required": true, "type": null}
+   ],
+   "help": "Mark a thread addressed-by-code-change (delta-review confirmation pass)"
+  },
+  "consume-pending": {
+   "arguments": [],
+   "help": "Scan /tmp/review-monitor/pending/ and register any PRs found"
+  },
+  "discover": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": null, "default": 7, "dest": "days", "help": null, "nargs": null, "option_strings": ["--days"], "required": false, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo_path", "help": null, "nargs": null, "option_strings": ["--repo-path"], "required": true, "type": null}
+   ],
+   "help": "Auto-register open author PRs from the past N days for a repo"
+  },
+  "drop": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "pr_number", "help": null, "nargs": null, "option_strings": [], "required": true, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null}
+   ],
+   "help": "Stop monitoring a PR"
+  },
+  "enqueue-action": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": ["channel_bump", "cron_failure", "dm_escalation", "nudge"], "default": null, "dest": "action_type", "help": null, "nargs": null, "option_strings": ["--type"], "required": true, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "payload", "help": "JSON object with the action's message data", "nargs": null, "option_strings": ["--payload"], "required": true, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "pr_number", "help": null, "nargs": null, "option_strings": ["--pr"], "required": false, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": false, "type": null}
+   ],
+   "help": "Write one outbound action to the Desktop action queue"
+  },
+  "list-repos": {
+   "arguments": [
+    {"action": "_StoreTrueAction", "choices": null, "default": false, "dest": "as_json", "help": null, "nargs": 0, "option_strings": ["--json"], "required": false, "type": null}
+   ],
+   "help": "List repos with state files"
+  },
+  "mark-comment-review": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": ["requests_changes", "neutral"], "default": null, "dest": "classification", "help": null, "nargs": null, "option_strings": ["--classification"], "required": true, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "pr_number", "help": null, "nargs": null, "option_strings": [], "required": true, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "review_id", "help": null, "nargs": null, "option_strings": ["--review-id"], "required": true, "type": null}
+   ],
+   "help": "Record the classifier's verdict on a tracked COMMENTED review"
+  },
+  "mark-escalated": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "pr_number", "help": null, "nargs": null, "option_strings": [], "required": true, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null}
+   ],
+   "help": "Record that a Slack-bot escalation fired"
+  },
+  "mark-notified": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "pr_number", "help": null, "nargs": null, "option_strings": [], "required": true, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "state_value", "help": null, "nargs": null, "option_strings": ["--state"], "required": true, "type": null}
+   ],
+   "help": "Record that a local ping fired for a state"
+  },
+  "nudge-ok": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "pr_number", "help": null, "nargs": null, "option_strings": [], "required": true, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null}
+   ],
+   "help": "Check if a nudge is allowed"
+  },
+  "pending-channel-bumps": {
+   "arguments": [],
+   "help": "Across all repos, list author PRs needing a stale-review channel bump"
+  },
+  "record-auto-fix": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "pr_number", "help": null, "nargs": null, "option_strings": [], "required": true, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null}
+   ],
+   "help": "Increment the per-day auto-fix attempt counter for a PR"
+  },
+  "record-channel-bump": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "pr_number", "help": null, "nargs": null, "option_strings": [], "required": true, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null}
+   ],
+   "help": "Record that a stale-review channel bump was posted for a PR"
+  },
+  "record-nudge": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "pr_number", "help": null, "nargs": null, "option_strings": [], "required": true, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null}
+   ],
+   "help": "Record a nudge was sent"
+  },
+  "recover-reviews": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": null, "default": 7, "dest": "days", "help": null, "nargs": null, "option_strings": ["--days"], "required": false, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo_path", "help": null, "nargs": null, "option_strings": ["--repo-path"], "required": true, "type": null}
+   ],
+   "help": "Auto-register open PRs reviewed by you in the past N days that were never monitored"
+  },
+  "register": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "pr_number", "help": null, "nargs": null, "option_strings": [], "required": true, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo_path", "help": null, "nargs": null, "option_strings": ["--repo-path"], "required": true, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "review_id", "help": null, "nargs": null, "option_strings": ["--review-id"], "required": false, "type": null},
+    {"action": "_StoreAction", "choices": ["reviewer", "author"], "default": null, "dest": "role", "help": null, "nargs": null, "option_strings": ["--role"], "required": true, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "sha", "help": null, "nargs": null, "option_strings": ["--sha"], "required": true, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "slack_channel", "help": "Slack channel ID for PR announcement thread", "nargs": null, "option_strings": ["--slack-channel"], "required": false, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "slack_ts", "help": "Parent ts for PR announcement thread", "nargs": null, "option_strings": ["--slack-ts"], "required": false, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "thread_details", "help": "JSON list of {id,file,line} objects", "nargs": null, "option_strings": ["--thread-details"], "required": false, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": [], "dest": "threads", "help": null, "nargs": "*", "option_strings": ["--threads"], "required": false, "type": null}
+   ],
+   "help": "Start monitoring a PR"
+  },
+  "set-status": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "pr_number", "help": null, "nargs": null, "option_strings": [], "required": true, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null},
+    {"action": "_StoreAction", "choices": ["watching", "ready_to_approve", "approved"], "default": null, "dest": "status", "help": null, "nargs": null, "option_strings": ["--status"], "required": true, "type": null}
+   ],
+   "help": "Set lifecycle status for a PR"
+  },
+  "slack-thread-cursor": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "pr_number", "help": null, "nargs": null, "option_strings": [], "required": true, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null}
+   ],
+   "help": "Print Slack channel+ts+last_seen for a PR"
+  },
+  "status": {
+   "arguments": [
+    {"action": "_StoreTrueAction", "choices": null, "default": false, "dest": "all_repos", "help": null, "nargs": 0, "option_strings": ["--all"], "required": false, "type": null},
+    {"action": "_StoreTrueAction", "choices": null, "default": false, "dest": "as_json", "help": null, "nargs": 0, "option_strings": ["--json"], "required": false, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": false, "type": null}
+   ],
+   "help": "Show current monitor state"
+  },
+  "update-slack-cursor": {
+   "arguments": [
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "last_seen_ts", "help": null, "nargs": null, "option_strings": ["--last-seen-ts"], "required": true, "type": null},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "pr_number", "help": null, "nargs": null, "option_strings": [], "required": true, "type": "int"},
+    {"action": "_StoreAction", "choices": null, "default": null, "dest": "repo", "help": null, "nargs": null, "option_strings": ["--repo"], "required": true, "type": null}
+   ],
+   "help": "Advance the slack_last_seen_ts cursor"
+  }
+ },
+ "description": "Review monitor: track PR review threads",
+ "subcommands_dest": "command",
+ "subcommands_required": true
+}

@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- review_monitor.py is now a thin entry point over the `review_monitor_lib/` package; CLI unchanged. Re-run scripts/install-skills.sh to link the package and clear `cw doctor` drift warnings; the entry point works without it.
+
 ### Fixed
 
 - **Operator commands no longer hang behind a held dev_queue, clients or concurrency_override lock (#2501).** `cw dev-queue add|move|remove|cancel|clear|prune|requeue|approve|revoke-plan-approval`, `cw dev-queue unblock`, `cw spawn complete`, `cw lane add|rm|pause|resume`, `cw config concurrency set|clear` and `cw init` now take those locks bounded, as #2491 did for the sessions lock: each bounded lock waits up to 60s per bounded lock (`CW_SESSIONS_LOCK_TIMEOUT_S`, a historic name that now governs every bounded lock) and then exits non-zero with an error that names the lock and how to find its holder (the new `LockTimeoutError`; `SessionsLockTimeoutError` is now its subclass). `cw spawn complete`, `cw dev-queue unblock` and `cw lane rm` take two bounded locks, so they can wait up to 120s in total and hold the outer lock while they wait on the inner one; the error reports the wait of the lock that timed out. The `cw dev-queue serve` and `dispatch.tick` advice appears only for the sessions and dev_queue locks. A multi-ticket `add`, `remove` or `cancel` stops at the first timeout and prints which tickets completed and which remain: re-running the full `add` or `cancel` command is safe, but `remove` is not idempotent, so re-run it for the not-removed tickets only. `cw dev-queue revoke-plan-approval` is also run by the headless plan-stage worker, which now exits blocked on a timeout instead of hanging. The default is unchanged: commit-after-side-effect callers (`cw spawn close`'s queue write, `cw spawn close --requeue`, `cw dev-queue drain`, the doctor reap paths), dispatch, reconcile and executors still wait. The LEAF locks (events inbox, session inbox) and `dispatch_state_lock` stay unbounded by design, since no operator command meets them behind a wedged holder.
