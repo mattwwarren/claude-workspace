@@ -1560,9 +1560,10 @@ find the row.
 **Emitter:** `run_unowned_running_recovery` (`cw.reconcile.unowned_running`),
 on every reconcile tick, before the TIMED_OUT backstop.
 **Semantics:** One event per adopted row, recorded after `dev_queue_lock`
-releases and the bind is saved. A failed write is logged and swallowed: the
-bind is already durable and the event is audit-only. `correlation_id` is the
-`ticket_id`. Not in the default operator-forward set; no push notification.
+releases and the bind is saved. A durable outbox marker is written before the
+bind; if the event write fails, the marker remains and the next reconcile tick
+retries it. `correlation_id` is the `ticket_id`. Not in the default
+operator-forward set; no push notification.
 
 A row is adopted only when the worktree's `cw-context.json` names the row's
 client, ticket and current `attempt`, its `session_id` is a recorded session
