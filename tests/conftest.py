@@ -53,6 +53,7 @@ from cw.review_findings import (
     Severity,
 )
 from cw.spawn import SPAWN_POST_LAUNCH_FAILED_REASON
+from tests import _git_ceiling
 from tests import _lock_invariants as lock_invariants
 
 if TYPE_CHECKING:
@@ -1961,6 +1962,33 @@ def _lock_invariants(
     trace = lock_invariants.install(monkeypatch)
     yield
     lock_invariants.finish(trace, request.node)
+
+
+@pytest.fixture(autouse=True)
+def _confine_git_discovery(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stop git ascending out of the pytest basetemp into an enclosing checkout.
+
+    A dispatched worker's ``TMPDIR`` lives inside its own worktree, so a
+    ``tmp_path`` meant as "not a repository" would otherwise resolve to that
+    worktree (#2598). Injected at the ``Popen`` layer because every git seam
+    strips ``GIT_*`` from its env. Logic: ``tests/_git_ceiling.py``.
+    """
+    _git_ceiling.install(monkeypatch, tmp_path_factory.getbasetemp())
+
+
+@pytest.fixture
+def ancestor_free_dir(tmp_path: Path) -> Path:
+    """A path directly under the filesystem root, never created.
+
+    For tests that walk the filesystem upward in Python (``find_cw_context``,
+    ``repo_root``), which no git ceiling can confine: no ancestor of this path
+    can be a checkout, so the walk finds nothing even when ``TMPDIR`` is inside
+    one. Relies on ``/.claude/cw-context.json`` and ``/pyproject.toml`` being
+    absent on the host.
+    """
+    return Path(tmp_path.anchor) / "cw-test-ancestor-free"
 
 
 @pytest.fixture(scope="session", autouse=True)
