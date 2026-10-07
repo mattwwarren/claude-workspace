@@ -29,6 +29,13 @@ table stays defined there because ``tests/test_dispatch.py`` monkeypatches
 names against the module it was defined in. See that package's docstring. The
 ``from cw.dispatch.routing import (...)`` block below is unaffected -- every
 name is still a package-level attribute.
+
+#2503 split ``gating`` into a package too, one submodule per gate family --
+``usage_limit``, ``availability``, ``freshness``, ``ssh_key``,
+``disk_pressure`` and ``context_json`` -- behind a pure re-export ``__init__``
+(the ``claim`` shape, not the ``routing`` one). The
+``from cw.dispatch.gating import (...)`` block below is unaffected; a test that
+patches a name a gate looks up must target the owning submodule.
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """Pre-spawn stale ``.cw/context.json`` invalidation tests (#1046).
 
-Covers ``cw.dispatch.gating``'s context-json family. Split out of
+Covers ``cw.dispatch.gating.context_json``. Split out of
 ``tests/test_dispatch.py`` (#2503).
 """
 

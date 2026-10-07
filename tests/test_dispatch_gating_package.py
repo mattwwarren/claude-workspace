@@ -39,6 +39,7 @@ _USAGE_LIMIT = f"{_GATING}.usage_limit"
 _AVAILABILITY = f"{_GATING}.availability"
 _SSH_KEY = f"{_GATING}.ssh_key"
 _FRESHNESS = f"{_GATING}.freshness"
+_DISK_PRESSURE = f"{_GATING}.disk_pressure"
 
 # Owning module for each of the 34 historic top-level names of the flat
 # ``gating.py``. Each extraction commit of the split edits only the entries it
@@ -66,17 +67,17 @@ _OWNER: dict[str, str] = {
     "_emit_ssh_key_skip": _SSH_KEY,
     "_emit_ssh_key_bypass": _SSH_KEY,
     "_apply_ssh_key_gate": _SSH_KEY,
-    "_HOST_TMP_EXHAUSTED_REASON": _GATING,
-    "_DiskPressure": _GATING,
-    "_resolve_inode_pressure": _GATING,
-    "_resolve_disk_pressure": _GATING,
-    "_disk_pressure_warn_line": _GATING,
-    "_emit_disk_pressure_skip": _GATING,
-    "_emit_disk_pressure_bypass": _GATING,
-    "_record_host_tmp_exhausted_block": _GATING,
-    "_reset_host_tmp_exhausted_block": _GATING,
-    "_update_host_tmp_latch": _GATING,
-    "_apply_disk_pressure_gate": _GATING,
+    "_HOST_TMP_EXHAUSTED_REASON": _DISK_PRESSURE,
+    "_DiskPressure": _DISK_PRESSURE,
+    "_resolve_inode_pressure": _DISK_PRESSURE,
+    "_resolve_disk_pressure": _DISK_PRESSURE,
+    "_disk_pressure_warn_line": _DISK_PRESSURE,
+    "_emit_disk_pressure_skip": _DISK_PRESSURE,
+    "_emit_disk_pressure_bypass": _DISK_PRESSURE,
+    "_record_host_tmp_exhausted_block": _DISK_PRESSURE,
+    "_reset_host_tmp_exhausted_block": _DISK_PRESSURE,
+    "_update_host_tmp_latch": _DISK_PRESSURE,
+    "_apply_disk_pressure_gate": _DISK_PRESSURE,
     "_invalidate_stale_context_json": _CONTEXT_JSON,
 }
 
@@ -143,16 +144,23 @@ _SEAMS = (
 
 # Every module that defines a ``_log``; each must log on ``cw.dispatch``.
 _LOGGING_MODULES = (
-    _GATING,
     _CONTEXT_JSON,
     _USAGE_LIMIT,
     _AVAILABILITY,
     _SSH_KEY,
     _FRESHNESS,
+    _DISK_PRESSURE,
 )
 
 # Every extracted gating submodule; each must import cold in a fresh interpreter.
-_SUBMODULES = ("context_json", "usage_limit", "availability", "ssh_key", "freshness")
+_SUBMODULES = (
+    "context_json",
+    "usage_limit",
+    "availability",
+    "ssh_key",
+    "freshness",
+    "disk_pressure",
+)
 
 
 def _owner(name: str) -> ModuleType:
@@ -228,6 +236,18 @@ def test_logger_name_is_defined_once_and_kept_out_of_all() -> None:
 def test_package_all_is_the_historic_surface() -> None:
     """``__all__`` lists exactly the 34 historic names."""
     assert sorted(cw.dispatch.gating.__all__) == sorted(_OWNER)
+
+
+def test_package_init_is_a_pure_reexport() -> None:
+    """The package binds only re-exports, its submodules and ``_LOGGER_NAME``.
+
+    Guards against a silent re-merge: a body (or a ``_log``) defined back in
+    ``__init__`` would add a name here.
+    """
+    bound = {name for name in vars(cw.dispatch.gating) if not name.startswith("__")}
+    # ``annotations`` is the ``from __future__ import annotations`` binding.
+    expected = set(_OWNER) | set(_SUBMODULES) | {"_LOGGER_NAME", "annotations"}
+    assert bound == expected
 
 
 @pytest.mark.parametrize("submodule", _SUBMODULES)

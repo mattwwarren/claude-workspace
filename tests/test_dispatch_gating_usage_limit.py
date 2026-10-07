@@ -1,6 +1,6 @@
 """Usage-limit reconcile preamble tests for ``dispatch_tick``.
 
-Covers ``cw.dispatch.gating``'s usage-limit family: a reconcile failure
+Covers ``cw.dispatch.gating.usage_limit``: a reconcile failure
 is contained, and a held ``.sessions.lock`` skips the tick (#2491).
 Split out of ``tests/test_dispatch.py`` (#2503).
 """

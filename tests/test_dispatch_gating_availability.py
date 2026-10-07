@@ -1,6 +1,6 @@
 """Fleet-wide gh-availability preflight gate tests (RFC 0011 A5, #1157).
 
-Covers ``cw.dispatch.gating``'s availability family: the TTL-cached
+Covers ``cw.dispatch.gating.availability``: the TTL-cached
 probe and its edge-triggered outage latch. Split out of
 ``tests/test_dispatch.py`` (#2503).
 """

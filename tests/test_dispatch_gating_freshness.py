@@ -1,6 +1,6 @@
 """Freshness preflight gate tests for ``dispatch_tick``.
 
-Covers ``cw.dispatch.gating``'s freshness family: the stale-main gate
+Covers ``cw.dispatch.gating.freshness``: the stale-main gate
 and the auto-fast-forward path with its non-main-head, diverged, dirty
 and detached refusals. Split out of ``tests/test_dispatch.py`` (#2503).
 """

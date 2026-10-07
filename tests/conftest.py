@@ -1736,9 +1736,10 @@ def _mock_gh_availability(monkeypatch: pytest.MonkeyPatch) -> None:
     availability gate calls ``check_gh_availability``, which shells out to a
     real ``gh auth status`` subprocess. Without a default, every existing
     dispatch test would depend on the host machine's live gh auth state (and
-    pay a real subprocess per tick). Patching the ``cw.dispatch`` binding
-    autouse guarantees no dispatch test probes for real; the fleet reads as
-    available unless a test overrides this seam. ``TestAvailabilityPreflightGate``
+    pay a real subprocess per tick). Patching the
+    ``cw.dispatch.gating.availability`` binding autouse guarantees no dispatch
+    test probes for real; the fleet reads as available unless a test overrides
+    this seam. ``TestAvailabilityPreflightGate``
     re-patches the same name via ``_force_gh_unavailable`` and pytest's patch
     stacking lets the test-level patch win. ``test_gh.py`` exercises the real
     helper via ``cw.gh`` directly and is unaffected.
@@ -1756,8 +1757,9 @@ def _mock_ssh_key_available(monkeypatch: pytest.MonkeyPatch) -> None:
     calls ``check_ssh_key_available``, which shells out to a real ``ssh-add
     -l`` subprocess. Without a default, every existing dispatch test would
     depend on the host machine's live ssh-agent state. Patching the
-    ``cw.dispatch.gating`` binding autouse guarantees no dispatch test probes
-    for real; the key reads as available unless a test overrides this seam.
+    ``cw.dispatch.gating.ssh_key`` binding autouse guarantees no dispatch test
+    probes for real; the key reads as available unless a test overrides this
+    seam.
     ``TestSshKeyPreflightGate`` re-patches the same name via
     ``_force_ssh_key_unavailable`` and pytest's patch stacking lets the
     test-level patch win. ``test_ssh.py`` exercises the real helper via
@@ -1796,9 +1798,9 @@ def _mock_disk_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     reads the *host machine's* real free space via ``shutil.disk_usage``.
     Without a default, every existing dispatch test would pass or fail
     depending on how full the CI runner's disk happens to be. Patching the
-    ``cw.dispatch.gating`` binding autouse guarantees no dispatch test probes
-    the real filesystem; the mount reads as roomy unless a test overrides this
-    seam. ``TestDiskPressurePreflightGate`` re-patches the same name via
+    ``cw.dispatch.gating.disk_pressure`` binding autouse guarantees no dispatch
+    test probes the real filesystem; the mount reads as roomy unless a test
+    overrides this seam. ``TestDiskPressurePreflightGate`` re-patches the same name via
     ``_force_disk_pressure_gated`` and pytest's patch stacking lets the
     test-level patch win. ``test_disk.py`` exercises the real helper via
     ``cw.disk`` directly and is unaffected.
@@ -1813,9 +1815,11 @@ def _mock_disk_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     roomy_disk = DiskUsage(total_gb=500.0, free_gb=250.0)
     roomy_inodes = InodeUsage(total_inodes=1_000_000, free_inodes=900_000)
-    monkeypatch.setattr("cw.dispatch.gating.check_disk_usage", lambda _path: roomy_disk)
     monkeypatch.setattr(
-        "cw.dispatch.gating.check_inode_usage", lambda _path: roomy_inodes
+        "cw.dispatch.gating.disk_pressure.check_disk_usage", lambda _path: roomy_disk
+    )
+    monkeypatch.setattr(
+        "cw.dispatch.gating.disk_pressure.check_inode_usage", lambda _path: roomy_inodes
     )
     monkeypatch.setattr(
         "cw.doctor.config_checks.check_disk_usage", lambda _path: roomy_disk

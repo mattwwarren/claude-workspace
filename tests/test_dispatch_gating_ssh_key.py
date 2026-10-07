@@ -1,6 +1,6 @@
 """SSH-agent-key preflight gate tests (#927).
 
-Covers ``cw.dispatch.gating``'s SSH-key family: the per-tick probe, the
+Covers ``cw.dispatch.gating.ssh_key``: the per-tick probe, the
 push-remote-scheme keying (#1495) and the gate bypass (#1437). Split
 out of ``tests/test_dispatch.py`` (#2503).
 """

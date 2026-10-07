@@ -1,6 +1,6 @@
 """Claim-time disk-pressure preflight gate tests (#1887, #2470).
 
-Covers ``cw.dispatch.gating``'s disk-pressure family: the free-bytes
+Covers ``cw.dispatch.gating.disk_pressure``: the free-bytes
 and free-inodes dimensions and the per-client ``host_tmp_exhausted``
 latch. Split out of ``tests/test_dispatch.py`` (#2503).
 """
@@ -50,10 +50,10 @@ def _force_disk_pressure_gated(
     """Force the claim-time disk-pressure probe to report a nearly-full mount.
 
     Overrides the autouse ``_mock_disk_usage`` default (which reports 250 GB
-    free) on the same ``cw.dispatch.gating.check_disk_usage`` seam.
+    free) on the same ``cw.dispatch.gating.disk_pressure.check_disk_usage`` seam.
     """
     monkeypatch.setattr(
-        "cw.dispatch.gating.check_disk_usage",
+        "cw.dispatch.gating.disk_pressure.check_disk_usage",
         lambda _path: DiskUsage(total_gb=500.0, free_gb=free_gb),
     )
 
@@ -275,7 +275,7 @@ class TestDiskPressurePreflightGate:
         def _raise(_path: Path) -> DiskUsage:
             raise OSError(probe_error)
 
-        monkeypatch.setattr("cw.dispatch.gating.check_disk_usage", _raise)
+        monkeypatch.setattr("cw.dispatch.gating.disk_pressure.check_disk_usage", _raise)
 
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
@@ -306,7 +306,7 @@ def _force_inode_usage(
 ) -> None:
     """Force the inode probe on every mount (overrides conftest's roomy default)."""
     monkeypatch.setattr(
-        "cw.dispatch.gating.check_inode_usage",
+        "cw.dispatch.gating.disk_pressure.check_inode_usage",
         lambda _path: InodeUsage(total_inodes=total_inodes, free_inodes=free_inodes),
     )
 
@@ -445,7 +445,9 @@ class TestHostTmpInodePressureGate:
             free = 10_000 if path == exhausted_base else 900_000
             return InodeUsage(total_inodes=1_000_000, free_inodes=free)
 
-        monkeypatch.setattr("cw.dispatch.gating.check_inode_usage", _probe)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.disk_pressure.check_inode_usage", _probe
+        )
         config = OrchestratorConfig(
             tick_interval_seconds=30,
             per_client_max_parallel={"test-client": 1, "other-client": 1},
@@ -562,7 +564,9 @@ class TestHostTmpInodePressureGate:
         def _raise(_path: Path) -> InodeUsage:
             raise OSError(probe_error)
 
-        monkeypatch.setattr("cw.dispatch.gating.check_inode_usage", _raise)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.disk_pressure.check_inode_usage", _raise
+        )
 
         result = dispatch_tick(
             simple_config, native_daemon=FakeNativeDaemonClient(), auto_ff=False
