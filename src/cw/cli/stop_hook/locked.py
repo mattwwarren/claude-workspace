@@ -44,7 +44,6 @@ logger = logging.getLogger(_LOGGER_NAME)
 # a USER-origin session reaches it on every Stop, but keep the canonical
 # terminal-status set as the source of truth for the other members.
 _SETTLED_STATUSES = TERMINAL_SESSION_STATUSES | frozenset({SessionStatus.IDLE})
-_HEADLESS_CONTEXT_KEY = "headless"
 
 
 def _handle_user_origin_stop(
@@ -102,7 +101,7 @@ def _prepare_sentinel_before_lock(
     cannot be read -- logged, never raised, so the locked section still
     harvests the sentinel, without scope verification.
     """
-    if not context.get(_HEADLESS_CONTEXT_KEY):
+    if not context.get("headless"):
         return None
     try:
         snapshot = next(
@@ -218,7 +217,7 @@ def _resolve_stop_under_lock(
         # sessions and non-headless daemon sessions — those fall through to the
         # normal COMPLETED path unchanged.
         is_headless = session.origin is SessionOrigin.DAEMON and bool(
-            context.get(_HEADLESS_CONTEXT_KEY)
+            context.get("headless")
         )
         now = datetime.now(UTC)
 
