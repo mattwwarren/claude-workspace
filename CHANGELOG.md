@@ -9,6 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **Haiku 5.5 workers now get `--permission-mode auto` instead of falling back to `bypassPermissions` (#2624).** `claude-haiku-5-5` (and dated or suffixed ids such as `claude-haiku-5-5-20260101`) is added to the auto-capable prefix allowlist in `cw.native_daemon`, per the Claude Code permission-modes docs. Haiku 4.5 remains non-auto-capable. `config/CONFIG_REFERENCE.md` and `config/clients.example.yaml` now recommend `claude-haiku-5-5` for the finalize stage, and the Haiku note in the reference describes only pre-5.5 Haiku.
+- **A classifier-denied auto-merge arm is now reported distinctly (#2625).** When the auto-mode permission classifier denies the `prep_pr_finalize.py arm-automerge` Bash call, the script never starts and the call has no exit status; finalize now emits variant (d) of `automerge_not_armed` (the denial quoted verbatim, the head-pinned by-hand command, and an operator-only allow-rule hint) instead of a generic or misleading `automerge_not_armed`, and `auto-dev.md`'s Tool-Use Denial Exit carves this one call out. Caveat: the ticket's first acceptance clause ("ends with auto-merge armed") is met only for arms the classifier permits; a classifier denial is a human-opened gate, and a cw-side re-arm is deferred to a follow-up (#2638) that needs an operator decision. No change to retry, `pr.auto_merge: false` (#2046) or the fail-closed reader (#2581).
 
 ## [1.68.1] - 2026-10-07
 
