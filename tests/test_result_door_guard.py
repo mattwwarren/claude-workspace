@@ -95,7 +95,7 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "via _apply_sentinel_to_task carries 'status'"
         ),
     },
-    "cli/stop_hook.py": {
+    "cli/stop_hook/__init__.py": {
         (
             "session.last_result = {\n"
             "**existing,\n"
@@ -103,8 +103,8 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "_STAGED_ROUTE_TASK_ALREADY_TERMINAL_KEY: task_already_terminal,\n"
             "}"
         ): (
-            "stop_hook.py (_stamp_staged_route_outcome) — #2458 fix cycle 5 "
-            "Action 2: merges this call's rescued/task_already_terminal "
+            "stop_hook/__init__.py (_stamp_staged_route_outcome) — #2458 fix "
+            "cycle 5 Action 2: merges this call's rescued/task_already_terminal "
             "outcome alongside the round-4 consumed flag on an already-"
             "terminal-shaped last_result, so a later complete_session=True "
             "call's already_routed short-circuit can restore them instead of "
@@ -112,8 +112,8 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "present (has_terminal_result() stays True)"
         ),
         "session.last_result = {**existing, _SENTINEL_UNROUTABLE_PAGED_KEY: True}": (
-            "stop_hook.py (_maybe_stamp_sentinel_unroutable_paged) — #2458 "
-            "fix cycle 6: merges a paging-dedup-only flag alongside an "
+            "stop_hook/__init__.py (_maybe_stamp_sentinel_unroutable_paged) — "
+            "#2458 fix cycle 6: merges a paging-dedup-only flag alongside an "
             "already-terminal-shaped last_result the first time the "
             "no-sentinel/not-parked bail is found pageable, so a repeat "
             "bg_count==0 drained-transition Stop landing on the same "
