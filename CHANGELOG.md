@@ -9,6 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - review_monitor.py is now a thin entry point over the `review_monitor_lib/` package; CLI unchanged. Re-run scripts/install-skills.sh to link the package and clear `cw doctor` drift warnings; the entry point works without it.
+- **`cw spawn close` and `cw spawn complete --force` no longer run the daemon stop under `sessions_lock` (#2547).** The surface stop (a `claude stop` subprocess of up to 10s) now runs after the lock releases, on the already-COMPLETED repeat-close path, the live close path and the `--force` no-op path alike, matching `cw done` and the Stop hook. `cw spawn close` now cancels the task and stamps the session COMPLETED before the stop (previously the stop came first), so a stop failure no longer leaves the session un-stamped; a repeat `cw spawn close` retries just the stop.
 
 ### Fixed
 
