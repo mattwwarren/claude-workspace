@@ -36,6 +36,15 @@ _TASK_RUNNING = f"{_PKG}.task_running"
 _BLOCKED_ON_USER = f"{_PKG}.blocked_on_user"
 _SESSION_LIVENESS = f"{_PKG}.session_liveness"
 _ORPHANS = f"{_PKG}.orphans"
+_REAP = f"{_PKG}.reap"
+_SUBMODULES = (
+    _CONSTANTS_MOD,
+    _TASK_RUNNING,
+    _BLOCKED_ON_USER,
+    _SESSION_LIVENESS,
+    _ORPHANS,
+    _REAP,
+)
 
 # The nine module-level constants the flat module bound at top level.
 _CONSTANTS = {
@@ -114,11 +123,11 @@ EXPECTED_OWNER: dict[str, str] = {
     "_null_liveness_orphan_recipe": _ORPHANS,
     "_check_wedge_active_null_liveness_orphan": _ORPHANS,
     "_check_wedge_leaked_daemon_worker": _ORPHANS,
-    "_REAP_CHECK_NAME": _PKG,
-    "_reap_daemon_sessions": _PKG,
-    "_reap_timeout_check": _PKG,
-    "_reap_sessions_and_sweep": _PKG,
-    "_reap_wedge_findings": _PKG,
+    "_REAP_CHECK_NAME": _REAP,
+    "_reap_daemon_sessions": _REAP,
+    "_reap_timeout_check": _REAP,
+    "_reap_sessions_and_sweep": _REAP,
+    "_reap_wedge_findings": _REAP,
 }
 
 # The 10 names ``cw.doctor.core`` imports and the four ``cw.doctor`` imports.
@@ -189,6 +198,18 @@ class TestPackageExportCompleteness:
     def test_all_is_sorted_without_duplicates(self) -> None:
         """Ruff RUF022's isort-style order: SCREAMING_CASE, CamelCase, the rest."""
         assert list(wedge.__all__) == sorted(set(wedge.__all__), key=_isort_style_key)
+
+    def test_package_init_is_a_pure_reexport(self) -> None:
+        """The package binds only re-exports, its submodules and ``_LOGGER_NAME``.
+
+        Guards against a silent re-merge: a body (or a stdlib/third-party
+        import) left in ``__init__`` would add a name here.
+        """
+        bound = {name for name in vars(wedge) if not name.startswith("__")}
+        submodules = {module.rsplit(".", 1)[1] for module in _SUBMODULES}
+        # ``annotations`` is the ``from __future__ import annotations`` binding.
+        expected = EXPECTED_EXPORTS | submodules | {"_LOGGER_NAME", "annotations"}
+        assert bound == expected
 
     def test_logger_name_is_defined_once_and_kept_out_of_all(self) -> None:
         """``_LOGGER_NAME`` lives in ``_constants``; the package only re-exports it."""
@@ -269,16 +290,16 @@ PATCH_OWNERSHIP = [
         _SESSION_LIVENESS,
     ),
     ("_check_wedge_leaked_daemon_worker", "get_native_daemon_client", _ORPHANS),
-    ("_reap_sessions_and_sweep", "get_native_daemon_client", _PKG),
+    ("_reap_sessions_and_sweep", "get_native_daemon_client", _REAP),
     ("_daemon_supervisor_alive", "_ROSTER_PATH", _SESSION_LIVENESS),
     (
         "_check_wedge_active_daemon_stale_no_sentinel",
         "load_orchestrator_config",
         _SESSION_LIVENESS,
     ),
-    ("_reap_sessions_and_sweep", "reap_routed_result_findings", _PKG),
-    ("_reap_daemon_sessions", "_reap_session_by_selector", _PKG),
-    ("_reap_sessions_and_sweep", "sweep_leaked_daemon_workers", _PKG),
+    ("_reap_sessions_and_sweep", "reap_routed_result_findings", _REAP),
+    ("_reap_daemon_sessions", "_reap_session_by_selector", _REAP),
+    ("_reap_sessions_and_sweep", "sweep_leaked_daemon_workers", _REAP),
 ]
 
 
@@ -391,14 +412,7 @@ def test_submodule_logger_is_the_package_logger(submodule: str) -> None:
 
 # Every extracted submodule, plus the cycle-sensitive ``loop_health`` importer;
 # each must import cold in a fresh isolated interpreter.
-_COLD_IMPORTS = (
-    "cw.doctor.loop_health",
-    _CONSTANTS_MOD,
-    _TASK_RUNNING,
-    _BLOCKED_ON_USER,
-    _SESSION_LIVENESS,
-    _ORPHANS,
-)
+_COLD_IMPORTS = ("cw.doctor.loop_health", *_SUBMODULES)
 
 
 @pytest.mark.parametrize("module", _COLD_IMPORTS)

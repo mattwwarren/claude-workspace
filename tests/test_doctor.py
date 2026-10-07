@@ -2533,9 +2533,9 @@ class TestWedgeReapRecipes:
                 raise self._lock_timeout(tmp_config_dir)
             return found
 
-        monkeypatch.setattr("cw.doctor.wedge._reap_session_by_selector", _reap)
+        monkeypatch.setattr("cw.doctor.wedge.reap._reap_session_by_selector", _reap)
         monkeypatch.setattr(
-            "cw.doctor.wedge.sweep_leaked_daemon_workers",
+            "cw.doctor.wedge.reap.sweep_leaked_daemon_workers",
             lambda *_a, **_k: sweeps.append(1),
         )
         return reap_calls, sweeps
@@ -2639,7 +2639,7 @@ class TestWedgeReapRecipes:
         )
         routed_calls: list[object] = []
         monkeypatch.setattr(
-            "cw.doctor.wedge.reap_routed_result_findings",
+            "cw.doctor.wedge.reap.reap_routed_result_findings",
             lambda findings: routed_calls.append(findings) or [],
         )
 
@@ -2666,7 +2666,7 @@ class TestWedgeReapRecipes:
             raise self._lock_timeout(tmp_config_dir)
 
         monkeypatch.setattr(
-            "cw.doctor.wedge.reap_routed_result_findings", _routed_timeout
+            "cw.doctor.wedge.reap.reap_routed_result_findings", _routed_timeout
         )
 
         result = _reap_wedge_findings(self._timeout_findings(with_routed=True))
@@ -2693,7 +2693,7 @@ class TestWedgeReapRecipes:
         )
         routed_calls: list[object] = []
         monkeypatch.setattr(
-            "cw.doctor.wedge.reap_routed_result_findings",
+            "cw.doctor.wedge.reap.reap_routed_result_findings",
             lambda findings: routed_calls.append(findings) or [],
         )
 
@@ -8060,7 +8060,9 @@ class TestWedgeLeakedDaemonWorker:
         monkeypatch.setattr(
             "cw.doctor.wedge.orphans.get_native_daemon_client", lambda: daemon
         )
-        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.wedge.reap.get_native_daemon_client", lambda: daemon
+        )
         monkeypatch.setattr(
             "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
         )
