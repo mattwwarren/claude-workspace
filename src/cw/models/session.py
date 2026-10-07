@@ -187,7 +187,7 @@ def counts_toward_client_ceiling(session: Session, client_name: str) -> bool:
     a pre-existing DAEMON session is real host load whether or not a queue row
     tracks it -- so ``cw dev-queue status`` can name the sessions no occupied
     row owns. Shared by ``cw.dispatch.tick._client_tick_snapshot``,
-    ``cw.dispatch.gating._emit_usage_limit_skip_events`` and that status
+    ``cw.dispatch.gating.usage_limit._emit_usage_limit_skip_events`` and that status
     annotation, so the three counts cannot drift.
     """
     return (

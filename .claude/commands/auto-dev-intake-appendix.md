@@ -29,7 +29,7 @@ Step P1 found `LOCAL_MAIN != ORIGIN_MAIN`.
 If `AHEAD == 0` and `BEHIND > 0` (behind-only divergence, the shape
 `fast_forward_main`'s own guards would allow), do not declare divergence
 yet: the dispatch-tick auto-ff (`_resolve_freshness` in
-`src/cw/dispatch/gating.py`) advances the base checkout's `main`
+`src/cw/dispatch/gating/freshness.py`) advances the base checkout's `main`
 concurrently. Give it a bounded window before falling through.
 
 #### Behind-only wait-and-recheck

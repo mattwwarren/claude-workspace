@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING
 import pytest
 import yaml
 
-from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
 from cw._lock_guard import LockRank, is_rank_held
 from cw.auto_dev_result import IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
 from cw.codex_background import _default_background, join_outstanding_codex_threads
@@ -26,7 +25,6 @@ from cw.config import (
     load_state,
     orchestrator_config_file,
     save_state,
-    sessions_lock_file,
 )
 from cw.dev_queue import (
     add_ticket,
@@ -35,16 +33,9 @@ from cw.dev_queue import (
     save_dev_queue,
     save_plan,
 )
-from cw.disk import DiskUsage, InodeUsage
 from cw.dispatch import (
-    _AVAILABILITY_OUTAGE_REASON,
-    _AVAILABILITY_PROBE_TTL_SECONDS,
     _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD,
     _CODEX_CAPABILITY_PROBE_TTL_SECONDS,
-    FRESHNESS_MAIN_DETACHED,
-    FRESHNESS_MAIN_DIRTY_CHECKOUT,
-    FRESHNESS_MAIN_DIVERGED,
-    FRESHNESS_NON_MAIN_HEAD,
     TICK_STALE_SECONDS,
     DispatchTickResult,
     _accumulate_task_cost,
@@ -62,21 +53,15 @@ from cw.dispatch import (
 )
 from cw.dispatch.claim.codex_capability import _SpawnOutcome
 from cw.dispatch.claim.spawn import _handle_post_launch_failure
-from cw.dispatch.gating import _reconcile_usage_limited
 from cw.dispatch.loop import _run_stale_client_watchdog_guarded
 from cw.dispatch_state import (
-    AvailabilityProbeCache,
-    load_availability_probe_cache,
-    load_host_tmp_probe_cache,
     merge_and_save_usage_limited_until,
-    save_availability_probe_cache,
     save_usage_limit_armed_at,
 )
 from cw.events import read_events, record_event
 from cw.exceptions import (
     ConfigValidationError,
     DispatchLoopLockedError,
-    SessionsLockTimeoutError,
     StaleWorktreeError,
     VersionDriftError,
     WorktreeError,
@@ -84,7 +69,6 @@ from cw.exceptions import (
 from cw.executor.core import FakeFireAndForgetRunner
 from cw.models import (
     CODEX_BACKEND,
-    DEFAULT_DISK_PRESSURE_MIN_FREE_GB,
     DEFAULT_GLOBAL_ATTEMPT_CEILING,
     DEFAULT_LANE,
     OPENCODE_BACKEND,
@@ -111,8 +95,8 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from tests._clients_yaml import ClientSpec, executor_backend_extra, write_clients_yaml
+from tests._dispatch_gating_helpers import _force_gh_unavailable
 from tests.conftest import (
-    _hold_sessions_lock,
     _make_daemon_session,
     _make_tick_summary,
     _make_ticket_task,
@@ -127,7 +111,6 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
-    from cw.models import OrchestratorEvent
     from cw.native_daemon import NativeDaemonClient
     from cw.worktree import FetchWarningKey, UnresolvablePathWarningKey
     from tests.conftest import CapturedEvent
@@ -235,48 +218,6 @@ def test_dispatch_package_submodules_import_without_cycle() -> None:
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def tmp_dispatch_dirs(tmp_config_dir: Path) -> Path:
-    """Return tmp_path; state isolation is handled by the autouse fixture."""
-    return tmp_config_dir
-
-
-@pytest.fixture
-def workspace_dir(make_git_repo: Callable[[str], Path]) -> Path:
-    """Return a real git repo to host the fake client.
-
-    dispatch_tick now calls ``create_worktree`` on this dir, so it must
-    be a real git repo with at least one commit.
-    """
-    return make_git_repo("workspace/test-project")
-
-
-@pytest.fixture
-def sample_client_config(workspace_dir: Path, tmp_path: Path) -> ClientConfig:
-    """A ClientConfig for use with dispatch tests.
-
-    Sets worktree_base to a tmp_path subdirectory so create_worktree
-    writes test worktrees under tmp_path (not ~/.cw/wt/), preventing
-    stale-directory accumulation across test runs.
-    """
-    return ClientConfig(
-        name="test-client",
-        workspace_path=workspace_dir,
-        default_branch="main",
-        worktree_base=tmp_path / "worktrees",
-        blocked_result_requeue_enabled=True,
-    )
-
-
-@pytest.fixture
-def simple_config() -> OrchestratorConfig:
-    """OrchestratorConfig with cap=1 for test-client."""
-    return OrchestratorConfig(
-        tick_interval_seconds=30,
-        per_client_max_parallel={"test-client": 1},
-    )
 
 
 @pytest.fixture
@@ -4636,456 +4577,6 @@ class TestDispatchCodexCapabilityGate:
         )
 
 
-# ---------------------------------------------------------------------------
-# TestDispatchTickFreshnessGate
-# ---------------------------------------------------------------------------
-
-
-class TestDispatchTickFreshnessGate:
-    """Freshness-gate tests: stale main blocks dispatch and emits ticket.needs_sync."""
-
-    def test_stale_main_skips_dispatch_and_keeps_pending(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Stale client: dispatch returns 0, task stays PENDING, event emitted."""
-        write_clients_yaml(sample_client_config)
-        task = TicketTask(ticket_id="CW-1", client="test-client")
-        add_ticket(task)
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 3),
-        )
-
-        daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
-
-        assert spawned == 0
-
-        store = load_dev_queue()
-        assert store.tasks[0].status == QueueItemStatus.PENDING
-
-        assert len(daemon.spawn_calls) == 0
-
-        events = read_events(
-            consumer="test-freshness",
-            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
-        )
-        assert len(events) == 1
-        assert events[0].payload["ticket_id"] == "CW-1"
-        assert events[0].payload["client"] == "test-client"
-
-    def test_stale_main_emits_event_once_per_pending_ticket(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Two PENDING tasks emit two ticket.needs_sync events (one per task)."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="CW-10", client="test-client"))
-        add_ticket(TicketTask(ticket_id="CW-11", client="test-client"))
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 1),
-        )
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon)
-
-        events = read_events(
-            consumer="test-freshness-multi",
-            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
-        )
-        assert len(events) == 2
-        ticket_ids = {e.payload["ticket_id"] for e in events}
-        assert ticket_ids == {"CW-10", "CW-11"}
-
-    def test_stale_check_skips_only_stale_client(
-        self,
-        tmp_dispatch_dirs: Path,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-        make_git_repo: Callable[[str], Path],
-    ) -> None:
-        """Stale client A skipped; fresh client B dispatches normally."""
-        write_clients_yaml(sample_client_config)
-
-        # Create second fresh client
-        fresh_ws = make_git_repo("workspace/fresh-project")
-        fresh_client = ClientConfig(
-            name="fresh-client",
-            workspace_path=fresh_ws,
-            default_branch="main",
-            worktree_base=tmp_path / "worktrees-fresh",
-        )
-        # Append fresh-client to clients.yaml
-        config_dir = tmp_dispatch_dirs / ".config" / "cw"
-        clients_file = config_dir / "clients.yaml"
-        existing = clients_file.read_text()
-        existing += (
-            f"  {fresh_client.name}:\n"
-            f"    workspace_path: {fresh_client.workspace_path}\n"
-            f"    default_branch: {fresh_client.default_branch}\n"
-            f"    worktree_base: {fresh_client.worktree_base}\n"
-        )
-        clients_file.write_text(existing)
-
-        add_ticket(TicketTask(ticket_id="CW-20", client="test-client"))
-        add_ticket(TicketTask(ticket_id="CW-21", client="fresh-client"))
-
-        def _freshness_check(
-            client: ClientConfig,
-            warned_fetch_fail: set[FetchWarningKey] | None = None,
-        ) -> tuple[bool, str, str, int]:
-            if client.name == "test-client":
-                return (True, "aaa", "bbb", 2)
-            return (False, "abc", "abc", 0)
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin", _freshness_check
-        )
-
-        # fresh-client also needs cap=1
-        config = OrchestratorConfig(
-            tick_interval_seconds=30,
-            per_client_max_parallel={"test-client": 1, "fresh-client": 1},
-        )
-
-        daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(config, native_daemon=daemon).spawned
-
-        assert spawned == 1  # only fresh-client
-
-        events = read_events(
-            consumer="test-freshness-split",
-            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
-        )
-        assert len(events) == 1
-        assert events[0].payload["client"] == "test-client"
-
-    def test_fresh_main_dispatches_normally(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Fresh main: existing dispatch behaviour unchanged."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="CW-30", client="test-client"))
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (False, "abc", "abc", 0),
-        )
-
-        daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
-
-        assert spawned == 1
-
-        events = read_events(
-            consumer="test-freshness-no-event",
-            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
-        )
-        assert len(events) == 0, "Fresh main should not emit ticket.needs_sync"
-
-    def test_freshness_check_called_once_per_client_per_tick(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """is_main_behind_origin called exactly once per client even with 3 tasks."""
-        write_clients_yaml(sample_client_config)
-        for i in range(3):
-            add_ticket(TicketTask(ticket_id=f"CW-4{i}", client="test-client"))
-
-        call_count = 0
-
-        def _counting(
-            _client: ClientConfig,
-            warned_fetch_fail: set[FetchWarningKey] | None = None,
-        ) -> tuple[bool, str, str, int]:
-            nonlocal call_count
-            call_count += 1
-            return (False, "abc", "abc", 0)
-
-        monkeypatch.setattr("cw.dispatch.gating.is_main_behind_origin", _counting)
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon)
-
-        assert call_count == 1
-
-    def test_freshness_check_missing_workspace_no_traceback(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-        tmp_path: Path,
-    ) -> None:
-        """dispatch_tick with missing workspace_path: WARNING logged, no traceback."""
-        missing_dir = tmp_path / "nonexistent"  # intentionally not created
-        missing_client = ClientConfig(
-            name="missing-ws",
-            workspace_path=missing_dir,
-            default_branch="main",
-        )
-        write_clients_yaml(missing_client)
-        add_ticket(TicketTask(ticket_id="CW-99", client="missing-ws"))
-
-        daemon = FakeNativeDaemonClient()
-        caplog.set_level(logging.WARNING, logger="cw.dispatch")
-        caplog.set_level(logging.WARNING, logger="cw.worktree")
-
-        config = OrchestratorConfig(
-            tick_interval_seconds=30,
-            per_client_max_parallel={"missing-ws": 1},
-        )
-        # Should not raise even with missing workspace_path
-        dispatch_tick(config, native_daemon=daemon)
-
-        # No exc_info on freshness-related log records.
-        # (dispatch may log other errors if it proceeds to create_worktree with
-        # the missing path; those are separate concerns from the freshness gate.)
-        freshness_records = [
-            r
-            for r in caplog.records
-            if r.name in ("cw.dispatch", "cw.worktree._freshness")
-            and "freshness" in r.message.lower()
-        ]
-        assert not any(r.exc_info for r in freshness_records), (
-            "No traceback should appear for missing workspace freshness check — "
-            "got exc_info on: "
-            + str([r.message for r in freshness_records if r.exc_info])
-        )
-        # The freshness skip warning should appear
-        assert any("freshness_check_skip" in r.message for r in caplog.records), (
-            "Expected freshness_check_skip warning for missing workspace"
-        )
-
-    def test_freshness_check_failure_does_not_block_dispatch(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """RuntimeError from freshness check: WARNING logged, dispatch proceeds."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="CW-50", client="test-client"))
-
-        def _boom(
-            _client: ClientConfig,
-            warned_fetch_fail: set[FetchWarningKey] | None = None,
-        ) -> tuple[bool, str, str, int]:
-            msg = "network unreachable"
-            raise RuntimeError(msg)
-
-        monkeypatch.setattr("cw.dispatch.gating.is_main_behind_origin", _boom)
-
-        daemon = FakeNativeDaemonClient()
-
-        caplog.set_level(logging.WARNING, logger="cw.dispatch")
-        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
-
-        assert spawned == 1  # dispatch proceeded
-        assert any(
-            "freshness check failed" in r.message.lower() for r in caplog.records
-        )
-
-
-class TestDispatchTickReconcileErrors:
-    """Reconcile failure inside dispatch_tick is contained, not propagated.
-
-    Paired test for the sanctioned BLE001 broad-catch at
-    src/cw/dispatch.py:105. Reconcile is best-effort housekeeping; if it
-    fails (transient adapter outage, corrupted roster, OSError on stale
-    socket), dispatch_tick must log + continue, not propagate.
-    """
-
-    def test_reconcile_failure_does_not_crash_dispatch_tick(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        write_clients_yaml(sample_client_config)
-
-        def _boom_reconcile(*_args: object, **_kwargs: object) -> None:
-            msg = "simulated reconcile failure"
-            raise RuntimeError(msg)
-
-        # Patch the name as imported into cw.dispatch (not cw.reconcile).
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", _boom_reconcile)
-
-        daemon = FakeNativeDaemonClient()
-
-        caplog.set_level(logging.ERROR, logger="cw.dispatch")
-
-        # Must not raise; reconcile guard catches and logs, dispatch_tick
-        # continues to the dev-queue scan and returns normally.
-        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
-
-        assert spawned == 0
-        assert any(
-            "reconcile failed" in record.getMessage().lower()
-            for record in caplog.records
-            if record.name == "cw.dispatch" and record.levelno >= logging.ERROR
-        ), "expected ERROR log from cw.dispatch mentioning 'reconcile failed'"
-
-    @pytest.mark.parametrize("usage_limited", [True, False])
-    def test_dispatch_loop_reconcile_opts_in_to_review_job_dispatch(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        usage_limited: bool,
-    ) -> None:
-        """#1229: the live dispatch loop's reconcile preamble is the ONE caller
-        that lets reconcile() fire the address_review / auto_fix_ci recipes
-        (cw status / list / start / doctor call it with the False default)."""
-        from cw.dispatch.gating import _reconcile_usage_limited
-        from cw.reconcile import ReconcileReport
-
-        seen: list[dict[str, object]] = []
-
-        def _record_reconcile(**kwargs: object) -> ReconcileReport:
-            seen.append(kwargs)
-            return ReconcileReport(usage_limited=usage_limited)
-
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", _record_reconcile)
-
-        assert _reconcile_usage_limited() is usage_limited
-        assert seen == [{"dispatch_review_jobs": True}]
-
-
-class TestDispatchTickSessionsLockTimeout:
-    """A held ``.sessions.lock`` skips the tick; it never crashes serve (#2491)."""
-
-    def test_reconcile_lock_timeout_skips_tick_with_warning(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-2491", client="test-client"))
-
-        def _timeout(*_args: object, **_kwargs: object) -> None:
-            msg = "lock held"
-            raise SessionsLockTimeoutError(
-                msg, lock_path=sessions_lock_file(), waited_s=60.0
-            )
-
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", _timeout)
-        daemon = FakeNativeDaemonClient()
-        caplog.set_level(logging.WARNING, logger="cw.dispatch")
-
-        result = dispatch_tick(simple_config, native_daemon=daemon)
-
-        assert result.spawned == 0
-        assert not result.usage_limit_detected
-        assert daemon.spawn_calls == []
-        store = load_dev_queue()
-        task = next(t for t in store.tasks if t.ticket_id == "GEN-2491")
-        assert task.status == QueueItemStatus.PENDING  # not claimed this tick
-        skip_warnings = [
-            record
-            for record in caplog.records
-            if record.name == "cw.dispatch" and "skipping tick" in record.getMessage()
-        ]
-        assert len(skip_warnings) == 1  # logged once, with the exception text
-        assert skip_warnings[0].levelno == logging.WARNING
-        assert "lock held" in skip_warnings[0].getMessage()
-
-    def test_skipped_tick_records_no_dispatch_tick_event(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """DISPATCH_TICK is written after claim/spawn, so a skipped tick has none.
-
-        This is the premise of the watchdog claim in ``tick.py``: the gap is
-        visible only through the watchdogs that read ``dispatch.tick`` age.
-        """
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-2493", client="test-client"))
-
-        def _timeout(*_args: object, **_kwargs: object) -> None:
-            msg = "lock held"
-            raise SessionsLockTimeoutError(
-                msg, lock_path=sessions_lock_file(), waited_s=60.0
-            )
-
-        with monkeypatch.context() as patch_ctx:
-            patch_ctx.setattr("cw.dispatch.gating.reconcile", _timeout)
-            dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
-
-        assert read_events(event_types=[OrchestratorEventType.DISPATCH_TICK]) == []
-
-        # Positive control: with reconcile working again the same tick records
-        # exactly one event (one client), so the empty list above is not vacuous.
-        dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
-
-        assert len(read_events(event_types=[OrchestratorEventType.DISPATCH_TICK])) == 1
-
-    def test_real_contention_skips_tick_then_next_tick_proceeds(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """Real contention end to end: held lock -> skipped tick; released -> spawn."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-2492", client="test-client"))
-        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.2")
-        caplog.set_level(logging.WARNING, logger="cw.dispatch")
-        daemon = FakeNativeDaemonClient()
-
-        with _hold_sessions_lock():
-            skipped = dispatch_tick(simple_config, native_daemon=daemon)
-
-        assert skipped.spawned == 0
-        assert daemon.spawn_calls == []
-        assert any("skipping tick" in record.getMessage() for record in caplog.records)
-        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-2492")
-        assert task.status == QueueItemStatus.PENDING  # nothing claimed or spawned
-        assert read_events(event_types=[OrchestratorEventType.DISPATCH_TICK]) == []
-
-        retried = dispatch_tick(simple_config, native_daemon=daemon)
-
-        assert retried.spawned == 1
-        # Positive control: the very same setup DOES record a tick once it
-        # proceeds (one per client), so the empty list above is not vacuous.
-        assert len(read_events(event_types=[OrchestratorEventType.DISPATCH_TICK])) == 1
-
-    def test_other_reconcile_errors_still_swallowed(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Only the lock timeout escapes the guard; the broad catch is intact."""
-        write_clients_yaml(sample_client_config)
-
-        def _boom(*_args: object, **_kwargs: object) -> None:
-            msg = "simulated reconcile failure"
-            raise RuntimeError(msg)
-
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", _boom)
-
-        assert not _reconcile_usage_limited()
-
-
 def test_dispatch_tick_runs_diagnostics_cleanup_outside_lock(
     sample_client_config: ClientConfig,
     simple_config: OrchestratorConfig,
@@ -6165,14 +5656,16 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-420", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
 
         lines: list[str] = []
         run_dispatch_loop(
@@ -6194,14 +5687,16 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-421", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
 
         lines: list[str] = []
         run_dispatch_loop(
@@ -6223,14 +5718,16 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-422", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
 
         tick_count = 0
 
@@ -6300,10 +5797,12 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-423", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
 
         daemon = FakeNativeDaemonClient()
         lines: list[str] = []
@@ -6328,10 +5827,12 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-424", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
 
         daemon = FakeNativeDaemonClient()
         lines: list[str] = []
@@ -6355,10 +5856,12 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-425", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
 
         # Should not raise; output is silently discarded
         run_dispatch_loop(once=True, emit=None)
@@ -6465,7 +5968,7 @@ class TestDispatchTickEvents:
         add_ticket(TicketTask(ticket_id="TICK-FG-2", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
 
@@ -8004,617 +7507,6 @@ class TestConfigReloadedEachTick:
 
 
 # ---------------------------------------------------------------------------
-# TestFreshnessGateAutoFF
-# ---------------------------------------------------------------------------
-
-
-class TestFreshnessGateAutoFF:
-    """Auto-ff tests: stale+behind triggers fast-forward; other states block."""
-
-    def test_auto_ff_behind_succeeds_claims_ticket(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """safety='behind' + successful ff → task claimed.
-
-        TICKET_NEEDS_SYNC must NOT be emitted; spawned=1.
-        """
-        write_clients_yaml(sample_client_config)
-        task = TicketTask(ticket_id="CW-100", client="test-client")
-        add_ticket(task)
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "abc12345" * 5, "def67890" * 5, 3),
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
-            lambda _client, **_kw: "behind",
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.fast_forward_main",
-            lambda _client, **_kwargs: ("abc12345" * 5, "def67890" * 5),
-        )
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon)
-
-        # ff succeeded → stale cleared → task should be spawned
-        assert result.spawned == 1
-
-        events = read_events(
-            consumer="test-auto-ff-behind",
-            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
-        )
-        # TICKET_NEEDS_SYNC must NOT be emitted after a successful auto-ff.
-        assert len(events) == 0
-
-    def test_auto_ff_ahead_skips_with_ticket_needs_sync(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """safety='ahead' → TICKET_NEEDS_SYNC emitted, claim blocked."""
-        write_clients_yaml(sample_client_config)
-        task = TicketTask(ticket_id="CW-101", client="test-client")
-        add_ticket(task)
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 1),
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
-            lambda _client, **_kw: "ahead",
-        )
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon)
-
-        assert result.spawned == 0
-        events = read_events(
-            consumer="test-auto-ff-ahead",
-            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
-        )
-        assert len(events) == 1
-        assert events[0].payload["ticket_id"] == "CW-101"
-
-    def test_auto_ff_diverged_skips(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """safety='diverged' → TICKET_NEEDS_SYNC emitted, claim blocked."""
-        write_clients_yaml(sample_client_config)
-        task = TicketTask(ticket_id="CW-102", client="test-client")
-        add_ticket(task)
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 2),
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
-            lambda _client, **_kw: "diverged",
-        )
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon)
-
-        assert result.spawned == 0
-        events = read_events(
-            consumer="test-auto-ff-diverged",
-            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
-        )
-        assert len(events) == 1
-
-    def test_auto_ff_detached_skips(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """safety='detached' → TICKET_NEEDS_SYNC emitted, claim blocked."""
-        write_clients_yaml(sample_client_config)
-        task = TicketTask(ticket_id="CW-103", client="test-client")
-        add_ticket(task)
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 1),
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
-            lambda _client, **_kw: "detached",
-        )
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon)
-
-        assert result.spawned == 0
-        events = read_events(
-            consumer="test-auto-ff-detached",
-            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
-        )
-        assert len(events) == 1
-
-    def test_auto_ff_ff_raises_falls_through_to_ticket_needs_sync(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """safety='behind' but fast_forward_main raises WorktreeError.
-
-        Exception must be swallowed; TICKET_NEEDS_SYNC emitted as fallback.
-        """
-        write_clients_yaml(sample_client_config)
-        task = TicketTask(ticket_id="CW-104", client="test-client")
-        add_ticket(task)
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 2),
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
-            lambda _client, **_kw: "behind",
-        )
-
-        def _boom(_client: object, **_kwargs: object) -> tuple[str, str]:
-            msg = "git pull failed"
-            raise WorktreeError(msg)
-
-        monkeypatch.setattr("cw.dispatch.gating.fast_forward_main", _boom)
-
-        daemon = FakeNativeDaemonClient()
-        # Exception must be swallowed; falls through to TICKET_NEEDS_SYNC.
-        result = dispatch_tick(simple_config, native_daemon=daemon)
-
-        assert result.spawned == 0
-        events = read_events(
-            consumer="test-auto-ff-raises",
-            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
-        )
-        assert len(events) == 1
-
-    def test_auto_ff_non_main_head_skips_fast_forward_emits_non_main_head_detail(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """get_head_branch returns non-default branch → dispatch bails before ff.
-
-        When the dispatch repo's HEAD is on a non-default branch and the repo is
-        stale, dispatch must:
-        - emit skip_reason=freshness_gate with freshness_detail="non_main_head"
-        - still emit TICKET_NEEDS_SYNC for the blocked task
-        - NOT call fast_forward_main
-        - not spawn any sessions (spawned==0)
-        """
-        write_clients_yaml(sample_client_config)
-        task = TicketTask(ticket_id="CW-110", client="test-client")
-        add_ticket(task)
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 2),
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.get_head_branch",
-            lambda _client: "feature/xyz",
-        )
-
-        ff_called = {"count": 0}
-
-        def _ff_spy(_client: object, **_kwargs: object) -> tuple[str, str]:
-            ff_called["count"] += 1
-            return ("aaa", "bbb")
-
-        monkeypatch.setattr("cw.dispatch.gating.fast_forward_main", _ff_spy)
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon)
-
-        assert result.spawned == 0
-        assert ff_called["count"] == 0
-
-        tick_events = read_events(
-            consumer="test-auto-ff-non-main-head-tick",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        assert len(tick_events) == 1
-        assert (
-            tick_events[0].payload["skip_reason"] == DispatchSkipReason.FRESHNESS_GATE
-        )
-        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_NON_MAIN_HEAD
-
-        sync_events = read_events(
-            consumer="test-auto-ff-non-main-head-sync",
-            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
-        )
-        assert len(sync_events) == 1
-        assert sync_events[0].payload["ticket_id"] == "CW-110"
-
-    def test_auto_ff_detached_head_uses_normal_path(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """get_head_branch returns None (detached) → normal auto-ff path proceeds.
-
-        A detached HEAD is not the non-main-HEAD case; fast_forward_main should
-        be attempted (check_main_ff_safety gates it appropriately).
-        """
-        write_clients_yaml(sample_client_config)
-        task = TicketTask(ticket_id="CW-111", client="test-client")
-        add_ticket(task)
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 2),
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.get_head_branch",
-            lambda _client: None,  # detached HEAD
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
-            lambda _client, **_kw: "behind",
-        )
-
-        ff_called = {"count": 0}
-
-        def _ff_spy(_client: object, **_kwargs: object) -> tuple[str, str]:
-            ff_called["count"] += 1
-            return ("aaa", "bbb")
-
-        monkeypatch.setattr("cw.dispatch.gating.fast_forward_main", _ff_spy)
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon)
-
-        assert ff_called["count"] == 1
-
-    def test_auto_ff_on_default_branch_uses_normal_path(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """get_head_branch returns default_branch → normal path (not non_main_head).
-
-        When HEAD == default_branch and the repo is stale with diverged safety,
-        dispatch emits freshness_detail="main_diverged_from_origin" — NOT
-        "non_main_head" (which would be wrong when we ARE on the default branch).
-        """
-        write_clients_yaml(sample_client_config)
-        task = TicketTask(ticket_id="CW-112", client="test-client")
-        add_ticket(task)
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 2),
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.get_head_branch",
-            lambda _client: "main",  # on default branch
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
-            lambda _client, **_kw: "diverged",  # unsafe, so auto-ff skipped
-        )
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon)
-
-        tick_events = read_events(
-            consumer="test-auto-ff-default-branch-tick",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        assert len(tick_events) == 1
-        assert (
-            tick_events[0].payload["skip_reason"] == DispatchSkipReason.FRESHNESS_GATE
-        )
-        # Key assertion: not NON_MAIN_HEAD — we ARE on the default branch.
-        # With diverged safety, the new distinct detail is FRESHNESS_MAIN_DIVERGED.
-        assert tick_events[0].payload["freshness_detail"] != FRESHNESS_NON_MAIN_HEAD
-        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIVERGED
-
-    def test_auto_ff_non_main_head_detached_at_emit_time_shows_detached(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """TOCTOU: get_head_branch returns None in _emit_stale_skip → "(detached)".
-
-        _resolve_freshness detects a non-default branch and returns
-        freshness_detail="non_main_head".  By the time _emit_stale_skip calls
-        get_head_branch a second time the HEAD has moved to detached; the WARN
-        message should fall back to "(detached)".
-        """
-        write_clients_yaml(sample_client_config)
-        task = TicketTask(ticket_id="CW-113", client="test-client")
-        add_ticket(task)
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 2),
-        )
-
-        call_count: list[int] = [0]
-
-        def _get_head_toctou(_client: object) -> str | None:
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return "feature/xyz"  # _resolve_freshness: non-default → bail
-            return None  # _emit_stale_skip: HEAD detached (TOCTOU)
-
-        monkeypatch.setattr("cw.dispatch.gating.get_head_branch", _get_head_toctou)
-
-        emitted: list[str] = []
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(
-            simple_config,
-            native_daemon=daemon,
-            emit=emitted.append,
-        )
-
-        assert any("(detached)" in m for m in emitted)
-
-    def test_auto_ff_false_keeps_ticket_needs_sync(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """auto_ff=False preserves legacy block-only behavior even when 'behind'."""
-        write_clients_yaml(sample_client_config)
-        task = TicketTask(ticket_id="CW-105", client="test-client")
-        add_ticket(task)
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 3),
-        )
-        # check_main_ff_safety must NOT be called; if it is called that's a bug
-        check_called = [False]
-
-        def _check_boom(_client: object) -> str:
-            check_called[0] = True
-            return "behind"
-
-        monkeypatch.setattr("cw.dispatch.gating.check_main_ff_safety", _check_boom)
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, auto_ff=False, native_daemon=daemon)
-
-        assert result.spawned == 0
-        # check_main_ff_safety must NOT be called when auto_ff=False.
-        assert not check_called[0]
-        events = read_events(
-            consumer="test-auto-ff-disabled",
-            event_types=[OrchestratorEventType.TICKET_NEEDS_SYNC],
-        )
-        assert len(events) == 1
-
-    def test_auto_ff_ahead_emits_diverged_detail(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """safety='ahead' → freshness_detail='main_diverged_from_origin' (#766).
-
-        When local main is ahead of origin (unpushed commits exist), the
-        dispatch loop should emit a distinct freshness_detail so the operator
-        can distinguish "ahead" from "behind" in the status output.
-        """
-        write_clients_yaml(sample_client_config)
-        task = TicketTask(ticket_id="CW-120", client="test-client")
-        add_ticket(task)
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 1),
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
-            lambda _client, **_kw: "ahead",
-        )
-
-        emitted: list[str] = []
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, emit=emitted.append)
-
-        assert result.spawned == 0
-        tick_events = read_events(
-            consumer="test-auto-ff-ahead-diverged-detail",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        assert len(tick_events) == 1
-        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIVERGED
-        assert any("diverged" in ln for ln in emitted)
-
-    def test_auto_ff_diverged_emits_diverged_detail(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """safety='diverged' → freshness_detail='main_diverged_from_origin' (#766).
-
-        When local main has diverged from origin (has both local and remote
-        commits), a distinct freshness_detail tells the operator to reconcile
-        rather than just wait for auto-ff.
-        """
-        write_clients_yaml(sample_client_config)
-        task = TicketTask(ticket_id="CW-121", client="test-client")
-        add_ticket(task)
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 2),
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
-            lambda _client, **_kw: "diverged",
-        )
-
-        emitted: list[str] = []
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, emit=emitted.append)
-
-        assert result.spawned == 0
-        tick_events = read_events(
-            consumer="test-auto-ff-diverged-detail",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        assert len(tick_events) == 1
-        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIVERGED
-        assert any("diverged" in ln for ln in emitted)
-
-    def test_auto_ff_behind_dirty_emits_dirty_checkout_detail(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """safety='behind' + dirty checkout → freshness_detail='main_dirty_checkout'.
-
-        When local main is behind origin but the working tree has uncommitted
-        tracked changes, auto-ff is blocked.  A distinct freshness_detail
-        tells the operator to commit or stash — not wait for auto-ff.
-        """
-        write_clients_yaml(sample_client_config)
-        task = TicketTask(ticket_id="CW-122", client="test-client")
-        add_ticket(task)
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 1),
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
-            lambda _client, **_kw: "behind",
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_checkout_dirty",
-            lambda _client: True,
-            raising=False,
-        )
-
-        emitted: list[str] = []
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, emit=emitted.append)
-
-        assert result.spawned == 0
-        tick_events = read_events(
-            consumer="test-auto-ff-dirty-checkout-detail",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        assert len(tick_events) == 1
-        assert (
-            tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DIRTY_CHECKOUT
-        )
-        assert any("dirty" in ln or "uncommitted" in ln for ln in emitted)
-
-    def test_auto_ff_diverged_warn_advises_inspect_not_rebase(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """#940: diverged WARN advises inspect-first, not ``pull --rebase``.
-
-        A diverged main may carry stray commits from an isolation breach; the
-        operator must inspect before touching it, so the advice points at a
-        read-only ``git log origin/<default_branch>..HEAD`` and explicitly warns
-        against auto-rebase/reset.
-        """
-        write_clients_yaml(sample_client_config)
-        task = TicketTask(ticket_id="CW-940", client="test-client")
-        add_ticket(task)
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 2),
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.get_head_branch",
-            lambda _client: "main",
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
-            lambda _client, **_kw: "diverged",
-        )
-
-        emitted: list[str] = []
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon, emit=emitted.append)
-
-        diverged_warns = [ln for ln in emitted if "diverged" in ln]
-        assert diverged_warns, f"no diverged WARN emitted: {emitted}"
-        warn = diverged_warns[0]
-        assert "log origin/" in warn
-        assert "do NOT auto-rebase" in warn
-        assert "pull --rebase" not in warn
-
-    def test_auto_ff_detached_emits_detached_detail(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """safety='detached' → freshness_detail='main_detached_head' (#964).
-
-        When the client's main checkout HEAD is detached, dispatch should
-        emit a distinct freshness_detail so the operator WARN gives accurate
-        checkout advice instead of falling through to the generic
-        "main behind origin" message.
-        """
-        write_clients_yaml(sample_client_config)
-        task = TicketTask(ticket_id="CW-964", client="test-client")
-        add_ticket(task)
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 1),
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.get_head_branch",
-            lambda _client: None,  # detached HEAD
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
-            lambda _client, **_kw: "detached",
-        )
-
-        emitted: list[str] = []
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, emit=emitted.append)
-
-        assert result.spawned == 0
-        tick_events = read_events(
-            consumer="test-auto-ff-detached-detail",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        assert len(tick_events) == 1
-        assert tick_events[0].payload["freshness_detail"] == FRESHNESS_MAIN_DETACHED
-        detached_warns = [ln for ln in emitted if "detached" in ln]
-        assert detached_warns, f"no detached WARN emitted: {emitted}"
-        warn = detached_warns[0]
-        assert "checkout" in warn
-
-
-# ---------------------------------------------------------------------------
 # TestTier1ClientSelection — max_parallel_clients (#558)
 # ---------------------------------------------------------------------------
 
@@ -8756,7 +7648,7 @@ class TestTier1ClientSelection:
 
         # client-a3 is stale (skipped by the freshness gate); client-b3 fresh.
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda client, **_kw: (client.name == "client-a3", "aaa", "bbb", 1),
         )
 
@@ -9593,7 +8485,7 @@ class TestLaneOccupantsPayload:
         """FRESHNESS_GATE skip carries lane_occupants/occupied."""
         self._make_running_lane(sample_client_config.workspace_path)
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
 
@@ -17386,7 +16278,7 @@ class TestWaveCollisionDetection:
         write_clients_yaml(sample_client_config)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
 
@@ -17449,10 +16341,12 @@ class TestWaveCollisionDetection:
 
         monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", _spy)
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
 
         run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
 
@@ -17500,10 +16394,12 @@ class TestWaveCollisionDetection:
             lambda _path, _base_ref: frozenset({"src/shared.py"}),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
 
         warned: set[frozenset[str]] = set()
         dispatch_tick(
@@ -19041,7 +17937,9 @@ class TestRunDispatchLoopHydrationHook:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         write_clients_yaml(sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
         calls: list[object] = []
 
         def _record(cfg: object) -> None:
@@ -19057,7 +17955,9 @@ class TestRunDispatchLoopHydrationHook:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         write_clients_yaml(sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
 
         def _boom(_cfg: object) -> None:
             msg = "hydration boom"
@@ -19096,7 +17996,9 @@ class TestRunDispatchLoopHydrationHook:
             "    default_branch: main\n"
             f"    worktree_base: {tmp_path / 'worktrees-b'}\n"
         )
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
         calls: list[object] = []
 
         def _record(cfg: object) -> None:
@@ -19117,7 +18019,9 @@ class TestRunDispatchLoopStaleGateHook:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         write_clients_yaml(sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
         calls: list[object] = []
 
         def _record() -> list[str]:
@@ -19134,7 +18038,9 @@ class TestRunDispatchLoopStaleGateHook:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         write_clients_yaml(sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
 
         def _boom() -> list[str]:
             msg = "stale-gate boom"
@@ -19157,7 +18063,9 @@ class TestRunDispatchLoopStaleDispatchWatchHook:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         write_clients_yaml(sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
         calls: list[object] = []
 
         def _record() -> list[str]:
@@ -19178,7 +18086,9 @@ class TestRunDispatchLoopStaleDispatchWatchHook:
         """Ordering is load-bearing: a watch registered after hydration would
         sit un-hydrated until the NEXT tick, delaying every release by one."""
         write_clients_yaml(sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
         order: list[str] = []
 
         monkeypatch.setattr(
@@ -19202,7 +18112,9 @@ class TestRunDispatchLoopStaleDispatchWatchHook:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         write_clients_yaml(sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
 
         def _boom() -> list[str]:
             msg = "stale-dispatch-watch boom"
@@ -19617,7 +18529,9 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         write_clients_yaml(sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
         calls: list[object] = []
         monkeypatch.setattr(
             "cw.dispatch.loop._notify_stale_clients_with_pending",
@@ -19643,7 +18557,9 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
         guarded pre-tick passes + spawn work), routinely aging past
         TICK_STALE_SECONDS and false-paging the operator."""
         write_clients_yaml(sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
         order: list[str] = []
         monkeypatch.setattr(
             "cw.dispatch.loop.dispatch_tick",
@@ -19663,7 +18579,9 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
     ) -> None:
         """Two back-to-back ticks produce exactly one inbox scan."""
         write_clients_yaml(sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
         monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
         calls: list[object] = []
         monkeypatch.setattr(
@@ -19684,7 +18602,9 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
         from freezegun import freeze_time
 
         write_clients_yaml(sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
         calls: list[object] = []
         monkeypatch.setattr(
             "cw.dispatch.loop._notify_stale_clients_with_pending",
@@ -19715,7 +18635,9 @@ class TestRunDispatchLoopStaleClientWatchdogHook:
         from freezegun import freeze_time
 
         write_clients_yaml(sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
 
         def _boom(**_kwargs: object) -> None:
             msg = "stale-client watchdog boom"
@@ -19765,7 +18687,9 @@ class TestWarnIfScopedServeStarvesSiblings:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         write_clients_yaml(sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
         self._stub_ticks(
             monkeypatch,
             {
@@ -19791,7 +18715,9 @@ class TestWarnIfScopedServeStarvesSiblings:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         write_clients_yaml(sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
         self._stub_ticks(monkeypatch, {"review-bingo": _make_tick_summary(pending=3)})
         caplog.set_level(logging.WARNING, logger="cw.dispatch")
         run_dispatch_loop(once=True, emit=None)
@@ -19804,7 +18730,9 @@ class TestWarnIfScopedServeStarvesSiblings:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         write_clients_yaml(sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
         self._stub_ticks(
             monkeypatch,
             {
@@ -19824,7 +18752,9 @@ class TestWarnIfScopedServeStarvesSiblings:
     ) -> None:
         """The scoped client's own pending work is being dispatched, not starved."""
         write_clients_yaml(sample_client_config)
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda **_kw: None)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None
+        )
         self._stub_ticks(
             monkeypatch,
             {
@@ -19880,7 +18810,7 @@ def _client_freshness_override() -> ClientConcurrencyOverride:
 def _force_stale(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force _resolve_freshness to report test-client as stale (main behind)."""
     monkeypatch.setattr(
-        "cw.dispatch.gating.is_main_behind_origin",
+        "cw.dispatch.gating.freshness.is_main_behind_origin",
         lambda _client, **_kw: (True, "aaa", "bbb", 3),
     )
 
@@ -20060,1554 +18990,6 @@ class TestFreshnessBlockAttentionLatch:
 
         assert _client_freshness_override().consecutive_freshness_blocks == 2
         assert push_calls == []
-
-
-# ---------------------------------------------------------------------------
-# TestAvailabilityPreflightGate (RFC 0011 A5, #1157)
-# ---------------------------------------------------------------------------
-
-
-def _force_gh_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force the fleet-wide gh-availability probe to report unavailable.
-
-    Overrides the autouse ``_mock_gh_availability`` default (which returns
-    True) on the same ``cw.dispatch.gating.check_gh_availability`` seam.
-    """
-    monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", lambda **_kw: False)
-
-
-def _seed_availability_cache(
-    *, probed_at: datetime, available: bool, latched: bool
-) -> None:
-    """Persist a fleet-wide AvailabilityProbeCache to the shared sidecar."""
-    save_availability_probe_cache(
-        AvailabilityProbeCache(
-            probed_at=probed_at, available=available, latched=latched
-        )
-    )
-
-
-def _availability_cache() -> AvailabilityProbeCache:
-    """Read back the persisted fleet-wide availability probe cache."""
-    cache = load_availability_probe_cache()
-    assert cache is not None
-    return cache
-
-
-class TestAvailabilityPreflightGate:
-    """Fleet-wide gh-availability preflight gate (RFC 0011 A5).
-
-    A TTL-cached ``gh auth status`` probe runs as the highest-precedence
-    per-client pre-claim gate in ``dispatch_tick``'s client loop. On probe
-    failure every client stays PENDING (no claim, no ``attempts`` consumed),
-    the fleet-wide outage latch fires ``session.needs_attention`` exactly once
-    per outage episode (edge-triggered), and a fresh success silently resets
-    the latch.
-    """
-
-    def test_available_spawns_normally(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-    ) -> None:
-        """When the probe reports available, dispatch proceeds as usual."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-A5A", client="test-client"))
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 1
-
-    def test_unavailable_holds_task_pending_no_attempt_consumed(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The core binding requirement: a gated PENDING task keeps attempts=0."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-A5B", client="test-client", attempts=0))
-        _force_gh_unavailable(monkeypatch)
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 0
-        assert daemon.spawn_calls == []
-        store = load_dev_queue()
-        task = next(t for t in store.tasks if t.ticket_id == "GEN-A5B")
-        assert task.status == QueueItemStatus.PENDING
-        assert task.attempts == 0
-
-    def test_unavailable_emits_dispatch_tick_availability_gate(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A gated client emits dispatch.tick with skip_reason=availability_gate."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-A5C", client="test-client"))
-        _force_gh_unavailable(monkeypatch)
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        events = read_events(
-            consumer="test-a5-tick",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        ticks = [
-            e
-            for e in events
-            if e.payload.get("skip_reason") == DispatchSkipReason.AVAILABILITY_GATE
-        ]
-        assert len(ticks) == 1
-        payload = ticks[0].payload
-        assert payload["client"] == "test-client"
-        assert payload["claimed"] == 0
-        assert payload["pending"] == 1
-
-    def test_first_failure_emits_session_needs_attention_once(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The first bad probe fires the full fleet-wide attention payload."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-A5D", client="test-client"))
-        _force_gh_unavailable(monkeypatch)
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        events = read_events(
-            consumer="test-a5-attn",
-            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
-        )
-        assert len(events) == 1
-        assert events[0].payload == {
-            "session_id": "",
-            "session_name": "",
-            "client": "",
-            "ticket_id": None,
-            "claude_session_id": None,
-            "paused_status": _AVAILABILITY_OUTAGE_REASON,
-            "breadcrumbs": "availability_probe_failed",
-            "crashed": False,
-        }
-        assert events[0].correlation_id is None
-
-    def test_second_consecutive_failure_within_ttl_does_not_re_emit(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A cache-hit second tick within the TTL fires no second attention."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-A5E", client="test-client"))
-        _force_gh_unavailable(monkeypatch)
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        events = read_events(
-            consumer="test-a5-reemit",
-            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
-        )
-        assert len(events) == 1
-
-    def test_persistent_failure_across_ttl_expiry_does_not_re_emit(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A still-failing fresh probe after TTL expiry does NOT re-emit (MF2).
-
-        Distinct from the within-TTL test: here the TTL expires so a fresh
-        ``check_gh_availability`` call actually runs on the second tick, yet the
-        outage-episode latch suppresses a second attention event. Uses a
-        call-counting stub (not the constant ``_force_gh_unavailable`` lambda)
-        so the "a fresh probe call occurs" half of MF2 is independently
-        asserted, not just inferred from the freeze_time advance.
-        """
-        from freezegun import freeze_time
-
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-A5F", client="test-client"))
-
-        calls: list[int] = []
-
-        def _counting_unavailable_probe(**_kw: object) -> bool:
-            calls.append(1)
-            return False
-
-        monkeypatch.setattr(
-            "cw.dispatch.gating.check_gh_availability", _counting_unavailable_probe
-        )
-
-        daemon = FakeNativeDaemonClient()
-        with freeze_time("2026-07-16 12:00:00") as frozen:
-            dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-            frozen.tick(delta=timedelta(seconds=_AVAILABILITY_PROBE_TTL_SECONDS + 10))
-            dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert len(calls) == 2, "TTL expiry must trigger a second real probe call"
-
-        events = read_events(
-            consumer="test-a5-ttl-reemit",
-            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
-        )
-        assert len(events) == 1
-        assert _availability_cache().latched is True
-
-    def test_recovery_resets_latch_silently(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A fresh success after an outage resets the latch and fires no event."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-A5G", client="test-client"))
-        # Seed a latched outage state whose TTL is already expired so the next
-        # tick re-probes (autouse default → available → recovery).
-        _seed_availability_cache(
-            probed_at=datetime.now(UTC)
-            - timedelta(seconds=_AVAILABILITY_PROBE_TTL_SECONDS + 10),
-            available=False,
-            latched=True,
-        )
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 1
-        assert _availability_cache().latched is False
-        events = read_events(
-            consumer="test-a5-recover",
-            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
-        )
-        assert events == []
-
-    def test_ttl_cache_suppresses_repeat_probe_within_window(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Two ticks within the TTL trigger only one real probe call."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-A5H", client="test-client"))
-
-        calls: list[int] = []
-
-        def _counting_probe(**_kw: object) -> bool:
-            calls.append(1)
-            return True
-
-        monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", _counting_probe)
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert len(calls) == 1
-
-    def test_reprobes_after_ttl_expiry(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A tick after the TTL window runs a fresh probe."""
-        from freezegun import freeze_time
-
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-A5I", client="test-client"))
-
-        calls: list[int] = []
-
-        def _counting_probe(**_kw: object) -> bool:
-            calls.append(1)
-            return True
-
-        monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", _counting_probe)
-
-        daemon = FakeNativeDaemonClient()
-        with freeze_time("2026-07-16 12:00:00") as frozen:
-            dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-            frozen.tick(delta=timedelta(seconds=_AVAILABILITY_PROBE_TTL_SECONDS + 10))
-            dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert len(calls) == 2
-
-    def test_ttl_dedup_across_multiple_clients_in_one_tick(
-        self,
-        tmp_dispatch_dirs: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        make_git_repo: Callable[[str], Path],
-        tmp_path: Path,
-    ) -> None:
-        """A single dispatch_tick with two eligible clients probes only once.
-
-        Distinct from test_ttl_cache_suppresses_repeat_probe_within_window
-        (which proves dedup *across ticks*): this proves dedup *within* one
-        tick's client loop, via the in-process ``_resolve_availability_once``
-        memoization already hoisted outside the per-client loop.
-        """
-        ws_a = make_git_repo("workspace/ttl-client-a")
-        ws_b = make_git_repo("workspace/ttl-client-b")
-        client_a = ClientConfig(
-            name="ttl-client-a",
-            workspace_path=ws_a,
-            default_branch="main",
-            worktree_base=tmp_path / "worktrees-ttl-a",
-        )
-        client_b = ClientConfig(
-            name="ttl-client-b",
-            workspace_path=ws_b,
-            default_branch="main",
-            worktree_base=tmp_path / "worktrees-ttl-b",
-        )
-
-        config_dir = tmp_dispatch_dirs / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            "clients:\n"
-            f"  {client_a.name}:\n"
-            f"    workspace_path: {client_a.workspace_path}\n"
-            f"    default_branch: main\n"
-            f"    worktree_base: {client_a.worktree_base}\n"
-            f"  {client_b.name}:\n"
-            f"    workspace_path: {client_b.workspace_path}\n"
-            f"    default_branch: main\n"
-            f"    worktree_base: {client_b.worktree_base}\n"
-        )
-
-        add_ticket(TicketTask(ticket_id="GEN-A5K1", client=client_a.name))
-        add_ticket(TicketTask(ticket_id="GEN-A5K2", client=client_b.name))
-
-        calls: list[int] = []
-
-        def _counting_probe(**_kw: object) -> bool:
-            calls.append(1)
-            return True
-
-        monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", _counting_probe)
-
-        config = OrchestratorConfig(default_max_parallel=1)
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(config, native_daemon=daemon, auto_ff=False)
-
-        assert len(calls) == 1
-
-    def test_resolution_error_fails_open(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Any resolution error fails open — dispatch proceeds (no gate)."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-A5J", client="test-client"))
-
-        def _boom(**_kw: object) -> bool:
-            msg = "probe blew up"
-            raise RuntimeError(msg)
-
-        monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", _boom)
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 1
-
-    def test_no_push_notification_on_first_failure_emit(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The outage escalation never calls fire_push_notification."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-A5K", client="test-client"))
-        _force_gh_unavailable(monkeypatch)
-
-        push_calls: list[object] = []
-        monkeypatch.setattr(
-            "cw.reconcile._deps.fire_push_notification",
-            lambda *a, **kw: push_calls.append((a, kw)),
-        )
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert push_calls == []
-
-    def test_availability_outage_reason_constant_value(self) -> None:
-        """Pin the paused_status constant value (distinct from awaiting-op)."""
-        assert _AVAILABILITY_OUTAGE_REASON == "gh_availability_outage"
-
-    def test_availability_gate_precedes_freshness_gate(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """When the availability gate is closed, _resolve_freshness is not called.
-
-        Event-ordering alone doesn't prove short-circuit (MF1) — spy the
-        freshness resolver and assert it is never invoked on the gated path.
-        """
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-A5L", client="test-client"))
-        _force_gh_unavailable(monkeypatch)
-
-        freshness_calls: list[object] = []
-        monkeypatch.setattr(
-            "cw.dispatch.tick._resolve_freshness",
-            lambda *a, **kw: freshness_calls.append((a, kw)) or (False, None),
-        )
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert freshness_calls == []
-
-    def test_finalize_stage_task_also_held_pending(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A FINALIZE-stage PENDING task is also held by the single gate (S2)."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(
-            TicketTask(
-                ticket_id="GEN-A5M",
-                client="test-client",
-                stage=Stage.FINALIZE,
-                attempts=0,
-            )
-        )
-        _force_gh_unavailable(monkeypatch)
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 0
-        store = load_dev_queue()
-        task = next(t for t in store.tasks if t.ticket_id == "GEN-A5M")
-        assert task.status == QueueItemStatus.PENDING
-        assert task.attempts == 0
-
-    def test_freshness_helpers_not_called_on_gated_path(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """On the gated path neither freshness latch helper runs (S3).
-
-        The freshness counter must stay frozen during an outage, not reset —
-        prevents a future reorder from silently clearing real freshness latches.
-        """
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-A5N", client="test-client"))
-        _force_gh_unavailable(monkeypatch)
-
-        record_calls: list[object] = []
-        reset_calls: list[object] = []
-        monkeypatch.setattr(
-            "cw.dispatch.tick._record_client_freshness_block",
-            lambda *a, **kw: record_calls.append((a, kw)),
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.tick._reset_client_freshness_blocks",
-            lambda *a, **kw: reset_calls.append((a, kw)),
-        )
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert record_calls == []
-        assert reset_calls == []
-
-    def test_probe_not_called_when_fleet_dispatch_paused(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """max_parallel_clients=0 (fleet-wide dispatch pause) never probes.
-
-        The availability check is memoized inside the per-client loop (only
-        resolved once the loop body actually runs for a client), not hoisted
-        unconditionally above it — a fully-paused fleet, which breaks out of
-        the loop on its very first iteration before reaching the gate, must
-        not shell out to `gh auth status` or touch the outage latch.
-        """
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-A5O", client="test-client"))
-
-        calls: list[int] = []
-
-        def _counting_probe(**_kw: object) -> bool:
-            calls.append(1)
-            return True
-
-        monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", _counting_probe)
-
-        paused_config = simple_config.model_copy(update={"max_parallel_clients": 0})
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(paused_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 0
-        assert calls == []
-
-
-# ---------------------------------------------------------------------------
-# TestSshKeyPreflightGate (#927)
-# ---------------------------------------------------------------------------
-
-
-def _force_ssh_key_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force the SSH-agent-key preflight probe to report unavailable.
-
-    Overrides the autouse ``_mock_ssh_key_available`` default (which returns
-    True) on the same ``cw.dispatch.gating.check_ssh_key_available`` seam.
-    """
-    monkeypatch.setattr(
-        "cw.dispatch.gating.check_ssh_key_available", lambda **_kw: False
-    )
-
-
-class TestSshKeyPreflightGate:
-    """SSH-agent-key preflight gate (#927).
-
-    A per-tick-memoized ``ssh-add -l`` probe runs as the second-highest-
-    precedence per-client pre-claim gate in ``dispatch_tick``'s client loop,
-    immediately after the fleet-wide gh-availability gate and before the
-    per-client freshness gate. On probe failure every client stays PENDING
-    (no claim, no ``attempts`` consumed) and an operator error line is
-    emitted once per dispatch-loop run.
-    """
-
-    def test_available_spawns_normally(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-    ) -> None:
-        """When the probe reports available, dispatch proceeds as usual."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-S1A", client="test-client"))
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 1
-
-    def test_unavailable_holds_task_pending_no_attempt_consumed(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The core binding requirement: a gated PENDING task keeps attempts=0."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-S1B", client="test-client", attempts=0))
-        _force_ssh_key_unavailable(monkeypatch)
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 0
-        assert daemon.spawn_calls == []
-        store = load_dev_queue()
-        task = next(t for t in store.tasks if t.ticket_id == "GEN-S1B")
-        assert task.status == QueueItemStatus.PENDING
-        assert task.attempts == 0
-
-    def test_unavailable_emits_dispatch_tick_ssh_key_gate(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A gated client emits dispatch.tick with skip_reason=ssh_key_gate."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-S1C", client="test-client"))
-        _force_ssh_key_unavailable(monkeypatch)
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        events = read_events(
-            consumer="test-s1-tick",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        ticks = [
-            e
-            for e in events
-            if e.payload.get("skip_reason") == DispatchSkipReason.SSH_KEY_GATE
-        ]
-        assert len(ticks) == 1
-        payload = ticks[0].payload
-        assert payload["client"] == "test-client"
-        assert payload["claimed"] == 0
-        assert payload["pending"] == 1
-
-    def test_unavailable_emits_operator_error_line_once(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The operator error line is deduplicated across ticks in one run."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-S1D", client="test-client"))
-        _force_ssh_key_unavailable(monkeypatch)
-
-        lines: list[str] = []
-        warned_ssh_key: set[str] = set()
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(
-            simple_config,
-            native_daemon=daemon,
-            auto_ff=False,
-            emit=lines.append,
-            warned_ssh_key=warned_ssh_key,
-        )
-        dispatch_tick(
-            simple_config,
-            native_daemon=daemon,
-            auto_ff=False,
-            emit=lines.append,
-            warned_ssh_key=warned_ssh_key,
-        )
-
-        expected = (
-            "Error: SSH key not available in agent."
-            " Run 'ssh-add' to unlock before dispatching."
-        )
-        matches = [ln for ln in lines if ln == expected]
-        assert len(matches) == 1
-
-    def test_availability_gate_takes_precedence_over_ssh_key_gate(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Both probes forced unavailable: AVAILABILITY_GATE wins, not SSH_KEY_GATE."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-S1E", client="test-client"))
-        _force_gh_unavailable(monkeypatch)
-        _force_ssh_key_unavailable(monkeypatch)
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        events = read_events(
-            consumer="test-s1-precedence-avail",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        assert len(events) == 1
-        assert events[0].payload["skip_reason"] == DispatchSkipReason.AVAILABILITY_GATE
-
-    def test_ssh_key_gate_takes_precedence_over_freshness_gate(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """SSH unavailable + stale repo: SSH_KEY_GATE wins over FRESHNESS_GATE."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-S1F", client="test-client"))
-        _force_ssh_key_unavailable(monkeypatch)
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 3),
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
-            lambda _client, **_kw: "behind",
-        )
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        events = read_events(
-            consumer="test-s1-precedence-fresh",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        assert len(events) == 1
-        assert events[0].payload["skip_reason"] == DispatchSkipReason.SSH_KEY_GATE
-
-    def test_gate_disabled_bypasses_skip_and_emits_bypass_event(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """GitHub #1437: ssh_key_gate_enabled=False bypasses the probe-failure
-        skip — the client dispatches normally, an SSH_KEY_GATE_BYPASSED event
-        is recorded, and no dispatch.tick SSH_KEY_GATE skip is recorded."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-S1G", client="test-client"))
-        _force_ssh_key_unavailable(monkeypatch)
-
-        bypass_config = simple_config.model_copy(update={"ssh_key_gate_enabled": False})
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(bypass_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 1
-
-        bypass_events = read_events(
-            consumer="test-s1-bypass",
-            event_types=[OrchestratorEventType.SSH_KEY_GATE_BYPASSED],
-        )
-        assert len(bypass_events) == 1
-        assert bypass_events[0].payload["client"] == "test-client"
-
-        tick_events = read_events(
-            consumer="test-s1-bypass-tick",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        skip_ticks = [
-            e
-            for e in tick_events
-            if e.payload.get("skip_reason") == DispatchSkipReason.SSH_KEY_GATE
-        ]
-        assert skip_ticks == []
-
-    def test_http_remote_skips_probe_and_dispatches(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """GitHub #1495: an HTTP(S) push remote never engages the SSH probe.
-
-        Even with the probe forced unavailable, the client dispatches, no
-        SSH_KEY_GATE skip is recorded, and the probe is never even called.
-        """
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-S1I", client="test-client"))
-        probe_calls: list[bool] = []
-
-        def _probe(**_kw: object) -> bool:
-            probe_calls.append(True)
-            return False
-
-        monkeypatch.setattr("cw.dispatch.gating.check_ssh_key_available", _probe)
-        monkeypatch.setattr("cw.dispatch.gating.push_remote_scheme", lambda _p: "http")
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 1
-        assert probe_calls == []
-        tick_events = read_events(
-            consumer="test-s1-http-tick",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        assert [
-            e
-            for e in tick_events
-            if e.payload.get("skip_reason") == DispatchSkipReason.SSH_KEY_GATE
-        ] == []
-
-    def test_local_remote_skips_probe_and_dispatches(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """GitHub #1495: a local-path push remote is exempt the same way."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-S1J", client="test-client"))
-        _force_ssh_key_unavailable(monkeypatch)
-        monkeypatch.setattr("cw.dispatch.gating.push_remote_scheme", lambda _p: "local")
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 1
-
-    def test_unknown_remote_scheme_still_gates(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """GitHub #1495: a scheme-resolution failure keeps the gate fail-closed."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-S1K", client="test-client"))
-        _force_ssh_key_unavailable(monkeypatch)
-        monkeypatch.setattr(
-            "cw.dispatch.gating.push_remote_scheme", lambda _p: "unknown"
-        )
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 0
-        tick_events = read_events(
-            consumer="test-s1-unknown-tick",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        skips = [
-            e
-            for e in tick_events
-            if e.payload.get("skip_reason") == DispatchSkipReason.SSH_KEY_GATE
-        ]
-        assert len(skips) == 1
-        assert skips[0].payload["remote_scheme"] == "unknown"
-
-    def test_skip_and_bypass_events_record_remote_scheme(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """GitHub #1495: both ssh-gate events name the transport that engaged
-        the probe, so a false gate is diagnosable from events alone."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-S1L", client="test-client"))
-        _force_ssh_key_unavailable(monkeypatch)
-        daemon = FakeNativeDaemonClient()
-
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-        bypass_config = simple_config.model_copy(update={"ssh_key_gate_enabled": False})
-        dispatch_tick(bypass_config, native_daemon=daemon, auto_ff=False)
-
-        skips = [
-            e
-            for e in read_events(
-                consumer="test-s1-scheme-tick",
-                event_types=[OrchestratorEventType.DISPATCH_TICK],
-            )
-            if e.payload.get("skip_reason") == DispatchSkipReason.SSH_KEY_GATE
-        ]
-        assert [e.payload["remote_scheme"] for e in skips] == ["ssh"]
-        bypasses = read_events(
-            consumer="test-s1-scheme-bypass",
-            event_types=[OrchestratorEventType.SSH_KEY_GATE_BYPASSED],
-        )
-        assert [e.payload["remote_scheme"] for e in bypasses] == ["ssh"]
-
-    def test_probe_scope_uses_repo_path_when_set(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """GitHub #1495: the scheme is resolved against the client's repo."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-S1M", client="test-client"))
-        _force_ssh_key_unavailable(monkeypatch)
-        probed: list[Path] = []
-
-        def _scheme(path: Path) -> str:
-            probed.append(path)
-            return "http"
-
-        monkeypatch.setattr("cw.dispatch.gating.push_remote_scheme", _scheme)
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        expected = sample_client_config.repo_path or sample_client_config.workspace_path
-        assert probed == [expected]
-
-    def test_gate_enforced_by_default_still_skips_and_no_bypass_event(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """GitHub #1437: default (ssh_key_gate_enabled=True) is unchanged —
-        client still skipped, SSH_KEY_GATE skip still recorded, and the new
-        bypass event is NOT recorded."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-S1H", client="test-client"))
-        _force_ssh_key_unavailable(monkeypatch)
-
-        assert simple_config.ssh_key_gate_enabled is True
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 0
-
-        tick_events = read_events(
-            consumer="test-s1-enforced-tick",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        skip_ticks = [
-            e
-            for e in tick_events
-            if e.payload.get("skip_reason") == DispatchSkipReason.SSH_KEY_GATE
-        ]
-        assert len(skip_ticks) == 1
-
-        bypass_events = read_events(
-            consumer="test-s1-enforced-bypass",
-            event_types=[OrchestratorEventType.SSH_KEY_GATE_BYPASSED],
-        )
-        assert bypass_events == []
-
-
-# ---------------------------------------------------------------------------
-# TestDiskPressurePreflightGate (#1887, split from #1858)
-# ---------------------------------------------------------------------------
-
-
-def _force_disk_pressure_gated(
-    monkeypatch: pytest.MonkeyPatch, *, free_gb: float = 0.5
-) -> None:
-    """Force the claim-time disk-pressure probe to report a nearly-full mount.
-
-    Overrides the autouse ``_mock_disk_usage`` default (which reports 250 GB
-    free) on the same ``cw.dispatch.gating.check_disk_usage`` seam.
-    """
-    monkeypatch.setattr(
-        "cw.dispatch.gating.check_disk_usage",
-        lambda _path: DiskUsage(total_gb=500.0, free_gb=free_gb),
-    )
-
-
-class TestDiskPressurePreflightGate:
-    """Claim-time disk-pressure preflight gate (#1887, split from #1858).
-
-    A ``shutil.disk_usage`` probe of the client's worktree-base mount runs as
-    the third per-client pre-claim gate in ``dispatch_tick``'s client loop,
-    after the fleet-wide gh-availability and SSH-agent-key gates and before
-    the per-client freshness gate (whose ``git pull --ff-only`` would
-    otherwise write more data onto an already-tight disk). On pressure the
-    client stays PENDING (no claim, no ``attempts`` consumed) and an operator
-    WARN line is emitted once per client per dispatch-loop run.
-    """
-
-    def test_available_spawns_normally(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-    ) -> None:
-        """With plenty of free space, dispatch proceeds as usual."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-D1A", client="test-client"))
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 1
-
-    def test_low_disk_holds_task_pending_no_attempt_consumed(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The core binding requirement: a gated PENDING task keeps attempts=0."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-D1B", client="test-client", attempts=0))
-        _force_disk_pressure_gated(monkeypatch)
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 0
-        assert daemon.spawn_calls == []
-        store = load_dev_queue()
-        task = next(t for t in store.tasks if t.ticket_id == "GEN-D1B")
-        assert task.status == QueueItemStatus.PENDING
-        assert task.attempts == 0
-
-    def test_low_disk_emits_dispatch_tick_disk_pressure_gate(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A gated client emits dispatch.tick with skip_reason=disk_pressure_gate."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-D1C", client="test-client"))
-        _force_disk_pressure_gated(monkeypatch, free_gb=1.25)
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        events = read_events(
-            consumer="test-d1-tick",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        ticks = [
-            e
-            for e in events
-            if e.payload.get("skip_reason") == DispatchSkipReason.DISK_PRESSURE_GATE
-        ]
-        assert len(ticks) == 1
-        payload = ticks[0].payload
-        assert payload["client"] == "test-client"
-        assert payload["claimed"] == 0
-        assert payload["pending"] == 1
-        assert payload["disk_free_gb"] == 1.25
-        assert payload["disk_min_free_gb"] == DEFAULT_DISK_PRESSURE_MIN_FREE_GB
-
-    def test_low_disk_emits_operator_warn_line_once_per_client(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The operator WARN line is deduplicated across ticks in one run."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-D1D", client="test-client"))
-        _force_disk_pressure_gated(monkeypatch)
-
-        lines: list[str] = []
-        warned_disk_pressure: set[str] = set()
-        daemon = FakeNativeDaemonClient()
-        for _ in range(2):
-            dispatch_tick(
-                simple_config,
-                native_daemon=daemon,
-                auto_ff=False,
-                emit=lines.append,
-                warned_disk_pressure=warned_disk_pressure,
-            )
-
-        matches = [
-            ln for ln in lines if ln.startswith("WARN test-client: worktree disk low")
-        ]
-        assert len(matches) == 1
-        assert warned_disk_pressure == {"test-client"}
-
-    def test_ssh_key_gate_takes_precedence_over_disk_pressure_gate(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Both probes forced bad: SSH_KEY_GATE wins, not DISK_PRESSURE_GATE."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-D1E", client="test-client"))
-        _force_ssh_key_unavailable(monkeypatch)
-        _force_disk_pressure_gated(monkeypatch)
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        events = read_events(
-            consumer="test-d1-precedence-ssh",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        assert len(events) == 1
-        assert events[0].payload["skip_reason"] == DispatchSkipReason.SSH_KEY_GATE
-
-    def test_disk_pressure_gate_takes_precedence_over_freshness_gate(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Low disk + stale repo: DISK_PRESSURE_GATE wins over FRESHNESS_GATE."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-D1F", client="test-client"))
-        _force_disk_pressure_gated(monkeypatch)
-        monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
-            lambda _client, **_kw: (True, "aaa", "bbb", 3),
-        )
-        monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
-            lambda _client, **_kw: "behind",
-        )
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        events = read_events(
-            consumer="test-d1-precedence-fresh",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        assert len(events) == 1
-        assert events[0].payload["skip_reason"] == DispatchSkipReason.DISK_PRESSURE_GATE
-
-    def test_gate_disabled_bypasses_skip_and_emits_bypass_event(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """disk_pressure_gate_enabled=False bypasses the pressure skip — the
-        client dispatches normally, a DISK_PRESSURE_GATE_BYPASSED event is
-        recorded, and no dispatch.tick DISK_PRESSURE_GATE skip is recorded."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-D1G", client="test-client"))
-        _force_disk_pressure_gated(monkeypatch, free_gb=1.5)
-
-        bypass_config = simple_config.model_copy(
-            update={"disk_pressure_gate_enabled": False}
-        )
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(bypass_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 1
-
-        bypass_events = read_events(
-            consumer="test-d1-bypass",
-            event_types=[OrchestratorEventType.DISK_PRESSURE_GATE_BYPASSED],
-        )
-        assert len(bypass_events) == 1
-        assert bypass_events[0].payload["client"] == "test-client"
-        assert bypass_events[0].payload["disk_free_gb"] == 1.5
-        assert (
-            bypass_events[0].payload["disk_min_free_gb"]
-            == DEFAULT_DISK_PRESSURE_MIN_FREE_GB
-        )
-
-        tick_events = read_events(
-            consumer="test-d1-bypass-tick",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        skip_ticks = [
-            e
-            for e in tick_events
-            if e.payload.get("skip_reason") == DispatchSkipReason.DISK_PRESSURE_GATE
-        ]
-        assert skip_ticks == []
-
-    def test_probe_oserror_fails_open_and_dispatches(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """An unprobeable mount is not evidence of pressure: the gate fails open."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-D1H", client="test-client"))
-
-        probe_error = "mount went away"
-
-        def _raise(_path: Path) -> DiskUsage:
-            raise OSError(probe_error)
-
-        monkeypatch.setattr("cw.dispatch.gating.check_disk_usage", _raise)
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 1
-        tick_events = read_events(
-            consumer="test-d1-probe-error",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
-        )
-        skip_ticks = [
-            e
-            for e in tick_events
-            if e.payload.get("skip_reason") == DispatchSkipReason.DISK_PRESSURE_GATE
-        ]
-        assert skip_ticks == []
-
-
-# ---------------------------------------------------------------------------
-# TestHostTmpInodePressureGate (#2470)
-# ---------------------------------------------------------------------------
-
-
-def _force_inode_usage(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    total_inodes: int = 1_000_000,
-    free_inodes: int = 10_000,
-) -> None:
-    """Force the inode probe on every mount (overrides conftest's roomy default)."""
-    monkeypatch.setattr(
-        "cw.dispatch.gating.check_inode_usage",
-        lambda _path: InodeUsage(total_inodes=total_inodes, free_inodes=free_inodes),
-    )
-
-
-def _disk_pressure_skips(consumer: str) -> list[OrchestratorEvent]:
-    return [
-        e
-        for e in read_events(
-            consumer=consumer, event_types=[OrchestratorEventType.DISPATCH_TICK]
-        )
-        if e.payload.get("skip_reason") == DispatchSkipReason.DISK_PRESSURE_GATE
-    ]
-
-
-def _host_tmp_attention(consumer: str) -> list[OrchestratorEvent]:
-    return [
-        e
-        for e in read_events(
-            consumer=consumer,
-            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
-        )
-        if e.payload.get("paused_status") == "host_tmp_exhausted"
-    ]
-
-
-class TestHostTmpInodePressureGate:
-    """Inode dimension of the claim-time disk-pressure gate (#2470).
-
-    A tmpfs can exhaust its inodes while bytes remain plentiful (the
-    2026-09-27 ENOSPC incident). The gate refuses a spawn when free inodes
-    fall below ``max(disk_pressure_min_free_inodes,
-    disk_pressure_min_free_inode_fraction x total)`` and fires one per-client,
-    edge-triggered ``session.needs_attention(host_tmp_exhausted)``.
-    """
-
-    def test_low_inodes_gate_with_inode_payload(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Bytes fine, inodes low: DISK_PRESSURE_GATE skip carrying inode fields."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-I1A", client="test-client", attempts=0))
-        _force_inode_usage(monkeypatch, free_inodes=10_000)
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 0
-        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-I1A")
-        assert task.status == QueueItemStatus.PENDING
-        assert task.attempts == 0
-        skips = _disk_pressure_skips("test-i1-skip")
-        assert len(skips) == 1
-        assert skips[0].payload["disk_free_inodes"] == 10_000
-        assert skips[0].payload["disk_min_free_inodes"] == 50_000
-        assert skips[0].payload["disk_free_gb"] == 250.0
-
-    def test_low_inodes_emit_inode_specific_operator_warn_line(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-I1W", client="test-client"))
-        _force_inode_usage(monkeypatch, free_inodes=10_000)
-
-        lines: list[str] = []
-        dispatch_tick(
-            simple_config,
-            native_daemon=FakeNativeDaemonClient(),
-            auto_ff=False,
-            emit=lines.append,
-        )
-
-        assert any(
-            ln.startswith("WARN test-client: worktree mount low on inodes")
-            and "10,000 free, need 50,000" in ln
-            for ln in lines
-        )
-
-    def test_attention_latch_is_edge_triggered_and_resets_on_healthy_probe(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Fires once per outage episode, per client; a healthy probe re-arms it."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-I1B", client="test-client"))
-        daemon = FakeNativeDaemonClient()
-
-        _force_inode_usage(monkeypatch, free_inodes=10_000)
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-
-        fired = _host_tmp_attention("test-i1-latch-1")
-        assert len(fired) == 1
-        payload = fired[0].payload
-        assert payload["client"] == "test-client"
-        assert payload["session_id"] == ""
-        assert payload["ticket_id"] is None
-        assert load_host_tmp_probe_cache()["test-client"].latched is True
-
-        _force_inode_usage(monkeypatch, free_inodes=900_000)
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-        assert load_host_tmp_probe_cache()["test-client"].latched is False
-
-        _force_inode_usage(monkeypatch, free_inodes=10_000)
-        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
-        assert len(_host_tmp_attention("test-i1-latch-2")) == 2
-
-    def test_latch_is_per_client_and_isolated(
-        self,
-        sample_client_config: ClientConfig,
-        make_git_repo: Callable[[str], Path],
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """One client's exhausted mount neither gates nor latches another client."""
-        other = ClientConfig(
-            name="other-client",
-            workspace_path=make_git_repo("workspace/other-project"),
-            default_branch="main",
-            worktree_base=tmp_path / "worktrees-other",
-        )
-        write_clients_yaml(sample_client_config, other)
-        add_ticket(TicketTask(ticket_id="GEN-I1C", client="test-client"))
-        add_ticket(TicketTask(ticket_id="GEN-I1D", client="other-client"))
-        exhausted_base = sample_client_config.worktree_base
-        assert exhausted_base is not None
-
-        def _probe(path: Path) -> InodeUsage:
-            free = 10_000 if path == exhausted_base else 900_000
-            return InodeUsage(total_inodes=1_000_000, free_inodes=free)
-
-        monkeypatch.setattr("cw.dispatch.gating.check_inode_usage", _probe)
-        config = OrchestratorConfig(
-            tick_interval_seconds=30,
-            per_client_max_parallel={"test-client": 1, "other-client": 1},
-        )
-
-        daemon = FakeNativeDaemonClient()
-        result = dispatch_tick(config, native_daemon=daemon, auto_ff=False)
-
-        assert result.spawned == 1
-        other_task = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-I1D")
-        assert other_task.status == QueueItemStatus.RUNNING
-        skips = _disk_pressure_skips("test-i1-iso-skip")
-        assert [e.payload["client"] for e in skips] == ["test-client"]
-        fired = _host_tmp_attention("test-i1-iso-attn")
-        assert [e.payload["client"] for e in fired] == ["test-client"]
-        cache = load_host_tmp_probe_cache()
-        assert cache["test-client"].latched is True
-        assert "other-client" not in cache
-
-    @pytest.mark.parametrize(
-        ("total_inodes", "free_inodes", "gated"),
-        [
-            # Absolute floor dominates: 5% of 200K is only 10K.
-            (200_000, 40_000, True),
-            # R1 example 1: 1M-inode tmpfs refuses below 50K free.
-            (1_000_000, 49_999, True),
-            (1_000_000, 50_000, False),
-            # R1 example 2: fraction dominates -- 50M-inode mount refuses
-            # below 2.5M free even though 2M is far above the 50K floor.
-            (50_000_000, 2_000_000, True),
-            (50_000_000, 2_500_000, False),
-        ],
-    )
-    def test_threshold_is_max_of_floor_and_fraction(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-        total_inodes: int,
-        free_inodes: int,
-        gated: bool,
-    ) -> None:
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-I1E", client="test-client"))
-        _force_inode_usage(
-            monkeypatch, total_inodes=total_inodes, free_inodes=free_inodes
-        )
-
-        result = dispatch_tick(
-            simple_config, native_daemon=FakeNativeDaemonClient(), auto_ff=False
-        )
-
-        assert result.spawned == (0 if gated else 1)
-        assert len(_disk_pressure_skips("test-i1-threshold")) == (1 if gated else 0)
-
-    def test_gate_disabled_bypasses_but_still_fires_attention(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The informational signal is independent of the enforcement bypass."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-I1F", client="test-client"))
-        _force_inode_usage(monkeypatch, free_inodes=10_000)
-        bypass_config = simple_config.model_copy(
-            update={"disk_pressure_gate_enabled": False}
-        )
-
-        result = dispatch_tick(
-            bypass_config, native_daemon=FakeNativeDaemonClient(), auto_ff=False
-        )
-
-        assert result.spawned == 1
-        bypass_events = read_events(
-            consumer="test-i1-bypass",
-            event_types=[OrchestratorEventType.DISK_PRESSURE_GATE_BYPASSED],
-        )
-        assert len(bypass_events) == 1
-        assert bypass_events[0].payload["disk_free_inodes"] == 10_000
-        assert bypass_events[0].payload["disk_min_free_inodes"] == 50_000
-        assert _disk_pressure_skips("test-i1-bypass-tick") == []
-        assert len(_host_tmp_attention("test-i1-bypass-attn")) == 1
-
-    def test_zero_total_inodes_never_gates(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """btrfs reports f_files=f_ffree=0: the inode dimension does not apply."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-I1G", client="test-client"))
-        _force_inode_usage(monkeypatch, total_inodes=0, free_inodes=0)
-
-        result = dispatch_tick(
-            simple_config, native_daemon=FakeNativeDaemonClient(), auto_ff=False
-        )
-
-        assert result.spawned == 1
-        assert _disk_pressure_skips("test-i1-btrfs") == []
-        assert _host_tmp_attention("test-i1-btrfs-attn") == []
-
-    def test_inode_probe_oserror_fails_open(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-I1H", client="test-client"))
-        probe_error = "statvfs failed"
-
-        def _raise(_path: Path) -> InodeUsage:
-            raise OSError(probe_error)
-
-        monkeypatch.setattr("cw.dispatch.gating.check_inode_usage", _raise)
-
-        result = dispatch_tick(
-            simple_config, native_daemon=FakeNativeDaemonClient(), auto_ff=False
-        )
-
-        assert result.spawned == 1
-        assert _disk_pressure_skips("test-i1-oserror") == []
-
-    def test_custom_thresholds_thread_from_config(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """disk_pressure_min_free_inodes/_fraction reach the gate from config."""
-        write_clients_yaml(sample_client_config)
-        add_ticket(TicketTask(ticket_id="GEN-I1J", client="test-client"))
-        _force_inode_usage(monkeypatch, total_inodes=1_000_000, free_inodes=150_000)
-        strict = simple_config.model_copy(
-            update={
-                "disk_pressure_min_free_inodes": 10_000,
-                "disk_pressure_min_free_inode_fraction": 0.2,
-            }
-        )
-
-        result = dispatch_tick(
-            strict, native_daemon=FakeNativeDaemonClient(), auto_ff=False
-        )
-
-        assert result.spawned == 0
-        skips = _disk_pressure_skips("test-i1-custom")
-        assert skips[0].payload["disk_min_free_inodes"] == 200_000
-
-
-# ---------------------------------------------------------------------------
-# TestSpawnInvalidatesStaleContextJson (#1046)
-# ---------------------------------------------------------------------------
-
-
-class TestSpawnInvalidatesStaleContextJson:
-    """Pre-spawn invalidation of a stale ``.cw/context.json`` (#1046).
-
-    A requeued/re-spawned task (``attempts > 1``) must not let a worker
-    silently replan against a prior session's materialized context — see
-    #1030 for the incident this guards against. LocalExecutor is excluded:
-    ``local_runner.build_task_message`` reads ``.cw/context.json`` and
-    degrades silently to an empty ``## Ticket:`` header if it disappears
-    (the #952 regression class).
-    """
-
-    def test_deletes_stale_context_json_for_non_local_executor(
-        self,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-    ) -> None:
-        """attempts > 1 + non-local (default) executor -> stale
-        .cw/context.json is removed before spawn."""
-        from cw.worktree import create_worktree
-
-        write_clients_yaml(sample_client_config)
-
-        branch = f"{sample_client_config.feature_branch_prefix}/GEN-STALE"
-        worktree_path = create_worktree(
-            sample_client_config, branch, allow_dirty_reuse=True
-        )
-        context_file = worktree_path / ".cw" / "context.json"
-        context_file.parent.mkdir(parents=True, exist_ok=True)
-        context_file.write_text('{"sentinel": "stale"}')
-
-        add_ticket(TicketTask(ticket_id="GEN-STALE", client="test-client", attempts=1))
-
-        daemon = FakeNativeDaemonClient()
-        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
-
-        assert spawned == 1
-        assert not context_file.exists()
-
-    def test_preserves_context_json_for_local_executor(
-        self,
-        tmp_dispatch_dirs: Path,
-        sample_client_config: ClientConfig,
-        simple_config: OrchestratorConfig,
-    ) -> None:
-        """attempts > 1 + LOCAL_BACKEND executor -> .cw/context.json
-        survives (local_runner.build_task_message reads it; deleting it
-        would recreate the #952 empty-header regression)."""
-        from cw.worktree import create_worktree
-
-        config_dir = tmp_dispatch_dirs / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        clients_file = config_dir / "clients.yaml"
-        clients_file.write_text(
-            "clients:\n"
-            "  test-client:\n"
-            f"    workspace_path: {sample_client_config.workspace_path}\n"
-            f"    default_branch: {sample_client_config.default_branch}\n"
-            f"    worktree_base: {sample_client_config.worktree_base}\n"
-            "    pipeline:\n"
-            "      executors:\n"
-            "        plan:\n"
-            "          backend: local\n"
-        )
-
-        branch = f"{sample_client_config.feature_branch_prefix}/GEN-STALE-LOCAL"
-        worktree_path = create_worktree(
-            sample_client_config, branch, allow_dirty_reuse=True
-        )
-        context_file = worktree_path / ".cw" / "context.json"
-        context_file.parent.mkdir(parents=True, exist_ok=True)
-        context_file.write_text('{"sentinel": "preserved"}')
-
-        add_ticket(
-            TicketTask(ticket_id="GEN-STALE-LOCAL", client="test-client", attempts=1)
-        )
-
-        daemon = FakeNativeDaemonClient()
-        dispatch_tick(simple_config, native_daemon=daemon)
-
-        assert context_file.exists()
-        assert context_file.read_text() == '{"sentinel": "preserved"}'
 
 
 # ---------------------------------------------------------------------------
@@ -22763,7 +20145,7 @@ def test_client_tick_snapshot_running_count_matches_legacy_ceiling_oracle() -> N
 
 
 def test_usage_limit_skip_event_running_count_matches_legacy_ceiling_oracle() -> None:
-    from cw.dispatch.gating import _emit_usage_limit_skip_events
+    from cw.dispatch.gating.usage_limit import _emit_usage_limit_skip_events
 
     sessions = _mixed_ceiling_sessions()
     client = ClientConfig(name="ceil-client", workspace_path=Path("/tmp/ws"))

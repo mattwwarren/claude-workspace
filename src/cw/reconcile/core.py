@@ -230,7 +230,8 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
 
     *dispatch_review_jobs* (#1229) says whether THIS call may act on the
     ``address_review`` and ``auto_fix_ci`` review recipes. Only the live
-    dispatch loop passes True (``dispatch.gating._reconcile_usage_limited``).
+    dispatch loop passes True
+    (``dispatch.gating.usage_limit._reconcile_usage_limited``).
     Every other caller — ``cw status``/``cw list`` (via
     ``_check_and_mark_dead_sessions``), ``cw start``, ``cw doctor`` — is a
     read-or-housekeeping command that must not, as a side effect, spawn a

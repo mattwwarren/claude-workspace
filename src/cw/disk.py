@@ -5,7 +5,7 @@ Bytes since #1887 (split from #1858); inodes since #2470.
 Standalone probe with no dispatch-specific knowledge, mirroring
 :func:`cw.ssh.check_ssh_key_available` and :func:`cw.gh.check_gh_availability`:
 the two existing preflight probes are plain functions imported into
-``cw.dispatch.gating``, not inlined there.
+``cw.dispatch.gating.disk_pressure``, not inlined there.
 """
 
 from __future__ import annotations
