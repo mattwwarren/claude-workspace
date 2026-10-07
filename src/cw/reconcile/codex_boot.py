@@ -101,7 +101,7 @@ audited off it. That stays fail-closed, because every requeue or park needs a
 fresh hit, and it is not a clock-driven disposition (ADR-0014): an expired
 probe only delays a re-check. A probe that captured a git error is real
 evidence and still parks as ``git_error``. Capture-lockless, consume-in-lock,
-defer-on-miss is the template for the remaining in-lock git (#2546, #2548).
+defer-on-miss is the template for the remaining in-lock git (#2546).
 Because there is no atomic worktree-generation check spanning the pre-pass and
 the in-lock mutation, a consumed probe cannot authorize a clean requeue either:
 that candidate defers for a fresh decision. The boot pass itself runs unlocked
