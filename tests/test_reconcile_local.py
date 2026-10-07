@@ -17,7 +17,6 @@ from pathlib import Path
 import freezegun
 import pytest
 
-from cw._config_migrate import migrate_cw_state
 from cw._git import run_git
 from cw.auto_dev_result import AutoDevResult
 from cw.config import (
@@ -26,7 +25,6 @@ from cw.config import (
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
-from cw.local_runner import AIDER_LOG_RELATIVE_PATH
 from cw.models import (
     ClientConfig,
     CompletionReason,
@@ -67,69 +65,18 @@ from tests._opencode_helpers import (
 from tests._reconcile_helpers import (
     _attention_events,
     _failing_record_event,
+    _legacy_handle_state,
+    _local_git_worktree,
+    _mk_local_session,
+    _save_dead_local_session,
     _stage_complete_payload,
+    _touch_aider_log,
 )
 from tests.conftest import (
     _audit_failure_logged,
     _fail_audit_append,
     _make_daemon_session,
 )
-
-
-def _local_git_worktree(
-    make_git_repo: Callable[[str], Path], name: str, *, with_commit: bool
-) -> Path:
-    """Build a git worktree with an origin/main ref and an optional impl commit.
-
-    origin/main lets synthesize_git_result compute the fork point; with_commit
-    controls whether the git-only synthesis yields stage_complete (commit) or
-    aider_no_output (no commit).
-    """
-    worktree = make_git_repo(name)
-    subprocess.run(
-        ["git", "-C", str(worktree), "remote", "add", "origin", str(worktree)],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(worktree), "fetch", "origin", "main"],
-        check=True,
-        capture_output=True,
-    )
-    if with_commit:
-        (worktree / "impl.py").write_text("x = 1\n", encoding="utf-8")
-        subprocess.run(
-            ["git", "-C", str(worktree), "add", "."], check=True, capture_output=True
-        )
-        subprocess.run(
-            ["git", "-C", str(worktree), "commit", "-m", "impl"],
-            check=True,
-            capture_output=True,
-        )
-    return worktree
-
-
-def _mk_local_session(
-    sid: str,
-    worktree: Path,
-    liveness: LocalLivenessHandle,
-    *,
-    started_at: datetime | None = None,
-) -> Session:
-    """Build an ACTIVE, DAEMON-origin LOCAL session with a liveness handle.
-
-    surface_ref is None (LOCAL sessions never register on the daemon roster);
-    local_liveness is what harvest keys off.
-    """
-    return _make_daemon_session(
-        id=sid,
-        name=f"client-a/auto-dev/{sid}",
-        worktree_path=worktree,
-        surface_ref=None,
-        started_at=started_at or datetime(2026, 1, 1, tzinfo=UTC),
-        stage=Stage.IMPL,
-        local_liveness=liveness,
-    )
 
 
 def test_local_harvest_dead_process_completes_and_advances(
@@ -1341,72 +1288,6 @@ def test_local_harvest_aider_backend_ignores_stray_opencode_log(
 # Fixture provenance (composed arrangement, HYPOTHESIZED robustness lines, no
 # capture of the failing session): see tests/_opencode_helpers.py.
 # ---------------------------------------------------------------------------
-
-
-def _touch_aider_log(worktree: Path) -> None:
-    """Leave the empty ``.cw/aider.log`` a real aider launch always leaves (#2512)."""
-    log_path = worktree / AIDER_LOG_RELATIVE_PATH
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text("", encoding="utf-8")
-
-
-def _legacy_handle_state(sess: Session) -> CwState:
-    """*sess* as a pre-#2369 on-disk record run through the real v18->v19 migration.
-
-    The handle has no ``backend`` on disk (schema 18); the migration writes an
-    explicit ``"aider"`` that is byte-identical to a genuine aider handle -- the
-    incident shape of #2512.
-    """
-    raw = CwState(sessions=[sess]).model_dump(mode="json")
-    raw["schema_version"] = 18
-    del raw["sessions"][0]["local_liveness"]["backend"]
-    migrated = migrate_cw_state(raw)
-    assert migrated["sessions"][0]["local_liveness"]["backend"] == "aider"
-    return CwState.model_validate(migrated)
-
-
-def _save_dead_local_session(
-    worktree: Path,
-    ticket_id: str,
-    *,
-    backend: str | None,
-    session_stage: Stage | None,
-    row_stage: Stage,
-    row_client: str = "client-a",
-) -> dict[str, TicketTask]:
-    """Save a dead local session + RUNNING row at *row_stage*; session id == ticket id.
-
-    The session name is what ties a harvest candidate to its row
-    (``ticket_id_for_session``), so the two ids must match. *backend* ``None``
-    persists a LEGACY handle (see :func:`_legacy_handle_state`); otherwise the
-    handle records *backend* explicitly. *session_stage* is the spawn stage
-    ``Session.stage`` stamps, *row_stage* the dev-queue row's current stage. The
-    client is written first (stage list + ``sentinel_mismatch_veto``) so the stage
-    position resolves; ``client-unconfigured`` skips it so the position does not.
-    """
-    if row_client == "client-a":
-        write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
-    sid = ticket_id
-    dead_handle = LocalLivenessHandle.model_validate(
-        {"pid": 2_000_000_000, "start_time_ns": 1, "backend": backend or "aider"}
-    )
-    sess = _mk_local_session(sid, worktree, dead_handle)
-    sess.stage = session_stage
-    save_state(CwState(sessions=[sess]) if backend else _legacy_handle_state(sess))
-    save_dev_queue(
-        DevQueueStore(
-            tasks=[
-                TicketTask(
-                    ticket_id=ticket_id,
-                    client=row_client,
-                    stage=row_stage,
-                    status=QueueItemStatus.RUNNING,
-                    session_id=sid,
-                )
-            ]
-        )
-    )
-    return {t.ticket_id: t for t in load_dev_queue().tasks}
 
 
 def _save_dead_opencode_finalize(
