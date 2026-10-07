@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.67.1] - 2026-10-06
+
 ### Fixed
 
 - **The idle, stalled and phantom sweeps now page once when the staged-advance guard refuses a session's result on a stage mismatch (#2513).** Each sweep latched the refusal silently, so the worker's real result (e.g. a `blocked` finalize sentinel) was dropped with no page. They now emit one `session.needs_attention` with the canonical 9 fields before the existing latch, as the local dead-process harvest does since #2490, and stamp the latch only once that write succeeded, so a failed write is re-paged next tick. The phantom sweep (worker gone from the daemon roster) uses `paused_status=sentinel_stage_mismatch_dead_session` and the recovery command `cw spawn close --confirmed-dead --requeue <id>`. The idle and stalled sweeps (worker still in the roster) use a new `paused_status=sentinel_stage_mismatch_live_session` whose breadcrumbs say the worker may yet report a result and give `cw spawn close --requeue <id>`, never `--confirmed-dead`. A non-stage refusal (e.g. a PENDING row still carrying the session id) is latched silently as before, and a session latched before the upgrade is never re-offered or paged. Nothing is closed, requeued or reaped automatically, no push notification fires, and phantom's `sentinel_mismatch_veto_cap_exhausted` escalation is unchanged. The page, payload and emit move from `cw.reconcile.local` into `cw.reconcile._shared` (`stage_refusal_page`, `emit_stage_refusal_pages`, `page_and_latch_stage_refusal`), together with `SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON`; the local harvest's page text is byte-identical. `attention_watch.py` shows the new status's breadcrumbs.
