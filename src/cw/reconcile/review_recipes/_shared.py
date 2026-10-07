@@ -426,7 +426,10 @@ class RepoSlugs:
         if self._deadline is not None and monotonic() >= self._deadline:
             self.budget_exhausted = True
             return
-        self._slugs[git_dir] = _resolve_repo_slug(git_dir)
+        resolved = _resolve_repo_slug(git_dir)
+        if self._deadline is not None and monotonic() >= self._deadline:
+            self.budget_exhausted = True
+        self._slugs[git_dir] = resolved
 
     def mismatch(self, pr_repo: str, git_dir: Path) -> str | None:
         """Return *git_dir*'s captured slug if it disagrees with *pr_repo*. No git.
