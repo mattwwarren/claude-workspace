@@ -20,6 +20,7 @@ GROUPS: list[tuple[str, list[str]]] = [
             "prep_pr_finalize",
             "prep_pr_state",
             "review_monitor",
+            "review_monitor_lib.models",
         ],
     ),
     (".claude/skills/cw-fanout/scripts", ["wave_status"]),
