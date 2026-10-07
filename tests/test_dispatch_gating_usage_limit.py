@@ -56,7 +56,7 @@ class TestDispatchTickReconcileErrors:
             raise RuntimeError(msg)
 
         # Patch the name as imported into cw.dispatch (not cw.reconcile).
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", _boom_reconcile)
+        monkeypatch.setattr("cw.dispatch.gating.usage_limit.reconcile", _boom_reconcile)
 
         daemon = FakeNativeDaemonClient()
 
@@ -91,7 +91,9 @@ class TestDispatchTickReconcileErrors:
             seen.append(kwargs)
             return ReconcileReport(usage_limited=usage_limited)
 
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", _record_reconcile)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.usage_limit.reconcile", _record_reconcile
+        )
 
         assert _reconcile_usage_limited() is usage_limited
         assert seen == [{"dispatch_review_jobs": True}]
@@ -116,7 +118,7 @@ class TestDispatchTickSessionsLockTimeout:
                 msg, lock_path=sessions_lock_file(), waited_s=60.0
             )
 
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", _timeout)
+        monkeypatch.setattr("cw.dispatch.gating.usage_limit.reconcile", _timeout)
         daemon = FakeNativeDaemonClient()
         caplog.set_level(logging.WARNING, logger="cw.dispatch")
 
@@ -158,7 +160,7 @@ class TestDispatchTickSessionsLockTimeout:
             )
 
         with monkeypatch.context() as patch_ctx:
-            patch_ctx.setattr("cw.dispatch.gating.reconcile", _timeout)
+            patch_ctx.setattr("cw.dispatch.gating.usage_limit.reconcile", _timeout)
             dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
 
         assert read_events(event_types=[OrchestratorEventType.DISPATCH_TICK]) == []
@@ -213,6 +215,6 @@ class TestDispatchTickSessionsLockTimeout:
             msg = "simulated reconcile failure"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr("cw.dispatch.gating.reconcile", _boom)
+        monkeypatch.setattr("cw.dispatch.gating.usage_limit.reconcile", _boom)
 
         assert not _reconcile_usage_limited()

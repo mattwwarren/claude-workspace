@@ -35,13 +35,14 @@ if TYPE_CHECKING:
 
 _GATING = "cw.dispatch.gating"
 _CONTEXT_JSON = f"{_GATING}.context_json"
+_USAGE_LIMIT = f"{_GATING}.usage_limit"
 
 # Owning module for each of the 34 historic top-level names of the flat
 # ``gating.py``. Each extraction commit of the split edits only the entries it
 # moves.
 _OWNER: dict[str, str] = {
-    "_emit_usage_limit_skip_events": _GATING,
-    "_reconcile_usage_limited": _GATING,
+    "_emit_usage_limit_skip_events": _USAGE_LIMIT,
+    "_reconcile_usage_limited": _USAGE_LIMIT,
     "_AVAILABILITY_OUTAGE_REASON": _GATING,
     "_AVAILABILITY_PROBE_TIMEOUT_SECONDS": _GATING,
     "_AVAILABILITY_PROBE_TTL_SECONDS": _GATING,
@@ -138,10 +139,10 @@ _SEAMS = (
 )
 
 # Every module that defines a ``_log``; each must log on ``cw.dispatch``.
-_LOGGING_MODULES = (_GATING, _CONTEXT_JSON)
+_LOGGING_MODULES = (_GATING, _CONTEXT_JSON, _USAGE_LIMIT)
 
 # Every extracted gating submodule; each must import cold in a fresh interpreter.
-_SUBMODULES = ("context_json",)
+_SUBMODULES = ("context_json", "usage_limit")
 
 
 def _owner(name: str) -> ModuleType:
