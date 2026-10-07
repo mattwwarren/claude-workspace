@@ -46,7 +46,10 @@ def revoke_plan_approval_command(ticket_id: str, client: str | None) -> None:
     """Durably revoke a PLAN approval before applying new resolutions."""
     config = load_orchestrator_config()
     resolved = resolve_client(ticket_id, config, client)
-    result = revoke_plan_approval(ticket_id, resolved)
+    # bounded=True (#2501): nothing precedes the lock. The headless plan-stage
+    # worker also runs this command; a timeout makes it exit blocked (fail
+    # closed) instead of hanging behind a wedged queue lock.
+    result = revoke_plan_approval(ticket_id, resolved, bounded=True)
     if result["cleared"]:
         click.echo(
             f"Revoked plan approval for {ticket_id} ({resolved}); "
@@ -184,10 +187,12 @@ def _tracker_is_github_or_unknown(client_name: str) -> bool:
 def _approve_scope_drift(ticket_id: str, resolved: str, scope_drift: str) -> None:
     """The ``--scope-drift`` branch of ``dev_queue_approve`` (#2337)."""
     extra_files = [path.strip() for path in scope_drift.split(",") if path.strip()]
+    # bounded=True (#2501): operator command; nothing precedes the lock.
     result = approve_scope_drift_ticket(
         ticket_id,
         resolved,
         extra_files,
+        bounded=True,
     )
     click.echo(
         f"Approved scope drift for {ticket_id} ({resolved}):"
@@ -200,7 +205,8 @@ def _approve_scope_drift(ticket_id: str, resolved: str, scope_drift: str) -> Non
 
 def _approve_must_fix_override(ticket_id: str, resolved: str, reason: str) -> None:
     """The ``--override-must-fix`` branch of ``dev_queue_approve`` (#2205)."""
-    result = approve_must_fix_override_ticket(ticket_id, resolved, reason)
+    # bounded=True (#2501): operator command; nothing precedes the lock.
+    result = approve_must_fix_override_ticket(ticket_id, resolved, reason, bounded=True)
     count = len(result["finding_ids"])
     noun = "finding" if count == 1 else "findings"
     actor = result["actor"] or "<unresolved operator>"
@@ -344,7 +350,8 @@ def dev_queue_approve(
     if scope_drift is not None:
         _approve_scope_drift(ticket_id, resolved, scope_drift)
         return
-    result = approve_ticket(ticket_id, resolved)
+    # bounded=True (#2501): operator command; nothing precedes the lock.
+    result = approve_ticket(ticket_id, resolved, bounded=True)
     # #2311: advisory only -- the approval already landed. approve_ticket
     # recorded the audit event itself; the CLI just surfaces the warning.
     body_drift_warning = result[BODY_DRIFT_WARNING_KEY]

@@ -59,6 +59,8 @@ def approve_must_fix_override_ticket(
     ticket_id: str,
     client_name: str,
     reason: str,
+    *,
+    bounded: bool = False,
 ) -> MustFixOverrideApproval:
     """Record an operator override of a ``codex_must_fix_findings`` park.
 
@@ -70,7 +72,7 @@ def approve_must_fix_override_ticket(
             has no fingerprint. Nothing is recorded on any of these paths.
         CwError: if no matching task is found.
     """
-    with _lock():
+    with _lock(bounded=bounded):
         return _approve_must_fix_override_locked(ticket_id, client_name, reason)
 
 

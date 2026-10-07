@@ -520,6 +520,7 @@ def requeue_ticket(
     from_completed: bool = False,
     native_daemon: NativeDaemonClient | None = None,
     ignore_session_ids: frozenset[str] = frozenset(),
+    bounded: bool = False,
 ) -> dict[str, str | bool | int]:
     """Requeue a BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF ticket, optionally
     at a specific stage.
@@ -600,7 +601,7 @@ def requeue_ticket(
     # import above, see module docstring).
     from cw.executor import resolve_pipeline_stages
 
-    with _lock():
+    with _lock(bounded=bounded):
         store = load_dev_queue()
         task = _find_ticket(store, ticket_id, client_name)
 
@@ -748,7 +749,10 @@ def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
                 )
             raise UnblockStateError(msg)
 
-        with _lock():
+        # bounded=True (#2501): operator-only; the inner dev-queue lock is
+        # taken before any write, so a timeout is a clean retry. It holds
+        # sessions_lock while it waits (up to the timeout again).
+        with _lock(bounded=True):
             store = load_dev_queue()
             task = _find_ticket(store, ticket_id, client_name)
             if task.status != QueueItemStatus.BLOCKED_ON_USER:

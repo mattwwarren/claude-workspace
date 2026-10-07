@@ -2308,6 +2308,138 @@ class TestSpawnClose:
 class TestSpawnComplete:
     """Tests for _spawn_complete_impl and cw spawn complete command."""
 
+    def test_held_dev_queue_lock_times_out_before_any_side_effect(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The nested dev-queue lock is bounded too (#2501): a clean retry."""
+        from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
+        from cw.cli import _spawn_complete_impl
+        from cw.config import dev_queue_file, dev_queue_lock
+        from cw.events import read_events
+        from cw.exceptions import LockTimeoutError
+        from cw.models import OrchestratorEventType
+        from tests.conftest import _hold_flock
+
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir)
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
+        queue_before = dev_queue_file().read_bytes()
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.05")
+        daemon = FakeNativeDaemonClient()
+
+        with (
+            _hold_flock(dev_queue_lock()),
+            pytest.raises(LockTimeoutError) as exc_info,
+        ):
+            _spawn_complete_impl(
+                session_id=sess.id,
+                status="shipped",
+                ticket_id=None,
+                force=False,
+                native_daemon=daemon,
+            )
+
+        assert exc_info.value.lock_name == "dev_queue"
+        events = read_events(
+            consumer="_test_held_dev_queue",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert events == []
+        updated = load_state().find_by_name_or_id(sess.id)
+        assert updated is not None
+        assert updated.status == SessionStatus.ACTIVE
+        assert dev_queue_file().read_bytes() == queue_before
+        assert daemon.stop_calls == []
+        assert held_locks() == ()
+
+    def test_nested_timeout_reports_only_its_own_wait(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each bounded lock waits up to the timeout on its own (#2501)."""
+        from cw import _flock
+        from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
+        from cw.cli import _spawn_complete_impl
+        from cw.config import dev_queue_lock, sessions_lock_file
+        from cw.exceptions import LockTimeoutError
+        from tests.conftest import _FakeClock, _hold_flock
+
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir)
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.5")
+
+        with (
+            _hold_flock(dev_queue_lock()),
+            _hold_flock(sessions_lock_file()) as release_sessions,
+        ):
+            # The sessions holder lets go at the first poll sleep, so the
+            # outer acquisition succeeds after one sleep; dev_queue stays held.
+            clock = _FakeClock(on_sleep=lambda _n: release_sessions())
+            monkeypatch.setattr(_flock, "time", clock)
+            with pytest.raises(LockTimeoutError) as exc_info:
+                _spawn_complete_impl(
+                    session_id=sess.id,
+                    status="shipped",
+                    ticket_id=None,
+                    force=False,
+                    native_daemon=FakeNativeDaemonClient(),
+                )
+
+        err = exc_info.value
+        assert err.lock_name == "dev_queue"
+        assert sum(clock.sleeps) > err.waited_s
+        assert err.waited_s == pytest.approx(0.5)
+        assert str(err).startswith("Timed out after 0.5s")
+
+    def test_spawn_close_still_waits_out_a_held_dev_queue_lock(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``cancel_task_for_session`` runs after ``daemon.stop``: unbounded."""
+        import threading
+
+        from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
+        from cw.cli import _spawn_close_impl
+        from cw.config import dev_queue_lock
+        from cw.dev_queue import load_dev_queue
+        from cw.models import QueueItemStatus
+        from tests.conftest import _hold_flock
+
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir)
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.01")
+
+        with _hold_flock(dev_queue_lock()) as release:
+            timer = threading.Timer(0.2, release)
+            timer.start()
+            try:
+                _spawn_close_impl(
+                    session_id=sess.id, native_daemon=FakeNativeDaemonClient()
+                )
+            finally:
+                timer.cancel()
+
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-42")
+        assert task.status == QueueItemStatus.CANCELLED
+
+    def test_spawn_close_requeue_keeps_the_unbounded_default(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--requeue`` runs after the close landed: no ``bounded`` passed."""
+        from cw.cli.spawn import _spawn_close_requeue_impl
+
+        seen: list[dict[str, object]] = []
+
+        def _record(*_args: object, **kwargs: object) -> dict[str, object]:
+            seen.append(kwargs)
+            return {"from_stage": "plan", "to_stage": "plan", "regressed": False}
+
+        monkeypatch.setattr("cw.cli.spawn.requeue_ticket", _record)
+
+        _spawn_close_requeue_impl(
+            session_id="dead1234", ticket_id="GEN-42", client="test-client"
+        )
+
+        assert len(seen) == 1
+        assert "bounded" not in seen[0]
+
     def test_happy_path_session_completed_with_reason_user(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:

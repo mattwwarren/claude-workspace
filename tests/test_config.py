@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import fcntl
+import inspect
 import logging
 import os
 import select
@@ -63,12 +64,12 @@ from tests.conftest import (
     _hold_sessions_lock,
     _make_daemon_session,
     _raise_eio,
+    _RecordingLockPath,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from datetime import datetime
-    from typing import IO
 
     from cw.dispatch_state import ExecutorBlockedMarker
 
@@ -2086,9 +2087,32 @@ _CHILD_READY_TIMEOUT_S = 10.0
 # ``dispatch_tick``, SessionsLockTimeoutError is handled.
 _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/cli/maintenance.py", "doctor"): 1,  # `cw doctor --reap <SESSION>`
+    ("cw/cli/maintenance.py", "init"): 1,  # `cw init` -> init_client (#2501)
     ("cw/cli/spawn.py", "_spawn_close_impl"): 1,  # `cw spawn close`
-    ("cw/cli/spawn.py", "_spawn_complete_impl"): 1,  # `cw spawn complete`
-    ("cw/dev_queue/requeue.py", "unblock_ticket"): 1,  # `cw dev-queue unblock`
+    # `cw spawn complete`: sessions_lock + nested dev_queue_lock (#2501)
+    ("cw/cli/spawn.py", "_spawn_complete_impl"): 2,
+    # `cw dev-queue unblock`: sessions_lock + nested _lock (#2501)
+    ("cw/dev_queue/requeue.py", "unblock_ticket"): 2,
+    # `cw dev-queue ...` operator commands, dev_queue lock (#2501)
+    ("cw/cli/dev_queue/crud.py", "dev_queue_add"): 1,
+    ("cw/cli/dev_queue/crud.py", "dev_queue_move"): 1,
+    ("cw/cli/dev_queue/crud.py", "dev_queue_requeue"): 1,
+    ("cw/cli/dev_queue/crud.py", "dev_queue_remove"): 1,
+    ("cw/cli/dev_queue/crud.py", "dev_queue_cancel"): 1,
+    ("cw/cli/dev_queue/crud.py", "dev_queue_clear"): 1,
+    ("cw/cli/dev_queue/crud.py", "dev_queue_prune"): 1,
+    ("cw/cli/dev_queue/approve.py", "revoke_plan_approval_command"): 1,
+    ("cw/cli/dev_queue/approve.py", "_approve_scope_drift"): 1,
+    ("cw/cli/dev_queue/approve.py", "_approve_must_fix_override"): 1,
+    ("cw/cli/dev_queue/approve.py", "dev_queue_approve"): 1,
+    # `cw config concurrency ...` / `cw lane ...`: clients, concurrency_override
+    # and (lane rm) dev_queue locks (#2501)
+    ("cw/cli/config_cmds.py", "config_concurrency_set"): 1,
+    ("cw/cli/config_cmds.py", "config_concurrency_clear"): 2,
+    ("cw/cli/config_cmds.py", "lane_add"): 1,
+    ("cw/cli/config_cmds.py", "lane_rm"): 2,
+    ("cw/cli/config_cmds.py", "lane_pause"): 1,
+    ("cw/cli/config_cmds.py", "lane_resume"): 1,
     ("cw/doctor/wedge/reap.py", "_reap_daemon_sessions"): 1,  # `cw doctor --reap`
     # `cw doctor --reap`, stranded routed-result close (#2524)
     ("cw/doctor/routed_result_wedge.py", "reap_routed_result_findings"): 1,
@@ -2109,10 +2133,43 @@ _BOUNDED_FORWARDERS_ALLOWLIST: dict[tuple[str, str], int] = {
     # pass True, the unattended `cw orchestrate run --lane` poll loop keeps the
     # unbounded default (a timeout would end that consumer for good).
     ("cw/doctor/loop_health.py", "_reap_session_by_selector"): 1,
+    # The lock context managers hand their own ``bounded`` to the flock
+    # acquire helper (#2501).
+    ("cw/config.py", "sessions_lock"): 1,
+    ("cw/config.py", "clients_lock"): 1,
+    ("cw/config.py", "concurrency_override_lock"): 1,
+    ("cw/dev_queue/storage.py", "_lock"): 1,
+    # Library entry points forward their caller's choice to the lock (#2501):
+    # the operator CLI passes True, every other caller keeps the default.
+    ("cw/config.py", "init_client"): 1,
+    ("cw/dev_queue/crud.py", "add_ticket"): 1,
+    ("cw/dev_queue/crud.py", "move_ticket"): 1,
+    ("cw/dev_queue/crud.py", "remove_ticket"): 1,
+    ("cw/dev_queue/crud.py", "cancel_ticket"): 1,
+    ("cw/dev_queue/crud.py", "clear_tickets"): 1,
+    ("cw/dev_queue/crud.py", "prune_tickets"): 1,
+    ("cw/dev_queue/approval.py", "approve_ticket"): 1,
+    ("cw/dev_queue/approval.py", "revoke_plan_approval"): 1,
+    ("cw/dev_queue/approval.py", "approve_scope_drift_ticket"): 1,
+    ("cw/dev_queue/must_fix_override.py", "approve_must_fix_override_ticket"): 1,
+    ("cw/dev_queue/requeue.py", "requeue_ticket"): 1,
+    # cw/_flock.py has NO entry by design: acquire_flock and
+    # acquire_sessions_flock branch on ``bounded`` themselves, and the shared
+    # poll helper takes no ``bounded`` parameter.
 }
-# Callables whose ``bounded=`` argument the scan audits.
+# Callables whose aliases, bare references and ``**kwargs`` calls the scan
+# rejects. Recording is wider: a ``bounded=`` keyword is audited on ANY callee,
+# because the dev-queue lock's context manager (``dev_queue_lock`` / ``_lock``)
+# shares its name with the ``cw.config.dev_queue_lock`` PATH function and so
+# cannot join this set.
 _LOCK_ENTRY_POINTS = frozenset(
-    {"sessions_lock", "mutate_state", "_reap_session_by_selector"}
+    {
+        "sessions_lock",
+        "mutate_state",
+        "_reap_session_by_selector",
+        "clients_lock",
+        "concurrency_override_lock",
+    }
 )
 
 
@@ -2191,7 +2248,9 @@ class _BoundedCallVisitor(ast.NodeVisitor):
         self._call_funcs.add(id(node.func))
         func = node.func
         name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
-        if name in _LOCK_ENTRY_POINTS:
+        if name in _LOCK_ENTRY_POINTS or any(
+            kw.arg == "bounded" for kw in node.keywords
+        ):
             self._record(node, name)
         self.generic_visit(node)
 
@@ -2224,31 +2283,6 @@ def _scan_bounded_calls(src_root: Path) -> _BoundedScan:
         scan.true_targets.update(visitor.true_targets)
         scan.violations.extend(visitor.violations)
     return scan
-
-
-class _RecordingLockPath:
-    """Duck-typed lock path that remembers every handle ``sessions_lock`` opens."""
-
-    def __init__(self, real: Path) -> None:
-        self._real = real
-        self.handles: list[IO[str]] = []
-
-    def open(self, mode: str) -> IO[str]:
-        handle = self._real.open(mode)
-        self.handles.append(handle)
-        return handle
-
-    def __str__(self) -> str:
-        return str(self._real)
-
-
-@pytest.fixture
-def recording_lock_path(
-    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> _RecordingLockPath:
-    recorder = _RecordingLockPath(sessions_lock_file())
-    monkeypatch.setattr("cw.config.sessions_lock_file", lambda: recorder)
-    return recorder
 
 
 class TestSessionsLockAcquire:
@@ -2555,6 +2589,65 @@ class TestBoundedSessionsLockAllowlist:
         assert key not in src_scan.literal_true
         assert key not in src_scan.non_literal
 
+    def test_unattended_and_post_side_effect_sites_stay_unbounded(
+        self, src_scan: _BoundedScan
+    ) -> None:
+        """The #2501 audit's "stay unbounded" list, pinned."""
+        for allowlist in (_BOUNDED_TRUE_ALLOWLIST, _BOUNDED_FORWARDERS_ALLOWLIST):
+            assert not [key for key in allowlist if key[0].startswith("cw/dispatch/")]
+        for key in (
+            # After daemon.stop(): a timeout would strand a stopped session.
+            ("cw/dev_queue/crud.py", "cancel_task_for_session"),
+            # Runs after the close already landed.
+            ("cw/cli/spawn.py", "_spawn_close_requeue_impl"),
+            # A continue-on-error loop would wait out the bound per ticket.
+            ("cw/dev_queue/drain.py", "drain_held_tickets"),
+        ):
+            assert key not in src_scan.literal_true
+            assert key not in src_scan.non_literal
+        # `cw spawn close` bounds only its sessions lock, never the queue write.
+        assert src_scan.literal_true[("cw/cli/spawn.py", "_spawn_close_impl")] == 1
+
+    def test_leaf_and_dispatch_state_locks_take_no_bounded_parameter(self) -> None:
+        """No operator-during-wedge caller exists for these (#2501 audit): the
+        inbox locks are LEAF (their holder cannot be stuck on another lock) and
+        ``dispatch_state_lock`` is reached only from unattended paths. See the
+        ``cw._flock`` module docstring."""
+        from cw import events, session_inbox
+        from cw.dev_queue.storage import _plan_lock
+        from cw.dispatch_state import dispatch_state_lock
+
+        for lock_cm in (
+            dispatch_state_lock,
+            events._inbox_lock,
+            session_inbox._inbox_lock,
+            _plan_lock,
+        ):
+            assert "bounded" not in inspect.signature(lock_cm).parameters
+
+    def test_scanner_records_bounded_keyword_on_any_callee(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "q.py").write_text(
+            "def op():\n"
+            "    with _lock(bounded=True):\n"
+            "        pass\n"
+            "    add_ticket(t, bounded=True)\n"
+            "def fwd(flag):\n"
+            "    acquire_flock(fd, p, lock_name='x', bounded=flag)\n"
+            "def off():\n"
+            "    whatever(bounded=False)\n"
+        )
+
+        scan = _scan_bounded_calls(tmp_path)
+
+        assert dict(scan.literal_true) == {("q.py", "op"): 2}
+        assert scan.true_targets[("q.py", "op")] == ["", "t"]
+        assert dict(scan.non_literal) == {("q.py", "fwd"): 1}
+        assert ("q.py", "off") not in scan.literal_true
+        assert ("q.py", "off") not in scan.non_literal
+        assert scan.violations == []
+
     def test_scanner_tracks_enclosing_function_qualnames(self, tmp_path: Path) -> None:
         (tmp_path / "a.py").write_text(
             "def top():\n"
@@ -2612,6 +2705,21 @@ class TestBoundedSessionsLockAllowlist:
             ("lock = config.mutate_state\n", "referenced without being called"),
             ("sessions_lock(**opts)\n", "**kwargs call to sessions_lock"),
             ("cfg.mutate_state(fn, **opts)\n", "**kwargs call to mutate_state"),
+            ("from cw.config import clients_lock as cl\n", "imported as cl"),
+            (
+                "from cw.config import concurrency_override_lock as col\n",
+                "imported as col",
+            ),
+            ("lock = clients_lock\n", "referenced without being called"),
+            (
+                "lock = config.concurrency_override_lock\n",
+                "referenced without being called",
+            ),
+            ("clients_lock(**opts)\n", "**kwargs call to clients_lock"),
+            (
+                "concurrency_override_lock(**opts)\n",
+                "**kwargs call to concurrency_override_lock",
+            ),
         ],
     )
     def test_scanner_reports_forms_it_cannot_follow(
