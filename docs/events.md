@@ -935,12 +935,18 @@ open enum; consumers MUST tolerate unknown values. Known values:
   handoff, the next reconcile instead treats that unrecorded session as
   finished and unparks the row for a fresh REVIEW round; with a readable
   roster the same reconcile stops the worker first, but an unreadable roster
-  or a failed stop can leave both workers running. When only the
-  dev-queue stamp failed, the worker keeps running and the row stays RUNNING
-  with no `session_id`. Either way the operator inspects the worker and
-  requeues the row (`cw dev-queue requeue`); nothing recovers it
-  automatically yet. No push notification is fired (`fire_push_notification`
-  is not called).
+  or a failed stop can leave both workers running. When only the dev-queue
+  stamp failed, the worker keeps running and the row stays RUNNING with no
+  `session_id`; reconcile then adopts the row (`task.session_adopted`) once
+  the recorded session's `cw-context.json` ties it to this claim and the
+  session did not predate the claim, and until it does the operator inspects
+  the worker and, if none is running, releases the row with
+  `cw dev-queue cancel <ticket> -c <client>` followed by
+  `cw dev-queue requeue <ticket> -c <client> --from-cancelled` (plain
+  `cw dev-queue requeue` refuses a RUNNING row). When the `sessions.json`
+  write failed, the same operator release applies; nothing yet recovers that
+  case automatically (#2591 follow-up). No push notification is fired
+  (`fire_push_notification` is not called).
 - `"plan_parked"` — A headless worker completed its plan stage with open
   ambiguities or unverified premises (`ambiguities_pending_resolution` or
   `premises_pending_verification` sentinel status). The task is BLOCKED_ON_USER.
@@ -1543,6 +1549,53 @@ above deliberately set `correlation_id=ticket_id`; the older `ticket.*` family
 was **not** retrofitted in this change to avoid touching unrelated emit sites.
 Consumers that need to correlate a `ticket.*` event to a ticket must read
 `payload["ticket_id"]`, not `correlation_id`.
+
+### `task.session_adopted`
+
+Reconcile bound a RUNNING row that had no `session_id` to the session its
+claim launched (#2591). This is the row a #2502 post-launch failure leaves
+when dispatch's dev-queue stamp failed: the worker runs, but no completion can
+find the row.
+
+**Emitter:** `run_unowned_running_recovery` (`cw.reconcile.unowned_running`),
+on every reconcile tick, before the TIMED_OUT backstop.
+**Semantics:** One event per adopted row, recorded after `dev_queue_lock`
+releases and the bind is saved. A failed write is logged and swallowed: the
+bind is already durable and the event is audit-only. `correlation_id` is the
+`ticket_id`. Not in the default operator-forward set; no push notification.
+
+A row is adopted only when the worktree's `cw-context.json` names the row's
+client, ticket and current `attempt`, its `session_id` is a recorded session
+that no other row owns, of the same client and named for the same ticket, and
+that session did not start before the row's `claimed_at` (a naive timestamp
+on either side is never adopted; a row with no `claimed_at` skips this
+check). The bind writes exactly the fields dispatch's own spawn stamp writes,
+except `stage_base_ref`. It is not gated by `reap_policy`: it reverts, stops
+and parks nothing. A row that cannot be tied this way is left untouched. A
+live worker with no recorded session is still stopped by the leaked-worker
+sweep, never adopted.
+
+| key | type | source |
+|---|---|---|
+| `client` | str | the row's `client` |
+| `ticket_id` | str | the row's `ticket_id` |
+| `lane` | str | the row's `lane` |
+| `session_id` | str | the adopted session's id (the context's `session_id`) |
+| `session_name` | str | the adopted session's name |
+| `attempt` | int | the context's `attempt`, equal to the row's `attempts` |
+| `claimed_at` | str or null | the row's `claimed_at` (ISO 8601), `null` for a row claimed before schema v44 |
+
+```json
+{
+  "client": "my-client",
+  "ticket_id": "CW-42",
+  "lane": "default",
+  "session_id": "d3c1a9e0",
+  "session_name": "my-client/auto-dev/CW-42",
+  "attempt": 1,
+  "claimed_at": "2026-10-07T09:00:00+00:00"
+}
+```
 
 ### `session.liveness_changed`
 

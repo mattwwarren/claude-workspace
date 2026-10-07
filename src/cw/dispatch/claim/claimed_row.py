@@ -324,6 +324,61 @@ def _park_running_task_blocked_on_user(
     return stored_task is not None
 
 
+def _apply_spawn_success_fields(stored_task: TicketTask, *, session_id: str) -> None:
+    """Write the spawn-success fields onto *stored_task*, in memory only.
+
+    The field half of :func:`_stamp_spawn_success`, split out (#2591) so
+    ``cw.reconcile.unowned_running`` can bind a row whose stamp failed with
+    exactly the writes dispatch's own stamp makes, under ``sessions_lock``
+    where no git may run (ADR-0019). The caller holds ``dev_queue_lock``,
+    re-found *stored_task* in the store it loaded under it, and saves that
+    store. ``stage_base_ref`` (a git read) is not written here.
+    """
+    stored_task.session_id = session_id
+    stored_task.spawn_error_count = 0
+    stored_task.next_eligible_at = None
+    # #1631: the single write site for the durable "a session was
+    # genuinely spawned for this row" fact. Unconditional and
+    # write-once-to-True -- reaching here IS the proof, and no
+    # revert/requeue path ever clears it. reconcile's
+    # timed-out-merged backstop reads it to tell a usage-limit-only
+    # attempt history (which leaves spawn_error_count at 0, so the
+    # counters alone cannot say) apart from a task that really ran
+    # and shipped.
+    stored_task.ever_spawned = True
+    # #1674: the worktree just proved reusable, so any recorded
+    # hook-context conflict is stale evidence — cleared here
+    # atomically with the other spawn-failure counters.
+    stored_task.hook_context_conflict_session_id = None
+    # #1794: the spawn's executor.spawn already wrote the in-memory
+    # task's regressed_into_stage into the new session's
+    # queue_metadata, so the per-arrival marker is consumed.
+    # Clear it so it never leaks into a later, unrelated stage
+    # entry (the false positive the cumulative regress_attempts
+    # counter would have produced).
+    # #1801: this clear is unconditional and runs BEFORE any
+    # reap could ever observe a no-sentinel death, which is
+    # why a spawn that dies silently loses the signal for
+    # good -- evaluated and accepted, see the field's comment
+    # in src/cw/models/tasks.py for the full reasoning.
+    stored_task.regressed_into_stage = None
+    # #2337: the operator's plan_scope_drift grant is consumed the
+    # same way, and just as unconditionally -- it was written into
+    # this spawn's queue_metadata at spawn and is meant for exactly the
+    # IMPL session the approval requeued. Surviving past it would let
+    # the grant cover a later round's drift it was never given for.
+    stored_task.scope_drift_approved_extra_files = None
+    stored_task.scope_drift_approved_head = None
+    # #1730: stage-gated clear -- unlike regressed_into_stage
+    # (cleared unconditionally at the next spawn), this marker
+    # must survive an intervening non-REVIEW spawn (e.g. Rule
+    # 5a's self-heal regresses to IMPL, not REVIEW) so it is
+    # only consumed when a REVIEW-stage session is actually
+    # about to read the delivered comments.
+    if stored_task.stage == Stage.REVIEW:
+        stored_task.pending_operator_comment = False
+
+
 def _stamp_spawn_success(
     task: TicketTask,
     *,
@@ -337,7 +392,8 @@ def _stamp_spawn_success(
     events to the correct (current) session and reject stale events from prior
     crashed sessions for the same ticket (GitHub #97), clears the spawn-failure
     counters the successful spawn just invalidated, consumes the per-arrival
-    regress markers, and records stage_base_ref.
+    regress markers (all via :func:`_apply_spawn_success_fields`), and records
+    stage_base_ref.
 
     Extracted from :func:`_spawn_claimed_task` to keep that function inside the
     PLR statement budget, mirroring :func:`_codex_capability_gate`'s extraction
@@ -354,49 +410,7 @@ def _stamp_spawn_success(
             store, task.ticket_id, client_name, created_at=task.created_at
         )
         if stored_task is not None:
-            stored_task.session_id = session_id
-            stored_task.spawn_error_count = 0
-            stored_task.next_eligible_at = None
-            # #1631: the single write site for the durable "a session was
-            # genuinely spawned for this row" fact. Unconditional and
-            # write-once-to-True -- reaching here IS the proof, and no
-            # revert/requeue path ever clears it. reconcile's
-            # timed-out-merged backstop reads it to tell a usage-limit-only
-            # attempt history (which leaves spawn_error_count at 0, so the
-            # counters alone cannot say) apart from a task that really ran
-            # and shipped.
-            stored_task.ever_spawned = True
-            # #1674: the worktree just proved reusable, so any recorded
-            # hook-context conflict is stale evidence — cleared here
-            # atomically with the other spawn-failure counters.
-            stored_task.hook_context_conflict_session_id = None
-            # #1794: executor.spawn above already wrote the in-memory
-            # task's regressed_into_stage into the new session's
-            # queue_metadata, so the per-arrival marker is consumed.
-            # Clear it so it never leaks into a later, unrelated stage
-            # entry (the false positive the cumulative regress_attempts
-            # counter would have produced).
-            # #1801: this clear is unconditional and runs BEFORE any
-            # reap could ever observe a no-sentinel death, which is
-            # why a spawn that dies silently loses the signal for
-            # good -- evaluated and accepted, see the field's comment
-            # in src/cw/models/tasks.py for the full reasoning.
-            stored_task.regressed_into_stage = None
-            # #2337: the operator's plan_scope_drift grant is consumed the
-            # same way, and just as unconditionally -- it was written into
-            # this spawn's queue_metadata above and is meant for exactly the
-            # IMPL session the approval requeued. Surviving past it would let
-            # the grant cover a later round's drift it was never given for.
-            stored_task.scope_drift_approved_extra_files = None
-            stored_task.scope_drift_approved_head = None
-            # #1730: stage-gated clear -- unlike regressed_into_stage
-            # (cleared unconditionally at the next spawn), this marker
-            # must survive an intervening non-REVIEW spawn (e.g. Rule
-            # 5a's self-heal regresses to IMPL, not REVIEW) so it is
-            # only consumed when a REVIEW-stage session is actually
-            # about to read the delivered comments.
-            if stored_task.stage == Stage.REVIEW:
-                stored_task.pending_operator_comment = False
+            _apply_spawn_success_fields(stored_task, session_id=session_id)
             # R5: stamp stage_base_ref -- non-fatal on failure
             try:
                 head_sha = git_output(

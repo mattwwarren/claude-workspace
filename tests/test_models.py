@@ -1261,7 +1261,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 43
+        assert DEV_QUEUE_SCHEMA_VERSION == 44
 
     def test_ticket_task_old_row_without_codex_orphan_fields_defaults_none(
         self,
@@ -2729,6 +2729,21 @@ class TestMustFixOverrideField:
         store = DevQueueStore.model_validate(migrate_dev_queue(raw))
         assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION
         assert store.tasks[0].must_fix_override is None
+
+
+class TestClaimedAtField:
+    """v44 (#2591): the instant the row was last claimed to RUNNING."""
+
+    def test_field_defaults_none(self) -> None:
+        assert TicketTask(ticket_id="GEN-1", client="acme").claimed_at is None
+
+    def test_field_round_trips_on_the_row(self) -> None:
+        claimed = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
+        task = TicketTask(ticket_id="GEN-1", client="acme", claimed_at=claimed)
+
+        restored = TicketTask.model_validate_json(task.model_dump_json())
+
+        assert restored.claimed_at == claimed
 
 
 class TestScopeDriftApprovalFields:

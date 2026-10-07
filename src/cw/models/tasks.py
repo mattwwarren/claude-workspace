@@ -207,7 +207,12 @@ from cw.review_finding_dispositions import FindingDisposition
 #      #2421) — whether MERGE_HEAD was present in the ticket's worktree when a
 #      FINALIZE-origin regress fired. Backfilled to False on every pre-v43
 #      row: no regress under the older schema measured it.
-DEV_QUEUE_SCHEMA_VERSION = 43
+# v44: added TicketTask.claimed_at (GitHub #2591) — the instant the row was
+#      last claimed to RUNNING, which reconcile's unbound-row adoption checks
+#      a session's started_at against. ``| None`` with a ``None`` default, so
+#      no migration filler is needed (same as v13/v38/v40/v42); a pre-v44 row
+#      is a claim of unknown age.
+DEV_QUEUE_SCHEMA_VERSION = 44
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -430,6 +435,15 @@ class TicketTask(BaseModel):
     # Incremented each time the task is claimed by _claim_next_pending. Used to
     # apply a hard cap on validation_failed retries (see issue #251).
     attempts: int = 0
+    # The instant of the claim that last moved this row to RUNNING (v44,
+    # GitHub #2591), stamped with a fresh clock at the single RUNNING entry
+    # (dispatch/claim/screening.py's _screen_and_claim), next to the
+    # `attempts` increment. Only meaningful while the row is RUNNING, and
+    # deliberately has no clear site: the next claim overwrites it.
+    # cw.reconcile.unowned_running reads it so a cw-context.json left by an
+    # earlier row's session (one that started before this claim) is never
+    # taken as this claim's. None on rows claimed before the field existed.
+    claimed_at: datetime | None = None
     # Subset of `attempts`: claims that exited RUNNING having produced no
     # evidence of progress. This — not raw `attempts` — is what the global
     # attempt ceiling compares against (dispatch/claim.py, reconcile/

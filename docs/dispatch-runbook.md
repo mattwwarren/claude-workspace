@@ -593,7 +593,13 @@ If the task is already in a terminal queue status but wedged (e.g.,
 `RUNNING` with no live session), `cw doctor --reap` detects and repairs
 common wedge conditions:
 
-- `wedge/task-running-no-session` — reverts task to PENDING.
+- `wedge/task-running-no-session` — reverts task to PENDING. A RUNNING row
+  whose dev-queue stamp failed after its worker launched (#2502) is usually
+  not left for this: reconcile adopts it onto its recorded session
+  (`task.session_adopted`, #2591) once the worktree's `cw-context.json` ties
+  the session to the claim, after which it is an ordinary bound row and no
+  longer a wedge. A row reconcile cannot tie, for example because the
+  `sessions.json` write also failed, is still reported here.
 - `wedge/task-running-completed-session` — reverts task to PENDING.
 - `wedge/terminal-sibling-park` — a `BLOCKED_ON_USER` row with
   `disposition=terminal_sibling` (see below) that was never claimed

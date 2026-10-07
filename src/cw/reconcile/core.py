@@ -109,6 +109,7 @@ from cw.reconcile.tasks import (
     revert_completed_silent_tasks,
     revert_timed_out_tasks,
 )
+from cw.reconcile.unowned_running import run_unowned_running_recovery
 from cw.reconcile.usage_limit_mid_turn import (
     detect_and_park_mid_turn_usage_limits,
     sessions_with_act_in_flight,
@@ -166,8 +167,12 @@ def _run_terminal_backstops_and_sweeps(
     member: their decisions (one-shot latch, gate release) are stamped
     in-lock either way, and ``reconcile()`` always builds and drains the sink.
 
+    First, it adopts any RUNNING row whose launched session was never
+    stamped on it (#2591), so the backstops below see that row bound.
+
     Returns (timed_out_ticket_ids, completed_silent_ticket_ids).
     """
+    run_unowned_running_recovery(clients=clients)
     timed_out_ticket_ids = revert_timed_out_tasks()
     completed_silent_ticket_ids = revert_completed_silent_tasks()
     park_terminal_sibling_tasks()

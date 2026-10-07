@@ -13,7 +13,8 @@ from elsewhere must target the submodule that looks it up at call time
 - ``events`` — per-task ``dispatch.tick`` / ``SESSION_NEEDS_ATTENTION``
   emitters shared by the claim screen and the spawn path.
 - ``claimed_row`` — locked load/re-find/mutate/save primitives for one
-  claimed RUNNING row: revert, park, spawn-success stamp.
+  claimed RUNNING row: revert, park, spawn-success stamp (and its pure field
+  half, shared with ``cw.reconcile.unowned_running``, #2591).
 - ``codex_capability`` — TTL-cached codex CLI probe and pre-spawn gate
   (#1238); also holds the ``_SpawnOutcome`` record returned by both the gate
   and the spawn path.
@@ -28,6 +29,7 @@ from __future__ import annotations
 from cw.dispatch.claim.claimed_row import (
     _SPAWN_ERROR_BACKOFF_CAP_SECONDS,
     _SPAWN_ERROR_BACKOFF_INITIAL_SECONDS,
+    _apply_spawn_success_fields,
     _find_running_row,
     _park_running_task_blocked_on_user,
     _revert_claimed_task_to_pending,
@@ -90,6 +92,7 @@ __all__ = [
     "_SPAWN_ERROR_BACKOFF_INITIAL_SECONDS",
     "_SpawnOutcome",
     "_apply_plan_bypass_if_available",
+    "_apply_spawn_success_fields",
     "_cached_codex_capability_diagnosis",
     "_claim_next_pending",
     "_codex_capability_cache",
