@@ -265,15 +265,6 @@ ignore = [
 # level is the sanctioned mechanism, not a workaround.
 "src/cw/reconcile/_shared/_routing.py" = ["PLC0415"]
 "src/cw/reconcile/_shared/_sentinels.py" = ["PLC0415"]
-# tasks defers cw.dispatch.routing's _AUTOMERGE_NOT_ARMED_REASON (inside
-# _is_variant_a_gate_task) and _PRIOR_PIPELINE_PR_OPEN_REASON (inside
-# _is_variant_b_gate_task) to break the cw.dispatch ↔ cw.reconcile circular
-# dependency (#1713): cw.dispatch's package __init__ imports cw.reconcile at
-# module top (loop.py/gating.py/lanes.py), so this module's own reach into
-# cw.dispatch.routing must be function-level. Same shape as the #698
-# reconcile/_shared entries above. Inline import is the sanctioned
-# mechanism, not a workaround.
-"src/cw/reconcile/tasks.py" = ["PLC0415"]
 # phantom/_mutations and stalled/_mutations defer cw.dispatch.productivity's
 # extract_claim_evidence / is_unproductive (#1750) to break the same
 # cw.dispatch ↔ cw.reconcile cycle as the tasks.py entry above: cw.dispatch's

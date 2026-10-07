@@ -40,6 +40,11 @@ from cw.models import (
     TicketTask,
 )
 from cw.pr_hydrate import _parse_pr_url
+from cw.queue_rows import (
+    _AUTOMERGE_NOT_ARMED_REASON,
+    _PRIOR_PIPELINE_PR_OPEN_REASON,
+    _is_backstop_exempt,
+)
 from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
     _DIRTY_WORKTREE_REASON,
@@ -120,13 +125,6 @@ def _revert_running_tasks_for_sessions(
     """
     if not session_ids:
         return []
-
-    # Deferred, not module-top: cw.dispatch's package __init__ imports
-    # cw.reconcile, so a top-level import of any cw.dispatch submodule here
-    # is a real circular import at package-init time (same precedent as the
-    # deferred cw.dispatch.routing import below and phantom/_mutations.py's
-    # deferred cw.dispatch.productivity import).
-    from cw.dispatch.claim import _is_backstop_exempt
 
     dirty = dirty_session_reasons or {}
     reverted: list[str] = []
@@ -549,8 +547,6 @@ def revert_timed_out_tasks() -> list[str]:
     can emit queue.session_reaped (#380) without false events on the happy
     path (sessions whose task already completed normally are not stamped).
     """
-    from cw.dispatch.claim import _is_backstop_exempt
-
     state = load_state()
     target_sessions = [
         s
@@ -615,8 +611,6 @@ def revert_completed_silent_tasks() -> list[str]:
     can emit queue.session_reaped (#380) without false events on the happy
     path (sessions whose task already completed normally are not stamped).
     """
-    from cw.dispatch.claim import _is_backstop_exempt
-
     state = load_state()
     target_sessions = [
         s
@@ -816,20 +810,11 @@ _STALE_GATE_CONSUMER = "dev_queue_stale_gate"
 #
 # The "automerge_not_armed" / "prior_pipeline_pr_open" reason literals
 # themselves are NOT re-declared here -- _is_variant_a_gate_task and
-# _is_variant_b_gate_task below import them directly from
-# cw.dispatch.routing (the sole producer that stamps task.blocked_reason
-# with these values) via a function-level deferred import, so a locally
-# re-declared copy can never drift from the producer with no compiler
-# signal. Deferred, not module-top, because cw.dispatch's package __init__
-# imports cw.reconcile at module level (loop.py, gating/ and lanes.py), so a
-# top-level `from cw.dispatch.routing import ...` here creates a real
-# circular import at package-init time (confirmed: ImportError "cannot
-# import name 'reconcile' from partially initialized module 'cw.reconcile'"
-# via gating/usage_limit.py's `from cw.reconcile import reconcile`). Same shape as the
-# #698 reconcile._shared -> cw.dispatch precedent and the #1310 gating<->
-# claim pair -- see cw.reconcile._shared.classify_sentinel_stage_position
-# and cw.dispatch.claim's deferred `from cw.dispatch.gating.context_json import
-# _invalidate_stale_context_json`.
+# _is_variant_b_gate_task below import them from cw.queue_rows, the same
+# objects cw.dispatch.routing (the sole producer that stamps
+# task.blocked_reason with these values) imports, so a locally re-declared
+# copy can never drift from the producer with no compiler signal. The leaf
+# imports nothing from cw.dispatch, so the import is module-scope (#2613).
 _VARIANT_A_MERGE_PENDING_DISPOSITION = "merge_pending"
 _VARIANT_A_BLOCKED_DISPOSITION = "blocked"
 
@@ -850,11 +835,6 @@ def _is_variant_a_gate_task(task: TicketTask) -> bool:
         return False
     if task.disposition == _VARIANT_A_MERGE_PENDING_DISPOSITION:
         return True
-    # Function-level import breaks the cw.dispatch<->cw.reconcile package
-    # import cycle -- see the comment above _VARIANT_A_MERGE_PENDING_
-    # DISPOSITION.
-    from cw.dispatch.routing import _AUTOMERGE_NOT_ARMED_REASON
-
     return (
         task.disposition == _VARIANT_A_BLOCKED_DISPOSITION
         and task.blocked_reason == _AUTOMERGE_NOT_ARMED_REASON
@@ -886,11 +866,6 @@ def _is_variant_b_gate_task(task: TicketTask) -> bool:
         return False
     if task.blocked_on_pr is None:
         return False
-    # Function-level import breaks the cw.dispatch<->cw.reconcile package
-    # import cycle -- see the comment above _VARIANT_A_MERGE_PENDING_
-    # DISPOSITION.
-    from cw.dispatch.routing import _PRIOR_PIPELINE_PR_OPEN_REASON
-
     if task.disposition == _VARIANT_B_DISPOSITION:
         return task.blocked_reason == _PRIOR_PIPELINE_PR_OPEN_REASON
     return (

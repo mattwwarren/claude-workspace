@@ -104,36 +104,6 @@ _DEFERRED_DISPATCH_IMPORTS: Counter[_ImportKey] = Counter(
             "cw.dispatch.productivity",
             ("extract_claim_evidence", "is_unproductive"),
         ): 1,
-        (
-            "src/cw/reconcile/tasks.py",
-            "_revert_running_tasks_for_sessions",
-            "cw.dispatch.claim",
-            ("_is_backstop_exempt",),
-        ): 1,
-        (
-            "src/cw/reconcile/tasks.py",
-            "revert_timed_out_tasks",
-            "cw.dispatch.claim",
-            ("_is_backstop_exempt",),
-        ): 1,
-        (
-            "src/cw/reconcile/tasks.py",
-            "revert_completed_silent_tasks",
-            "cw.dispatch.claim",
-            ("_is_backstop_exempt",),
-        ): 1,
-        (
-            "src/cw/reconcile/tasks.py",
-            "_is_variant_a_gate_task",
-            "cw.dispatch.routing",
-            ("_AUTOMERGE_NOT_ARMED_REASON",),
-        ): 1,
-        (
-            "src/cw/reconcile/tasks.py",
-            "_is_variant_b_gate_task",
-            "cw.dispatch.routing",
-            ("_PRIOR_PIPELINE_PR_OPEN_REASON",),
-        ): 1,
     }
 )
 
@@ -187,7 +157,6 @@ _RECONCILE_PLC0415_KEYS = frozenset(
     {
         "src/cw/reconcile/_shared/_routing.py",
         "src/cw/reconcile/_shared/_sentinels.py",
-        "src/cw/reconcile/tasks.py",
         "src/cw/reconcile/phantom/_mutations.py",
         "src/cw/reconcile/stalled/_mutations.py",
         "src/cw/reconcile/codex_boot.py",

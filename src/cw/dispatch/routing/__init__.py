@@ -149,8 +149,9 @@ if TYPE_CHECKING:
 
 # Re-exported submodule surface. Listed here (rather than left as bare
 # imports) because several names are consumed only by *other* modules --
-# dispatch/__init__.py's facade, dispatch/loop.py, reconcile/tasks.py's
-# deferred imports -- and would otherwise read as unused. Mirrors
+# dispatch/__init__.py's facade, dispatch/loop.py, the historic
+# ``cw.dispatch.routing.<name>`` import paths -- and would otherwise read as
+# unused. Mirrors
 # dispatch/__init__.py's own __all__ convention.
 __all__ = [
     "_AUTOMERGE_NOT_ARMED_REASON",
