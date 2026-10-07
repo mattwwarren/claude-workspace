@@ -249,6 +249,7 @@ class TestLoggerNameIsPinned:
         "cw.models.orchestrator_config.concurrency",
         "cw.models.orchestrator_config.constants",
         "cw.models.orchestrator_config.hooks",
+        "cw.models.orchestrator_config.lane",
         "cw.models.orchestrator_config.stage",
         "cw.models.client",
         "cw.models",
