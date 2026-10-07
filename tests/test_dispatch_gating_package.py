@@ -20,6 +20,9 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
+import subprocess
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -31,6 +34,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 _GATING = "cw.dispatch.gating"
+_CONTEXT_JSON = f"{_GATING}.context_json"
 
 # Owning module for each of the 34 historic top-level names of the flat
 # ``gating.py``. Each extraction commit of the split edits only the entries it
@@ -69,7 +73,7 @@ _OWNER: dict[str, str] = {
     "_reset_host_tmp_exhausted_block": _GATING,
     "_update_host_tmp_latch": _GATING,
     "_apply_disk_pressure_gate": _GATING,
-    "_invalidate_stale_context_json": _GATING,
+    "_invalidate_stale_context_json": _CONTEXT_JSON,
 }
 
 # Module-level ``str``/``int`` constants: they carry no ``__module__``, so their
@@ -134,7 +138,10 @@ _SEAMS = (
 )
 
 # Every module that defines a ``_log``; each must log on ``cw.dispatch``.
-_LOGGING_MODULES = (_GATING,)
+_LOGGING_MODULES = (_GATING, _CONTEXT_JSON)
+
+# Every extracted gating submodule; each must import cold in a fresh interpreter.
+_SUBMODULES = ("context_json",)
 
 
 def _owner(name: str) -> ModuleType:
@@ -197,3 +204,26 @@ def test_module_logs_on_cw_dispatch(
     with caplog.at_level(logging.DEBUG, logger="cw.dispatch"):
         log.debug("gating logger pin probe")
     assert [record.name for record in caplog.records] == ["cw.dispatch"]
+
+
+def test_logger_name_is_defined_once_and_kept_out_of_all() -> None:
+    """``_LOGGER_NAME`` lives in ``context_json``; the package only re-exports it."""
+    context_json = importlib.import_module(_CONTEXT_JSON)
+    assert vars(context_json)["_LOGGER_NAME"] == "cw.dispatch"
+    assert vars(cw.dispatch.gating)["_LOGGER_NAME"] == "cw.dispatch"
+    assert "_LOGGER_NAME" not in cw.dispatch.gating.__all__
+
+
+def test_package_all_is_the_historic_surface() -> None:
+    """``__all__`` lists exactly the 34 historic names."""
+    assert sorted(cw.dispatch.gating.__all__) == sorted(_OWNER)
+
+
+@pytest.mark.parametrize("submodule", _SUBMODULES)
+def test_submodule_imports_cold(submodule: str) -> None:
+    """Each submodule imports in a fresh isolated interpreter (no cycle)."""
+    subprocess.run(
+        [sys.executable, "-I", "-c", f"import {_GATING}.{submodule}"],
+        check=True,
+        env=os.environ.copy(),
+    )

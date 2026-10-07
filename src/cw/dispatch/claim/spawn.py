@@ -535,11 +535,12 @@ def _spawn_claimed_task(
         if task.stage == Stage.PLAN:
             _apply_plan_bypass_if_available(task, client, worktree_path)
 
-        # Function-level import breaks the gating<->claim import cycle:
-        # cw.dispatch.gating imports this module at top level, so claim.py
-        # must defer its own reach back into gating (mirrors the #698
-        # reconcile/_shared -> cw.dispatch precedent the ticket cites).
-        from cw.dispatch.gating import _invalidate_stale_context_json
+        # Function-level import breaks the gating<->claim import cycle: the
+        # cw.dispatch.gating package imports this module at top level, so
+        # claim must defer its own reach back into gating.context_json
+        # (mirrors the #698 reconcile/_shared -> cw.dispatch precedent the
+        # ticket cites).
+        from cw.dispatch.gating.context_json import _invalidate_stale_context_json
 
         _invalidate_stale_context_json(task, client, worktree_path)
 

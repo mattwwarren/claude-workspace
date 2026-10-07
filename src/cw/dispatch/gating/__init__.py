@@ -19,6 +19,12 @@ from cw.disk import (
     effective_min_free_inodes,
     inodes_exhausted,
 )
+from cw.dispatch.gating.context_json import (
+    _LOGGER_NAME as _LOGGER_NAME,
+)
+from cw.dispatch.gating.context_json import (
+    _invalidate_stale_context_json,
+)
 from cw.dispatch_state import (
     AvailabilityProbeCache,
     HostTmpProbeCache,
@@ -33,11 +39,8 @@ from cw.exceptions import (
     SessionsLockTimeoutError,
     WorktreeError,
 )
-from cw.executor import resolve_executor_config
 from cw.gh import check_gh_availability
 from cw.models import (
-    CONTEXT_JSON_RELATIVE_PATH,
-    LOCAL_BACKEND,
     ClientConfig,
     DispatchSkipReason,
     OrchestratorEventType,
@@ -66,13 +69,49 @@ if TYPE_CHECKING:
         CwState,
         DevQueueStore,
         OrchestratorConfig,
-        TicketTask,
     )
     from cw.ssh import RemoteScheme
     from cw.worktree import FetchWarningKey
 from cw.dispatch.claim import _lane_occupants_for_client, _lane_stats_for_client
 
-_log = logging.getLogger("cw.dispatch")
+__all__ = [
+    "FRESHNESS_MAIN_BEHIND",
+    "FRESHNESS_MAIN_DETACHED",
+    "FRESHNESS_MAIN_DIRTY_CHECKOUT",
+    "FRESHNESS_MAIN_DIVERGED",
+    "FRESHNESS_NON_MAIN_HEAD",
+    "_AVAILABILITY_OUTAGE_REASON",
+    "_AVAILABILITY_PROBE_TIMEOUT_SECONDS",
+    "_AVAILABILITY_PROBE_TTL_SECONDS",
+    "_HOST_TMP_EXHAUSTED_REASON",
+    "_SSH_KEY_WARN_SENTINEL",
+    "_DiskPressure",
+    "_apply_disk_pressure_gate",
+    "_apply_ssh_key_gate",
+    "_disk_pressure_warn_line",
+    "_emit_availability_skip",
+    "_emit_disk_pressure_bypass",
+    "_emit_disk_pressure_skip",
+    "_emit_ssh_key_bypass",
+    "_emit_ssh_key_skip",
+    "_emit_stale_skip",
+    "_emit_usage_limit_skip_events",
+    "_invalidate_stale_context_json",
+    "_reconcile_usage_limited",
+    "_record_availability_block",
+    "_record_host_tmp_exhausted_block",
+    "_reset_availability_block",
+    "_reset_host_tmp_exhausted_block",
+    "_resolve_availability",
+    "_resolve_availability_once",
+    "_resolve_disk_pressure",
+    "_resolve_freshness",
+    "_resolve_inode_pressure",
+    "_resolve_ssh_key_once",
+    "_update_host_tmp_latch",
+]
+
+_log = logging.getLogger(_LOGGER_NAME)
 
 
 # paused_status written to SESSION_NEEDS_ATTENTION when the fleet-wide
@@ -968,39 +1007,6 @@ def _emit_stale_skip(
             "occupied": sum(len(v) for v in lane_occupants.values()),
         },
     )
-
-
-def _invalidate_stale_context_json(
-    task: TicketTask, client: ClientConfig, worktree_path: Path
-) -> None:
-    """Delete a stale ``.cw/context.json`` before spawning a re-spawned task.
-
-    Requeue idempotency guard (#1046): a re-spawned task (``attempts > 1``,
-    covering true requeues as well as normal plan->impl->review stage
-    advances) may reuse a worktree that still carries a prior session's
-    materialized ``.cw/context.json``. Left in place, a worker can silently
-    replan against stale ticket context and miss operator-folded
-    resolutions/comments (the #1030 incident). Delete it before spawn so the
-    new session always materializes fresh context.
-
-    Excluded for LocalExecutor: ``local_runner.build_task_message`` reads
-    ``.cw/context.json`` directly and degrades silently to an empty
-    ``## Ticket:`` header if it is missing (the #952 regression class).
-    """
-    if task.attempts <= 1:
-        return
-    if resolve_executor_config(task.stage, task, client).backend == LOCAL_BACKEND:
-        return
-    stale_context = worktree_path / CONTEXT_JSON_RELATIVE_PATH
-    if stale_context.exists():
-        _log.info(
-            "dispatch: invalidated stale .cw/context.json for"
-            " ticket_id=%s attempts=%d worktree_path=%s",
-            task.ticket_id,
-            task.attempts,
-            worktree_path,
-        )
-    stale_context.unlink(missing_ok=True)
 
 
 def _reconcile_usage_limited() -> bool:
