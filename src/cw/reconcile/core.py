@@ -1,9 +1,10 @@
 """Top-level reconcile orchestration.
 
-``reconcile`` runs the lockless gh pre-pass, then ``_reconcile_locked`` under
-``sessions_lock`` (the detect/emit/act sweeps for stalled, idle, and phantom
-sessions), then the post-lock gh/git passes. See the package ``__init__``
-docstring and ADR-0005/ADR-0006 for the invariants.
+``reconcile`` runs the lockless gh pre-pass and the lockless codex clean-probe
+pre-pass (#2563), then ``_reconcile_locked`` under ``sessions_lock`` (the
+detect/emit/act sweeps for stalled, idle, and phantom sessions), then the
+post-lock gh/git passes. See the package ``__init__`` docstring and
+ADR-0005/ADR-0006 for the invariants.
 
 Anything whose side effect re-acquires ``sessions_lock`` (a ``spawn_create_impl``
 call, a dispatch tick that re-enters ``reconcile()``) must NOT run inside
@@ -53,7 +54,11 @@ from cw.reconcile._shared import (
     feature_branch_key,
     ticket_id_for_session,
 )
-from cw.reconcile.codex_reparks import run_codex_live_writer_reparks
+from cw.reconcile.codex_boot import CAPTURE_BUDGET_SECONDS, CleanProbes
+from cw.reconcile.codex_reparks import (
+    capture_repark_probes,
+    run_codex_live_writer_reparks,
+)
 from cw.reconcile.concierge import run_concierge_recoveries
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 from cw.reconcile.escalation import run_escalation_sweep
@@ -65,6 +70,7 @@ from cw.reconcile.liveness import record_session_liveness_changes
 from cw.reconcile.local import (
     _act_on_local_harvest_candidates,
     _detect_local_harvest_candidates,
+    capture_codex_harvest_probes,
 )
 from cw.reconcile.main_drift import (
     _act_on_main_drift_candidates,
@@ -110,6 +116,7 @@ def _run_terminal_backstops_and_sweeps(
     config: OrchestratorConfig,
     clients: dict[str, ClientConfig],
     deferred: DeferredReconcileJobs,
+    codex_probes: CleanProbes | None,
 ) -> tuple[list[str], list[str]]:
     """Run the post-detect TicketTask backstops + RFC 0008 capstone sweeps.
 
@@ -124,7 +131,8 @@ def _run_terminal_backstops_and_sweeps(
     All of these load their own fresh dev-queue/state snapshots rather than
     reusing the (possibly now-stale) locals in ``_reconcile_locked``.
     *clients* is the tick's own client scope; the codex re-park sweep acts
-    only within it (#2307 review round 1).
+    only within it (#2307 review round 1), and reads its clean checks from
+    *codex_probes*, captured before the lock (#2563).
     Extracted to one call site (instead of duplicating 4 lines in each
     branch) to keep ``_reconcile_locked``'s statement count under the
     PLR0915 limit.
@@ -149,7 +157,9 @@ def _run_terminal_backstops_and_sweeps(
     # #2307: re-evaluate codex-orphan parks the boot pass left with an ACTIVE
     # session (live or unprovable writer). Unconditional, like the boot pass,
     # but scoped to this tick's clients: never another client's session.
-    run_codex_live_writer_reparks(now=now, config=config, clients=clients)
+    run_codex_live_writer_reparks(
+        now=now, config=config, clients=clients, probes=codex_probes
+    )
     run_gate_recipes(now=now, config=config, deferred=deferred)
     run_review_recipes(config=config, jobs=deferred)
     run_escalation_sweep(now=now)
@@ -213,6 +223,42 @@ def _verify_supervisor_session_id(state: CwState) -> int:
     if cleared:
         save_state(state)
     return cleared
+
+
+def _capture_codex_clean_probes(
+    *, config: OrchestratorConfig, clients: dict[str, ClientConfig]
+) -> CleanProbes:
+    """Lockless pre-pass: capture the codex clean-check git per candidate (#2563).
+
+    Runs in ``reconcile()`` before ``sessions_lock`` is taken, so the in-lock
+    re-park sweep and the harvest sweep's codex branch run no git: each
+    module re-runs its own detect predicate here over a fresh snapshot and
+    records the probes, which the in-lock code only reads. Bounded by
+    ``CAPTURE_BUDGET_SECONDS``.
+
+    ``reconcile()`` also serves ``cw status``/``cw list``/``cw start``/``cw
+    doctor``, so this must never fail it: a state or dev-queue read error
+    (``json.JSONDecodeError`` and pydantic's ``ValidationError`` are both
+    ``ValueError``) is logged and yields an empty ``CleanProbes``, a miss for
+    every candidate, which then defers in-lock. Nothing broader is caught.
+    """
+    try:
+        state = load_state()
+        tasks = load_dev_queue().tasks
+    except (OSError, ValueError):
+        _log.warning(
+            "reconcile: codex clean-probe pre-pass could not read state;"
+            " deferring all codex candidates this tick",
+            exc_info=True,
+        )
+        return CleanProbes()
+    probes = CleanProbes(budget_seconds=CAPTURE_BUDGET_SECONDS)
+    now = datetime.now(UTC)
+    capture_repark_probes(
+        state, tasks, now=now, clients=clients, config=config, probes=probes
+    )
+    capture_codex_harvest_probes(state, tasks, config=config, probes=probes)
+    return probes
 
 
 def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
@@ -325,6 +371,12 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
             _merged_client_tids.append((_session.client, _ticket_id))
     merged_ticket_ids = frozenset(tid for _client, tid in _merged_client_tids)
     gh_blocked_ticket_ids = frozenset(_gh_blocked_tids)
+    # Second lockless pre-pass (#2563): the codex orphan clean check's git
+    # (`git status`, `git rev-parse`) must not run under sessions_lock either.
+    # It must stay above the lock; the in-lock sweeps only read its probes.
+    codex_probes = _capture_codex_clean_probes(
+        config=_orchestrator_config, clients=_clients
+    )
 
     jobs = DeferredReconcileJobs(
         review=DeferredReviewDispatch() if dispatch_review_jobs else None
@@ -342,6 +394,7 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
                 gh_blocked_ticket_ids=gh_blocked_ticket_ids,
                 clients=_clients,
                 deferred=jobs,
+                codex_probes=codex_probes,
             )
     finally:
         # Post-lock drain (#1232, #1229). Everything in `jobs` was decided and
@@ -428,6 +481,7 @@ def _reconcile_locked(
     gh_blocked_ticket_ids: frozenset[str] = frozenset(),
     clients: dict[str, ClientConfig] | None = None,
     deferred: DeferredReconcileJobs,
+    codex_probes: CleanProbes | None = None,
 ) -> ReconcileReport:
     """Body of reconcile(), called while sessions_lock is held.
 
@@ -452,6 +506,10 @@ def _reconcile_locked(
     (feature_branch_prefix SSOT, #728) — threaded through so the main-drift
     sweep (#940) doesn't re-read clients.yaml a second time this tick, and
     as the client scope of the codex live-writer re-park sweep (#2307).
+    codex_probes comes from reconcile()'s lockless codex clean-probe pre-pass
+    (#2563): the re-park sweep and the local harvest sweep's codex branch
+    read their git checks from it, so neither runs git under sessions_lock.
+    ``None`` (nothing captured) makes every such candidate defer a tick.
 
     Since the process-kill-timeout removal, no sweep in here dispositions a
     session off elapsed time or transcript quietness: the foreign-result and
@@ -494,6 +552,7 @@ def _reconcile_locked(
         now=now,
         task_by_ticket=shared_task_by_ticket,
         config=orchestrator_config,
+        codex_probes=codex_probes,
     )
 
     # Main-checkout drift sweep (#925/#940): flag live worktree workers whose
@@ -624,6 +683,7 @@ def _reconcile_locked(
                 config=orchestrator_config,
                 clients=clients,
                 deferred=deferred,
+                codex_probes=codex_probes,
             )
         )
         all_reverted = list(
@@ -679,6 +739,7 @@ def _reconcile_locked(
             config=orchestrator_config,
             clients=clients,
             deferred=deferred,
+            codex_probes=codex_probes,
         )
     )
     all_reverted = list(

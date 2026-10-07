@@ -20,14 +20,22 @@ passes).
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+from freezegun import freeze_time
 
 from cw import result as cw_result
-from cw.config import load_clients, load_state, save_state
+from cw.config import (
+    load_clients,
+    load_state,
+    orchestrator_config_file,
+    save_state,
+    sessions_lock,
+)
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.models import (
@@ -46,6 +54,8 @@ from cw.reconcile import (
     ProposedAction,
     _act_on_local_harvest_candidates,
     _detect_local_harvest_candidates,
+    codex_boot,
+    reconcile,
 )
 from cw.reconcile import local as reconcile_local
 from cw.reconcile.codex_boot import (
@@ -54,20 +64,27 @@ from cw.reconcile.codex_boot import (
     _PARK_REASON_GIT_ERROR,
     _PARK_REASON_HEAD_MOVED,
     _PARK_REASON_REAP_POLICY_NOT_AUTO,
+    CLEAN_PROBE_MAX_AGE_SECONDS,
+    CleanProbes,
+    probe_clean_state,
 )
 from cw.reconcile.local import (
     CODEX_HARVEST_CLEAN_REQUEUE_REASON,
     CODEX_HARVEST_ORPHANED_DISPOSITION,
+    _evaluate_codex_clean_requeue_gate,
     _harvest_codex_candidate,
     act_on_codex_harvest_candidate,
+    capture_codex_harvest_probes,
 )
 from cw.reconcile.tasks import revert_completed_silent_tasks
 from tests._codex_recovery_helpers import (
     _assert_session_closed,
     _assert_session_left_active,
     _attention_events,
+    _capture_probes_for,
     _completed_events,
     _failing_record_event,
+    _record_git_lock_state,
     _requeued_events,
     _seed_clean_codex_orphan,
     _task_without_base_ref,
@@ -80,7 +97,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from cw.models import Session, TicketTask
+    from cw.models import CwState, Session, TicketTask
 
 _NOW = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
 _TICKET = "T-orphan"
@@ -123,17 +140,39 @@ def _seed(
     return repo
 
 
+def _capture(state: CwState, tasks: list[TicketTask]) -> CleanProbes:
+    """``reconcile()``'s lockless pre-pass for the harvest sweep (#2563).
+
+    The probes record git facts only; which config the discarded gate result
+    resolved against does not matter, so it is pinned rather than loaded.
+    """
+    probes = CleanProbes()
+    capture_codex_harvest_probes(state, tasks, config=_AUTO, probes=probes)
+    return probes
+
+
 def _harvest(config: OrchestratorConfig | None) -> list[str]:
-    """Run one detect+act sweep, as ``reconcile()`` does."""
+    """Run one capture + detect+act sweep, as ``reconcile()`` does."""
     state = load_state()
     task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
-    candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
+    tasks = list(task_by_ticket.values())
+    probes = _capture(state, tasks)
+    candidates = _detect_local_harvest_candidates(state, tasks)
     if config is None:
         return _act_on_local_harvest_candidates(
-            state, candidates, now=_NOW, task_by_ticket=task_by_ticket
+            state,
+            candidates,
+            now=_NOW,
+            task_by_ticket=task_by_ticket,
+            codex_probes=probes,
         )
     return _act_on_local_harvest_candidates(
-        state, candidates, now=_NOW, task_by_ticket=task_by_ticket, config=config
+        state,
+        candidates,
+        now=_NOW,
+        task_by_ticket=task_by_ticket,
+        config=config,
+        codex_probes=probes,
     )
 
 
@@ -549,26 +588,35 @@ def _act(
     config: OrchestratorConfig,
     *,
     legacy_reason: str | None = None,
+    capture: bool = True,
 ) -> CodexHarvestOutcome:
     """Call ``act_on_codex_harvest_candidate`` directly on the seeded orphan.
 
     A legacy caller passes no liveness handle; the A1 sweep passes the real one.
+    With *capture* (the default) the orphan's clean probe is captured first,
+    as both callers do before taking the lock; without it none is passed.
     """
     state = load_state()
     session = state.sessions[0]
     assert session.worktree_path is not None
     clients = load_clients()
+    task = load_dev_queue().tasks[0]
     return act_on_codex_harvest_candidate(
         state,
         session,
         None if legacy_reason is not None else session.local_liveness,
-        load_dev_queue().tasks[0],
+        task,
         clients["client-a"],
         clients,
         config,
         worktree=session.worktree_path,
         now=_NOW,
         legacy_reason=legacy_reason,
+        probes=(
+            _capture_probes_for(session.worktree_path, task, clients)
+            if capture
+            else None
+        ),
     )
 
 
@@ -679,7 +727,7 @@ def test_act_with_legacy_reason_and_no_handle_writes_the_legacy_payload(
 
 
 def _wrapper(
-    *, real_task: TicketTask | None, client_name: str | None
+    *, real_task: TicketTask | None, client_name: str | None, capture: bool = True
 ) -> CodexHarvestOutcome:
     state = load_state()
     session = state.sessions[0]
@@ -687,6 +735,11 @@ def _wrapper(
     [candidate] = _detect_local_harvest_candidates(state)
     assert candidate.worktree_path is not None
     clients = load_clients()
+    probes = (
+        _capture_probes_for(candidate.worktree_path, load_dev_queue().tasks[0], clients)
+        if capture
+        else None
+    )
     return _harvest_codex_candidate(
         state,
         session,
@@ -698,6 +751,7 @@ def _wrapper(
         clients=clients,
         config=_AUTO,
         now=_NOW,
+        probes=probes,
     )
 
 
@@ -731,3 +785,261 @@ def test_harvest_wrapper_returns_the_act_outcome(
     outcome = _wrapper(real_task=load_dev_queue().tasks[0], client_name="client-a")
 
     assert outcome is CodexHarvestOutcome.REQUEUED
+
+
+# --------------------------------------------------------------------------- #
+# Lockless clean probe (#2563): the codex gate's git runs in reconcile()'s
+# pre-pass; under the lock the gate only reads the captured probe, and a
+# missing or stale one leaves the session untouched for the next tick.
+# --------------------------------------------------------------------------- #
+
+
+def _sweep_untouched(probes: CleanProbes | None) -> list[str]:
+    state = load_state()
+    tasks = load_dev_queue().tasks
+    return _act_on_local_harvest_candidates(
+        state,
+        _detect_local_harvest_candidates(state, tasks),
+        now=_NOW,
+        task_by_ticket={t.ticket_id: t for t in tasks},
+        config=_AUTO,
+        codex_probes=probes,
+    )
+
+
+def _assert_deferred(consumer: str, caplog: pytest.LogCaptureFixture) -> None:
+    _assert_untouched(consumer)
+    session = load_state().sessions[0]
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.RUNNING
+    assert task.session_id == session.id
+    assert (
+        f"codex session {session.id} ({session.client}/{task.ticket_id})"
+        " has no usable clean probe" in caplog.text
+    )
+
+
+@pytest.mark.parametrize("unusable", ["missing", "stale"])
+def test_sweep_with_an_unusable_probe_leaves_the_session_for_the_next_tick(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    unusable: str,
+) -> None:
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+    probes = (
+        None
+        if unusable == "missing"
+        else _capture(load_state(), load_dev_queue().tasks)
+    )
+    clock = (
+        freeze_time(datetime.now(UTC) + timedelta(seconds=CLEAN_PROBE_MAX_AGE_SECONDS))
+        if unusable == "stale"
+        else contextlib.nullcontext()
+    )
+    git_calls = _record_git_lock_state(monkeypatch)
+
+    with clock, caplog.at_level(logging.WARNING, logger=reconcile_local.__name__):
+        assert _sweep_untouched(probes) == []
+
+    assert git_calls == []
+    _assert_deferred(f"codex-harvest-defer-{unusable}", caplog)
+
+
+def test_act_with_no_probe_returns_probe_unavailable(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+
+    with caplog.at_level(logging.WARNING, logger=reconcile_local.__name__):
+        outcome = _act(_AUTO, capture=False)
+
+    assert outcome is CodexHarvestOutcome.PROBE_UNAVAILABLE
+    _assert_deferred("codex-act-no-probe", caplog)
+
+
+def test_harvest_wrapper_forwards_a_missing_probe(
+    tmp_config_dir: Path, tmp_path: Path, make_git_repo: Callable[..., Path]
+) -> None:
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+
+    outcome = _wrapper(
+        real_task=load_dev_queue().tasks[0], client_name="client-a", capture=False
+    )
+
+    assert outcome is CodexHarvestOutcome.PROBE_UNAVAILABLE
+    _assert_untouched("codex-wrapper-no-probe")
+
+
+def _harvest_dirty(repo: Path) -> None:
+    (repo / "extra.txt").write_text("stray\n")
+
+
+def _harvest_head_moved(repo: Path) -> None:
+    commit_tracked_file(repo, "extra.txt")
+
+
+def _harvest_no_baseline(_repo: Path) -> None:
+    save_dev_queue(DevQueueStore(tasks=[_task_without_base_ref()]))
+
+
+def _harvest_unchanged(_repo: Path) -> None:
+    """Leave the seeded orphan clean."""
+
+
+@pytest.mark.parametrize(
+    ("shape", "reason"),
+    [
+        (_harvest_unchanged, CODEX_HARVEST_CLEAN_REQUEUE_REASON),
+        (_harvest_dirty, _PARK_REASON_DIRTY_WORKTREE),
+        (_harvest_head_moved, _PARK_REASON_HEAD_MOVED),
+        (_harvest_no_baseline, _PARK_REASON_GIT_ERROR),
+    ],
+    ids=["clean", "dirty", "head-moved", "git-error"],
+)
+def test_captured_gate_equals_the_live_gate(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    shape: Callable[[Path], None],
+    reason: str,
+) -> None:
+    """Every ``gate_checks`` value read from the probe matches live git."""
+    repo = _seed(tmp_config_dir, tmp_path, make_git_repo)
+    shape(repo)
+    task = load_dev_queue().tasks[0]
+    clients = load_clients()
+    args = (repo, task, clients["client-a"], clients, _AUTO)
+    live = _evaluate_codex_clean_requeue_gate(*args, probe_clean_state)
+    probes = _capture_probes_for(repo, task, clients)
+
+    consumed = _evaluate_codex_clean_requeue_gate(*args, probes.lookup)
+
+    assert consumed == live
+    assert consumed.reason == reason
+
+
+def _another_clients_row() -> None:
+    store = load_dev_queue()
+    store.tasks[0].client = "client-b"
+    save_dev_queue(store)
+
+
+def _no_row() -> None:
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+
+def _aider_backend() -> None:
+    state = load_state()
+    handle = state.sessions[0].local_liveness
+    assert handle is not None
+    state.sessions[0].local_liveness = handle.model_copy(update={"backend": "aider"})
+    save_state(state)
+
+
+@pytest.mark.parametrize(
+    "unprobeable",
+    [_no_row, _another_clients_row, _aider_backend],
+    ids=["synthetic-row", "client-mismatch", "non-codex-backend"],
+)
+def test_pre_pass_skips_what_the_sweep_would_not_gate(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    unprobeable: Callable[[], None],
+) -> None:
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+    unprobeable()
+    git_calls = _record_git_lock_state(monkeypatch)
+
+    probes = _capture(load_state(), load_dev_queue().tasks)
+
+    assert probes.captured_keys == frozenset()
+    assert git_calls == []
+
+
+def test_pre_pass_captures_a_gateable_dead_codex_session(
+    tmp_config_dir: Path, tmp_path: Path, make_git_repo: Callable[..., Path]
+) -> None:
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+
+    probes = _capture(load_state(), load_dev_queue().tasks)
+
+    assert probes.captured_keys == frozenset({("client-a", _TICKET)})
+
+
+def test_held_lock_sweep_runs_no_git(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+    git_calls = _record_git_lock_state(monkeypatch)
+    probes = _capture(load_state(), load_dev_queue().tasks)
+
+    with sessions_lock():
+        _sweep_untouched(probes)
+
+    assert {subcommand for subcommand, _ in git_calls} == {"status", "rev-parse"}
+    assert all(lock_free for _, lock_free in git_calls)
+    assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
+
+
+def test_pre_pass_with_a_spent_budget_captures_nothing_and_does_not_raise(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+    clock = {"now": 0.0}
+    monkeypatch.setattr(codex_boot, "monotonic", lambda: clock["now"])
+    probes = CleanProbes(budget_seconds=1.0)
+    clock["now"] = 2.0
+    git_calls = _record_git_lock_state(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger=reconcile_local.__name__):
+        capture_codex_harvest_probes(
+            load_state(), load_dev_queue().tasks, config=_AUTO, probes=probes
+        )
+
+    assert probes.captured_keys == frozenset()
+    assert git_calls == []
+    assert "1 candidate(s) deferred to the next tick" in caplog.text
+
+
+def test_reconcile_requeues_a_dead_codex_session_with_git_outside_the_lock(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end: one ordinary reconcile() tick gates the dead codex process
+    on probes its lockless pre-pass captured, and requeues it."""
+    orchestrator_config_file().parent.mkdir(parents=True, exist_ok=True)
+    orchestrator_config_file().write_text("reap_policy: auto\n")
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    git_calls = _record_git_lock_state(monkeypatch)
+
+    reconcile()
+
+    assert {subcommand for subcommand, _ in git_calls} == {"status", "rev-parse"}
+    assert all(lock_free for _, lock_free in git_calls)
+    _assert_session_closed()
+    assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
+    assert [p["reason"] for p in _requeued_events("codex-harvest-e2e")] == [
+        CODEX_HARVEST_CLEAN_REQUEUE_REASON
+    ]

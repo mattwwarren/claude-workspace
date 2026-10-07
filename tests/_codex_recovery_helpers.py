@@ -18,6 +18,7 @@ import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from cw import _git
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket
 from cw.events import read_events
@@ -34,16 +35,23 @@ from cw.models import (
     TicketTask,
 )
 from cw.reconcile import codex_boot
+from cw.reconcile.codex_boot import CleanProbes
 from tests._clients_yaml import review_backend_clients, write_clients_yaml
-from tests._reconcile_helpers import _mk_headless_daemon_session
+from tests._reconcile_helpers import (
+    _mk_headless_daemon_session,
+    probe_sessions_lock_free,
+)
 from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    import subprocess
+    from collections.abc import Callable, Sequence
     from pathlib import Path
     from types import ModuleType
 
     import pytest
+
+    from cw.models import ClientConfig
 
 _STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
@@ -207,6 +215,40 @@ def _seed_clean_codex_orphan(
     )
     (repo / ".claude" / "review-verdict.md").write_text("verdict text\n")
     return repo, head_sha
+
+
+def _record_git_lock_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, bool]]:
+    """Record ``(git subcommand, sessions_lock free?)`` for every clean-check git.
+
+    Shaped on ``test_reconcile_core._record_gh_lock_state``. Wraps both seams
+    the codex clean check reaches git through: ``codex_boot.run_git`` (the
+    porcelain status) and ``cw._git.run_git``, the module global
+    ``capture_head_sha`` calls (the HEAD / baseline ``rev-parse``). Each
+    wrapper records, then delegates to the real ``run_git``.
+    """
+    calls: list[tuple[str, bool]] = []
+    real = _git.run_git
+
+    def _recording(
+        argv: Sequence[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((argv[0], probe_sessions_lock_free()))
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(codex_boot, "run_git", _recording)
+    monkeypatch.setattr(_git, "run_git", _recording)
+    return calls
+
+
+def _capture_probes_for(
+    worktree: Path, task: TicketTask, clients: dict[str, ClientConfig]
+) -> CleanProbes:
+    """A fresh ``CleanProbes`` holding one live capture for *task*'s orphan."""
+    probes = CleanProbes()
+    probes.capture(worktree, task, clients)
+    return probes
 
 
 def _task_without_base_ref() -> TicketTask:

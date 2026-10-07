@@ -1391,6 +1391,7 @@ resolved ones alone. There is no `--force`.
   `sessions.json`. Fix the disk problem and re-run.
 - `client_config_missing`: the session's client is not in `clients.yaml`.
   Restore it, or close the session, and re-run.
+- `clean_probe_unavailable`: the lockless git probe was missing or stale; re-run.
 
 Audit events are attempt records. A `state_write_failed` session can carry two
 `SESSION_COMPLETED` events for one session id (the failed attempt and the

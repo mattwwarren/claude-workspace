@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from cw._lock_guard import LockRank, is_rank_held
 from cw.auto_dev_result import AutoDevResult
 from cw.config import (
+    load_clients,
     load_state,
     save_state,
     sessions_lock,
@@ -31,6 +35,7 @@ from cw.models import (
     OrchestratorEventType,
     PrState,
     QueueItemStatus,
+    ReapPolicy,
     ReapReason,
     Session,
     SessionOrigin,
@@ -44,11 +49,13 @@ from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
     ReconcileReport,
     _verify_supervisor_session_id,
+    codex_boot,
     reconcile,
     revert_timed_out_tasks,
 )
 from cw.reconcile import core as reconcile_core
 from cw.reconcile._shared import ProposedAction, ReapCandidate
+from cw.reconcile.codex_boot import CAPTURE_BUDGET_SECONDS, CleanProbe, CleanProbes
 from cw.reconcile.deferred import DeferredReconcileJobs
 from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
@@ -75,6 +82,7 @@ from tests._reconcile_helpers import (
 )
 from tests.conftest import _make_daemon_session, _make_ticket_task
 from tests.test_pr_hydrate import _pr_state
+from tests.test_reconcile_codex_reparks import _seed_two_client_parks
 from tests.test_reconcile_gate_recipes import _GATE_LANES, _clean_result
 from tests.test_reconcile_gate_recipes import _make_session as _gate_session
 from tests.test_reconcile_gate_recipes import _make_task as _gate_task
@@ -1089,6 +1097,11 @@ class TestConciergeAndEscalationWiring:
         escalation_mock.assert_called_once()
 
 
+# reconcile()'s dev-queue loads: its gh pre-pass first, then the codex
+# clean-probe pre-pass (#2563).
+_CODEX_PRE_PASS_LOAD = 2
+
+
 class TestCodexLiveWriterRepark:
     """#2307: wiring-only — the live-writer codex-orphan re-evaluation runs
     exactly once per reconcile() tick, in both branches of _reconcile_locked,
@@ -1126,7 +1139,12 @@ class TestCodexLiveWriterRepark:
         reconcile()
 
         repark_mock.assert_called_once()
-        assert set(repark_mock.call_args.kwargs) == {"now", "config", "clients"}
+        assert set(repark_mock.call_args.kwargs) == {
+            "now",
+            "config",
+            "clients",
+            "probes",
+        }
         assert len(loaded) == 1
         assert repark_mock.call_args.kwargs["clients"] is loaded[0]
 
@@ -1175,6 +1193,162 @@ class TestCodexLiveWriterRepark:
         repark_mock.assert_called_once()
         assert repark_mock.call_args.kwargs["clients"] is scope
         assert loaded == []
+        # No codex_probes handed in: the sweep gets None, an always-miss
+        # source, so every git-gated candidate defers (#2563).
+        assert repark_mock.call_args.kwargs["probes"] is None
+
+    def test_pre_pass_probes_are_captured_unlocked_and_threaded_through(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2563: reconcile() captures the codex clean probes before it takes
+        sessions_lock, and hands that one object to both in-lock consumers."""
+        save_state(CwState(sessions=[]))
+        sentinel = CleanProbes()
+        lock_free_at_capture: list[bool] = []
+
+        def _fake_capture(
+            *, config: OrchestratorConfig, clients: dict[str, ClientConfig]
+        ) -> CleanProbes:
+            del config, clients
+            lock_free_at_capture.append(probe_sessions_lock_free())
+            return sentinel
+
+        monkeypatch.setattr(
+            reconcile_core, "_capture_codex_clean_probes", _fake_capture
+        )
+        repark_mock = MagicMock(return_value=[])
+        harvest_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "cw.reconcile.core.run_codex_live_writer_reparks", repark_mock
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.core._act_on_local_harvest_candidates", harvest_mock
+        )
+
+        reconcile()
+
+        assert lock_free_at_capture == [True]
+        assert repark_mock.call_args.kwargs["probes"] is sentinel
+        assert harvest_mock.call_args.kwargs["codex_probes"] is sentinel
+
+    def test_unreadable_state_in_the_pre_pass_defers_without_failing_reconcile(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """#2563 containment: reconcile() also serves cw status/list/start, so
+        a pre-pass read failure must not fail it. Every codex candidate gets an
+        empty CleanProbes (a miss) and defers."""
+        save_state(CwState(sessions=[]))
+        real_load = reconcile_core.load_dev_queue
+        loads: list[int] = []
+
+        def _second_load_fails() -> DevQueueStore:
+            loads.append(1)
+            if len(loads) == _CODEX_PRE_PASS_LOAD:
+                msg = "dev queue unreadable"
+                raise OSError(msg)
+            return real_load()
+
+        monkeypatch.setattr(reconcile_core, "load_dev_queue", _second_load_fails)
+        repark_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "cw.reconcile.core.run_codex_live_writer_reparks", repark_mock
+        )
+
+        with caplog.at_level(logging.WARNING, logger=reconcile_core.__name__):
+            report = reconcile()
+
+        assert isinstance(report, ReconcileReport)
+        probes = repark_mock.call_args.kwargs["probes"]
+        assert isinstance(probes, CleanProbes)
+        assert probes.captured_keys == frozenset()
+        assert probes.budget_seconds is None
+        assert "codex clean-probe pre-pass could not read state" in caplog.text
+
+
+def _validation_error() -> ValidationError:
+    try:
+        CwState.model_validate({"sessions": 5})
+    except ValidationError as err:
+        return err
+    msg = "expected a ValidationError"
+    raise AssertionError(msg)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError("state unreadable"),
+        json.JSONDecodeError("bad", "{", 0),
+        _validation_error(),
+    ],
+    ids=["os-error", "json-decode-error", "validation-error"],
+)
+def test_capture_pre_pass_contains_state_read_errors(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    def _fail() -> CwState:
+        raise error
+
+    monkeypatch.setattr(reconcile_core, "load_state", _fail)
+
+    probes = reconcile_core._capture_codex_clean_probes(
+        config=OrchestratorConfig(), clients={}
+    )
+
+    assert probes.captured_keys == frozenset()
+    assert probes.budget_seconds is None
+
+
+def test_capture_pre_pass_does_not_swallow_unexpected_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No broad except: only the expected read errors are contained."""
+
+    def _fail() -> CwState:
+        msg = "a bug, not an unreadable file"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(reconcile_core, "load_state", _fail)
+
+    with pytest.raises(RuntimeError, match="a bug"):
+        reconcile_core._capture_codex_clean_probes(
+            config=OrchestratorConfig(), clients={}
+        )
+
+
+def test_capture_pre_pass_spends_at_most_its_budget(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pre-pass runs within CAPTURE_BUDGET_SECONDS: once a slow capture
+    spends it, later candidates get no probe (they defer in-lock)."""
+    _seed_two_client_parks(
+        tmp_config_dir,
+        tmp_path,
+        make_git_repo,
+        lane_policies={"client-a": ReapPolicy.AUTO, "client-b": ReapPolicy.AUTO},
+    )
+    monkeypatch.setattr(codex_boot, "_codex_processes_in", lambda _wt: [])
+    clock = {"now": 0.0}
+    monkeypatch.setattr(codex_boot, "monotonic", lambda: clock["now"])
+    real_probe = codex_boot.probe_clean_state
+
+    def _slow_probe(*args: Any) -> CleanProbe:
+        probe = real_probe(*args)
+        clock["now"] += CAPTURE_BUDGET_SECONDS + 1
+        return probe
+
+    monkeypatch.setattr(codex_boot, "probe_clean_state", _slow_probe)
+
+    probes = reconcile_core._capture_codex_clean_probes(
+        config=OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+        clients=load_clients(),
+    )
+
+    assert probes.budget_seconds == CAPTURE_BUDGET_SECONDS
+    assert len(probes.captured_keys) == 1
 
 
 class TestFixDispatchRunsPostLock:

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Literal
 
 import pytest
 from click.testing import CliRunner
+from freezegun import freeze_time
 
 from cw import codex_legacy_recovery
 from cw.cli import main
@@ -32,6 +33,7 @@ from cw.codex_legacy_recovery import (
     REASON_AUDIT_WRITE_FAILED,
     REASON_CLIENT_MISSING,
     REASON_LIVE_WRITER,
+    REASON_PROBE_UNAVAILABLE,
     REASON_STATE_WRITE_FAILED,
     _headless_scan_kind,
     _HeadlessScanKind,
@@ -68,6 +70,7 @@ from cw.models import (
 from cw.reconcile import codex_boot
 from cw.reconcile import local as reconcile_local
 from cw.reconcile.codex_boot import (
+    CLEAN_PROBE_MAX_AGE_SECONDS,
     CODEX_ORPHAN_CLEAN_REQUEUE_REASON,
     CODEX_ORPHAN_CLOSE_REASON,
     reap_orphaned_codex_sessions_at_boot,
@@ -82,6 +85,7 @@ from tests._codex_recovery_helpers import (
     _attention_events,
     _completed_events,
     _no_codex_process,
+    _record_git_lock_state,
     _requeued_events,
     _use_auto_reap_policy,
 )
@@ -779,6 +783,73 @@ def test_act_runs_under_sessions_lock_without_dev_queue_lock(
         "callee-",
         "sessions-",
     ]
+
+
+def test_clean_check_git_runs_before_sessions_lock(
+    codex_clients: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2563: the clean probe is captured unlocked, right after the writer
+    scan; the locked act only reads it."""
+    _use_legacy_config(monkeypatch)
+    _no_codex_process(monkeypatch)
+    _seed_legacy(make_git_repo, "T-clean")
+    git_calls = _record_git_lock_state(monkeypatch)
+
+    report = run_codex_legacy_recovery(now=_NOW)
+
+    assert report.status is LegacyRecoveryStatus.COMPLETED
+    assert {subcommand for subcommand, _ in git_calls} == {"status", "rev-parse"}
+    assert all(lock_free for _, lock_free in git_calls)
+
+
+def _act_after_the_probe_went_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[..., object]:
+    """Run the locked revalidate-and-act with the clock past the probe's TTL.
+
+    Returns the real function so the test can restore it for a retry.
+    """
+    real: Callable[..., object] = codex_legacy_recovery._revalidate_and_act
+
+    def _late(*args: object, **kwargs: object) -> object:
+        later = datetime.now(UTC) + timedelta(seconds=CLEAN_PROBE_MAX_AGE_SECONDS)
+        with freeze_time(later):
+            return real(*args, **kwargs)
+
+    monkeypatch.setattr(codex_legacy_recovery, "_revalidate_and_act", _late)
+    return real
+
+
+def test_stale_clean_probe_is_unresolved_and_untouched(
+    codex_clients: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use_legacy_config(monkeypatch)
+    _no_codex_process(monkeypatch)
+    session = _seed_legacy(make_git_repo, "T-clean")
+    real_act = _act_after_the_probe_went_stale(monkeypatch)
+
+    report = run_codex_legacy_recovery(now=_NOW)
+
+    assert report.status is LegacyRecoveryStatus.PARTIAL
+    assert _dispositions(report.marker) == {session.id: CodexLegacyDisposition.FAILED}
+    assert _unresolved(report.marker) == {session.id: REASON_PROBE_UNAVAILABLE}
+    assert REASON_PROBE_UNAVAILABLE == "clean_probe_unavailable"
+    assert _session(session.id).status is SessionStatus.ACTIVE
+    assert _task("T-clean").status is QueueItemStatus.RUNNING
+    assert _completed_events("legacy-stale-probe") == []
+
+    monkeypatch.setattr(codex_legacy_recovery, "_revalidate_and_act", real_act)
+    retried = run_codex_legacy_recovery(now=_LATER)
+
+    assert retried.status is LegacyRecoveryStatus.COMPLETED
+    assert _dispositions(retried.marker) == {
+        session.id: CodexLegacyDisposition.REQUEUED
+    }
+    assert _task("T-clean").status is QueueItemStatus.PENDING
 
 
 # --------------------------------------------------------------------------- #

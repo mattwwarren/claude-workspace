@@ -24,17 +24,22 @@ before ``_synthesize_harvest_sentinel`` into an audited clean-requeue gate —
 the four checks ``cw.reconcile.codex_boot`` requeues on (``reap_policy:
 auto``, codex fix loop off, worktree clean apart from the review verdict, HEAD
 unmoved since the review's baseline), all evaluated so the audit event records
-each one. All four pass → the task is requeued; any one fails → it is parked.
-Either way the session closes ``COMPLETED``/``CRASHED``, only after its
-``SESSION_COMPLETED`` audit event is recorded. The sweep does not repeat the
+each one. Any failing check parks. For a failing gate the session closes
+``COMPLETED``/``CRASHED``, only after its ``SESSION_COMPLETED`` audit event is
+recorded. The sweep does not repeat the
 boot pass's live-writer process scan: the recycled-PID guard has already
-proven the codex process dead.
+proven the codex process dead. The two git checks never run under the
+caller's ``sessions_lock`` (#2563): ``reconcile()`` captures them first,
+lockless, through :func:`capture_codex_harvest_probes`, and the gate reads
+those pre-lock probes. A session whose probe is missing or stale is left
+untouched (``PROBE_UNAVAILABLE``) for the next tick.
 
 ``act_on_codex_harvest_candidate`` has a second caller,
 ``cw.codex_legacy_recovery`` (``cw codex migrate-legacy``, RFC 0014 B1,
 #2389). A legacy session carries no liveness handle, so that caller runs the
-boot pass's live-writer scan itself before acting, passes no handle, and
-passes a ``legacy_reason`` that marks the audit event as a legacy recovery.
+boot pass's live-writer scan itself before acting, captures the session's
+clean probe before taking the lock, passes no handle, and passes a
+``legacy_reason`` that marks the audit event as a legacy recovery.
 The act helper returns a :class:`CodexHarvestOutcome` so that caller never
 re-derives what happened from state.
 """
@@ -100,8 +105,9 @@ from cw.reconcile.codex_boot import (
     _PARK_REASON_GIT_ERROR,
     _PARK_REASON_HEAD_MOVED,
     _PARK_REASON_REAP_POLICY_NOT_AUTO,
-    _head_matches_pre_review_ref,
-    _worktree_porcelain_clean_except_verdict,
+    CAPTURE_BUDGET_SECONDS,
+    CleanProbeUnavailableError,
+    lookup_probe,
 )
 from cw.reconcile.tasks import _resolve_task_policy
 
@@ -119,6 +125,7 @@ if TYPE_CHECKING:
         OrchestratorConfig,
         Session,
     )
+    from cw.reconcile.codex_boot import CleanProbes, ProbeSource
 
 _log = logging.getLogger(__name__)
 
@@ -425,6 +432,7 @@ def _evaluate_codex_clean_requeue_gate(
     client: ClientConfig,
     clients: dict[str, ClientConfig],
     config: OrchestratorConfig,
+    probe_source: ProbeSource,
 ) -> _CodexGateResult:
     """Run all four clean-requeue checks for a dead codex process.
 
@@ -434,18 +442,21 @@ def _evaluate_codex_clean_requeue_gate(
     already proved the process dead through the recycled-PID guard, and the
     legacy caller (``cw.codex_legacy_recovery``) runs
     ``codex_boot.live_writer_park`` before it gets here.
+
+    The two git checks come from *probe_source* (#2563): a lockless capture
+    in the pre-pass, an in-lock lookup in the act helper, which raises
+    ``CleanProbeUnavailableError`` when it has no usable probe.
     """
     auto = _resolve_task_policy(task.client, task.lane, clients, config) is (
         ReapPolicy.AUTO
     )
     fix_loop_disabled = not _resolve_codex_fix_loop_enabled(client, task, config)
-    clean = _worktree_porcelain_clean_except_verdict(worktree)
-    head_matches = _head_matches_pre_review_ref(worktree, task, clients)
+    probe = probe_source(worktree, task, clients)
     checks = {
         "reap_policy_auto": auto,
         "fix_loop_disabled": fix_loop_disabled,
-        "worktree_clean": bool(clean),
-        "head_unmoved": bool(head_matches),
+        "worktree_clean": bool(probe.clean),
+        "head_unmoved": bool(probe.head_matches),
     }
     return _CodexGateResult(
         checks=checks,
@@ -453,8 +464,8 @@ def _evaluate_codex_clean_requeue_gate(
         reason=_codex_gate_reason(
             auto=auto,
             fix_loop_disabled=fix_loop_disabled,
-            clean=clean,
-            head_matches=head_matches,
+            clean=probe.clean,
+            head_matches=probe.head_matches,
         ),
     )
 
@@ -554,9 +565,16 @@ def act_on_codex_harvest_candidate(
     *,
     worktree: Path,
     now: datetime,
+    probes: CleanProbes | None,
     legacy_reason: str | None = None,
 ) -> CodexHarvestOutcome:
     """Gate, audit, close, then requeue or park one dead codex process.
+
+    The gate's git checks are read from *probes*, captured before the caller
+    took ``sessions_lock`` (#2563); nothing here runs git. A missing or stale
+    probe (``None`` means none was captured) leaves everything untouched and
+    returns ``PROBE_UNAVAILABLE``, before any audit event, so the next tick
+    retries.
 
     Audit before effect (``codex_boot._close_session_audited``'s ordering): a
     failed audit write transitions nothing (``AUDIT_FAILED``), so the next
@@ -574,7 +592,19 @@ def act_on_codex_harvest_candidate(
     only for ``cw.codex_legacy_recovery`` (see
     :func:`_codex_recovery_audit_payload`).
     """
-    gate = _evaluate_codex_clean_requeue_gate(worktree, task, client, clients, config)
+    try:
+        gate = _evaluate_codex_clean_requeue_gate(
+            worktree, task, client, clients, config, lookup_probe(probes)
+        )
+    except CleanProbeUnavailableError:
+        _log.warning(
+            "reconcile.local: codex session %s (%s/%s) has no usable clean"
+            " probe; leaving it for the next tick",
+            session.id,
+            session.client,
+            task.ticket_id,
+        )
+        return CodexHarvestOutcome.PROBE_UNAVAILABLE
     try:
         record_event(
             OrchestratorEventType.SESSION_COMPLETED,
@@ -628,6 +658,23 @@ def act_on_codex_harvest_candidate(
     return CodexHarvestOutcome.PARKED
 
 
+def _codex_gate_target(
+    session: Session, real_task: TicketTask | None, client: ClientConfig | None
+) -> tuple[TicketTask, ClientConfig] | None:
+    """The row and client a dead codex session is gated on, or None.
+
+    The one predicate the sweep and its lockless probe pre-pass share: a
+    synthetic task carries no lane, baseline, or claim to gate or transition,
+    so a missing row, a missing client config, or another client's row is
+    never gated. A row re-claimed by another session still gates: the probe
+    key carries the claim identity, so a re-claim between the pre-pass and the
+    sweep misses and defers, and the identity-checked revert leaves the row.
+    """
+    if real_task is None or client is None or real_task.client != session.client:
+        return None
+    return real_task, client
+
+
 def _harvest_codex_candidate(
     state: CwState,
     session: Session,
@@ -640,6 +687,7 @@ def _harvest_codex_candidate(
     clients: dict[str, ClientConfig],
     config: OrchestratorConfig,
     now: datetime,
+    probes: CleanProbes | None,
 ) -> CodexHarvestOutcome:
     """Gate a dead codex process on its real dev-queue row and client config.
 
@@ -647,9 +695,10 @@ def _harvest_codex_candidate(
     fallback: a synthetic task carries no lane, baseline, or claim to gate or
     transition, so a missing row (or one belonging to another client) leaves
     the session untouched for a later tick rather than guessing (``NO_ROW``).
-    Otherwise returns the act helper's outcome.
+    Otherwise returns the act helper's outcome, gated on *probes* (#2563).
     """
-    if real_task is None or client is None or real_task.client != session.client:
+    target = _codex_gate_target(session, real_task, client)
+    if target is None:
         _log.warning(
             "reconcile.local: dead codex session %s (%s/%s) has no matching"
             " dev-queue row or client config; leaving it for the next tick",
@@ -658,17 +707,87 @@ def _harvest_codex_candidate(
             candidate.ticket_id,
         )
         return CodexHarvestOutcome.NO_ROW
+    gated_task, gated_client = target
     return act_on_codex_harvest_candidate(
         state,
         session,
         handle,
-        real_task,
-        client,
+        gated_task,
+        gated_client,
         clients,
         config,
         worktree=worktree,
         now=now,
+        probes=probes,
     )
+
+
+def _codex_probe_targets(
+    state: CwState, tasks: Sequence[TicketTask]
+) -> list[tuple[Session, Path, TicketTask | None]]:
+    """The dead codex sessions the sweep would branch to its codex gate.
+
+    The sweep's own detect pass, filtered exactly as its act phase filters:
+    a worktree and a codex liveness handle, paired with the row looked up the
+    same way (``{ticket_id: row}``, last one wins).
+    """
+    task_by_ticket = {t.ticket_id: t for t in tasks}
+    session_by_id = {s.id: s for s in state.sessions}
+    targets: list[tuple[Session, Path, TicketTask | None]] = []
+    for candidate in _detect_local_harvest_candidates(state, tasks):
+        session = session_by_id[candidate.session_id]
+        handle = session.local_liveness
+        if (
+            candidate.worktree_path is None
+            or handle is None
+            or handle.backend != CODEX_BACKEND
+        ):
+            continue
+        real_task = (
+            task_by_ticket.get(candidate.ticket_id) if candidate.ticket_id else None
+        )
+        targets.append((session, candidate.worktree_path, real_task))
+    return targets
+
+
+def capture_codex_harvest_probes(
+    state: CwState,
+    tasks: Sequence[TicketTask],
+    *,
+    config: OrchestratorConfig,
+    probes: CleanProbes,
+) -> None:
+    """Lockless pre-pass: capture each gateable dead codex session's probe (#2563).
+
+    The candidates are exactly the ones the sweep's codex branch would gate
+    (same detect pass, same row and client guard), and each is evaluated
+    through the sweep's own gate with *probes*' capture as the probe source;
+    the gate result is discarded, only the probes recorded in *probes* are
+    kept. Clients load only when there is a codex candidate. Once the capture
+    budget is spent the rest get no probe, so they defer in-lock. Runs git,
+    so it must never be called with ``sessions_lock`` held.
+    """
+    targets = _codex_probe_targets(state, tasks)
+    if not targets:
+        return
+    clients = _deps.load_effective_clients()
+    for index, (session, worktree, real_task) in enumerate(targets):
+        target = _codex_gate_target(session, real_task, clients.get(session.client))
+        if target is None:
+            continue
+        task, client = target
+        try:
+            _evaluate_codex_clean_requeue_gate(
+                worktree, task, client, clients, config, probes.capture
+            )
+        except CleanProbeUnavailableError:
+            _log.warning(
+                "reconcile: codex clean-probe budget (%.0fs) spent;"
+                " %d candidate(s) deferred to the next tick",
+                CAPTURE_BUDGET_SECONDS,
+                len(targets) - index,
+            )
+            return
 
 
 def _act_on_local_harvest_candidates(
@@ -678,6 +797,7 @@ def _act_on_local_harvest_candidates(
     now: datetime,
     task_by_ticket: dict[str, TicketTask] | None = None,
     config: OrchestratorConfig | None = None,
+    codex_probes: CleanProbes | None = None,
 ) -> list[str]:
     """Act phase: synthesize the git result, advance the task, complete session.
 
@@ -685,7 +805,9 @@ def _act_on_local_harvest_candidates(
     ``_harvest_codex_candidate`` (#2387): no sentinel is synthesized or routed
     for it, and its ticket id is never counted as harvested. *config* is the
     orchestrator config its clean-requeue gate resolves against; omitted, it
-    is loaded with ``load_effective_config``.
+    is loaded with ``load_effective_config``. Its gate reads *codex_probes*,
+    the clean probes ``reconcile()`` captured before taking the lock
+    (#2563); omitted, none was captured and every codex candidate defers.
 
     For each candidate, in canonical order (task first, then session — mirroring
     ``phantom._apply_phantom_routed_mutations`` and the ``_apply_sentinel_to_task``
@@ -767,6 +889,7 @@ def _act_on_local_harvest_candidates(
                 clients=clients,
                 config=_config,
                 now=now,
+                probes=codex_probes,
             )
             continue
 

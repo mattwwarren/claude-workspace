@@ -18,10 +18,10 @@ the session's worktree:
   row's ``codex_orphan_rescan_next_eligible_at``, pushed out by a fixed
   interval so ``psutil.process_iter`` is not walked on every tick. No event,
   no signal (the boot pass never kills a writer and neither does this).
-- **Scan affirmatively finds no writer** — #2285's clean path: the session
-  closes with its ``SESSION_COMPLETED`` audit event, then the row is requeued
-  (``TICKET_REQUEUED``) if the tree is provably clean under ``reap_policy:
-  auto``, otherwise it stays parked with its link cleared.
+- **Scan affirmatively finds no writer** — #2285's clean path: a captured
+  non-clean result can close the session and leave it parked; a clean result
+  defers because no final worktree check can authorize a requeue under the
+  lock.
 - **Linked session gone, or resumed since the park** — the link is stale, so
   only it is cleared. A resumed session is a live claude process, not the
   orphan, and must never be closed on a codex-writer scan.
@@ -34,7 +34,14 @@ Runs from ``_run_terminal_backstops_and_sweeps``, inside ``reconcile()``'s
 ``sessions_lock`` hold, so it never takes that lock itself: sessions are
 loaded and saved directly under the ambient lock, as
 ``concierge._close_confirmed_dead_session`` does, and ``dev_queue_lock`` nests
-inside it exactly as in the boot pass.
+inside it exactly as in the boot pass. No git runs under that lock (#2563):
+``reconcile()`` first runs :func:`capture_repark_probes`, lockless, which
+re-runs this same detect pass to capture each due candidate's clean probe,
+and the in-lock sweep only looks those probes up. A candidate whose probe is
+missing, mismatched or stale is left untouched (not even its backoff moves)
+for the next tick; one that parks on a live writer never needs a probe.
+Even a matching clean probe is deferred rather than used to requeue, because
+the pre-pass has no atomic worktree-generation check through disposition.
 
 Unconditional, like the boot pass: it acts only on the evidence bar the boot
 pass already applies, and it never touches a row the boot pass did not link.
@@ -64,9 +71,11 @@ from cw.models import (
 )
 from cw.reconcile.codex_boot import (
     _STALE_SESSION_GONE,
+    CleanProbeUnavailableError,
     _close_session_audited,
     _OrphanDisposition,
     _resolve_orphan_action,
+    lookup_probe,
 )
 
 if TYPE_CHECKING:
@@ -81,6 +90,7 @@ if TYPE_CHECKING:
         Stage,
         TicketTask,
     )
+    from cw.reconcile.codex_boot import CleanProbes, ProbeSource
 
 _log = logging.getLogger(__name__)
 
@@ -159,6 +169,7 @@ def _detect_live_writer_repark_candidates(
     now: datetime,
     clients: dict[str, ClientConfig],
     config: OrchestratorConfig,
+    probe_source: ProbeSource | None,
 ) -> list[_ReparkCandidate]:
     """Classify every linked park due a rescan. Makes zero writes.
 
@@ -167,6 +178,11 @@ def _detect_live_writer_repark_candidates(
     mistaken for it (the identity bug #2285 round 5 fixed). The rescan runs
     even when the session is already terminal, which is how a crash between
     a prior tick's session close and its row write is recovered.
+
+    *probe_source* supplies the clean check's git answers (#2563): a lockless
+    capture in :func:`capture_repark_probes`, an in-lock lookup in
+    :func:`run_codex_live_writer_reparks`. A candidate it has no usable probe
+    for is logged and left out, so the act phase never touches it.
     """
     sessions_by_id = {session.id: session for session in state.sessions}
     candidates: list[_ReparkCandidate] = []
@@ -179,11 +195,21 @@ def _detect_live_writer_repark_candidates(
             continue
         session = sessions_by_id.get(orphan_session_id)
         stale_reason = _stale_link_reason(session, task)
-        disposition = (
-            _resolve_orphan_action(session.worktree_path, task, client, clients, config)
-            if session is not None and stale_reason is None
-            else None
-        )
+        disposition = None
+        if session is not None and stale_reason is None:
+            try:
+                disposition = _resolve_orphan_action(
+                    session.worktree_path, task, client, clients, config, probe_source
+                )
+            except CleanProbeUnavailableError:
+                _log.warning(
+                    "codex_reparks: %s/%s's orphan session %s has no usable clean"
+                    " probe; leaving it for the next tick",
+                    task.client,
+                    task.ticket_id,
+                    session.id,
+                )
+                continue
         candidates.append(
             _ReparkCandidate(
                 ticket_id=task.ticket_id,
@@ -354,11 +380,40 @@ def _act_on_live_writer_repark_candidates(
     return requeued
 
 
+def capture_repark_probes(
+    state: CwState,
+    tasks: list[TicketTask],
+    *,
+    now: datetime,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
+    probes: CleanProbes,
+) -> None:
+    """Lockless pre-pass: capture the clean probe of every due candidate (#2563).
+
+    Re-runs the sweep's own detect pass over this earlier snapshot, so the
+    candidate set is the sweep's by construction, with *probes*' capture as
+    the probe source: the live-writer scan, the policy and the fix-loop gates
+    run first, and git only when the full ladder reaches it. The classified
+    candidates are discarded; only the probes recorded in *probes* are kept.
+    Runs git, so it must never be called with ``sessions_lock`` held.
+    """
+    _detect_live_writer_repark_candidates(
+        state,
+        tasks,
+        now=now,
+        clients=clients,
+        config=config,
+        probe_source=probes.capture,
+    )
+
+
 def run_codex_live_writer_reparks(
     *,
     now: datetime,
     config: OrchestratorConfig,
     clients: dict[str, ClientConfig],
+    probes: CleanProbes | None = None,
 ) -> list[str]:
     """Re-evaluate every live-writer codex-orphan park due a rescan.
 
@@ -372,6 +427,10 @@ def run_codex_live_writer_reparks(
     mutated and saved both files (``run_concierge_recoveries``' rationale).
     Safe under the caller's ``sessions_lock``; never acquires it.
 
+    Runs no subprocess: the clean check reads *probes*, captured before the
+    lock by :func:`capture_repark_probes` (#2563). ``None`` means nothing was
+    captured, so every candidate that reaches the git gate defers.
+
     Returns only the ticket ids actually transitioned to PENDING by this call.
     A row merely touched is never listed: a stale link cleared, a rescan that
     still finds a writer (or cannot tell) and only moves the backoff, and a
@@ -380,6 +439,11 @@ def run_codex_live_writer_reparks(
     state = load_state()
     tasks = load_dev_queue().tasks
     candidates = _detect_live_writer_repark_candidates(
-        state, tasks, now=now, clients=clients, config=config
+        state,
+        tasks,
+        now=now,
+        clients=clients,
+        config=config,
+        probe_source=lookup_probe(probes),
     )
     return _act_on_live_writer_repark_candidates(candidates, now=now)

@@ -735,6 +735,8 @@ class CodexHarvestOutcome(StrEnum):
       the session is untouched.
     - ``TRANSITION_LOST``: the session was closed, but its row no longer
       belonged to it, so there was no revert or park to report.
+    - ``PROBE_UNAVAILABLE``: the lockless clean probe was missing or stale
+      (#2563); the session is untouched and the next tick retries.
     """
 
     REQUEUED = "requeued"
@@ -742,6 +744,7 @@ class CodexHarvestOutcome(StrEnum):
     AUDIT_FAILED = "audit_failed"
     NO_ROW = "no_row"
     TRANSITION_LOST = "transition_lost"
+    PROBE_UNAVAILABLE = "probe_unavailable"
 
 
 class ReasoningEffort(StrEnum):

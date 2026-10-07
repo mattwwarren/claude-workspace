@@ -19,11 +19,15 @@ Per session, in order:
    read, or whose worktree may still hold a codex writer
    (``codex_boot.live_writer_park``), is ``skipped_writer_live``: nothing is
    mutated and it stays unresolved.
-3. **Revalidate and act under ``sessions_lock``.** The session and its row are
-   re-read and re-checked (``codex_boot.stale_snapshot_reason``), then the A1
-   gate-audit-close path runs (``act_on_codex_harvest_candidate``) with no
-   liveness handle and ``legacy_reason`` set, so its ``SESSION_COMPLETED``
-   audit event carries ``legacy: true``.
+3. **Revalidate and act under ``sessions_lock``.** The worktree's clean probe
+   (``codex_boot.CleanProbes``) is captured first, unlocked, right after the
+   write-ahead intent, so no git runs under the lock (#2563). The session and
+   its row are re-read and re-checked (``codex_boot.stale_snapshot_reason``),
+   then the A1 gate-audit-close path runs (``act_on_codex_harvest_candidate``)
+   on that probe, with no liveness handle and ``legacy_reason`` set, so its
+   ``SESSION_COMPLETED`` audit event carries ``legacy: true``. A probe gone
+   stale or mismatched by then touches nothing and leaves the session
+   unresolved as ``clean_probe_unavailable``, for a re-run.
 
 Every outcome is written to the marker (``cw.config.codex_legacy_recovery_file``)
 as soon as it is known. The run completes only when no session is left
@@ -80,7 +84,11 @@ from cw.models import (
     UnresolvedEntry,
 )
 from cw.reconcile._shared import _LIVE_STATUSES, ticket_id_for_session
-from cw.reconcile.codex_boot import live_writer_park, stale_snapshot_reason
+from cw.reconcile.codex_boot import (
+    CleanProbes,
+    live_writer_park,
+    stale_snapshot_reason,
+)
 from cw.reconcile.local import (
     CODEX_HARVEST_ORPHANED_DISPOSITION,
     act_on_codex_harvest_candidate,
@@ -105,6 +113,7 @@ REASON_AUDIT_WRITE_FAILED = "audit_write_failed"
 REASON_STATE_WRITE_FAILED = "state_write_failed"
 REASON_PENDING_RECOVERY = "pending_recovery"
 REASON_EVENT_DELIVERY_FAILED = "event_delivery_failed"
+REASON_PROBE_UNAVAILABLE = "clean_probe_unavailable"
 
 
 def _raise_scope_error(message: str) -> NoReturn:
@@ -198,6 +207,11 @@ _ACT_RESOLUTIONS: dict[CodexHarvestOutcome, _Resolution] = {
     # total. It would leave the session untouched, which is a failure here.
     CodexHarvestOutcome.NO_ROW: _Resolution(
         CodexLegacyDisposition.FAILED, CodexHarvestOutcome.NO_ROW.value
+    ),
+    # The probe captured before the lock went stale or no longer matches the
+    # row (#2563): nothing was touched, so a re-run retries it.
+    CodexHarvestOutcome.PROBE_UNAVAILABLE: _Resolution(
+        CodexLegacyDisposition.FAILED, REASON_PROBE_UNAVAILABLE
     ),
 }
 
@@ -559,8 +573,11 @@ def _revalidate_and_act(
     *,
     worktree: Path,
     now: datetime,
+    probes: CleanProbes,
 ) -> _Resolution:
     """Re-read the session and row under lock, then gate, audit and close it.
+
+    The gate reads *probes*, captured before the lock (#2563).
 
     Holding ``sessions_lock`` across the act excludes every session writer,
     the boot sweep included: whichever of the two runs second sees the
@@ -602,6 +619,7 @@ def _revalidate_and_act(
                 snapshot.config,
                 worktree=worktree,
                 now=now,
+                probes=probes,
                 legacy_reason=CODEX_LEGACY_RECOVERY_REASON,
             )
         except OSError:
@@ -647,7 +665,13 @@ def _recover(
             prior_stage=row.stage,
         ),
     )
-    return _revalidate_and_act(candidate, client, snapshot, worktree=scan, now=now)
+    # Unlocked, right after the writer scan and as close to the locked act as
+    # possible (#2563); one candidate, so no capture budget.
+    probes = CleanProbes()
+    probes.capture(scan, row, snapshot.clients)
+    return _revalidate_and_act(
+        candidate, client, snapshot, worktree=scan, now=now, probes=probes
+    )
 
 
 # --------------------------------------------------------------------------- #
