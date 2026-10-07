@@ -332,6 +332,10 @@ def _screen_and_claim(
         return _CLAIM_SKIPPED
     transition_task_status(task, QueueItemStatus.RUNNING)
     task.attempts += 1
+    # #2591: a fresh clock, not *now* (read once at the start of the claim
+    # loop): reconcile's adoption skips a session that started before this
+    # instant, so an early stamp would let a stale one through.
+    task.claimed_at = datetime.now(UTC)
     save_dev_queue(store)
     return _CLAIM_CLAIMED
 

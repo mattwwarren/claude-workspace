@@ -88,7 +88,7 @@ from tests._reconcile_helpers import (
     _write_transcript_records,
     probe_sessions_lock_free,
 )
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests.conftest import CapturedEvent, _make_daemon_session, _make_ticket_task
 from tests.test_pr_hydrate import _pr_state
 from tests.test_reconcile_codex_reparks import _seed_two_client_parks
 from tests.test_reconcile_gate_recipes import _GATE_LANES, _clean_result, _plan_result
@@ -3413,3 +3413,129 @@ def test_reconcile_recipe_gh_calls_run_with_sessions_lock_free(
     assert rows["GEN-1"].stage == Stage.FINALIZE
     assert rows["GEN-2"].request_reviewer_fired_at is not None
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+class TestUnownedRunningSweepWiring:
+    """#2591: the unbound-row adoption sweep runs in both terminal tails,
+    before the TIMED_OUT backstop, and not on the daemon-outage early return."""
+
+    @staticmethod
+    def _record_order(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        order: list[str] = []
+        real_adopt = reconcile_core.run_unowned_running_recovery
+        real_revert = reconcile_core.revert_timed_out_tasks
+
+        def _adopt(*, clients: dict[str, ClientConfig]) -> list[str]:
+            order.append("unowned_running")
+            return real_adopt(clients=clients)
+
+        def _revert() -> list[str]:
+            order.append("revert_timed_out")
+            return real_revert()
+
+        monkeypatch.setattr(reconcile_core, "run_unowned_running_recovery", _adopt)
+        monkeypatch.setattr(reconcile_core, "revert_timed_out_tasks", _revert)
+        return order
+
+    def test_runs_before_the_timed_out_backstop_without_phantoms(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        order = self._record_order(monkeypatch)
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+
+        report = reconcile()
+
+        assert report.phantom_session_ids == []
+        assert order == ["unowned_running", "revert_timed_out"]
+
+    def test_runs_before_the_timed_out_backstop_with_phantoms(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+        save_state(CwState(sessions=[_mk_session("s1", "missing-ref")]))
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "decoy000"}],
+        )
+        order = self._record_order(monkeypatch)
+
+        report = reconcile()
+
+        assert report.phantom_session_ids == ["s1"]
+        assert order == ["unowned_running", "revert_timed_out"]
+
+    def test_skipped_on_the_daemon_outage_early_return(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(CwState(sessions=[_mk_session("s1", "live-ref")]))
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+        order = self._record_order(monkeypatch)
+
+        reconcile()
+
+        assert order == []
+
+    def test_phantom_sweep_reverts_an_unbound_phantom_row_first(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """A row whose claim session is a phantom is the phantom sweep's (keyed
+        by ticket id); adoption then finds no RUNNING row and does nothing."""
+        from cw.worktree import worktree_path_for
+        from tests.conftest import _write_hook_context_file
+
+        monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+        client = ClientConfig(
+            name="client-a",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "worktrees",
+        )
+        write_clients_yaml(client)
+        wt = worktree_path_for(client, f"{client.feature_branch_prefix}/TKT-1")
+        wt.mkdir(parents=True)
+        _write_hook_context_file(
+            wt,
+            session_id="sess-daemon",
+            ticket_id="TKT-1",
+            client="client-a",
+            task=_make_ticket_task(ticket_id="TKT-1", client="client-a", attempts=1),
+        )
+        sess = _mk_session("sess-daemon", "dead-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.name = "client-a/auto-dev/TKT-1"
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="TKT-1",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        attempts=1,
+                    )
+                ]
+            )
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (False, True),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "decoy000"}],
+        )
+        adopted = capture_events(
+            "cw.reconcile.unowned_running",
+            OrchestratorEventType.TASK_SESSION_ADOPTED,
+        )
+
+        report = reconcile()
+
+        assert "TKT-1" in report.reverted_ticket_ids
+        row = load_dev_queue().tasks[0]
+        assert row.status == QueueItemStatus.PENDING
+        assert row.session_id is None
+        assert adopted == []
