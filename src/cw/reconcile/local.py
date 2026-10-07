@@ -667,14 +667,11 @@ def _codex_gate_target(
     The one predicate the sweep and its lockless probe pre-pass share: a
     synthetic task carries no lane, baseline, or claim to gate or transition,
     so a missing row, a missing client config, or another client's row is
-    never gated.
+    never gated. A row re-claimed by another session still gates: the probe
+    key carries the claim identity, so a re-claim between the pre-pass and the
+    sweep misses and defers, and the identity-checked revert leaves the row.
     """
-    if (
-        real_task is None
-        or client is None
-        or real_task.client != session.client
-        or (real_task.session_id or real_task.codex_orphan_session_id) != session.id
-    ):
+    if real_task is None or client is None or real_task.client != session.client:
         return None
     return real_task, client
 
