@@ -209,8 +209,16 @@ PATCH_OWNERSHIP = [
         "_write_cw_context_locked",
         f"{_PKG}.staged_emit",
     ),
-    ("_resolve_and_complete_headless_session", "_apply_sentinel_to_task", _PKG),
-    ("_resolve_and_complete_headless_session", "_write_cw_context_locked", _PKG),
+    (
+        "_resolve_and_complete_headless_session",
+        "_apply_sentinel_to_task",
+        f"{_PKG}.headless",
+    ),
+    (
+        "_resolve_and_complete_headless_session",
+        "_write_cw_context_locked",
+        f"{_PKG}.headless",
+    ),
     ("_resolve_stop_under_lock", "load_state", _PKG),
     ("_resolve_stop_under_lock", "sessions_lock", _PKG),
     ("signal_stop", "get_native_daemon_client", _PKG),
