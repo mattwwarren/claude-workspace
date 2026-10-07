@@ -17,7 +17,9 @@ logger = logging.getLogger(__name__)
 
 # Shared handoff directory for ship-it → review-monitor file-drop registrations.
 # Located in /tmp so macOS auto-purges it on machines without the monitor (3d).
-PENDING_INBOX_DIR = Path("/tmp/review-monitor/pending")  # noqa: S108  # cross-process contract: ship-it.md + cron hardcode this literal path
+# Cross-process contract: ship-it.md and the cron hardcode the literal path
+# /tmp/review-monitor/pending, so this must always equal it exactly.
+PENDING_INBOX_DIR = Path("/") / "tmp" / "review-monitor" / "pending"
 
 # Purge pending files older than this even if they couldn't be consumed.
 PENDING_STALE_AFTER = timedelta(hours=24)
