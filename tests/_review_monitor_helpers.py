@@ -409,12 +409,15 @@ def format_cli_contract(contract: dict[str, Any]) -> str:
     command_blocks: list[str] = []
     for name in sorted(contract["commands"]):
         command = contract["commands"][name]
-        argument_lines = ",\n".join(
+        argument_lines = [
             f"    {json.dumps(arg, sort_keys=True)}" for arg in command["arguments"]
+        ]
+        arguments = (
+            "[\n" + ",\n".join(argument_lines) + "\n   ]" if argument_lines else "[]"
         )
         command_blocks.append(
             f"  {json.dumps(name)}: {{\n"
-            f'   "arguments": [\n{argument_lines}\n   ],\n'
+            f'   "arguments": {arguments},\n'
             f'   "help": {json.dumps(command["help"])}\n'
             "  }"
         )
