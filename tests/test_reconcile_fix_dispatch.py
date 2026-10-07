@@ -945,20 +945,22 @@ def test_act_on_fix_dispatch_completions_skips_still_live_session(
     assert task.status == QueueItemStatus.RUNNING
 
 
-def test_act_on_fix_dispatch_completions_keeps_unresolvable_session_latched(
+def test_act_on_fix_dispatch_completions_unparks_unresolvable_session(
     tmp_config_dir: Path,
 ) -> None:
-    """An absent record may be a live worker after a post-launch write failure."""
+    """A session cw cannot resolve at all is gone, not pending.
+
+    Treating it as still-live would strand the row RUNNING forever, since
+    nothing else clears fix_dispatch_session_id.
+    """
     _seed_task(fix_dispatch_session_id="vanished")
 
     unparked = fix_dispatch._act_on_fix_dispatch_completions(
         [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)]
     )
 
-    assert unparked == []
-    task = _only_task()
-    assert task.fix_dispatch_session_id == "vanished"
-    assert task.status == QueueItemStatus.RUNNING
+    assert unparked == [_TICKET]
+    assert _only_task().status == QueueItemStatus.PENDING
 
 
 # --- entry point ------------------------------------------------------------
@@ -1057,7 +1059,7 @@ def test_post_launch_failure_records_fix_session_and_pages(
     )
 
 
-def test_unrecorded_fix_worker_is_stopped_before_handoff_can_recover(
+def test_unrecorded_fix_worker_is_stopped_before_its_row_unparks(
     tmp_config_dir: Path,
     make_git_repo: Callable[..., Path],
     tmp_path: Path,
@@ -1067,11 +1069,13 @@ def test_unrecorded_fix_worker_is_stopped_before_handoff_can_recover(
 ) -> None:
     """#2502 note 4: pins the ordering that bounds the double-worker window.
 
-    The row now names a fix session ``sessions.json`` never received. With a
-    readable roster, the next reconcile stops the unrecorded worker, but keeps
-    the handoff latched instead of unparking a fresh REVIEW round. The window
-    stays open when the roster is unreadable or the stop fails; this test does
-    not cover those cases.
+    The row now names a fix session ``sessions.json`` never received, so the
+    next reconcile treats it as finished and unparks the row for a fresh
+    REVIEW round. With a readable roster, that same reconcile stops the
+    unrecorded worker first: the leaked-worker stop is drained after the
+    sessions lock releases, before ``run_fix_dispatch`` runs. The window stays
+    open when the roster is unreadable or the stop fails; this test does not
+    cover those cases.
     """
     _seed_fix_handoff_after_failed_session_write(
         make_git_repo, tmp_path, mock_native_daemon, monkeypatch
@@ -1099,10 +1103,8 @@ def test_unrecorded_fix_worker_is_stopped_before_handoff_can_recover(
     assert order == []
     reconcile()
 
-    assert order == ["stop 00000001"]
-    task = _only_task()
-    assert task.status == QueueItemStatus.RUNNING
-    assert task.fix_dispatch_session_id is not None
+    assert order == ["stop 00000001", "unpark 2502"]
+    assert _only_task().status == QueueItemStatus.PENDING
     assert len(mock_native_daemon.spawn_calls) == 1
 
 
