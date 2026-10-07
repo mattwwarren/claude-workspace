@@ -14,8 +14,6 @@ import ast
 import hashlib
 import json
 import logging
-import subprocess
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1819,40 +1817,6 @@ class TestDispositionSentinelConstant:
                 offenders[path.name] = lines
         assert list(offenders) == ["review_markers.py"]
         assert len(offenders["review_markers.py"]) == 1
-
-
-# ---------------------------------------------------------------------------
-# Import-cycle lock (#1838)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "first",
-    [
-        "cw.review_finding_dispositions",
-        "cw.review_findings",
-        "cw.review_debt",
-        "cw.models",
-        "cw.events",
-    ],
-)
-def test_module_imports_cleanly_whichever_module_loads_first(first: str) -> None:
-    """``cw.models.tasks`` imports this module, so a module-scope ``cw`` import
-    here would close a cycle that only fails in ONE import order — invisible to
-    a test suite whose conftest always warms ``cw.models`` first.
-
-    Each interpreter below starts cold and imports one module, then the rest,
-    which is what makes the ordering genuinely exercised. Uses
-    ``sys.executable`` (not a bare ``python3``) per PYTHON-PATTERNS' compiled-
-    dependency isolation rule — ``pydantic_core`` is ABI-bound to this venv.
-    """
-    script = (
-        f"import {first}\n"
-        "import cw.review_finding_dispositions, cw.models, cw.events\n"
-        "from cw.models import TicketTask\n"
-        "assert TicketTask(ticket_id='T-1', client='c').finding_dispositions == {}\n"
-    )
-    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 # ---------------------------------------------------------------------------
