@@ -22,6 +22,7 @@ GROUPS: list[tuple[str, list[str]]] = [
             "review_monitor",
             "review_monitor_lib.attention",
             "review_monitor_lib.check",
+            "review_monitor_lib.cli",
             "review_monitor_lib.comment_reviews",
             "review_monitor_lib.delta",
             "review_monitor_lib.discovery",
