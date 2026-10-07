@@ -90,8 +90,10 @@ from cw.reconcile.review_recipes import (
 from cw.reconcile.review_recipes import (
     _detect_repeat_fire_counts as _real_detect_repeat_fire_counts,
 )
+from cw.reconcile.review_recipes._shared import RepoSlugs, RepoSlugUnavailableError
 from cw.reconcile.review_recipes.address_review import _DispatchJob
 from cw.reconcile.review_recipes.auto_fix_ci import _RedispatchJob
+from cw.reconcile.review_recipes.core import capture_review_repo_slugs
 from cw.reconcile.review_recipes.request_reviewer import (
     _dispatch_request_reviewer,
     _ReviewerJob,
@@ -99,7 +101,7 @@ from cw.reconcile.review_recipes.request_reviewer import (
 from cw.review_strategy import ReviewStrategy
 from cw.worktree import FetchOutcome, FetchResult, create_worktree, worktree_path_for
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests._reconcile_helpers import act_then_dispatch
+from tests._reconcile_helpers import act_then_dispatch, capture_repo_slugs
 
 # Reuse the sibling test helpers rather than re-deriving TicketTask / PrState
 # construction: _make_task accepts **kwargs (pr_url / pr_state / session_id /
@@ -193,7 +195,8 @@ def _run_review_recipes_and_dispatch(*, config: OrchestratorConfig) -> list[str]
     escalate_merge_block.
     """
     jobs = DeferredReconcileJobs(review=DeferredReviewDispatch())
-    acted = run_review_recipes(config=config, jobs=jobs)
+    repo_slugs = capture_review_repo_slugs(config=config, dispatching=True)
+    acted = run_review_recipes(config=config, jobs=jobs, repo_slugs=repo_slugs)
     run_post_lock_jobs(jobs)
     assert jobs.review is not None
     return dispatch_deferred_review_jobs(jobs.review) + acted
@@ -345,7 +348,9 @@ def test_act_phases_return_jobs_and_dispatch_nothing(
 
     deferred = DeferredReviewDispatch()
     acted = run_review_recipes(
-        config=_config(), jobs=DeferredReconcileJobs(review=deferred)
+        config=_config(),
+        jobs=DeferredReconcileJobs(review=deferred),
+        repo_slugs=capture_review_repo_slugs(config=_config(), dispatching=True),
     )
 
     assert acted == []
@@ -429,8 +434,14 @@ def test_run_review_recipes_appends_each_recipes_jobs_before_the_next_runs(
     monkeypatch.setattr("cw.reconcile.review_recipes.core._act_auto_fix_ci", _boom)
     sink = DeferredReviewDispatch()
 
+    repo_slugs = capture_review_repo_slugs(config=_config(), dispatching=True)
+
     with pytest.raises(RuntimeError, match="later recipe exploded"):
-        run_review_recipes(config=_config(), jobs=DeferredReconcileJobs(review=sink))
+        run_review_recipes(
+            config=_config(),
+            jobs=DeferredReconcileJobs(review=sink),
+            repo_slugs=repo_slugs,
+        )
 
     assert [j.ticket_id for j in sink.address_review] == ["GEN-1"]
     assert load_dev_queue().tasks[0].address_review_fired_at is not None
@@ -455,8 +466,12 @@ def test_dispatch_deferred_review_jobs_isolates_a_failing_job(
         for ticket_id, number in (("GEN-1", 41), ("GEN-2", 42))
     ]
     save_dev_queue(DevQueueStore(tasks=tasks))
+    candidates = [_candidate_for(t) for t in tasks]
+    clients = load_effective_clients()
     jobs = _act_address_review(
-        [_candidate_for(t) for t in tasks], clients=load_effective_clients()
+        candidates,
+        clients=clients,
+        repo_slugs=capture_repo_slugs(candidates, clients=clients),
     )
 
     def _fail_first(**kwargs: Any) -> None:
@@ -953,13 +968,19 @@ def test_reconcile_reentry_guard_fires_and_is_swallowed(
             raise
 
     monkeypatch.setattr("cw.spawn.spawn_create_impl", _spawn_reentering_the_lock)
+    candidates = [_candidate(task, RECIPE_ADDRESS_REVIEW, "changes_requested")]
+    clients = load_effective_clients()
+    # Captured before the outer lock, as reconcile() does (#2564): the slug
+    # capture runs git, which must not run under sessions_lock.
+    repo_slugs = capture_repo_slugs(candidates, clients=clients)
 
     with sessions_lock():
         acted = act_then_dispatch(
             _act_address_review,
             _dispatch_address_review_jobs,
-            [_candidate(task, RECIPE_ADDRESS_REVIEW, "changes_requested")],
-            clients=load_effective_clients(),
+            candidates,
+            clients=clients,
+            repo_slugs=repo_slugs,
         )
 
     assert acted == []
@@ -2083,6 +2104,427 @@ def test_auto_fix_ci_unresolvable_client_fails_open(tmp_config_dir: Path) -> Non
 
     assert acted == [task.ticket_id]
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+# --- repo slugs pre-resolved before sessions_lock (GitHub #2564) ------------
+
+
+def _stub_slug_resolver(
+    monkeypatch: pytest.MonkeyPatch, slugs: dict[Path, str | None]
+) -> list[Path]:
+    """Stub the pre-pass's slug resolver from *slugs*; return the dirs it saw."""
+    calls: list[Path] = []
+
+    def _resolve(git_dir: Path) -> str | None:
+        calls.append(git_dir)
+        return slugs.get(git_dir)
+
+    monkeypatch.setattr(
+        "cw.reconcile.review_recipes._shared._resolve_repo_slug", _resolve
+    )
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("resolved", "expected"),
+    [
+        ("acme/widgets", None),
+        ("ACME/Widgets", None),
+        ("other/repo", "other/repo"),
+        (None, None),
+    ],
+    ids=["match", "case_insensitive", "mismatch", "unresolvable_fails_open"],
+)
+def test_repo_slugs_mismatch_compares_the_captured_slug(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resolved: str | None,
+    expected: str | None,
+) -> None:
+    calls = _stub_slug_resolver(monkeypatch, {tmp_path: resolved})
+    slugs = RepoSlugs()
+    slugs.capture(tmp_path)
+
+    assert slugs.mismatch("acme/widgets", tmp_path) == expected
+    assert calls == [tmp_path]
+    assert tmp_path in slugs
+
+
+def test_repo_slugs_resolves_a_real_origin(make_git_repo: Any) -> None:
+    repo = make_git_repo("slugs-real")
+    _set_origin(repo, "https://github.com/other/repo.git")
+    slugs = RepoSlugs()
+    slugs.capture(repo)
+
+    assert slugs.mismatch("acme/widgets", repo) == "other/repo"
+
+
+def test_repo_slugs_uncaptured_dir_raises(tmp_path: Path) -> None:
+    with pytest.raises(RepoSlugUnavailableError, match="no origin slug"):
+        RepoSlugs().mismatch("acme/widgets", tmp_path)
+
+
+def test_repo_slugs_capture_is_deduplicated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_slug_resolver(monkeypatch, {tmp_path: "acme/widgets"})
+    slugs = RepoSlugs()
+
+    slugs.capture(tmp_path)
+    slugs.capture(tmp_path)
+
+    assert calls == [tmp_path]
+    assert len(slugs) == 1
+
+
+def test_repo_slugs_spent_budget_skips_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_slug_resolver(monkeypatch, {tmp_path: "acme/widgets"})
+    slugs = RepoSlugs(budget_seconds=0)
+
+    slugs.capture(tmp_path)
+
+    assert calls == []
+    assert slugs.budget_exhausted is True
+    with pytest.raises(RepoSlugUnavailableError):
+        slugs.mismatch("acme/widgets", tmp_path)
+
+
+def test_address_review_without_a_captured_slug_defers_without_burning_the_latch(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A worktree the pre-pass did not capture skips the tick silently: no
+    event, no latch stamp, no spawn. The next tick, captured, fires."""
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
+    task = _cr_task(worktree_path=make_git_repo("slug-miss-ar"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    with caplog.at_level("INFO", logger="cw.reconcile.review_recipes"):
+        jobs = _act_address_review(
+            [_candidate_for(task)],
+            clients=load_effective_clients(),
+            repo_slugs=RepoSlugs(),
+        )
+
+    assert jobs == []
+    assert stub_spawn.calls == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+    assert load_dev_queue().tasks[0].address_review_fired_at is None
+    assert f"review_recipe_repo_slug_unavailable ticket={task.ticket_id}" in (
+        caplog.text
+    )
+
+    acted = act_then_dispatch(
+        _act_address_review,
+        _dispatch_address_review_jobs,
+        [_candidate_for(task)],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == [task.ticket_id]
+    assert load_dev_queue().tasks[0].address_review_fired_at is not None
+
+
+def test_address_review_worktree_moved_since_capture_is_a_miss(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """The act phase re-loads the row: a worktree_path other than the one the
+    pre-pass captured is a miss and defers, never a stale guard verdict."""
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
+    old_wt = make_git_repo("slug-old-wt")
+    task = _cr_task(worktree_path=old_wt)
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    candidates = [_candidate_for(task)]
+    clients = load_effective_clients()
+    repo_slugs = capture_repo_slugs(candidates, clients=clients)
+    moved = task.model_copy(update={"worktree_path": make_git_repo("slug-new-wt")})
+    save_dev_queue(DevQueueStore(tasks=[moved]))
+
+    jobs = _act_address_review(candidates, clients=clients, repo_slugs=repo_slugs)
+
+    assert jobs == []
+    assert stub_spawn.calls == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+    assert load_dev_queue().tasks[0].address_review_fired_at is None
+
+
+def test_auto_fix_ci_without_a_captured_slug_defers_without_burning_the_latch(
+    tmp_config_dir: Path, make_git_repo: Any
+) -> None:
+    _acme_workspace_repo(make_git_repo, "https://github.com/acme/widgets.git")
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    candidates = [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")]
+
+    jobs = _act_auto_fix_ci(
+        candidates, clients=load_effective_clients(), repo_slugs=RepoSlugs()
+    )
+
+    assert jobs == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+    assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is None
+
+    acted = act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
+        candidates,
+        clients=load_effective_clients(),
+    )
+
+    assert acted == [task.ticket_id]
+    assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is not None
+
+
+@pytest.mark.parametrize("case", ["unparseable_pr_url", "unresolvable_client"])
+def test_auto_fix_ci_fail_open_branches_need_no_slug(
+    tmp_config_dir: Path, make_git_repo: Any, case: str
+) -> None:
+    """With no guard target there is nothing to look up, so an EMPTY
+    ``RepoSlugs`` still fires (the #1198 fail-open is unchanged)."""
+    _acme_workspace_repo(make_git_repo, "https://github.com/other/repo.git")
+    pr_url = "https://example.com/not-a-pr" if case == "unparseable_pr_url" else _PR_URL
+    clients = load_effective_clients() if case == "unparseable_pr_url" else {}
+    task = _make_task(pr_url=pr_url, pr_state=_pr_state(attention_state="ci_failing"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    acted = act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=clients,
+        repo_slugs=RepoSlugs(),
+    )
+
+    assert acted == [task.ticket_id]
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+def _seed_capture_rows(make_git_repo: Any) -> tuple[Path, Path]:
+    """One enabled address_review row and one enabled auto_fix_ci row.
+
+    Returns ``(worktree, workspace)``: the two git dirs the pre-pass probes.
+    """
+    workspace = make_git_repo("capture-ws")
+    write_clients_yaml(ClientSpec("acme", workspace, default_branch="main"))
+    worktree = make_git_repo("capture-wt")
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                _cr_task(
+                    ticket_id="GEN-1",
+                    review_recipes={RECIPE_ADDRESS_REVIEW: True},
+                    worktree_path=worktree,
+                ),
+                _cr_task(
+                    ticket_id="GEN-2",
+                    review_recipes={RECIPE_AUTO_FIX_CI: True},
+                    pr_state=_pr_state(state="OPEN", attention_state="ci_failing"),
+                ),
+            ]
+        )
+    )
+    return worktree, workspace
+
+
+def test_capture_review_repo_slugs_probes_each_candidate_dir(
+    tmp_config_dir: Path, make_git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree, workspace = _seed_capture_rows(make_git_repo)
+    calls = _stub_slug_resolver(
+        monkeypatch, {worktree: "acme/widgets", workspace: "other/repo"}
+    )
+
+    slugs = capture_review_repo_slugs(config=_config(), dispatching=True)
+
+    assert calls == [worktree, workspace]
+    assert slugs.mismatch("acme/widgets", worktree) is None
+    assert slugs.mismatch("acme/widgets", workspace) == "other/repo"
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "disabled_lane",
+        "wrong_attention_state",
+        "no_pr_state",
+        "no_worktree",
+        "missing_worktree",
+    ],
+)
+def test_capture_review_repo_slugs_skips_non_candidates(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    row: str,
+) -> None:
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
+    worktree = make_git_repo("capture-skip")
+    enabled = {RECIPE_ADDRESS_REVIEW: True}
+    task = {
+        "disabled_lane": _cr_task(worktree_path=worktree),
+        "wrong_attention_state": _cr_task(
+            review_recipes=enabled,
+            worktree_path=worktree,
+            pr_state=_pr_state(state="OPEN", attention_state="no_reviewer"),
+        ),
+        "no_pr_state": _cr_task(
+            review_recipes=enabled, worktree_path=worktree, pr_state=None
+        ),
+        "no_worktree": _cr_task(review_recipes=enabled, worktree_path=None),
+        "missing_worktree": _cr_task(
+            review_recipes=enabled, worktree_path=tmp_path / "gone"
+        ),
+    }[row]
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    calls = _stub_slug_resolver(monkeypatch, {})
+
+    capture_review_repo_slugs(config=_config(), dispatching=True)
+
+    assert calls == []
+
+
+def test_capture_review_repo_slugs_dedups_shared_dirs(
+    tmp_config_dir: Path, make_git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = make_git_repo("dedup-ws")
+    write_clients_yaml(ClientSpec("acme", workspace, default_branch="main"))
+    worktree = make_git_repo("dedup-wt")
+    ar = {RECIPE_ADDRESS_REVIEW: True}
+    ci = {RECIPE_AUTO_FIX_CI: True}
+    ci_state = _pr_state(state="OPEN", attention_state="ci_failing")
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                _cr_task(ticket_id="GEN-1", review_recipes=ar, worktree_path=worktree),
+                _cr_task(ticket_id="GEN-2", review_recipes=ar, worktree_path=worktree),
+                _cr_task(ticket_id="GEN-3", review_recipes=ci, pr_state=ci_state),
+                _cr_task(ticket_id="GEN-4", review_recipes=ci, pr_state=ci_state),
+            ]
+        )
+    )
+    calls = _stub_slug_resolver(monkeypatch, {})
+
+    slugs = capture_review_repo_slugs(config=_config(), dispatching=True)
+
+    assert calls == [worktree, workspace]
+    assert len(slugs) == 2
+
+
+@pytest.mark.parametrize(
+    ("config", "dispatching"),
+    [(_config(), False), (OrchestratorConfig(), True)],
+    ids=["not_dispatching", "recipes_disabled"],
+)
+def test_capture_review_repo_slugs_is_gated(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    config: OrchestratorConfig,
+    *,
+    dispatching: bool,
+) -> None:
+    _seed_capture_rows(make_git_repo)
+    calls = _stub_slug_resolver(monkeypatch, {})
+
+    slugs = capture_review_repo_slugs(config=config, dispatching=dispatching)
+
+    assert calls == []
+    assert len(slugs) == 0
+
+
+def test_capture_review_repo_slugs_contains_a_queue_read_error(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``reconcile()`` also serves cw status/list/start/doctor, so a read
+    failure must not fail it: every candidate defers this tick instead."""
+    worktree, _workspace = _seed_capture_rows(make_git_repo)
+
+    def _unreadable() -> DevQueueStore:
+        msg = "dev queue unreadable"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.reconcile.review_recipes.core.load_dev_queue", _unreadable)
+    calls = _stub_slug_resolver(monkeypatch, {})
+
+    with caplog.at_level("WARNING", logger="cw.reconcile.review_recipes"):
+        slugs = capture_review_repo_slugs(config=_config(), dispatching=True)
+
+    assert calls == []
+    assert len(slugs) == 0
+    assert worktree not in slugs
+    assert "review repo-slug pre-pass could not read state" in caplog.text
+
+
+def test_capture_review_repo_slugs_warns_once_when_the_budget_runs_out(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _seed_capture_rows(make_git_repo)
+    monkeypatch.setattr(
+        "cw.reconcile.review_recipes.core.SLUG_CAPTURE_BUDGET_SECONDS", 0.0
+    )
+    calls = _stub_slug_resolver(monkeypatch, {})
+
+    with caplog.at_level("WARNING", logger="cw.reconcile.review_recipes"):
+        slugs = capture_review_repo_slugs(config=_config(), dispatching=True)
+
+    assert calls == []
+    assert len(slugs) == 0
+    warnings = [r.getMessage() for r in caplog.records if "budget" in r.getMessage()]
+    assert warnings == [
+        "reconcile: review repo-slug pre-pass budget (0s) exhausted; captured 0"
+        " dir(s), 2 uncaptured; deferring those candidates"
+    ]
+
+
+def test_dispatching_acts_run_no_git_once_slugs_are_captured(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_review_recipes`` (which runs under sessions_lock) reads the slugs
+    and never runs git; with nothing captured it defers, still with no git."""
+    _seed_capture_rows(make_git_repo)
+    captured = capture_review_repo_slugs(config=_config(), dispatching=True)
+
+    def _no_git(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("the review-recipe act phases must not run git")
+
+    monkeypatch.setattr("cw.pr_hydrate.run_git", _no_git)
+    monkeypatch.setattr("cw.pr_hydrate._resolve_repo_slug", _no_git)
+    monkeypatch.setattr(
+        "cw.reconcile.review_recipes._shared._resolve_repo_slug", _no_git
+    )
+
+    uncaptured = DeferredReviewDispatch()
+    run_review_recipes(config=_config(), jobs=DeferredReconcileJobs(review=uncaptured))
+    assert uncaptured == DeferredReviewDispatch()
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+
+    sink = DeferredReviewDispatch()
+    run_review_recipes(
+        config=_config(),
+        jobs=DeferredReconcileJobs(review=sink),
+        repo_slugs=captured,
+    )
+    assert [j.ticket_id for j in sink.address_review] == ["GEN-1"]
+    assert [j.ticket_id for j in sink.auto_fix_ci] == ["GEN-2"]
 
 
 # --- request_reviewer ------------------------------------------------------

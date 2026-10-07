@@ -1,7 +1,8 @@
 """Top-level reconcile orchestration.
 
 ``reconcile`` runs the lockless pre-passes -- gh merge state, the codex clean
-probes (#2563) and the gate recipes' plan-of-record prefetch (#2545) -- then
+probes (#2563), the gate recipes' plan-of-record prefetch (#2545) and the review
+recipes' repo slugs (#2564) -- then
 ``_reconcile_locked`` under ``sessions_lock`` (the
 detect/emit/act sweeps for stalled, idle, and phantom sessions), then the
 post-lock gh/git passes. See the package ``__init__`` docstring and
@@ -91,6 +92,7 @@ from cw.reconcile.review_recipes import (
     dispatch_deferred_review_jobs,
     run_review_recipes,
 )
+from cw.reconcile.review_recipes.core import capture_review_repo_slugs
 from cw.reconcile.routed_result_sessions import sweep_routed_result_sessions
 from cw.reconcile.stalled import (
     _act_on_stalled_candidates,
@@ -111,6 +113,7 @@ from cw.reconcile.usage_limit_mid_turn import (
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, OrchestratorConfig, TicketTask
+    from cw.reconcile.review_recipes._shared import RepoSlugs
 
 _log = logging.getLogger(__name__)
 
@@ -124,6 +127,7 @@ def _run_terminal_backstops_and_sweeps(
     deferred: DeferredReconcileJobs,
     codex_probes: CleanProbes | None,
     plan_probes: PlanProbes | None,
+    repo_slugs: RepoSlugs | None,
 ) -> tuple[list[str], list[str]]:
     """Run the post-detect TicketTask backstops + RFC 0008 capstone sweeps.
 
@@ -142,6 +146,8 @@ def _run_terminal_backstops_and_sweeps(
     *codex_probes*, captured before the lock (#2563). The gate recipes read
     each plan-of-record body from *plan_probes*, also captured before the
     lock (#2545); ``None`` skips every plan candidate for the tick.
+    *repo_slugs*, likewise captured before the lock (#2564), is what the review
+    recipes' cross-repo guard reads instead of running git.
     Extracted to one call site (instead of duplicating 4 lines in each
     branch) to keep ``_reconcile_locked``'s statement count under the
     PLR0915 limit.
@@ -170,7 +176,7 @@ def _run_terminal_backstops_and_sweeps(
         now=now, config=config, clients=clients, probes=codex_probes
     )
     run_gate_recipes(now=now, config=config, deferred=deferred, plan_probes=plan_probes)
-    run_review_recipes(config=config, jobs=deferred)
+    run_review_recipes(config=config, jobs=deferred, repo_slugs=repo_slugs)
     run_escalation_sweep(now=now)
     return timed_out_ticket_ids, completed_silent_ticket_ids
 
@@ -432,6 +438,10 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     # Third lockless pre-pass (#2545): the gate recipes' plan-of-record read
     # (`gh issue view`, and `git` for the `.cw/plan.md` fallback).
     plan_probes = _capture_plan_probes(config=_orchestrator_config, clients=_clients)
+    # Fourth (#2564): the review recipes' repo-slug `git remote get-url`.
+    repo_slugs = capture_review_repo_slugs(
+        config=_orchestrator_config, dispatching=dispatch_review_jobs
+    )
 
     jobs = DeferredReconcileJobs(
         review=DeferredReviewDispatch() if dispatch_review_jobs else None
@@ -451,6 +461,7 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
                 deferred=jobs,
                 codex_probes=codex_probes,
                 plan_probes=plan_probes,
+                repo_slugs=repo_slugs,
             )
     finally:
         # Post-lock drain (#1232, #1229). Everything in `jobs` was decided and
@@ -539,6 +550,7 @@ def _reconcile_locked(
     deferred: DeferredReconcileJobs,
     codex_probes: CleanProbes | None = None,
     plan_probes: PlanProbes | None = None,
+    repo_slugs: RepoSlugs | None = None,
 ) -> ReconcileReport:
     """Body of reconcile(), called while sessions_lock is held.
 
@@ -571,6 +583,8 @@ def _reconcile_locked(
     (#2545): the gate recipes read each plan-of-record body from it, so no
     gh/git runs for them under sessions_lock; ``None`` skips every plan
     candidate for the tick.
+    repo_slugs comes from reconcile()'s lockless review repo-slug pre-pass
+    (#2564) and is forwarded to the review recipes the same way.
 
     Since the process-kill-timeout removal, no sweep in here dispositions a
     session off elapsed time or transcript quietness: the foreign-result and
@@ -746,6 +760,7 @@ def _reconcile_locked(
                 deferred=deferred,
                 codex_probes=codex_probes,
                 plan_probes=plan_probes,
+                repo_slugs=repo_slugs,
             )
         )
         all_reverted = list(
@@ -803,6 +818,7 @@ def _reconcile_locked(
             deferred=deferred,
             codex_probes=codex_probes,
             plan_probes=plan_probes,
+            repo_slugs=repo_slugs,
         )
     )
     all_reverted = list(
