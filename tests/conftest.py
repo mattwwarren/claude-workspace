@@ -34,6 +34,7 @@ from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     ClientConfig,
     CwState,
+    OrchestratorConfig,
     OrchestratorEventType,
     Session,
     SessionOrigin,
@@ -2525,3 +2526,50 @@ def _vouch_for_roster_worker(client: ClientConfig, short_id: str) -> None:
         )
     )
     save_state(state)
+
+
+# ---------------------------------------------------------------------------
+# Dispatch fixtures (hoisted from tests/test_dispatch.py, #2503)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tmp_dispatch_dirs(tmp_config_dir: Path) -> Path:
+    """Return tmp_path; state isolation is handled by the autouse fixture."""
+    return tmp_config_dir
+
+
+@pytest.fixture
+def workspace_dir(make_git_repo: Callable[[str], Path]) -> Path:
+    """Return a real git repo to host the fake client.
+
+    dispatch_tick now calls ``create_worktree`` on this dir, so it must
+    be a real git repo with at least one commit.
+    """
+    return make_git_repo("workspace/test-project")
+
+
+@pytest.fixture
+def sample_client_config(workspace_dir: Path, tmp_path: Path) -> ClientConfig:
+    """A ClientConfig for use with dispatch tests.
+
+    Sets worktree_base to a tmp_path subdirectory so create_worktree
+    writes test worktrees under tmp_path (not ~/.cw/wt/), preventing
+    stale-directory accumulation across test runs.
+    """
+    return ClientConfig(
+        name="test-client",
+        workspace_path=workspace_dir,
+        default_branch="main",
+        worktree_base=tmp_path / "worktrees",
+        blocked_result_requeue_enabled=True,
+    )
+
+
+@pytest.fixture
+def simple_config() -> OrchestratorConfig:
+    """OrchestratorConfig with cap=1 for test-client."""
+    return OrchestratorConfig(
+        tick_interval_seconds=30,
+        per_client_max_parallel={"test-client": 1},
+    )

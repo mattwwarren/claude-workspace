@@ -53,12 +53,6 @@ _CLIENTS = ("client-a", "client-b", "client-c")
 
 
 @pytest.fixture
-def tmp_dispatch_dirs(tmp_config_dir: Path) -> Path:
-    """Return tmp_path; state isolation is handled by the autouse fixture."""
-    return tmp_config_dir
-
-
-@pytest.fixture
 def fleet(
     make_git_repo: Callable[[str], Path], tmp_path: Path
 ) -> dict[str, ClientConfig]:
