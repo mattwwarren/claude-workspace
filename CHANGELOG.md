@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- review_monitor.py is now a thin entry point over the `review_monitor_lib/` package; CLI unchanged. Re-run scripts/install-skills.sh to link the package and clear `cw doctor` drift warnings; the entry point works without it.
+
 ## [1.68.0] - 2026-10-07
 
 ### Added

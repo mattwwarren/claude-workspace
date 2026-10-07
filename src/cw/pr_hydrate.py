@@ -7,8 +7,9 @@ push transport — the emit target is the orchestrator bus (``record_event`` ->
 ``inbox.jsonl``), consumed by ``retire_merged_prs``.
 
 The CI-summary and attention-state derivation logic is ported from
-``.claude/scripts/review_monitor.py`` (``_summarize_status_checks`` and
-``_compute_attention_state``), which lives outside ``src/`` and cannot be
+``.claude/scripts/review_monitor_lib/attention.py`` (``_summarize_status_checks``
+and ``_compute_attention_state``, run via ``.claude/scripts/review_monitor.py``),
+which lives outside ``src/`` and cannot be
 imported: every real invocation execs the script directly via its shebang
 under a bare system interpreter with none of this project's dependencies
 installed, and the script is cross-repo by design (state keyed
@@ -45,7 +46,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Ported verbatim from .claude/scripts/review_monitor.py (_summarize_status_checks).
+# Ported verbatim from _summarize_status_checks in
+# .claude/scripts/review_monitor_lib/attention.py.
 _FAILED_CHECKRUN_CONCLUSIONS: frozenset[str] = frozenset(
     {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"}
 )
@@ -131,7 +133,8 @@ def _summarize_status_checks(rollup: list[dict[str, Any]]) -> dict[str, Any]:
     """Collapse a ``statusCheckRollup`` list into a ``failing`` / ``pending`` summary.
 
     Ported verbatim from ``_summarize_status_checks`` in
-    ``.claude/scripts/review_monitor.py`` (un-importable — lives outside src/).
+    ``.claude/scripts/review_monitor_lib/attention.py`` (un-importable — lives
+    outside src/).
     ``ok`` is the sole source of CI truth: in-progress/pending checks never block
     it, only genuine failures do.
 
@@ -260,7 +263,8 @@ def _compute_attention_state(
     """Derive the operator attention-state via the #929 decision table.
 
     Precedence chain + unconditional draft-gate ported from
-    ``_compute_attention_state`` in ``.claude/scripts/review_monitor.py``. cw
+    ``_compute_attention_state`` in
+    ``.claude/scripts/review_monitor_lib/attention.py``. cw
     drops the reference's role/status/unaddressed_count inputs (no subsystem
     exists for them), but does carry a narrow comment-review input (#1195,
     row 2b) — see ``_has_blocking_comment_review``. First matching row wins:
