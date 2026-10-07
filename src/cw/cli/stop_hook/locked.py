@@ -30,7 +30,7 @@ from cw.config import (
     sessions_lock,
 )
 from cw.exceptions import CwError
-from cw.models import SessionOrigin, SessionStatus
+from cw.models import TERMINAL_SESSION_STATUSES, SessionOrigin, SessionStatus
 from cw.reconcile import _has_terminal_sentinel
 
 if TYPE_CHECKING:
@@ -40,14 +40,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(_LOGGER_NAME)
 
-# A Stop on a session in any of these is an idempotent no-op. Not
-# ``TERMINAL_SESSION_STATUSES``: that set lacks IDLE, which a USER-origin
-# session reaches on every Stop.
-_SETTLED_STATUSES = (
-    SessionStatus.COMPLETED,
-    SessionStatus.IDLE,
-    SessionStatus.TIMED_OUT,
-)
+# A Stop on a session in any of these is an idempotent no-op. Add IDLE because
+# a USER-origin session reaches it on every Stop, but keep the canonical
+# terminal-status set as the source of truth for the other members.
+_SETTLED_STATUSES = TERMINAL_SESSION_STATUSES | frozenset({SessionStatus.IDLE})
+_HEADLESS_CONTEXT_KEY = "headless"
 
 
 def _handle_user_origin_stop(
@@ -105,7 +102,7 @@ def _prepare_sentinel_before_lock(
     cannot be read -- logged, never raised, so the locked section still
     harvests the sentinel, without scope verification.
     """
-    if not context.get("headless"):
+    if not context.get(_HEADLESS_CONTEXT_KEY):
         return None
     try:
         snapshot = next(
@@ -221,7 +218,7 @@ def _resolve_stop_under_lock(
         # sessions and non-headless daemon sessions — those fall through to the
         # normal COMPLETED path unchanged.
         is_headless = session.origin is SessionOrigin.DAEMON and bool(
-            context.get("headless")
+            context.get(_HEADLESS_CONTEXT_KEY)
         )
         now = datetime.now(UTC)
 
