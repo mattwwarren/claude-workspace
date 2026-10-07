@@ -86,24 +86,6 @@ _DEFERRED_DISPATCH_IMPORTS: Counter[_ImportKey] = Counter(
             "cw.dispatch.claim",
             ("_park_running_task_blocked_on_user",),
         ): 1,
-        (
-            "src/cw/reconcile/phantom/_mutations.py",
-            "_apply_phantom_queue_mutations",
-            "cw.dispatch.claim",
-            ("_is_backstop_exempt",),
-        ): 1,
-        (
-            "src/cw/reconcile/phantom/_mutations.py",
-            "_apply_phantom_queue_mutations",
-            "cw.dispatch.productivity",
-            ("extract_claim_evidence", "is_unproductive"),
-        ): 1,
-        (
-            "src/cw/reconcile/stalled/_mutations.py",
-            "_apply_foreign_result_queue_mutation",
-            "cw.dispatch.productivity",
-            ("extract_claim_evidence", "is_unproductive"),
-        ): 1,
     }
 )
 
@@ -157,8 +139,6 @@ _RECONCILE_PLC0415_KEYS = frozenset(
     {
         "src/cw/reconcile/_shared/_routing.py",
         "src/cw/reconcile/_shared/_sentinels.py",
-        "src/cw/reconcile/phantom/_mutations.py",
-        "src/cw/reconcile/stalled/_mutations.py",
         "src/cw/reconcile/codex_boot.py",
         "src/cw/reconcile/fix_dispatch.py",
         "src/cw/reconcile/local.py",
