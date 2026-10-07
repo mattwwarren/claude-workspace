@@ -7,9 +7,11 @@ attention-state constants, the shared PR_ACTION payload keys, the three
 recipe-indexed aggregator dicts, the pure ``_detect_by_attention_state``
 classifier, and the shared act-phase helpers (``_find_review_task``,
 ``_emit_pr_action_failed``, ``_skip_with_anomaly``, ``_guard_cross_repo_mismatch``,
-``_review_payload_base``, ``_record_pr_action_taken``, ``_clear_ended_episodes``).
-Recipe modules import from here; this module never imports from a recipe module,
-so the package's import graph stays acyclic.
+``_review_payload_base``, ``_record_pr_action_taken``, ``_clear_ended_episodes``),
+and the pre-captured repo slugs the cross-repo guard reads under the lock
+(:class:`RepoSlugs`, ``_repo_guard_allows``, #2564). Recipe modules import
+from here; this module never imports from a recipe module, so the package's
+import graph stays acyclic.
 
 Like the gate recipes, this layer gates on its own master switch, opt-in here
 (``OrchestratorConfig.review_recipes_enabled``, default False), checked in BOTH
@@ -27,17 +29,24 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from time import monotonic
 from typing import TYPE_CHECKING
 
 from cw.dev_queue import _newest_by_created_at
 from cw.events import record_event
 from cw.models import OrchestratorEventType
-from cw.pr_hydrate import PrAttentionState, _is_candidate
+from cw.pr_hydrate import (
+    PrAttentionState,
+    _is_candidate,
+    _resolve_repo_slug,
+    _slug_mismatch,
+)
 from cw.reconcile._shared import _PAUSED_STATUS_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from datetime import datetime
+    from pathlib import Path
 
     from cw.models import (
         ClientConfig,
@@ -368,6 +377,105 @@ def _guard_cross_repo_mismatch(
         ticket_id=task.ticket_id,
     )
     return False
+
+
+class RepoSlugUnavailableError(Exception):
+    """No captured origin slug for a git dir: the lockless pre-pass missed it.
+
+    A plain ``Exception``, deliberately not a ``CwError`` (mirrors
+    ``codex_boot.CleanProbeUnavailableError``), so no broad ``except CwError``
+    swallows it: ``_repo_guard_allows`` catches it by name and defers the
+    candidate to the next tick.
+    """
+
+
+class RepoSlugs:
+    """Origin repo slugs resolved lockless, keyed by git dir (#2564).
+
+    ``reconcile()`` captures (:meth:`capture`, runs ``git remote get-url``,
+    lockless only) before it takes ``sessions_lock``; the in-lock act phases
+    look up (:meth:`mismatch`, never runs git). Keyed by git dir rather than
+    ticket because the act phases re-load each row, whose path may have moved
+    since. With *budget_seconds* set, captures stop once that much monotonic
+    time has passed since construction, and :attr:`budget_exhausted` records
+    it. A stored ``None`` is a remote that could not be resolved (fail-open),
+    distinct from a dir never captured (a miss).
+    """
+
+    def __init__(self, *, budget_seconds: float | None = None) -> None:
+        self._deadline = (
+            None if budget_seconds is None else monotonic() + budget_seconds
+        )
+        self._slugs: dict[Path, str | None] = {}
+        self.budget_exhausted = False
+
+    def __len__(self) -> int:
+        return len(self._slugs)
+
+    def __contains__(self, git_dir: object) -> bool:
+        return git_dir in self._slugs
+
+    def capture(self, git_dir: Path) -> None:
+        """Resolve and keep *git_dir*'s origin slug. Runs git: lockless only.
+
+        A no-op for a dir already captured, and once the budget is spent
+        (which sets :attr:`budget_exhausted`).
+        """
+        if git_dir in self._slugs:
+            return
+        if self._deadline is not None and monotonic() >= self._deadline:
+            self.budget_exhausted = True
+            return
+        self._slugs[git_dir] = _resolve_repo_slug(git_dir)
+
+    def mismatch(self, pr_repo: str, git_dir: Path) -> str | None:
+        """Return *git_dir*'s captured slug if it disagrees with *pr_repo*. No git.
+
+        Raises ``RepoSlugUnavailableError`` when *git_dir* was never captured.
+        """
+        if git_dir not in self._slugs:
+            msg = f"no origin slug was captured for {git_dir}"
+            raise RepoSlugUnavailableError(msg)
+        return _slug_mismatch(pr_repo, self._slugs[git_dir])
+
+
+def _repo_guard_allows(
+    task: TicketTask,
+    payload_base: dict[str, object],
+    repo_slugs: RepoSlugs,
+    *,
+    pr_repo: str,
+    git_dir: Path,
+    location: str,
+) -> bool:
+    """The cross-repo guard (GitHub #1198) over a pre-captured slug. No git.
+
+    Returns ``True`` to proceed: the slugs agree, the remote was unresolvable
+    (fail-open), or ``cross_repo_override`` allows a mismatch. Returns
+    ``False`` to skip: a mismatch (``_guard_cross_repo_mismatch`` has emitted
+    the anomaly), or *git_dir* missing from *repo_slugs* (#2564). The miss is
+    logged at INFO with no event, so the caller returns before any
+    ``PR_ACTION_TAKEN`` or latch stamp and the next tick re-captures.
+    """
+    try:
+        client_repo = repo_slugs.mismatch(pr_repo, git_dir)
+    except RepoSlugUnavailableError:
+        _log.info(
+            "review_recipe_repo_slug_unavailable ticket=%s git_dir=%s:"
+            " not pre-resolved, deferring to next tick",
+            task.ticket_id,
+            git_dir,
+        )
+        return False
+    if client_repo is None:
+        return True
+    return _guard_cross_repo_mismatch(
+        task,
+        payload_base,
+        pr_repo=pr_repo,
+        client_repo=client_repo,
+        location=location,
+    )
 
 
 def _review_payload_base(
