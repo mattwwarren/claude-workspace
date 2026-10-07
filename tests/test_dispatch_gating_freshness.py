@@ -63,7 +63,7 @@ class TestDispatchTickFreshnessGate:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
 
@@ -97,7 +97,7 @@ class TestDispatchTickFreshnessGate:
         add_ticket(TicketTask(ticket_id="CW-11", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
 
@@ -156,7 +156,7 @@ class TestDispatchTickFreshnessGate:
             return (False, "abc", "abc", 0)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin", _freshness_check
+            "cw.dispatch.gating.freshness.is_main_behind_origin", _freshness_check
         )
 
         # fresh-client also needs cap=1
@@ -188,7 +188,7 @@ class TestDispatchTickFreshnessGate:
         add_ticket(TicketTask(ticket_id="CW-30", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
 
@@ -224,7 +224,9 @@ class TestDispatchTickFreshnessGate:
             call_count += 1
             return (False, "abc", "abc", 0)
 
-        monkeypatch.setattr("cw.dispatch.gating.is_main_behind_origin", _counting)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.freshness.is_main_behind_origin", _counting
+        )
 
         daemon = FakeNativeDaemonClient()
         dispatch_tick(simple_config, native_daemon=daemon)
@@ -295,7 +297,7 @@ class TestDispatchTickFreshnessGate:
             msg = "network unreachable"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr("cw.dispatch.gating.is_main_behind_origin", _boom)
+        monkeypatch.setattr("cw.dispatch.gating.freshness.is_main_behind_origin", _boom)
 
         daemon = FakeNativeDaemonClient()
 
@@ -331,15 +333,15 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "abc12345" * 5, "def67890" * 5, 3),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.fast_forward_main",
+            "cw.dispatch.gating.freshness.fast_forward_main",
             lambda _client, **_kwargs: ("abc12345" * 5, "def67890" * 5),
         )
 
@@ -368,11 +370,11 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "ahead",
         )
 
@@ -399,11 +401,11 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "diverged",
         )
 
@@ -429,11 +431,11 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "detached",
         )
 
@@ -462,11 +464,11 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
 
@@ -474,7 +476,7 @@ class TestFreshnessGateAutoFF:
             msg = "git pull failed"
             raise WorktreeError(msg)
 
-        monkeypatch.setattr("cw.dispatch.gating.fast_forward_main", _boom)
+        monkeypatch.setattr("cw.dispatch.gating.freshness.fast_forward_main", _boom)
 
         daemon = FakeNativeDaemonClient()
         # Exception must be swallowed; falls through to TICKET_NEEDS_SYNC.
@@ -507,11 +509,11 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.get_head_branch",
+            "cw.dispatch.gating.freshness.get_head_branch",
             lambda _client: "feature/xyz",
         )
 
@@ -521,7 +523,7 @@ class TestFreshnessGateAutoFF:
             ff_called["count"] += 1
             return ("aaa", "bbb")
 
-        monkeypatch.setattr("cw.dispatch.gating.fast_forward_main", _ff_spy)
+        monkeypatch.setattr("cw.dispatch.gating.freshness.fast_forward_main", _ff_spy)
 
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(simple_config, native_daemon=daemon)
@@ -562,15 +564,15 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.get_head_branch",
+            "cw.dispatch.gating.freshness.get_head_branch",
             lambda _client: None,  # detached HEAD
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
 
@@ -580,7 +582,7 @@ class TestFreshnessGateAutoFF:
             ff_called["count"] += 1
             return ("aaa", "bbb")
 
-        monkeypatch.setattr("cw.dispatch.gating.fast_forward_main", _ff_spy)
+        monkeypatch.setattr("cw.dispatch.gating.freshness.fast_forward_main", _ff_spy)
 
         daemon = FakeNativeDaemonClient()
         dispatch_tick(simple_config, native_daemon=daemon)
@@ -604,15 +606,15 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.get_head_branch",
+            "cw.dispatch.gating.freshness.get_head_branch",
             lambda _client: "main",  # on default branch
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "diverged",  # unsafe, so auto-ff skipped
         )
 
@@ -650,7 +652,7 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
 
@@ -662,7 +664,9 @@ class TestFreshnessGateAutoFF:
                 return "feature/xyz"  # _resolve_freshness: non-default → bail
             return None  # _emit_stale_skip: HEAD detached (TOCTOU)
 
-        monkeypatch.setattr("cw.dispatch.gating.get_head_branch", _get_head_toctou)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.freshness.get_head_branch", _get_head_toctou
+        )
 
         emitted: list[str] = []
         daemon = FakeNativeDaemonClient()
@@ -686,7 +690,7 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
         # check_main_ff_safety must NOT be called; if it is called that's a bug
@@ -696,7 +700,9 @@ class TestFreshnessGateAutoFF:
             check_called[0] = True
             return "behind"
 
-        monkeypatch.setattr("cw.dispatch.gating.check_main_ff_safety", _check_boom)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.freshness.check_main_ff_safety", _check_boom
+        )
 
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(simple_config, auto_ff=False, native_daemon=daemon)
@@ -727,11 +733,11 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "ahead",
         )
 
@@ -765,11 +771,11 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "diverged",
         )
 
@@ -803,17 +809,16 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_checkout_dirty",
+            "cw.dispatch.gating.freshness.is_main_checkout_dirty",
             lambda _client: True,
-            raising=False,
         )
 
         emitted: list[str] = []
@@ -849,15 +854,15 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.get_head_branch",
+            "cw.dispatch.gating.freshness.get_head_branch",
             lambda _client: "main",
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "diverged",
         )
 
@@ -890,15 +895,15 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.get_head_branch",
+            "cw.dispatch.gating.freshness.get_head_branch",
             lambda _client: None,  # detached HEAD
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "detached",
         )
 

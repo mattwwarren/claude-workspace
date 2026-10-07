@@ -5653,11 +5653,11 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-420", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
         monkeypatch.setattr(
@@ -5684,11 +5684,11 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-421", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
         monkeypatch.setattr(
@@ -5715,11 +5715,11 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-422", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
         monkeypatch.setattr(
@@ -5794,7 +5794,7 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-423", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
         monkeypatch.setattr(
@@ -5824,7 +5824,7 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-424", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
         monkeypatch.setattr(
@@ -5853,7 +5853,7 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-425", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr(
@@ -5965,7 +5965,7 @@ class TestDispatchTickEvents:
         add_ticket(TicketTask(ticket_id="TICK-FG-2", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
 
@@ -7645,7 +7645,7 @@ class TestTier1ClientSelection:
 
         # client-a3 is stale (skipped by the freshness gate); client-b3 fresh.
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda client, **_kw: (client.name == "client-a3", "aaa", "bbb", 1),
         )
 
@@ -8482,7 +8482,7 @@ class TestLaneOccupantsPayload:
         """FRESHNESS_GATE skip carries lane_occupants/occupied."""
         self._make_running_lane(sample_client_config.workspace_path)
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
 
@@ -16275,7 +16275,7 @@ class TestWaveCollisionDetection:
         write_clients_yaml(sample_client_config)
 
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
 
@@ -16338,7 +16338,7 @@ class TestWaveCollisionDetection:
 
         monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", _spy)
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
         monkeypatch.setattr(
@@ -16391,7 +16391,7 @@ class TestWaveCollisionDetection:
             lambda _path, _base_ref: frozenset({"src/shared.py"}),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
         monkeypatch.setattr(
@@ -18361,7 +18361,7 @@ def _client_freshness_override() -> ClientConcurrencyOverride:
 def _force_stale(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force _resolve_freshness to report test-client as stale (main behind)."""
     monkeypatch.setattr(
-        "cw.dispatch.gating.is_main_behind_origin",
+        "cw.dispatch.gating.freshness.is_main_behind_origin",
         lambda _client, **_kw: (True, "aaa", "bbb", 3),
     )
 

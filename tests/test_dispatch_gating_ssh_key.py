@@ -181,11 +181,11 @@ class TestSshKeyPreflightGate:
         add_ticket(TicketTask(ticket_id="GEN-S1F", client="test-client"))
         _force_ssh_key_unavailable(monkeypatch)
         monkeypatch.setattr(
-            "cw.dispatch.gating.is_main_behind_origin",
+            "cw.dispatch.gating.freshness.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
         monkeypatch.setattr(
-            "cw.dispatch.gating.check_main_ff_safety",
+            "cw.dispatch.gating.freshness.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
 

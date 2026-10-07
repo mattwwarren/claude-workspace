@@ -38,6 +38,7 @@ _CONTEXT_JSON = f"{_GATING}.context_json"
 _USAGE_LIMIT = f"{_GATING}.usage_limit"
 _AVAILABILITY = f"{_GATING}.availability"
 _SSH_KEY = f"{_GATING}.ssh_key"
+_FRESHNESS = f"{_GATING}.freshness"
 
 # Owning module for each of the 34 historic top-level names of the flat
 # ``gating.py``. Each extraction commit of the split edits only the entries it
@@ -53,13 +54,13 @@ _OWNER: dict[str, str] = {
     "_record_availability_block": _AVAILABILITY,
     "_reset_availability_block": _AVAILABILITY,
     "_emit_availability_skip": _AVAILABILITY,
-    "FRESHNESS_NON_MAIN_HEAD": _GATING,
-    "FRESHNESS_MAIN_BEHIND": _GATING,
-    "FRESHNESS_MAIN_DIRTY_CHECKOUT": _GATING,
-    "FRESHNESS_MAIN_DIVERGED": _GATING,
-    "FRESHNESS_MAIN_DETACHED": _GATING,
-    "_resolve_freshness": _GATING,
-    "_emit_stale_skip": _GATING,
+    "FRESHNESS_NON_MAIN_HEAD": _FRESHNESS,
+    "FRESHNESS_MAIN_BEHIND": _FRESHNESS,
+    "FRESHNESS_MAIN_DIRTY_CHECKOUT": _FRESHNESS,
+    "FRESHNESS_MAIN_DIVERGED": _FRESHNESS,
+    "FRESHNESS_MAIN_DETACHED": _FRESHNESS,
+    "_resolve_freshness": _FRESHNESS,
+    "_emit_stale_skip": _FRESHNESS,
     "_SSH_KEY_WARN_SENTINEL": _SSH_KEY,
     "_resolve_ssh_key_once": _SSH_KEY,
     "_emit_ssh_key_skip": _SSH_KEY,
@@ -141,10 +142,17 @@ _SEAMS = (
 )
 
 # Every module that defines a ``_log``; each must log on ``cw.dispatch``.
-_LOGGING_MODULES = (_GATING, _CONTEXT_JSON, _USAGE_LIMIT, _AVAILABILITY, _SSH_KEY)
+_LOGGING_MODULES = (
+    _GATING,
+    _CONTEXT_JSON,
+    _USAGE_LIMIT,
+    _AVAILABILITY,
+    _SSH_KEY,
+    _FRESHNESS,
+)
 
 # Every extracted gating submodule; each must import cold in a fresh interpreter.
-_SUBMODULES = ("context_json", "usage_limit", "availability", "ssh_key")
+_SUBMODULES = ("context_json", "usage_limit", "availability", "ssh_key", "freshness")
 
 
 def _owner(name: str) -> ModuleType:
