@@ -64,6 +64,7 @@ _CONSTANTS_MODULE = f"{_PKG}._constants"
 _MODEL = f"{_PKG}.model"
 _DRIFT = f"{_PKG}.drift"
 _PROVENANCE = f"{_PKG}.provenance"
+_MATCH = f"{_PKG}.match"
 _LOGGER = "cw.review_finding_dispositions"
 _TICKET = "T-2498"
 
@@ -103,22 +104,22 @@ _OWNER: dict[str, str] = {
     "partition_enforceable_dispositions": _PROVENANCE,
     "log_refused_dispositions": _PROVENANCE,
     "_render_suppression_signal": _PKG,
-    "_MIN_TOKEN_LEN": _PKG,
-    "_ANCHORED_MIN_SHARED": _PKG,
-    "_ANCHORED_MIN_DICE": _PKG,
-    "_PROSE_MIN_SHARED": _PKG,
-    "_PROSE_MIN_DICE": _PKG,
-    "_STOPWORDS": _PKG,
-    "_TOKEN_RE": _PKG,
-    "_BACKTICK_RE": _PKG,
-    "_IDENTIFIER_SPAN_RE": _PKG,
-    "_claim_tokens": _PKG,
-    "_claim_symbols": _PKG,
-    "_claim_similarity": _PKG,
-    "_LedgerMatch": _PKG,
-    "_best_claim_match": _PKG,
-    "_match_ledger": _PKG,
-    "_ledger_matches": _PKG,
+    "_MIN_TOKEN_LEN": _MATCH,
+    "_ANCHORED_MIN_SHARED": _MATCH,
+    "_ANCHORED_MIN_DICE": _MATCH,
+    "_PROSE_MIN_SHARED": _MATCH,
+    "_PROSE_MIN_DICE": _MATCH,
+    "_STOPWORDS": _MATCH,
+    "_TOKEN_RE": _MATCH,
+    "_BACKTICK_RE": _MATCH,
+    "_IDENTIFIER_SPAN_RE": _MATCH,
+    "_claim_tokens": _MATCH,
+    "_claim_symbols": _MATCH,
+    "_claim_similarity": _MATCH,
+    "_LedgerMatch": _MATCH,
+    "_best_claim_match": _MATCH,
+    "_match_ledger": _MATCH,
+    "_ledger_matches": _MATCH,
     "_CLAIM_NOTE": _PKG,
     "_stamp_suppressed": _PKG,
     "_emit_suppression": _PKG,
