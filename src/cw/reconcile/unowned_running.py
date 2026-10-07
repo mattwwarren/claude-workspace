@@ -41,9 +41,10 @@ adopted.
 Runs from ``cw.reconcile.core._run_terminal_backstops_and_sweeps``, under
 ``reconcile()``'s ``sessions_lock``, before the TIMED_OUT backstop. It reads
 state and the queue fresh, nests ``dev_queue_lock`` for each bind (ADR-0019
-order), and records the ``task.session_adopted`` audit event before each bind
-takes effect, so a failed audit write leaves the row available for the next
-tick.
+order), persists each bind before releasing the queue lock, and then records
+the ``task.session_adopted`` audit event. A failed queue write leaves the row
+available for the next tick; a failed audit write leaves the durable bind in
+place without claiming that the event was recorded.
 """
 
 from __future__ import annotations
@@ -288,7 +289,7 @@ def _still_adoptable(
 
 
 def _emit_adopted(candidate: UnownedCandidate) -> None:
-    """Record the audit event before the corresponding bind is persisted."""
+    """Record the audit event after the corresponding bind is persisted."""
     payload: dict[str, object] = {
         "client": candidate.client,
         "ticket_id": candidate.ticket_id,
@@ -324,19 +325,25 @@ def _act_adopt(candidate: UnownedCandidate) -> bool:
         if row is None or not _still_adoptable(store, row, candidate):
             return False
         try:
-            # Audit before effect: if the event cannot be persisted, leave the
-            # row unbound so this adoption is retried on the next tick.
-            _emit_adopted(candidate)
+            _apply_spawn_success_fields(row, session_id=candidate.session_id)
+            save_dev_queue(store)
         except (CwError, OSError):
             _log.exception(
                 "unowned_running: %s/%s adoption deferred because the "
-                "task.session_adopted event was not recorded",
+                "dev-queue bind was not persisted",
                 candidate.client,
                 candidate.ticket_id,
             )
             return False
-        _apply_spawn_success_fields(row, session_id=candidate.session_id)
-        save_dev_queue(store)
+    try:
+        _emit_adopted(candidate)
+    except (CwError, OSError):
+        _log.exception(
+            "unowned_running: %s/%s bind persisted but the "
+            "task.session_adopted event was not recorded",
+            candidate.client,
+            candidate.ticket_id,
+        )
     _log.info(
         "unowned_running: adopted %s/%s onto session %s (attempt %d)",
         candidate.client,
