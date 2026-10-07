@@ -352,6 +352,11 @@ class TestLoggerNamePinned:
         assert stop_hook.logger.name == PINNED_LOGGER_NAME
 
 
+# Submodules that log. Each binds its own ``logger`` to the pinned name via
+# ``_constants._LOGGER_NAME``, never ``__name__``.
+LOGGING_SUBMODULES = ["agent_stamp"]
+
+
 class TestLoggerObjectsPinned:
     """Every ``logger`` in the package is the one pinned-name Logger."""
 
@@ -359,6 +364,11 @@ class TestLoggerObjectsPinned:
         constants = importlib.import_module(f"{_PKG}._constants")
         assert vars(constants)["_LOGGER_NAME"] == PINNED_LOGGER_NAME
         assert stop_hook.logger is logging.getLogger(PINNED_LOGGER_NAME)
+
+    @pytest.mark.parametrize("submodule", LOGGING_SUBMODULES)
+    def test_submodule_logger_is_the_package_logger(self, submodule: str) -> None:
+        module_logger = vars(importlib.import_module(f"{_PKG}.{submodule}"))["logger"]
+        assert module_logger is stop_hook.logger
 
 
 class TestMovedCodeCharacterization:
