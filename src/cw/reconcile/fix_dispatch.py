@@ -904,11 +904,6 @@ def run_fix_dispatch(*, config: OrchestratorConfig) -> list[str]:
 
     Returns the ticket_ids acted on across both phases.
     """
-    # This is the independent recurring consumer for pages left in the
-    # post-launch outbox by a prior process, including idle fix-dispatch ticks.
-    from cw.spawn import retry_spawn_post_launch_attention
-
-    retry_spawn_post_launch_attention()
     del config
     acted = _act_on_fix_dispatch_completions(
         _detect_fix_dispatch_completions(load_dev_queue().tasks)
