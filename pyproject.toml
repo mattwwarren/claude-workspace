@@ -418,6 +418,7 @@ ignore = [
 # docstring section.
 "src/cw/review_finding_dispositions/__init__.py" = ["PLC0415"]
 "src/cw/review_finding_dispositions/model.py" = ["PLC0415"]
+"src/cw/review_finding_dispositions/drift.py" = ["PLC0415"]
 # codex_review/_context defers cw.codex_background
 # ._sync_finding_dispositions_to_running_task inside _prepare_review_pass
 # (#1838): codex_background imports cw.codex_fix_loop, which imports

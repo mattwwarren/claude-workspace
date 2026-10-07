@@ -62,6 +62,7 @@ if TYPE_CHECKING:
 _PKG = "cw.review_finding_dispositions"
 _CONSTANTS_MODULE = f"{_PKG}._constants"
 _MODEL = f"{_PKG}.model"
+_DRIFT = f"{_PKG}.drift"
 _LOGGER = "cw.review_finding_dispositions"
 _TICKET = "T-2498"
 
@@ -121,9 +122,9 @@ _OWNER: dict[str, str] = {
     "_stamp_suppressed": _PKG,
     "_emit_suppression": _PKG,
     "_emit_shadow": _PKG,
-    "_GIT_DIFF_UNCHANGED": _PKG,
-    "_GIT_DIFF_CHANGED": _PKG,
-    "disposition_drifted": _PKG,
+    "_GIT_DIFF_UNCHANGED": _DRIFT,
+    "_GIT_DIFF_CHANGED": _DRIFT,
+    "disposition_drifted": _DRIFT,
     "disposition_event_type": _PKG,
     "disposition_event_payload": _PKG,
     "_emit_stale": _PKG,
