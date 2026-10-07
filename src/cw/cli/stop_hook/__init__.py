@@ -22,6 +22,13 @@ from cw.cli._sentinels import (
     _parse_sentinel_from_transcript,
     _sentinel_frame_after,
 )
+from cw.cli.stop_hook._constants import (
+    _LOGGER_NAME,
+    _SENTINEL_UNROUTABLE_PAGED_KEY,
+    _SENTINEL_UNROUTABLE_REASON,
+    _STAGED_ROUTE_RESCUED_KEY,
+    _STAGED_ROUTE_TASK_ALREADY_TERMINAL_KEY,
+)
 from cw.config import (
     load_state,
     save_state,
@@ -60,40 +67,45 @@ if TYPE_CHECKING:
     from cw.auto_dev_result import BlockedResult
     from cw.models import CwState, ParkCommentMarker, Session, TicketTask
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(_LOGGER_NAME)
 
-# ``paused_status`` of the signal-only ``session.needs_attention`` page fired
-# when a staged emit_cli result reaches the resolution step and neither its
-# reconstruction nor the transcript fallback yields a routable sentinel
-# (#2458). See docs/session-disposition.md §6d.
-_SENTINEL_UNROUTABLE_REASON = "sentinel_unroutable"
-
-# Merged-in (never overwriting) companions to reconcile._shared's own
-# _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY, stamped onto session.last_result
-# alongside it in the same complete_session=False accepted-route branch
-# (#2458 fix cycle 5, Action 2). The already_routed short-circuit skips
-# _apply_sentinel_to_task entirely on the completing call, which otherwise
-# leaves rescued/task_already_terminal at their init-False defaults even
-# when the first (partial-route) call's outcome was rescued=True (a #918
-# late-parked-task rescue) -- silently dropping that fact from the eventual
-# SESSION_COMPLETED payload. Local to this module (not reconcile/_shared/,
-# out of this cycle's approved scope): only this function reads or writes
-# them.
-_STAGED_ROUTE_RESCUED_KEY = "sentinel_partial_route_rescued"
-_STAGED_ROUTE_TASK_ALREADY_TERMINAL_KEY = "sentinel_partial_route_task_already_terminal"
-# Merged-in (never overwriting) flag stamped onto session.last_result the
-# first time the no-sentinel/not-parked bail below is found genuinely
-# pageable (#2458 fix cycle 6). Deliberately NOT
-# reconcile._shared._SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY: that flag means
-# "actually routed" and is read by holds_staged_emit_result, the shared
-# candidacy predicate for the idle sweep and cw spawn close's retry path --
-# setting it here (a route that never succeeded) would wrongly tell those
-# two call sites the result had been routed and block them from ever
-# retrying it. This flag only dedups the WARNING + SESSION_NEEDS_ATTENTION
-# sentinel_unroutable page across repeat Stops that land on the same
-# still-unroutable bail; it is local to this module and read only by
-# _sentinel_unroutable, never by holds_staged_emit_result.
-_SENTINEL_UNROUTABLE_PAGED_KEY = "sentinel_unroutable_paged"
+__all__ = [
+    "_SENTINEL_UNROUTABLE_PAGED_KEY",
+    "_SENTINEL_UNROUTABLE_REASON",
+    "_STAGED_ROUTE_RESCUED_KEY",
+    "_STAGED_ROUTE_TASK_ALREADY_TERMINAL_KEY",
+    "_HeadlessResolution",
+    "_LockedStop",
+    "_agent_spawn_stamp_is_clear",
+    "_armed_running_task",
+    "_build_completed_payload",
+    "_clear_agent_spawn_stamp",
+    "_clear_staged_emit_result_marker",
+    "_handle_headless_no_sentinel",
+    "_handle_unrouted_stop",
+    "_handle_user_origin_stop",
+    "_harvest_last_result_through_door",
+    "_maybe_clear_staged_emit_result",
+    "_maybe_stamp_sentinel_unroutable_paged",
+    "_page_sentinel_unroutable",
+    "_park_if_abandoned",
+    "_parse_headless_sentinel",
+    "_peek_staged_emit_result",
+    "_read_stop_hook_payload",
+    "_reconstruct_emitted_sentinel",
+    "_resolve_and_complete_headless_session",
+    "_resolve_signal_stop_context",
+    "_resolve_stop_under_lock",
+    "_restore_staged_route_outcome",
+    "_sentinel_frame_follows_marker",
+    "_sentinel_unroutable",
+    "_sentinel_unroutable_already_paged",
+    "_snapshot_agent_spawn_stamp",
+    "_stamp_staged_route_outcome",
+    "_verify_headless_scope",
+    "logger",
+    "signal_stop",
+]
 
 
 def _read_stop_hook_payload() -> tuple[dict[str, object], str] | None:

@@ -116,6 +116,15 @@ def _project_defined_names() -> set[str]:
     return names
 
 
+def _isort_style_key(name: str) -> tuple[int, str]:
+    stripped = name.lstrip("_")
+    if stripped.isupper():
+        return 0, name
+    if stripped[:1].isupper():
+        return 1, name
+    return 2, name
+
+
 class TestPackageExportCompleteness:
     """Guards that ``cw.cli.stop_hook`` keeps its full pre-split surface."""
 
@@ -130,6 +139,15 @@ class TestPackageExportCompleteness:
         """A dropped re-export must fail here, not at a downstream import site."""
         missing = [name for name in EXPECTED_EXPORTS if not hasattr(stop_hook, name)]
         assert missing == []
+
+    def test_all_matches_full_surface(self) -> None:
+        assert set(stop_hook.__all__) == EXPECTED_EXPORTS
+
+    def test_all_is_sorted_without_duplicates(self) -> None:
+        """Ruff RUF022's isort-style order: SCREAMING_CASE, CamelCase, the rest."""
+        assert list(stop_hook.__all__) == sorted(
+            set(stop_hook.__all__), key=_isort_style_key
+        )
 
 
 class TestCommandRegistration:
@@ -331,6 +349,15 @@ class TestLoggerNamePinned:
 
     def test_package_logger_uses_pinned_name(self) -> None:
         assert stop_hook.logger.name == PINNED_LOGGER_NAME
+
+
+class TestLoggerObjectsPinned:
+    """Every ``logger`` in the package is the one pinned-name Logger."""
+
+    def test_pinned_constant_and_package_logger(self) -> None:
+        constants = importlib.import_module(f"{_PKG}._constants")
+        assert vars(constants)["_LOGGER_NAME"] == PINNED_LOGGER_NAME
+        assert stop_hook.logger is logging.getLogger(PINNED_LOGGER_NAME)
 
 
 class TestMovedCodeCharacterization:
