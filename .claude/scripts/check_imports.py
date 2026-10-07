@@ -24,6 +24,7 @@ GROUPS: list[tuple[str, list[str]]] = [
             "review_monitor_lib.comment_reviews",
             "review_monitor_lib.delta",
             "review_monitor_lib.escalation",
+            "review_monitor_lib.lifecycle",
             "review_monitor_lib.models",
             "review_monitor_lib.shell",
             "review_monitor_lib.state",
