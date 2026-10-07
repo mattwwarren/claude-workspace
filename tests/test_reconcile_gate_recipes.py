@@ -27,6 +27,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
+from cw.reconcile.gate_plan_probes import PlanProbes
 from cw.reconcile.gate_recipes import (
     RECIPE_AUTO_ADOPT_PLAN,
     RECIPE_AUTO_APPROVE_REVIEW,
@@ -35,7 +36,6 @@ from cw.reconcile.gate_recipes import (
     _act_auto_approve_review,
     _approve_ticket_locked,
     _clean_review_snapshot,
-    _detect_auto_adopt_plan,
     _detect_auto_approve_review,
     _find_blocked_task,
     _marker_version,
@@ -46,7 +46,12 @@ from cw.reconcile.gate_recipes import (
     run_gate_recipes,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests._reconcile_helpers import call_and_drain
+from tests._reconcile_helpers import (
+    call_and_drain,
+    detect_adopt_plan_prefetched,
+    forbidden_plan_fetch,
+    run_gate_recipes_prefetched,
+)
 from tests._worktree_helpers import patch_worktree
 from tests.conftest import (
     _make_daemon_session,
@@ -618,7 +623,10 @@ class TestMasterSwitch:
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
 
         recovered = call_and_drain(
-            run_gate_recipes, now=_NOW, config=_config(gate_recipes_enabled=False)
+            run_gate_recipes,
+            now=_NOW,
+            config=_config(gate_recipes_enabled=False),
+            plan_probes=PlanProbes(),
         )
 
         assert recovered == []
@@ -659,7 +667,9 @@ class TestPerLaneYamlDisablement:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
 
-        recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        recovered = call_and_drain(
+            run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+        )
 
         assert recovered == []
         store = load_dev_queue()
@@ -701,7 +711,9 @@ class TestPerLaneYamlDisablement:
             )
         )
 
-        recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        recovered = call_and_drain(
+            run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+        )
 
         assert recovered == ["GEN-B"]
 
@@ -719,7 +731,9 @@ class TestRunApprove:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
 
-        recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        recovered = call_and_drain(
+            run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+        )
 
         assert recovered == ["GEN-1"]
         store = load_dev_queue()
@@ -766,7 +780,9 @@ class TestRunApprove:
             )
         )
 
-        recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        recovered = call_and_drain(
+            run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+        )
 
         assert sorted(recovered) == ["GEN-1", "GEN-1"]
         store = load_dev_queue()
@@ -790,7 +806,9 @@ class TestRunApprove:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
 
-        call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        call_and_drain(
+            run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+        )
 
         events = read_events(
             consumer="test-gate-approve-event",
@@ -825,7 +843,9 @@ class TestRunApprove:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
 
-        call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        call_and_drain(
+            run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+        )
 
         assert len(stub_gh_comment) == 1
         argv = stub_gh_comment[0]
@@ -852,7 +872,9 @@ class TestRunApprove:
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
         deferred = DeferredReconcileJobs()
 
-        approved = run_gate_recipes(now=_NOW, config=_config(), deferred=deferred)
+        approved = run_gate_recipes(
+            now=_NOW, config=_config(), deferred=deferred, plan_probes=PlanProbes()
+        )
 
         assert approved == ["GEN-1"]
         assert load_dev_queue().tasks[0].stage == Stage.FINALIZE
@@ -889,7 +911,9 @@ class TestRunApprove:
         monkeypatch.setattr("cw.gh._sp.run", _boom)
 
         with caplog.at_level("WARNING"):
-            recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+            recovered = call_and_drain(
+                run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+            )
 
         # Approve still stands despite the comment write failing.
         assert recovered == ["GEN-1"]
@@ -929,7 +953,9 @@ class TestRunApprove:
 
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
 
-        approved = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        approved = call_and_drain(
+            run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+        )
 
         assert approved == ["GEN-1"]
         # _git_dir(acme) == acme's workspace_path, not beta's.
@@ -1029,7 +1055,9 @@ class TestActApproveFailure:
         monkeypatch.setattr("cw.reconcile.gate_recipes._approve_ticket_locked", _boom)
 
         with caplog.at_level("WARNING"):
-            recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+            recovered = call_and_drain(
+                run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+            )
 
         assert recovered == []
         store = load_dev_queue()
@@ -1150,8 +1178,12 @@ class TestActApproveFailure:
 
         monkeypatch.setattr("cw.reconcile.gate_recipes._approve_ticket_locked", _boom)
 
-        first_tick = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
-        second_tick = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        first_tick = call_and_drain(
+            run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+        )
+        second_tick = call_and_drain(
+            run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+        )
 
         assert first_tick == []
         assert second_tick == []
@@ -1235,7 +1267,9 @@ class TestActApproveFailure:
 
         monkeypatch.setattr("cw.reconcile.gate_recipes._approve_ticket_locked", _boom)
 
-        call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        call_and_drain(
+            run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+        )
 
         store = load_dev_queue()
         by_session = {t.session_id: t for t in store.tasks}
@@ -1275,7 +1309,9 @@ class TestActApproveFailure:
             )
         )
 
-        approved = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        approved = call_and_drain(
+            run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+        )
 
         store = load_dev_queue()
         # Key on created_at (stable identity): the approved row's session_id is
@@ -1350,7 +1386,9 @@ class TestActApproveFailure:
             "cw.reconcile.gate_recipes._approve_ticket_locked", _fail_beta_only
         )
 
-        call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        call_and_drain(
+            run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+        )
 
         store = load_dev_queue()
         by_client = {t.client: t for t in store.tasks}
@@ -1587,7 +1625,9 @@ class TestCommentNonZeroReturn:
         monkeypatch.setattr("cw.gh._sp.run", _fail)
 
         with caplog.at_level("WARNING"):
-            recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+            recovered = call_and_drain(
+                run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+            )
 
         assert recovered == ["GEN-1"]  # approve stands despite comment rc!=0
         assert any(
@@ -1670,7 +1710,7 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        candidates = _detect_auto_adopt_plan(
+        candidates = detect_adopt_plan_prefetched(
             state, [task], clients=_SEAM1_CLIENTS, config=_config()
         )
 
@@ -1718,7 +1758,7 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result(**result_kwargs))
 
         assert (
-            _detect_auto_adopt_plan(
+            detect_adopt_plan_prefetched(
                 CwState(sessions=[session]),
                 [task],
                 clients=_SEAM1_CLIENTS,
@@ -1743,7 +1783,7 @@ class TestDetectAdoptPlan:
         )
         session = _make_session(last_result=_plan_result())
 
-        candidates = _detect_auto_adopt_plan(
+        candidates = detect_adopt_plan_prefetched(
             CwState(sessions=[session]),
             [task],
             clients=_SEAM1_CLIENTS,
@@ -1759,7 +1799,7 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=result)
 
         assert (
-            _detect_auto_adopt_plan(
+            detect_adopt_plan_prefetched(
                 CwState(sessions=[session]),
                 [_make_task(stage=Stage.PLAN)],
                 clients=_SEAM1_CLIENTS,
@@ -1777,7 +1817,7 @@ class TestDetectAdoptPlan:
         state = CwState(sessions=[session])
 
         _assert_released_unreviewed(
-            _detect_auto_adopt_plan(
+            detect_adopt_plan_prefetched(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
         )
@@ -1791,7 +1831,7 @@ class TestDetectAdoptPlan:
         state = CwState(sessions=[session])
 
         _assert_released_unreviewed(
-            _detect_auto_adopt_plan(
+            detect_adopt_plan_prefetched(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
         )
@@ -1807,7 +1847,7 @@ class TestDetectAdoptPlan:
         state = CwState(sessions=[session])
 
         assert (
-            _detect_auto_adopt_plan(
+            detect_adopt_plan_prefetched(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
             == []
@@ -1822,7 +1862,7 @@ class TestDetectAdoptPlan:
         state = CwState(sessions=[session])
 
         assert (
-            _detect_auto_adopt_plan(
+            detect_adopt_plan_prefetched(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
             == []
@@ -1835,7 +1875,7 @@ class TestDetectAdoptPlan:
         state = CwState(sessions=[session])
 
         assert (
-            _detect_auto_adopt_plan(
+            detect_adopt_plan_prefetched(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
             == []
@@ -1847,7 +1887,7 @@ class TestDetectAdoptPlan:
         state = CwState(sessions=[])
 
         assert (
-            _detect_auto_adopt_plan(
+            detect_adopt_plan_prefetched(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
             == []
@@ -1859,7 +1899,7 @@ class TestDetectAdoptPlan:
         state = CwState(sessions=[])
 
         assert (
-            _detect_auto_adopt_plan(
+            detect_adopt_plan_prefetched(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
             == []
@@ -1874,7 +1914,7 @@ class TestDetectAdoptPlan:
         state = CwState(sessions=[session])
 
         assert (
-            _detect_auto_adopt_plan(
+            detect_adopt_plan_prefetched(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
             == []
@@ -1893,7 +1933,7 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        candidates = _detect_auto_adopt_plan(
+        candidates = detect_adopt_plan_prefetched(
             state, [task], clients=_SEAM1_CLIENTS, config=_config()
         )
 
@@ -1911,7 +1951,7 @@ class TestDetectAdoptPlan:
         state = CwState(sessions=[session])
 
         _assert_released_unreviewed(
-            _detect_auto_adopt_plan(
+            detect_adopt_plan_prefetched(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
         )
@@ -1930,7 +1970,7 @@ class TestDetectAdoptPlan:
         state = CwState(sessions=[session])
 
         _assert_released_unreviewed(
-            _detect_auto_adopt_plan(
+            detect_adopt_plan_prefetched(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
         )
@@ -1952,7 +1992,7 @@ class TestDetectAdoptPlan:
         state = CwState(sessions=[session])
 
         _assert_released_unreviewed(
-            _detect_auto_adopt_plan(
+            detect_adopt_plan_prefetched(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
         )
@@ -1975,7 +2015,7 @@ class TestDetectAdoptPlan:
         state = CwState(sessions=[session])
 
         _assert_released_unreviewed(
-            _detect_auto_adopt_plan(
+            detect_adopt_plan_prefetched(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
         )
@@ -2006,7 +2046,7 @@ class TestDetectAdoptPlan:
         monkeypatch.setattr(Path, "read_text", _boom_read_text)
 
         _assert_released_unreviewed(
-            _detect_auto_adopt_plan(
+            detect_adopt_plan_prefetched(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
         )
@@ -2029,7 +2069,7 @@ class TestDetectAdoptPlan:
         state = CwState(sessions=[session])
 
         _assert_released_unreviewed(
-            _detect_auto_adopt_plan(
+            detect_adopt_plan_prefetched(
                 state, [task], clients=_SEAM1_CLIENTS, config=_config()
             )
         )
@@ -2049,7 +2089,7 @@ class TestRunAdoptPlan:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
 
-        recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        recovered = run_gate_recipes_prefetched(now=_NOW, config=_config())
 
         assert recovered == ["GEN-1"]
         store = load_dev_queue()
@@ -2071,7 +2111,7 @@ class TestRunAdoptPlan:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
 
-        call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        run_gate_recipes_prefetched(now=_NOW, config=_config())
 
         events = read_events(
             consumer="test-gate-adopt-event",
@@ -2102,7 +2142,7 @@ class TestRunAdoptPlan:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
 
-        call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        run_gate_recipes_prefetched(now=_NOW, config=_config())
 
         assert len(stub_gh_comment) == 1
         argv = stub_gh_comment[0]
@@ -2132,7 +2172,7 @@ class TestRunAdoptPlan:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
 
-        recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        recovered = run_gate_recipes_prefetched(now=_NOW, config=_config())
 
         assert recovered == ["GEN-1"]
         released = load_dev_queue().tasks[0]
@@ -2173,9 +2213,53 @@ class TestRunAdoptPlan:
             )
         )
 
-        recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        recovered = run_gate_recipes_prefetched(now=_NOW, config=_config())
 
         assert recovered == ["GEN-R", "GEN-P"]
+
+    def test_run_gate_recipes_without_probes_skips_plan_candidates_but_releases_review(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2545: with no plan prefetch the plan row stays parked for the tick
+        and no live read runs, while a review candidate in the same call is
+        still approved."""
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.gate_recipes.fetch_approved_plan_comment",
+            forbidden_plan_fetch(),
+        )
+        review_task = _make_task(
+            ticket_id="GEN-R", session_id="sess-r", stage=Stage.REVIEW
+        )
+        plan_task = _make_task(ticket_id="GEN-P", session_id="sess-p", stage=Stage.PLAN)
+        save_dev_queue(DevQueueStore(tasks=[review_task, plan_task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        ticket_id="GEN-R",
+                        session_id="sess-r",
+                        last_result=_clean_result(),
+                    ),
+                    _make_session(
+                        ticket_id="GEN-P",
+                        session_id="sess-p",
+                        last_result=_plan_result(),
+                    ),
+                ]
+            )
+        )
+
+        recovered = call_and_drain(
+            run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+        )
+
+        assert recovered == ["GEN-R"]
+        plan_row = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-P")
+        assert plan_row.status == QueueItemStatus.BLOCKED_ON_USER
+        assert plan_row.stage == Stage.PLAN
 
     def test_comment_failure_swallowed_and_logged(
         self,
@@ -2201,7 +2285,7 @@ class TestRunAdoptPlan:
         monkeypatch.setattr("cw.gh._sp.run", _boom)
 
         with caplog.at_level("WARNING"):
-            recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+            recovered = run_gate_recipes_prefetched(now=_NOW, config=_config())
 
         assert recovered == ["GEN-1"]
         store = load_dev_queue()
@@ -2232,7 +2316,7 @@ class TestRunAdoptPlan:
         monkeypatch.setattr("cw.gh._sp.run", _fail)
 
         with caplog.at_level("WARNING"):
-            recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+            recovered = run_gate_recipes_prefetched(now=_NOW, config=_config())
 
         assert recovered == ["GEN-1"]
         assert any(
@@ -2271,7 +2355,7 @@ class TestActAdoptPlanFailure:
         monkeypatch.setattr("cw.reconcile.gate_recipes._approve_ticket_locked", _boom)
 
         with caplog.at_level("WARNING"):
-            recovered = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+            recovered = run_gate_recipes_prefetched(now=_NOW, config=_config())
 
         assert recovered == []
         store = load_dev_queue()
@@ -2327,8 +2411,8 @@ class TestActAdoptPlanFailure:
 
         monkeypatch.setattr("cw.reconcile.gate_recipes._approve_ticket_locked", _boom)
 
-        first_tick = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
-        second_tick = call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        first_tick = run_gate_recipes_prefetched(now=_NOW, config=_config())
+        second_tick = run_gate_recipes_prefetched(now=_NOW, config=_config())
 
         assert first_tick == []
         assert second_tick == []
@@ -2538,7 +2622,7 @@ class TestActAdoptRecheckRace:
 
         monkeypatch.setattr("cw.gh._sp.run", _tracking_run)
 
-        call_and_drain(run_gate_recipes, now=_NOW, config=_config())
+        run_gate_recipes_prefetched(now=_NOW, config=_config())
 
         assert events == ["locked", "unlocked", "comment_posted"]
 
@@ -2778,7 +2862,7 @@ class TestMasterSwitchVsLane:
         task = _make_task(stage=Stage.PLAN)
         state = CwState(sessions=[_make_session(last_result=_plan_result())])
 
-        candidates = _detect_auto_adopt_plan(
+        candidates = detect_adopt_plan_prefetched(
             state, [task], clients=clients, config=_config()
         )
 
@@ -2878,7 +2962,7 @@ class TestDetectAdoptPlanTrackerAware:
         task = _make_task(stage=Stage.PLAN, worktree_path=None)
         state = CwState(sessions=[_make_session(last_result=_plan_result())])
 
-        candidates = _detect_auto_adopt_plan(
+        candidates = detect_adopt_plan_prefetched(
             state, [task], clients=_linear_clients(tmp_path / "ws"), config=_config()
         )
 
@@ -2903,7 +2987,7 @@ class TestDetectAdoptPlanTrackerAware:
         state = CwState(sessions=[_make_session(last_result=_plan_result())])
 
         _assert_released_unreviewed(
-            _detect_auto_adopt_plan(
+            detect_adopt_plan_prefetched(
                 state,
                 [task],
                 clients=_linear_clients(tmp_path / "ws"),
@@ -2928,6 +3012,6 @@ class TestDetectAdoptPlanTrackerAware:
         task = _make_task(stage=Stage.PLAN, worktree_path=None)
         state = CwState(sessions=[_make_session(last_result=_plan_result())])
 
-        _detect_auto_adopt_plan(state, [task], clients={}, config=_config())
+        detect_adopt_plan_prefetched(state, [task], clients={}, config=_config())
 
         assert calls == ["GEN-1"]

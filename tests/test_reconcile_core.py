@@ -57,6 +57,11 @@ from cw.reconcile import core as reconcile_core
 from cw.reconcile._shared import ProposedAction, ReapCandidate
 from cw.reconcile.codex_boot import CAPTURE_BUDGET_SECONDS, CleanProbe, CleanProbes
 from cw.reconcile.deferred import DeferredReconcileJobs
+from cw.reconcile.gate_plan_probes import (
+    PLAN_PREFETCH_BUDGET_SECONDS,
+    PLAN_PREFETCH_MAX_PER_TICK,
+    PlanProbes,
+)
 from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
     RECIPE_AUTO_FIX_CI,
@@ -85,7 +90,7 @@ from tests._reconcile_helpers import (
 from tests.conftest import _make_daemon_session, _make_ticket_task
 from tests.test_pr_hydrate import _pr_state
 from tests.test_reconcile_codex_reparks import _seed_two_client_parks
-from tests.test_reconcile_gate_recipes import _GATE_LANES, _clean_result
+from tests.test_reconcile_gate_recipes import _GATE_LANES, _clean_result, _plan_result
 from tests.test_reconcile_gate_recipes import _make_session as _gate_session
 from tests.test_reconcile_gate_recipes import _make_task as _gate_task
 from tests.test_reconcile_review_recipes import _cr_task
@@ -1100,8 +1105,10 @@ class TestConciergeAndEscalationWiring:
 
 
 # reconcile()'s dev-queue loads: its gh pre-pass first, then the codex
-# clean-probe pre-pass (#2563).
+# clean-probe pre-pass (#2563), then the gate recipes' plan prefetch
+# pre-pass third (#2545).
 _CODEX_PRE_PASS_LOAD = 2
+_PLAN_PRE_PASS_LOAD = 3
 
 
 class TestCodexLiveWriterRepark:
@@ -1351,6 +1358,150 @@ def test_capture_pre_pass_spends_at_most_its_budget(
 
     assert probes.budget_seconds == CAPTURE_BUDGET_SECONDS
     assert len(probes.captured_keys) == 1
+
+
+class TestPlanPrefetchPrePass:
+    """#2545: the gate recipes' plan-of-record read runs in a lockless
+    pre-pass, and the in-lock run_gate_recipes only reads its probes."""
+
+    @pytest.mark.parametrize("phantom", [False, True], ids=["no-phantoms", "phantom"])
+    def test_plan_pre_pass_is_captured_unlocked_and_threaded_through(
+        self, monkeypatch: pytest.MonkeyPatch, phantom: bool
+    ) -> None:
+        if phantom:
+            save_state(CwState(sessions=[_mk_session("phantom-1", "missing-ref")]))
+            monkeypatch.setattr(
+                "cw.reconcile.core._claude_agents_json",
+                lambda: [{"sessionId": "unrelated1"}],
+            )
+        else:
+            save_state(CwState(sessions=[]))
+        sentinel = PlanProbes()
+        lock_free_at_capture: list[bool] = []
+
+        def _fake_capture(
+            *, config: OrchestratorConfig, clients: dict[str, ClientConfig]
+        ) -> PlanProbes:
+            del config, clients
+            lock_free_at_capture.append(probe_sessions_lock_free())
+            return sentinel
+
+        monkeypatch.setattr(reconcile_core, "_capture_plan_probes", _fake_capture)
+        gate_mock = MagicMock(return_value=[])
+        monkeypatch.setattr("cw.reconcile.core.run_gate_recipes", gate_mock)
+
+        report = reconcile()
+
+        assert report.phantom_session_ids == (["phantom-1"] if phantom else [])
+        assert lock_free_at_capture == [True]
+        gate_mock.assert_called_once()
+        assert gate_mock.call_args.kwargs["plan_probes"] is sentinel
+
+    def test_plan_pre_pass_is_bounded_by_the_explicit_cap_and_budget(self) -> None:
+        save_state(CwState(sessions=[]))
+
+        probes = reconcile_core._capture_plan_probes(
+            config=OrchestratorConfig(gate_recipes_enabled=True), clients={}
+        )
+
+        assert probes.max_captures == PLAN_PREFETCH_MAX_PER_TICK
+        assert probes.budget_seconds == PLAN_PREFETCH_BUDGET_SECONDS
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            OSError("state unreadable"),
+            json.JSONDecodeError("bad", "{", 0),
+            _validation_error(),
+        ],
+        ids=["os-error", "json-decode-error", "validation-error"],
+    )
+    def test_capture_plan_pre_pass_contains_state_read_errors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        error: Exception,
+    ) -> None:
+        def _fail() -> CwState:
+            raise error
+
+        monkeypatch.setattr(reconcile_core, "load_state", _fail)
+
+        with caplog.at_level(logging.WARNING, logger=reconcile_core.__name__):
+            probes = reconcile_core._capture_plan_probes(
+                config=OrchestratorConfig(gate_recipes_enabled=True), clients={}
+            )
+
+        assert probes.captured_keys == frozenset()
+        assert probes.budget_seconds is None
+        assert probes.max_captures is None
+        assert "plan prefetch pre-pass could not read state" in caplog.text
+
+    def test_capture_plan_pre_pass_does_not_swallow_unexpected_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only state/dev-queue read errors are contained: a reader bug
+        propagates out of the pre-pass, as it did from the old in-lock read."""
+        save_dev_queue(DevQueueStore(tasks=[_gate_task(stage=Stage.PLAN)]))
+        save_state(CwState(sessions=[_gate_session(last_result=_plan_result())]))
+
+        def _boom(_task: TicketTask, _client_cfg: ClientConfig | None) -> str | None:
+            msg = "a reader bug, not an unreadable file"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("cw.reconcile.gate_recipes._plan_of_record_body", _boom)
+
+        with pytest.raises(RuntimeError, match="a reader bug"):
+            reconcile_core._capture_plan_probes(
+                config=OrchestratorConfig(gate_recipes_enabled=True), clients={}
+            )
+
+    def test_capture_plan_pre_pass_reads_nothing_when_gate_recipes_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reads: list[str] = []
+
+        def _spy() -> CwState:
+            reads.append("state")
+            return CwState(sessions=[])
+
+        monkeypatch.setattr(reconcile_core, "load_state", _spy)
+
+        probes = reconcile_core._capture_plan_probes(
+            config=OrchestratorConfig(gate_recipes_enabled=False), clients={}
+        )
+
+        assert reads == []
+        assert probes.captures == 0
+        assert probes.max_captures is None
+
+    def test_unreadable_dev_queue_in_the_plan_pre_pass_does_not_fail_reconcile(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        save_state(CwState(sessions=[]))
+        real_load = reconcile_core.load_dev_queue
+        loads: list[int] = []
+
+        def _third_load_fails() -> DevQueueStore:
+            loads.append(1)
+            if len(loads) == _PLAN_PRE_PASS_LOAD:
+                msg = "dev queue unreadable"
+                raise OSError(msg)
+            return real_load()
+
+        monkeypatch.setattr(reconcile_core, "load_dev_queue", _third_load_fails)
+        gate_mock = MagicMock(return_value=[])
+        monkeypatch.setattr("cw.reconcile.core.run_gate_recipes", gate_mock)
+
+        with caplog.at_level(logging.WARNING, logger=reconcile_core.__name__):
+            report = reconcile()
+
+        assert isinstance(report, ReconcileReport)
+        probes = gate_mock.call_args.kwargs["plan_probes"]
+        assert isinstance(probes, PlanProbes)
+        assert probes.captured_keys == frozenset()
+        assert probes.budget_seconds is None
+        assert "plan prefetch pre-pass could not read state" in caplog.text
 
 
 class TestFixDispatchRunsPostLock:
