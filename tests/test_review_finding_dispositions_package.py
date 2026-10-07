@@ -65,6 +65,7 @@ _MODEL = f"{_PKG}.model"
 _DRIFT = f"{_PKG}.drift"
 _PROVENANCE = f"{_PKG}.provenance"
 _MATCH = f"{_PKG}.match"
+_EMIT = f"{_PKG}.emit"
 _LOGGER = "cw.review_finding_dispositions"
 _TICKET = "T-2498"
 
@@ -122,14 +123,14 @@ _OWNER: dict[str, str] = {
     "_ledger_matches": _MATCH,
     "_CLAIM_NOTE": _PKG,
     "_stamp_suppressed": _PKG,
-    "_emit_suppression": _PKG,
-    "_emit_shadow": _PKG,
+    "_emit_suppression": _EMIT,
+    "_emit_shadow": _EMIT,
     "_GIT_DIFF_UNCHANGED": _DRIFT,
     "_GIT_DIFF_CHANGED": _DRIFT,
     "disposition_drifted": _DRIFT,
-    "disposition_event_type": _PKG,
-    "disposition_event_payload": _PKG,
-    "_emit_stale": _PKG,
+    "disposition_event_type": _EMIT,
+    "disposition_event_payload": _EMIT,
+    "_emit_stale": _EMIT,
     "suppress_adjudicated_findings": _PKG,
     "build_finding_disposition_ledger": _PKG,
 }
