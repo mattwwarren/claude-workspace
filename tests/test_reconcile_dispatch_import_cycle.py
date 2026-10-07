@@ -68,24 +68,6 @@ _DEFERRED_DISPATCH_IMPORTS: Counter[_ImportKey] = Counter(
             "cw.dispatch.claim",
             ("_park_running_task_blocked_on_user",),
         ): 1,
-        (
-            "src/cw/reconcile/fix_dispatch.py",
-            "_park_for_unresolved_ref",
-            "cw.dispatch.claim",
-            ("_park_running_task_blocked_on_user",),
-        ): 1,
-        (
-            "src/cw/reconcile/local.py",
-            "_requeue_codex_harvest_orphan",
-            "cw.dispatch.claim",
-            ("_revert_claimed_task_to_pending",),
-        ): 1,
-        (
-            "src/cw/reconcile/local.py",
-            "act_on_codex_harvest_candidate",
-            "cw.dispatch.claim",
-            ("_park_running_task_blocked_on_user",),
-        ): 1,
     }
 )
 
@@ -140,8 +122,6 @@ _RECONCILE_PLC0415_KEYS = frozenset(
         "src/cw/reconcile/_shared/_routing.py",
         "src/cw/reconcile/_shared/_sentinels.py",
         "src/cw/reconcile/codex_boot.py",
-        "src/cw/reconcile/fix_dispatch.py",
-        "src/cw/reconcile/local.py",
         "src/cw/reconcile/review_recipes/address_review.py",
         "src/cw/reconcile/review_recipes/fix_agent.py",
         "src/cw/reconcile/review_recipes/auto_fix_ci.py",

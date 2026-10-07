@@ -83,6 +83,10 @@ from cw.models import (
     Stage,
     TicketTask,
 )
+from cw.queue_rows import (
+    _park_running_task_blocked_on_user,
+    _revert_claimed_task_to_pending,
+)
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
     ProposedAction,
@@ -383,9 +387,6 @@ def _requeue_codex_harvest_orphan(session: Session, task: TicketTask) -> bool:
     Payload mirrors ``codex_boot._requeue_clean_orphan`` field for field.
     Returns whether the revert happened.
     """
-    # Deferred for the import-cycle reason codex_boot documents.
-    from cw.dispatch.claim import _revert_claimed_task_to_pending
-
     if not _revert_claimed_task_to_pending(
         session.client, task.ticket_id, expected_session_id=session.id
     ):
@@ -495,9 +496,6 @@ def act_on_codex_harvest_candidate(
         if _requeue_codex_harvest_orphan(session, task):
             return CodexHarvestOutcome.REQUEUED
         return CodexHarvestOutcome.TRANSITION_LOST
-    # Deferred for the import-cycle reason codex_boot documents.
-    from cw.dispatch.claim import _park_running_task_blocked_on_user
-
     if not _park_running_task_blocked_on_user(
         ticket_id=task.ticket_id,
         client_name=session.client,
