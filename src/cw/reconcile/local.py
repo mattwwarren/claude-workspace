@@ -24,16 +24,19 @@ before ``_synthesize_harvest_sentinel`` into an audited clean-requeue gate —
 the four checks ``cw.reconcile.codex_boot`` requeues on (``reap_policy:
 auto``, codex fix loop off, worktree clean apart from the review verdict, HEAD
 unmoved since the review's baseline), all evaluated so the audit event records
-each one. Any failing check parks; a clean pre-lock result authorizes the
-requeue under the lock.
-Either way the session closes ``COMPLETED``/``CRASHED``, only after its
-``SESSION_COMPLETED`` audit event is recorded. The sweep does not repeat the
+each one. Any failing check parks; a matching pre-lock clean result is
+deferred because it cannot safely authorize requeue without a final worktree
+check.
+For a failing gate the session closes ``COMPLETED``/``CRASHED``, only after its
+``SESSION_COMPLETED`` audit event is recorded; a matching clean probe is
+deferred before that event. The sweep does not repeat the
 boot pass's live-writer process scan: the recycled-PID guard has already
 proven the codex process dead. The two git checks never run under the
 caller's ``sessions_lock`` (#2563): ``reconcile()`` captures them first,
 lockless, through :func:`capture_codex_harvest_probes`, and the gate reads
-those pre-lock probes. A session whose probe is missing or stale is left
-untouched (``PROBE_UNAVAILABLE``) for the next tick.
+those pre-lock probes. A session whose probe is missing, stale, or cannot
+safely authorize a clean requeue is left untouched (``PROBE_UNAVAILABLE``)
+for the next tick.
 
 ``act_on_codex_harvest_candidate`` has a second caller,
 ``cw.codex_legacy_recovery`` (``cw codex migrate-legacy``, RFC 0014 B1,
@@ -573,9 +576,10 @@ def act_on_codex_harvest_candidate(
 
     The gate's git checks are read from *probes*, captured before the caller
     took ``sessions_lock`` (#2563); nothing here runs git. A missing or stale
-    probe (``None`` means none was captured) leaves everything untouched and
-    returns ``PROBE_UNAVAILABLE``, before any audit event, so the next tick
-    retries.
+    probe (``None`` means none was captured), or a matching clean probe that
+    cannot safely authorize a requeue without a final worktree check, leaves
+    everything untouched and returns ``PROBE_UNAVAILABLE``, before any audit
+    event, so the next tick retries.
 
     Audit before effect (``codex_boot._close_session_audited``'s ordering): a
     failed audit write transitions nothing (``AUDIT_FAILED``), so the next
@@ -593,11 +597,12 @@ def act_on_codex_harvest_candidate(
     only for ``cw.codex_legacy_recovery`` (see
     :func:`_codex_recovery_audit_payload`).
     """
-    try:
+    gate: _CodexGateResult | None = None
+    with contextlib.suppress(CleanProbeUnavailableError):
         gate = _evaluate_codex_clean_requeue_gate(
             worktree, task, client, clients, config, lookup_probe(probes)
         )
-    except CleanProbeUnavailableError:
+    if gate is None or gate.should_requeue:
         _log.warning(
             "reconcile.local: codex session %s (%s/%s) has no usable clean"
             " probe; leaving it for the next tick",

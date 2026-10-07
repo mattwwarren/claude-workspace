@@ -40,7 +40,6 @@ from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.models import (
     CodexHarvestOutcome,
-    CompletionReason,
     DevQueueStore,
     LocalLivenessHandle,
     OrchestratorConfig,
@@ -48,7 +47,6 @@ from cw.models import (
     QueueItemStatus,
     ReapPolicy,
     SessionStatus,
-    Stage,
 )
 from cw.reconcile import (
     ProposedAction,
@@ -285,38 +283,21 @@ def test_unresolvable_baseline_parks_as_git_error(
     )
 
 
-def test_all_checks_pass_requeues(
+def test_all_checks_pass_defers_without_audit_or_transition(
     tmp_config_dir: Path, tmp_path: Path, make_git_repo: Callable[..., Path]
 ) -> None:
     _seed(tmp_config_dir, tmp_path, make_git_repo)
 
     assert _harvest(_AUTO) == []
 
-    task = load_dev_queue().tasks[0]
-    assert task.status is QueueItemStatus.PENDING
-    assert task.session_id is None
-    assert task.disposition is None
-    _assert_session_closed()
-    session = load_state().sessions[0]
-    assert session.completed_reason is CompletionReason.CRASHED
-    assert session.completed_at == _NOW
-    assert _attention_events("codex-harvest-requeue-attention") == []
-    assert _requeued_events("codex-harvest-requeue") == [
-        {
-            "ticket_id": _TICKET,
-            "client": "client-a",
-            "from_stage": Stage.REVIEW,
-            "to_stage": Stage.REVIEW,
-            "reason": CODEX_HARVEST_CLEAN_REQUEUE_REASON,
-            "session_id": _TICKET,
-        }
-    ]
+    _assert_untouched("codex-harvest-clean-defer")
 
 
 def test_audit_event_carries_full_recovery_evidence(
     tmp_config_dir: Path, tmp_path: Path, make_git_repo: Callable[..., Path]
 ) -> None:
-    _seed(tmp_config_dir, tmp_path, make_git_repo)
+    repo = _seed(tmp_config_dir, tmp_path, make_git_repo)
+    (repo / "extra.txt").write_text("stray\n")
 
     _harvest(_AUTO)
 
@@ -336,9 +317,9 @@ def test_audit_event_carries_full_recovery_evidence(
         "salvaged": False,
         "prior_status": "active",
         "resulting_status": "completed",
-        "disposition": "requeued",
-        "reason": CODEX_HARVEST_CLEAN_REQUEUE_REASON,
-        "gate_checks": dict.fromkeys(_GATE_KEYS, True),
+        "disposition": "parked",
+        "reason": _PARK_REASON_DIRTY_WORKTREE,
+        "gate_checks": {**dict.fromkeys(_GATE_KEYS, True), "worktree_clean": False},
         "pid": _DEAD_PID,
         "start_time_ns": _DEAD_START_TIME_NS,
     }
@@ -373,7 +354,7 @@ def test_failed_audit_write_blocks_the_transition(
         monkeypatch, reconcile_local, OrchestratorEventType.SESSION_COMPLETED
     )
 
-    assert _harvest(_AUTO) == []
+    assert _harvest(_SIGNAL_ONLY) == []
 
     session = _assert_session_left_active()
     task = load_dev_queue().tasks[0]
@@ -384,9 +365,9 @@ def test_failed_audit_write_blocks_the_transition(
 
     monkeypatch.setattr(reconcile_local, "record_event", real)
 
-    assert _harvest(_AUTO) == []
+    assert _harvest(_SIGNAL_ONLY) == []
     _assert_session_closed()
-    assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
+    assert load_dev_queue().tasks[0].status is QueueItemStatus.BLOCKED_ON_USER
     assert len(_completed_events("codex-harvest-failed-audit-completed")) == 1
 
 
@@ -448,7 +429,7 @@ def test_codex_candidate_never_reaches_git_synthesis_or_opencode_parse(
     for backend in ("aider", "opencode"):
         monkeypatch.setitem(reconcile_local._HARVEST_SYNTHESIZERS, backend, _forbidden)
 
-    _harvest(_AUTO)
+    _harvest(_SIGNAL_ONLY)
 
     session = load_state().sessions[0]
     assert session.last_result is None
@@ -465,7 +446,10 @@ def test_codex_harvest_ticket_id_excluded_from_harvested_list(
     _seed(tmp_config_dir, tmp_path, make_git_repo)
 
     assert _TICKET not in _harvest(config)
-    _assert_session_closed()
+    if config is _AUTO:
+        _assert_untouched("codex-harvest-clean-defer")
+    else:
+        _assert_session_closed()
 
 
 def _assert_untouched(consumer: str) -> None:
@@ -529,13 +513,13 @@ def test_requeue_skipped_when_the_row_was_reclaimed(
     with caplog.at_level(logging.WARNING, logger=reconcile_local.__name__):
         assert _harvest(_AUTO) == []
 
-    _assert_session_closed()
+    _assert_session_left_active()
     task = load_dev_queue().tasks[0]
     assert task.status is QueueItemStatus.RUNNING
     assert task.session_id == "fresh-session"
     assert _requeued_events("codex-harvest-reclaimed-requeued") == []
-    assert len(_completed_events("codex-harvest-reclaimed-completed")) == 1
-    assert "requeue skipped" in caplog.text
+    assert _completed_events("codex-harvest-reclaimed-completed") == []
+    assert "no usable clean probe" in caplog.text
 
 
 def test_unknown_client_leaves_session_untouched(
@@ -575,7 +559,7 @@ def test_config_param_defaults_to_effective_config_when_omitted(
 
     assert loads == [1]
     # The loaded (auto) config is what the gate ran against.
-    assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
+    assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
 
 
 # --------------------------------------------------------------------------- #
@@ -626,13 +610,14 @@ def _repoint_row(session_id: str) -> None:
     save_dev_queue(store)
 
 
-def test_act_returns_requeued(
+def test_act_with_a_matching_clean_probe_defers(
     tmp_config_dir: Path, tmp_path: Path, make_git_repo: Callable[..., Path]
 ) -> None:
     _seed(tmp_config_dir, tmp_path, make_git_repo)
 
-    assert _act(_AUTO) is CodexHarvestOutcome.REQUEUED
-    assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
+    assert _act(_AUTO) is CodexHarvestOutcome.PROBE_UNAVAILABLE
+    _assert_session_left_active()
+    assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
 
 
 def test_act_returns_parked(
@@ -650,7 +635,8 @@ def test_act_returns_audit_failed_and_transitions_nothing(
     make_git_repo: Callable[..., Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _seed(tmp_config_dir, tmp_path, make_git_repo)
+    repo = _seed(tmp_config_dir, tmp_path, make_git_repo)
+    (repo / "extra.txt").write_text("stray\n")
     _failing_record_event(
         monkeypatch, reconcile_local, OrchestratorEventType.SESSION_COMPLETED
     )
@@ -661,7 +647,7 @@ def test_act_returns_audit_failed_and_transitions_nothing(
     assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
 
 
-def test_act_returns_transition_lost_when_the_revert_is_lost(
+def test_act_defers_before_a_requeue_transition_check(
     tmp_config_dir: Path,
     tmp_path: Path,
     make_git_repo: Callable[..., Path],
@@ -669,22 +655,10 @@ def test_act_returns_transition_lost_when_the_revert_is_lost(
 ) -> None:
     _seed(tmp_config_dir, tmp_path, make_git_repo)
     _repoint_row("fresh-session")
-    reverted: list[bool] = []
-    real_requeue = reconcile_local._requeue_codex_harvest_orphan
 
-    def _recording_requeue(session: Session, task: TicketTask) -> bool:
-        result = real_requeue(session, task)
-        reverted.append(result)
-        return result
+    assert _act(_AUTO) is CodexHarvestOutcome.PROBE_UNAVAILABLE
 
-    monkeypatch.setattr(
-        reconcile_local, "_requeue_codex_harvest_orphan", _recording_requeue
-    )
-
-    assert _act(_AUTO) is CodexHarvestOutcome.TRANSITION_LOST
-
-    assert reverted == [False]
-    _assert_session_closed()
+    _assert_session_left_active()
     assert _requeued_events("codex-act-lost-revert") == []
     assert load_dev_queue().tasks[0].session_id == "fresh-session"
 
@@ -784,7 +758,7 @@ def test_harvest_wrapper_returns_the_act_outcome(
 
     outcome = _wrapper(real_task=load_dev_queue().tasks[0], client_name="client-a")
 
-    assert outcome is CodexHarvestOutcome.REQUEUED
+    assert outcome is CodexHarvestOutcome.PROBE_UNAVAILABLE
 
 
 # --------------------------------------------------------------------------- #
@@ -989,7 +963,7 @@ def test_held_lock_sweep_runs_no_git(
 
     assert {subcommand for subcommand, _ in git_calls} == {"status", "rev-parse"}
     assert all(lock_free for _, lock_free in git_calls)
-    assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
+    assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
 
 
 def test_pre_pass_with_a_spent_budget_captures_nothing_and_does_not_raise(
@@ -1038,8 +1012,6 @@ def test_reconcile_requeues_a_dead_codex_session_with_git_outside_the_lock(
 
     assert {subcommand for subcommand, _ in git_calls} == {"status", "rev-parse"}
     assert all(lock_free for _, lock_free in git_calls)
-    _assert_session_closed()
-    assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
-    assert [p["reason"] for p in _requeued_events("codex-harvest-e2e")] == [
-        CODEX_HARVEST_CLEAN_REQUEUE_REASON
-    ]
+    _assert_session_left_active()
+    assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
+    assert _requeued_events("codex-harvest-e2e") == []

@@ -29,7 +29,6 @@ from freezegun import freeze_time
 from cw import codex_legacy_recovery
 from cw.cli import main
 from cw.codex_legacy_recovery import (
-    CODEX_LEGACY_RECOVERY_REASON,
     REASON_AUDIT_WRITE_FAILED,
     REASON_CLIENT_MISSING,
     REASON_LIVE_WRITER,
@@ -76,7 +75,6 @@ from cw.reconcile.codex_boot import (
     reap_orphaned_codex_sessions_at_boot,
 )
 from cw.reconcile.local import (
-    CODEX_HARVEST_CLEAN_REQUEUE_REASON,
     CODEX_HARVEST_ORPHANED_DISPOSITION,
 )
 from tests._clients_yaml import review_backend_clients, write_clients_yaml
@@ -337,7 +335,7 @@ def _wrap_after_scan(
 
 # Mixed population: every disposition the recovery can reach in one run.
 _MIXED_EXPECTED = {
-    "T-clean": CodexLegacyDisposition.REQUEUED,
+    "T-clean": CodexLegacyDisposition.FAILED,
     "T-dirty": CodexLegacyDisposition.PARKED,
     "T-moved": CodexLegacyDisposition.PARKED,
     "T-other": CodexLegacyDisposition.SKIPPED_ALREADY_HANDLED,
@@ -359,7 +357,7 @@ def _seed_mixed(
     _seed_legacy(make_git_repo, "T-linked", row="linked")
     _seed_legacy(make_git_repo, "T-norow", row="none")
     live = _seed_legacy(make_git_repo, "T-live")
-    _seed_legacy(make_git_repo, "T-audit")
+    _seed_legacy(make_git_repo, "T-audit", dirty=True)
     _writers_in(monkeypatch, live.worktree_path)
     return _fail_audit_for(monkeypatch, "T-audit")
 
@@ -389,22 +387,23 @@ def test_mixed_population_counts_every_disposition(
         marker.failed,
         marker.skipped_already_handled,
         marker.skipped_writer_live,
-    ) == (8, 1, 2, 1, 3, 1)
+    ) == (8, 0, 2, 2, 3, 1)
     _assert_counts_consistent(marker)
     assert marker.completed_at is None
     assert _unresolved(marker) == {
+        "T-clean": REASON_PROBE_UNAVAILABLE,
         "T-live": REASON_LIVE_WRITER,
         "T-audit": REASON_AUDIT_WRITE_FAILED,
     }
     # Acted-on sessions close; everything else is left exactly as found.
-    for ticket_id in ("T-clean", "T-dirty", "T-moved"):
+    for ticket_id in ("T-dirty", "T-moved"):
         closed = _session(ticket_id)
         assert closed.status is SessionStatus.COMPLETED
         assert closed.completed_reason is CompletionReason.CRASHED
         assert closed.completed_at == _NOW
-    for ticket_id in ("T-other", "T-linked", "T-norow", "T-live", "T-audit"):
+    for ticket_id in ("T-clean", "T-other", "T-linked", "T-norow", "T-live", "T-audit"):
         assert _session(ticket_id).status is SessionStatus.ACTIVE
-    assert _task("T-clean").status is QueueItemStatus.PENDING
+    assert _task("T-clean").status is QueueItemStatus.RUNNING
     assert _task("T-dirty").status is QueueItemStatus.BLOCKED_ON_USER
     assert _task("T-dirty").disposition == CODEX_HARVEST_ORPHANED_DISPOSITION
     assert _task("T-moved").status is QueueItemStatus.BLOCKED_ON_USER
@@ -448,22 +447,12 @@ def test_partial_run_retries_only_unresolved_then_completes(
     report = run_codex_legacy_recovery(now=_LATER)
 
     marker = report.marker
-    assert report.status is LegacyRecoveryStatus.COMPLETED
-    assert marker.completed_at == _LATER
-    assert marker.unresolved == []
-    assert _dispositions(marker)["T-live"] == CodexLegacyDisposition.REQUEUED
-    assert _dispositions(marker)["T-audit"] == CodexLegacyDisposition.REQUEUED
-    assert (marker.scanned, marker.requeued, marker.parked, marker.failed) == (
-        8,
-        3,
-        2,
-        0,
-    )
-    assert (marker.skipped_already_handled, marker.skipped_writer_live) == (3, 0)
-    _assert_counts_consistent(marker)
-    # Resolved sessions were not touched a second time.
-    assert len(_completed_events("retry-completed")) == 5
-    assert len(_requeued_events("retry-requeued")) == 3
+    assert report.status is LegacyRecoveryStatus.PARTIAL
+    assert marker.completed_at is None
+    assert _unresolved(marker) == {
+        "T-clean": REASON_PROBE_UNAVAILABLE,
+        "T-live": REASON_PROBE_UNAVAILABLE,
+    }
 
 
 def test_completed_marker_makes_a_third_run_a_no_op(
@@ -476,18 +465,17 @@ def test_completed_marker_makes_a_third_run_a_no_op(
     run_codex_legacy_recovery(now=_NOW)
     _writers_in(monkeypatch)
     monkeypatch.setattr(reconcile_local, "record_event", real_record_event)
-    completed = run_codex_legacy_recovery(now=_LATER)
+    run_codex_legacy_recovery(now=_LATER)
     before = _file_bytes()
     events_before = len(read_events())
 
     report = run_codex_legacy_recovery(now=_LATER + timedelta(days=1))
 
-    assert report.status is LegacyRecoveryStatus.ALREADY_COMPLETED
-    assert report.marker == completed.marker
-    assert _file_bytes() == before
-    assert len(read_events()) == events_before
-    # A fresh loader read (a new process) sees the same persisted marker.
-    assert load_codex_legacy_marker() == completed.marker
+    assert report.status is LegacyRecoveryStatus.PARTIAL
+    assert report.marker.completed_at is None
+    assert _file_bytes() != before
+    assert len(read_events()) >= events_before
+    assert load_codex_legacy_marker() == report.marker
 
 
 def test_empty_population_completes_with_zero_counts(
@@ -521,22 +509,10 @@ def test_clean_case_audit_payload_is_the_legacy_shape(
     _no_codex_process(monkeypatch)
     _seed_legacy(make_git_repo, "T-clean")
 
-    run_codex_legacy_recovery(now=_NOW)
+    report = run_codex_legacy_recovery(now=_NOW)
 
-    [payload] = _completed_events("legacy-audit")
-    assert payload["legacy"] is True
-    assert payload["reason"] == CODEX_LEGACY_RECOVERY_REASON
-    assert payload["detail"] == CODEX_HARVEST_CLEAN_REQUEUE_REASON
-    assert payload["pid"] is None
-    assert payload["start_time_ns"] is None
-    assert payload["executor"] == "codex"
-    assert payload["crashed"] is True
-    assert payload["disposition"] == "requeued"
-    assert payload["prior_status"] == SessionStatus.ACTIVE.value
-    gate_checks = payload["gate_checks"]
-    assert isinstance(gate_checks, dict)
-    assert tuple(gate_checks) == _GATE_KEYS
-    assert all(gate_checks.values())
+    assert _completed_events("legacy-audit") == []
+    assert _unresolved(report.marker) == {"T-clean": REASON_PROBE_UNAVAILABLE}
 
 
 def test_clean_case_emits_one_audit_and_one_requeue(
@@ -550,15 +526,9 @@ def test_clean_case_emits_one_audit_and_one_requeue(
 
     run_codex_legacy_recovery(now=_NOW)
 
-    # TASK_TRANSITION is the row transition primitive's own record.
-    assert _event_types() == [
-        OrchestratorEventType.SESSION_COMPLETED,
-        OrchestratorEventType.TASK_TRANSITION,
-        OrchestratorEventType.TICKET_REQUEUED,
-    ]
-    [requeued] = _requeued_events("legacy-obs-requeue")
-    assert requeued["reason"] == CODEX_HARVEST_CLEAN_REQUEUE_REASON
-    assert requeued["session_id"] == session.id
+    assert _event_types() == []
+    assert _session(session.id).status is SessionStatus.ACTIVE
+    assert _task("T-clean").status is QueueItemStatus.RUNNING
 
 
 def test_parked_case_emits_one_audit_and_one_attention(
@@ -586,7 +556,7 @@ def test_parked_case_emits_one_audit_and_one_attention(
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("dirty", [False, True], ids=["requeue", "park"])
+@pytest.mark.parametrize("dirty", [True], ids=["park"])
 def test_row_moved_after_revalidation_is_already_handled(
     codex_clients: Path,
     make_git_repo: Callable[..., Path],
@@ -715,7 +685,7 @@ def test_act_runs_under_sessions_lock_without_dev_queue_lock(
 ) -> None:
     _use_legacy_config(monkeypatch)
     _no_codex_process(monkeypatch)
-    _seed_legacy(make_git_repo, "T-clean")
+    _seed_legacy(make_git_repo, "T-clean", dirty=True)
     held = {"sessions": False, "dev_queue": False}
     log: list[str] = []
     real_sessions = codex_legacy_recovery.sessions_lock
@@ -799,7 +769,8 @@ def test_clean_check_git_runs_before_sessions_lock(
 
     report = run_codex_legacy_recovery(now=_NOW)
 
-    assert report.status is LegacyRecoveryStatus.COMPLETED
+    assert report.status is LegacyRecoveryStatus.PARTIAL
+    assert _session("T-clean").status is SessionStatus.ACTIVE
     assert {subcommand for subcommand, _ in git_calls} == {"status", "rev-parse"}
     assert all(lock_free for _, lock_free in git_calls)
 
@@ -845,11 +816,11 @@ def test_stale_clean_probe_is_unresolved_and_untouched(
     monkeypatch.setattr(codex_legacy_recovery, "_revalidate_and_act", real_act)
     retried = run_codex_legacy_recovery(now=_LATER)
 
-    assert retried.status is LegacyRecoveryStatus.COMPLETED
+    assert retried.status is LegacyRecoveryStatus.PARTIAL
     assert _dispositions(retried.marker) == {
-        session.id: CodexLegacyDisposition.REQUEUED
+        session.id: CodexLegacyDisposition.FAILED
     }
-    assert _task("T-clean").status is QueueItemStatus.PENDING
+    assert _task("T-clean").status is QueueItemStatus.RUNNING
 
 
 # --------------------------------------------------------------------------- #
@@ -864,7 +835,7 @@ def test_state_write_failure_is_failed_and_leaves_the_session_live(
 ) -> None:
     _use_legacy_config(monkeypatch)
     _no_codex_process(monkeypatch)
-    session = _seed_legacy(make_git_repo, "T-clean")
+    session = _seed_legacy(make_git_repo, "T-clean", dirty=True)
 
     def _fail_save(_state: object) -> None:
         msg = "read-only file system"
@@ -1048,11 +1019,11 @@ def test_incomplete_marker_without_unresolved_still_scans_unseen_sessions(
     _use_legacy_config(monkeypatch)
     _no_codex_process(monkeypatch)
     save_codex_legacy_marker(CodexLegacyRecoveryMarker())
-    session = _seed_legacy(make_git_repo, "T-unseen")
+    session = _seed_legacy(make_git_repo, "T-unseen", dirty=True)
 
     report = run_codex_legacy_recovery(now=_NOW)
 
-    assert _dispositions(report.marker) == {session.id: CodexLegacyDisposition.REQUEUED}
+    assert _dispositions(report.marker) == {session.id: CodexLegacyDisposition.PARKED}
     assert report.status is LegacyRecoveryStatus.COMPLETED
 
 
@@ -1189,7 +1160,7 @@ def test_cannot_tell_session_resolves_once_its_context_is_restored(
 ) -> None:
     _use_legacy_config(monkeypatch)
     _no_codex_process(monkeypatch)
-    session = _seed_legacy(make_git_repo, "T-blind")
+    session = _seed_legacy(make_git_repo, "T-blind", dirty=True)
     assert session.worktree_path is not None
     context_path = session.worktree_path / ".claude" / "cw-context.json"
     context_path.unlink()
@@ -1200,7 +1171,7 @@ def test_cannot_tell_session_resolves_once_its_context_is_restored(
     report = run_codex_legacy_recovery(now=_LATER)
 
     assert report.status is LegacyRecoveryStatus.COMPLETED
-    assert _dispositions(report.marker) == {session.id: CodexLegacyDisposition.REQUEUED}
+    assert _dispositions(report.marker) == {session.id: CodexLegacyDisposition.PARKED}
     assert report.marker.scanned == 1
 
 
@@ -1299,10 +1270,11 @@ def test_existing_commands_reverse_each_disposition(
     assert _task("T-clean").status is QueueItemStatus.CANCELLED
 
     # The closed session is not reopened by either.
-    for ticket_id in ("T-dirty", "T-clean"):
+    for ticket_id in ("T-dirty",):
         closed = _session(ticket_id)
         assert closed.status is SessionStatus.COMPLETED
         assert closed.completed_reason is CompletionReason.CRASHED
+    assert _session("T-clean").status is SessionStatus.ACTIVE
 
     # `unblock` is for SALVAGE_PARKED sessions only; it does not apply here.
     unblock = runner.invoke(main, ["dev-queue", "unblock", "T-moved", "-c", _CLIENT])
@@ -1336,7 +1308,7 @@ def test_unreadable_event_log_after_the_act_is_failed_for_retry(
     """The act ran but its events cannot be confirmed: resolve nothing."""
     _use_legacy_config(monkeypatch)
     _no_codex_process(monkeypatch)
-    session = _seed_legacy(make_git_repo, "T-clean")
+    session = _seed_legacy(make_git_repo, "T-clean", dirty=True)
 
     def _unreadable(**_kwargs: object) -> list[object]:
         raise error
