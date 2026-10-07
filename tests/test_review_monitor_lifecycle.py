@@ -95,6 +95,7 @@ def test_register_update_reanchors_merges_and_heals(
             {"id": "t1", "file": "other.py", "line": 9},
             {"id": "t2", "file": "b.py", "line": None},
         ],
+        slack_channel="C2",
         slack_ts="2.0",
     )
 
@@ -105,7 +106,7 @@ def test_register_update_reanchors_merges_and_heals(
     assert pr.our_threads == ["t1", "t2"]
     assert pr.thread_status["t1"] == _status(resolved=True)
     assert pr.thread_status["t2"] == _status(file="b.py", line=None)
-    assert (pr.slack_channel, pr.slack_ts) == ("C1", "2.0")
+    assert (pr.slack_channel, pr.slack_ts) == ("C2", "2.0")
     assert pr.nudge_count == 3
 
 

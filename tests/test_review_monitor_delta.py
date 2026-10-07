@@ -52,9 +52,10 @@ def test_parse_real_diff_records_only_added_new_file_lines(real_diff: str) -> No
     }
 
 
-def test_parse_diff_ignores_lines_before_any_file_header() -> None:
+def test_parse_diff_ignores_stray_lines_and_deleted_file_headers() -> None:
     diff = (
         "+stray\n@@ -1 +1 @@\n+orphan\n+++ b/c.py\n@@ -3,2 +7,3 @@\n ctx\n-gone\n+new\n"
+        "--- a/old.py\n+++ /dev/null\n"
     )
 
     assert helpers.get("parse_diff_changed_lines")(diff) == {"c.py": {8}}
