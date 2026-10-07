@@ -62,7 +62,9 @@ def test_context_path_has_exactly_one_definition_in_this_module() -> None:
     assert source.count("HOOK_CONTEXT_RELATIVE_PATH") >= 3
 
 
-def test_find_cw_context_walks_up_to_the_nearest_context(tmp_path: Path) -> None:
+def test_find_cw_context_walks_up_to_the_nearest_context(
+    tmp_path: Path, ancestor_free_dir: Path
+) -> None:
     """The operator-run CLI guard is not handed a worktree root (#2210)."""
     worktree = _seeded_worktree(tmp_path)
     nested = worktree / "src" / "cw"
@@ -71,16 +73,15 @@ def test_find_cw_context_walks_up_to_the_nearest_context(tmp_path: Path) -> None
     found = find_cw_context(nested)
     assert found is not None
     assert found == _read_cw_context(str(worktree))
-    assert find_cw_context(tmp_path / "elsewhere") is None
+    assert find_cw_context(ancestor_free_dir / "elsewhere") is None
 
 
 class TestActiveHeadlessContext:
     """The policy applies to headless dispatch workers and nowhere else."""
 
-    def test_no_context_anywhere_yields_none(self, tmp_path: Path) -> None:
+    def test_no_context_anywhere_yields_none(self, ancestor_free_dir: Path) -> None:
         """A cwd with no ancestor cw-context.json is not a dispatch worker."""
-        bare = tmp_path / "bare"
-        bare.mkdir()
+        bare = ancestor_free_dir / "bare"
 
         assert active_headless_context(_spawn_payload(bare)) is None
 

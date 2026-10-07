@@ -55,10 +55,12 @@ class TestRepoRoot:
         mod = _load()
         assert mod.repo_root().is_dir()
 
-    def test_repo_root_raises_when_no_pyproject(self, tmp_path: Path) -> None:
+    def test_repo_root_raises_when_no_pyproject(self, ancestor_free_dir: Path) -> None:
         mod = _load()
         # Patch module __file__ to a path with no pyproject.toml ancestor
-        mod.__file__ = str(tmp_path / "fake_scripts" / "utils" / "runtime_paths.py")
+        mod.__file__ = str(
+            ancestor_free_dir / "fake_scripts" / "utils" / "runtime_paths.py"
+        )
         with pytest.raises(RuntimeError, match=r"pyproject\.toml"):
             mod.repo_root()
 
