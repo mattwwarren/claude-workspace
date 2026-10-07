@@ -52,6 +52,24 @@ def test_check_changelog_frozen_in_groups() -> None:
     assert "check_changelog_frozen" in _scripts_group()
 
 
+def test_every_review_monitor_lib_module_is_smoke_imported() -> None:
+    """Each ``review_monitor_lib`` submodule is its own dotted GROUPS entry (#2499).
+
+    The bare package is deliberately absent: importing any submodule imports
+    it, and it has no ``review_monitor_lib.py`` for the existence check below.
+    """
+    package_dir = _REPO_ROOT / ".claude" / "scripts" / "review_monitor_lib"
+    on_disk = {
+        f"review_monitor_lib.{path.stem}"
+        for path in package_dir.glob("*.py")
+        if path.stem != "__init__"
+    }
+    enumerated = {m for m in _scripts_group() if m.startswith("review_monitor_lib")}
+    assert len(on_disk) == 15
+    assert enumerated == on_disk
+    assert "review_monitor" in _scripts_group()
+
+
 def test_every_enumerated_script_exists_on_disk() -> None:
     for pythonpath, modules in _mod.GROUPS:
         for module in modules:

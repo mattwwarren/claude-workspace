@@ -14,6 +14,10 @@ legacy state file is cwd-relative).
 - E3: the same layout plus a stale/decoy ``review_monitor_lib/`` package and a
   decoy ``utils/runtime_paths.py`` beside the symlink. The script resolves its
   own path before touching ``sys.path``, so neither decoy is ever imported.
+- E4: a copy of the shim with no ``review_monitor_lib/`` beside it fails
+  loudly, naming the resolved directory it looked in.
+- E5: a partial package (``__init__.py`` only) fails loudly on the missing
+  ``review_monitor_lib.cli`` rather than passing silently.
 """
 
 from __future__ import annotations
@@ -105,3 +109,35 @@ def test_e3_decoys_beside_the_symlink_are_never_imported(tmp_path: Path) -> None
     assert result.stdout.startswith("usage:")
     assert "DECOY" not in result.stdout
     assert "DECOY" not in result.stderr
+
+
+def _lone_shim(tmp_path: Path) -> Path:
+    lone_dir = tmp_path / "lone"
+    lone_dir.mkdir()
+    shim = lone_dir / "review_monitor.py"
+    shim.write_text(helpers.ENTRY_SCRIPT.read_text(encoding="utf-8"))
+    return shim
+
+
+def test_e4_shim_without_package_fails_loudly(tmp_path: Path) -> None:
+    shim = _lone_shim(tmp_path)
+
+    result = _run(shim, tmp_path, "--help")
+
+    assert result.returncode != 0
+    assert str(shim.parent.resolve()) in result.stderr
+    assert "review_monitor_lib" in result.stderr
+    assert result.stdout == ""
+
+
+def test_e5_partial_package_fails_loudly(tmp_path: Path) -> None:
+    shim = _lone_shim(tmp_path)
+    partial = shim.parent / "review_monitor_lib"
+    partial.mkdir()
+    (partial / "__init__.py").write_text('"""Partial copy."""\n')
+
+    result = _run(shim, tmp_path, "--help")
+
+    assert result.returncode != 0
+    assert "review_monitor_lib.cli" in result.stderr
+    assert result.stdout == ""

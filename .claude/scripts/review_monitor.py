@@ -2,12 +2,9 @@
 """
 Review monitor: track PR review threads and nudge authors/reviewers.
 
-Subcommands (to be added in subsequent tasks):
-  register  — Start monitoring a PR
-  drop      — Stop monitoring a PR
-  complete  — Mark a PR as done
-  status    — Show current monitor state
-  check     — Run one monitoring cycle (resolve threads, detect deferrals, nudge)
+Thin entry point. The implementation lives in the sibling package
+``review_monitor_lib`` (one submodule per concern); see its ``cli`` module for
+the subcommand list.
 """
 
 from __future__ import annotations
@@ -16,43 +13,23 @@ import logging
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Installed copies are symlinks (~/.claude/scripts -> global-claude/scripts ->
+# this repo), so resolve first: the package and utils/ must come from the same
+# checkout as this file, never from a stale or partial copy beside the link.
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from review_monitor_lib.cli import main
+try:
+    from review_monitor_lib.cli import main
+except ModuleNotFoundError as exc:
+    if (exc.name or "").split(".")[0] != "review_monitor_lib":
+        raise
+    sys.exit(
+        f"review_monitor.py: package 'review_monitor_lib' is missing next to "
+        f"{_SCRIPTS_DIR / 'review_monitor.py'} (launched as {__file__}): {exc}"
+    )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Data models
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Persistence
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# GitHub / git helpers
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Subcommand implementations
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Auto-discover, auto-fix tracking, channel-bump
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
-
 
 if __name__ == "__main__":
     main()
