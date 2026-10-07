@@ -46,6 +46,7 @@ from cw.models.orchestrator_config.constants import (
     WORKER_TMPDIR_RELATIVE_PATH,
     extract_unresolved_spawn_count,
 )
+from cw.models.orchestrator_config.hooks import EventHookRegistry, HookRule
 from cw.models.tasks import (
     _validate_gate_recipe_keys,
     _validate_park_on_abandoned_exit_keys,
@@ -1142,20 +1143,6 @@ class OrchestratorConfig(BaseModel):
         if "default_max_parallel" not in data:
             data["default_max_parallel"] = legacy
         return data
-
-
-class HookRule(BaseModel):
-    """A user-defined shell command to run when a lifecycle event fires."""
-
-    event_type: str
-    command: str
-    description: str = ""
-
-
-class EventHookRegistry(BaseModel):
-    """Persisted event hook rules for a client."""
-
-    rules: list[HookRule] = Field(default_factory=list)
 
 
 __all__ = [
