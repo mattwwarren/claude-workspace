@@ -9,6 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **The review recipes' repo-slug check no longer runs `git` under `sessions_lock` (#2564).** The `address_review` and `auto_fix_ci` cross-repo guard ran `git remote get-url origin` from their act phases inside the lock. `reconcile()` now resolves each candidate's worktree or client-workspace origin slug before taking the lock (within a 30 s budget, with one warning when it runs out) and the act phases only read it. A candidate that was not pre-resolved is skipped for the tick with no event and no latch burn, and retried next tick; an unresolvable remote still fails open. `cw.pr_hydrate` leaves the lock-invariant allowlist.
+- **The Stop hook's headless scope verification no longer runs `git` under `sessions_lock` (#2566).** `cw signal-stop` now parses the transcript sentinel and measures its scope against git (`merge-base`, `diff --numstat`) before taking the lock; the locked section only reads state, revalidates and writes. A sentinel that lands after the pre-lock parse is picked up by the next Stop, so the late-sentinel deferral window now includes lock wait (it relies on ADR-0003 deferral and reconcile salvage); if the lockless session snapshot cannot be read the sentinel is still harvested, with its self-reported scope uncorrected. `cw.cli.stop_hook.locked` leaves the lock-invariant allowlist.
 
 ## [1.67.3] - 2026-10-07
 
