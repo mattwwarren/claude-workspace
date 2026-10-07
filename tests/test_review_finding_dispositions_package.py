@@ -63,6 +63,7 @@ _PKG = "cw.review_finding_dispositions"
 _CONSTANTS_MODULE = f"{_PKG}._constants"
 _MODEL = f"{_PKG}.model"
 _DRIFT = f"{_PKG}.drift"
+_PROVENANCE = f"{_PKG}.provenance"
 _LOGGER = "cw.review_finding_dispositions"
 _TICKET = "T-2498"
 
@@ -95,12 +96,12 @@ _OWNER: dict[str, str] = {
     "render_finding_disposition_block": _PKG,
     "_parse_one_disposition_block": _PKG,
     "parse_finding_disposition_block": _PKG,
-    "merge_finding_dispositions": _PKG,
-    "_is_utc_timestamp": _PKG,
-    "_identity_is_bound": _PKG,
-    "_provenance_gaps": _PKG,
-    "partition_enforceable_dispositions": _PKG,
-    "log_refused_dispositions": _PKG,
+    "merge_finding_dispositions": _PROVENANCE,
+    "_is_utc_timestamp": _PROVENANCE,
+    "_identity_is_bound": _PROVENANCE,
+    "_provenance_gaps": _PROVENANCE,
+    "partition_enforceable_dispositions": _PROVENANCE,
+    "log_refused_dispositions": _PROVENANCE,
     "_render_suppression_signal": _PKG,
     "_MIN_TOKEN_LEN": _PKG,
     "_ANCHORED_MIN_SHARED": _PKG,
