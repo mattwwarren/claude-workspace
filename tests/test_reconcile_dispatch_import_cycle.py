@@ -134,24 +134,6 @@ _DEFERRED_DISPATCH_IMPORTS: Counter[_ImportKey] = Counter(
             "cw.dispatch.routing",
             ("_PRIOR_PIPELINE_PR_OPEN_REASON",),
         ): 1,
-        (
-            "src/cw/reconcile/unowned_running.py",
-            "detect_unowned_running",
-            "cw.dispatch.claim",
-            ("_is_backstop_exempt",),
-        ): 1,
-        (
-            "src/cw/reconcile/unowned_running.py",
-            "_act_adopt",
-            "cw.dispatch.claim",
-            ("_apply_spawn_success_fields", "_find_running_row"),
-        ): 1,
-        (
-            "src/cw/reconcile/usage_limit_mid_turn.py",
-            "_decide",
-            "cw.dispatch.claim",
-            ("_find_running_row",),
-        ): 1,
     }
 )
 
@@ -211,8 +193,6 @@ _RECONCILE_PLC0415_KEYS = frozenset(
         "src/cw/reconcile/codex_boot.py",
         "src/cw/reconcile/fix_dispatch.py",
         "src/cw/reconcile/local.py",
-        "src/cw/reconcile/usage_limit_mid_turn.py",
-        "src/cw/reconcile/unowned_running.py",
         "src/cw/reconcile/review_recipes/address_review.py",
         "src/cw/reconcile/review_recipes/fix_agent.py",
         "src/cw/reconcile/review_recipes/auto_fix_ci.py",

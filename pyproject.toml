@@ -305,19 +305,6 @@ ignore = [
 # _revert_claimed_task_to_pending inside its codex harvest branch (#2387), for
 # the identical cw.dispatch ↔ cw.reconcile cycle as codex_boot above.
 "src/cw/reconcile/local.py" = ["PLC0415"]
-# usage_limit_mid_turn defers cw.dispatch.claim._find_running_row inside
-# _decide (#2324) for the same cw.dispatch ↔ cw.reconcile cycle as the
-# tasks.py and phantom/_mutations entries above: cw.dispatch's package
-# __init__ imports cw.reconcile at module top, so this module's reach into
-# cw.dispatch.claim must be function-level. Inline import is the sanctioned
-# mechanism, not a workaround.
-"src/cw/reconcile/usage_limit_mid_turn.py" = ["PLC0415"]
-# unowned_running defers cw.dispatch.claim's _is_backstop_exempt (inside
-# detect_unowned_running) and _find_running_row / _apply_spawn_success_fields
-# (inside _act_adopt) (#2591), for the same cw.dispatch ↔ cw.reconcile cycle
-# as the usage_limit_mid_turn entry above. Inline import is the sanctioned
-# mechanism, not a workaround.
-"src/cw/reconcile/unowned_running.py" = ["PLC0415"]
 # claim defers the cw.dispatch.gating import inside _spawn_claimed_task to break
 # the gating ↔ claim circular dependency (#1310): gating imports claim at module
 # top, so claim's own reach back into gating must be function-level. Inline
