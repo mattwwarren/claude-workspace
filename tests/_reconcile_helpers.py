@@ -284,7 +284,7 @@ def _install_fake_daemon_roster(
     class's -- so a doctor run stays hermetic.
     """
     roster_path = _write_fake_roster(tmp_path)
-    monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+    monkeypatch.setattr("cw.doctor.wedge.session_liveness._ROSTER_PATH", roster_path)
     monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
     home = Path.home()
@@ -292,7 +292,10 @@ def _install_fake_daemon_roster(
     daemon = FakeNativeDaemonClient()
     daemon._live.add(surface_ref)
     for target in (
-        "cw.doctor.wedge.get_native_daemon_client",
+        "cw.doctor.wedge.blocked_on_user.get_native_daemon_client",
+        "cw.doctor.wedge.session_liveness.get_native_daemon_client",
+        "cw.doctor.wedge.orphans.get_native_daemon_client",
+        "cw.doctor.wedge.reap.get_native_daemon_client",
         "cw.doctor.loop_health.get_native_daemon_client",
         "cw.doctor.routed_result_wedge.get_native_daemon_client",
     ):
