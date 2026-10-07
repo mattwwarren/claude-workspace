@@ -417,7 +417,7 @@ def _emit_thread_reversal_events(
     ticket thread — and there is nothing to hold back. Aborting a review pass
     over an event-store ``OSError`` would park a run to protect a record that
     the next pass re-reads and re-emits anyway. Same direction, and the same
-    reasoning, as ``review_finding_dispositions._emit_stale``.
+    reasoning, as ``review_finding_dispositions.emit._emit_stale``.
     """
     reversals = [
         (key, entry)

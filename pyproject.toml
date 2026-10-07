@@ -407,16 +407,22 @@ ignore = [
     # submodules, leaving this module's import annotation-only.
     "TC001",
 ]
-# review_finding_dispositions must import NOTHING from cw at module scope
-# (#1838): cw.models.tasks imports FindingDisposition from it, so a module-scope
-# cw.review_debt / cw.events / cw.models.enums import there closes the cycle
+# The review_finding_dispositions package must import nothing from cw at module
+# scope beyond cw.review_markers and its own sibling submodules (#1838, #2498):
+# cw.models.tasks imports FindingDisposition, so another module-scope
+# cw.review_debt / cw.events / cw.models.enums import would close the cycle
 # cw.review_findings -> cw.auto_dev_result.schema -> cw.models ->
 # cw.models.tasks -> review_finding_dispositions -> cw.review_debt ->
 # cw.review_findings, which raises on a partially initialized cw.review_findings
-# in one import order. Deferring every cw import into the function bodies is the
-# sanctioned mechanism, not a workaround — see that module's "Import discipline"
-# docstring section.
-"src/cw/review_finding_dispositions.py" = ["PLC0415"]
+# in one import order. Deferring every other cw import into function bodies is
+# the sanctioned mechanism, not a workaround — see the package docstring's
+# "Import discipline" section. Only the submodules that keep such a
+# function-local import are listed: model (cw.review_debt), drift (cw._git),
+# emit (cw.events, cw.models.enums) and suppress (cw.review_debt).
+"src/cw/review_finding_dispositions/model.py" = ["PLC0415"]
+"src/cw/review_finding_dispositions/drift.py" = ["PLC0415"]
+"src/cw/review_finding_dispositions/emit.py" = ["PLC0415"]
+"src/cw/review_finding_dispositions/suppress.py" = ["PLC0415"]
 # codex_review/_context defers cw.codex_background
 # ._sync_finding_dispositions_to_running_task inside _prepare_review_pass
 # (#1838): codex_background imports cw.codex_fix_loop, which imports

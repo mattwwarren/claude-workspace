@@ -144,7 +144,7 @@ class TestTheLeafStaysALeaf:
     """#2210 round 4: the whole reason this module exists.
 
     Asserted on the SOURCE, in the style of the sentinel-drift guard in
-    ``test_review_finding_dispositions``: the runtime behaviour is identical
+    ``test_review_finding_dispositions_parse``: the runtime behaviour is identical
     whichever module a constant comes from, which is exactly why the
     dependency direction has to be pinned by something other than behaviour.
     """
@@ -180,7 +180,7 @@ class TestTheLeafStaysALeaf:
     def test_the_ledger_and_the_voided_record_share_these_spellings(self) -> None:
         """No second copy of a string a parser keys on (#2210 round 3's rule)."""
         from cw.review_adjudication._voided import _VOIDED_SENTINEL
-        from cw.review_finding_dispositions import _DISPOSITION_BLOCK_RE
+        from cw.review_finding_dispositions.parse import _DISPOSITION_BLOCK_RE
 
         assert _VOIDED_SENTINEL is VOIDED_SENTINEL
         assert DISPOSITION_SENTINEL in _DISPOSITION_BLOCK_RE.pattern
