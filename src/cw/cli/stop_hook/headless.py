@@ -2,7 +2,9 @@
 
 :func:`_resolve_and_complete_headless_session` runs under ``sessions_lock``
 (via ``locked._resolve_stop_under_lock``): it resolves the headless sentinel
-(#536 emit precedence, then the transcript parse), routes it through the #251
+(#536 emit precedence, then the transcript sentinel that
+``locked._prepare_sentinel_before_lock`` parsed and scope-verified before the
+lock, #2566), routes it through the #251
 staged-advance authority, and marks the session COMPLETED, returning a
 :class:`_HeadlessResolution` that tells ``signal_stop`` what to do once the
 lock releases. Imports ``sentinel``, ``park`` and ``staged_emit``. Split out
@@ -18,8 +20,8 @@ from cw.cli.stop_hook.park import _park_if_abandoned
 from cw.cli.stop_hook.sentinel import (
     _handle_headless_no_sentinel,
     _harvest_last_result_through_door,
-    _parse_headless_sentinel,
     _reconstruct_emitted_sentinel,
+    _resolve_headless_sentinel,
 )
 from cw.cli.stop_hook.staged_emit import (
     _clear_staged_emit_result_marker,
@@ -42,6 +44,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from cw.auto_dev_result import AutoDevResult, BlockedResult
+    from cw.cli.stop_hook.sentinel import _PreparedSentinel
     from cw.models import CwState, Session
 
 
@@ -108,12 +111,20 @@ def _resolve_and_complete_headless_session(
     is_headless: bool,
     now: datetime,
     complete_session: bool = True,
+    prepared: _PreparedSentinel | None = None,
 ) -> _HeadlessResolution:
     """Resolve the headless sentinel and mark the session COMPLETED (#176, #251).
 
     Extracted from ``signal_stop`` to stay under the branch/return caps; owns
     the sentinel lookup, the #251 staged-advance routing, and the terminal
     session mutation + ``save_state``.
+
+    #2566: the transcript sentinel is parsed and scope-verified before the
+    lock, by ``locked._prepare_sentinel_before_lock``, and handed in as
+    *prepared*; this function runs no git. A prepared value is authoritative
+    (a prepared ``None`` defers like any no-sentinel Stop); ``prepared=None``
+    (not prepared) parses the transcript here without scope verification. An
+    emitted terminal ``last_result`` (#536) still takes precedence over both.
 
     Returns a ``_HeadlessResolution`` with ``rescued=None`` when the caller
     must bail without any further action: either no sentinel was found
@@ -187,8 +198,8 @@ def _resolve_and_complete_headless_session(
     # this call still completes the session from it normally.
     already_routed = emit_terminal and _sentinel_partial_route_consumed(session)
     if not emit_terminal and is_headless:
-        parsed_sentinel = _parse_headless_sentinel(
-            session, cwd_value, claude_session_id, ticket_id_value
+        parsed_sentinel = _resolve_headless_sentinel(
+            prepared, session, cwd_value, claude_session_id, ticket_id_value
         )
         if parsed_sentinel is None:
             _handle_headless_no_sentinel()

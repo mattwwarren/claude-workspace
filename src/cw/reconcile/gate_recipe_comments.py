@@ -8,7 +8,8 @@ posted there: :func:`defer_gate_recipe_comment_jobs` queues one
 sink, and ``reconcile()`` runs it after the lock releases.
 
 Split out of ``gate_recipes.py`` only to keep that module under the ~1000-line
-ceiling; it holds just the comment-deferral helpers.
+ceiling; it holds the comment-deferral helpers and the two audit-comment
+templates (#2545 moved the templates here for the same reason).
 """
 
 from __future__ import annotations
@@ -27,6 +28,42 @@ if TYPE_CHECKING:
     from cw.reconcile.deferred import DeferredReconcileJobs
 
 _log = logging.getLogger(__name__)
+
+# Audit-comment body for a review gate the ``auto_approve_clean_review``
+# recipe released (formatted by ``gate_recipes._post_auto_approve_comment``).
+AUTO_APPROVE_COMMENT_TEMPLATE = """\
+Auto-approved by gate recipe `{recipe}`.
+
+The review met the clean-review predicate and was approved automatically
+(no human review) by RFC 0009 gate-recipe automation:
+
+- must_fix_initial: {must_fix_initial}
+- deferred: {deferred}
+- recommendation: {recommendation}
+- forbidden_touched: {forbidden_touched}
+- agents_run: {agents_run}
+
+See event `GATE_AUTO_APPROVED` for the full audit trail.
+"""
+
+# Audit-comment body for a plan gate the ``auto_adopt_clean_plan`` recipe
+# released (formatted by ``gate_recipes._post_auto_adopt_comment``).
+AUTO_ADOPT_COMMENT_TEMPLATE = """\
+Auto-approved by gate recipe `{recipe}`.
+
+The plan met the clean-plan predicate (no forbidden-area touch, no operator
+`scope_hint: large`, and a draft fingerprint the approval is bound to) and was
+approved automatically (no human review) by RFC 0009 gate-recipe automation:
+
+- scope: {tier} ({files} files, ~{lines_estimate} lines)
+- forbidden_touched: {forbidden_touched}
+- plan_draft_fingerprint: {plan_draft_fingerprint}
+- plan_reviewed: {plan_reviewed}
+
+An unreviewed plan returns to the plan stage, which runs Plan Quality Review
+before implementation starts. See event
+`GATE_AUTO_APPROVED` for the full audit trail.
+"""
 
 
 class _CommentPostFn(Protocol):

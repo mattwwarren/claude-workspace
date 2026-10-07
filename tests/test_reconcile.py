@@ -35,9 +35,11 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.reconcile import core as reconcile_core
 from cw.reconcile import (
     reconcile,
 )
+from cw.reconcile.gate_plan_probes import PlanProbes
 from cw.reconcile.gate_recipes import (
     RECIPE_AUTO_ADOPT_PLAN,
     RECIPE_AUTO_APPROVE_REVIEW,
@@ -48,6 +50,8 @@ from tests._reconcile_helpers import (
     _mk_headless_daemon_session,
     _mk_phantom_daemon_session,
     call_and_drain,
+    forbidden_plan_fetch,
+    probe_sessions_lock_free,
 )
 from tests.conftest import (
     _make_ticket_task,
@@ -753,6 +757,59 @@ class TestReconcileGateRecipeIntegration:
         assert len(events) == 1
         assert events[0].payload["ticket_id"] == "GEN-1"
         assert events[0].payload["recipe"] == RECIPE_AUTO_ADOPT_PLAN
+
+    def test_plan_fetch_runs_before_the_lock_and_never_under_it(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2545: one unmocked tick reads the plan-of-record exactly once,
+        in the lockless pre-pass, and still releases the gate in-lock."""
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
+        _write_gate_orchestrator_yaml(gate_recipes_enabled=True)
+        _stub_gate_comment(monkeypatch)
+        calls: list[bool] = []
+
+        def _fetch(_ticket_id: str, **_k: object) -> str | None:
+            calls.append(probe_sessions_lock_free())
+            return plan_body()
+
+        monkeypatch.setattr(
+            "cw.reconcile.gate_recipes.fetch_approved_plan_comment", _fetch
+        )
+        save_dev_queue(DevQueueStore(tasks=[self._blocked_task(Stage.PLAN)]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        reconcile()
+
+        assert calls == [True]
+        assert load_dev_queue().tasks[0].stage == Stage.IMPL
+
+    def test_plan_without_a_prefetch_is_skipped_for_the_tick(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2545: with no usable prefetch the in-lock detect skips the plan
+        row (it stays parked) rather than falling back to a live read."""
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
+        _write_gate_orchestrator_yaml(gate_recipes_enabled=True)
+        _stub_gate_comment(monkeypatch)
+        monkeypatch.setattr(
+            reconcile_core, "_capture_plan_probes", lambda **_k: PlanProbes()
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.gate_recipes.fetch_approved_plan_comment",
+            forbidden_plan_fetch(),
+        )
+        save_dev_queue(DevQueueStore(tasks=[self._blocked_task(Stage.PLAN)]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        reconcile()
+
+        row = load_dev_queue().tasks[0]
+        assert row.status == QueueItemStatus.BLOCKED_ON_USER
+        assert row.stage == Stage.PLAN
 
     def test_master_switch_off_leaves_task_blocked(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
