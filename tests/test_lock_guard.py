@@ -538,7 +538,9 @@ def test_lock_guard_accepts_any_path_key(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 _CM_DECORATORS = frozenset({"contextmanager", "asynccontextmanager"})
-_ACQUIRE_HELPERS = frozenset({"try_flock_until", "acquire_sessions_flock"})
+_ACQUIRE_HELPERS = frozenset(
+    {"try_flock_until", "acquire_sessions_flock", "acquire_flock"}
+)
 _GUARD_NAME = "lock_guard"
 
 # Matched (flock LOCK_EX / bounded helper) context managers deliberately left
@@ -741,6 +743,10 @@ def test_every_flock_context_manager_is_guarded_or_exempt() -> None:
         ("fcntl.flock(fd, fcntl.LOCK_EX)\n    yield", "unguarded"),
         ("try_flock_until(fd, timeout_s=1, poll_interval_s=1)\n    yield", "unguarded"),
         ("acquire_sessions_flock(fd, p, bounded=False)\n    yield", "unguarded"),
+        (
+            "acquire_flock(fd, p, lock_name='n', bounded=False)\n    yield",
+            "unguarded",
+        ),
         ("fcntl.flock(fd, fcntl.LOCK_UN)\n    yield", None),
         (
             "with lock_guard('n', p, r):\n"
@@ -751,6 +757,12 @@ def test_every_flock_context_manager_is_guarded_or_exempt() -> None:
         (
             "with _lock_guard.lock_guard('n', p, r):\n"
             "        acquire_sessions_flock(fd, p, bounded=True)\n"
+            "        yield",
+            "guarded",
+        ),
+        (
+            "with lock_guard('n', p, r):\n"
+            "        acquire_flock(fd, p, lock_name='n', bounded=True)\n"
             "        yield",
             "guarded",
         ),

@@ -15,6 +15,7 @@ import fcntl
 import json
 from typing import TYPE_CHECKING
 
+from cw._flock import acquire_flock
 from cw._lock_guard import LockRank, lock_guard
 from cw.atomic import atomic_write_text, rotate_backup
 from cw.config import (
@@ -35,17 +36,25 @@ if TYPE_CHECKING:
 
 
 @contextlib.contextmanager
-def _lock() -> Iterator[None]:
+def _lock(*, bounded: bool = False) -> Iterator[None]:
     """Acquire an exclusive file lock for the dev queue.
 
-    Rank STATE; lock discipline: ADR-0019.
+    Rank STATE; lock discipline: ADR-0019. Unbounded by default:
+    dispatch, reconcile, executors and every commit-after-side-effect caller
+    must wait. ``bounded=True`` is for operator entry points with no
+    irreversible side effect before the lock (#2501); it raises
+    :class:`~cw.exceptions.LockTimeoutError` after the ``cw._flock`` wait.
     """
     lock_path = _dev_queue_lock_file()
     with lock_guard("dev_queue", lock_path, LockRank.STATE):
         dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
         fd = lock_path.open("w")
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            acquire_flock(fd, lock_path, lock_name="dev_queue", bounded=bounded)
+        except BaseException:
+            fd.close()
+            raise
+        try:
             yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
