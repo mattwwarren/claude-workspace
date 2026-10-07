@@ -3,7 +3,7 @@
 The PRODUCER half of the Stop-hook abandoned-exit park. A headless worker runs
 it once, from its session worktree root, after its park comment has posted and
 immediately before it emits its exit sentinel; the CONSUMER is
-``cw signal-stop`` (``cli/stop_hook.py``), which reads the marker back on the
+``cw signal-stop`` (``cli/stop_hook/park.py``), which reads the marker back on the
 next Stop and may park the dev-queue row when no sentinel landed.
 
 Best-effort and fail-open throughout, mirroring ``cw agent-spawn-pre`` and

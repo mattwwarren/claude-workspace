@@ -1,6 +1,6 @@
 """Shared stdin/file JSON helpers for Claude Code hook handlers (#940).
 
-Both the Stop hook (``cw signal-stop``, ``cli/stop_hook.py``) and the
+Both the Stop hook (``cw signal-stop``, ``cli/stop_hook/``) and the
 PreToolUse guard (``cw guard-cwd``, ``cli/guard.py``) read a JSON hook
 payload from stdin, and both may then load ``.claude/cw-context.json`` from
 a ``cwd`` the payload names. Extracted here so a fix to either read path

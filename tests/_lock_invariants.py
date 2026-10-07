@@ -71,7 +71,7 @@ SUBPROCESS_UNDER_SESSIONS_ALLOWLIST: dict[str, str] = {
     "cw.reconcile.codex_boot": "#2563",  # codex orphan clean check git, #2563
     "cw.pr_hydrate": "#2564",  # recipe repo-slug `git remote get-url`, #2564
     "cw.local_runner": "#2565",  # local harvest sentinel synthesis git, #2565
-    "cw.cli.stop_hook": "#2566",  # Stop-hook headless scope git, #2566
+    "cw.cli.stop_hook.locked": "#2566",  # Stop-hook headless scope git, #2566
 }
 
 
