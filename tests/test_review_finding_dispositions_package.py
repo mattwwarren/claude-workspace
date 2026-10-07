@@ -61,6 +61,7 @@ if TYPE_CHECKING:
 
 _PKG = "cw.review_finding_dispositions"
 _CONSTANTS_MODULE = f"{_PKG}._constants"
+_MODEL = f"{_PKG}.model"
 _LOGGER = "cw.review_finding_dispositions"
 _TICKET = "T-2498"
 
@@ -73,23 +74,23 @@ _PACKAGE_DIR = _SRC / "review_finding_dispositions"
 # defines its own). Each extraction commit of the split edits only the entries
 # it moves.
 _OWNER: dict[str, str] = {
-    "Outcome": _PKG,
-    "_REJECTED": _PKG,
-    "REVERSED": _PKG,
+    "Outcome": _MODEL,
+    "_REJECTED": _MODEL,
+    "REVERSED": _MODEL,
     "_MUST_FIX": _CONSTANTS_MODULE,
     "_FIXED": _CONSTANTS_MODULE,
     "_MATCH_EXACT": _CONSTANTS_MODULE,
     "_MATCH_CLAIM": _CONSTANTS_MODULE,
-    "_KEY_SEPARATOR": _PKG,
-    "_DIGEST_SUFFIX_RE": _PKG,
+    "_KEY_SEPARATOR": _MODEL,
+    "_DIGEST_SUFFIX_RE": _MODEL,
     "_DISPOSITION_MD_TITLE": _PKG,
     "_DISPOSITION_SCHEMA_VERSION": _PKG,
     "_DISPOSITION_BLOCK_RE": _PKG,
     "_SUPPRESSION_SIGNAL": _PKG,
-    "FindingDisposition": _PKG,
-    "_summary_digest": _PKG,
-    "_disposition_key": _PKG,
-    "split_disposition_key": _PKG,
+    "FindingDisposition": _MODEL,
+    "_summary_digest": _MODEL,
+    "_disposition_key": _MODEL,
+    "split_disposition_key": _MODEL,
     "render_finding_disposition_block": _PKG,
     "_parse_one_disposition_block": _PKG,
     "parse_finding_disposition_block": _PKG,
