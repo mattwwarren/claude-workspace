@@ -817,9 +817,7 @@ def test_stale_clean_probe_is_unresolved_and_untouched(
     retried = run_codex_legacy_recovery(now=_LATER)
 
     assert retried.status is LegacyRecoveryStatus.PARTIAL
-    assert _dispositions(retried.marker) == {
-        session.id: CodexLegacyDisposition.FAILED
-    }
+    assert _dispositions(retried.marker) == {session.id: CodexLegacyDisposition.FAILED}
     assert _task("T-clean").status is QueueItemStatus.RUNNING
 
 
