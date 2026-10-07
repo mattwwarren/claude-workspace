@@ -76,12 +76,6 @@ def _interactive_worktree(tmp_path: Path) -> Path:
     return worktree
 
 
-def _bare_dir(tmp_path: Path) -> Path:
-    bare = tmp_path / "bare"
-    bare.mkdir()
-    return bare
-
-
 def _refused_events() -> list[object]:
     return list(
         read_events(event_types=[OrchestratorEventType.GUARD_BACKGROUND_TOOL_REFUSED])
@@ -145,16 +139,18 @@ class TestClassifyBackgroundTool:
 
         assert classify_background_tool(_monitor_payload(worktree)) is None
 
-    def test_no_context_allows_backgrounded_bash(self, tmp_path: Path) -> None:
-        bare = _bare_dir(tmp_path)
+    def test_no_context_allows_backgrounded_bash(self, ancestor_free_dir: Path) -> None:
+        bare = ancestor_free_dir / "bare"
 
         assert (
             classify_background_tool(_bash_payload(bare, run_in_background=True))
             is None
         )
 
-    def test_no_context_allows_monitor(self, tmp_path: Path) -> None:
-        assert classify_background_tool(_monitor_payload(_bare_dir(tmp_path))) is None
+    def test_no_context_allows_monitor(self, ancestor_free_dir: Path) -> None:
+        bare = ancestor_free_dir / "bare"
+
+        assert classify_background_tool(_monitor_payload(bare)) is None
 
     def test_disabled_guard_allows_backgrounded_bash(
         self, tmp_path: Path, tmp_config_dir: Path

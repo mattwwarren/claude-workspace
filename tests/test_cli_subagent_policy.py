@@ -177,8 +177,7 @@ class TestClassifySpawn:
 
         assert classify_spawn(_spawn_payload(worktree, "fork")) is None
 
-    def test_no_context_allows_an_explicit_fork(self, tmp_path: Path) -> None:
-        bare = tmp_path / "bare"
-        bare.mkdir()
+    def test_no_context_allows_an_explicit_fork(self, ancestor_free_dir: Path) -> None:
+        bare = ancestor_free_dir / "bare"
 
         assert classify_spawn(_spawn_payload(bare, "fork")) is None

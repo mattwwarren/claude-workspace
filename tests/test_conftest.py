@@ -372,3 +372,15 @@ class TestHomeRedirectByConstruction:
         (real_projects / "pytest-of-x").mkdir()
         with pytest.raises(AssertionError, match=re.escape(str(real_projects))):
             next(loud)
+
+
+class TestAncestorFreeDir:
+    """``ancestor_free_dir`` (#2598): a path whose ancestors hold no checkout."""
+
+    def test_sits_directly_under_the_filesystem_root(
+        self, ancestor_free_dir: Path
+    ) -> None:
+        assert ancestor_free_dir.parent == Path(ancestor_free_dir.anchor)
+
+    def test_is_never_created(self, ancestor_free_dir: Path) -> None:
+        assert not ancestor_free_dir.exists()
