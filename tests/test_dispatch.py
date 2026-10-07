@@ -18456,6 +18456,42 @@ class TestPostLaunchSpawnFailure:
             if r.name == "cw.dispatch" and r.levelno == logging.ERROR
         )
 
+    def test_page_write_failure_is_swallowed_and_logged(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+        caplog: pytest.LogCaptureFixture,
+        fail_state_write_after_launch: None,
+    ) -> None:
+        """(c1b) The page is best-effort (resolution 6): a failing ``record_event``
+        is swallowed and logged at ERROR, and the row stays RUNNING, spawned."""
+        outcomes, _pages = self._arrange(
+            sample_client_config, monkeypatch, capture_events
+        )
+
+        def _no_inbox(*_args: object, **_kwargs: object) -> None:
+            msg = "inbox unwritable"
+            raise OSError(msg)
+
+        # After _arrange, so this replaces the capturing stub for the page.
+        monkeypatch.setattr("cw.spawn.record_event", _no_inbox)
+        daemon = FakeNativeDaemonClient()
+        caplog.set_level(logging.ERROR, logger="cw.spawn")
+
+        result = dispatch_tick(breaker_config, native_daemon=daemon)
+
+        assert result.spawned == 1
+        self._assert_kept(outcomes, daemon)
+        assert any(
+            "spawn_post_launch_failed" in r.getMessage()
+            and r.name == "cw.spawn"
+            and r.levelno == logging.ERROR
+            and r.exc_info is not None
+            for r in caplog.records
+        )
+
     def test_stamp_failure_keeps_row_running_unbound(
         self,
         sample_client_config: ClientConfig,
