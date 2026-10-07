@@ -86,86 +86,6 @@ type PlanBodyReader = Callable[[TicketTask], str | None]
 type PlanBodySource = Callable[[TicketTask, str], str | None]
 
 type _ProbeKey = tuple[str, str, str | None, str]
-_PLAN_KEY_PARTS = 4
-
-
-class _ProbeStore[KeyT, PayloadT]:
-    """Shared bounded, expiring storage mechanics for lockless probes.
-
-    The domain wrappers supply their key/payload validators and error factory;
-    this class owns only the capture budget, attempt count, timestamp lookup,
-    and freshness check. It is deliberately private so each probe domain can
-    keep its own public payload and source types.
-    """
-
-    def __init__(
-        self,
-        *,
-        budget_seconds: float | None,
-        max_captures: int | None,
-        max_age_seconds: float,
-        validate_key: Callable[[KeyT], bool],
-        validate_payload: Callable[[PayloadT], bool],
-        error_factory: Callable[[str], Exception],
-    ) -> None:
-        self.budget_seconds = budget_seconds
-        self.max_captures = max_captures
-        self._max_age_seconds = max_age_seconds
-        self._validate_key = validate_key
-        self._validate_payload = validate_payload
-        self._error_factory = error_factory
-        self._deadline = (
-            None if budget_seconds is None else monotonic() + budget_seconds
-        )
-        self._captures = 0
-        self._probes: dict[KeyT, PayloadT] = {}
-
-    @property
-    def captures(self) -> int:
-        """How many live reads this store has attempted, failed ones included."""
-        return self._captures
-
-    @property
-    def captured_keys(self) -> frozenset[KeyT]:
-        """The keys whose payloads were captured successfully."""
-        return frozenset(self._probes)
-
-    def reserve_capture(self, *, budget_message: str, cap_message: str) -> None:
-        """Check limits and count one live read before it starts."""
-        if self._deadline is not None and monotonic() >= self._deadline:
-            raise self._error_factory(budget_message)
-        if self.max_captures is not None and self._captures >= self.max_captures:
-            raise self._error_factory(cap_message)
-        self._captures += 1
-
-    def store(self, key: KeyT, payload: PayloadT) -> None:
-        """Validate and retain one captured payload."""
-        if not self._validate_key(key):
-            msg = "invalid probe key"
-            raise ValueError(msg)
-        if not self._validate_payload(payload):
-            msg = "invalid probe payload"
-            raise ValueError(msg)
-        self._probes[key] = payload
-
-    def lookup(
-        self,
-        key: KeyT,
-        *,
-        missing_message: str,
-        stale_message: Callable[[float], str],
-        captured_at: Callable[[PayloadT], datetime],
-    ) -> PayloadT:
-        """Return a fresh payload or raise the domain's unavailable error."""
-        if not self._validate_key(key):
-            raise self._error_factory(missing_message)
-        payload = self._probes.get(key)
-        if payload is None:
-            raise self._error_factory(missing_message)
-        age = (datetime.now(UTC) - captured_at(payload)).total_seconds()
-        if not 0 <= age < self._max_age_seconds:
-            raise self._error_factory(stale_message(age))
-        return payload
 
 
 def _probe_key(task: TicketTask, fingerprint: str) -> _ProbeKey:
@@ -180,6 +100,11 @@ def _probe_key(task: TicketTask, fingerprint: str) -> _ProbeKey:
 class PlanProbes:
     """Plan-of-record bodies captured lockless, keyed by claim identity.
 
+    This store intentionally mirrors ``CleanProbes``' small domain-specific
+    implementation rather than introducing a private generic base: the two
+    probe domains have different keys, payloads, freshness semantics, and
+    capture limits.
+
     One pass captures (:meth:`capture`, runs the live reader, lockless only),
     then the in-lock detect looks up (:meth:`lookup`, never runs a
     subprocess). With *budget_seconds* set, captures stop once that much
@@ -193,31 +118,23 @@ class PlanProbes:
         budget_seconds: float | None = None,
         max_captures: int | None = None,
     ) -> None:
-        self._store = _ProbeStore[
-            _ProbeKey, PlanProbe
-        ](
-            budget_seconds=budget_seconds,
-            max_captures=max_captures,
-            max_age_seconds=PLAN_PROBE_MAX_AGE_SECONDS,
-            validate_key=lambda key: len(key) == _PLAN_KEY_PARTS,
-            validate_payload=lambda probe: isinstance(probe, PlanProbe),
-            error_factory=PlanProbeUnavailableError,
-        )
         self.budget_seconds = budget_seconds
         self.max_captures = max_captures
+        self._deadline = (
+            None if budget_seconds is None else monotonic() + budget_seconds
+        )
+        self._captures = 0
+        self._probes: dict[_ProbeKey, PlanProbe] = {}
 
     @property
     def captured_keys(self) -> frozenset[tuple[str, str]]:
         """The client/ticket pairs of probes captured so far (diagnostics)."""
-        return frozenset(
-            (client, ticket_id)
-            for client, ticket_id, *_ in self._store.captured_keys
-        )
+        return frozenset((client, ticket_id) for client, ticket_id, *_ in self._probes)
 
     @property
     def captures(self) -> int:
         """How many live reads this store has attempted, failed ones included."""
-        return self._store.captures
+        return self._captures
 
     def capture(
         self, task: TicketTask, fingerprint: str, *, read: PlanBodyReader
@@ -230,31 +147,23 @@ class PlanProbes:
         exception propagates and nothing is stored.
         """
         who = f"{task.client}/{task.ticket_id}"
-        budget_message = (
-            ""
-            if self.budget_seconds is None
-            else (
+        if self._deadline is not None and monotonic() >= self._deadline:
+            msg = (
                 f"the {self.budget_seconds:.0f}s plan prefetch budget is spent;"
                 f" {who} was not read"
             )
-        )
-        cap_message = (
-            ""
-            if self.max_captures is None
-            else (
+            raise PlanProbeUnavailableError(msg)
+        if self.max_captures is not None and self._captures >= self.max_captures:
+            msg = (
                 f"the {self.max_captures}-read per-tick plan prefetch cap is"
                 f" reached; {who} was not read"
             )
-        )
-        self._store.reserve_capture(
-            budget_message=budget_message,
-            cap_message=cap_message,
-        )
+            raise PlanProbeUnavailableError(msg)
+        self._captures += 1
         captured_at = datetime.now(UTC)
         body = read(task)
-        self._store.store(
-            _probe_key(task, fingerprint),
-            PlanProbe(body=body, captured_at=captured_at),
+        self._probes[_probe_key(task, fingerprint)] = PlanProbe(
+            body=body, captured_at=captured_at
         )
         return body
 
@@ -266,18 +175,17 @@ class PlanProbes:
         Otherwise raises ``PlanProbeUnavailableError``.
         """
         who = f"{task.client}/{task.ticket_id}"
-        missing_message = (
-            f"no plan prefetch was captured for {who} under this session"
-            " and plan fingerprint"
-        )
-        probe = self._store.lookup(
-            _probe_key(task, fingerprint),
-            missing_message=missing_message,
-            stale_message=lambda age: (
-                f"the plan prefetch for {who} is unusable at age {age:.1f}s"
-            ),
-            captured_at=lambda captured: captured.captured_at,
-        )
+        probe = self._probes.get(_probe_key(task, fingerprint))
+        if probe is None:
+            msg = (
+                f"no plan prefetch was captured for {who} under this session"
+                " and plan fingerprint"
+            )
+            raise PlanProbeUnavailableError(msg)
+        age = (datetime.now(UTC) - probe.captured_at).total_seconds()
+        if not 0 <= age < PLAN_PROBE_MAX_AGE_SECONDS:
+            msg = f"the plan prefetch for {who} is unusable at age {age:.1f}s"
+            raise PlanProbeUnavailableError(msg)
         return probe.body
 
 
