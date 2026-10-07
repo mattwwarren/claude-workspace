@@ -22,6 +22,7 @@ GROUPS: list[tuple[str, list[str]]] = [
             "review_monitor",
             "review_monitor_lib.models",
             "review_monitor_lib.shell",
+            "review_monitor_lib.state",
         ],
     ),
     (".claude/skills/cw-fanout/scripts", ["wave_status"]),
