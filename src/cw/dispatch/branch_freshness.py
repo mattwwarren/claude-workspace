@@ -1,11 +1,11 @@
 """Ticket-branch staleness detection against ``origin/<default_branch>`` (#1823).
 
-The pre-existing freshness gate (``dispatch/gating.py``) checks only the shared
-*client checkout* at dispatch-tick preflight time — never the ticket's own
-branch, and never at the REVIEW->approval boundary. This module answers the
-narrower question that boundary needs: **is this ticket's branch behind
-``origin/<default_branch>``, and do the intervening main commits touch at least
-one file the branch itself touches?**
+The pre-existing freshness gate (``dispatch/gating/freshness.py``) checks only
+the shared *client checkout* at dispatch-tick preflight time — never the
+ticket's own branch, and never at the REVIEW->approval boundary. This module
+answers the narrower question that boundary needs: **is this ticket's branch
+behind ``origin/<default_branch>``, and do the intervening main commits touch
+at least one file the branch itself touches?**
 
 Deliberately *narrow* (the ticket's option B, not option A's "flag every lag"):
 a branch that has merely fallen behind, where main's churn is disjoint from the

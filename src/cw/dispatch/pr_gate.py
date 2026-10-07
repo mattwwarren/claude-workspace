@@ -22,7 +22,7 @@ Two hard contracts, both inherited from the sibling gate modules:
 * **No network calls under ``dev_queue_lock()``.** This runs from
   ``_dispatch_client_lanes`` *before* the per-lane claim loop, outside the
   queue lock, and its result is folded into ``_claim_next_pending`` as a
-  precomputed ``frozenset`` — exactly the shape ``gating.py``'s TTL-cached
+  precomputed ``frozenset`` — exactly the shape ``gating/availability.py``'s TTL-cached
   ``_resolve_availability`` preflight probe already establishes.
 
 The per-ticket probe is TTL-cached in ``dispatch_state.json`` (see

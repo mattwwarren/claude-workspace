@@ -124,7 +124,7 @@ def _apply_phantom_queue_mutations(
     where "dirty" only reports that something is uncommitted.
     """
     # Deferred, not module-top: cw.dispatch's package __init__ imports
-    # cw.reconcile (loop.py/gating.py/lanes.py), so a top-level import of any
+    # cw.reconcile (loop.py/gating/lanes.py), so a top-level import of any
     # cw.dispatch submodule here is a real circular import at package-init
     # time. Same shape as the #698 reconcile._shared -> cw.dispatch precedent
     # and tasks.py's deferred cw.dispatch.routing import. See #1750.

@@ -87,7 +87,7 @@ from cw.dispatch.regress_repeat import (
 # this direction only: review_gates reaches back into this package for
 # _resolve_scope_tier / _APPROVAL_GATE_REASON via function-level deferred
 # imports, so promoting either of those to a module-top import there recreates
-# a real cycle. Same shape as gating.py <-> claim.py since #1310, and as
+# a real cycle. Same shape as gating/ <-> claim/ since #1310, and as
 # routing/stage_walk.py's own deferred reach back into this module (#1728),
 # guarded by test_dispatch_package_submodules_import_without_cycle.
 from cw.dispatch.review_gates import (

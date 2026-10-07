@@ -710,7 +710,7 @@ def _run_codex_review_and_complete(
     # cycle: executor.py imports this module at its top, and the name below is
     # defined *after* executor.py's own import block, so a module-level import
     # here would hit a partially initialized module. Mirrors claim.py's
-    # deferred cw.dispatch.gating import (#1310).
+    # deferred cw.dispatch.gating.context_json import (#1310).
     # ``_complete_session_via_door`` stays in executor.py because it is shared
     # with LocalExecutor, OpencodeExecutor, and CodexExecutor's own synchronous
     # pre-flight-failure branch.

@@ -232,7 +232,7 @@ def _load_voided_findings(
 
     Same degrade-never-raise contract as :func:`_load_operator_comments`, plus
     one reason specific to this record: it lives on the tracker thread rather
-    than in ``.cw/`` precisely because ``dispatch/gating.py`` deletes
+    than in ``.cw/`` precisely because ``dispatch/gating/context_json.py`` deletes
     ``.cw/context.json`` on the rescued-respawn path this ticket exists to
     survive. Degrading to ``[]`` means a void goes unhonored and the finding
     re-appears — visible and correctable, unlike a silent false suppression.
@@ -292,10 +292,10 @@ def _load_pending_operator_comment_marker(worktree: Path) -> bool:
     ``spawn.py``'s ``_write_hook_context`` materializes at spawn time — NOT the
     sibling ``.cw/context.json`` this function's first cut read (#1730). Those
     are different layers: ``.cw/context.json`` is Stage 0's *ticket* context and
-    is deleted outright by ``dispatch/gating.py``'s stale-context invalidation
-    (#1046) on a rescued respawn, so ``queue_metadata`` cannot live there. Both
-    ends now share the one constant so the read cannot drift off the write
-    again; the reader-vs-writer path agreement is pinned by
+    is deleted outright by ``dispatch/gating/context_json.py``'s stale-context
+    invalidation (#1046) on a rescued respawn, so ``queue_metadata`` cannot live
+    there. Both ends now share the one constant so the read cannot drift off
+    the write again; the reader-vs-writer path agreement is pinned by
     ``TestLoadPendingOperatorCommentMarker``, which drives the real writer.
 
     The queue-side field is cleared by ``dispatch/claim.py`` once a REVIEW-stage

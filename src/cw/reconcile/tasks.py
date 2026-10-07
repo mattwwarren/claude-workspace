@@ -821,14 +821,14 @@ _STALE_GATE_CONSUMER = "dev_queue_stale_gate"
 # with these values) via a function-level deferred import, so a locally
 # re-declared copy can never drift from the producer with no compiler
 # signal. Deferred, not module-top, because cw.dispatch's package __init__
-# imports cw.reconcile at module level (loop.py/gating.py/lanes.py), so a
+# imports cw.reconcile at module level (loop.py/gating/lanes.py), so a
 # top-level `from cw.dispatch.routing import ...` here creates a real
 # circular import at package-init time (confirmed: ImportError "cannot
 # import name 'reconcile' from partially initialized module 'cw.reconcile'"
-# via gating.py's `from cw.reconcile import reconcile`). Same shape as the
+# via gating/usage_limit.py's `from cw.reconcile import reconcile`). Same shape as the
 # #698 reconcile._shared -> cw.dispatch precedent and the #1310 gating<->
 # claim pair -- see cw.reconcile._shared.classify_sentinel_stage_position
-# and cw.dispatch.claim's deferred `from cw.dispatch.gating import
+# and cw.dispatch.claim's deferred `from cw.dispatch.gating.context_json import
 # _invalidate_stale_context_json`.
 _VARIANT_A_MERGE_PENDING_DISPOSITION = "merge_pending"
 _VARIANT_A_BLOCKED_DISPOSITION = "blocked"

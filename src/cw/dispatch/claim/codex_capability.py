@@ -85,10 +85,10 @@ class _SpawnOutcome:
 # TTL (seconds) for the in-process codex-capability probe cache (#1238). Codex
 # CLI presence/version essentially never changes between dispatch ticks, so a
 # short process-lifetime cache avoids re-shelling `codex --version` on every
-# codex-backed spawn attempt. Unlike gating.py's _AVAILABILITY_PROBE_TTL_SECONDS
-# this has no fleet-wide sidecar persistence or latch semantics -- it's a
-# per-task gate, not a fleet-wide outage signal, so a plain in-memory cache is
-# sufficient.
+# codex-backed spawn attempt. Unlike gating/availability.py's
+# _AVAILABILITY_PROBE_TTL_SECONDS this has no fleet-wide sidecar persistence
+# or latch semantics -- it's a per-task gate, not a fleet-wide outage signal,
+# so a plain in-memory cache is sufficient.
 _CODEX_CAPABILITY_PROBE_TTL_SECONDS = 60
 
 # Timeout for the codex-capability probe's own `codex --version` subprocess
@@ -135,7 +135,7 @@ _codex_capability_park_count: list[int] = [0]
 def _cached_codex_capability_diagnosis() -> CodexCapabilityDiagnosis:
     """TTL-cached wrapper over :func:`codex_capability_diagnosis` (#1238).
 
-    Mirrors ``gating._resolve_availability``'s cache-and-reuse shape at a
+    Mirrors ``gating.availability._resolve_availability``'s cache-and-reuse shape at a
     smaller scope: within ``_CODEX_CAPABILITY_PROBE_TTL_SECONDS`` of the last
     probe, reuse the cached verdict instead of re-shelling ``codex --version``
     on every codex-backed spawn attempt. Process-lifetime only (no sidecar

@@ -3,7 +3,9 @@
 Part of the ``cw.dispatch`` package (#1444): a single optional ceiling on how
 many DAEMON sessions may run concurrently across the whole host, independent
 of (and folded into) the existing per-client ceiling in ``lanes.py``.
-Structurally mirrors ``cw.dispatch.gating``'s "fleet-wide value resolved once
+Structurally mirrors ``cw.dispatch.gating``'s resolve-once helpers
+(``availability._resolve_availability_once``,
+``ssh_key._resolve_ssh_key_once``) -- the "fleet-wide value resolved once
 per tick" shape, minus its TTL-cache/latch machinery -- this is a pure
 in-memory computation over state and queue snapshots the caller already
 loaded once this tick (no subprocess, no sidecar file), so there is nothing

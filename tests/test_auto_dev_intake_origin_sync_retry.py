@@ -14,7 +14,7 @@ Root cause pinned here: `/auto-dev-intake`'s Step P3 (headless) exited the
 local `main` and `origin/main` — including the transient behind-only case
 where a concurrent wave PR merge is in the process of being auto-ff'd into
 the base checkout's `main` by `_resolve_freshness`
-(``src/cw/dispatch/gating.py``). That race meant the next queued ticket
+(``src/cw/dispatch/gating/freshness.py``). That race meant the next queued ticket
 would spuriously block at pre-flight with `local_main_diverged_from_origin`
 even though the divergence was about to resolve itself on its own, requiring
 a manual `refresh-all`.

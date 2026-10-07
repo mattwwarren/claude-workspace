@@ -112,7 +112,7 @@ def _reconcile_usage_limited() -> bool:
         # 2. Logging: _log.exception captures the full traceback with exc_info.
         # 3. Non-critical: reconcile is best-effort housekeeping. Skipping a tick
         #    just means phantoms get reaped on the next dispatch_tick.
-        # 4. Paired test: tests/test_dispatch.py
+        # 4. Paired test: tests/test_dispatch_gating_usage_limit.py
         #    test_reconcile_failure_does_not_crash_dispatch_tick.
         _log.exception("reconcile failed during dispatch_tick; continuing")
     return reconcile_report is not None and reconcile_report.usage_limited
