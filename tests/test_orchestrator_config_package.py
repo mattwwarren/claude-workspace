@@ -20,6 +20,7 @@ this file pins the things that suite cannot see:
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import subprocess
@@ -194,6 +195,13 @@ class TestImportSurface:
     def test_cw_models_still_reexports_the_31_names(self) -> None:
         assert set(cw.models.__all__) >= _CW_MODELS_REEXPORTS
 
+    @pytest.mark.parametrize("name", sorted(EXPECTED_EXPORTS))
+    def test_reexport_is_defined_in_a_submodule(self, name: str) -> None:
+        """The package ``__init__`` only re-exports; it defines nothing itself."""
+        obj = getattr(pkg, name)
+        if inspect.isclass(obj) or inspect.isfunction(obj):
+            assert obj.__module__.startswith(f"{pkg.__name__}."), obj.__module__
+
 
 class TestLoggerNameIsPinned:
     """Every validator warning logs as ``cw.models.orchestrator_config``."""
@@ -240,6 +248,15 @@ class TestLoggerNameIsPinned:
 
         records = [r for r in caplog.records if message in r.getMessage()]
         assert [r.name for r in records] == [_PINNED_LOGGER]
+        assert [r.module for r in records] == ["orchestrator"]
+
+    @pytest.mark.parametrize(
+        "path",
+        sorted(Path(pkg.__file__).parent.glob("*.py")),
+        ids=lambda p: p.name,
+    )
+    def test_no_submodule_logs_under_its_own_name(self, path: Path) -> None:
+        assert "getLogger(__name__)" not in path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -251,6 +268,7 @@ class TestLoggerNameIsPinned:
         "cw.models.orchestrator_config.hooks",
         "cw.models.orchestrator_config.lane",
         "cw.models.orchestrator_config.operator_forward",
+        "cw.models.orchestrator_config.orchestrator",
         "cw.models.orchestrator_config.stage",
         "cw.models.client",
         "cw.models",
