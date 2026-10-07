@@ -667,6 +667,61 @@ class TestPatchOwnership:
         monkeypatch.setattr("cw._git.run_git", _raise_oserror)
         assert disposition_drifted(tmp_path, "aaa", "bbb", "src/cw/foo.py") is True
 
+    def test_the_patched_readers_live_in_emit_and_drift(self) -> None:
+        """The seams sit where the package docstring says they do."""
+        assert {reader: _OWNER[reader] for reader, _, _ in _PATCHED_READERS} == {
+            "_emit_suppression": _EMIT,
+            "_emit_shadow": _EMIT,
+            "_emit_stale": _EMIT,
+            "disposition_drifted": _DRIFT,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Final-state guards: module size, the pinned surface, a pure ``__init__``
+# ---------------------------------------------------------------------------
+
+#: CLAUDE.md's "Module Size" yellow flag; the flat module was 1410 lines.
+_MODULE_LINE_LIMIT = 800
+
+
+@pytest.mark.parametrize("path", _package_files(), ids=lambda path: path.name)
+def test_package_file_is_under_the_module_size_flag(path: Path) -> None:
+    """No submodule grows back toward the flat module's size."""
+    assert len(path.read_text(encoding="utf-8").splitlines()) < _MODULE_LINE_LIMIT
+
+
+def test_package_all_is_the_pinned_surface() -> None:
+    """``__all__`` lists exactly the 15 surface names, no more and no fewer."""
+    assert sorted(cw.review_finding_dispositions.__all__) == sorted(_SURFACE)
+
+
+def test_package_init_is_a_pure_reexport() -> None:
+    """``__init__`` binds only re-exports, its submodules and ``annotations``.
+
+    Guards against a silent re-merge: a body, a ``_log`` or a re-bound
+    ``_LOGGER_NAME`` back in ``__init__`` would add a name here.
+    """
+    init_file = _PACKAGE_DIR / "__init__.py"
+    tree = ast.parse(init_file.read_text(encoding="utf-8"))
+    assert not [
+        node
+        for node in ast.walk(tree)
+        if isinstance(
+            node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda
+        )
+    ]
+    bound = {
+        name
+        for name in vars(cw.review_finding_dispositions)
+        if not name.startswith("__")
+    }
+    submodules = {path.stem for path in _package_files()} - {"__init__"}
+    # ``annotations`` is the ``from __future__ import annotations`` binding.
+    assert bound == set(_SURFACE) | submodules | {"annotations"}
+    assert "_log" not in bound
+    assert "_LOGGER_NAME" not in bound
+
 
 # ---------------------------------------------------------------------------
 # Entrypoint: ``cw review dispositions`` through the package's re-exports
