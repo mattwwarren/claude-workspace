@@ -32,6 +32,7 @@ from tests.conftest import _make_ticket_task
 
 _PKG = "cw.doctor.wedge"
 _CONSTANTS_MOD = f"{_PKG}._constants"
+_TASK_RUNNING = f"{_PKG}.task_running"
 
 # The nine module-level constants the flat module bound at top level.
 _CONSTANTS = {
@@ -91,10 +92,10 @@ EXPECTED_OWNER: dict[str, str] = {
     "_WEDGE_BLOCKED_DEAD_SESSION": _CONSTANTS_MOD,
     "_WEDGE_LEAKED_DAEMON_WORKER": _CONSTANTS_MOD,
     "_WEDGE_TERMINAL_SIBLING": _CONSTANTS_MOD,
-    "_check_wedge_task_running_no_session": _PKG,
-    "_check_wedge_task_running_completed_session": _PKG,
-    "_resolve_wedge_branch": _PKG,
-    "_check_wedge_repo_ahead": _PKG,
+    "_check_wedge_task_running_no_session": _TASK_RUNNING,
+    "_check_wedge_task_running_completed_session": _TASK_RUNNING,
+    "_resolve_wedge_branch": _TASK_RUNNING,
+    "_check_wedge_repo_ahead": _TASK_RUNNING,
     "_is_dead_session_task": _PKG,
     "_is_terminal_sibling_disposition": _PKG,
     "_check_wedge_dead_session_blocked_on_user": _PKG,
@@ -248,7 +249,7 @@ class TestConsumerContract:
 # intercepting. One row per reading function; each extraction commit repoints
 # the rows whose function it moves.
 PATCH_OWNERSHIP = [
-    ("_check_wedge_repo_ahead", "run_git", _PKG),
+    ("_check_wedge_repo_ahead", "run_git", _TASK_RUNNING),
     ("_check_wedge_dead_session_blocked_on_user", "get_native_daemon_client", _PKG),
     ("_check_wedge_active_no_daemon_entry", "get_native_daemon_client", _PKG),
     (
@@ -284,6 +285,27 @@ class TestPatchOwnership:
         namespace = vars(importlib.import_module(owner))
         assert getattr(wedge, function).__globals__ is namespace
         assert global_name in namespace
+
+    def test_package_binds_no_patched_global(self) -> None:
+        """A stale ``cw.doctor.wedge.<global>`` patch target fails loudly.
+
+        The package re-exports only its own 33 names, never a third-party
+        global a submodule imports, so a patch left on the package raises
+        ``AttributeError`` instead of resolving and silently not
+        intercepting. A global the package's own ``__init__`` still reads is
+        exempt until its last reader there moves out; the exemption is read
+        from ``__init__``'s AST, not hardcoded.
+        """
+        init_tree = ast.parse(Path(inspect.getfile(wedge)).read_text("utf-8"))
+        still_read_here = {
+            node.id
+            for node in ast.walk(init_tree)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        }
+        patched = {global_name for _fn, global_name, _owner in PATCH_OWNERSHIP}
+        moved = patched - still_read_here - EXPECTED_EXPORTS
+        assert moved
+        assert sorted(g for g in moved if hasattr(wedge, g)) == []
 
 
 # Every record the package emits must carry the pre-split logger name
@@ -349,6 +371,7 @@ class TestLoggerNamePinned:
 _COLD_IMPORTS = (
     "cw.doctor.loop_health",
     _CONSTANTS_MOD,
+    _TASK_RUNNING,
 )
 
 
