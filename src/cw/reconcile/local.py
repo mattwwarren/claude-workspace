@@ -48,12 +48,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 
 from cw.codex_background import _resolve_codex_fix_loop_enabled
 from cw.config import load_effective_config, save_state
 from cw.events import record_event
-from cw.local_runner import read_process_start_time_ns
+from cw.local_runner import git_facts, read_process_start_time_ns
 from cw.models import (
     CODEX_BACKEND,
     DEFAULT_LANE,
@@ -740,6 +741,7 @@ def _act_on_local_harvest_candidates(
             default_branch=default_branch,
             session_id=candidate.session_id,
             backend=backend,
+            facts=partial(git_facts, candidate.worktree_path, default_branch),
         )
         # Task first (before the session status change) so the task is in its
         # terminal/advanced state when revert_completed_silent_tasks runs.
