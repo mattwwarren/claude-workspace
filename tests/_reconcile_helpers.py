@@ -45,7 +45,8 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from cw.reconcile._shared import _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY
+from cw.reconcile._shared import _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY, ReapCandidate
+from cw.reconcile.codex_boot import CleanProbes
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 from cw.reconcile.gate_plan_probes import PlanProbes
 from cw.reconcile.gate_recipes import (
@@ -53,6 +54,11 @@ from cw.reconcile.gate_recipes import (
     _detect_auto_adopt_plan,
     capture_plan_probes,
     run_gate_recipes,
+)
+from cw.reconcile.harvest_synthesis import HarvestFacts
+from cw.reconcile.local import (
+    _act_on_local_harvest_candidates,
+    capture_local_harvest_facts,
 )
 from cw.reconcile.review_recipes import ReviewRecipeCandidate
 from cw.reconcile.review_recipes._shared import RepoSlugs, _find_review_task
@@ -1253,3 +1259,35 @@ def _save_dead_local_session(
         )
     )
     return {t.ticket_id: t for t in load_dev_queue().tasks}
+
+
+def act_on_local_harvest(
+    state: CwState,
+    candidates: list[ReapCandidate],
+    *,
+    now: datetime,
+    task_by_ticket: dict[str, TicketTask] | None = None,
+    config: OrchestratorConfig | None = None,
+    codex_probes: CleanProbes | None = None,
+) -> list[str]:
+    """``reconcile()``'s harvest-facts pre-pass, then the local harvest act (#2565).
+
+    Captures the git facts lockless over *state* and *task_by_ticket*'s rows
+    (the act's own task scope), then runs ``_act_on_local_harvest_candidates``
+    with them -- the stand-in for ``reconcile()``'s capture-then-lock, as
+    ``capture_repo_slugs`` is for the review recipes. Capture and act run
+    back to back in this one call, so a caller's ``freeze_time`` covers both.
+    """
+    facts = HarvestFacts()
+    capture_local_harvest_facts(
+        state, list((task_by_ticket or {}).values()), facts=facts
+    )
+    return _act_on_local_harvest_candidates(
+        state,
+        candidates,
+        now=now,
+        task_by_ticket=task_by_ticket,
+        config=config,
+        codex_probes=codex_probes,
+        harvest_facts=facts,
+    )

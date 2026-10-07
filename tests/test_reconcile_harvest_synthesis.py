@@ -19,9 +19,22 @@ import freezegun
 import pytest
 
 from cw._git import run_git
+from cw.config import load_state, save_state
+from cw.dev_queue import save_dev_queue
+from cw.events import read_events
 from cw.local_runner import GitFacts
-from cw.models import LocalLivenessBackend, LocalLivenessHandle, Stage, TicketTask
+from cw.models import (
+    CwState,
+    DevQueueStore,
+    LocalLivenessBackend,
+    LocalLivenessHandle,
+    QueueItemStatus,
+    Session,
+    Stage,
+    TicketTask,
+)
 from cw.reconcile import harvest_synthesis
+from cw.reconcile import local as reconcile_local
 from cw.reconcile.harvest_synthesis import (
     GIT_SYNTHESIS_ERRORS,
     HARVEST_FACTS_MAX_AGE_SECONDS,
@@ -31,8 +44,14 @@ from cw.reconcile.harvest_synthesis import (
     _synthesize_harvest_sentinel,
     harvest_uses_git,
 )
+from cw.reconcile.local import capture_local_harvest_facts
+from tests._clients_yaml import staged_client, write_clients_yaml
 from tests._opencode_helpers import write_opencode_log
-from tests._reconcile_helpers import _local_git_worktree, _mk_local_session
+from tests._reconcile_helpers import (
+    _local_git_worktree,
+    _mk_local_session,
+    _touch_aider_log,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -292,3 +311,176 @@ def test_harvest_synthesis_logs_under_the_pinned_local_logger_name(
         "harvest_backend_overridden": [_LOCAL_LOGGER],
         "harvest_synthesis_failed": [_LOCAL_LOGGER],
     }
+
+
+# ---------------------------------------------------------------------------
+# capture_local_harvest_facts: the lockless driver reconcile() runs last
+# ---------------------------------------------------------------------------
+
+
+def _dead_session(
+    sid: str,
+    worktree: Path | None,
+    *,
+    backend: LocalLivenessBackend = "aider",
+    spawn_stage: Stage = Stage.IMPL,
+) -> Session:
+    handle = LocalLivenessHandle(
+        pid=_HANDLE.pid, start_time_ns=_HANDLE.start_time_ns, backend=backend
+    )
+    sess = _mk_local_session(sid, worktree or Path("/nonexistent"), handle)
+    sess.worktree_path = worktree
+    sess.stage = spawn_stage
+    return sess
+
+
+def _save(sessions: list[Session]) -> tuple[CwState, list[TicketTask]]:
+    """Persist *sessions* with one RUNNING row each (row stage = spawn stage)."""
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
+    save_state(CwState(sessions=sessions))
+    rows = [
+        TicketTask(
+            ticket_id=s.id,
+            client="client-a",
+            stage=s.stage or Stage.IMPL,
+            status=QueueItemStatus.RUNNING,
+            session_id=s.id,
+        )
+        for s in sessions
+    ]
+    save_dev_queue(DevQueueStore(tasks=rows))
+    return load_state(), rows
+
+
+def _aider_worktree(tmp_path: Path, name: str) -> Path:
+    worktree = tmp_path / name
+    worktree.mkdir()
+    _touch_aider_log(worktree)
+    return worktree
+
+
+def _local_warnings(
+    caplog: pytest.LogCaptureFixture, marker: str
+) -> list[logging.LogRecord]:
+    return [
+        r
+        for r in caplog.records
+        if r.name == _LOCAL_LOGGER and marker in r.getMessage()
+    ]
+
+
+def test_capture_local_harvest_facts_only_captures_git_backed_candidates(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    aider_wt = _aider_worktree(tmp_path, "aider")
+    oc_wt = tmp_path / "oc-only"
+    write_opencode_log(oc_wt, [])
+    unproven_wt = _aider_worktree(tmp_path, "unproven")
+    write_opencode_log(unproven_wt, [])
+    sessions = [
+        _dead_session("T-AIDER", aider_wt),
+        _dead_session("T-OC-ONLY", oc_wt),
+        _dead_session("T-CODEX", _aider_worktree(tmp_path, "codex"), backend="codex"),
+        _dead_session("T-UNPROVEN", unproven_wt, spawn_stage=Stage.FINALIZE),
+        _dead_session("T-NO-WT", None),
+    ]
+    state, rows = _save(sessions)
+    facts = HarvestFacts()
+    source = MagicMock(return_value=_facts())
+
+    with patch.object(harvest_synthesis, "git_facts", source):
+        capture_local_harvest_facts(state, rows, facts=facts)
+
+    source.assert_called_once_with(aider_wt, _BRANCH)
+    assert facts.lookup("T-AIDER", _HANDLE, aider_wt, _BRANCH) == _facts()
+    for sid, worktree in (("T-OC-ONLY", oc_wt), ("T-UNPROVEN", unproven_wt)):
+        with pytest.raises(HarvestFactsUnavailableError, match="never captured"):
+            facts.lookup(sid, _HANDLE, worktree, _BRANCH)
+
+
+def test_capture_local_harvest_facts_timeout_defers_and_warns(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A hung git defers its candidate with one signal-only advisory; the sweep
+    continues, and nothing is stored, latched or emitted."""
+    hung_wt = _aider_worktree(tmp_path, "hung")
+    ok_wt = _aider_worktree(tmp_path, "ok")
+    state, rows = _save(
+        [_dead_session("T-HUNG", hung_wt), _dead_session("T-OK", ok_wt)]
+    )
+    timeout = subprocess.TimeoutExpired(["git", "log"], 10.0)
+    monkeypatch.setattr(
+        harvest_synthesis, "git_facts", MagicMock(side_effect=[timeout, _facts()])
+    )
+    monkeypatch.setattr(
+        reconcile_local, "monotonic", MagicMock(side_effect=[0.0, 12.5, 20.0])
+    )
+    facts = HarvestFacts()
+
+    with caplog.at_level(logging.WARNING):
+        capture_local_harvest_facts(state, rows, facts=facts)
+
+    with pytest.raises(HarvestFactsUnavailableError, match="never captured"):
+        facts.lookup("T-HUNG", _HANDLE, hung_wt, _BRANCH)
+    assert facts.lookup("T-OK", _HANDLE, ok_wt, _BRANCH) == _facts()
+    [advisory] = _local_warnings(caplog, "harvest_git_timeout")
+    assert advisory.getMessage() == (
+        "harvest_git_timeout: session=T-HUNG ticket=T-HUNG elapsed=12.5s;"
+        " deferring to the next tick (GitHub #2565)"
+    )
+    assert advisory.exc_info is None
+    assert read_events() == []
+
+
+def test_capture_local_harvest_facts_budget_exhausted_warns_once_and_stops(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = {"now": 0.0}
+    monkeypatch.setattr(harvest_synthesis, "monotonic", lambda: clock["now"])
+    facts = HarvestFacts(budget_seconds=60.0)
+
+    def _slow(*_args: object) -> GitFacts:
+        clock["now"] += 61.0
+        return _facts()
+
+    source = MagicMock(side_effect=_slow)
+    monkeypatch.setattr(harvest_synthesis, "git_facts", source)
+    first_wt = _aider_worktree(tmp_path, "first")
+    state, rows = _save(
+        [
+            _dead_session("T-FIRST", first_wt),
+            _dead_session("T-SECOND", _aider_worktree(tmp_path, "second")),
+            _dead_session("T-THIRD", _aider_worktree(tmp_path, "third")),
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING):
+        capture_local_harvest_facts(state, rows, facts=facts)
+
+    assert source.call_count == 1
+    assert facts.lookup("T-FIRST", _HANDLE, first_wt, _BRANCH) == _facts()
+    [budget] = _local_warnings(caplog, "harvest-facts budget")
+    assert budget.getMessage() == (
+        "reconcile: harvest-facts budget (60s) spent;"
+        " 2 candidate(s) deferred to the next tick"
+    )
+
+
+def test_capture_local_harvest_facts_no_git_candidates_loads_no_clients(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    oc_wt = tmp_path / "oc"
+    oc_wt.mkdir()
+    state, rows = _save([_dead_session("T-OC", oc_wt, backend="opencode")])
+    loader = MagicMock()
+    monkeypatch.setattr("cw.reconcile._deps.load_effective_clients", loader)
+
+    capture_local_harvest_facts(state, rows, facts=HarvestFacts())
+
+    loader.assert_not_called()

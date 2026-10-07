@@ -15,7 +15,19 @@ save_state, and event emission. See GitHub #888, ADR-0006.
 A recorded ``aider`` backend is not trusted: a handle that predates the
 ``backend`` field migrates to an explicit ``"aider"`` (#2369), so
 ``_resolve_harvest_backend`` verifies it against the worktree's launch logs and
-the session's spawn stage, and parks the row when it cannot (#2512).
+the session's spawn stage, and parks the row when it cannot (#2512). That
+per-backend synthesis cluster lives in ``cw.reconcile.harvest_synthesis``
+(split out by #2565); its warnings keep this module's logger name.
+
+The git facts an aider result is built from never run under the caller's
+``sessions_lock`` (#2565): ``reconcile()`` captures them first, lockless and
+budgeted, through :func:`capture_local_harvest_facts` into a
+``HarvestFacts`` store, and the act only looks them up. A missing,
+mismatched or stale capture defers the candidate to the next tick with one
+``harvest_facts_unavailable`` warning, and so does a git call that timed out
+during the capture (a ``harvest_git_timeout`` advisory; a timeout never parks).
+A captured ``OSError`` / ``CalledProcessError`` is git's own evidence and
+still parks the row ``unexpected_error``, as before.
 
 A ``codex``-backend handle (RFC 0014 A1, #2387) is detected the same way but
 never harvested through a result synthesizer: a crashed codex review leaves no
@@ -47,14 +59,16 @@ re-derives what happened from state.
 from __future__ import annotations
 
 import logging
+import subprocess
 from dataclasses import dataclass
 from functools import partial
+from time import monotonic
 from typing import TYPE_CHECKING
 
 from cw.codex_background import _resolve_codex_fix_loop_enabled
 from cw.config import load_effective_config, save_state
 from cw.events import record_event
-from cw.local_runner import git_facts, read_process_start_time_ns
+from cw.local_runner import read_process_start_time_ns
 from cw.models import (
     CODEX_BACKEND,
     DEFAULT_LANE,
@@ -93,19 +107,26 @@ from cw.reconcile.codex_boot import (
     lookup_probe,
 )
 from cw.reconcile.harvest_synthesis import (
+    HARVEST_CAPTURE_BUDGET_SECONDS,
+    HarvestFacts,
+    HarvestFactsUnavailableError,
     _resolve_harvest_backend,
     _synthesize_harvest_sentinel,
+    harvest_uses_git,
+    prove_harvest_backend,
 )
 from cw.reconcile.tasks import _resolve_task_policy
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from datetime import datetime
     from pathlib import Path
 
+    from cw.auto_dev_result import AutoDevResult
     from cw.models import (
         ClientConfig,
         CwState,
+        LocalLivenessBackend,
         LocalLivenessHandle,
         OrchestratorConfig,
         Session,
@@ -627,6 +648,144 @@ def capture_codex_harvest_probes(
             return
 
 
+def _harvest_task_for(
+    candidate: ReapCandidate,
+    session: Session,
+    task_by_ticket: Mapping[str, TicketTask],
+) -> TicketTask:
+    """The row a non-codex candidate is harvested against, else a synthetic task.
+
+    The row is looked up by ticket id (last one wins). With no row, a synthetic
+    task carries the session's client and spawn stage (IMPL when it has none),
+    so the result is still built and routed. Shared by the act and its
+    lockless harvest-facts pre-pass, so both prove the backend the same way.
+    """
+    task = task_by_ticket.get(candidate.ticket_id) if candidate.ticket_id else None
+    if task is not None:
+        return task
+    return TicketTask(
+        ticket_id=candidate.ticket_id or "",
+        client=session.client,
+        stage=session.stage or Stage.IMPL,
+    )
+
+
+def _harvest_default_branch(client_cfg: ClientConfig | None) -> str:
+    """The branch a harvest's fork point is measured against."""
+    return client_cfg.default_branch if client_cfg is not None else "main"
+
+
+def _git_harvest_targets(
+    state: CwState, tasks: Sequence[TicketTask]
+) -> list[tuple[Session, LocalLivenessHandle, Path, TicketTask]]:
+    """The dead sessions whose harvest builds its result from git facts.
+
+    The sweep's own detect pass, filtered as its act phase filters: a worktree
+    and a liveness handle, never a codex handle (branched to its gate; note
+    ``harvest_uses_git("codex")`` alone would be True), and a backend that
+    :func:`prove_harvest_backend` proves git-backed. Each is paired with the
+    task the act would use (:func:`_harvest_task_for`).
+    """
+    task_by_ticket = {t.ticket_id: t for t in tasks}
+    session_by_id = {s.id: s for s in state.sessions}
+    targets: list[tuple[Session, LocalLivenessHandle, Path, TicketTask]] = []
+    for candidate in _detect_local_harvest_candidates(state, tasks):
+        session = session_by_id[candidate.session_id]
+        handle = session.local_liveness
+        worktree = candidate.worktree_path
+        if worktree is None or handle is None or handle.backend == CODEX_BACKEND:
+            continue
+        task = _harvest_task_for(candidate, session, task_by_ticket)
+        backend = prove_harvest_backend(handle.backend, session, task, worktree)
+        if harvest_uses_git(backend):
+            targets.append((session, handle, worktree, task))
+    return targets
+
+
+def capture_local_harvest_facts(
+    state: CwState,
+    tasks: Sequence[TicketTask],
+    *,
+    facts: HarvestFacts,
+) -> None:
+    """Lockless pre-pass: capture each git-backed harvest candidate's facts (#2565).
+
+    The candidates are exactly the ones the sweep would synthesize from git
+    (:func:`_git_harvest_targets`); their git facts are recorded in *facts*,
+    which the in-lock act only looks up. Clients load only when there is a
+    candidate. Once the capture budget is spent the rest get no facts, so they
+    defer in-lock. A git call that times out is a signal-only advisory: the
+    candidate stores nothing, defers in-lock like a miss, and the sweep moves
+    on (a timeout is elapsed time, never a reason to park, ADR-0014). Runs
+    git, so it must never be called with ``sessions_lock`` held.
+    """
+    targets = _git_harvest_targets(state, tasks)
+    if not targets:
+        return
+    clients = _deps.load_effective_clients()
+    for index, (session, handle, worktree, task) in enumerate(targets):
+        default_branch = _harvest_default_branch(clients.get(session.client))
+        started = monotonic()
+        try:
+            facts.capture(session.id, handle, worktree, default_branch)
+        except HarvestFactsUnavailableError:
+            _log.warning(
+                "reconcile: harvest-facts budget (%.0fs) spent;"
+                " %d candidate(s) deferred to the next tick",
+                HARVEST_CAPTURE_BUDGET_SECONDS,
+                len(targets) - index,
+            )
+            return
+        except subprocess.TimeoutExpired:
+            _log.warning(
+                "harvest_git_timeout: session=%s ticket=%s elapsed=%.1fs;"
+                " deferring to the next tick (GitHub #2565)",
+                session.id,
+                task.ticket_id,
+                monotonic() - started,
+            )
+
+
+def _harvest_sentinel_or_defer(
+    session: Session,
+    handle: LocalLivenessHandle,
+    worktree: Path,
+    task: TicketTask,
+    *,
+    default_branch: str,
+    backend: LocalLivenessBackend | None,
+    harvest_facts: HarvestFacts | None,
+) -> AutoDevResult | None:
+    """Synthesize *session*'s harvest sentinel, or ``None`` to defer it a tick.
+
+    Git facts come only from *harvest_facts*, captured before the lock
+    (``None`` means nothing was captured, so a git-backed candidate defers);
+    no git runs here. A missing, mismatched or stale capture logs one
+    ``harvest_facts_unavailable`` warning naming the reason and returns
+    ``None``: the session stays ACTIVE, nothing is emitted, and the next tick
+    retries. Opencode and unproven backends never read the facts.
+    """
+    store = harvest_facts if harvest_facts is not None else HarvestFacts()
+    try:
+        return _synthesize_harvest_sentinel(
+            worktree,
+            task,
+            default_branch,
+            session.id,
+            backend,
+            facts=partial(store.lookup, session.id, handle, worktree, default_branch),
+        )
+    except HarvestFactsUnavailableError as exc:
+        _log.warning(
+            "harvest_facts_unavailable: session=%s ticket=%s;"
+            " deferring to the next tick: %s",
+            session.id,
+            task.ticket_id,
+            exc,
+        )
+        return None
+
+
 def _act_on_local_harvest_candidates(
     state: CwState,
     candidates: list[ReapCandidate],
@@ -635,6 +794,7 @@ def _act_on_local_harvest_candidates(
     task_by_ticket: dict[str, TicketTask] | None = None,
     config: OrchestratorConfig | None = None,
     codex_probes: CleanProbes | None = None,
+    harvest_facts: HarvestFacts | None = None,
 ) -> list[str]:
     """Act phase: synthesize the git result, advance the task, complete session.
 
@@ -646,14 +806,19 @@ def _act_on_local_harvest_candidates(
     the clean probes ``reconcile()`` captured before taking the lock
     (#2563); omitted, none was captured and every codex candidate defers.
 
+    A git-backed candidate's result is built from *harvest_facts*, the git
+    facts ``reconcile()`` captured before taking the lock (#2565); omitted,
+    none was captured and every git-backed candidate defers a tick
+    (:func:`_harvest_sentinel_or_defer`). No subprocess runs here.
+
     For each candidate, in canonical order (task first, then session — mirroring
     ``phantom._apply_phantom_routed_mutations`` and the ``_apply_sentinel_to_task``
     docstring): synthesize an AutoDevResult from git facts, route it through the
     shared staged-advance authority, then mark the session COMPLETED/NORMAL. Emits
     a ``SESSION_COMPLETED`` event with ``crashed: False`` and no result payload;
     dispatch simply reads ``last_result`` as written by the RFC 0012 door.
-    Returns the harvested ticket IDs. Acquires no gh subprocess; runs entirely
-    under the caller's ``sessions_lock``.
+    Returns the harvested ticket IDs. Runs entirely under the caller's
+    ``sessions_lock`` and launches no subprocess (no gh, no git).
 
     GitHub #1031 (extends #1019's phantom-path guard): when
     ``_apply_sentinel_to_task`` reports ``routed=False`` (a stage-mismatch
@@ -676,7 +841,7 @@ def _act_on_local_harvest_candidates(
     terminal status by a concurrent caller before this lookup ran, not a
     stage-mismatch refusal. Without this carve-out, every subsequent tick
     would re-detect the same dead-PID candidate and re-synthesize the harvest
-    sentinel (a real git/opencode subprocess call) forever, re-hitting the
+    sentinel forever, re-hitting the
     identical race deterministically. That case is now admitted past this
     bail so it flows through the shared audited result door -- the same
     first-writer and audit ordering the ordinary path uses.
@@ -698,14 +863,8 @@ def _act_on_local_harvest_candidates(
             # liveness handle; the guard narrows both for the calls below.
             continue
         client_cfg = clients.get(session.client)
-        default_branch = client_cfg.default_branch if client_cfg is not None else "main"
-        task = _task_by_ticket.get(candidate.ticket_id) if candidate.ticket_id else None
-        if task is None:
-            task = TicketTask(
-                ticket_id=candidate.ticket_id or "",
-                client=session.client,
-                stage=session.stage or Stage.IMPL,
-            )
+        default_branch = _harvest_default_branch(client_cfg)
+        task = _harvest_task_for(candidate, session, _task_by_ticket)
         if session.local_liveness.backend == CODEX_BACKEND:
             # Never the synthetic `task` above: only a real row can be gated.
             # The outcome is discarded: every non-final one (AUDIT_FAILED,
@@ -735,14 +894,18 @@ def _act_on_local_harvest_candidates(
         backend = _resolve_harvest_backend(
             session.local_liveness.backend, session, task, candidate.worktree_path
         )
-        sentinel = _synthesize_harvest_sentinel(
-            worktree=candidate.worktree_path,
-            task=task,
+        # Git facts were captured before the lock (#2565); a miss defers a tick.
+        sentinel = _harvest_sentinel_or_defer(
+            session,
+            session.local_liveness,
+            candidate.worktree_path,
+            task,
             default_branch=default_branch,
-            session_id=candidate.session_id,
             backend=backend,
-            facts=partial(git_facts, candidate.worktree_path, default_branch),
+            harvest_facts=harvest_facts,
         )
+        if sentinel is None:
+            continue
         # Task first (before the session status change) so the task is in its
         # terminal/advanced state when revert_completed_silent_tasks runs.
         routed = True
