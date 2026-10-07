@@ -18716,17 +18716,15 @@ class TestPostLaunchSpawnFailure:
         )
         task = TicketTask(ticket_id=self._TICKET, client="test-client")
 
-        outcome = _handle_post_launch_failure(
-            task,
-            sample_client_config,
-            OSError("first stamp failed"),
-            session_id="sess-9",
-            worktree_path=tmp_path,
-        )
+        with pytest.raises(ValueError, match=r"dev_queue\.json is not valid JSON"):
+            _handle_post_launch_failure(
+                task,
+                sample_client_config,
+                OSError("first stamp failed"),
+                session_id="sess-9",
+                worktree_path=tmp_path,
+            )
 
-        assert outcome == _SpawnOutcome(
-            spawned=True, error="first stamp failed"
-        )
         assert post_launch_attention_payload(pages)["session_id"] == "sess-9"
 
 
