@@ -73,7 +73,8 @@ Two sibling modules import this module's private helpers: ``cw.reconcile
 .codex_reparks`` re-runs ``_resolve_orphan_action`` on reconcile ticks (#2307),
 and ``cw.reconcile.local``'s codex harvest branch (RFC 0014 A1, #2387) reuses
 the clean-requeue primitives (``_worktree_porcelain_clean_except_verdict``,
-``_head_matches_pre_review_ref``) and the ``_PARK_REASON_*`` constants for a
+``_head_matches_pre_review_ref``, read through a :class:`CleanProbe` since
+#2563) and the ``_PARK_REASON_*`` constants for a
 codex session whose recorded PID has died. That branch skips the live-writer
 scan (the recycled-PID guard already proved the process dead) and evaluates
 every gate check rather than short-circuiting, so its audit event can report
@@ -84,6 +85,24 @@ each one. Changing these helpers' contracts changes both consumers.
 ``stale_snapshot_reason``: a legacy session carries no PID to prove dead, so
 it runs this pass's live-writer scan first, and it revalidates its unlocked
 snapshot with the same staleness check before acting.
+
+Those three consumers decide under ``sessions_lock``, where no subprocess may
+run (ADR-0019), so none of them runs the clean check's git there (#2563).
+Their git checks run in a lockless pre-pass instead, through this module's
+:class:`CleanProbes` seam: ``reconcile()`` and the legacy recovery *capture*
+both primitives' answers per candidate (:meth:`CleanProbes.capture`) before
+taking the lock, and the in-lock code only *consumes* them
+(:meth:`CleanProbes.lookup`), never running git. A lookup that finds no probe,
+a probe captured for another worktree or baseline, or one at least
+``CLEAN_PROBE_MAX_AGE_SECONDS`` old raises :class:`CleanProbeUnavailableError`,
+and the consumer *defers*: it leaves the candidate exactly as it found it for
+the next tick, with nothing requeued, closed, parked, backoff-stamped or
+audited off it. That stays fail-closed, because every requeue or park needs a
+fresh hit, and it is not a clock-driven disposition (ADR-0014): an expired
+probe only delays a re-check. A probe that captured a git error is real
+evidence and still parks as ``git_error``. Capture-lockless, consume-in-lock,
+defer-on-miss is the template for the remaining in-lock git (#2546, #2548).
+This boot pass itself runs unlocked and keeps calling the primitives live.
 """
 
 from __future__ import annotations
@@ -93,6 +112,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING
 
 import psutil
@@ -134,7 +154,7 @@ from cw.reconcile._shared import (
 from cw.reconcile.tasks import _resolve_task_policy
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from cw.models import (
         ClientConfig,
@@ -205,6 +225,16 @@ _CODEX_PROCESS_NAME = "codex"
 # What Linux reports (via /proc/<pid>/cwd, which psutil passes through) for a
 # process whose cwd directory has been removed: "<path> (deleted)".
 _DELETED_CWD_SUFFIX = " (deleted)"
+
+# How old a captured clean probe may be when it is consumed under the lock
+# (#2563). Strict ``<``: a probe exactly this old is stale. Expiry only defers
+# the candidate to the next tick, so the value is a freshness bound, not a
+# disposition clock.
+CLEAN_PROBE_MAX_AGE_SECONDS: float = 120.0
+# Wall-clock budget for one lockless capture pass. Well under the TTL, so git
+# calls run serially for later candidates can never age the early probes past
+# it; a candidate reached after the budget is spent gets no probe and defers.
+CAPTURE_BUDGET_SECONDS: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -295,6 +325,149 @@ def _head_matches_pre_review_ref(
     return head == origin_sha
 
 
+class CleanProbeUnavailableError(Exception):
+    """No usable clean probe for a candidate: missing, mismatched or stale.
+
+    A plain ``Exception``, deliberately not a ``CwError``, so no caller's broad
+    ``except CwError`` swallows it: each consumer catches it by name and
+    defers the candidate to the next tick (see the module docstring).
+    """
+
+
+@dataclass(frozen=True)
+class CleanProbe:
+    """One candidate's clean-check git answers, captured before the lock.
+
+    ``clean`` and ``head_matches`` are exactly what
+    ``_worktree_porcelain_clean_except_verdict`` and
+    ``_head_matches_pre_review_ref`` returned, ``None`` still meaning git
+    could not answer. ``worktree`` and ``baseline`` (what HEAD was compared
+    against, see ``_baseline_ref``) are the identity a consumer re-checks.
+    ``captured_at`` is stamped before the git calls, so the probe's age is
+    measured conservatively from the start of the observation.
+    """
+
+    worktree: Path
+    client: str
+    ticket_id: str
+    baseline: str
+    clean: bool | None
+    head_matches: bool | None
+    captured_at: datetime
+
+
+# How a clean-check consumer obtains a candidate's probe: live git
+# (``probe_clean_state``), a lockless capture (``CleanProbes.capture``), or an
+# in-lock lookup that never runs git (``CleanProbes.lookup``).
+type ProbeSource = Callable[[Path, TicketTask, dict[str, ClientConfig]], CleanProbe]
+
+
+def _baseline_ref(task: TicketTask, clients: dict[str, ClientConfig]) -> str:
+    """The ref ``_head_matches_pre_review_ref`` compares HEAD against.
+
+    Pure (no git): the stamped ``stage_base_ref``, else the local
+    ``origin/<feature branch>`` tracking ref's name.
+    """
+    if task.stage_base_ref:
+        return task.stage_base_ref
+    return f"origin/{feature_branch_key(task.client, task.ticket_id, clients)}"
+
+
+def probe_clean_state(
+    worktree: Path, task: TicketTask, clients: dict[str, ClientConfig]
+) -> CleanProbe:
+    """Run both clean-check primitives live and record their answers.
+
+    Never short-circuits: the harvest gate reports every check. Runs git, so
+    it must never be called with ``sessions_lock`` held.
+    """
+    captured_at = datetime.now(UTC)
+    clean = _worktree_porcelain_clean_except_verdict(worktree)
+    head_matches = _head_matches_pre_review_ref(worktree, task, clients)
+    return CleanProbe(
+        worktree=worktree,
+        client=task.client,
+        ticket_id=task.ticket_id,
+        baseline=_baseline_ref(task, clients),
+        clean=clean,
+        head_matches=head_matches,
+        captured_at=captured_at,
+    )
+
+
+class CleanProbes:
+    """Clean probes captured lockless, keyed by ``(client, ticket_id)``.
+
+    One pass captures (:meth:`capture`, runs git, lockless only), then the
+    in-lock consumers look up (:meth:`lookup`, never runs git). With
+    *budget_seconds* set, captures stop once that much monotonic time has
+    passed since construction.
+    """
+
+    def __init__(self, *, budget_seconds: float | None = None) -> None:
+        self.budget_seconds = budget_seconds
+        self._deadline = (
+            None if budget_seconds is None else monotonic() + budget_seconds
+        )
+        self._probes: dict[tuple[str, str], CleanProbe] = {}
+
+    @property
+    def captured_keys(self) -> frozenset[tuple[str, str]]:
+        """The ``(client, ticket_id)`` of every probe captured so far."""
+        return frozenset(self._probes)
+
+    def capture(
+        self, worktree: Path, task: TicketTask, clients: dict[str, ClientConfig]
+    ) -> CleanProbe:
+        """Probe *task*'s worktree live and keep the result. Lockless only.
+
+        Raises ``CleanProbeUnavailableError`` before running any git once the
+        budget is spent.
+        """
+        if self._deadline is not None and monotonic() >= self._deadline:
+            msg = (
+                f"the {self.budget_seconds:.0f}s clean-probe budget is spent;"
+                f" {task.client}/{task.ticket_id} was not probed"
+            )
+            raise CleanProbeUnavailableError(msg)
+        probe = probe_clean_state(worktree, task, clients)
+        self._probes[task.client, task.ticket_id] = probe
+        return probe
+
+    def lookup(
+        self, worktree: Path, task: TicketTask, clients: dict[str, ClientConfig]
+    ) -> CleanProbe:
+        """Return *task*'s captured probe if it is still usable. Never runs git.
+
+        Usable means captured for this same worktree and baseline, and aged in
+        ``[0, CLEAN_PROBE_MAX_AGE_SECONDS)``: a negative age (the clock went
+        backwards) fails closed too. Otherwise raises
+        ``CleanProbeUnavailableError``.
+        """
+        who = f"{task.client}/{task.ticket_id}"
+        probe = self._probes.get((task.client, task.ticket_id))
+        if probe is None:
+            msg = f"no clean probe was captured for {who}"
+            raise CleanProbeUnavailableError(msg)
+        if (probe.worktree, probe.baseline) != (worktree, _baseline_ref(task, clients)):
+            msg = f"the clean probe for {who} no longer matches its worktree/baseline"
+            raise CleanProbeUnavailableError(msg)
+        age = (datetime.now(UTC) - probe.captured_at).total_seconds()
+        if not 0 <= age < CLEAN_PROBE_MAX_AGE_SECONDS:
+            msg = f"the clean probe for {who} is unusable at age {age:.1f}s"
+            raise CleanProbeUnavailableError(msg)
+        return probe
+
+
+def lookup_probe(probes: CleanProbes | None) -> ProbeSource:
+    """The in-lock probe source: *probes*' lookup, or an always-miss one.
+
+    ``None`` means nothing was captured, so every lookup misses and the
+    consumer defers: fail closed.
+    """
+    return (probes if probes is not None else CleanProbes()).lookup
+
+
 # Everything the scan can raise while reading or normalizing a candidate:
 # psutil's own errors, OS errors, and ``Path.resolve`` failing on a symlink
 # loop (``RuntimeError``) or an embedded NUL (``ValueError``). Any of them
@@ -375,21 +548,43 @@ def live_writer_park(worktree: Path) -> _OrphanDisposition | None:
     return None
 
 
-def _git_park_reason(
-    worktree: Path, task: TicketTask, clients: dict[str, ClientConfig]
+def _park_reason_for_git(
+    clean: bool | None, head_matches: Callable[[], bool | None]
 ) -> str | None:
-    """Return the park reason the worktree's git state implies, or None."""
-    clean = _worktree_porcelain_clean_except_verdict(worktree)
+    """The git park ladder, shared by live git and a captured probe.
+
+    *head_matches* is lazy so the live boot path keeps its short-circuit: it
+    never asks for HEAD once the tree is dirty or unreadable.
+    """
     if clean is None:
         return _PARK_REASON_GIT_ERROR
     if not clean:
         return _PARK_REASON_DIRTY_WORKTREE
-    head_matches = _head_matches_pre_review_ref(worktree, task, clients)
-    if head_matches is None:
+    matches = head_matches()
+    if matches is None:
         return _PARK_REASON_GIT_ERROR
-    if not head_matches:
+    if not matches:
         return _PARK_REASON_HEAD_MOVED
     return None
+
+
+def _git_park_reason(
+    worktree: Path,
+    task: TicketTask,
+    clients: dict[str, ClientConfig],
+    probe: CleanProbe | None = None,
+) -> str | None:
+    """Return the park reason the worktree's git state implies, or None.
+
+    With no *probe* the primitives run live, exactly as the boot pass always
+    has; with one, its captured answers go through the same ladder.
+    """
+    if probe is None:
+        return _park_reason_for_git(
+            _worktree_porcelain_clean_except_verdict(worktree),
+            lambda: _head_matches_pre_review_ref(worktree, task, clients),
+        )
+    return _park_reason_for_git(probe.clean, lambda: probe.head_matches)
 
 
 def _resolve_orphan_action(
@@ -398,6 +593,7 @@ def _resolve_orphan_action(
     client: ClientConfig,
     clients: dict[str, ClientConfig],
     config: OrchestratorConfig,
+    probe_source: ProbeSource | None = None,
 ) -> _OrphanDisposition:
     """Decide requeue vs. park, and whether the session may close, for one orphan.
 
@@ -408,6 +604,11 @@ def _resolve_orphan_action(
     (ADR-0006): anything but ``reap_policy: auto`` parks; under ``auto`` the
     remaining gates run cheapest and most decisive first, and the first
     failing gate parks with its own reason.
+
+    *probe_source* supplies the git answers (see ``_gate_clean_requeue``);
+    omitted, the boot pass's live git runs. Raises
+    ``CleanProbeUnavailableError`` only when a lookup source misses at the
+    git gate.
     """
     if worktree is None:
         # No path to scan is a scan that cannot run, so it is inconclusive. A
@@ -419,7 +620,13 @@ def _resolve_orphan_action(
         return live_writer
     policy = _resolve_task_policy(task.client, task.lane, clients, config)
     return _gate_clean_requeue(
-        worktree, task, client, clients, config, auto=policy is ReapPolicy.AUTO
+        worktree,
+        task,
+        client,
+        clients,
+        config,
+        auto=policy is ReapPolicy.AUTO,
+        probe_source=probe_source,
     )
 
 
@@ -431,13 +638,19 @@ def _gate_clean_requeue(
     config: OrchestratorConfig,
     *,
     auto: bool,
+    probe_source: ProbeSource | None = None,
 ) -> _OrphanDisposition:
-    """With no writer left, requeue only a provably clean orphan under ``auto``."""
+    """With no writer left, requeue only a provably clean orphan under ``auto``.
+
+    *probe_source* is consulted only once the cheap policy and fix-loop gates
+    pass, so a missing probe is irrelevant whenever git would not be reached.
+    """
     if not auto:
         return _park(_PARK_REASON_REAP_POLICY_NOT_AUTO)
     if _resolve_codex_fix_loop_enabled(client, task, config):
         return _park(_PARK_REASON_FIX_LOOP_ENABLED)
-    git_reason = _git_park_reason(worktree, task, clients)
+    probe = None if probe_source is None else probe_source(worktree, task, clients)
+    git_reason = _git_park_reason(worktree, task, clients, probe)
     if git_reason is not None:
         return _park(git_reason)
     return _OrphanDisposition(

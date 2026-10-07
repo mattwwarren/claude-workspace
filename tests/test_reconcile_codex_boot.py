@@ -14,13 +14,14 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import psutil
 import pytest
+from freezegun import freeze_time
 
 from cw.config import load_clients, load_state, save_state, sessions_lock
 from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue
@@ -54,14 +55,21 @@ from cw.reconcile.codex_boot import (
     _PARK_REASON_PROCESS_SCAN_INCONCLUSIVE,
     _PARK_REASON_REAP_POLICY_NOT_AUTO,
     _SCAN_INCONCLUSIVE,
+    CAPTURE_BUDGET_SECONDS,
+    CLEAN_PROBE_MAX_AGE_SECONDS,
     CODEX_ORPHAN_CLEAN_REQUEUE_REASON,
     CODEX_ORPHAN_CLOSE_REASON,
     CODEX_ORPHANED_AT_BOOT_DISPOSITION,
+    CleanProbe,
+    CleanProbes,
+    CleanProbeUnavailableError,
     _codex_processes_in,
     _head_matches_pre_review_ref,
     _OrphanDisposition,
     _resolve_orphan_action,
     _worktree_porcelain_clean_except_verdict,
+    lookup_probe,
+    probe_clean_state,
     reap_orphaned_codex_sessions_at_boot,
 )
 from cw.spawn import _write_hook_context
@@ -71,12 +79,14 @@ from tests._codex_recovery_helpers import (
     _assert_session_closed,
     _assert_session_left_active,
     _attention_events,
+    _capture_probes_for,
     _completed_events,
     _failing_record_event,
     _FakeCodex,
     _forbid_os_kill,
     _live_writer,
     _no_codex_process,
+    _record_git_lock_state,
     _requeued_events,
     _seed_clean_codex_orphan,
     _task_without_base_ref,
@@ -1446,3 +1456,397 @@ def test_unknown_client_is_skipped(tmp_config_dir: Path, tmp_path: Path) -> None
 
     assert reap_orphaned_codex_sessions_at_boot() == 0
     assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
+
+
+# --------------------------------------------------------------------------- #
+# Lockless clean-probe seam (#2563): capture runs git before sessions_lock,
+# the in-lock consumers only look the result up.
+# --------------------------------------------------------------------------- #
+
+
+def _seeded_orphan(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+) -> tuple[Path, str, TicketTask, dict[str, ClientConfig]]:
+    """The seeded clean orphan's repo, baseline sha, task row and clients."""
+    repo, head_sha = _seed_clean_codex_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    return repo, head_sha, load_dev_queue().tasks[0], load_clients()
+
+
+def _forbid_git(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every git primitive the clean check reaches raise."""
+
+    def _no_git(*_args: object, **_kwargs: object) -> None:
+        msg = "a probe lookup must never run git"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(codex_boot, "run_git", _no_git)
+    monkeypatch.setattr(codex_boot, "capture_head_sha", _no_git)
+
+
+def test_capture_records_both_tri_states_and_a_pre_git_timestamp(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, head_sha, task, clients = _seeded_orphan(
+        tmp_config_dir, tmp_path, make_git_repo
+    )
+    first_git_at: list[datetime] = []
+    real_run_git = codex_boot.run_git
+
+    def _timed(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        first_git_at.append(datetime.now(UTC))
+        result: subprocess.CompletedProcess[str] = real_run_git(argv, **kwargs)
+        return result
+
+    monkeypatch.setattr(codex_boot, "run_git", _timed)
+    probes = CleanProbes()
+
+    probe = probes.capture(repo, task, clients)
+
+    assert probe == CleanProbe(
+        worktree=repo,
+        client="client-a",
+        ticket_id="T-orphan",
+        baseline=head_sha,
+        clean=True,
+        head_matches=True,
+        captured_at=probe.captured_at,
+    )
+    assert first_git_at
+    assert probe.captured_at <= first_git_at[0]
+    assert probes.captured_keys == frozenset({("client-a", "T-orphan")})
+
+
+def test_capture_evaluates_head_even_on_a_dirty_tree(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """The probe never short-circuits: the harvest gate reports every check."""
+    repo, _, task, clients = _seeded_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    (repo / "extra.txt").write_text("stray\n")
+
+    probe = CleanProbes().capture(repo, task, clients)
+
+    assert (probe.clean, probe.head_matches) == (False, True)
+
+
+def test_capture_names_the_tracking_ref_baseline_without_a_base_ref(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+) -> None:
+    repo, _, task, clients = _seeded_orphan(tmp_config_dir, tmp_path, make_git_repo)
+
+    probe = probe_clean_state(
+        repo, task.model_copy(update={"stage_base_ref": None}), clients
+    )
+
+    assert probe.baseline == "origin/dev/T-orphan"
+    assert probe.head_matches is None
+
+
+def test_lookup_returns_a_fresh_matching_probe_without_git(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, _, task, clients = _seeded_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    probes = CleanProbes()
+    captured = probes.capture(repo, task, clients)
+    _forbid_git(monkeypatch)
+
+    assert probes.lookup(repo, task, clients) is captured
+    assert lookup_probe(probes) == probes.lookup
+
+
+def test_lookup_misses_when_nothing_was_captured(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+) -> None:
+    repo, _, task, clients = _seeded_orphan(tmp_config_dir, tmp_path, make_git_repo)
+
+    with pytest.raises(CleanProbeUnavailableError, match="no clean probe"):
+        CleanProbes().lookup(repo, task, clients)
+    with pytest.raises(CleanProbeUnavailableError):
+        lookup_probe(None)(repo, task, clients)
+
+
+def test_lookup_misses_when_the_base_ref_was_restamped(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+) -> None:
+    repo, _, task, clients = _seeded_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    probes = _capture_probes_for(repo, task, clients)
+    restamped = task.model_copy(update={"stage_base_ref": "0" * 40})
+
+    with pytest.raises(CleanProbeUnavailableError, match="no longer matches"):
+        probes.lookup(repo, restamped, clients)
+
+
+def test_lookup_misses_when_the_worktree_changed(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+) -> None:
+    repo, _, task, clients = _seeded_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    probes = _capture_probes_for(repo, task, clients)
+
+    with pytest.raises(CleanProbeUnavailableError, match="no longer matches"):
+        probes.lookup(tmp_path / "elsewhere", task, clients)
+
+
+def test_lookup_misses_when_the_branch_prefix_renamed_the_baseline(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """No stamped base ref: the baseline is ``origin/<feature branch>``, and a
+    changed ``feature_branch_prefix`` names a different ref."""
+    repo, _, task, clients = _seeded_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    unstamped = task.model_copy(update={"stage_base_ref": None})
+    probes = _capture_probes_for(repo, unstamped, clients)
+    renamed = {
+        name: cfg.model_copy(update={"feature_branch_prefix": "feat"})
+        for name, cfg in clients.items()
+    }
+
+    probes.lookup(repo, unstamped, clients)
+    with pytest.raises(CleanProbeUnavailableError, match="no longer matches"):
+        probes.lookup(repo, unstamped, renamed)
+
+
+@pytest.mark.parametrize(
+    "offset",
+    [timedelta(seconds=CLEAN_PROBE_MAX_AGE_SECONDS), timedelta(seconds=-1)],
+    ids=["at-ttl", "negative-age"],
+)
+def test_lookup_misses_a_probe_outside_its_age_window(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    offset: timedelta,
+) -> None:
+    """Age must be in ``[0, CLEAN_PROBE_MAX_AGE_SECONDS)``: strict ``<`` at the
+    TTL, and a clock that went backwards fails closed too."""
+    repo, _, task, clients = _seeded_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    probes = _capture_probes_for(repo, task, clients)
+    captured_at = probes.lookup(repo, task, clients).captured_at
+
+    with (
+        freeze_time(captured_at + offset),
+        pytest.raises(CleanProbeUnavailableError, match="age"),
+    ):
+        probes.lookup(repo, task, clients)
+
+
+def test_capture_budget_stops_further_git_once_spent(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the monotonic budget is spent, capture refuses BEFORE any git, so
+    serial git calls can never age the early probes past the TTL."""
+    assert CAPTURE_BUDGET_SECONDS < CLEAN_PROBE_MAX_AGE_SECONDS
+    repo, _, task, clients = _seeded_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(codex_boot, "monotonic", lambda: clock["now"])
+    git_calls = _record_git_lock_state(monkeypatch)
+    probes = CleanProbes(budget_seconds=CAPTURE_BUDGET_SECONDS)
+    assert probes.budget_seconds == CAPTURE_BUDGET_SECONDS
+
+    probes.capture(repo, task, clients)
+    probed = len(git_calls)
+    assert probed > 0
+    clock["now"] += CAPTURE_BUDGET_SECONDS + 1
+    second = task.model_copy(update={"ticket_id": "T-second"})
+
+    with pytest.raises(CleanProbeUnavailableError, match="budget"):
+        probes.capture(repo, second, clients)
+
+    assert len(git_calls) == probed
+    assert probes.captured_keys == frozenset({("client-a", "T-orphan")})
+
+
+def _dirty(repo: Path, task: TicketTask) -> tuple[Path, TicketTask]:
+    (repo / "extra.txt").write_text("stray\n")
+    return repo, task
+
+
+def _head_moved(repo: Path, task: TicketTask) -> tuple[Path, TicketTask]:
+    commit_tracked_file(repo, "extra.txt")
+    return repo, task
+
+
+def _not_a_repo(repo: Path, task: TicketTask) -> tuple[Path, TicketTask]:
+    plain = repo.parent / "plain"
+    plain.mkdir()
+    return plain, task
+
+
+def _unresolvable_baseline(repo: Path, task: TicketTask) -> tuple[Path, TicketTask]:
+    return repo, task.model_copy(update={"stage_base_ref": None})
+
+
+def _unchanged(repo: Path, task: TicketTask) -> tuple[Path, TicketTask]:
+    return repo, task
+
+
+@pytest.mark.parametrize(
+    ("shape", "reason"),
+    [
+        (_unchanged, CODEX_ORPHAN_CLEAN_REQUEUE_REASON),
+        (_dirty, _PARK_REASON_DIRTY_WORKTREE),
+        (_head_moved, _PARK_REASON_HEAD_MOVED),
+        (_not_a_repo, _PARK_REASON_GIT_ERROR),
+        (_unresolvable_baseline, _PARK_REASON_GIT_ERROR),
+    ],
+    ids=["clean", "dirty", "head-moved", "non-repo", "unresolvable-baseline"],
+)
+def test_lookup_disposition_equals_the_live_one(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    shape: Callable[[Path, TicketTask], tuple[Path, TicketTask]],
+    reason: str,
+) -> None:
+    """Consuming a captured probe decides exactly what the live git would, and
+    never touches git to do it."""
+    seeded_repo, _, seeded_task, clients = _seeded_orphan(
+        tmp_config_dir, tmp_path, make_git_repo
+    )
+    repo, task = shape(seeded_repo, seeded_task)
+    _no_codex_process(monkeypatch)
+    client = clients["client-a"]
+    config = _auto(auto=True)
+    live = _resolve_orphan_action(repo, task, client, clients, config)
+    probes = _capture_probes_for(repo, task, clients)
+    _forbid_git(monkeypatch)
+
+    consumed = _resolve_orphan_action(
+        repo, task, client, clients, config, probe_source=probes.lookup
+    )
+
+    assert consumed == live
+    assert consumed.reason == reason
+
+
+def test_lookup_disposition_equals_the_live_one_on_a_status_timeout(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    hanging_git: Callable[[str], None],
+) -> None:
+    repo, _, task, clients = _seeded_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    _no_codex_process(monkeypatch)
+    hanging_git("status")
+    client = clients["client-a"]
+    config = _auto(auto=True)
+    live = _resolve_orphan_action(repo, task, client, clients, config)
+    probes = _capture_probes_for(repo, task, clients)
+    _forbid_git(monkeypatch)
+
+    consumed = _resolve_orphan_action(
+        repo, task, client, clients, config, probe_source=probes.lookup
+    )
+
+    assert consumed == live == _OrphanDisposition(
+        should_requeue=False, reason=_PARK_REASON_GIT_ERROR
+    )
+
+
+def _live_writer_4242(monkeypatch: pytest.MonkeyPatch) -> OrchestratorConfig:
+    _live_writer(monkeypatch, 4242)
+    return _auto(auto=True)
+
+
+def _signal_only(monkeypatch: pytest.MonkeyPatch) -> OrchestratorConfig:
+    _no_codex_process(monkeypatch)
+    return _auto(auto=False)
+
+
+def _fix_loop_on(monkeypatch: pytest.MonkeyPatch) -> OrchestratorConfig:
+    _no_codex_process(monkeypatch)
+    return _use_auto_reap_policy(default_codex_fix_loop_enabled=True)
+
+
+@pytest.mark.parametrize(
+    ("setup", "reason"),
+    [
+        (_signal_only, _PARK_REASON_REAP_POLICY_NOT_AUTO),
+        (_fix_loop_on, _PARK_REASON_FIX_LOOP_ENABLED),
+        (_live_writer_4242, f"{_PARK_REASON_CODEX_PROCESS_RUNNING} (pid 4242)"),
+    ],
+    ids=["signal-only", "fix-loop-on", "live-writer"],
+)
+def test_a_missing_probe_is_irrelevant_when_git_is_not_reached(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    setup: Callable[[pytest.MonkeyPatch], OrchestratorConfig],
+    reason: str,
+) -> None:
+    repo, _, task, clients = _seeded_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    config = setup(monkeypatch)
+
+    disposition = _resolve_orphan_action(
+        repo,
+        task,
+        clients["client-a"],
+        clients,
+        config,
+        probe_source=lookup_probe(None),
+    )
+
+    assert disposition.should_requeue is False
+    assert disposition.reason == reason
+
+
+def test_a_missing_probe_raises_once_git_would_be_reached(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, _, task, clients = _seeded_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    _no_codex_process(monkeypatch)
+
+    with pytest.raises(CleanProbeUnavailableError):
+        _resolve_orphan_action(
+            repo,
+            task,
+            clients["client-a"],
+            clients,
+            _auto(auto=True),
+            probe_source=lookup_probe(None),
+        )
+
+
+def test_boot_pass_still_runs_live_git_and_never_under_the_lock(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The serve-boot path is unchanged: it decides on live git, unlocked."""
+    _seed_clean_codex_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    _no_codex_process(monkeypatch)
+    _use_auto_reap_policy(monkeypatch)
+    git_calls = _record_git_lock_state(monkeypatch)
+
+    assert reap_orphaned_codex_sessions_at_boot() == 1
+
+    assert {subcommand for subcommand, _ in git_calls} == {"status", "rev-parse"}
+    assert all(lock_free for _, lock_free in git_calls)
+    assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
