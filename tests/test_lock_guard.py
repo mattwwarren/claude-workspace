@@ -538,7 +538,9 @@ def test_lock_guard_accepts_any_path_key(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 _CM_DECORATORS = frozenset({"contextmanager", "asynccontextmanager"})
-_ACQUIRE_HELPERS = frozenset({"try_flock_until", "acquire_sessions_flock"})
+_ACQUIRE_HELPERS = frozenset(
+    {"try_flock_until", "acquire_sessions_flock", "acquire_flock"}
+)
 _GUARD_NAME = "lock_guard"
 
 # Matched (flock LOCK_EX / bounded helper) context managers deliberately left
@@ -577,7 +579,7 @@ _GUARDED: frozenset[tuple[str, str]] = frozenset(
 )
 
 type _FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef
-_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
 
 def _call_name(call: ast.Call) -> str | None:
@@ -590,7 +592,11 @@ def _call_name(call: ast.Call) -> str | None:
 
 def _is_guard_call(call: ast.Call) -> bool:
     if isinstance(call.func, ast.Name):
-        return call.func.id == _GUARD_NAME
+        return call.func.id in {
+            _GUARD_NAME,
+            "_guarded_flock",
+            "_guarded_state_lock",
+        }
     return (
         isinstance(call.func, ast.Attribute)
         and call.func.attr == _GUARD_NAME
@@ -650,8 +656,14 @@ def _guard_spans(fn: _FunctionNode) -> list[tuple[int, int]]:
             and _is_guard_call(item.context_expr)
             for item in node.items
         ):
-            first, last = node.body[0], node.body[-1]
-            spans.append((first.lineno, last.end_lineno or last.lineno))
+            first = min(
+                item.context_expr.lineno
+                for item in node.items
+                if isinstance(item.context_expr, ast.Call)
+                and _is_guard_call(item.context_expr)
+            )
+            last = node.body[-1]
+            spans.append((first, last.end_lineno or last.lineno))
     return spans
 
 
@@ -741,6 +753,10 @@ def test_every_flock_context_manager_is_guarded_or_exempt() -> None:
         ("fcntl.flock(fd, fcntl.LOCK_EX)\n    yield", "unguarded"),
         ("try_flock_until(fd, timeout_s=1, poll_interval_s=1)\n    yield", "unguarded"),
         ("acquire_sessions_flock(fd, p, bounded=False)\n    yield", "unguarded"),
+        (
+            "acquire_flock(fd, p, lock_name='n', bounded=False)\n    yield",
+            "unguarded",
+        ),
         ("fcntl.flock(fd, fcntl.LOCK_UN)\n    yield", None),
         (
             "with lock_guard('n', p, r):\n"
@@ -751,6 +767,12 @@ def test_every_flock_context_manager_is_guarded_or_exempt() -> None:
         (
             "with _lock_guard.lock_guard('n', p, r):\n"
             "        acquire_sessions_flock(fd, p, bounded=True)\n"
+            "        yield",
+            "guarded",
+        ),
+        (
+            "with lock_guard('n', p, r):\n"
+            "        acquire_flock(fd, p, lock_name='n', bounded=True)\n"
             "        yield",
             "guarded",
         ),

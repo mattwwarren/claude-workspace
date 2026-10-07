@@ -11713,6 +11713,49 @@ class TestUnblockTicket:
         assert t.session_id is None
         assert t.stage_base_ref is None
 
+    def test_unblock_times_out_on_a_held_dev_queue_lock_and_writes_nothing(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The inner dev-queue lock is bounded too (#2501): a clean retry."""
+        from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
+        from cw.config import dev_queue_file, dev_queue_lock, save_state, state_file
+        from cw.dev_queue import unblock_ticket
+        from cw.exceptions import LockTimeoutError
+        from cw.models import CwState, ReapReason
+        from tests.conftest import _hold_flock
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.IMPL, session_id="sess8004")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess8004",
+                        last_result={"status": "salvage_parked"},
+                        reap_reason=ReapReason.SALVAGE_PARKED,
+                    )
+                ]
+            )
+        )
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.05")
+        queue_path = dev_queue_file()
+        queue_before = queue_path.read_bytes()
+        sessions_before = state_file().read_bytes()
+
+        with (
+            _hold_flock(dev_queue_lock()),
+            pytest.raises(LockTimeoutError) as exc_info,
+        ):
+            unblock_ticket("GEN-500", "genhealth")
+
+        assert exc_info.value.lock_name == "dev_queue"
+        assert queue_path.read_bytes() == queue_before
+        assert state_file().read_bytes() == sessions_before
+
     def test_unblock_clears_escalation_fields(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:

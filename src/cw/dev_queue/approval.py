@@ -80,7 +80,9 @@ None. Not a persisted ``TicketTask`` field, so it lives here rather than in
 _BODY_SHA_DISPLAY_LEN = 12
 
 
-def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool | None]:
+def approve_ticket(
+    ticket_id: str, client_name: str, *, bounded: bool = False
+) -> dict[str, str | bool | None]:
     """Approve a plan/review approval gate, or clear an operator-signoff gate.
 
     Two distinct gates share this entry point (GitHub #990):
@@ -123,7 +125,7 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool | N
             body-drift audit event failed (nothing is recorded).
         CwError: if no matching task is found.
     """
-    with _lock():
+    with _lock(bounded=bounded):
         # operator_initiated=True: this entry point IS the human `cw dev-queue
         # approve` path, the one caller authorised to release an RFC 0011 A3
         # force hold (#1160).
@@ -136,6 +138,7 @@ def revoke_plan_approval(
     *,
     resolutions_source: str = "step_1a.0b",
     reason: str = "preflight_resolutions_delta",
+    bounded: bool = False,
 ) -> dict[str, str | bool | None]:
     """Clear both durable PLAN approval fields for a resolutions revision.
 
@@ -155,7 +158,7 @@ def revoke_plan_approval(
     revocation was attempted; an ERROR log line naming the ticket is the only
     other trace needed.
     """
-    with _lock():
+    with _lock(bounded=bounded):
         store = load_dev_queue()
         task = _find_ticket(store, ticket_id, client_name)
         had_approval = (
@@ -922,6 +925,8 @@ def approve_scope_drift_ticket(
     ticket_id: str,
     client_name: str,
     extra_files: list[str],
+    *,
+    bounded: bool = False,
 ) -> ScopeDriftApproval:
     """Grant operator-directed scope growth to a ``plan_scope_drift`` park (#2337).
 
@@ -941,7 +946,7 @@ def approve_scope_drift_ticket(
             resolved on origin. Nothing is mutated on any of these paths.
         CwError: if no matching task is found.
     """
-    with _lock():
+    with _lock(bounded=bounded):
         return _approve_scope_drift_locked(
             ticket_id,
             client_name,

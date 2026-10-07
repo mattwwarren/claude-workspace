@@ -98,7 +98,7 @@ def _validate_stage_in_pipeline(
         raise RequeueStageError(msg)
 
 
-def add_ticket(task: TicketTask) -> bool:
+def add_ticket(task: TicketTask, *, bounded: bool = False) -> bool:
     """Enqueue a TicketTask, acquiring the file lock atomically.
 
     Returns True if the task was inserted, False if a task with the same
@@ -122,7 +122,7 @@ def add_ticket(task: TicketTask) -> bool:
         QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
     }
     _terminal = {QueueItemStatus.COMPLETED, QueueItemStatus.CANCELLED}
-    with _lock():
+    with _lock(bounded=bounded):
         try:
             client_cfg = get_client(task.client)
         except CwError:
@@ -302,6 +302,7 @@ def remove_ticket(
     remove_all: bool = False,
     status: QueueItemStatus | None = None,
     disposition: str | None = None,
+    bounded: bool = False,
 ) -> None:
     """Remove one (or all) matching TicketTask(s) from the dev queue.
 
@@ -321,7 +322,7 @@ def remove_ticket(
     *remove_all* is False -- the message then suggests --status/--disposition
     when neither was already given as a narrowing selector.
     """
-    with _lock():
+    with _lock(bounded=bounded):
         store = load_dev_queue()
         matches = [
             t
@@ -358,13 +359,15 @@ def remove_ticket(
             _emit_task_deleted(removed, "operator_remove")
 
 
-def cancel_ticket(ticket_id: str, client: str) -> list[str | None]:
+def cancel_ticket(
+    ticket_id: str, client: str, *, bounded: bool = False
+) -> list[str | None]:
     """Mark a TicketTask as CANCELLED, clearing its session_id.
 
     Returns the list of session_ids that were cleared (one per cancelled task).
     Raises CwError when no task matches. Idempotent for already-CANCELLED tasks.
     """
-    with _lock():
+    with _lock(bounded=bounded):
         store = load_dev_queue()
         matches = [
             t for t in store.tasks if t.ticket_id == ticket_id and t.client == client
@@ -432,6 +435,8 @@ def move_ticket(
     client_name: str,
     to_lane: str | None = None,
     priority: int | None = None,
+    *,
+    bounded: bool = False,
 ) -> dict[str, str | int | None]:
     """Move a pending ticket to a different lane and/or edit its priority.
 
@@ -447,7 +452,7 @@ def move_ticket(
     Note: record_event is NOT called here — the CLI layer fires TICKET_MOVED
     and/or TICKET_REPRIORITIZED.
     """
-    with _lock():
+    with _lock(bounded=bounded):
         store = load_dev_queue()
         task = next(
             (
@@ -555,7 +560,7 @@ def select_clearable_tickets(
 
 
 def clear_tickets(
-    client: str, status: QueueItemStatus | None = None
+    client: str, status: QueueItemStatus | None = None, *, bounded: bool = False
 ) -> list[TicketTask]:
     """Remove TicketTasks for *client*, optionally filtered by *status* (#2003).
 
@@ -580,7 +585,7 @@ def clear_tickets(
     signature -- the CLI's summary table needs per-row detail, mirroring
     ``prune_tickets``).
     """
-    with _lock():
+    with _lock(bounded=bounded):
         store = load_dev_queue()
         removed_tasks = _select_clear_candidates(store, client, status)
         removed_ids = {id(t) for t in removed_tasks}
@@ -699,6 +704,7 @@ def prune_tickets(
     client: str | None = None,
     *,
     all_clients: bool = False,
+    bounded: bool = False,
 ) -> list[TicketTask]:
     """Remove TicketTasks matching *statuses* past *older_than_days* (#382).
 
@@ -719,7 +725,7 @@ def prune_tickets(
     the CLI's summary table needs per-row detail). Raises ``CwError`` per
     ``_select_prune_candidates``.
     """
-    with _lock():
+    with _lock(bounded=bounded):
         store = load_dev_queue()
         removed_tasks = _select_prune_candidates(
             store, statuses, older_than_days, client, all_clients=all_clients

@@ -441,7 +441,11 @@ def init(
     if purposes:
         purpose_list = [p.strip() for p in purposes.split(",")]
 
-    init_client(name, path, default_branch=branch, auto_purposes=purpose_list)
+    # bounded=True (#2501): operator command; only input validation precedes
+    # the clients lock, so a held lock is a clean retry rather than a hang.
+    init_client(
+        name, path, default_branch=branch, auto_purposes=purpose_list, bounded=True
+    )
 
     click.echo(f"Added client '{name}' to configuration.")
 
