@@ -2089,7 +2089,7 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/cli/spawn.py", "_spawn_close_impl"): 1,  # `cw spawn close`
     ("cw/cli/spawn.py", "_spawn_complete_impl"): 1,  # `cw spawn complete`
     ("cw/dev_queue/requeue.py", "unblock_ticket"): 1,  # `cw dev-queue unblock`
-    ("cw/doctor/wedge.py", "_reap_daemon_sessions"): 1,  # `cw doctor --reap`
+    ("cw/doctor/wedge/reap.py", "_reap_daemon_sessions"): 1,  # `cw doctor --reap`
     # `cw doctor --reap`, stranded routed-result close (#2524)
     ("cw/doctor/routed_result_wedge.py", "reap_routed_result_findings"): 1,
     ("cw/orchestrate.py", "retire_merged_prs"): 1,  # `cw orchestrate retire`
