@@ -1071,6 +1071,11 @@ def _write_hook_context_file(
     lane: str | None = None,
     stamp: object = _STAMP_UNCHANGED,
     headless: bool = False,
+    *,
+    session_id: str = "sess940g",
+    ticket_id: str = "940",
+    client: str = "client-a",
+    task: TicketTask | None = None,
 ) -> None:
     """Materialize ``<worktree>/.claude/cw-context.json`` via the real writer.
 
@@ -1094,18 +1099,29 @@ def _write_hook_context_file(
     ``cw agent-spawn-pre``'s spawn-shape policy — which applies only to
     headless dispatch workers — reads the same ``"headless"`` key production
     stamps, for the same anti-drift reason as *lane* above.
+
+    *session_id*, *ticket_id* and *client* (#2591) default to the literals
+    every earlier caller relied on, and *task* defaults to ``None``, which
+    passes nothing extra to the real writer, so those callers' files are
+    byte-identical. A claim's context passes the claim's own values plus
+    ``task=`` (the claimed row): the writer then stamps the ``attempt`` key
+    from ``task.attempts``, as a dispatch spawn does, and runs
+    ``git rev-parse`` (outside any lock here). ``session_name`` stays
+    ``client-a/impl`` whatever *client* is: reconcile's adoption reads the
+    Session's own name, never this one.
     """
     from cw.spawn import _write_hook_context
 
     _write_hook_context(
         worktree,
-        session_id="sess940g",
+        session_id=session_id,
         session_name="client-a/impl",
-        client="client-a",
+        client=client,
         purpose="impl",
-        ticket_id="940",
+        ticket_id=ticket_id,
         origin=SessionOrigin.DAEMON,
         headless=headless,
+        task=task,
         workspace_path=workspace_path,
         lane=lane,
     )

@@ -21,7 +21,7 @@ import pytest
 
 from cw._lock_guard import LockRank, is_rank_held
 from cw.config import load_state
-from cw.dev_queue import load_dev_queue
+from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
@@ -30,11 +30,13 @@ from cw.models import (
     OrchestratorConfig,
     OrchestratorEventType,
     PendingFixDispatch,
+    QueueItemStatus,
     ReapPolicy,
     Session,
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile._shared import _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY
@@ -1038,3 +1040,51 @@ def _failing_record_event(
 
     monkeypatch.setattr(target, flaky)
     return failures
+
+
+def mk_unowned_running_row(
+    *,
+    client: str,
+    ticket_id: str,
+    attempts: int,
+    claimed_at: datetime | None,
+    session_id: str | None = None,
+    ever_spawned: bool = False,
+    **overrides: object,
+) -> TicketTask:
+    """Append one RUNNING row to the saved dev queue and return it (#2591).
+
+    The shape a claim leaves when the post-launch stamp never bound a session:
+    RUNNING, ``session_id`` unset, and ``ever_spawned=False`` as
+    ``dev_queue_add`` seeds it (``cli/dev_queue/crud.py``; the model default
+    is True). *overrides* reach the row unchanged (``lane``, ``stage``,
+    the per-arrival markers).
+    """
+    row = TicketTask.model_validate(
+        {
+            "ticket_id": ticket_id,
+            "client": client,
+            "status": QueueItemStatus.RUNNING,
+            "attempts": attempts,
+            "claimed_at": claimed_at,
+            "session_id": session_id,
+            "ever_spawned": ever_spawned,
+            **overrides,
+        }
+    )
+    store = load_dev_queue()
+    store.tasks.append(row)
+    save_dev_queue(store)
+    return row
+
+
+def write_unreadable_claim_context(worktree: Path, text: str) -> None:
+    """Write *text* verbatim as *worktree*'s cw-context.json (#2591).
+
+    Only for the shapes the real writer can never produce: a non-JSON file
+    (``"{not json"``) or a JSON value that is not an object (``"[1, 2]"``).
+    Every readable claim context goes through ``_write_hook_context_file``.
+    """
+    context_path = worktree / HOOK_CONTEXT_RELATIVE_PATH
+    context_path.parent.mkdir(parents=True, exist_ok=True)
+    context_path.write_text(text, encoding="utf-8")

@@ -67,6 +67,9 @@ re-exports. Submodules:
   ``reap_policy``-gated revert or BLOCKED_ON_USER park, plus lockout arm).
 - ``phantom`` — phantom (dead-surface) sweep.
 - ``tasks`` — dev-queue revert backstops and timed-out-merged completion.
+- ``unowned_running`` — adopts a RUNNING row whose launched session was never
+  stamped on it, from the worktree's ``cw-context.json`` (#2591;
+  constructive, not ``reap_policy``-gated).
 - ``deferred`` — the post-lock job sink (``DeferredReconcileJobs``,
   ``PostLockJob``, ``defer_surface_stop``, ``run_post_lock_jobs``) that
   carries the act phases' daemon stops and the recipes' gh calls out of
