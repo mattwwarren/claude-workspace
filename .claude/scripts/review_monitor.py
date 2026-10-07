@@ -13,12 +13,10 @@ Subcommands (to be added in subsequent tasks):
 from __future__ import annotations
 
 import argparse
-import functools
 import json
 import logging
 import os
 import re
-import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -36,6 +34,7 @@ from review_monitor_lib.models import (
     MonitorState,
     ThreadStatus,
 )
+from review_monitor_lib.shell import _get_our_username, _run_gh, _run_git
 from utils.runtime_paths import desktop_queue_dir, review_monitor_dir
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -298,56 +297,6 @@ def save_state(state: MonitorState, repo: str) -> None:
 # ---------------------------------------------------------------------------
 # GitHub / git helpers
 # ---------------------------------------------------------------------------
-
-
-def _run_gh(args: list[str], repo: str | None = None) -> str:
-    """Run a gh CLI command and return stdout.
-
-    Returns empty string on failure (FileNotFoundError or CalledProcessError).
-    If *repo* is provided, adds ``-R repo`` to the command.
-    """
-    cmd = ["gh", *args]
-    if repo is not None:
-        cmd = ["gh", "-R", repo, *args]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except FileNotFoundError:
-        logger.warning("gh CLI not found. Install it: https://cli.github.com/")
-        return ""
-    except subprocess.CalledProcessError as e:
-        logger.warning("gh command failed: %s\n%s", " ".join(cmd), e.stderr.strip())
-        return ""
-    return result.stdout.strip()
-
-
-def _run_git(args: list[str], cwd: str | None = None) -> str:
-    """Run a git command and return stdout.
-
-    Returns empty string on failure (FileNotFoundError or CalledProcessError).
-    If *cwd* is provided, adds ``-C cwd`` to the command.
-    """
-    cmd = ["git", *args]
-    if cwd is not None:
-        cmd = ["git", "-C", cwd, *args]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except FileNotFoundError:
-        logger.warning("git not found in PATH")
-        return ""
-    except subprocess.CalledProcessError as e:
-        logger.warning("git command failed: %s\n%s", " ".join(cmd), e.stderr.strip())
-        return ""
-    return result.stdout.strip()
 
 
 def is_deferral(text: str) -> bool:
@@ -1030,16 +979,6 @@ def cmd_mark_comment_review(
         "review_id": review_id,
         "classification": classification,
     }
-
-
-@functools.lru_cache(maxsize=1)
-def _get_our_username() -> str:
-    """Return the authenticated GitHub username.
-
-    Calls ``gh api user --jq .login`` and returns the result stripped of
-    surrounding whitespace.  Returns an empty string if the call fails.
-    """
-    return _run_gh(["api", "user", "--jq", ".login"]).strip()
 
 
 def _extract_login(comment: dict[str, Any]) -> str:
