@@ -397,6 +397,10 @@ def _read_adoption_outbox() -> list[dict[str, object]]:
             raise CwError(message)
         for entry in entries:
             entry.setdefault("bind_committed", False)
+            # This is a durable acknowledgement, not a property inferred from
+            # the finite event inbox.  Keep it with the logical event key so
+            # inbox pruning cannot make a delivered audit eligible again.
+            entry.setdefault("event_acknowledged", False)
             entry.setdefault("event_key", _event_key(entry))
         return entries
 
@@ -436,6 +440,9 @@ def _adoption_record(candidate: UnownedCandidate) -> dict[str, object]:
         # This is a write-ahead bind intent.  It is promoted after the queue
         # save, and a matching row also promotes it after an interrupted tick.
         "bind_committed": False,
+        # Retained as the durable delivery/acknowledgement ledger after the
+        # event inbox eventually prunes the event itself.
+        "event_acknowledged": False,
     }
     record["event_key"] = _event_key(record)
     return record
@@ -449,16 +456,6 @@ def _stage_adoption(candidate: UnownedCandidate) -> None:
         if not any(_outbox_key(entry) == _outbox_key(record) for entry in entries):
             entries.append(record)
             _write_adoption_outbox(entries)
-
-
-def _remove_adoption_record(record: dict[str, object]) -> None:
-    with _adoption_outbox_lock():
-        entries = _read_adoption_outbox()
-        remaining = [
-            entry for entry in entries if _outbox_key(entry) != _outbox_key(record)
-        ]
-        if len(remaining) != len(entries):
-            _write_adoption_outbox(remaining)
 
 
 def _mark_adoption_bound(record: dict[str, object]) -> None:
@@ -489,7 +486,7 @@ def _adoption_event_delivered(record: dict[str, object]) -> bool:
 
 
 def _deliver_adoption_record(record: dict[str, object]) -> None:
-    """Deliver and acknowledge one record as one serialized transaction."""
+    """Deliver one record and retain its durable acknowledgement."""
     with _adoption_outbox_lock():
         entries = _read_adoption_outbox()
         current = next(
@@ -498,14 +495,19 @@ def _deliver_adoption_record(record: dict[str, object]) -> None:
         )
         if current is None:
             return
-        if not _adoption_event_delivered(current):
+        if current.get("event_acknowledged"):
+            return
+        # Pre-ledger records may already have landed in the inbox. This check
+        # only upgrades those records; once delivery succeeds, the durable
+        # acknowledgement below is authoritative and survives inbox pruning.
+        if _adoption_event_delivered(current):
+            current["event_acknowledged"] = True
+        else:
             _emit_adoption_record(current)
-        remaining = [
-            entry
-            for entry in entries
-            if _outbox_key(entry) != _outbox_key(current)
-        ]
-        _write_adoption_outbox(remaining)
+            current["event_acknowledged"] = True
+        # Keep the acknowledgement record even after inbox pruning. It is the
+        # stable idempotency ledger for this audit event.
+        _write_adoption_outbox(entries)
 
 
 def _drain_adoption_outbox() -> None:
@@ -521,7 +523,6 @@ def _drain_adoption_outbox() -> None:
         store = load_dev_queue()
         ready: list[dict[str, object]] = []
         promoted: list[dict[str, object]] = []
-        stale: list[dict[str, object]] = []
         for entry in entries:
             row = next(
                 (
@@ -538,21 +539,12 @@ def _drain_adoption_outbox() -> None:
             elif row is not None and row.session_id == entry.get("session_id"):
                 ready.append(entry)
                 promoted.append(entry)
-            else:
-                stale.append(entry)
     for entry in promoted:
         try:
             _mark_adoption_bound(entry)
         except (CwError, OSError, ValueError):
             _log.exception(
                 "unowned_running: interrupted bind marker could not be promoted"
-            )
-    for entry in stale:
-        try:
-            _remove_adoption_record(entry)
-        except (CwError, OSError, ValueError):
-            _log.exception(
-                "unowned_running: stale adoption outbox entry could not be removed"
             )
     for entry in ready:
         try:
@@ -588,12 +580,10 @@ def _act_adopt(candidate: UnownedCandidate) -> bool:
             created_at=candidate.created_at,
         )
         if row is None or not _still_adoptable(store, row, candidate):
-            try:
-                _remove_adoption_record(_adoption_record(candidate))
-            except (CwError, OSError, ValueError):
-                _log.exception(
-                    "unowned_running: stale adoption outbox entry could not be removed"
-                )
+            # Keep the intent.  Another adopter may have committed the bind
+            # concurrently, and a missing row is not proof that its commit did
+            # not happen. The next drain can promote a matching row; ambiguous
+            # intents remain quarantined for operator reconciliation.
             return False
         try:
             _apply_spawn_success_fields(row, session_id=candidate.session_id)
