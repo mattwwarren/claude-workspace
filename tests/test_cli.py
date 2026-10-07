@@ -4552,7 +4552,7 @@ class TestSignalStop:
             return read_park_comment_marker(context)
 
         monkeypatch.setattr(
-            "cw.cli.stop_hook.read_park_comment_marker", _counting, raising=True
+            "cw.cli.stop_hook.park.read_park_comment_marker", _counting, raising=True
         )
         return calls
 
@@ -4560,7 +4560,7 @@ class TestSignalStop:
     def _count_transcript_lookups(monkeypatch: pytest.MonkeyPatch) -> list[int]:
         """Count the park path's transcript lookups, preserving the real result.
 
-        ``claude_project_dir`` is imported into ``cw.cli.stop_hook`` for the
+        ``claude_project_dir`` is imported into ``cw.cli.stop_hook.park`` for the
         park path alone -- the sentinel parse resolves its own transcript
         inside ``cw.cli._sentinels`` -- so patching it there counts exactly the
         transcript I/O this feature added.
@@ -4572,7 +4572,7 @@ class TestSignalStop:
             return claude_project_dir(path)
 
         monkeypatch.setattr(
-            "cw.cli.stop_hook.claude_project_dir", _counting, raising=True
+            "cw.cli.stop_hook.park.claude_project_dir", _counting, raising=True
         )
         return calls
 
@@ -4850,9 +4850,9 @@ class TestSignalStop:
             raise AssertionError(msg)
 
         monkeypatch.setattr(
-            "cw.cli.stop_hook.find_running_task_for_session", lambda *_a: None
+            "cw.cli.stop_hook.park.find_running_task_for_session", lambda *_a: None
         )
-        monkeypatch.setattr("cw.cli.stop_hook.park_gate_open", _must_not_run)
+        monkeypatch.setattr("cw.cli.stop_hook.park.park_gate_open", _must_not_run)
         session = MagicMock(spec=Session)
         session.id = "sess-row-first"
 
