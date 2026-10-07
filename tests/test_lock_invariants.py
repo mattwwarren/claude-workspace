@@ -380,6 +380,13 @@ def test_pr_hydrate_is_not_allowlisted() -> None:
     assert "cw.pr_hydrate" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
 
 
+def test_local_runner_is_not_allowlisted() -> None:
+    """#2565: the local harvest's git facts are captured in a lockless
+    pre-pass, so no in-lock subprocess under a ``cw.local_runner`` frame is
+    forgiven any more."""
+    assert "cw.local_runner" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+
+
 def test_stop_hook_is_not_allowlisted() -> None:
     """#2566: the Stop hook's headless scope verification runs before
     sessions_lock, so no in-lock subprocess under any ``cw.cli.stop_hook``

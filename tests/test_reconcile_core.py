@@ -62,6 +62,7 @@ from cw.reconcile.gate_plan_probes import (
     PLAN_PREFETCH_MAX_PER_TICK,
     PlanProbes,
 )
+from cw.reconcile.harvest_synthesis import HARVEST_CAPTURE_BUDGET_SECONDS, HarvestFacts
 from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
     RECIPE_AUTO_FIX_CI,
@@ -1106,9 +1107,12 @@ class TestConciergeAndEscalationWiring:
 
 # reconcile()'s dev-queue loads: its gh pre-pass first, then the codex
 # clean-probe pre-pass (#2563), then the gate recipes' plan prefetch
-# pre-pass third (#2545).
+# pre-pass third (#2545). The review recipes' repo-slug pre-pass (#2564) loads
+# through its own module's binding, so it is not counted here; the local
+# harvest-facts pre-pass (#2565) is the fourth, last before the lock.
 _CODEX_PRE_PASS_LOAD = 2
 _PLAN_PRE_PASS_LOAD = 3
+_HARVEST_PRE_PASS_LOAD = 4
 
 
 class TestCodexLiveWriterRepark:
@@ -1502,6 +1506,131 @@ class TestPlanPrefetchPrePass:
         assert probes.captured_keys == frozenset()
         assert probes.budget_seconds is None
         assert "plan prefetch pre-pass could not read state" in caplog.text
+
+
+class TestHarvestFactsPrePass:
+    """#2565: the local harvest's git facts are captured in reconcile()'s last
+    lockless pre-pass, and the in-lock act only looks them up."""
+
+    def test_harvest_facts_captured_unlocked_and_threaded_through(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(CwState(sessions=[]))
+        sentinel = HarvestFacts()
+        lock_free_at_capture: list[bool] = []
+
+        def _fake_capture() -> HarvestFacts:
+            lock_free_at_capture.append(probe_sessions_lock_free())
+            return sentinel
+
+        monkeypatch.setattr(reconcile_core, "_capture_harvest_facts", _fake_capture)
+        harvest_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "cw.reconcile.core._act_on_local_harvest_candidates", harvest_mock
+        )
+
+        reconcile()
+
+        assert lock_free_at_capture == [True]
+        assert harvest_mock.call_args.kwargs["harvest_facts"] is sentinel
+
+    def test_harvest_capture_runs_last_before_the_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Its facts age from capture, so no other pre-pass may run after it."""
+        save_state(CwState(sessions=[]))
+        order: list[str] = []
+
+        def _step(name: str, result: object) -> Callable[..., object]:
+            def _record(*_args: object, **_kwargs: object) -> object:
+                order.append(name)
+                return result
+
+            return _record
+
+        monkeypatch.setattr(
+            reconcile_core, "_capture_codex_clean_probes", _step("codex", None)
+        )
+        monkeypatch.setattr(
+            reconcile_core, "capture_review_repo_slugs", _step("slugs", None)
+        )
+        monkeypatch.setattr(
+            reconcile_core, "_capture_harvest_facts", _step("harvest", None)
+        )
+        monkeypatch.setattr(
+            reconcile_core, "_act_on_local_harvest_candidates", _step("locked", [])
+        )
+
+        reconcile()
+
+        assert order == ["codex", "slugs", "harvest", "locked"]
+
+    def test_unreadable_state_in_harvest_pre_pass_defers_without_failing_reconcile(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        save_state(CwState(sessions=[]))
+        real_load = reconcile_core.load_dev_queue
+        loads: list[int] = []
+
+        def _harvest_load_fails() -> DevQueueStore:
+            loads.append(1)
+            if len(loads) == _HARVEST_PRE_PASS_LOAD:
+                msg = "dev queue unreadable"
+                raise OSError(msg)
+            return real_load()
+
+        monkeypatch.setattr(reconcile_core, "load_dev_queue", _harvest_load_fails)
+        harvest_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "cw.reconcile.core._act_on_local_harvest_candidates", harvest_mock
+        )
+
+        with caplog.at_level(logging.WARNING, logger=reconcile_core.__name__):
+            report = reconcile()
+
+        assert isinstance(report, ReconcileReport)
+        facts = harvest_mock.call_args.kwargs["harvest_facts"]
+        assert isinstance(facts, HarvestFacts)
+        assert facts.budget_seconds is None
+        assert "harvest-facts pre-pass could not read state" in caplog.text
+
+    def test_capture_harvest_pre_pass_does_not_swallow_unexpected_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _fail() -> CwState:
+            msg = "a bug, not an unreadable file"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(reconcile_core, "load_state", _fail)
+
+        with pytest.raises(RuntimeError, match="a bug"):
+            reconcile_core._capture_harvest_facts()
+
+    def test_capture_harvest_pre_pass_builds_a_budgeted_store(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(CwState(sessions=[]))
+        driver = MagicMock()
+        monkeypatch.setattr(reconcile_core, "capture_local_harvest_facts", driver)
+
+        facts = reconcile_core._capture_harvest_facts()
+
+        assert facts.budget_seconds == HARVEST_CAPTURE_BUDGET_SECONDS
+        assert driver.call_args.kwargs["facts"] is facts
+
+    def test_reconcile_locked_without_harvest_facts_passes_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(CwState(sessions=[]))
+        harvest_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "cw.reconcile.core._act_on_local_harvest_candidates", harvest_mock
+        )
+
+        with sessions_lock():
+            reconcile_core._reconcile_locked(deferred=DeferredReconcileJobs())
+
+        assert harvest_mock.call_args.kwargs["harvest_facts"] is None
 
 
 class TestFixDispatchRunsPostLock:

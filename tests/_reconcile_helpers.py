@@ -19,27 +19,34 @@ from typing import Any
 
 import pytest
 
+from cw._config_migrate import migrate_cw_state
 from cw._lock_guard import LockRank, is_rank_held
-from cw.config import load_effective_clients, load_state
-from cw.dev_queue import load_dev_queue
+from cw.config import load_effective_clients, load_state, save_state
+from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
+from cw.local_runner import AIDER_LOG_RELATIVE_PATH
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     ClientConfig,
     CwState,
+    DevQueueStore,
     LastResultSource,
+    LocalLivenessHandle,
     OrchestratorConfig,
     OrchestratorEventType,
     PendingFixDispatch,
+    QueueItemStatus,
     ReapPolicy,
     Session,
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    Stage,
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from cw.reconcile._shared import _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY
+from cw.reconcile._shared import _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY, ReapCandidate
+from cw.reconcile.codex_boot import CleanProbes
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 from cw.reconcile.gate_plan_probes import PlanProbes
 from cw.reconcile.gate_recipes import (
@@ -47,6 +54,11 @@ from cw.reconcile.gate_recipes import (
     _detect_auto_adopt_plan,
     capture_plan_probes,
     run_gate_recipes,
+)
+from cw.reconcile.harvest_synthesis import HarvestFacts
+from cw.reconcile.local import (
+    _act_on_local_harvest_candidates,
+    capture_local_harvest_facts,
 )
 from cw.reconcile.review_recipes import ReviewRecipeCandidate
 from cw.reconcile.review_recipes._shared import RepoSlugs, _find_review_task
@@ -58,6 +70,7 @@ from cw.reconcile.review_recipes.auto_fix_ci import (
     _act_auto_fix_ci,
     _auto_fix_ci_guard_target,
 )
+from tests._clients_yaml import staged_client, write_clients_yaml
 from tests.conftest import (
     _make_daemon_session,
     _write_idle_transcript,
@@ -1118,3 +1131,163 @@ def forbidden_plan_fetch() -> Callable[..., str | None]:
         raise AssertionError(msg)
 
     return _fetch
+
+
+# ---------------------------------------------------------------------------
+# Local (aider/opencode) harvest fixtures, shared by test_reconcile_local.py,
+# test_reconcile_harvest_synthesis.py and test_reconcile_codex_harvest.py.
+# ---------------------------------------------------------------------------
+
+
+def _local_git_worktree(
+    make_git_repo: Callable[[str], Path], name: str, *, with_commit: bool
+) -> Path:
+    """Build a git worktree with an origin/main ref and an optional impl commit.
+
+    origin/main lets synthesize_git_result compute the fork point; with_commit
+    controls whether the git-only synthesis yields stage_complete (commit) or
+    aider_no_output (no commit).
+    """
+    worktree = make_git_repo(name)
+    subprocess.run(
+        ["git", "-C", str(worktree), "remote", "add", "origin", str(worktree)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "fetch", "origin", "main"],
+        check=True,
+        capture_output=True,
+    )
+    if with_commit:
+        (worktree / "impl.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(worktree), "add", "."], check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "-C", str(worktree), "commit", "-m", "impl"],
+            check=True,
+            capture_output=True,
+        )
+    return worktree
+
+
+def _mk_local_session(
+    sid: str,
+    worktree: Path,
+    liveness: LocalLivenessHandle,
+    *,
+    started_at: datetime | None = None,
+) -> Session:
+    """Build an ACTIVE, DAEMON-origin LOCAL session with a liveness handle.
+
+    surface_ref is None (LOCAL sessions never register on the daemon roster);
+    local_liveness is what harvest keys off.
+    """
+    return _make_daemon_session(
+        id=sid,
+        name=f"client-a/auto-dev/{sid}",
+        worktree_path=worktree,
+        surface_ref=None,
+        started_at=started_at or datetime(2026, 1, 1, tzinfo=UTC),
+        stage=Stage.IMPL,
+        local_liveness=liveness,
+    )
+
+
+def _touch_aider_log(worktree: Path) -> None:
+    """Leave the empty ``.cw/aider.log`` a real aider launch always leaves (#2512)."""
+    log_path = worktree / AIDER_LOG_RELATIVE_PATH
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+
+def _legacy_handle_state(sess: Session) -> CwState:
+    """*sess* as a pre-#2369 on-disk record run through the real v18->v19 migration.
+
+    The handle has no ``backend`` on disk (schema 18); the migration writes an
+    explicit ``"aider"`` that is byte-identical to a genuine aider handle -- the
+    incident shape of #2512.
+    """
+    raw = CwState(sessions=[sess]).model_dump(mode="json")
+    raw["schema_version"] = 18
+    del raw["sessions"][0]["local_liveness"]["backend"]
+    migrated = migrate_cw_state(raw)
+    assert migrated["sessions"][0]["local_liveness"]["backend"] == "aider"
+    return CwState.model_validate(migrated)
+
+
+def _save_dead_local_session(
+    worktree: Path,
+    ticket_id: str,
+    *,
+    backend: str | None,
+    session_stage: Stage | None,
+    row_stage: Stage,
+    row_client: str = "client-a",
+) -> dict[str, TicketTask]:
+    """Save a dead local session + RUNNING row at *row_stage*; session id == ticket id.
+
+    The session name is what ties a harvest candidate to its row
+    (``ticket_id_for_session``), so the two ids must match. *backend* ``None``
+    persists a LEGACY handle (see :func:`_legacy_handle_state`); otherwise the
+    handle records *backend* explicitly. *session_stage* is the spawn stage
+    ``Session.stage`` stamps, *row_stage* the dev-queue row's current stage. The
+    client is written first (stage list + ``sentinel_mismatch_veto``) so the stage
+    position resolves; ``client-unconfigured`` skips it so the position does not.
+    """
+    if row_client == "client-a":
+        write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
+    sid = ticket_id
+    dead_handle = LocalLivenessHandle.model_validate(
+        {"pid": 2_000_000_000, "start_time_ns": 1, "backend": backend or "aider"}
+    )
+    sess = _mk_local_session(sid, worktree, dead_handle)
+    sess.stage = session_stage
+    save_state(CwState(sessions=[sess]) if backend else _legacy_handle_state(sess))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=ticket_id,
+                    client=row_client,
+                    stage=row_stage,
+                    status=QueueItemStatus.RUNNING,
+                    session_id=sid,
+                )
+            ]
+        )
+    )
+    return {t.ticket_id: t for t in load_dev_queue().tasks}
+
+
+def act_on_local_harvest(
+    state: CwState,
+    candidates: list[ReapCandidate],
+    *,
+    now: datetime,
+    task_by_ticket: dict[str, TicketTask] | None = None,
+    config: OrchestratorConfig | None = None,
+    codex_probes: CleanProbes | None = None,
+) -> list[str]:
+    """``reconcile()``'s harvest-facts pre-pass, then the local harvest act (#2565).
+
+    Captures the git facts lockless over *state* and *task_by_ticket*'s rows
+    (the act's own task scope), then runs ``_act_on_local_harvest_candidates``
+    with them -- the stand-in for ``reconcile()``'s capture-then-lock, as
+    ``capture_repo_slugs`` is for the review recipes. Capture and act run
+    back to back in this one call, so a caller's ``freeze_time`` covers both.
+    """
+    facts = HarvestFacts()
+    capture_local_harvest_facts(
+        state, list((task_by_ticket or {}).values()), facts=facts
+    )
+    return _act_on_local_harvest_candidates(
+        state,
+        candidates,
+        now=now,
+        task_by_ticket=task_by_ticket,
+        config=config,
+        codex_probes=codex_probes,
+        harvest_facts=facts,
+    )

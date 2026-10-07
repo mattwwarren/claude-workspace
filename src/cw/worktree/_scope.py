@@ -69,7 +69,7 @@ def _parse_numstat_totals(numstat_output: str) -> tuple[int, int]:
     file while contributing zero lines would make the two totals disagree about
     the same diff.
 
-    Shared by :func:`compute_branch_diff_scope` and ``local_runner._git_facts``
+    Shared by :func:`compute_branch_diff_scope` and ``local_runner.git_facts``
     so every producer of ``scope.files`` / ``scope.lines_actual`` counts the
     same way (#1487).
     """

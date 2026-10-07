@@ -53,7 +53,7 @@ def _run_title_tiers(
 
     Built on the ``make_git_repo`` fixture (which already supplies a git
     identity and a base commit) plus the self-remote shape used by
-    ``tests/test_reconcile_local.py``'s ``_local_git_worktree``: adding the
+    ``tests/_reconcile_helpers.py``'s ``_local_git_worktree``: adding the
     repo itself as ``origin`` and fetching pins ``refs/remotes/origin/main``
     at the base commit, so every commit in ``commits`` lands in the
     ``origin/main..HEAD`` range the ladder scans.

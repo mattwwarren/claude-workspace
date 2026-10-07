@@ -13,11 +13,11 @@ import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import DEFAULT, MagicMock
 
 import freezegun
 import pytest
 
-from cw._config_migrate import migrate_cw_state
 from cw._git import run_git
 from cw.auto_dev_result import AutoDevResult
 from cw.config import (
@@ -26,7 +26,6 @@ from cw.config import (
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
-from cw.local_runner import AIDER_LOG_RELATIVE_PATH
 from cw.models import (
     ClientConfig,
     CompletionReason,
@@ -56,7 +55,14 @@ from cw.reconcile import (
     _detect_local_harvest_candidates,
     reconcile,
 )
-from cw.reconcile.local import _resolve_harvest_backend
+from cw.reconcile import local as reconcile_local
+from cw.reconcile.harvest_synthesis import (
+    HarvestFacts,
+    HarvestFactsUnavailableError,
+    _resolve_harvest_backend,
+    prove_harvest_backend,
+)
+from cw.reconcile.local import capture_local_harvest_facts
 from tests._clients_yaml import staged_client, write_clients_yaml
 from tests._opencode_helpers import (
     earlier_stage_then_final_log,
@@ -67,69 +73,20 @@ from tests._opencode_helpers import (
 from tests._reconcile_helpers import (
     _attention_events,
     _failing_record_event,
+    _legacy_handle_state,
+    _local_git_worktree,
+    _mk_local_session,
+    _save_dead_local_session,
     _stage_complete_payload,
+    _touch_aider_log,
+    act_on_local_harvest,
+    probe_sessions_lock_free,
 )
 from tests.conftest import (
     _audit_failure_logged,
     _fail_audit_append,
     _make_daemon_session,
 )
-
-
-def _local_git_worktree(
-    make_git_repo: Callable[[str], Path], name: str, *, with_commit: bool
-) -> Path:
-    """Build a git worktree with an origin/main ref and an optional impl commit.
-
-    origin/main lets synthesize_git_result compute the fork point; with_commit
-    controls whether the git-only synthesis yields stage_complete (commit) or
-    aider_no_output (no commit).
-    """
-    worktree = make_git_repo(name)
-    subprocess.run(
-        ["git", "-C", str(worktree), "remote", "add", "origin", str(worktree)],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(worktree), "fetch", "origin", "main"],
-        check=True,
-        capture_output=True,
-    )
-    if with_commit:
-        (worktree / "impl.py").write_text("x = 1\n", encoding="utf-8")
-        subprocess.run(
-            ["git", "-C", str(worktree), "add", "."], check=True, capture_output=True
-        )
-        subprocess.run(
-            ["git", "-C", str(worktree), "commit", "-m", "impl"],
-            check=True,
-            capture_output=True,
-        )
-    return worktree
-
-
-def _mk_local_session(
-    sid: str,
-    worktree: Path,
-    liveness: LocalLivenessHandle,
-    *,
-    started_at: datetime | None = None,
-) -> Session:
-    """Build an ACTIVE, DAEMON-origin LOCAL session with a liveness handle.
-
-    surface_ref is None (LOCAL sessions never register on the daemon roster);
-    local_liveness is what harvest keys off.
-    """
-    return _make_daemon_session(
-        id=sid,
-        name=f"client-a/auto-dev/{sid}",
-        worktree_path=worktree,
-        surface_ref=None,
-        started_at=started_at or datetime(2026, 1, 1, tzinfo=UTC),
-        stage=Stage.IMPL,
-        local_liveness=liveness,
-    )
 
 
 def test_local_harvest_dead_process_completes_and_advances(
@@ -168,7 +125,7 @@ def test_local_harvest_dead_process_completes_and_advances(
     assert candidates[0].session_id == "harv-1"
 
     now = datetime(2026, 1, 2, tzinfo=UTC)
-    harvested = _act_on_local_harvest_candidates(
+    harvested = act_on_local_harvest(
         state, candidates, now=now, task_by_ticket=task_by_ticket
     )
     assert harvested == ["harv-1"]
@@ -224,7 +181,7 @@ def test_local_harvest_stamps_git_synthesis_source(
     task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
     candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
 
-    harvested = _act_on_local_harvest_candidates(
+    harvested = act_on_local_harvest(
         state,
         candidates,
         now=datetime(2026, 1, 2, tzinfo=UTC),
@@ -277,7 +234,7 @@ def test_local_harvest_audit_append_failure_still_persists_result_and_routes(
     attempts = _fail_audit_append(monkeypatch)
 
     with caplog.at_level(logging.WARNING, logger="cw.result"):
-        harvested = _act_on_local_harvest_candidates(
+        harvested = act_on_local_harvest(
             load_state(),
             candidates,
             now=datetime(2026, 1, 2, tzinfo=UTC),
@@ -404,7 +361,7 @@ def test_local_harvest_refused_by_door_leaves_session_and_task_untouched(
     candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
     attempts = _fail_audit_append(monkeypatch)
 
-    harvested = _act_on_local_harvest_candidates(
+    harvested = act_on_local_harvest(
         state,
         candidates,
         now=datetime(2026, 1, 2, tzinfo=UTC),
@@ -474,7 +431,7 @@ def test_local_harvest_queue_save_failure_keeps_audit_event(
 
     monkeypatch.setattr("cw.reconcile._shared._routing.save_dev_queue", _raise_save)
     with pytest.raises(OSError, match="queue file unwritable"):
-        _act_on_local_harvest_candidates(
+        act_on_local_harvest(
             load_state(),
             candidates,
             now=datetime(2026, 1, 2, tzinfo=UTC),
@@ -528,7 +485,7 @@ def test_act_on_local_harvest_candidates_completes_on_task_already_terminal(
     candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
     assert len(candidates) == 1
 
-    harvested = _act_on_local_harvest_candidates(
+    harvested = act_on_local_harvest(
         state,
         candidates,
         now=datetime(2026, 1, 2, tzinfo=UTC),
@@ -591,7 +548,7 @@ def test_local_harvest_stage_mismatch_does_not_orphan_task_or_complete_session(
     assert candidates[0].proposed_action == ProposedAction.HARVEST_LOCAL_COMPLETE
 
     now = datetime(2026, 1, 2, tzinfo=UTC)
-    harvested = _act_on_local_harvest_candidates(
+    harvested = act_on_local_harvest(
         state, candidates, now=now, task_by_ticket=task_by_ticket
     )
     assert harvested == []
@@ -703,7 +660,7 @@ def test_local_harvest_no_commits_synthesizes_aider_no_output(
     candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
     assert len(candidates) == 1
 
-    _act_on_local_harvest_candidates(
+    act_on_local_harvest(
         state,
         candidates,
         now=datetime(2026, 1, 2, tzinfo=UTC),
@@ -755,8 +712,8 @@ def test_act_on_local_harvest_candidates_passes_session_id_to_synthesize_git_res
         captured["session_id"] = kwargs.get("session_id")
         return _real_synth(**kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr("cw.reconcile.local.synthesize_git_result", _spy)
-    _act_on_local_harvest_candidates(
+    monkeypatch.setattr("cw.reconcile.harvest_synthesis.synthesize_git_result", _spy)
+    act_on_local_harvest(
         state,
         candidates,
         now=datetime(2026, 1, 2, tzinfo=UTC),
@@ -799,7 +756,7 @@ def test_local_harvest_act_handles_missing_task_and_no_worktree(
 
     # No dev-queue task for either ticket → act builds a synthetic TicketTask.
     candidates = _detect_local_harvest_candidates(state)
-    _act_on_local_harvest_candidates(
+    act_on_local_harvest(
         state, candidates, now=datetime(2026, 1, 2, tzinfo=UTC), task_by_ticket={}
     )
 
@@ -1190,7 +1147,7 @@ def test_local_harvest_opencode_sentinel_found(
     assert len(candidates) == 1
 
     with freezegun.freeze_time("2026-01-01 12:00:00"):
-        _act_on_local_harvest_candidates(
+        act_on_local_harvest(
             load_state(),
             candidates,
             now=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
@@ -1239,7 +1196,7 @@ def test_local_harvest_opencode_no_output(
     assert len(candidates) == 1
 
     with freezegun.freeze_time("2026-01-01 12:00:00"):
-        _act_on_local_harvest_candidates(
+        act_on_local_harvest(
             load_state(),
             candidates,
             now=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
@@ -1282,7 +1239,7 @@ def _harvest_single(sid: str, ticket_id: str, worktree: Path, backend: str) -> S
     state = load_state()
     candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
     assert len(candidates) == 1
-    _act_on_local_harvest_candidates(
+    act_on_local_harvest(
         state,
         candidates,
         now=datetime(2026, 1, 2, tzinfo=UTC),
@@ -1343,72 +1300,6 @@ def test_local_harvest_aider_backend_ignores_stray_opencode_log(
 # ---------------------------------------------------------------------------
 
 
-def _touch_aider_log(worktree: Path) -> None:
-    """Leave the empty ``.cw/aider.log`` a real aider launch always leaves (#2512)."""
-    log_path = worktree / AIDER_LOG_RELATIVE_PATH
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text("", encoding="utf-8")
-
-
-def _legacy_handle_state(sess: Session) -> CwState:
-    """*sess* as a pre-#2369 on-disk record run through the real v18->v19 migration.
-
-    The handle has no ``backend`` on disk (schema 18); the migration writes an
-    explicit ``"aider"`` that is byte-identical to a genuine aider handle -- the
-    incident shape of #2512.
-    """
-    raw = CwState(sessions=[sess]).model_dump(mode="json")
-    raw["schema_version"] = 18
-    del raw["sessions"][0]["local_liveness"]["backend"]
-    migrated = migrate_cw_state(raw)
-    assert migrated["sessions"][0]["local_liveness"]["backend"] == "aider"
-    return CwState.model_validate(migrated)
-
-
-def _save_dead_local_session(
-    worktree: Path,
-    ticket_id: str,
-    *,
-    backend: str | None,
-    session_stage: Stage | None,
-    row_stage: Stage,
-    row_client: str = "client-a",
-) -> dict[str, TicketTask]:
-    """Save a dead local session + RUNNING row at *row_stage*; session id == ticket id.
-
-    The session name is what ties a harvest candidate to its row
-    (``ticket_id_for_session``), so the two ids must match. *backend* ``None``
-    persists a LEGACY handle (see :func:`_legacy_handle_state`); otherwise the
-    handle records *backend* explicitly. *session_stage* is the spawn stage
-    ``Session.stage`` stamps, *row_stage* the dev-queue row's current stage. The
-    client is written first (stage list + ``sentinel_mismatch_veto``) so the stage
-    position resolves; ``client-unconfigured`` skips it so the position does not.
-    """
-    if row_client == "client-a":
-        write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
-    sid = ticket_id
-    dead_handle = LocalLivenessHandle.model_validate(
-        {"pid": 2_000_000_000, "start_time_ns": 1, "backend": backend or "aider"}
-    )
-    sess = _mk_local_session(sid, worktree, dead_handle)
-    sess.stage = session_stage
-    save_state(CwState(sessions=[sess]) if backend else _legacy_handle_state(sess))
-    save_dev_queue(
-        DevQueueStore(
-            tasks=[
-                TicketTask(
-                    ticket_id=ticket_id,
-                    client=row_client,
-                    stage=row_stage,
-                    status=QueueItemStatus.RUNNING,
-                    session_id=sid,
-                )
-            ]
-        )
-    )
-    return {t.ticket_id: t for t in load_dev_queue().tasks}
-
-
 def _save_dead_opencode_finalize(
     worktree: Path, ticket_id: str, stage: Stage
 ) -> dict[str, TicketTask]:
@@ -1450,7 +1341,7 @@ def test_local_harvest_opencode_finalize_keeps_final_blocked_sentinel(
     state = load_state()
     candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
 
-    _act_on_local_harvest_candidates(
+    act_on_local_harvest(
         state,
         candidates,
         now=datetime(2026, 1, 2, tzinfo=UTC),
@@ -1505,9 +1396,7 @@ def test_local_harvest_stage_mismatch_pages_once_and_stops_reoffering(
         candidates = _detect_local_harvest_candidates(
             state, list(task_by_ticket.values())
         )
-        _act_on_local_harvest_candidates(
-            state, candidates, now=now, task_by_ticket=task_by_ticket
-        )
+        act_on_local_harvest(state, candidates, now=now, task_by_ticket=task_by_ticket)
 
     attention = _attention_events("test-harvest-page", "harv-page")
     assert len(attention) == 1
@@ -1573,7 +1462,7 @@ def test_local_harvest_non_stage_refusal_neither_pages_nor_latches(
     candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
     assert len(candidates) == 1
 
-    harvested = _act_on_local_harvest_candidates(
+    harvested = act_on_local_harvest(
         state,
         candidates,
         now=datetime(2026, 1, 2, tzinfo=UTC),
@@ -1616,7 +1505,7 @@ def test_local_harvest_stage_mismatch_latch_merges_into_existing_last_result(
     candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
     assert len(candidates) == 1
 
-    _act_on_local_harvest_candidates(
+    act_on_local_harvest(
         state,
         candidates,
         now=datetime(2026, 1, 2, tzinfo=UTC),
@@ -1685,7 +1574,7 @@ def _harvest_tick(task_by_ticket: dict[str, TicketTask]) -> list[str]:
     """One detect + act pass over the persisted state."""
     state = load_state()
     candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
-    return _act_on_local_harvest_candidates(
+    return act_on_local_harvest(
         state, candidates, now=_NOW, task_by_ticket=task_by_ticket
     )
 
@@ -2049,10 +1938,11 @@ def _forbid_synthesis_call(**_kwargs: object) -> object:
 def _forbid_synthesis(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make either result synthesizer fail the test if it is ever called."""
     monkeypatch.setattr(
-        "cw.reconcile.local.synthesize_opencode_result", _forbid_synthesis_call
+        "cw.reconcile.harvest_synthesis.synthesize_opencode_result",
+        _forbid_synthesis_call,
     )
     monkeypatch.setattr(
-        "cw.reconcile.local.synthesize_git_result", _forbid_synthesis_call
+        "cw.reconcile.harvest_synthesis.synthesize_git_result", _forbid_synthesis_call
     )
 
 
@@ -2176,7 +2066,7 @@ def test_legacy_handle_impl_spawn_stage_git_synthesizes(
         row_stage=Stage.IMPL,
     )
     monkeypatch.setattr(
-        "cw.reconcile.local.synthesize_opencode_result",
+        "cw.reconcile.harvest_synthesis.synthesize_opencode_result",
         _forbid_synthesis_call,
     )
 
@@ -2300,7 +2190,8 @@ def test_legacy_handle_session_stage_none_decides_by_row_stage(
     )
     if expect_git:
         monkeypatch.setattr(
-            "cw.reconcile.local.synthesize_opencode_result", _forbid_synthesis_call
+            "cw.reconcile.harvest_synthesis.synthesize_opencode_result",
+            _forbid_synthesis_call,
         )
     else:
         _forbid_synthesis(monkeypatch)
@@ -2332,7 +2223,7 @@ def test_legacy_handle_session_stage_none_synthetic_impl_task_git_synthesizes(
 
     state = load_state()
     candidates = _detect_local_harvest_candidates(state)
-    _act_on_local_harvest_candidates(state, candidates, now=_NOW, task_by_ticket={})
+    act_on_local_harvest(state, candidates, now=_NOW, task_by_ticket={})
 
     last_result = _session("T-SYNTH").last_result
     assert last_result is not None
@@ -2534,7 +2425,9 @@ def test_harvest_exception_fallback_opencode_handle_stages_at_row(
         session_stage=stage,
         row_stage=stage,
     )
-    monkeypatch.setattr("cw.reconcile.local.synthesize_opencode_result", _raise_oserror)
+    monkeypatch.setattr(
+        "cw.reconcile.harvest_synthesis.synthesize_opencode_result", _raise_oserror
+    )
 
     _harvest_tick(tbt)
 
@@ -2618,3 +2511,376 @@ def test_harvest_exception_fallback_aider_impl_row_keeps_stage2_impl(
     assert result.stage_reached == "stage2_impl"
     assert result.scope.lines_actual == 0
     assert result.next_actions == _LOCAL_NEXT_ACTIONS
+
+
+# ---------------------------------------------------------------------------
+# #2565 -- harvest git facts are captured lockless; a miss or a timeout defers
+# ---------------------------------------------------------------------------
+
+
+def _fake_pr_not_merged(_tid: str, **_kw: object) -> tuple[bool | None, bool]:
+    return (None, True)
+
+
+def _patch_run_git(
+    monkeypatch: pytest.MonkeyPatch, side_effect: Callable[..., object]
+) -> MagicMock:
+    """Wrap ``cw.local_runner.run_git``; *side_effect* returns DEFAULT to delegate."""
+    spy = MagicMock(wraps=run_git, side_effect=side_effect)
+    monkeypatch.setattr("cw.local_runner.run_git", spy)
+    return spy
+
+
+def _save_dead_aider(
+    make_git_repo: Callable[[str], Path], ticket: str, *, row_stage: Stage = Stage.IMPL
+) -> dict[str, TicketTask]:
+    """A dead recorded-aider session with an impl commit and its aider.log."""
+    worktree = _local_git_worktree(make_git_repo, f"wt-{ticket}", with_commit=True)
+    _touch_aider_log(worktree)
+    return _save_dead_local_session(
+        worktree,
+        ticket,
+        backend="aider",
+        session_stage=Stage.IMPL,
+        row_stage=row_stage,
+    )
+
+
+def _warnings(caplog: pytest.LogCaptureFixture, marker: str) -> list[logging.LogRecord]:
+    return [
+        r
+        for r in caplog.records
+        if r.name == "cw.reconcile.local" and marker in r.getMessage()
+    ]
+
+
+def test_reconcile_runs_no_git_under_sessions_lock_for_aider_harvest(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The aider harvest's git runs in reconcile()'s lockless pre-pass (#2565).
+
+    With ``cw.local_runner`` off the in-lock subprocess allowlist, the suite's
+    lock-invariant harness also fails this test on any in-lock git.
+    """
+    _save_dead_aider(make_git_repo, "T-LOCKLESS")
+    lock_free: list[bool] = []
+
+    def _record(*_args: object, **_kwargs: object) -> object:
+        lock_free.append(probe_sessions_lock_free())
+        return DEFAULT
+
+    _patch_run_git(monkeypatch, _record)
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+    monkeypatch.setattr(
+        "cw.reconcile.core._deps.pr_is_merged_for_ticket", _fake_pr_not_merged
+    )
+
+    report = reconcile()
+
+    assert lock_free
+    assert all(lock_free)
+    assert _session("T-LOCKLESS").status == SessionStatus.COMPLETED
+    assert _last_result("T-LOCKLESS").status == "stage_complete"
+    assert "T-LOCKLESS" in report.completed_ticket_ids
+
+
+def test_missing_facts_defer_aider_candidate_and_sweep_continues(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No capture: the aider candidate is left as is; the opencode one harvests."""
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
+    dead = {"pid": 2_000_000_000, "start_time_ns": 1}
+    aider_wt = _local_git_worktree(make_git_repo, "wt-miss-aider", with_commit=True)
+    _touch_aider_log(aider_wt)
+    oc_wt = make_git_repo("wt-miss-oc")
+    sessions = [
+        _mk_local_session(
+            "T-MISS-AIDER",
+            aider_wt,
+            LocalLivenessHandle.model_validate({**dead, "backend": "aider"}),
+        ),
+        _mk_local_session(
+            "T-MISS-OC",
+            oc_wt,
+            LocalLivenessHandle.model_validate({**dead, "backend": "opencode"}),
+        ),
+    ]
+    save_state(CwState(sessions=sessions))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=s.id,
+                    client="client-a",
+                    stage=Stage.IMPL,
+                    status=QueueItemStatus.RUNNING,
+                    session_id=s.id,
+                )
+                for s in sessions
+            ]
+        )
+    )
+    tbt = {t.ticket_id: t for t in load_dev_queue().tasks}
+    state = load_state()
+    candidates = _detect_local_harvest_candidates(state, list(tbt.values()))
+
+    with caplog.at_level(logging.WARNING, logger="cw.reconcile.local"):
+        harvested = _act_on_local_harvest_candidates(
+            state, candidates, now=_NOW, task_by_ticket=tbt
+        )
+
+    assert harvested == ["T-MISS-OC"]
+    assert _session("T-MISS-OC").status == SessionStatus.COMPLETED
+    aider = _session("T-MISS-AIDER")
+    assert aider.status == SessionStatus.ACTIVE
+    assert aider.last_result is None
+    assert _row("T-MISS-AIDER").status == QueueItemStatus.RUNNING
+    completed = read_events(event_types=[OrchestratorEventType.SESSION_COMPLETED])
+    assert [e.payload["session_id"] for e in completed] == ["T-MISS-OC"]
+    [miss] = _warnings(caplog, "harvest_facts_unavailable")
+    message = miss.getMessage()
+    assert "session=T-MISS-AIDER ticket=T-MISS-AIDER" in message
+    assert "never captured" in message
+
+
+def test_facts_for_changed_liveness_handle_defer(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A session re-spawned under the same id after capture misses and defers."""
+    tbt = _save_dead_aider(make_git_repo, "T-RESPAWN")
+    state = load_state()
+    facts = HarvestFacts()
+    capture_local_harvest_facts(state, list(tbt.values()), facts=facts)
+    candidates = _detect_local_harvest_candidates(state, list(tbt.values()))
+    handle = state.sessions[0].local_liveness
+    assert handle is not None
+    state.sessions[0].local_liveness = handle.model_copy(update={"start_time_ns": 99})
+
+    with caplog.at_level(logging.WARNING, logger="cw.reconcile.local"):
+        harvested = _act_on_local_harvest_candidates(
+            state, candidates, now=_NOW, task_by_ticket=tbt, harvest_facts=facts
+        )
+
+    assert harvested == []
+    assert _session("T-RESPAWN").status == SessionStatus.ACTIVE
+    [miss] = _warnings(caplog, "harvest_facts_unavailable")
+    assert "identity changed" in miss.getMessage()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        subprocess.CalledProcessError(128, ["git", "rev-parse"]),
+        OSError("worktree vanished"),
+    ],
+    ids=["called-process-error", "os-error"],
+)
+@pytest.mark.parametrize(("stage", "marker"), _PARK_STAGES)
+def test_captured_git_failure_parks_at_row_entry_marker(
+    stage: Stage,
+    marker: str,
+    error: Exception,
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Git's own failure is evidence: captured, replayed in-lock, and parked."""
+    ticket = f"T-GITFAIL-{stage.value}-{type(error).__name__}"
+    tbt = _save_dead_aider(make_git_repo, ticket, row_stage=stage)
+
+    def _fail(*_args: object, **_kwargs: object) -> object:
+        raise error
+
+    _patch_run_git(monkeypatch, _fail)
+
+    with caplog.at_level(logging.WARNING, logger="cw.reconcile.local"):
+        _harvest_tick(tbt)
+
+    result = _last_result(ticket)
+    assert result.status == "blocked"
+    assert result.stage_reached == marker
+    assert result.stage_reached != "stage2_impl"
+    assert result.blocker is not None
+    assert result.blocker.reason == _UNEXPECTED_ERROR
+    [warning] = _fallback_warnings(caplog)
+    assert warning.exc_info is not None
+    assert _row(ticket).status == QueueItemStatus.BLOCKED_ON_USER
+
+
+def test_captured_git_timeout_defers_and_the_next_tick_harvests(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A git timeout defers the candidate untouched; it never parks (ADR-0014)."""
+    ticket = "T-HANG"
+    tbt = _save_dead_aider(make_git_repo, ticket)
+    hang = {"on": True}
+
+    def _flaky(argv: list[str], **_kwargs: object) -> object:
+        if hang["on"]:
+            raise subprocess.TimeoutExpired(argv, 10.0)
+        return DEFAULT
+
+    _patch_run_git(monkeypatch, _flaky)
+    router = MagicMock(wraps=reconcile_local._apply_sentinel_to_task_audited)
+    monkeypatch.setattr(reconcile_local, "_apply_sentinel_to_task_audited", router)
+    session_before = _session(ticket).model_dump()
+    row_before = _row(ticket).model_dump()
+    events_before = read_events()
+
+    with caplog.at_level(logging.WARNING, logger="cw.reconcile.local"):
+        assert _harvest_tick(tbt) == []
+
+    session = _session(ticket)
+    assert session.status == SessionStatus.ACTIVE
+    assert session.last_result is None
+    assert session.model_dump() == session_before
+    assert _row(ticket).model_dump() == row_before
+    assert read_events() == events_before
+    router.assert_not_called()
+    assert len(_detect_local_harvest_candidates(load_state(), list(tbt.values()))) == 1
+    assert len(_warnings(caplog, "harvest_git_timeout")) == 1
+    [miss] = _warnings(caplog, "harvest_facts_unavailable")
+    assert "never captured" in miss.getMessage()
+
+    hang["on"] = False
+    assert _harvest_tick(tbt) == [ticket]
+    assert _session(ticket).status == SessionStatus.COMPLETED
+    assert _last_result(ticket).status == "stage_complete"
+
+
+def test_one_candidate_git_failure_does_not_abort_other_candidates(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tbt = _save_refusal_scenario(
+        make_git_repo, tmp_config_dir, {"T-BAD": Stage.IMPL, "T-GOOD": Stage.IMPL}
+    )
+    bad = str(_session("T-BAD").worktree_path)
+
+    def _fail_bad(argv: list[str], **_kwargs: object) -> object:
+        if bad in argv:
+            raise subprocess.CalledProcessError(128, argv)
+        return DEFAULT
+
+    _patch_run_git(monkeypatch, _fail_bad)
+
+    # Both complete: one with its real result, one parked on git's failure.
+    assert sorted(_harvest_tick(tbt)) == ["T-BAD", "T-GOOD"]
+
+    assert _last_result("T-GOOD").status == "stage_complete"
+    parked = _last_result("T-BAD")
+    assert parked.blocker is not None
+    assert parked.blocker.reason == _UNEXPECTED_ERROR
+    assert _row("T-BAD").status == QueueItemStatus.BLOCKED_ON_USER
+
+
+def test_pre_pass_plus_act_emit_one_backend_override_warning(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The pre-pass proves the backend silently; only the act warns, once."""
+    worktree = make_git_repo("wt-override-once")
+    _decoy_opencode_log(worktree, "T-OVERRIDE")
+    tbt = _save_dead_local_session(
+        worktree,
+        "T-OVERRIDE",
+        backend=None,
+        session_stage=Stage.FINALIZE,
+        row_stage=Stage.FINALIZE,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="cw.reconcile.local"):
+        capture_local_harvest_facts(
+            load_state(), list(tbt.values()), facts=HarvestFacts()
+        )
+        assert _override_warnings(caplog) == []
+        _harvest_tick(tbt)
+
+    assert len(_override_warnings(caplog)) == 1
+
+
+def test_prove_backend_never_logs_but_resolve_warns_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _arrange_launch_logs(tmp_path, "opencode_only", "T-PROVE")
+    sess = _mk_local_session(
+        "s-prove", tmp_path, LocalLivenessHandle(pid=1, start_time_ns=1)
+    )
+    task = TicketTask(ticket_id="T-PROVE", client="client-a", stage=Stage.FINALIZE)
+
+    with caplog.at_level(logging.WARNING, logger="cw.reconcile.local"):
+        assert prove_harvest_backend("aider", sess, task, tmp_path) == "opencode"
+        assert _override_warnings(caplog) == []
+        assert _resolve_harvest_backend("aider", sess, task, tmp_path) == "opencode"
+
+    assert len(_override_warnings(caplog)) == 1
+
+
+@pytest.mark.parametrize(
+    ("logs", "spawn_stage", "expected"),
+    [
+        pytest.param("aider_only", Stage.IMPL, "aider", id="aider-only-impl"),
+        pytest.param("both", Stage.IMPL, "aider", id="both-impl"),
+        pytest.param("neither", Stage.IMPL, "aider", id="neither-impl"),
+        pytest.param("opencode_only", Stage.IMPL, "opencode", id="oc-only-impl"),
+        pytest.param("opencode_only", Stage.FINALIZE, "opencode", id="oc-only-fin"),
+        pytest.param("both", Stage.FINALIZE, None, id="both-fin"),
+        pytest.param("neither", Stage.FINALIZE, None, id="neither-fin"),
+    ],
+)
+def test_backend_parity_between_capture_and_act(
+    logs: str,
+    spawn_stage: Stage,
+    expected: str | None,
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The pre-pass captures exactly the candidates the act synthesizes from git."""
+    ticket = f"T-PARITY-{logs}-{spawn_stage.value}"
+    worktree = _local_git_worktree(make_git_repo, f"wt-{ticket}", with_commit=True)
+    _arrange_launch_logs(worktree, logs, ticket)
+    tbt = _save_dead_local_session(
+        worktree,
+        ticket,
+        backend=None,
+        session_stage=spawn_stage,
+        row_stage=spawn_stage,
+    )
+    git = _patch_run_git(monkeypatch, lambda *_a, **_k: DEFAULT)
+    state = load_state()
+    facts = HarvestFacts()
+    capture_local_harvest_facts(state, list(tbt.values()), facts=facts)
+    handle = state.sessions[0].local_liveness
+    assert handle is not None
+    captured = True
+    try:
+        facts.lookup(ticket, handle, worktree, "main")
+    except HarvestFactsUnavailableError:
+        captured = False
+    candidates = _detect_local_harvest_candidates(state, list(tbt.values()))
+
+    with caplog.at_level(logging.WARNING, logger="cw.reconcile.local"):
+        _act_on_local_harvest_candidates(
+            state, candidates, now=_NOW, task_by_ticket=tbt, harvest_facts=facts
+        )
+
+    assert captured is (expected == "aider")
+    assert git.called is (expected == "aider")
+    if expected == "aider":
+        assert _last_result(ticket).status == "stage_complete"
+    elif expected is None:
+        _assert_parked_unproven(ticket, spawn_stage, "stage4a_merge_gate", caplog)

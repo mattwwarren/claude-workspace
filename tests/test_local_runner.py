@@ -7,11 +7,12 @@ import os
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, get_args
-from unittest.mock import MagicMock, patch
+from unittest.mock import DEFAULT, MagicMock, patch
 
 import pathspec
 import pytest
 
+from cw._git import run_git
 from cw.auto_dev_result import AutoDevResult, StageReached
 from cw.executor_diagnostics import (
     ExecutorFailure,
@@ -24,9 +25,11 @@ from cw.local_runner import (
     AIDER_FILE_REQUEST_UNANSWERED,
     AIDER_NO_OUTPUT,
     AIDER_NOT_FOUND,
+    GIT_FACTS_TIMEOUT_SECONDS,
     PLAN_MISSING,
     TASK_CONTEXT_RELATIVE_PATH,
     FakePlanFetcher,
+    GitFacts,
     RealAiderRunner,
     _blocked_scope,
     _detect_unanswered_file_request,
@@ -35,6 +38,7 @@ from cw.local_runner import (
     build_argv,
     build_env,
     build_task_message,
+    git_facts,
     make_blocked,
     read_process_start_time_ns,
     synthesize_git_result,
@@ -1178,7 +1182,7 @@ def test_synthesize_git_result_has_no_manifest_cross_check_by_design(
 
     synthesize_git_result itself is a post-hoc, git-facts-only function this
     fix does not touch: scope carries a plain file *count*
-    (schema.py:292), _git_facts → _parse_numstat_totals reduce the diff to
+    (schema.py:292), git_facts → _parse_numstat_totals reduce the diff to
     counts, and synthesize_git_result takes no manifest parameter at all —
     committed file names are retained nowhere in AutoDevResult, so a post-hoc
     cross-check against the plan manifest remains not structurally possible
@@ -1412,12 +1416,9 @@ def test_github_issue_plan_fetcher_delegates_to_gh(tmp_path: Path) -> None:
 
 def test_synthesize_git_result_threads_plan_source(tmp_path: Path) -> None:
     """synthesize_git_result passes plan_source through to AutoDevResult."""
-    from unittest.mock import patch
-
-    from cw.local_runner import _GitFacts, synthesize_git_result
     from cw.models import Stage, TicketTask
 
-    fake_facts: _GitFacts = {
+    fake_facts: GitFacts = {
         "branch": "dev/test",
         "fork_point": "abc123",
         "commits": ["abc123"],
@@ -1426,7 +1427,7 @@ def test_synthesize_git_result_threads_plan_source(tmp_path: Path) -> None:
     }
     task = TicketTask(ticket_id="T-1", client="c", stage=Stage.IMPL)
 
-    with patch("cw.local_runner._git_facts", return_value=fake_facts):
+    with patch("cw.local_runner.git_facts", return_value=fake_facts):
         result = synthesize_git_result(
             task=task,
             worktree=tmp_path,
@@ -1439,7 +1440,7 @@ def test_synthesize_git_result_threads_plan_source(tmp_path: Path) -> None:
 
 
 # ----------------------------------------------------------------------
-# #1487 — _git_facts delegates numstat parsing to cw.worktree
+# #1487 — git_facts delegates numstat parsing to cw.worktree
 # ----------------------------------------------------------------------
 
 
@@ -1447,9 +1448,7 @@ def test_git_facts_counts_files_and_lines_via_shared_parser(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """Regression pin: _git_facts still totals numstat after the parser extraction."""
-    from cw.local_runner import _git_facts
-
+    """Regression pin: git_facts still totals numstat after the parser extraction."""
     worktree = make_git_repo("wt-1487-facts")
     git_in(worktree, "remote", "add", "origin", str(worktree))
     git_in(worktree, "fetch", "origin", "main")
@@ -1459,7 +1458,7 @@ def test_git_facts_counts_files_and_lines_via_shared_parser(
     git_in(worktree, "add", "-A")
     git_in(worktree, "commit", "-m", "two files")
 
-    facts = _git_facts(worktree, "main")
+    facts = git_facts(worktree, "main")
 
     assert facts["files"] == 2
     assert facts["lines_actual"] == 6
@@ -1471,7 +1470,6 @@ def test_git_facts_and_compute_branch_diff_scope_agree(
     make_git_repo: Callable[[str], Path],
 ) -> None:
     """Both scope producers must report identical numbers for the same repo state."""
-    from cw.local_runner import _git_facts
     from cw.worktree import compute_branch_diff_scope
 
     worktree = make_git_repo("wt-1487-agree")
@@ -1482,7 +1480,7 @@ def test_git_facts_and_compute_branch_diff_scope_agree(
     git_in(worktree, "add", "-A")
     git_in(worktree, "commit", "-m", "one file")
 
-    facts = _git_facts(worktree, "main")
+    facts = git_facts(worktree, "main")
     measured = compute_branch_diff_scope(worktree, "main")
 
     assert measured is not None
@@ -1490,6 +1488,132 @@ def test_git_facts_and_compute_branch_diff_scope_agree(
         measured["files"],
         measured["lines_actual"],
     )
+
+
+# ----------------------------------------------------------------------
+# #2565 — git_facts is bounded per call; precomputed facts skip git entirely
+# ----------------------------------------------------------------------
+
+
+def _branch_with_one_commit(make_git_repo: Callable[[str], Path], name: str) -> Path:
+    """A repo with origin/main fetched and one commit on a feature branch."""
+    worktree = make_git_repo(name)
+    git_in(worktree, "remote", "add", "origin", str(worktree))
+    git_in(worktree, "fetch", "origin", "main")
+    git_in(worktree, "checkout", "-b", f"dev/{name}")
+    (worktree / "one.txt").write_text("x\n", encoding="utf-8")
+    git_in(worktree, "add", "-A")
+    git_in(worktree, "commit", "-m", "one file")
+    return worktree
+
+
+def _forbid_git(*_args: object, **_kwargs: object) -> object:
+    msg = "precomputed git facts must not run git"
+    raise AssertionError(msg)
+
+
+def test_git_facts_passes_a_timeout_to_every_git_call(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """All four git calls (rev-parse, merge-base, log, diff) carry the bound."""
+    worktree = _branch_with_one_commit(make_git_repo, "wt-2565-timeout")
+    spy = MagicMock(wraps=run_git)
+
+    with patch("cw.local_runner.run_git", spy):
+        facts = git_facts(worktree, "main")
+
+    assert facts["commits"]
+    assert [c.kwargs.get("timeout") for c in spy.call_args_list] == [
+        GIT_FACTS_TIMEOUT_SECONDS
+    ] * 4
+
+
+@pytest.mark.parametrize("subcommand", ["rev-parse", "merge-base", "log", "diff"])
+def test_git_facts_propagates_timeout_expired(
+    subcommand: str,
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A hung git call raises out of git_facts, merge-base included.
+
+    merge-base's ``CalledProcessError`` is suppressed (no fork point); its
+    timeout is not, since elapsed time is no evidence about the fork point.
+    """
+    worktree = _branch_with_one_commit(make_git_repo, f"wt-2565-hang-{subcommand}")
+
+    def _hang_on(argv: list[str], **_kwargs: object) -> object:
+        if subcommand in argv:
+            raise subprocess.TimeoutExpired(argv, GIT_FACTS_TIMEOUT_SECONDS)
+        return DEFAULT
+
+    hanging = MagicMock(wraps=run_git, side_effect=_hang_on)
+
+    with (
+        patch("cw.local_runner.run_git", hanging),
+        pytest.raises(subprocess.TimeoutExpired),
+    ):
+        git_facts(worktree, "main")
+
+
+def _commit_facts() -> GitFacts:
+    return GitFacts(
+        branch="dev/T-1",
+        fork_point="f0f0",
+        commits=["c1", "c2"],
+        files=3,
+        lines_actual=42,
+    )
+
+
+def test_synthesize_git_result_with_facts_runs_no_git(tmp_path: Path) -> None:
+    """Given facts, the result is built from them alone: no git subprocess."""
+    task = _make_task(ticket_id="T-1", scope_hint="large")
+
+    with patch("cw.local_runner.run_git", side_effect=_forbid_git):
+        result = synthesize_git_result(
+            task=task,
+            worktree=tmp_path,
+            default_branch="main",
+            facts=_commit_facts(),
+        )
+
+    assert result.status == "stage_complete"
+    assert result.commits == ["c1", "c2"]
+    assert result.branch == "dev/T-1"
+    assert result.fork_point_sha == "f0f0"
+    assert result.scope.files == 3
+    assert result.scope.lines_actual == 42
+    assert result.scope.tier == "large"
+
+
+def test_synthesize_git_result_with_facts_no_commits_still_reads_log_and_diagnoses(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """The log read and the diagnostics bundle stay in the result-building phase."""
+    _write_aider_log(tmp_path, "aider: nothing to do\n")
+    no_commits = GitFacts(
+        branch="dev/T-1", fork_point="f0f0", commits=[], files=0, lines_actual=0
+    )
+
+    with patch("cw.local_runner.run_git", side_effect=_forbid_git):
+        result = synthesize_git_result(
+            task=_make_task(),
+            worktree=tmp_path,
+            default_branch="main",
+            session_id="s-2565",
+            facts=no_commits,
+        )
+
+    assert result.blocker is not None
+    assert result.blocker.reason == AIDER_NO_OUTPUT
+    assert result.blocker.details == (
+        f"aider: nothing to do\n [diagnostics: {render_bundle_path('s-2565')}]"
+    )
+    bundles = diagnostics_bundle_dir("s-2565").glob("aider-missing_output-*.json")
+    [bundle] = list(bundles)
+    assert bundle.exists()
 
 
 # ---------------------------------------------------------------------------
