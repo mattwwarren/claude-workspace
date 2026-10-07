@@ -35,8 +35,8 @@ def _snapshot_agent_spawn_stamp(
     to accumulate against. ``last_stamped_at`` refreshes on every snapshot,
     even when the count is unchanged. At count > 0 it IS load-bearing: it bounds
     the #2012 distress-suppression deadline (``reconcile/liveness.py``,
-    ``doctor/wedge.py``), which is why the deferral snapshot never skips a
-    write. At count 0 nothing reads it.
+    ``doctor/wedge/session_liveness.py``), which is why the deferral snapshot
+    never skips a write. At count 0 nothing reads it.
     """
     context[AGENT_SPAWN_STAMP_KEY] = {
         AGENT_SPAWN_UNRESOLVED_COUNT_KEY: count,

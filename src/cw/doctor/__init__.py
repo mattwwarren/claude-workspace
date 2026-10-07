@@ -18,7 +18,8 @@ re-exports. Submodules:
   monkeypatch at ``cw.doctor._deps.NAME`` intercepts every caller.
 - ``config_checks`` — config-file / project-config / review-recipe checks.
 - ``linkage`` — session-state linkage, workspace, worktree, reconcile checks.
-- ``wedge`` — wedge-condition detection and reap.
+- ``wedge`` — wedge-condition detection and reap; a package with one
+  submodule per detector family plus ``reap`` (#2164).
 - ``routed_result_wedge`` — the stranded routed-result session class (#2524)
   and its operator-only ``--reap`` close.
 - ``loop_health`` — dispatch loop health/liveness, TIMED_OUT-merged detection,

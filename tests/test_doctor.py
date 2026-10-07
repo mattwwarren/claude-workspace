@@ -8054,7 +8054,8 @@ class TestWedgeLeakedDaemonWorker:
         self, monkeypatch: pytest.MonkeyPatch, daemon: FakeNativeDaemonClient
     ) -> None:
         """Both chokepoints must see the SAME fake: the wedge detector/reap
-        branch (``cw.doctor.wedge.get_native_daemon_client``) and the
+        branch (``get_native_daemon_client`` in ``cw.doctor.wedge.orphans``
+        for the detector and ``cw.doctor.wedge.reap`` for the sweep) and the
         unconditional reconcile-pass sweep ``--reap`` also triggers via
         ``_check_reconcile`` (``cw.reconcile._deps.get_native_daemon_client``)."""
         monkeypatch.setattr(
