@@ -56,7 +56,7 @@ from cw.reconcile import (
     _detect_local_harvest_candidates,
     reconcile,
 )
-from cw.reconcile.local import _resolve_harvest_backend
+from cw.reconcile.harvest_synthesis import _resolve_harvest_backend
 from tests._clients_yaml import staged_client, write_clients_yaml
 from tests._opencode_helpers import (
     earlier_stage_then_final_log,
@@ -755,7 +755,7 @@ def test_act_on_local_harvest_candidates_passes_session_id_to_synthesize_git_res
         captured["session_id"] = kwargs.get("session_id")
         return _real_synth(**kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr("cw.reconcile.local.synthesize_git_result", _spy)
+    monkeypatch.setattr("cw.reconcile.harvest_synthesis.synthesize_git_result", _spy)
     _act_on_local_harvest_candidates(
         state,
         candidates,
@@ -2049,10 +2049,11 @@ def _forbid_synthesis_call(**_kwargs: object) -> object:
 def _forbid_synthesis(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make either result synthesizer fail the test if it is ever called."""
     monkeypatch.setattr(
-        "cw.reconcile.local.synthesize_opencode_result", _forbid_synthesis_call
+        "cw.reconcile.harvest_synthesis.synthesize_opencode_result",
+        _forbid_synthesis_call,
     )
     monkeypatch.setattr(
-        "cw.reconcile.local.synthesize_git_result", _forbid_synthesis_call
+        "cw.reconcile.harvest_synthesis.synthesize_git_result", _forbid_synthesis_call
     )
 
 
@@ -2176,7 +2177,7 @@ def test_legacy_handle_impl_spawn_stage_git_synthesizes(
         row_stage=Stage.IMPL,
     )
     monkeypatch.setattr(
-        "cw.reconcile.local.synthesize_opencode_result",
+        "cw.reconcile.harvest_synthesis.synthesize_opencode_result",
         _forbid_synthesis_call,
     )
 
@@ -2300,7 +2301,8 @@ def test_legacy_handle_session_stage_none_decides_by_row_stage(
     )
     if expect_git:
         monkeypatch.setattr(
-            "cw.reconcile.local.synthesize_opencode_result", _forbid_synthesis_call
+            "cw.reconcile.harvest_synthesis.synthesize_opencode_result",
+            _forbid_synthesis_call,
         )
     else:
         _forbid_synthesis(monkeypatch)
@@ -2534,7 +2536,9 @@ def test_harvest_exception_fallback_opencode_handle_stages_at_row(
         session_stage=stage,
         row_stage=stage,
     )
-    monkeypatch.setattr("cw.reconcile.local.synthesize_opencode_result", _raise_oserror)
+    monkeypatch.setattr(
+        "cw.reconcile.harvest_synthesis.synthesize_opencode_result", _raise_oserror
+    )
 
     _harvest_tick(tbt)
 

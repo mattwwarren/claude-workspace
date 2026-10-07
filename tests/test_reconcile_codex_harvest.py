@@ -55,6 +55,7 @@ from cw.reconcile import (
     _act_on_local_harvest_candidates,
     _detect_local_harvest_candidates,
     codex_boot,
+    harvest_synthesis,
     reconcile,
 )
 from cw.reconcile import local as reconcile_local
@@ -438,15 +439,14 @@ def test_codex_candidate_never_reaches_git_synthesis_or_opencode_parse(
         msg = "codex harvest must not synthesize a sentinel"
         raise AssertionError(msg)
 
-    for name in (
-        "_synthesize_harvest_sentinel",
-        "synthesize_git_result",
-        "synthesize_opencode_result",
-    ):
-        monkeypatch.setattr(reconcile_local, name, _forbidden)
+    monkeypatch.setattr(reconcile_local, "_synthesize_harvest_sentinel", _forbidden)
+    for name in ("synthesize_git_result", "synthesize_opencode_result"):
+        monkeypatch.setattr(harvest_synthesis, name, _forbidden)
     monkeypatch.setattr(cw_result, "emit_result_on", _forbidden)
     for backend in ("aider", "opencode"):
-        monkeypatch.setitem(reconcile_local._HARVEST_SYNTHESIZERS, backend, _forbidden)
+        monkeypatch.setitem(
+            harvest_synthesis._HARVEST_SYNTHESIZERS, backend, _forbidden
+        )
 
     _harvest(_AUTO)
 
