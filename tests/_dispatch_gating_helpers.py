@@ -25,8 +25,8 @@ def _force_ssh_key_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force the SSH-agent-key preflight probe to report unavailable.
 
     Overrides the autouse ``_mock_ssh_key_available`` default (which returns
-    True) on the same ``cw.dispatch.gating.check_ssh_key_available`` seam.
+    True) on the same ``cw.dispatch.gating.ssh_key.check_ssh_key_available`` seam.
     """
     monkeypatch.setattr(
-        "cw.dispatch.gating.check_ssh_key_available", lambda **_kw: False
+        "cw.dispatch.gating.ssh_key.check_ssh_key_available", lambda **_kw: False
     )

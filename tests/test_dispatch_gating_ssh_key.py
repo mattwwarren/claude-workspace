@@ -255,8 +255,12 @@ class TestSshKeyPreflightGate:
             probe_calls.append(True)
             return False
 
-        monkeypatch.setattr("cw.dispatch.gating.check_ssh_key_available", _probe)
-        monkeypatch.setattr("cw.dispatch.gating.push_remote_scheme", lambda _p: "http")
+        monkeypatch.setattr(
+            "cw.dispatch.gating.ssh_key.check_ssh_key_available", _probe
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.gating.ssh_key.push_remote_scheme", lambda _p: "http"
+        )
 
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
@@ -283,7 +287,9 @@ class TestSshKeyPreflightGate:
         write_clients_yaml(sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-S1J", client="test-client"))
         _force_ssh_key_unavailable(monkeypatch)
-        monkeypatch.setattr("cw.dispatch.gating.push_remote_scheme", lambda _p: "local")
+        monkeypatch.setattr(
+            "cw.dispatch.gating.ssh_key.push_remote_scheme", lambda _p: "local"
+        )
 
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
@@ -301,7 +307,7 @@ class TestSshKeyPreflightGate:
         add_ticket(TicketTask(ticket_id="GEN-S1K", client="test-client"))
         _force_ssh_key_unavailable(monkeypatch)
         monkeypatch.setattr(
-            "cw.dispatch.gating.push_remote_scheme", lambda _p: "unknown"
+            "cw.dispatch.gating.ssh_key.push_remote_scheme", lambda _p: "unknown"
         )
 
         daemon = FakeNativeDaemonClient()
@@ -368,7 +374,7 @@ class TestSshKeyPreflightGate:
             probed.append(path)
             return "http"
 
-        monkeypatch.setattr("cw.dispatch.gating.push_remote_scheme", _scheme)
+        monkeypatch.setattr("cw.dispatch.gating.ssh_key.push_remote_scheme", _scheme)
 
         daemon = FakeNativeDaemonClient()
         dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)

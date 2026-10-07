@@ -1764,7 +1764,7 @@ def _mock_ssh_key_available(monkeypatch: pytest.MonkeyPatch) -> None:
     ``cw.ssh`` directly and is unaffected.
     """
     monkeypatch.setattr(
-        "cw.dispatch.gating.check_ssh_key_available", lambda **_kw: True
+        "cw.dispatch.gating.ssh_key.check_ssh_key_available", lambda **_kw: True
     )
 
 
@@ -1782,7 +1782,9 @@ def _mock_push_remote_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
     (``TestSshKeyPreflightGate``) exercised verbatim; ``test_ssh.py``
     exercises the real helper via ``cw.ssh`` directly and is unaffected.
     """
-    monkeypatch.setattr("cw.dispatch.gating.push_remote_scheme", lambda _path: "ssh")
+    monkeypatch.setattr(
+        "cw.dispatch.gating.ssh_key.push_remote_scheme", lambda _path: "ssh"
+    )
 
 
 @pytest.fixture(autouse=True)
