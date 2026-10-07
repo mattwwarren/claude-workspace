@@ -103,7 +103,11 @@ from cw.reconcile.gate_predicates import (
     _predicate_holds,
     _row_eligible,
 )
-from cw.reconcile.gate_recipe_comments import defer_gate_recipe_comment_jobs
+from cw.reconcile.gate_recipe_comments import (
+    AUTO_ADOPT_COMMENT_TEMPLATE,
+    AUTO_APPROVE_COMMENT_TEMPLATE,
+    defer_gate_recipe_comment_jobs,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -197,43 +201,11 @@ def _recipe_gate_open(
     )
 
 
-_AUTO_APPROVE_COMMENT_TEMPLATE = """\
-Auto-approved by gate recipe `{recipe}`.
-
-The review met the clean-review predicate and was approved automatically
-(no human review) by RFC 0009 gate-recipe automation:
-
-- must_fix_initial: {must_fix_initial}
-- deferred: {deferred}
-- recommendation: {recommendation}
-- forbidden_touched: {forbidden_touched}
-- agents_run: {agents_run}
-
-See event `GATE_AUTO_APPROVED` for the full audit trail.
-"""
-
 # The two signoff markers auto-dev-plan appends to the plan-of-record body.
 # Canonical definition now lives in cw.dev_queue.lifecycle (#1567) — imported
 # above rather than redefined here. _PLAN_SPEC_MARKER still mirrors
 # gh._PLAN_MARKER, a genuinely separate definition in a different module;
 # test_plan_spec_marker_matches_gh_marker continues to guard that drift.
-
-_AUTO_ADOPT_COMMENT_TEMPLATE = """\
-Auto-approved by gate recipe `{recipe}`.
-
-The plan met the clean-plan predicate (no forbidden-area touch, no operator
-`scope_hint: large`, and a draft fingerprint the approval is bound to) and was
-approved automatically (no human review) by RFC 0009 gate-recipe automation:
-
-- scope: {tier} ({files} files, ~{lines_estimate} lines)
-- forbidden_touched: {forbidden_touched}
-- plan_draft_fingerprint: {plan_draft_fingerprint}
-- plan_reviewed: {plan_reviewed}
-
-An unreviewed plan returns to the plan stage, which runs Plan Quality Review
-before implementation starts. See event
-`GATE_AUTO_APPROVED` for the full audit trail.
-"""
 
 
 @dataclass(frozen=True)
@@ -528,7 +500,7 @@ def _post_auto_approve_comment(
 
     *cwd* scopes the gh call to the client's repo (GitHub #1269/#1279).
     """
-    body = _AUTO_APPROVE_COMMENT_TEMPLATE.format(
+    body = AUTO_APPROVE_COMMENT_TEMPLATE.format(
         recipe=RECIPE_AUTO_APPROVE_REVIEW,
         must_fix_initial=snapshot["must_fix_initial"],
         deferred=snapshot["deferred"],
@@ -567,7 +539,7 @@ def _post_auto_adopt_comment(
     # _clean_plan_snapshot with no code change here to acknowledge the new
     # public disclosure, and would raise TypeError if a future key ever
     # collided with the `recipe=` kwarg.
-    body = _AUTO_ADOPT_COMMENT_TEMPLATE.format(
+    body = AUTO_ADOPT_COMMENT_TEMPLATE.format(
         recipe=RECIPE_AUTO_ADOPT_PLAN,
         tier=snapshot.get(_SNAPSHOT_KEY_TIER),
         files=snapshot.get(_SNAPSHOT_KEY_FILES),
