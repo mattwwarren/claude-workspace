@@ -398,7 +398,7 @@ def _run_preflight_gates(
 
     ``ssh_key_gate_enabled`` (GitHub #1437) is the operator escape hatch: for
     a client whose push remote engages the probe (see
-    :func:`~cw.dispatch.gating._apply_ssh_key_gate`, GitHub #1495 -- an
+    :func:`~cw.dispatch.gating.ssh_key._apply_ssh_key_gate`, GitHub #1495 -- an
     HTTP(S)/local remote skips the probe entirely and leaves
     ``ssh_key_available`` unresolved), the probe runs unconditionally (needed
     either way to compute the resolved verdict threaded back to the caller,
@@ -410,9 +410,9 @@ def _run_preflight_gates(
 
     ``disk_pressure_gate_enabled`` / ``disk_pressure_min_free_gb`` (GitHub
     #1887) drive the third gate, applied via
-    :func:`~cw.dispatch.gating._apply_disk_pressure_gate` (extracted rather
-    than inlined here to keep this function under the PLR0911 six-return
-    ceiling -- see that helper's docstring).
+    :func:`~cw.dispatch.gating.disk_pressure._apply_disk_pressure_gate`
+    (extracted rather than inlined here to keep this function under the
+    PLR0911 six-return ceiling -- see that helper's docstring).
     ``disk_pressure_min_free_inodes`` / ``disk_pressure_min_free_inode_fraction``
     (#2470) add that gate's inode dimension.
     """

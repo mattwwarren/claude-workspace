@@ -397,7 +397,7 @@ Consumers MUST tolerate unknown `skip_reason` values.
 
 ### `gate.ssh_key_bypassed`
 
-**Emitter:** `_emit_ssh_key_bypass` (`cw.dispatch.gating`, called from `cw.dispatch.tick`)
+**Emitter:** `_emit_ssh_key_bypass` (`cw.dispatch.gating.ssh_key`, called from `cw.dispatch.tick`)
 **Payload:**
 ```json
 {
@@ -427,7 +427,7 @@ SSH-key-gate bypass is attention-worthy.
 
 ### `gate.disk_pressure_bypassed`
 
-**Emitter:** `_emit_disk_pressure_bypass` (`cw.dispatch.gating`, called from `_apply_disk_pressure_gate`)
+**Emitter:** `_emit_disk_pressure_bypass` (`cw.dispatch.gating.disk_pressure`, called from `_apply_disk_pressure_gate`)
 **Payload:**
 ```json
 {

@@ -226,7 +226,7 @@ def _hold_sessions_lock_via_reconcile_timeout(
             msg, lock_path=state_dir() / ".sessions.lock", waited_s=60.0
         )
 
-    monkeypatch.setattr("cw.dispatch.gating.reconcile", _timeout)
+    monkeypatch.setattr("cw.dispatch.gating.usage_limit.reconcile", _timeout)
 
 
 def _dispatch_tick_events() -> list[object]:

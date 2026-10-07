@@ -880,10 +880,10 @@ class TicketTask(BaseModel):
     #
     # Lives on the queue row rather than in ``.cw/`` or on the tracker alone
     # because neither survives what this memory has to survive:
-    # dispatch/gating.py deletes ``.cw/context.json`` on a rescued respawn, and
-    # a live tracker fetch degrades to nothing on an unresolvable tracker or a
-    # gh failure. The tracker marker remains the operator's INPUT surface; this
-    # field is the durable record derived from it.
+    # dispatch/gating/context_json.py deletes ``.cw/context.json`` on a rescued
+    # respawn, and a live tracker fetch degrades to nothing on an unresolvable
+    # tracker or a gh failure. The tracker marker remains the operator's INPUT
+    # surface; this field is the durable record derived from it.
     #
     # No clear site, deliberately — the opposite convention to the per-arrival
     # markers above (regressed_into_stage, pending_operator_comment), which are

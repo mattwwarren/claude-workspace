@@ -45,12 +45,6 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-def tmp_dispatch_dirs(tmp_config_dir: Path) -> Path:
-    """Return tmp_path; state isolation is handled by the autouse fixture."""
-    return tmp_config_dir
-
-
-@pytest.fixture
 def workspace_dir(make_git_repo: Callable[[str], Path]) -> Path:
     return make_git_repo("workspace/host-capacity-project")
 

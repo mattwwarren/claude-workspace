@@ -268,8 +268,8 @@ class TestDigestBuffering:
 
     def test_ticketless_event_never_buffered(self, tmp_events_dir: Path) -> None:
         """A fleet-wide session.needs_attention (no owning ticket, e.g.
-        gating.py's gh_availability_outage shape) always forwards immediately
-        -- it can never resolve to a held task."""
+        gating/availability.py's gh_availability_outage shape) always forwards
+        immediately -- it can never resolve to a held task."""
         _attention_event(None, client=None)
         q = subscribe()
         try:

@@ -690,7 +690,7 @@ def _legacy_ceiling_predicate(s: Session, name: str) -> bool:
 
 class TestCountsTowardClientCeiling:
     """#2524 R4(c): the extracted predicate is byte-identical to the inline
-    comprehension it replaced in dispatch/tick.py and dispatch/gating.py."""
+    comprehension it replaced in dispatch/tick.py and dispatch/gating/usage_limit.py."""
 
     @pytest.mark.parametrize(
         ("status", "origin", "client"),

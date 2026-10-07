@@ -37,7 +37,7 @@ top. Two gates need state that stays in ``routing.py``
 (``_resolve_scope_tier``, ``_APPROVAL_GATE_REASON``) and reach back for it via
 *function-level* imports. Promoting either to a module-top import recreates a
 genuine circular import and ``cw.dispatch`` stops importing at all. This is the
-same shape ``gating.py``/``claim.py`` have carried since #1310, guarded by the
+same shape ``gating/``/``claim/`` have carried since #1310, guarded by the
 same test (``test_dispatch_package_submodules_import_without_cycle``).
 """
 
