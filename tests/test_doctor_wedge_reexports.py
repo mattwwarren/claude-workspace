@@ -17,6 +17,9 @@ import ast
 import importlib
 import inspect
 import logging
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -28,6 +31,7 @@ from cw.models import DevQueueStore, QueueItemStatus
 from tests.conftest import _make_ticket_task
 
 _PKG = "cw.doctor.wedge"
+_CONSTANTS_MOD = f"{_PKG}._constants"
 
 # The nine module-level constants the flat module bound at top level.
 _CONSTANTS = {
@@ -79,14 +83,14 @@ EXPECTED_EXPORTS = {*_FUNCTIONS, *_CONSTANTS, "_log"}
 # Owning module for each of the 32 defs and constants. Each extraction commit
 # of the split edits only the rows it moves.
 EXPECTED_OWNER: dict[str, str] = {
-    "_DIRTY_WORKTREE_DISPOSITION": _PKG,
-    "_HUMAN_GATED_PARK_DISPOSITIONS": _PKG,
-    "_WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL": _PKG,
-    "_WEDGE_ACTIVE_NO_DAEMON_ENTRY": _PKG,
-    "_WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN": _PKG,
-    "_WEDGE_BLOCKED_DEAD_SESSION": _PKG,
-    "_WEDGE_LEAKED_DAEMON_WORKER": _PKG,
-    "_WEDGE_TERMINAL_SIBLING": _PKG,
+    "_DIRTY_WORKTREE_DISPOSITION": _CONSTANTS_MOD,
+    "_HUMAN_GATED_PARK_DISPOSITIONS": _CONSTANTS_MOD,
+    "_WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL": _CONSTANTS_MOD,
+    "_WEDGE_ACTIVE_NO_DAEMON_ENTRY": _CONSTANTS_MOD,
+    "_WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN": _CONSTANTS_MOD,
+    "_WEDGE_BLOCKED_DEAD_SESSION": _CONSTANTS_MOD,
+    "_WEDGE_LEAKED_DAEMON_WORKER": _CONSTANTS_MOD,
+    "_WEDGE_TERMINAL_SIBLING": _CONSTANTS_MOD,
     "_check_wedge_task_running_no_session": _PKG,
     "_check_wedge_task_running_completed_session": _PKG,
     "_resolve_wedge_branch": _PKG,
@@ -134,6 +138,15 @@ _DOCTOR_IMPORTS = (
 )
 
 
+def _isort_style_key(name: str) -> tuple[int, str]:
+    stripped = name.lstrip("_")
+    if stripped.isupper():
+        return 0, name
+    if stripped[:1].isupper():
+        return 1, name
+    return 2, name
+
+
 def _project_defined_names() -> set[str]:
     """Top-level functions the package binds that it (or a submodule) defined."""
     names: set[str] = set()
@@ -165,6 +178,20 @@ class TestPackageExportCompleteness:
 
     def test_owner_table_covers_the_surface(self) -> None:
         assert set(EXPECTED_OWNER) == EXPECTED_EXPORTS - {"_log"}
+
+    def test_all_matches_full_surface(self) -> None:
+        assert set(wedge.__all__) == EXPECTED_EXPORTS
+
+    def test_all_is_sorted_without_duplicates(self) -> None:
+        """Ruff RUF022's isort-style order: SCREAMING_CASE, CamelCase, the rest."""
+        assert list(wedge.__all__) == sorted(set(wedge.__all__), key=_isort_style_key)
+
+    def test_logger_name_is_defined_once_and_kept_out_of_all(self) -> None:
+        """``_LOGGER_NAME`` lives in ``_constants``; the package only re-exports it."""
+        constants = importlib.import_module(_CONSTANTS_MOD)
+        assert vars(constants)["_LOGGER_NAME"] == PINNED_LOGGER_NAME
+        assert vars(wedge)["_LOGGER_NAME"] == PINNED_LOGGER_NAME
+        assert "_LOGGER_NAME" not in wedge.__all__
 
 
 class TestOwnership:
@@ -315,3 +342,21 @@ class TestLoggerNamePinned:
 
     def test_package_logger_uses_pinned_name(self) -> None:
         assert wedge._log is logging.getLogger(PINNED_LOGGER_NAME)
+
+
+# Every extracted submodule, plus the cycle-sensitive ``loop_health`` importer;
+# each must import cold in a fresh isolated interpreter.
+_COLD_IMPORTS = (
+    "cw.doctor.loop_health",
+    _CONSTANTS_MOD,
+)
+
+
+@pytest.mark.parametrize("module", _COLD_IMPORTS)
+def test_module_imports_cold(module: str) -> None:
+    """Each module imports in a fresh isolated interpreter (no import cycle)."""
+    subprocess.run(
+        [sys.executable, "-I", "-c", f"import {module}"],
+        check=True,
+        env=os.environ.copy(),
+    )
