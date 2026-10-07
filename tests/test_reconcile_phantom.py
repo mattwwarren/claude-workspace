@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from cw.reconcile import ProposedAction
 
 from tests._clients_yaml import staged_client, write_clients_yaml
+from tests._dirty_check_helpers import detect_phantom_prefetched
 from tests._reconcile_helpers import (
     PROVIDER_OVERLOAD_TEXT,
     SCOPE_GUARD_FILES,
@@ -1144,7 +1145,6 @@ def test_detect_phantom_candidates_worktree_dirty_on_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Phantom with dirty worktree → candidate.worktree_dirty True; bytes unchanged."""
-    from cw.reconcile import _detect_phantom_candidates
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     wt = tmp_path / "wt-dirty"
@@ -1160,7 +1160,7 @@ def test_detect_phantom_candidates_worktree_dirty_on_candidate(
         lambda _c, _p: "2 uncommitted path(s)",
     )
 
-    candidates = _detect_phantom_candidates(
+    candidates = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         now=started_at,
@@ -1178,7 +1178,6 @@ def test_detect_phantom_candidates_worktree_clean_reason_none_on_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Phantom with clean worktree → worktree_dirty False, reason None (#2118)."""
-    from cw.reconcile import _detect_phantom_candidates
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     wt = tmp_path / "wt-clean"
@@ -1193,7 +1192,7 @@ def test_detect_phantom_candidates_worktree_clean_reason_none_on_candidate(
         "cw.reconcile._shared.worktree_dirty_reason_by_path", lambda _c, _p: None
     )
 
-    candidates = _detect_phantom_candidates(
+    candidates = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         now=started_at,
@@ -1210,7 +1209,7 @@ def test_detect_phantom_candidates_usage_limit_detected_true(
     tmp_path: Path,
 ) -> None:
     """DAEMON phantom with usage-limit transcript → usage_limit_detected=True (#804)."""
-    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile import ProposedAction
 
     home = Path.home()
 
@@ -1236,9 +1235,7 @@ def test_detect_phantom_candidates_usage_limit_detected_true(
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
 
-    candidates = _detect_phantom_candidates(
-        state, phantom_set={sess.id}, now=started_at
-    )
+    candidates = detect_phantom_prefetched(state, phantom_set={sess.id}, now=started_at)
 
     assert len(candidates) == 1
     c = candidates[0]
@@ -1273,7 +1270,7 @@ def test_detect_phantom_candidates_usage_limit_recent_at_tail_true(
     tmp_path: Path,
 ) -> None:
     """#1345: a limit message at the transcript tail is recent → detected True."""
-    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile import ProposedAction
 
     home = Path.home()
 
@@ -1303,9 +1300,7 @@ def test_detect_phantom_candidates_usage_limit_recent_at_tail_true(
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
 
-    candidates = _detect_phantom_candidates(
-        state, phantom_set={sess.id}, now=started_at
-    )
+    candidates = detect_phantom_prefetched(state, phantom_set={sess.id}, now=started_at)
 
     assert len(candidates) == 1
     c = candidates[0]
@@ -1318,7 +1313,7 @@ def test_detect_phantom_candidates_usage_limit_stale_false(
     tmp_path: Path,
 ) -> None:
     """#1345: an early limit message with later unrelated work is stale → False."""
-    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile import ProposedAction
 
     home = Path.home()
 
@@ -1349,9 +1344,7 @@ def test_detect_phantom_candidates_usage_limit_stale_false(
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
 
-    candidates = _detect_phantom_candidates(
-        state, phantom_set={sess.id}, now=started_at
-    )
+    candidates = detect_phantom_prefetched(state, phantom_set={sess.id}, now=started_at)
 
     assert len(candidates) == 1
     c = candidates[0]
@@ -1364,7 +1357,7 @@ def test_detect_phantom_candidates_provider_overload_detected_true(
     tmp_path: Path,
 ) -> None:
     """DAEMON phantom with a provider-overload transcript → True (#1923)."""
-    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile import ProposedAction
 
     home = Path.home()
 
@@ -1388,9 +1381,7 @@ def test_detect_phantom_candidates_provider_overload_detected_true(
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
 
-    candidates = _detect_phantom_candidates(
-        state, phantom_set={sess.id}, now=started_at
-    )
+    candidates = detect_phantom_prefetched(state, phantom_set={sess.id}, now=started_at)
 
     assert len(candidates) == 1
     c = candidates[0]
@@ -1577,7 +1568,7 @@ def test_phantom_sentinel_mismatch_veto_disabled_keeps_age_fallback(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A client outside #2405 rollout keeps the old fallback with shadow telemetry."""
-    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile import ProposedAction
 
     home = Path.home()
     worktree = tmp_path / "wt-sentinel-veto-disabled"
@@ -1607,7 +1598,7 @@ def test_phantom_sentinel_mismatch_veto_disabled_keeps_age_fallback(
     save_dev_queue(DevQueueStore(tasks=[]))
 
     with caplog.at_level(logging.WARNING, logger="cw.reconcile.phantom._detect"):
-        candidates = _detect_phantom_candidates(state, phantom_set={sess.id}, now=now)
+        candidates = detect_phantom_prefetched(state, phantom_set={sess.id}, now=now)
 
     assert candidates[0].proposed_action == ProposedAction.CRASH_COMPLETE
     assert any(
@@ -1733,7 +1724,7 @@ def test_phantom_dirty_worktree_past_veto_cap_blocks_on_user_regardless_of_age(
         "cw.reconcile._shared.worktree_dirty_reason_by_path",
         lambda _c, _p: "2 uncommitted path(s)",
     )
-    from cw.reconcile import _act_on_phantom_candidates, _detect_phantom_candidates
+    from cw.reconcile import _act_on_phantom_candidates
 
     home = Path.home()
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -1770,7 +1761,7 @@ def test_phantom_dirty_worktree_past_veto_cap_blocks_on_user_regardless_of_age(
     )
     config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
 
-    cands = _detect_phantom_candidates(
+    cands = detect_phantom_prefetched(
         state, phantom_set={sess.id}, now=now, config=config
     )
     call_and_drain(_act_on_phantom_candidates, state, cands, now=now, config=config)
@@ -1795,7 +1786,7 @@ def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
     is not re-proposed on a subsequent detect pass -- it falls through to the
     ordinary CRASH_COMPLETE construction instead.
     """
-    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile import ProposedAction
     from cw.reconcile.phantom import _apply_phantom_routed_mutations
 
     home = Path.home()
@@ -1825,7 +1816,7 @@ def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    candidates = _detect_phantom_candidates(
+    candidates = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         task_by_ticket={"phantom-refusal-1": task},
@@ -1862,7 +1853,7 @@ def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
     # Second detect pass over the now-marked session: the already_refused
     # skip check stops offering the same doomed advance candidate -- it
     # falls through to CRASH_COMPLETE instead.
-    candidates_2 = _detect_phantom_candidates(
+    candidates_2 = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         task_by_ticket={"phantom-refusal-1": task_after},
@@ -2091,7 +2082,7 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     second, independent flag (_SENTINEL_ADVANCE_REFUSED_KEY) into the existing
     dict instead of choosing between the two.
     """
-    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile import ProposedAction
     from cw.reconcile.phantom import _apply_phantom_routed_mutations
 
     home = Path.home()
@@ -2123,7 +2114,7 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    candidates = _detect_phantom_candidates(
+    candidates = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         task_by_ticket={"phantom-preserve-1": task},
@@ -2169,7 +2160,7 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     # still stop offering the same doomed advance candidate even though the
     # marker's paused_status value is idle.py's, not the #1149 refusal
     # reason -- it falls through to CRASH_COMPLETE instead.
-    candidates_2 = _detect_phantom_candidates(
+    candidates_2 = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         task_by_ticket={"phantom-preserve-1": task},
@@ -3073,7 +3064,7 @@ def test_phantom_veto_bounded_falls_through_to_crash_complete(
     """A LIVE, already_refused phantom at the veto cap falls through to a single
     CRASH_COMPLETE candidate stamped veto_cap_exhausted=True — no
     SENTINEL_STAGE_MISMATCH_VETOED candidate (#1449)."""
-    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile import ProposedAction
 
     home = Path.home()
     worktree = tmp_path / "wt-bound-crash"
@@ -3089,7 +3080,7 @@ def test_phantom_veto_bounded_falls_through_to_crash_complete(
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
 
-    candidates = _detect_phantom_candidates(
+    candidates = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         now=now,
@@ -3123,7 +3114,6 @@ def test_sentinel_mismatch_veto_cap_end_to_end_via_detect_and_act(
         ProposedAction,
         ReapCandidate,
         _act_on_phantom_candidates,
-        _detect_phantom_candidates,
     )
 
     home = Path.home()
@@ -3147,7 +3137,7 @@ def test_sentinel_mismatch_veto_cap_end_to_end_via_detect_and_act(
     config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
 
     def _tick() -> list[ReapCandidate]:
-        cands = _detect_phantom_candidates(
+        cands = detect_phantom_prefetched(
             state, phantom_set={sess.id}, now=now, config=config
         )
         call_and_drain(_act_on_phantom_candidates, state, cands, now=now, config=config)
@@ -3190,7 +3180,6 @@ def test_sentinel_mismatch_veto_cap_exhaustion_emits_immediate_needs_attention(
     from cw.reconcile import (
         ProposedAction,
         _act_on_phantom_candidates,
-        _detect_phantom_candidates,
     )
 
     daemon = FakeNativeDaemonClient()
@@ -3221,7 +3210,7 @@ def test_sentinel_mismatch_veto_cap_exhaustion_emits_immediate_needs_attention(
     save_dev_queue(DevQueueStore(tasks=[task]))
     config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
 
-    candidates = _detect_phantom_candidates(
+    candidates = detect_phantom_prefetched(
         state, phantom_set={sess.id}, now=now, config=config
     )
     assert not any(
@@ -3270,7 +3259,7 @@ def test_sentinel_mismatch_veto_escalation_fires_once_not_every_tick(
         "cw.reconcile._deps.fire_push_notification",
         lambda *a, **kw: push_calls.append((a, kw)),
     )
-    from cw.reconcile import _act_on_phantom_candidates, _detect_phantom_candidates
+    from cw.reconcile import _act_on_phantom_candidates
 
     home = Path.home()
     worktree = tmp_path / "wt-veto-once"
@@ -3294,7 +3283,7 @@ def test_sentinel_mismatch_veto_escalation_fires_once_not_every_tick(
     config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
 
     for _ in range(3):
-        cands = _detect_phantom_candidates(
+        cands = detect_phantom_prefetched(
             state, phantom_set={sess.id}, now=now, config=config
         )
         call_and_drain(_act_on_phantom_candidates, state, cands, now=now, config=config)
@@ -4157,7 +4146,6 @@ def test_detect_phantom_candidates_reads_unresolved_spawn_from_worktree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1646: a real stamped cw-context.json flows into the candidate flag."""
-    from cw.reconcile import _detect_phantom_candidates
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     wt = tmp_path / "wt-unresolved-spawn"
@@ -4172,7 +4160,7 @@ def test_detect_phantom_candidates_reads_unresolved_spawn_from_worktree(
     save_dev_queue(DevQueueStore(tasks=[]))
     snap = _state_queue_snapshot()
 
-    candidates = _detect_phantom_candidates(
+    candidates = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         now=started_at,
@@ -4194,7 +4182,6 @@ def test_detect_phantom_candidates_unresolved_spawn_false_without_stamp(
     The fail-open acceptance criterion at the detect layer: an inaccessible
     worktree must classify as an ordinary phantom, never block the sweep.
     """
-    from cw.reconcile import _detect_phantom_candidates
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     sess = _mk_phantom_daemon_session(
@@ -4204,7 +4191,7 @@ def test_detect_phantom_candidates_unresolved_spawn_false_without_stamp(
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
 
-    candidates = _detect_phantom_candidates(
+    candidates = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         now=started_at,

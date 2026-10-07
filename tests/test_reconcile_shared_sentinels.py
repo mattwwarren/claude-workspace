@@ -51,10 +51,12 @@ from cw.reconcile import (
     _has_terminal_sentinel,
     compute_drift,
     reconcile,
-    revert_completed_silent_tasks,
-    revert_timed_out_tasks,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests._dirty_check_helpers import (
+    revert_completed_silent_prefetched,
+    revert_timed_out_prefetched,
+)
 from tests._reconcile_helpers import (
     PROVIDER_OVERLOAD_TEXT,
     SCOPE_GUARD_FILES,
@@ -2559,9 +2561,9 @@ def test_dirty_worktree_push_fires_once_not_per_tick_timed_out(
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
-    revert_timed_out_tasks()  # tick 1 — routes to BLOCKED_ON_USER, fires push
-    revert_timed_out_tasks()  # tick 2 — task is BLOCKED_ON_USER, must not re-fire
-    revert_timed_out_tasks()  # tick 3 — still BLOCKED_ON_USER, must not re-fire
+    revert_timed_out_prefetched()  # tick 1 — routes to BLOCKED_ON_USER, fires push
+    revert_timed_out_prefetched()  # tick 2 — task is BLOCKED_ON_USER, must not re-fire
+    revert_timed_out_prefetched()  # tick 3 — still BLOCKED_ON_USER, must not re-fire
 
     assert len(push_calls) == 1, (
         f"fire_push_notification must fire exactly once, fired {len(push_calls)} times"
@@ -2611,7 +2613,7 @@ def test_dirty_worktree_push_silent_for_already_blocked_task(
     )
 
     for _ in range(3):
-        revert_timed_out_tasks()
+        revert_timed_out_prefetched()
 
     assert push_calls == [], (
         f"fire_push_notification must not fire for already-BLOCKED_ON_USER task, "
@@ -2651,7 +2653,7 @@ def test_dirty_worktree_push_silent_for_no_task_terminal_session(
     )
 
     for _ in range(3):
-        revert_timed_out_tasks()
+        revert_timed_out_prefetched()
 
     assert push_calls == [], (
         f"fire_push_notification must not fire for zombie session with no queue task, "
@@ -2705,9 +2707,9 @@ def test_dirty_worktree_push_fires_once_not_per_tick_completed_silent(
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
-    revert_completed_silent_tasks()  # tick 1 — routes to BLOCKED_ON_USER, fires push
-    revert_completed_silent_tasks()  # tick 2 — already BLOCKED_ON_USER, no re-fire
-    revert_completed_silent_tasks()  # tick 3 — still BLOCKED_ON_USER, no re-fire
+    revert_completed_silent_prefetched()  # tick 1 — BLOCKED_ON_USER, fires push
+    revert_completed_silent_prefetched()  # tick 2 — already BLOCKED_ON_USER, no re-fire
+    revert_completed_silent_prefetched()  # tick 3 — still BLOCKED_ON_USER, no re-fire
 
     assert len(push_calls) == 1, (
         f"fire_push_notification must fire exactly once on completed-silent path, "
