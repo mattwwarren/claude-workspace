@@ -66,8 +66,7 @@ VIOLATION_KINDS = frozenset({"reentry", "order", "subprocess"})
 # docs/adr/0019-lock-hierarchy-and-no-subprocess-under-sessions-lock.md.
 SUBPROCESS_UNDER_SESSIONS_ALLOWLIST: dict[str, str] = {
     "cw.reconcile.main_drift": "#2546",  # main-drift git checks in-lock, #2546
-    "cw.reconcile.phantom._detect": "#2548",  # phantom dirty-check git, #2548
-    "cw.reconcile.tasks": "#2548",  # phantom dirty-check git (tasks path), #2548
+    "cw.reconcile._shared._sentinels": "#2641",  # salvage scope-check git, #2641
 }
 
 
