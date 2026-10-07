@@ -44,17 +44,18 @@ _SCREENING = "cw.dispatch.claim.screening"
 _REVIEW_GATES = "cw.dispatch.review_gates"
 _PR_REFS = "cw.dispatch.routing.pr_refs"
 _PRODUCTIVITY = "cw.dispatch.productivity"
+_QUEUE_ROWS = "cw.queue_rows"
 
 # Owning module for every name #2613 moves, plus ``_stamp_spawn_success``,
 # which stays behind in ``claimed_row``. Each extraction commit edits only the
 # entries it moves.
 _OWNER: dict[str, str] = {
-    "_SPAWN_ERROR_BACKOFF_INITIAL_SECONDS": _CLAIMED_ROW,
-    "_SPAWN_ERROR_BACKOFF_CAP_SECONDS": _CLAIMED_ROW,
-    "_find_running_row": _CLAIMED_ROW,
-    "_revert_claimed_task_to_pending": _CLAIMED_ROW,
-    "_park_running_task_blocked_on_user": _CLAIMED_ROW,
-    "_apply_spawn_success_fields": _CLAIMED_ROW,
+    "_SPAWN_ERROR_BACKOFF_INITIAL_SECONDS": _QUEUE_ROWS,
+    "_SPAWN_ERROR_BACKOFF_CAP_SECONDS": _QUEUE_ROWS,
+    "_find_running_row": _QUEUE_ROWS,
+    "_revert_claimed_task_to_pending": _QUEUE_ROWS,
+    "_park_running_task_blocked_on_user": _QUEUE_ROWS,
+    "_apply_spawn_success_fields": _QUEUE_ROWS,
     "_stamp_spawn_success": _CLAIMED_ROW,
     "_is_fix_dispatch_held": _SCREENING,
     "_is_backstop_exempt": _SCREENING,
@@ -115,7 +116,7 @@ _SEAMS = (
 # The leaf modules created so far. Each extraction commit that creates a leaf
 # adds it here; every leaf must bind no logger and import cold without loading
 # any module of the dispatch/reconcile cycle.
-_LEAVES: tuple[str, ...] = ()
+_LEAVES: tuple[str, ...] = (_QUEUE_ROWS,)
 
 # Module prefixes a leaf's cold import must not load (the import cycle).
 _CYCLE_EXACT = ("cw.dispatch", "cw.executor")

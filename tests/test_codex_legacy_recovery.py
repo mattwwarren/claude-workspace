@@ -26,7 +26,7 @@ import pytest
 from click.testing import CliRunner
 from freezegun import freeze_time
 
-from cw import codex_legacy_recovery
+from cw import codex_legacy_recovery, queue_rows
 from cw.cli import main
 from cw.codex_legacy_recovery import (
     CODEX_LEGACY_RECOVERY_REASON,
@@ -49,7 +49,6 @@ from cw.config import (
     state_file,
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
-from cw.dispatch.claim import claimed_row
 from cw.events import read_events
 from cw.exceptions import CodexLegacyRecoveryMarkerError
 from cw.models import (
@@ -720,7 +719,7 @@ def test_act_runs_under_sessions_lock_without_dev_queue_lock(
     log: list[str] = []
     real_sessions = codex_legacy_recovery.sessions_lock
     real_dev_queue = codex_legacy_recovery.dev_queue_lock
-    real_callee_dev_queue = claimed_row.dev_queue_lock
+    real_callee_dev_queue = queue_rows.dev_queue_lock
     real_act: Callable[..., object] = (
         codex_legacy_recovery.act_on_codex_harvest_candidate
     )
@@ -766,7 +765,7 @@ def test_act_runs_under_sessions_lock_without_dev_queue_lock(
         _recording_dev_queue(real_dev_queue, "revalidate"),
     )
     monkeypatch.setattr(
-        claimed_row,
+        queue_rows,
         "dev_queue_lock",
         _recording_dev_queue(real_callee_dev_queue, "callee"),
     )

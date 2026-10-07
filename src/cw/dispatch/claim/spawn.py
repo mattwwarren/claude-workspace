@@ -24,11 +24,7 @@ from cw.dev_queue import (
     save_dev_queue,
 )
 from cw.dev_queue.lifecycle import _advance_stage
-from cw.dispatch.claim.claimed_row import (
-    _park_running_task_blocked_on_user,
-    _revert_claimed_task_to_pending,
-    _stamp_spawn_success,
-)
+from cw.dispatch.claim.claimed_row import _stamp_spawn_success
 from cw.dispatch.claim.codex_capability import _codex_capability_gate, _SpawnOutcome
 from cw.dispatch.claim.events import _emit_worktree_occupied_skip_event
 from cw.events import record_event
@@ -43,6 +39,10 @@ from cw.exceptions import (
 )
 from cw.executor import resolve_executor, resolve_pipeline_stages
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.queue_rows import (
+    _park_running_task_blocked_on_user,
+    _revert_claimed_task_to_pending,
+)
 from cw.spawn import emit_spawn_post_launch_attention
 from cw.worktree import (
     check_not_main_checkout,
