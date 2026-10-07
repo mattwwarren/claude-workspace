@@ -932,9 +932,9 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `cw dev-queue tasks` shows the `?session_mismatch` advisory. For a fix-loop
   handoff, the row remains latched and RUNNING until the launched worker is
   confirmed stopped; the automatic recovery path is tracked in #2591. If the
-  event inbox append fails, the failure is logged while the original spawn
-  failure is preserved. When only the dev-queue stamp failed, the worker keeps
-  running and the row stays RUNNING
+  event inbox append fails, the emitter keeps a durable append-only attention
+  intent with the worker, ticket, operation and cause for retry. When only the
+  dev-queue stamp failed, the worker keeps running and the row stays RUNNING
   with no `session_id`. Either way the operator inspects the worker and
   requeues the row (`cw dev-queue requeue`); nothing recovers it
   automatically yet. No push notification is fired (`fire_push_notification`
