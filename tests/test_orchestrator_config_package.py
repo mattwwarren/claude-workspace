@@ -179,6 +179,10 @@ class TestImportSurface:
         assert len(_CW_MODELS_REEXPORTS) == 31
         assert len(EXPECTED_EXPORTS) == 32
 
+    def test_all_matches_full_surface(self) -> None:
+        assert set(pkg.__all__) == EXPECTED_EXPORTS
+        assert len(pkg.__all__) == len(EXPECTED_EXPORTS)
+
     @pytest.mark.parametrize("name", sorted(EXPECTED_EXPORTS))
     def test_name_is_bound(self, name: str) -> None:
         assert hasattr(pkg, name)
@@ -193,6 +197,12 @@ class TestImportSurface:
 
 class TestLoggerNameIsPinned:
     """Every validator warning logs as ``cw.models.orchestrator_config``."""
+
+    def test_constants_leaf_holds_the_pinned_name(self) -> None:
+        from cw.models.orchestrator_config import constants
+
+        assert constants._LOGGER_NAME == _PINNED_LOGGER
+        assert "_LOGGER_NAME" not in pkg.__all__
 
     @pytest.mark.parametrize(
         ("data", "message"),
@@ -236,6 +246,7 @@ class TestLoggerNameIsPinned:
     "first",
     [
         "cw.models.orchestrator_config",
+        "cw.models.orchestrator_config.constants",
         "cw.models.client",
         "cw.models",
     ],
