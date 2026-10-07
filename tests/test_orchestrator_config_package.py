@@ -246,6 +246,7 @@ class TestLoggerNameIsPinned:
     "first",
     [
         "cw.models.orchestrator_config",
+        "cw.models.orchestrator_config.concurrency",
         "cw.models.orchestrator_config.constants",
         "cw.models.client",
         "cw.models",
