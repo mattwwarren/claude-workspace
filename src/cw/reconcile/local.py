@@ -24,7 +24,8 @@ before ``_synthesize_harvest_sentinel`` into an audited clean-requeue gate —
 the four checks ``cw.reconcile.codex_boot`` requeues on (``reap_policy:
 auto``, codex fix loop off, worktree clean apart from the review verdict, HEAD
 unmoved since the review's baseline), all evaluated so the audit event records
-each one. All four pass → the task is requeued; any one fails → it is parked.
+each one. Any failing check parks; a clean pre-lock result defers because it
+cannot safely authorize a requeue without a final worktree check.
 Either way the session closes ``COMPLETED``/``CRASHED``, only after its
 ``SESSION_COMPLETED`` audit event is recorded. The sweep does not repeat the
 boot pass's live-writer process scan: the recycled-PID guard has already
@@ -554,6 +555,14 @@ def _requeue_codex_harvest_orphan(session: Session, task: TicketTask) -> bool:
     return True
 
 
+def _defer_prelock_requeue(
+    probes: CleanProbes | None, gate: _CodexGateResult
+) -> None:
+    """Reject a requeue that lacks a final worktree check."""
+    if probes is not None and gate.should_requeue:
+        raise CleanProbeUnavailableError
+
+
 def act_on_codex_harvest_candidate(
     state: CwState,
     session: Session,
@@ -572,9 +581,10 @@ def act_on_codex_harvest_candidate(
 
     The gate's git checks are read from *probes*, captured before the caller
     took ``sessions_lock`` (#2563); nothing here runs git. A missing or stale
-    probe (``None`` means none was captured) leaves everything untouched and
-    returns ``PROBE_UNAVAILABLE``, before any audit event, so the next tick
-    retries.
+    probe (``None`` means none was captured), or a clean probe that would
+    authorize a requeue without a final worktree check, leaves everything
+    untouched and returns ``PROBE_UNAVAILABLE``, before any audit event, so
+    the next tick retries.
 
     Audit before effect (``codex_boot._close_session_audited``'s ordering): a
     failed audit write transitions nothing (``AUDIT_FAILED``), so the next
@@ -596,6 +606,7 @@ def act_on_codex_harvest_candidate(
         gate = _evaluate_codex_clean_requeue_gate(
             worktree, task, client, clients, config, lookup_probe(probes)
         )
+        _defer_prelock_requeue(probes, gate)
     except CleanProbeUnavailableError:
         _log.warning(
             "reconcile.local: codex session %s (%s/%s) has no usable clean"
@@ -668,7 +679,13 @@ def _codex_gate_target(
     so a missing row, a missing client config, or another client's row is
     never gated.
     """
-    if real_task is None or client is None or real_task.client != session.client:
+    if (
+        real_task is None
+        or client is None
+        or real_task.client != session.client
+        or (real_task.session_id or real_task.codex_orphan_session_id)
+        != session.id
+    ):
         return None
     return real_task, client
 

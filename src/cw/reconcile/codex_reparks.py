@@ -18,10 +18,10 @@ the session's worktree:
   row's ``codex_orphan_rescan_next_eligible_at``, pushed out by a fixed
   interval so ``psutil.process_iter`` is not walked on every tick. No event,
   no signal (the boot pass never kills a writer and neither does this).
-- **Scan affirmatively finds no writer** — #2285's clean path: the session
-  closes with its ``SESSION_COMPLETED`` audit event, then the row is requeued
-  (``TICKET_REQUEUED``) if the tree is provably clean under ``reap_policy:
-  auto``, otherwise it stays parked with its link cleared.
+- **Scan affirmatively finds no writer** — #2285's clean path: a captured
+  non-clean result can close the session and leave it parked; a clean result
+  defers because no final worktree check can authorize a requeue under the
+  lock.
 - **Linked session gone, or resumed since the park** — the link is stale, so
   only it is cleared. A resumed session is a live claude process, not the
   orphan, and must never be closed on a codex-writer scan.
@@ -40,6 +40,8 @@ re-runs this same detect pass to capture each due candidate's clean probe,
 and the in-lock sweep only looks those probes up. A candidate whose probe is
 missing, mismatched or stale is left untouched (not even its backoff moves)
 for the next tick; one that parks on a live writer never needs a probe.
+Even a matching clean probe is deferred rather than used to requeue, because
+the pre-pass has no atomic worktree-generation check through disposition.
 
 Unconditional, like the boot pass: it acts only on the evidence bar the boot
 pass already applies, and it never touches a row the boot pass did not link.

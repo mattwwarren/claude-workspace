@@ -102,7 +102,10 @@ fresh hit, and it is not a clock-driven disposition (ADR-0014): an expired
 probe only delays a re-check. A probe that captured a git error is real
 evidence and still parks as ``git_error``. Capture-lockless, consume-in-lock,
 defer-on-miss is the template for the remaining in-lock git (#2546, #2548).
-This boot pass itself runs unlocked and keeps calling the primitives live.
+Because there is no atomic worktree-generation check spanning the pre-pass and
+the in-lock mutation, a consumed probe cannot authorize a clean requeue either:
+that candidate defers for a fresh decision. The boot pass itself runs unlocked
+and keeps calling the primitives live.
 """
 
 from __future__ import annotations
@@ -373,6 +376,11 @@ def _baseline_ref(task: TicketTask, clients: dict[str, ClientConfig]) -> str:
     return f"origin/{feature_branch_key(task.client, task.ticket_id, clients)}"
 
 
+def _claim_identity(task: TicketTask) -> tuple[str | None, str | None]:
+    """Return the task identities that bind a clean probe to its claim."""
+    return task.session_id, task.codex_orphan_session_id
+
+
 def probe_clean_state(
     worktree: Path, task: TicketTask, clients: dict[str, ClientConfig]
 ) -> CleanProbe:
@@ -396,12 +404,13 @@ def probe_clean_state(
 
 
 class CleanProbes:
-    """Clean probes captured lockless, keyed by ``(client, ticket_id)``.
+    """Clean probes captured lockless, keyed by claim identity.
 
     One pass captures (:meth:`capture`, runs git, lockless only), then the
     in-lock consumers look up (:meth:`lookup`, never runs git). With
     *budget_seconds* set, captures stop once that much monotonic time has
-    passed since construction.
+    passed since construction. The private key includes ``client``,
+    ``ticket_id``, ``session_id`` and ``codex_orphan_session_id``.
     """
 
     def __init__(self, *, budget_seconds: float | None = None) -> None:
@@ -409,12 +418,18 @@ class CleanProbes:
         self._deadline = (
             None if budget_seconds is None else monotonic() + budget_seconds
         )
-        self._probes: dict[tuple[str, str], CleanProbe] = {}
+        self._probes: dict[
+            tuple[str, str, str | None, str | None], CleanProbe
+        ] = {}
 
     @property
     def captured_keys(self) -> frozenset[tuple[str, str]]:
-        """The ``(client, ticket_id)`` of every probe captured so far."""
-        return frozenset(self._probes)
+        """The client/ticket pairs of probes captured so far.
+
+        The private store also includes both claim identity fields; this
+        compatibility view is only used for capture-pass diagnostics.
+        """
+        return frozenset((client, ticket_id) for client, ticket_id, *_ in self._probes)
 
     def capture(
         self, worktree: Path, task: TicketTask, clients: dict[str, ClientConfig]
@@ -431,7 +446,7 @@ class CleanProbes:
             )
             raise CleanProbeUnavailableError(msg)
         probe = probe_clean_state(worktree, task, clients)
-        self._probes[task.client, task.ticket_id] = probe
+        self._probes[task.client, task.ticket_id, *_claim_identity(task)] = probe
         return probe
 
     def lookup(
@@ -445,7 +460,7 @@ class CleanProbes:
         ``CleanProbeUnavailableError``.
         """
         who = f"{task.client}/{task.ticket_id}"
-        probe = self._probes.get((task.client, task.ticket_id))
+        probe = self._probes.get((task.client, task.ticket_id, *_claim_identity(task)))
         if probe is None:
             msg = f"no clean probe was captured for {who}"
             raise CleanProbeUnavailableError(msg)
@@ -607,8 +622,9 @@ def _resolve_orphan_action(
 
     *probe_source* supplies the git answers (see ``_gate_clean_requeue``);
     omitted, the boot pass's live git runs. Raises
-    ``CleanProbeUnavailableError`` only when a lookup source misses at the
-    git gate.
+    ``CleanProbeUnavailableError`` when a lookup source misses at the git gate
+    or when a captured clean result would otherwise authorize an unsafe
+    requeue.
     """
     if worktree is None:
         # No path to scan is a scan that cannot run, so it is inconclusive. A
@@ -619,7 +635,7 @@ def _resolve_orphan_action(
     if live_writer is not None:
         return live_writer
     policy = _resolve_task_policy(task.client, task.lane, clients, config)
-    return _gate_clean_requeue(
+    disposition = _gate_clean_requeue(
         worktree,
         task,
         client,
@@ -628,6 +644,9 @@ def _resolve_orphan_action(
         auto=policy is ReapPolicy.AUTO,
         probe_source=probe_source,
     )
+    if probe_source is not None and disposition.should_requeue:
+        raise CleanProbeUnavailableError
+    return disposition
 
 
 def _gate_clean_requeue(
