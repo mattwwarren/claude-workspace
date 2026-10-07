@@ -416,7 +416,7 @@ ignore = [
 # in one import order. Deferring every cw import into the function bodies is the
 # sanctioned mechanism, not a workaround — see that module's "Import discipline"
 # docstring section.
-"src/cw/review_finding_dispositions.py" = ["PLC0415"]
+"src/cw/review_finding_dispositions/__init__.py" = ["PLC0415"]
 # codex_review/_context defers cw.codex_background
 # ._sync_finding_dispositions_to_running_task inside _prepare_review_pass
 # (#1838): codex_background imports cw.codex_fix_loop, which imports
