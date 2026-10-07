@@ -172,7 +172,7 @@ def _host_timezone() -> tzinfo:
     ``datetime.replace(hour=…)`` resolves the offset at the candidate's own
     date (review round 1).
 
-    Resolution order, stdlib only, following ``orchestrator_config.py``'s
+    Resolution order, stdlib only, following ``orchestrator_config/orchestrator.py``'s
     ``attention_digest_window_tz`` ZoneInfo precedent: the ``TZ`` environment
     variable when it names an IANA zone, then the ``/etc/localtime`` database
     entry, then — only if both fail — the flattened fixed offset, which is no

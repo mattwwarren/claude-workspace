@@ -1,588 +1,31 @@
-"""Orchestrator and lane configuration models.
+"""Parsed orchestrator.yaml: ``OrchestratorConfig``.
 
-Depends on ``cw.models.enums`` and ``cw.models.tasks`` (for the shared recipe-key
-validators). See ``cw.models.__init__`` for the full DAG.
+Depends on ``cw.models.orchestrator_config.constants`` (config defaults and the
+pinned logger name), ``cw.models.orchestrator_config.operator_forward`` and
+``cw.models.enums``. The validators log under :data:`_LOGGER_NAME`, the
+pre-split module name, never ``__name__``.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from pathlib import Path
 from typing import ClassVar, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from cw.models.enums import (
-    LivenessBucket,
-    OrchestratorEventType,
-    QueueItemStatus,
-    ReapPolicy,
-    ReasoningEffort,
-    Stage,
+from cw.models.enums import ReapPolicy, Stage
+from cw.models.orchestrator_config.constants import (
+    _LOGGER_NAME,
+    DEFAULT_DISK_PRESSURE_MIN_FREE_GB,
+    DEFAULT_DISK_PRESSURE_MIN_FREE_INODE_FRACTION,
+    DEFAULT_DISK_PRESSURE_MIN_FREE_INODES,
+    DEFAULT_GLOBAL_ATTEMPT_CEILING,
 )
-from cw.models.tasks import (
-    _validate_gate_recipe_keys,
-    _validate_park_on_abandoned_exit_keys,
-    _validate_review_recipe_keys,
-)
-
-
-class LaneConcurrencyOverride(BaseModel):
-    """Per-lane overrides from the concurrency override store."""
-
-    # NOT extra=forbid — persisted/runtime state, see #1200
-    max_parallel: int | None = None
-    paused: bool | None = None
-    # Consecutive spawn_error count for the per-lane circuit breaker (#875).
-    # Incremented once per tick on a spawn error, reset to 0 on any success.
-    consecutive_spawn_errors: int = 0
-    # Debounce stamp for the recurring lane-starved session.needs_attention
-    # signal (#1630). Same persisted-timestamp-gate shape as
-    # TicketTask.false_park_recovery_next_eligible_at (see
-    # cw.reconcile.concierge) -- checked as a plain ``now < next_eligible_at``
-    # gate under concurrency_override_lock() and re-armed on every fire -- but
-    # a FIXED interval (OrchestratorConfig.lane_starved_notify_interval_minutes),
-    # not concierge's exponential backoff: that backoff exists to damp a
-    # flapping recovery retry storm, which doesn't apply here -- the operator
-    # wants "page me again in N minutes while this lane is still starved", not
-    # a growing delay. Cleared by ``cw lane resume`` so a fresh circuit trip
-    # after a resume notifies immediately rather than inheriting a stale
-    # debounce window from the prior episode.
-    lane_starved_notify_next_eligible_at: datetime | None = None
-
-
-class ClientConcurrencyOverride(BaseModel):
-    """Per-client ceiling override from the concurrency override store."""
-
-    # NOT extra=forbid — persisted/runtime state, see #1200
-    ceiling: int | None = None
-    # Consecutive freshness-gate-block count for the per-client attention latch
-    # (RFC 0007 §W2). Incremented once per tick the client is skipped with
-    # skip_reason=FRESHNESS_GATE, reset to 0 on the next non-stale tick.
-    consecutive_freshness_blocks: int = 0
-    # Debounce stamp for the recurring dispatch-loop-staleness
-    # session.needs_attention signal (#1875). Deliberately the same shape as
-    # LaneConcurrencyOverride.lane_starved_notify_next_eligible_at above --
-    # checked as a plain ``now < next_eligible_at`` gate under
-    # concurrency_override_lock() and re-armed on every fire, on a FIXED
-    # interval (OrchestratorConfig.dispatch_stale_notify_interval_minutes),
-    # not an exponential backoff: the operator wants "page me again in N
-    # minutes while this client's loop is still not ticking", not a growing
-    # delay. Cleared back to None on the first pass that observes the client
-    # recovered (a fresh tick, or its pending queue drained), so a later
-    # staleness episode notifies immediately rather than inheriting this
-    # episode's debounce window.
-    dispatch_stale_notify_next_eligible_at: datetime | None = None
-
-
-class ConcurrencyOverrides(BaseModel):
-    """Runtime concurrency overrides persisted outside orchestrator.yaml.
-
-    Written by ``cw config concurrency set`` and ``cw lane pause/resume``.
-    Merged with the declared config by ``load_effective_config()``.
-    NOT added to schema.REGISTRY — test_schema.py must stay unchanged.
-    """
-
-    # NOT extra=forbid — persisted/runtime state, see #1200
-    max_parallel_clients: int | None = None
-    clients: dict[str, ClientConcurrencyOverride] = Field(default_factory=dict)
-    lanes: dict[str, LaneConcurrencyOverride] = Field(default_factory=dict)
-
-
-# Ceiling on TicketTask.unproductive_attempts -- claims that left RUNNING
-# with no evidence of progress (#786, re-pointed at the narrower counter
-# by #1750). NOT a cap on the raw `attempts` claim counter, which bumps
-# once per pipeline stage and is never compared against this value
-# (#2256). Enforced at exactly one seam: dispatch/claim/screening.py.
-# Lives here so OrchestratorConfig.global_attempt_ceiling can reference it
-# directly without a circular import (dispatch.py imports from models.py).
-DEFAULT_GLOBAL_ATTEMPT_CEILING = 10
-
-
-# Judgment default for the claim-time disk-pressure gate (#1887, split from
-# #1858) -- conservative and open to tuning per host/mount, not derived from a
-# measured incident threshold. Named (not an inline literal at the field
-# default) so an operator or reviewer can find it by name, same convention as
-# DEFAULT_GLOBAL_ATTEMPT_CEILING above.
-DEFAULT_DISK_PRESSURE_MIN_FREE_GB = 5.0
-
-# Inode dimension of the same claim-time gate (#2470): a tmpfs can exhaust its
-# inodes long before its bytes (the 2026-09-27 ENOSPC incident). The gate
-# refuses a spawn when free inodes fall below
-# ``max(DEFAULT_DISK_PRESSURE_MIN_FREE_INODES,
-# DEFAULT_DISK_PRESSURE_MIN_FREE_INODE_FRACTION * total_inodes)`` -- the
-# absolute floor protects small mounts, the fraction scales to large ones.
-# Judgment defaults, same posture as DEFAULT_DISK_PRESSURE_MIN_FREE_GB above.
-DEFAULT_DISK_PRESSURE_MIN_FREE_INODES = 50_000
-DEFAULT_DISK_PRESSURE_MIN_FREE_INODE_FRACTION = 0.05
-
-
-CLAUDE_NATIVE_BACKEND: str = "claude-native"
-LOCAL_BACKEND: str = "local"
-CODEX_BACKEND: str = "codex"
-OPENCODE_BACKEND: str = "opencode"
-
-# Relative path of the per-worktree materialized ticket context, shared by
-# dispatch's pre-spawn invalidation (#1046) and local_runner's prompt builder
-# so the two never drift onto different literal paths for the same file.
-CONTEXT_JSON_RELATIVE_PATH: Path = Path(".cw", "context.json")
-
-# Relative path of the per-worktree hook/correlation context written at spawn
-# (``spawn._write_hook_context``). Distinct LAYER from CONTEXT_JSON_RELATIVE_PATH
-# above: that file is *ticket* context (title/body/comments) materialized by
-# Stage 0 and deleted by dispatch's stale-context invalidation (#1046), while
-# this one carries *dispatch/session* state (session ids, queue_metadata) and
-# survives a rescued respawn. Shared by the writer and by the readers of
-# ``queue_metadata`` so a reader can never drift onto the other file's literal
-# path — the defect #1730 shipped, where the pending_operator_comment read
-# pointed at .cw/context.json and silently always returned False.
-HOOK_CONTEXT_RELATIVE_PATH: Path = Path(".claude", "cw-context.json")
-
-# Relative path of the per-worktree scratch directory every dispatched worker
-# (Claude, aider, opencode, codex) gets as its TMPDIR/TMP/TEMP (#2470), so no
-# worker writes scratch files to the host's shared /tmp tmpfs. Lives under the
-# already-excluded ``.cw/`` tree and is removed with the worktree. Shared by
-# ``cw.worktree.resolve_worker_tmpdir`` and every reader, same one-literal
-# convention as CONTEXT_JSON_RELATIVE_PATH above.
-WORKER_TMPDIR_RELATIVE_PATH: Path = Path(".cw", "tmp")
-
-# Keys of the ``agent_spawn_stamp`` object inside cw-context.json (#1646).
-# Three modules touch this one object across two layers that cannot import
-# each other -- ``cw.spawn`` seeds it, ``cw.cli.agent_spawn_stamp``'s
-# PreToolUse/PostToolUse pair increments and decrements it, and
-# ``cw.reconcile._shared`` reads it during phantom classification. They live
-# beside HOOK_CONTEXT_RELATIVE_PATH for exactly the reason its own docstring
-# gives: a reader that hand-types the literal is one typo away from silently
-# always returning the default, the defect #1730 shipped.
-#
-# Shape: {"unresolved_count": int, "last_stamped_at": isoformat str | None}.
-# A counter rather than a flag because Claude Code can dispatch several
-# subagent tool_use blocks in one assistant turn, so two Pre hooks can fire
-# before either Post does -- a boolean would lose the second spawn.
-AGENT_SPAWN_STAMP_KEY = "agent_spawn_stamp"
-AGENT_SPAWN_UNRESOLVED_COUNT_KEY = "unresolved_count"
-AGENT_SPAWN_LAST_STAMPED_AT_KEY = "last_stamped_at"
-
-# Set True in cw-context.json by a successful ``cw result emit`` (#2458).
-# The Stop hook's lock-free peek (``cw.cli.stop_hook._peek_staged_emit_result``)
-# reads this flag instead of ``load_state()`` -- the peek's whole reason to
-# exist is a near-zero-cost check on every Stop-hook fire with pending
-# background_tasks, which a fleet-wide sessions.json load defeats. Lives here
-# for the same reason AGENT_SPAWN_STAMP_KEY does: ``cw.result`` (writer) and
-# ``cw.cli.stop_hook`` (reader) cannot import each other directly, so both
-# import the literal from this shared, dependency-free module.
-STAGED_EMIT_RESULT_KEY = "staged_emit_result"
-
-# Tool names the ``cw background-tool-guard-pre`` hook (#2303) is both wired to
-# and branches on: ``cw.spawn._build_hook_settings`` writes them as PreToolUse
-# matchers, and ``cw.cli._background_tool_policy`` compares the payload's
-# ``tool_name`` against them. One spelling for both sides, so a matcher the
-# classifier does not recognise cannot ship as a silent no-op. Here rather than
-# in the policy module for the reason the keys above give: ``cw.spawn`` cannot
-# import ``cw.cli`` (``cw.cli`` imports ``cw.spawn``).
-BASH_TOOL_NAME = "Bash"
-MONITOR_TOOL_NAME = "Monitor"
-
-
-def extract_unresolved_spawn_count(context: dict[str, object]) -> int:
-    """Return the ``agent_spawn_stamp`` counter in *context*, or 0 for any odd shape.
-
-    Shared by ``cw.cli.agent_spawn_stamp`` (write side) and
-    ``cw.reconcile._shared`` (read side) so the two independent readers of
-    this on-disk shape cannot silently drift onto different validation rules
-    (#1646 review finding) -- reconcile cannot import ``cw.cli``, so this
-    lives here instead, beside the key constants both layers already import.
-
-    A missing/non-dict stamp, a missing count, a non-int count, or a ``bool``
-    masquerading as an int (``bool`` is an ``int`` subclass in Python, so
-    ``True`` would otherwise read as a live count of 1) all read as 0.
-    """
-    stamp = context.get(AGENT_SPAWN_STAMP_KEY)
-    if not isinstance(stamp, dict):
-        return 0
-    count = stamp.get(AGENT_SPAWN_UNRESOLVED_COUNT_KEY)
-    if isinstance(count, bool) or not isinstance(count, int):
-        return 0
-    return count
-
-
-class StageExecutorConfig(BaseModel):
-    """Executor configuration for a single pipeline stage (RFC 0005 A1, dormant)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    backend: str = CLAUDE_NATIVE_BACKEND
-    model: str | None = None
-    endpoint: str | None = None  # OpenAI-compatible base URL for local backend
-    # Codex-only: pinned as `-c model_reasoning_effort=<value>` on every codex
-    # reviewer and fix invocation, which beats ~/.codex/config.toml. Defaults
-    # to "high" (#1711 R1: a reviewer's failure mode is a missed MUST_FIX, so
-    # depth beats token savings) -- a starting position, not a benchmarked
-    # optimum. Explicit null unpins it, leaving codex's own config in force.
-    # Resolved like `model`: a lane's stage config replaces the client's
-    # wholesale (resolve_executor_config), so a lane omitting it gets high.
-    reasoning_effort: ReasoningEffort | None = ReasoningEffort.HIGH
-
-    @model_validator(mode="after")
-    def _reasoning_effort_codex_only(self) -> StageExecutorConfig:
-        # Loud rather than silently ignored: no other backend reads it, so a
-        # value here would look pinned while changing nothing.
-        # model_fields_set, not the value: the high default rides on every
-        # stage config, including claude-native ones that never read it.
-        if (
-            "reasoning_effort" in self.model_fields_set
-            and self.reasoning_effort is not None
-            and self.backend != CODEX_BACKEND
-        ):
-            msg = (
-                "reasoning_effort is only honored by the codex backend "
-                f"(got backend={self.backend!r})"
-            )
-            raise ValueError(msg)
-        return self
-
-
-class StagePipelineConfig(BaseModel):
-    """Per-client (or per-lane) pipeline configuration (RFC 0005 A1, dormant)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    stages: list[Stage] = Field(
-        default_factory=lambda: [Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
-    )
-    executors: dict[Stage, StageExecutorConfig] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def _stages_unique(self) -> StagePipelineConfig:
-        if len(self.stages) != len(set(self.stages)):
-            msg = "pipeline stages must be unique"
-            raise ValueError(msg)
-        return self
-
-
-#: The one recognised key of :attr:`LaneConfig.codex_review_tiers` (#2210).
-#: A named constant, not a bare literal, because ``cw.codex_background``'s
-#: resolver and its hardcoded-off floor key on the same string.
-CODEX_TIER_CLAIM_SUPPRESSION = "claim_suppression"
-_CODEX_REVIEW_TIER_KEYS = frozenset({CODEX_TIER_CLAIM_SUPPRESSION})
-
-
-def _validate_codex_review_tier_keys(value: dict[str, bool]) -> dict[str, bool]:
-    """Fail loud on an unrecognized codex-review-tier key (#2210).
-
-    Same stance, and the same reason, as ``_validate_gate_recipe_keys``: a
-    typo'd key would otherwise resolve silently to the hardcoded default-off,
-    leaving the operator convinced they armed a tier they did not.
-    """
-    unknown = sorted(set(value) - _CODEX_REVIEW_TIER_KEYS)
-    if unknown:
-        msg = (
-            f"codex_review_tiers has unrecognized tier key(s): {unknown}. "
-            f"Recognised keys: {sorted(_CODEX_REVIEW_TIER_KEYS)}."
-        )
-        raise ValueError(msg)
-    return value
-
-
-class LaneConfig(BaseModel):
-    """Configuration for a named dispatch lane.
-
-    Lanes provide a scheduling boundary for TicketTasks.
-    Phase 1 (data model only): no dispatch wiring yet — see #558.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    max_parallel: int = 1
-    priority: int = 0
-    paused: bool = False
-    description: str = ""
-    reap_policy: ReapPolicy | None = None
-    # Lane-level overrides for the `cw guard-busy-wait` PreToolUse guard
-    # (#1946). Shaped on reap_policy and codex_fix_loop_enabled below, not on
-    # the opt-in-only Literal[True] fields (signoff, finalize_gate): a lane must
-    # be able to turn the guard OFF against an enabled global (a lane whose
-    # workers legitimately poll) and ON against a disabled one, so the override
-    # is bidirectional. None on any
-    # of the three = inherit the OrchestratorConfig default. Resolved by
-    # cw.cli.guard_busy_wait._resolve_settings, which mirrors
-    # resolve_reap_policy's lane-then-global fallthrough rather than importing
-    # it (that function's signature is reconcile-specific -- it takes a
-    # ReapCandidate, which no hook subprocess ever has).
-    busy_wait_guard_enabled: bool | None = None
-    busy_wait_guard_repeat_threshold: int | None = Field(default=None, ge=2)
-    busy_wait_guard_window_seconds: int | None = Field(default=None, ge=1)
-    # Lane-level override for the disposition ledger's drift check (#2232).
-    # Same bidirectional shape and reasoning as busy_wait_guard_enabled above:
-    # None = inherit the OrchestratorConfig default. Resolved by
-    # cw.codex_background._resolve_disposition_drift_check_enabled, which
-    # mirrors guard_busy_wait._resolve_settings' lane-then-global fallthrough
-    # rather than _resolve_claim_tier_enabled's master-switch-then-floor shape
-    # -- there is no kill switch and no floor for a check that defaults on.
-    # Turning it off for a lane REFUSES to arm that lane's claim tier; see
-    # cw.exceptions.ClaimTierArmingError.
-    disposition_drift_check_enabled: bool | None = None
-    # Lane-level override for the `cw agent-spawn-pre` spawn-shape policy
-    # (#2211). Same bidirectional shape and reasoning as
-    # busy_wait_guard_enabled above: None = inherit the OrchestratorConfig
-    # default. Resolved by cw.cli._hook_io.resolve_guard_enabled (a
-    # GuardToggle: renaming this field means renaming it there too).
-    subagent_spawn_guard_enabled: bool | None = None
-    # Lane-level override for the `cw background-tool-guard-pre` guard
-    # (#2303). Same bidirectional shape and reasoning as
-    # subagent_spawn_guard_enabled above: None = inherit the
-    # OrchestratorConfig default. Resolved by
-    # cw.cli._hook_io.resolve_guard_enabled (a GuardToggle, likewise).
-    background_tool_guard_enabled: bool | None = None
-    pipeline: StagePipelineConfig | None = None
-    # Lane-level operator-signoff override (RFC 0007 Phase 3). None defers to
-    # OrchestratorConfig.default_signoff. See GitHub #990.
-    signoff: Literal["operator"] | None = None
-    # Lane-level proactive finalize-hold override (RFC 0011 A3, #1160). None
-    # defers to OrchestratorConfig.default_finalize_gate. Overridden by
-    # TicketTask.hold_finalize -- see resolve_hold_finalize
-    # (dispatch/review_gates.py, moved from dispatch/routing.py by #1823).
-    finalize_gate: Literal["manual"] | None = None
-    # Lane-level override for the codex backend's autonomous MUST_FIX fix loop
-    # (#1553, superseding the removed ClientConfig.codex_fix_loop_enabled from
-    # #1465). None defers to OrchestratorConfig.default_codex_fix_loop_enabled.
-    # Resolved by cw.codex_background._resolve_codex_fix_loop_enabled, mirroring
-    # resolve_reap_policy's lane-then-global fallthrough shape. A plain bool
-    # override (#2541): True opts the lane IN, False opts the lane OUT against a
-    # globally enabled default_codex_fix_loop_enabled (no workspace-write fix
-    # pass ever runs on that lane), and None defers to the global.
-    codex_fix_loop_enabled: bool | None = None
-    # Lane-level override for the global attempt ceiling (#1751, scoping the
-    # flat #786 bound that #1750 re-pointed at unproductive_attempts).
-    # Precedence: lane > OrchestratorConfig.global_attempt_ceiling. Resolved by
-    # cw.reconcile._shared.resolve_attempt_ceiling, which BOTH the dispatch
-    # claim path and the concierge recovery recipes call -- they must agree on
-    # the number or the concierge would refuse a requeue the claim path would
-    # have allowed (the drift #1750's own comments warn against).
-    #
-    # Tri-state, and NOT a plain `bool | None` override like
-    # codex_fix_loop_enabled above: the global here is a number, not an on/off
-    # flag, so the lane needs a distinct "disable" token. `None` = the lane
-    # sets no override (defer to global) -- the meaning every sibling already
-    # assigns to None, which is exactly why `False`, not `None`, is the
-    # disable token here: a lane that wants to
-    # inherit whatever the global ceiling later becomes and a lane that wants
-    # no ceiling ever are different intents that must stay distinguishable, and
-    # Pydantic collapses "key absent" and "key present: null" to the same None.
-    # `False` = the lane explicitly disables the ceiling (a supervised lane
-    # whose operator answers every park IS the rate limiter, so an automated
-    # bound buys nothing). A positive int = the lane's own ceiling.
-    attempt_ceiling: Literal[False] | int | None = None
-    # Lane-level gate-recipe enablement map (RFC 0009 P4, #1067). Middle tier in
-    # resolve_gate_recipe_enabled's 3-tier precedence: consulted when the ticket
-    # carries no override for the recipe, and itself overridden by
-    # TicketTask.gate_recipes. A recipe absent from this map (or None) defers to
-    # the hardcoded floor (on). Recognised keys: "auto_approve_clean_review",
-    # "auto_adopt_clean_plan".
-    gate_recipes: dict[str, bool] | None = None
-    # Lane-level review-recipe enablement map (RFC 0010 P3, #1098). Middle tier
-    # in resolve_review_recipe_enabled's 3-tier precedence: consulted when the
-    # ticket carries no override for the recipe, and itself overridden by
-    # TicketTask.review_recipes. A recipe absent from this map (or None) defers
-    # to the hardcoded default-off. Recognised keys: "address_review",
-    # "auto_fix_ci", "request_reviewer", "escalate_merge_block" (RFC 0010 P4).
-    review_recipes: dict[str, bool] | None = None
-    # Lane-level enablement map for the Stop-hook abandoned-exit park (#2135).
-    # Middle tier in resolve_park_on_abandoned_exit_enabled's 3-tier
-    # precedence: consulted when the ticket carries no override, and itself
-    # overridden by TicketTask.park_on_abandoned_exit. The key absent from this
-    # map (or None) defers to the hardcoded default-off. Recognised key:
-    # PARK_ON_ABANDONED_EXIT_KEY.
-    park_on_abandoned_exit: dict[str, bool] | None = None
-    # Lane-level codex-review tier enablement map (#2210). Middle tier in
-    # cw.codex_background._resolve_claim_tier_enabled's precedence, which is
-    # 2-tier rather than 3 (master switch -> lane map -> hardcoded-off floor):
-    # a per-ticket override would be a persisted dev-queue schema change this
-    # ticket deliberately does not make. A tier absent from this map (or None)
-    # defers to the hardcoded default-off. Recognised keys:
-    # "claim_suppression". See ADR-0016.
-    codex_review_tiers: dict[str, bool] | None = None
-
-    @field_validator("name")
-    @classmethod
-    def _name_nonempty(cls, v: str) -> str:
-        if not v:
-            msg = "lane name must be non-empty"
-            raise ValueError(msg)
-        return v
-
-    @field_validator("attempt_ceiling", mode="before")
-    @classmethod
-    def _check_attempt_ceiling(cls, value: object) -> object:
-        """Reject the two raw values Pydantic's smart union silently reinterprets.
-
-        ``bool`` is an ``int`` subclass, so ``Literal[False] | int`` resolves
-        ``0`` to ``False`` (i.e. "disabled" -- the *opposite* of what an
-        operator writing "cap at 0" means) and ``True`` to ``1`` (a ceiling of
-        one unproductive attempt, not "enabled"). Both are plausible typos in
-        hand-edited YAML, so they fail loudly here rather than being quietly
-        reinterpreted. Runs ``mode="before"`` because by the time the union has
-        run, the evidence of which literal was written is already gone.
-        """
-        if isinstance(value, bool):
-            if value is True:
-                msg = (
-                    "lane attempt_ceiling does not accept true; use a positive"
-                    " integer to set a lane ceiling, false to disable the"
-                    " ceiling, or omit the key to defer to"
-                    " global_attempt_ceiling"
-                )
-                raise ValueError(msg)
-            return value
-        if isinstance(value, int) and value <= 0:
-            msg = (
-                f"lane attempt_ceiling must be a positive integer (got {value});"
-                " use false to disable the ceiling, or omit the key to defer to"
-                " global_attempt_ceiling"
-            )
-            raise ValueError(msg)
-        return value
-
-    @field_validator("gate_recipes")
-    @classmethod
-    def _check_gate_recipes(
-        cls, value: dict[str, bool] | None
-    ) -> dict[str, bool] | None:
-        if value is None:
-            return None
-        return _validate_gate_recipe_keys(value)
-
-    @field_validator("review_recipes")
-    @classmethod
-    def _check_review_recipes(
-        cls, value: dict[str, bool] | None
-    ) -> dict[str, bool] | None:
-        if value is None:
-            return None
-        return _validate_review_recipe_keys(value)
-
-    @field_validator("park_on_abandoned_exit")
-    @classmethod
-    def _check_park_on_abandoned_exit(
-        cls, value: dict[str, bool] | None
-    ) -> dict[str, bool] | None:
-        if value is None:
-            return None
-        return _validate_park_on_abandoned_exit_keys(value)
-
-    @field_validator("codex_review_tiers")
-    @classmethod
-    def _check_codex_review_tiers(
-        cls, value: dict[str, bool] | None
-    ) -> dict[str, bool] | None:
-        if value is None:
-            return None
-        return _validate_codex_review_tier_keys(value)
-
+from cw.models.orchestrator_config.operator_forward import OperatorChannelForward
 
 _USAGE_LIMIT_BACKOFF_SECONDS = 3600
 _HOURS_PER_DAY = 24
-
-# RFC 0008 W3 (#1002) default operator-attention forward-set. task.transition
-# is admitted only for the terminal/attention-worthy statuses below (narrowed
-# further in OperatorChannelForward._admits by cw.cw_operator_events); the
-# other four types are unconditional once present in event_types.
-_DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
-    {
-        OrchestratorEventType.TASK_TRANSITION,
-        OrchestratorEventType.TASK_DELETED,
-        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-        OrchestratorEventType.PR_REGISTERED,
-        OrchestratorEventType.PR_CI_FAILED,
-        OrchestratorEventType.PR_REVIEW_RECEIVED,
-        OrchestratorEventType.PR_MERGEABLE,
-        OrchestratorEventType.PR_MERGED,
-        OrchestratorEventType.SESSION_LIVENESS_CHANGED,
-        # RFC 0008 capstone (#1015, Q3): OPERATOR_ESCALATION is the durable
-        # escalation latch's operator-facing signal — forwarded by default.
-        # CONCIERGE_RECOVERED is deliberately EXCLUDED here: it is an
-        # audit-trail record of a *mechanical* (non-destructive) recovery the
-        # operator does not need paged for, recorded via record_event but
-        # never added to this forward-set.
-        OrchestratorEventType.OPERATOR_ESCALATION,
-        # GATE_AUTO_APPROVED is deliberately EXCLUDED (since v1.63.0), like
-        # CONCIERGE_RECOVERED above: the gate recipes are on by default and
-        # release Large gates whose only "reason" was size, so forwarding each
-        # release would page the operator for the very noise the recipes
-        # remove. It stays in the event log and the ticket's audit comment.
-        # Forwarded alongside TICKET_APPROVED: without this correction, a
-        # failed queue write/rollback could leave an approval event standing
-        # alone as a false-positive operator signal (#2337).
-        OrchestratorEventType.TICKET_APPROVAL_FAILED,
-        # A failed act-phase mutation leaves the row parked with its page
-        # suppressed (dispatch Rule 1 skips SESSION_NEEDS_ATTENTION for a park
-        # a recipe will release), so this correction is how the operator
-        # learns a person is needed after all.
-        OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
-        # RFC 0011 A3 (#1160): an A3 force hold declining the automatic
-        # mutation leaves the row parked for a person, same as a failure.
-        # Declined rather than raised, but the operator needs to know either
-        # way.
-        OrchestratorEventType.GATE_AUTO_APPROVE_HELD,
-        # RFC 0010 P2 (#1097): a review recipe dispatching an /address-review
-        # action with no human in the loop is operator-attention-worthy —
-        # forwarded by default (contrast CONCIERGE_RECOVERED, excluded above as
-        # audit-only). PR_ACTION_FAILED forwards alongside so a failed dispatch
-        # never leaves PR_ACTION_TAKEN standing alone as an uncorrected signal.
-        OrchestratorEventType.PR_ACTION_TAKEN,
-        OrchestratorEventType.PR_ACTION_FAILED,
-        # GitHub #1437: the ssh_key_gate operator escape hatch suppressing an
-        # already-live safety probe is attention-worthy.
-        OrchestratorEventType.SSH_KEY_GATE_BYPASSED,
-        # GitHub #1887: the disk_pressure_gate operator escape hatch
-        # suppressing an already-live safety probe is attention-worthy, same
-        # rationale as SSH_KEY_GATE_BYPASSED directly above.
-        OrchestratorEventType.DISK_PRESSURE_GATE_BYPASSED,
-        # GitHub #1730: a review-stage requeue proceeding with no operator-visible
-        # confirmation that the send-back comment actually reached the reviewer is
-        # a no-human-in-the-loop decision -- operator-attention-worthy, forwarded
-        # by default (contrast CONCIERGE_RECOVERED, excluded as audit-only).
-        # No companion "delivery succeeded" event exists to pair this with
-        # (see #1730 Decisions item 4) -- this event is self-contained, not a
-        # correction to another forwarded signal.
-        OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
-    }
-)
-_DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
-    {
-        QueueItemStatus.BLOCKED_ON_USER,
-        QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
-        QueueItemStatus.COMPLETED,
-        QueueItemStatus.FAILED,
-        QueueItemStatus.CANCELLED,
-    }
-)
-
-
-class OperatorChannelForward(BaseModel):
-    """Declarative forward-set for the cw-operator SSE channel (RFC 0008 W3).
-
-    Consumed by ``cw.cw_operator_events``'s filter engine, which additionally
-    applies the two sub-condition rules referenced above (task.transition's
-    ``new_status`` and session.liveness_changed's ``new_bucket`` are compared
-    against ``task_transition_statuses``/``liveness_min_bucket`` respectively;
-    every other admitted type in ``event_types`` forwards unconditionally).
-    No coercion validator by design -- see the field docstring on
-    ``OrchestratorConfig.operator_channel_forward``. See GitHub #1002.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    event_types: frozenset[OrchestratorEventType] = Field(
-        default_factory=lambda: frozenset(_DEFAULT_OPERATOR_EVENT_TYPES)
-    )
-    task_transition_statuses: frozenset[QueueItemStatus] = Field(
-        default_factory=lambda: frozenset(_DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES)
-    )
-    liveness_min_bucket: LivenessBucket = LivenessBucket.STALE_30M
 
 
 class OrchestratorConfig(BaseModel):
@@ -742,7 +185,7 @@ class OrchestratorConfig(BaseModel):
             self.event_inbox_auto_prune_enabled
             and self.event_inbox_retention_bytes < min_plausible_bytes
         ):
-            logging.getLogger(__name__).warning(
+            logging.getLogger(_LOGGER_NAME).warning(
                 "OrchestratorConfig: event_inbox_retention_bytes=%d is "
                 "smaller than event_inbox_retention_count=%d's plausible "
                 "footprint (%d bytes) -- auto-prune may thrash on every "
@@ -1211,13 +654,13 @@ class OrchestratorConfig(BaseModel):
         if not has_new_ceiling:
             if isinstance(legacy_per_client, dict) and legacy_per_client:
                 data.setdefault("per_client_ceiling", dict(legacy_per_client))
-                logging.getLogger(__name__).warning(
+                logging.getLogger(_LOGGER_NAME).warning(
                     "OrchestratorConfig: per_client_max_parallel is deprecated; "
                     "use per_client_ceiling instead"
                 )
             if isinstance(legacy_default, int):
                 data.setdefault("default_ceiling", legacy_default)
-                logging.getLogger(__name__).warning(
+                logging.getLogger(_LOGGER_NAME).warning(
                     "OrchestratorConfig: default_max_parallel is deprecated; "
                     "use default_ceiling instead"
                 )
@@ -1258,7 +701,7 @@ class OrchestratorConfig(BaseModel):
         for key in present:
             data.pop(key)
         if present:
-            logging.getLogger(__name__).warning(
+            logging.getLogger(_LOGGER_NAME).warning(
                 "OrchestratorConfig: ignoring removed timeout setting(s) %s — "
                 "process-kill timeouts were removed; sessions are never "
                 "dispositioned on elapsed time",
@@ -1297,17 +740,3 @@ class OrchestratorConfig(BaseModel):
         if "default_max_parallel" not in data:
             data["default_max_parallel"] = legacy
         return data
-
-
-class HookRule(BaseModel):
-    """A user-defined shell command to run when a lifecycle event fires."""
-
-    event_type: str
-    command: str
-    description: str = ""
-
-
-class EventHookRegistry(BaseModel):
-    """Persisted event hook rules for a client."""
-
-    rules: list[HookRule] = Field(default_factory=list)

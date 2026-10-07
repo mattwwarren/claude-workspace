@@ -16,11 +16,13 @@ each submodule only imports from those above it (no cycles):
   recipe-key validators, ``DEV_QUEUE_SCHEMA_VERSION``, ``DEFAULT_LANE``, and
   the ``PLAN_*_FINGERPRINT_KEY`` wire-key constants (#2102).
 - ``orchestrator_config`` — lane/pipeline/orchestrator config models and their
-  operator-forward defaults.
+  operator-forward defaults. Itself a package (#2497) with its own submodule
+  DAG (``constants``, ``concurrency``, ``hooks``, ``stage``, ``lane``,
+  ``operator_forward``, ``orchestrator``); see its ``__init__``.
 - ``park_comment_marker`` — ``ParkCommentMarker`` and its reader, the #2135
   worker-recorded park evidence. Its own module rather than a tenant of
-  ``orchestrator_config`` (where the sibling ``agent_spawn_stamp`` accessors
-  live) only because that file is already past the module-size convention.
+  ``orchestrator_config.constants`` (where the sibling ``agent_spawn_stamp``
+  accessors live), which holds only dependency-free constants and helpers.
 - ``session_inbox`` — ``SessionInboxMessage``, one operator message in a
   session's inbound mailbox (#2212). Also a DAG root.
 - ``session`` — ``LocalLivenessBackend``, ``LocalLivenessHandle``, ``Session``.

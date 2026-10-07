@@ -1128,7 +1128,7 @@ disk_pressure_gate_enabled: true
 # Minimum free space, in GB, required on a client's worktree-base mount
 # before the disk-pressure gate above holds that client PENDING (GitHub
 # #1887). Defined as DEFAULT_DISK_PRESSURE_MIN_FREE_GB in
-# src/cw/models/orchestrator_config.py -- a judgment default open to
+# src/cw/models/orchestrator_config/constants.py -- a judgment default open to
 # tuning per host/mount, not derived from a measured incident threshold.
 disk_pressure_min_free_gb: 5.0
 
@@ -1152,7 +1152,7 @@ disk_pressure_min_free_gb: 5.0
 # `cw doctor` reports the same thresholds as one worker-tmp/<client> check
 # per client. Defined as DEFAULT_DISK_PRESSURE_MIN_FREE_INODES /
 # DEFAULT_DISK_PRESSURE_MIN_FREE_INODE_FRACTION in
-# src/cw/models/orchestrator_config.py -- judgment defaults open to tuning
+# src/cw/models/orchestrator_config/constants.py -- judgment defaults open to tuning
 # per host/mount, not derived from a measured incident threshold.
 disk_pressure_min_free_inodes: 50000
 disk_pressure_min_free_inode_fraction: 0.05
