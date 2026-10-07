@@ -393,9 +393,9 @@ def test_stop_hook_is_not_allowlisted() -> None:
 
 def test_stop_hook_headless_context_readers_share_one_key() -> None:
     """The Stop hook's two persisted headless reads use one key symbol."""
-    source = (
-        _REPO_ROOT / "src" / "cw" / "cli" / "stop_hook" / "locked.py"
-    ).read_text(encoding="utf-8")
+    source = (_REPO_ROOT / "src" / "cw" / "cli" / "stop_hook" / "locked.py").read_text(
+        encoding="utf-8"
+    )
     assert source.count('_HEADLESS_CONTEXT_KEY = "headless"') == 1
     assert source.count("context.get(_HEADLESS_CONTEXT_KEY)") == 2
     assert 'context.get("headless")' not in source
