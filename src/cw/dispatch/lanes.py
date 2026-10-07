@@ -258,7 +258,7 @@ def _claim_stale_notify_slots(
     mirroring :func:`_maybe_notify_lane_starved`. Clients absent from *stale*
     (recovered since the last pass) have their stamp cleared back to ``None``
     in the same cycle -- see the field's docstring in
-    ``cw.models.orchestrator_config`` for why a stale window must not be
+    ``cw.models.orchestrator_config.concurrency`` for why a stale window must not be
     inherited by the next episode.
 
     Non-atomic with the emit: the debounce claim commits to disk here,

@@ -2001,7 +2001,7 @@ from the owning session's `last_result` (that site has no `last_result`
 parameter of its own, unlike the three `routing.py` sites).
 
 Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
-(`orchestrator_config.py`) -- this is an audit/diagnostic trail, not an
+(`orchestrator_config/operator_forward.py`) -- this is an audit/diagnostic trail, not an
 operator alert, and it fires on effectively every stage transition for every
 ticket (Rule 1 and Rule 3 both emit unconditionally on every call, not only
 when a gate fires) -- far higher volume than any currently-forwarded member.
@@ -2414,7 +2414,7 @@ coordinating session recorded when it minted the void; `voided_at` and
 event can find the settling comment without re-fetching the whole thread.
 
 Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
-(`orchestrator_config.py`): a suppression firing is the *expected* outcome of
+(`orchestrator_config/operator_forward.py`): a suppression firing is the *expected* outcome of
 an operator decision they already made, so forwarding it would page them about
 their own instruction being honored. It is an audit trail, consulted when a
 finding's disappearance needs explaining.
@@ -2452,7 +2452,7 @@ delta was taken from, so an operator can reconstruct exactly what the gate
 compared against.
 
 Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
-(`orchestrator_config.py`), for the same reason: a gate refusal is the
+(`orchestrator_config/operator_forward.py`), for the same reason: a gate refusal is the
 expected steady-state outcome on any branch with pre-existing debt, and the
 debt itself is already surfaced on the posted review comment.
 
@@ -2496,7 +2496,7 @@ progress. `cumulative_net_lines_added` never resets. Only `stall_streak`
 resets when a cycle resolves an original finding.
 
 Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
-(`orchestrator_config.py`), matching `review.treadmill_detected`. The park
+(`orchestrator_config/operator_forward.py`), matching `review.treadmill_detected`. The park
 itself already reaches the operator through the `BLOCKED_ON_USER`
 `task.transition` every fix-loop park emits, whatever its `blocker.reason`, and
 the same per-cycle breakdown is appended to `blocker.details`.
@@ -2557,7 +2557,7 @@ already render inline. This event is the durable half of that record; the
 comment is the human-visible half.
 
 Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
-(`orchestrator_config.py`), matching both siblings above: a suppression is the
+(`orchestrator_config/operator_forward.py`), matching both siblings above: a suppression is the
 expected steady-state outcome once an operator has settled a finding, and it is
 already visible on the review comment.
 
@@ -2887,7 +2887,7 @@ existing watch already belongs to someone else.
 `correlation_id` is `client`.
 
 Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
-(`orchestrator_config.py`): the condition requires two dev-queue clients
+(`orchestrator_config/operator_forward.py`): the condition requires two dev-queue clients
 mapped to the same repo colliding on the same PR number, which the codebase's
 `(client, repo)` injectivity premise (#1269) treats as configuration drift
 rather than a steady-state outcome. The event exists as the durable,
@@ -2945,7 +2945,7 @@ path passes the task's ticket id; `dispatch_fix_agent` passes its own), else
 absent (`ticket_id` is `null` in the payload).
 
 Audit-only: **not** forwarded to the operator-attention channel. It is not in
-`_DEFAULT_OPERATOR_EVENT_TYPES` (`orchestrator_config.py`, an allowlist), so
+`_DEFAULT_OPERATOR_EVENT_TYPES` (`orchestrator_config/operator_forward.py`, an allowlist), so
 the default is exclusion; a mechanical, strictly-forward move is not an
 operator alert. It exists as the durable, queryable record
 (`cw event tail --type worktree.fast_forwarded`).
