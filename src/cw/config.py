@@ -21,11 +21,14 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
 from cw import _config_migrate
-from cw._flock import acquire_sessions_flock
+from cw._flock import acquire_flock, acquire_sessions_flock
 from cw._git import run_git
 from cw._lock_guard import LockRank, lock_guard
 from cw.atomic import atomic_write_text
 from cw.exceptions import (
+    CLIENTS_LOCK_NAME,
+    CONCURRENCY_OVERRIDE_LOCK_NAME,
+    SESSIONS_LOCK_NAME,
     ConfigValidationError,
     CwError,
     DispatchLoopLockedError,
@@ -54,6 +57,29 @@ _SAFE_CLIENT_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 _SAFE_BRANCH_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$")
 
 _EMPTY_CLIENTS_DOC = "clients:\n"
+
+
+@contextlib.contextmanager
+def _guarded_state_lock(
+    lock_name: str,
+    lock_path: Path,
+    rank: LockRank,
+    acquire: Callable[[Any], None],
+) -> Iterator[None]:
+    """Guard and hold a state-lock fd using the lock-specific *acquire*."""
+    with lock_guard(lock_name, lock_path, rank):
+        fd = lock_path.open("w")
+        try:
+            acquire(fd)
+        except BaseException:
+            fd.close()
+            raise
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
+
 
 _xdg_config = os.environ.get("XDG_CONFIG_HOME", "")
 _xdg_data = os.environ.get("XDG_DATA_HOME", "")
@@ -271,22 +297,29 @@ def refuse_real_state_write(path: Path) -> None:
 
 
 @contextlib.contextmanager
-def concurrency_override_lock() -> Iterator[None]:
+def concurrency_override_lock(*, bounded: bool = False) -> Iterator[None]:
     """Acquire an exclusive file lock over the concurrency_overrides.json write window.
 
     Hold it across every load→mutate→write of the overrides. Rank STATE;
-    lock discipline (re-entry, order): ADR-0019.
+    lock discipline (re-entry, order): ADR-0019. Unbounded by default;
+    ``bounded=True`` (operator ``cw config concurrency`` / ``cw lane
+    pause|resume`` only, #2501) raises
+    :class:`~cw.exceptions.LockTimeoutError` after the ``cw._flock`` wait.
     """
     lock_path = concurrency_override_lock_file()
-    with lock_guard("concurrency_override", lock_path, LockRank.STATE):
-        state_dir().mkdir(parents=True, exist_ok=True)
-        fd = lock_path.open("w")
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            fd.close()
+    state_dir().mkdir(parents=True, exist_ok=True)
+    with _guarded_state_lock(
+        CONCURRENCY_OVERRIDE_LOCK_NAME,
+        lock_path,
+        LockRank.STATE,
+        lambda fd: acquire_flock(
+            fd,
+            lock_path,
+            lock_name=CONCURRENCY_OVERRIDE_LOCK_NAME,
+            bounded=bounded,
+        ),
+    ):
+        yield
 
 
 @contextlib.contextmanager
@@ -316,19 +349,14 @@ def sessions_lock(*, bounded: bool = False) -> Iterator[None]:
     allowlist test (``tests/test_config.py``).
     """
     lock_path = sessions_lock_file()
-    with lock_guard("sessions", lock_path, LockRank.SESSIONS):
-        state_dir().mkdir(parents=True, exist_ok=True)
-        fd = lock_path.open("w")
-        try:
-            acquire_sessions_flock(fd, lock_path, bounded=bounded)
-        except BaseException:
-            fd.close()
-            raise
-        try:
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            fd.close()
+    state_dir().mkdir(parents=True, exist_ok=True)
+    with _guarded_state_lock(
+        SESSIONS_LOCK_NAME,
+        lock_path,
+        LockRank.SESSIONS,
+        lambda fd: acquire_sessions_flock(fd, lock_path, bounded=bounded),
+    ):
+        yield
 
 
 def mutate_state(fn: Callable[[CwState], None], *, bounded: bool = False) -> CwState:
@@ -359,23 +387,26 @@ def mutate_state(fn: Callable[[CwState], None], *, bounded: bool = False) -> CwS
 
 
 @contextlib.contextmanager
-def clients_lock() -> Iterator[None]:
+def clients_lock(*, bounded: bool = False) -> Iterator[None]:
     """Acquire an exclusive file lock over the clients.yaml write window.
 
-    Hold it across every load→mutate→write in ``init_client`` (and any future
-    client-mutating command) so concurrent ``cw client add`` processes cannot
-    clobber each other's edits. Rank STATE; lock discipline: ADR-0019.
+    Hold it across every load→mutate→write in ``init_client`` and the ``cw
+    lane add|rm`` commands so concurrent ``cw init`` processes cannot clobber
+    each other's edits. Rank STATE; lock discipline: ADR-0019. Unbounded by
+    default; ``bounded=True`` (operator commands only, #2501) raises
+    :class:`~cw.exceptions.LockTimeoutError` after the ``cw._flock`` wait.
     """
     lock_path = clients_lock_file()
-    with lock_guard("clients", lock_path, LockRank.STATE):
-        config_dir().mkdir(parents=True, exist_ok=True)
-        fd = lock_path.open("w")
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            fd.close()
+    config_dir().mkdir(parents=True, exist_ok=True)
+    with _guarded_state_lock(
+        CLIENTS_LOCK_NAME,
+        lock_path,
+        LockRank.STATE,
+        lambda fd: acquire_flock(
+            fd, lock_path, lock_name=CLIENTS_LOCK_NAME, bounded=bounded
+        ),
+    ):
+        yield
 
 
 def _current_command_str() -> str:
@@ -811,11 +842,13 @@ def init_client(
     *,
     default_branch: str = "main",
     auto_purposes: list[str] | None = None,
+    bounded: bool = False,
 ) -> None:
     """Add a new client to clients.yaml.
 
     Validates inputs, creates config dir/file if needed, and uses
-    ruamel.yaml round-trip parsing to preserve existing comments.
+    ruamel.yaml round-trip parsing to preserve existing comments. *bounded*
+    is forwarded to :func:`clients_lock` (``cw init`` passes ``True``).
     """
     _validate_init_inputs(name, workspace_path, default_branch, auto_purposes)
 
@@ -823,7 +856,7 @@ def init_client(
     config_dir().mkdir(parents=True, exist_ok=True)
     clients_path = clients_file()
 
-    with clients_lock():
+    with clients_lock(bounded=bounded):
         # Round-trip parse-modify-write with ruamel.yaml (preserves comments)
         rt = YAML(typ="rt")
         rt.default_flow_style = False

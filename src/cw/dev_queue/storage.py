@@ -15,9 +15,11 @@ import fcntl
 import json
 from typing import TYPE_CHECKING
 
+from cw._flock import acquire_flock
 from cw._lock_guard import LockRank, lock_guard
 from cw.atomic import atomic_write_text, rotate_backup
 from cw.config import (
+    _guarded_state_lock,
     dev_plan_file,
     dev_plan_lock,
     dev_queue_file,
@@ -27,6 +29,7 @@ from cw.config import (
     dev_queue_lock as _dev_queue_lock_file,
 )
 from cw.dev_queue.migrate import migrate_dev_queue
+from cw.exceptions import DEV_QUEUE_LOCK_NAME
 from cw.models import DevQueueStore, DispatchPlan
 
 if TYPE_CHECKING:
@@ -35,21 +38,26 @@ if TYPE_CHECKING:
 
 
 @contextlib.contextmanager
-def _lock() -> Iterator[None]:
+def _lock(*, bounded: bool = False) -> Iterator[None]:
     """Acquire an exclusive file lock for the dev queue.
 
-    Rank STATE; lock discipline: ADR-0019.
+    Rank STATE; lock discipline: ADR-0019. Unbounded by default:
+    dispatch, reconcile, executors and every commit-after-side-effect caller
+    must wait. ``bounded=True`` is for operator entry points with no
+    irreversible side effect before the lock (#2501); it raises
+    :class:`~cw.exceptions.LockTimeoutError` after the ``cw._flock`` wait.
     """
     lock_path = _dev_queue_lock_file()
-    with lock_guard("dev_queue", lock_path, LockRank.STATE):
-        dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
-        fd = lock_path.open("w")
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            fd.close()
+    dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
+    with _guarded_state_lock(
+        DEV_QUEUE_LOCK_NAME,
+        lock_path,
+        LockRank.STATE,
+        lambda fd: acquire_flock(
+            fd, lock_path, lock_name=DEV_QUEUE_LOCK_NAME, bounded=bounded
+        ),
+    ):
+        yield
 
 
 # Public alias for callers that need the dev-queue lock directly (e.g. the

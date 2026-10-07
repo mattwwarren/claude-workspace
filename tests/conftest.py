@@ -60,6 +60,7 @@ from tests import _lock_invariants as lock_invariants
 if TYPE_CHECKING:
     import types
     from collections.abc import Callable, Iterator, Mapping, Sequence
+    from typing import IO
 
 
 # A captured record_event invocation: (event_type, payload, correlation_id).
@@ -1268,6 +1269,53 @@ def held_sessions_lock() -> Iterator[Path]:
     """Fixture form of :func:`_hold_sessions_lock` for whole-test contention."""
     with _hold_sessions_lock() as lock_path:
         yield lock_path
+
+
+class _RecordingLockPath:
+    """Duck-typed lock path that remembers every handle a lock opens on it.
+
+    Hoisted from ``test_config.py`` (#2501) so every bounded lock's
+    "timeout closes its fd" test shares it.
+    """
+
+    def __init__(self, real: Path) -> None:
+        self._real = real
+        self.handles: list[IO[str]] = []
+
+    def open(self, mode: str) -> IO[str]:
+        handle = self._real.open(mode)
+        self.handles.append(handle)
+        return handle
+
+    def __str__(self) -> str:
+        return str(self._real)
+
+
+@pytest.fixture
+def record_lock_path(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> Callable[[str, Path], _RecordingLockPath]:
+    """Factory: patch the lock-path function *patch_target* to a recorder.
+
+    ``record_lock_path("cw.config.clients_lock_file", clients_lock_file())``
+    wraps the real path in a :class:`_RecordingLockPath`, makes the patched
+    function return it, and returns the recorder.
+    """
+
+    def _install(patch_target: str, real: Path) -> _RecordingLockPath:
+        recorder = _RecordingLockPath(real)
+        monkeypatch.setattr(patch_target, lambda: recorder)
+        return recorder
+
+    return _install
+
+
+@pytest.fixture
+def recording_lock_path(
+    record_lock_path: Callable[[str, Path], _RecordingLockPath],
+) -> _RecordingLockPath:
+    """The sessions-lock form of :func:`record_lock_path`."""
+    return record_lock_path("cw.config.sessions_lock_file", sessions_lock_file())
 
 
 @contextlib.contextmanager

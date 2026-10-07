@@ -29,7 +29,7 @@ from cw.dev_queue import (
     unblock_ticket,
 )
 from cw.events import record_event
-from cw.exceptions import RequeueLiveSessionError
+from cw.exceptions import LockTimeoutError, RequeueLiveSessionError
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
@@ -47,6 +47,31 @@ from ._group import dev_queue
 # --stage` (GitHub #1682) -- HARDEN is excluded, matching requeue's original
 # precedent. A single constant keeps the two `click.Choice`s from drifting.
 _STAGE_CHOICES = ("plan", "impl", "review", "finalize")
+
+
+def _report_partial_progress(
+    done: list[str],
+    remaining: list[str],
+    *,
+    done_label: str,
+    remaining_label: str,
+    retry_note: str,
+) -> None:
+    """Name the tickets a multi-ticket command finished and the ones it did not.
+
+    A multi-ticket ``add``/``remove``/``cancel`` takes the bounded dev-queue
+    lock once per ticket and stops at the first :class:`LockTimeoutError`
+    (#2501): every later acquisition would wait out the same bound again (the
+    #2504 fail-fast precedent). Printed only when more than one ticket was
+    given; the caller re-raises the timeout so the exit is non-zero.
+    """
+    if len(done) + len(remaining) <= 1:
+        return
+    click.echo(
+        f"{done_label}: {', '.join(done) or '(none)'}."
+        f" {remaining_label}: {', '.join(remaining) or '(none)'}. {retry_note}",
+        err=True,
+    )
 
 
 @dev_queue.command(name="add")
@@ -125,7 +150,7 @@ def dev_queue_add(
     stage_value: Stage = (
         Stage(stage_override) if stage_override is not None else DEFAULT_STAGE
     )
-    for ticket_id in tickets:
+    for index, ticket_id in enumerate(tickets):
         resolved = resolve_client(ticket_id, config, client)
         try:
             task = TicketTask(
@@ -148,7 +173,22 @@ def dev_queue_add(
         except ValidationError as exc:
             msg = f"Invalid ticket '{ticket_id}': {exc.errors()[0]['msg']}"
             raise click.ClickException(msg) from exc
-        inserted = add_ticket(task)
+        try:
+            # bounded=True (#2501): operator command; only read-only client
+            # resolution and model validation precede the dev-queue lock.
+            inserted = add_ticket(task, bounded=True)
+        except LockTimeoutError:
+            _report_partial_progress(
+                list(tickets[:index]),
+                list(tickets[index:]),
+                done_label="Enqueued or already queued",
+                remaining_label="Not enqueued (lock timed out)",
+                retry_note=(
+                    "`cw dev-queue add` skips tickets that are already queued,"
+                    " so re-running the full command is safe."
+                ),
+            )
+            raise
         if not inserted:
             click.echo(
                 f"Skipped {ticket_id} -> {resolved}: already queued"
@@ -198,7 +238,10 @@ def dev_queue_move(
     if to_lane is None and priority is None:
         msg = "Must pass --to and/or --priority."
         raise click.UsageError(msg)
-    result = move_ticket(ticket_id, client, to_lane=to_lane, priority=priority)
+    # bounded=True (#2501): operator command; nothing precedes the lock.
+    result = move_ticket(
+        ticket_id, client, to_lane=to_lane, priority=priority, bounded=True
+    )
     if result["to_lane"] is not None:
         record_event(
             OrchestratorEventType.TICKET_MOVED,
@@ -317,6 +360,9 @@ def dev_queue_requeue(
             from_cancelled=from_cancelled,
             from_failed=from_failed,
             from_completed=from_completed,
+            # bounded=True (#2501): operator command; only the read-only
+            # live-session check precedes the dev-queue lock.
+            bounded=True,
         )
     except RequeueLiveSessionError as exc:
         _reason_tag, message = classify_requeue_live_session_error(exc)
@@ -494,14 +540,30 @@ def dev_queue_remove(
 ) -> None:
     """Remove dev-queue task(s) for the given ticket(s) and client."""
     status_enum = QueueItemStatus(status_filter) if status_filter else None
-    for ticket in tickets:
-        remove_ticket(
-            ticket,
-            client,
-            remove_all=remove_all,
-            status=status_enum,
-            disposition=disposition_filter,
-        )
+    for index, ticket in enumerate(tickets):
+        try:
+            # bounded=True (#2501): operator command; nothing precedes the lock.
+            remove_ticket(
+                ticket,
+                client,
+                remove_all=remove_all,
+                status=status_enum,
+                disposition=disposition_filter,
+                bounded=True,
+            )
+        except LockTimeoutError:
+            _report_partial_progress(
+                list(tickets[:index]),
+                list(tickets[index:]),
+                done_label="Removed",
+                remaining_label="Not removed (lock timed out)",
+                retry_note=(
+                    "`remove` is not idempotent: re-run it for the not-removed"
+                    " tickets only, with the same options; repeating a removed"
+                    " ticket fails with 'No dev-queue task found'."
+                ),
+            )
+            raise
         click.echo(f"Removed {ticket} from {client} dev-queue.")
 
 
@@ -513,8 +575,23 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
     """Cancel dev-queue task(s) and stop any running session."""
     state = load_state()
     daemon = get_native_daemon_client()
-    for ticket in tickets:
-        cleared_session_ids = cancel_ticket(ticket, client)
+    for index, ticket in enumerate(tickets):
+        try:
+            # bounded=True (#2501): operator command; only read-only state and
+            # daemon-client setup precede the lock, and each earlier ticket is
+            # fully committed (queue write + daemon.stop) before the next one.
+            cleared_session_ids = cancel_ticket(ticket, client, bounded=True)
+        except LockTimeoutError:
+            _report_partial_progress(
+                list(tickets[:index]),
+                list(tickets[index:]),
+                done_label="Cancelled",
+                remaining_label="Not cancelled (lock timed out)",
+                retry_note=(
+                    "`cancel` is idempotent: re-running the full command is safe."
+                ),
+            )
+            raise
         for old_session_id in cleared_session_ids:
             if old_session_id is not None:
                 sess = state.find_by_name_or_id(old_session_id)
@@ -603,7 +680,8 @@ def dev_queue_clear(
     # re-derive under a second, later lock -- a TOCTOU window in which a
     # concurrent dispatch tick could grow the deleted set past what was
     # shown. Mirrors dev_queue_prune's identical precedent.
-    removed = clear_tickets(client, status=status_enum)
+    # bounded=True (#2501): operator --confirm path; nothing precedes the lock.
+    removed = clear_tickets(client, status=status_enum, bounded=True)
     _print_task_summary(removed)
     click.echo(f"Cleared {len(removed)} dev-queue task(s) for {client}.")
 
@@ -783,6 +861,9 @@ def dev_queue_prune(
     # reports exactly what was removed. Previewing first would re-derive under
     # a second, later lock -- a TOCTOU window in which a concurrent dispatch
     # tick could grow the deleted set past what was shown.
-    removed = prune_tickets(statuses, older_than_days, client, all_clients=all_clients)
+    # bounded=True (#2501): operator --confirm path; nothing precedes the lock.
+    removed = prune_tickets(
+        statuses, older_than_days, client, all_clients=all_clients, bounded=True
+    )
     _print_task_summary(removed)
     click.echo(f"Pruned {len(removed)} dev-queue task(s).")
