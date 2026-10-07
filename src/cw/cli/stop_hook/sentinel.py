@@ -6,12 +6,17 @@ reconstruction of an emitted ``last_result``), corrects its self-reported
 scope against git (#1487), and pushes a freshly re-parsed one through the emit
 door (#1457). Imports ``_constants``. Split out of the flat
 ``cli/stop_hook.py`` (#2496).
+
+#2566: the parse and the scope git run *before* ``sessions_lock``
+(:func:`_prepare_headless_sentinel`, called by
+``locked._prepare_sentinel_before_lock``); the locked section only picks the
+prepared value (:func:`_resolve_headless_sentinel`) and never runs git.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw.auto_dev_result import AutoDevResult
 from cw.cli._sentinels import _parse_sentinel_from_transcript
@@ -26,6 +31,18 @@ if TYPE_CHECKING:
     from cw.models import Session
 
 logger = logging.getLogger(_LOGGER_NAME)
+
+
+class _PreparedSentinel(NamedTuple):
+    """The transcript sentinel parsed and scope-verified before the lock (#2566).
+
+    A prepared ``sentinel=None`` means "parsed, nothing found" -- authoritative
+    for the locked section, which then defers (ADR-0003) rather than rescanning.
+    "Not prepared at all" is expressed by passing ``None`` for the whole
+    wrapper, which makes the locked section parse without scope verification.
+    """
+
+    sentinel: AutoDevResult | BlockedResult | None
 
 
 def _parse_headless_sentinel(
@@ -49,6 +66,9 @@ def _parse_headless_sentinel(
     Extracted out of :func:`signal_stop` (rather than inlined) so the #536
     emit-precedence gate could be added there without pushing the function
     over its PLR0912 branch-count ceiling.
+
+    Parse-only: runs no git (#2566). Scope verification is the caller's job --
+    :func:`_prepare_headless_sentinel` adds it before ``sessions_lock``.
     """
     csid = claude_session_id if isinstance(claude_session_id, str) else None
     expected_ticket_id = (
@@ -74,15 +94,61 @@ def _parse_headless_sentinel(
         parsed = _parse_sentinel_from_transcript(
             str(session.worktree_path), csid, ticket_id=expected_ticket_id
         )
+    return parsed
+
+
+def _prepare_headless_sentinel(
+    session: Session,
+    cwd_value: str,
+    claude_session_id: object,
+    ticket_id_value: object = None,
+) -> _PreparedSentinel:
+    """Parse the transcript sentinel and verify its scope, for a lockless caller.
+
+    Runs git (``reconcile_result_scope``) -- call only with no lock held
+    (#2566, ADR-0019). *session* is a lockless snapshot; only its immutable
+    ``client``, ``worktree_path`` and ``id`` are read.
+    """
+    parsed = _parse_headless_sentinel(
+        session, cwd_value, claude_session_id, ticket_id_value
+    )
     if isinstance(parsed, AutoDevResult):
         parsed = _verify_headless_scope(parsed, session)
-    return parsed
+    return _PreparedSentinel(parsed)
+
+
+def _resolve_headless_sentinel(
+    prepared: _PreparedSentinel | None,
+    session: Session,
+    cwd_value: str,
+    claude_session_id: object,
+    ticket_id_value: object = None,
+) -> AutoDevResult | BlockedResult | None:
+    """Pick the transcript sentinel inside ``sessions_lock``; never runs git.
+
+    A *prepared* value is authoritative, including a prepared ``None``: a
+    sentinel that landed after the pre-lock parse is caught by the next Stop
+    (ADR-0003). With nothing prepared (the lockless snapshot failed) the
+    transcript is parsed here WITHOUT scope verification -- the scope guard is
+    fail-open, and losing the sentinel would cost far more than an uncorrected
+    ``files``/``lines_actual``.
+    """
+    if prepared is not None:
+        return prepared.sentinel
+    logger.warning(
+        "session=%s no pre-lock sentinel; parsing in-lock without scope verification",
+        session.id,
+    )
+    return _parse_headless_sentinel(
+        session, cwd_value, claude_session_id, ticket_id_value
+    )
 
 
 def _verify_headless_scope(result: AutoDevResult, session: Session) -> AutoDevResult:
     """Correct a headless sentinel's self-reported scope against git facts (#1487).
 
-    This is the last point before ``signal_stop`` writes ``last_result``, so a
+    Called before ``sessions_lock`` (#2566), by :func:`_prepare_headless_sentinel`,
+    on the sentinel ``signal_stop`` then writes to ``last_result``, so a
     fabricated or stale-merge-base scope corrected here never reaches the queue.
     An unresolvable client falls back to ``main`` — the Stop hook must never
     raise, and losing the sentinel would cost far more than measuring against

@@ -23,14 +23,19 @@ live count; a turn ending with none clears it. Both writes share
 
 from __future__ import annotations
 
+import copy
 import json
+import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 from freezegun import freeze_time
 
-from cw.config import load_state, save_state
+from cw._lock_guard import held_locks
+from cw.auto_dev_result import AutoDevResult
+from cw.cli.stop_hook import headless, locked, sentinel
+from cw.config import load_state, save_state, state_file
 from cw.events import read_events
 from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
@@ -38,7 +43,9 @@ from cw.models import (
     AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
     HOOK_CONTEXT_RELATIVE_PATH,
     CwState,
+    LastResultSource,
     OrchestratorEventType,
+    SessionOrigin,
     SessionStatus,
 )
 from cw.reconcile._shared import SentinelRouteOutcome
@@ -55,6 +62,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from cw._lock_guard import HeldLock
     from cw.models import Session
 
 
@@ -682,7 +690,6 @@ def test_parse_headless_sentinel_scans_transcript_once_when_cwd_is_worktree_path
     fallback``. No transcript exists on disk, so every scan returns ``None``.
     """
     from cw.cli import stop_hook
-    from cw.cli.stop_hook import sentinel
 
     worktree = tmp_path / "wt-scan"
     session = _make_daemon_session(worktree_path=worktree)
@@ -701,6 +708,8 @@ def test_parse_headless_sentinel_scans_transcript_once_when_cwd_is_worktree_path
         return real_scan(cwd, claude_session_id, ticket_id=ticket_id)
 
     monkeypatch.setattr(sentinel, "_parse_sentinel_from_transcript", _counting_scan)
+    # #2566: the parse is parse-only -- no git, so no scope verification.
+    monkeypatch.setattr(sentinel, "reconcile_result_scope", _never_called)
 
     parsed = stop_hook._parse_headless_sentinel(
         session, cwd_value, "uuid-2229", "ticket-2229"
@@ -714,3 +723,595 @@ def test_parse_headless_sentinel_scans_transcript_once_when_cwd_is_worktree_path
     assert scanned[0] == cwd_value
     if nested_cwd:
         assert scanned[1] == str(worktree)
+
+
+# ---------------------------------------------------------------------------
+# #2566: headless scope verification (git) runs before sessions_lock
+# ---------------------------------------------------------------------------
+
+_CSID_2566 = "claude-uuid-2566"
+# ``_write_hook_context_file`` hardcodes ``ticket_id="940"``; the transcript
+# sentinel must carry the same identity (#2515) for the parse to accept it.
+_TICKET_2566 = "940"
+_SELF_REPORTED_FILES = 3
+_SELF_REPORTED_LINES = 55
+_CORRECTED_FILES = 7
+_CORRECTED_LINES = 777
+_PINNED_LOGGER = "cw.cli.stop_hook"
+
+
+def _never_called(*_args: object, **_kwargs: object) -> NoReturn:
+    """A stub for a callee the test proves is never reached.
+
+    Raises ``AssertionError`` -- never ``OSError``/``ValueError`` -- so the
+    pre-lock gate's ``except (OSError, ValueError, CwError)`` cannot swallow it
+    and leave the assertion vacuous (Decision D5).
+    """
+    msg = "this callee must not run on this path"
+    raise AssertionError(msg)
+
+
+def _sentinel_payload_2566(ticket_id: str = _TICKET_2566) -> dict[str, object]:
+    payload: dict[str, object] = _stage_complete_payload()
+    payload["ticket_id"] = ticket_id
+    return payload
+
+
+def _seed_headless_scope_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    last_result: dict[str, object] | None = None,
+    status: SessionStatus = SessionStatus.ACTIVE,
+    origin: SessionOrigin = SessionOrigin.DAEMON,
+) -> Session:
+    """Seed a headless Stop case: persisted session, context, transcript sentinel.
+
+    Builds on :func:`_seed_session` (``sess940g``, ``surface_ref=None`` so the
+    stale-hook guard never drops the hook) and writes a ``headless=True``
+    ``cw-context.json`` plus a transcript holding a valid ``stage_complete``
+    sentinel for :data:`_CSID_2566` under the session's worktree project dir.
+    ``last_result`` seeds an already-emitted (``EMIT_CLI``) result. Returns the
+    session as persisted. Deliberately module-local (Decision D4a): the
+    ``tests/test_cli.py`` scope-guard helper drives real git repos instead.
+    """
+    seeded = _seed_session(tmp_path)
+    state = load_state()
+    session = next(s for s in state.sessions if s.id == seeded.id)
+    session.status = status
+    session.origin = origin
+    if last_result is not None:
+        session.last_result = last_result
+        session.last_result_source = LastResultSource.EMIT_CLI
+    save_state(state)
+    assert session.worktree_path is not None
+    _write_hook_context_file(
+        session.worktree_path, workspace_path=session.workspace_path, headless=True
+    )
+    home = tmp_path / "home-2566"
+    frame = (
+        "<<<AUTO_DEV_RESULT\n"
+        + json.dumps(_sentinel_payload_2566())
+        + "\nAUTO_DEV_RESULT>>>"
+    )
+    _write_stop_hook_transcript(home, session.worktree_path, _CSID_2566, frame)
+    monkeypatch.setattr("cw._util.Path.home", lambda: home)
+    return session
+
+
+def _correcting_scope(
+    calls: list[Path | None],
+) -> Callable[..., AutoDevResult]:
+    """A ``reconcile_result_scope`` stand-in that records and corrects scope."""
+
+    def _correct(
+        result: AutoDevResult, *, worktree_path: Path | None, default_branch: str
+    ) -> AutoDevResult:
+        calls.append(worktree_path)
+        scope = result.scope.model_copy(
+            update={"files": _CORRECTED_FILES, "lines_actual": _CORRECTED_LINES}
+        )
+        return result.model_copy(update={"scope": scope})
+
+    return _correct
+
+
+def _prepare(
+    session: Session,
+    *,
+    headless_context: bool = True,
+    cwd_value: str | None = None,
+    cw_session_id: str | None = None,
+    claude_session_id: object = _CSID_2566,
+) -> sentinel._PreparedSentinel | None:
+    """Call ``locked._prepare_sentinel_before_lock`` for a seeded case."""
+    return locked._prepare_sentinel_before_lock(
+        {"headless": headless_context},
+        cwd_value=cwd_value or str(session.worktree_path),
+        cw_session_id=cw_session_id or session.id,
+        claude_session_id=claude_session_id,
+        ticket_id_value=_TICKET_2566,
+    )
+
+
+def _reload(session_id: str) -> Session:
+    return next(s for s in load_state().sessions if s.id == session_id)
+
+
+def test_signal_stop_headless_parse_and_scope_run_outside_sessions_lock(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2566: the transcript parse, client-config read and scope git all run
+    with no lock held, each exactly once, and the sentinel still lands.
+
+    Before the fix all three ran inside ``sessions_lock`` (and the scope git
+    tripped the suite's lock-invariant harness at teardown).
+    """
+    session = _seed_headless_scope_case(tmp_path, monkeypatch)
+    assert session.worktree_path is not None
+    held: dict[str, list[tuple[HeldLock, ...]]] = {}
+
+    def _recording(name: str, real: Callable[..., object]) -> Callable[..., object]:
+        def _wrapper(*args: object, **kwargs: object) -> object:
+            held.setdefault(name, []).append(held_locks())
+            return real(*args, **kwargs)
+
+        return _wrapper
+
+    recorded = (
+        "_parse_sentinel_from_transcript",
+        "resolve_scope_guard_default_branch",
+        "reconcile_result_scope",
+    )
+    for name in recorded:
+        monkeypatch.setattr(sentinel, name, _recording(name, getattr(sentinel, name)))
+
+    result = _invoke_hook_command(
+        "signal-stop", _stop_payload(session.worktree_path, session_id=_CSID_2566)
+    )
+
+    assert result.exit_code == 0, result.output
+    assert held == {name: [()] for name in recorded}
+    updated = _reload(session.id)
+    assert updated.status == SessionStatus.COMPLETED
+    assert updated.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+
+
+def test_signal_stop_scope_correction_still_lands_through_prepared_sentinel(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2566: the pre-lock scope correction is what ``last_result`` persists."""
+    session = _seed_headless_scope_case(tmp_path, monkeypatch)
+    assert session.worktree_path is not None
+    scope_calls: list[Path | None] = []
+    monkeypatch.setattr(
+        sentinel, "reconcile_result_scope", _correcting_scope(scope_calls)
+    )
+
+    result = _invoke_hook_command(
+        "signal-stop", _stop_payload(session.worktree_path, session_id=_CSID_2566)
+    )
+
+    assert result.exit_code == 0, result.output
+    assert scope_calls == [session.worktree_path]
+    updated = _reload(session.id)
+    assert updated.last_result is not None
+    assert updated.last_result["scope"]["files"] == _CORRECTED_FILES
+    assert updated.last_result["scope"]["lines_actual"] == _CORRECTED_LINES
+
+
+@pytest.mark.parametrize(
+    ("headless_context", "cw_session_id", "status", "origin", "emitted"),
+    [
+        pytest.param(
+            False,
+            None,
+            SessionStatus.ACTIVE,
+            SessionOrigin.DAEMON,
+            False,
+            id="non-headless-context",
+        ),
+        pytest.param(
+            True,
+            "sess-missing",
+            SessionStatus.ACTIVE,
+            SessionOrigin.DAEMON,
+            False,
+            id="session-missing",
+        ),
+        pytest.param(
+            True,
+            None,
+            SessionStatus.ACTIVE,
+            SessionOrigin.USER,
+            False,
+            id="user-origin",
+        ),
+        pytest.param(
+            True,
+            None,
+            SessionStatus.COMPLETED,
+            SessionOrigin.DAEMON,
+            False,
+            id="completed",
+        ),
+        pytest.param(
+            True,
+            None,
+            SessionStatus.IDLE,
+            SessionOrigin.DAEMON,
+            False,
+            id="idle",
+        ),
+        pytest.param(
+            True,
+            None,
+            SessionStatus.TIMED_OUT,
+            SessionOrigin.DAEMON,
+            False,
+            id="timed-out",
+        ),
+        pytest.param(
+            True,
+            None,
+            SessionStatus.ACTIVE,
+            SessionOrigin.DAEMON,
+            True,
+            id="emitted-terminal-last-result",
+        ),
+    ],
+)
+def test_prepare_sentinel_before_lock_skips(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    headless_context: bool,
+    cw_session_id: str | None,
+    status: SessionStatus,
+    origin: SessionOrigin,
+    emitted: bool,
+) -> None:
+    """#2566: the pre-lock gate prepares nothing when the in-lock path would
+    not parse the transcript (or not reach the headless resolution at all).
+
+    A reconstructable emitted ``last_result`` takes the in-lock #536
+    emit-precedence path, so it needs no transcript parse either.
+    """
+    session = _seed_headless_scope_case(
+        tmp_path,
+        monkeypatch,
+        last_result=_sentinel_payload_2566() if emitted else None,
+        status=status,
+        origin=origin,
+    )
+    monkeypatch.setattr(locked, "_prepare_headless_sentinel", _never_called)
+    if not headless_context:
+        # The cheapest check runs first: a non-headless Stop reads no state.
+        monkeypatch.setattr(locked, "load_state", _never_called)
+
+    prepared = _prepare(
+        session, headless_context=headless_context, cw_session_id=cw_session_id
+    )
+
+    assert prepared is None
+
+
+def test_prepare_sentinel_before_lock_prepares_when_emitted_result_unreconstructable(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decision D2: an emitted-but-unreconstructable ``last_result`` falls back
+    in-lock to the transcript parse, so the gate prepares (and scope-verifies)
+    that parse instead of skipping it."""
+    session = _seed_headless_scope_case(
+        tmp_path, monkeypatch, last_result={"status": "not-a-real-status"}
+    )
+    real_prepare = locked._prepare_headless_sentinel
+    prepare_calls: list[object] = []
+
+    def _counting_prepare(*args: object, **kwargs: object) -> object:
+        prepare_calls.append(args)
+        return real_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(locked, "_prepare_headless_sentinel", _counting_prepare)
+    scope_calls: list[Path | None] = []
+    monkeypatch.setattr(
+        sentinel, "reconcile_result_scope", _correcting_scope(scope_calls)
+    )
+
+    prepared = _prepare(session)
+
+    assert len(prepare_calls) == 1
+    assert prepared is not None
+    assert isinstance(prepared.sentinel, AutoDevResult)
+    assert prepared.sentinel.ticket_id == _TICKET_2566
+    assert prepared.sentinel.scope.files == _CORRECTED_FILES
+    assert prepared.sentinel.scope.lines_actual == _CORRECTED_LINES
+    assert scope_calls == [session.worktree_path]
+
+
+def test_prepare_sentinel_before_lock_returns_prepared_sentinel(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2566: a found sentinel comes back scope-corrected; a miss comes back as
+    a prepared ``None`` -- distinct from "not prepared" (a bare ``None``).
+
+    The hook cwd is a nested dir, so only the #799 fallback -- which scans the
+    snapshot's ``worktree_path`` -- finds the transcript.
+    """
+    session = _seed_headless_scope_case(tmp_path, monkeypatch)
+    assert session.worktree_path is not None
+    scope_calls: list[Path | None] = []
+    monkeypatch.setattr(
+        sentinel, "reconcile_result_scope", _correcting_scope(scope_calls)
+    )
+    nested_cwd = str(session.worktree_path / "nested")
+
+    found = _prepare(session, cwd_value=nested_cwd)
+    missing = _prepare(
+        session, cwd_value=nested_cwd, claude_session_id="claude-uuid-absent"
+    )
+
+    assert found is not None
+    assert isinstance(found.sentinel, AutoDevResult)
+    assert found.sentinel.scope.files == _CORRECTED_FILES
+    assert found.sentinel.scope.lines_actual == _CORRECTED_LINES
+    assert scope_calls == [session.worktree_path]
+    assert missing is not None
+    assert missing == sentinel._PreparedSentinel(sentinel=None)
+
+
+@pytest.mark.parametrize("failure", ["corrupt-sessions-json", "load-state-oserror"])
+def test_prepare_sentinel_before_lock_snapshot_failure_fails_open(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+) -> None:
+    """Decision D7: an unreadable lockless snapshot is never trusted and never
+    raises -- the gate returns "not prepared" and logs a WARNING with the
+    traceback, leaving the in-lock path to parse without scope verification."""
+    if failure == "corrupt-sessions-json":
+        path = state_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json", encoding="utf-8")
+    else:
+
+        def _unreadable() -> NoReturn:
+            msg = "sessions.json unreadable"
+            raise OSError(msg)
+
+        monkeypatch.setattr(locked, "load_state", _unreadable)
+    monkeypatch.setattr(locked, "_prepare_headless_sentinel", _never_called)
+
+    with caplog.at_level(logging.WARNING, logger=_PINNED_LOGGER):
+        prepared = locked._prepare_sentinel_before_lock(
+            {"headless": True},
+            cwd_value=str(tmp_path),
+            cw_session_id="sess-2566-snap",
+            claude_session_id=_CSID_2566,
+            ticket_id_value=_TICKET_2566,
+        )
+
+    assert prepared is None
+    records = [
+        r
+        for r in caplog.records
+        if r.getMessage().startswith(
+            "session=sess-2566-snap pre-lock session snapshot failed"
+        )
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert records[0].name == _PINNED_LOGGER
+    assert records[0].exc_info is not None
+
+
+def test_signal_stop_snapshot_failure_still_harvests_sentinel(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Decision D7 end to end: with the pre-lock snapshot unreadable the hook
+    still harvests the sentinel -- with its self-reported scope, uncorrected,
+    because the in-lock fallback parse never runs git."""
+    session = _seed_headless_scope_case(tmp_path, monkeypatch)
+    assert session.worktree_path is not None
+    real_load = locked.load_state
+
+    def _fail_pre_lock() -> CwState:
+        if held_locks() == ():
+            msg = "pre-lock sessions.json read failed"
+            raise OSError(msg)
+        return real_load()
+
+    monkeypatch.setattr(locked, "load_state", _fail_pre_lock)
+    scope_calls: list[Path | None] = []
+    monkeypatch.setattr(
+        sentinel, "reconcile_result_scope", _correcting_scope(scope_calls)
+    )
+
+    with caplog.at_level(logging.WARNING, logger=_PINNED_LOGGER):
+        result = _invoke_hook_command(
+            "signal-stop", _stop_payload(session.worktree_path, session_id=_CSID_2566)
+        )
+
+    assert result.exit_code == 0, result.output
+    assert scope_calls == []
+    updated = _reload(session.id)
+    assert updated.status == SessionStatus.COMPLETED
+    assert updated.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+    assert updated.last_result is not None
+    assert updated.last_result["scope"]["files"] == _SELF_REPORTED_FILES
+    assert updated.last_result["scope"]["lines_actual"] == _SELF_REPORTED_LINES
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("pre-lock session snapshot failed" in m for m in messages)
+    assert any("no pre-lock sentinel" in m for m in messages)
+
+
+def test_resolve_headless_sentinel_prepared_is_authoritative(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2566: a prepared value is used as-is -- the in-lock chooser never
+    rescans, even when a sentinel has since landed on disk."""
+    session = _seed_headless_scope_case(tmp_path, monkeypatch)
+    monkeypatch.setattr(sentinel, "_parse_sentinel_from_transcript", _never_called)
+    prepared_result = AutoDevResult.model_validate(_sentinel_payload_2566())
+    args = (session, str(session.worktree_path), _CSID_2566, _TICKET_2566)
+
+    chosen = sentinel._resolve_headless_sentinel(
+        sentinel._PreparedSentinel(prepared_result), *args
+    )
+    chosen_none = sentinel._resolve_headless_sentinel(
+        sentinel._PreparedSentinel(None), *args
+    )
+
+    assert chosen is prepared_result
+    assert chosen_none is None
+
+
+def test_resolve_headless_sentinel_without_prepared_parses_without_git(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#2566: with nothing prepared the in-lock chooser parses the transcript
+    (never losing the sentinel) but runs no git, and says so."""
+    session = _seed_headless_scope_case(tmp_path, monkeypatch)
+    monkeypatch.setattr(sentinel, "reconcile_result_scope", _never_called)
+
+    with caplog.at_level(logging.WARNING, logger=_PINNED_LOGGER):
+        parsed = sentinel._resolve_headless_sentinel(
+            None, session, str(session.worktree_path), _CSID_2566, _TICKET_2566
+        )
+
+    assert isinstance(parsed, AutoDevResult)
+    assert parsed.scope.files == _SELF_REPORTED_FILES
+    assert parsed.scope.lines_actual == _SELF_REPORTED_LINES
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "no pre-lock sentinel" in m and "without scope verification" in m
+        for m in warnings
+    )
+
+
+def test_resolve_and_complete_headless_session_prepared_none_defers_on_late_sentinel(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2566 late-sentinel window: a sentinel landing after the pre-lock parse
+    (prepared ``None``) is treated as "no sentinel yet" -- the hook defers and
+    the next Stop picks it up (ADR-0003)."""
+    seeded = _seed_headless_scope_case(tmp_path, monkeypatch)
+    state = load_state()
+    session = next(s for s in state.sessions if s.id == seeded.id)
+    monkeypatch.setattr(headless, "_apply_sentinel_to_task", _never_called)
+
+    resolution = headless._resolve_and_complete_headless_session(
+        state,
+        session,
+        context={},
+        cwd_value=str(session.worktree_path),
+        claude_session_id=_CSID_2566,
+        ticket_id_value=_TICKET_2566,
+        is_headless=True,
+        now=datetime(2026, 1, 1, tzinfo=UTC),
+        prepared=sentinel._PreparedSentinel(None),
+    )
+
+    assert resolution.rescued is None
+    assert session.status == SessionStatus.ACTIVE
+    assert _reload(session.id).status == SessionStatus.ACTIVE
+
+
+def test_resolve_and_complete_headless_session_emitted_terminal_ignores_prepared(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2566: a session that gained an emitted terminal result before the lock
+    takes the #536 emit-precedence path; the prepared transcript value is
+    ignored and never harvested over ``last_result``."""
+    seeded = _seed_headless_scope_case(
+        tmp_path, monkeypatch, last_result=_sentinel_payload_2566()
+    )
+    state = load_state()
+    session = next(s for s in state.sessions if s.id == seeded.id)
+    emitted_before = copy.deepcopy(session.last_result)
+    prepared = sentinel._PreparedSentinel(
+        AutoDevResult.model_validate(_sentinel_payload_2566("other-2566"))
+    )
+    routed: list[object] = []
+
+    def _route(
+        _ticket_id: str, _session: Session, parsed: object
+    ) -> SentinelRouteOutcome:
+        routed.append(parsed)
+        return SentinelRouteOutcome(
+            rescued=False,
+            routed=True,
+            landed_terminal=False,
+            task_already_terminal=False,
+        )
+
+    monkeypatch.setattr(headless, "_apply_sentinel_to_task", _route)
+    monkeypatch.setattr(headless, "_harvest_last_result_through_door", _never_called)
+
+    resolution = headless._resolve_and_complete_headless_session(
+        state,
+        session,
+        context={},
+        cwd_value=str(session.worktree_path),
+        claude_session_id=_CSID_2566,
+        ticket_id_value=_TICKET_2566,
+        is_headless=True,
+        now=datetime(2026, 1, 1, tzinfo=UTC),
+        prepared=prepared,
+    )
+
+    assert resolution.rescued is False
+    assert len(routed) == 1
+    assert routed[0] is not prepared.sentinel
+    assert isinstance(routed[0], AutoDevResult)
+    assert routed[0].ticket_id == _TICKET_2566
+    assert session.last_result == emitted_before
+    assert session.status == SessionStatus.COMPLETED
+
+
+def test_signal_stop_prepared_sentinel_discarded_when_session_settles_before_lock(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2566: a session that settles between the lockless snapshot and the lock
+    is re-validated in-lock; the prepared value is dropped (idempotent no-op)."""
+    session = _seed_headless_scope_case(tmp_path, monkeypatch)
+    assert session.worktree_path is not None
+    real_prepare = locked._prepare_headless_sentinel
+    prepare_calls: list[object] = []
+
+    def _prepare_then_settle(*args: object, **kwargs: object) -> object:
+        prepare_calls.append(args)
+        prepared = real_prepare(*args, **kwargs)
+        state = load_state()
+        next(
+            s for s in state.sessions if s.id == session.id
+        ).status = SessionStatus.COMPLETED
+        save_state(state)
+        return prepared
+
+    monkeypatch.setattr(locked, "_prepare_headless_sentinel", _prepare_then_settle)
+    monkeypatch.setattr(headless, "_apply_sentinel_to_task", _never_called)
+
+    result = _invoke_hook_command(
+        "signal-stop", _stop_payload(session.worktree_path, session_id=_CSID_2566)
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(prepare_calls) == 1
+    updated = _reload(session.id)
+    assert updated.status == SessionStatus.COMPLETED
+    assert updated.last_result is None
+    assert updated.last_result_source is None
+    events = read_events(
+        consumer="test-2566-settled",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert not any(e.payload.get("session_id") == session.id for e in events)
