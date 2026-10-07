@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from review_monitor_lib.models import MonitoredPR
+    from review_monitor_lib.models import MonitoredPR, MonitorState
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -58,7 +58,6 @@ from review_monitor_lib.lifecycle import (
     cmd_slack_thread_cursor,
     cmd_update_slack_cursor,
 )
-from review_monitor_lib.models import MonitorState
 from review_monitor_lib.notify import (
     cmd_catchup,
     cmd_mark_escalated,
@@ -71,6 +70,7 @@ from review_monitor_lib.notify import (
 )
 from review_monitor_lib.shell import _get_our_username, _run_gh
 from review_monitor_lib.state import cmd_list_repos, load_state, save_state
+from review_monitor_lib.status import cmd_status, cmd_status_all
 from review_monitor_lib.threads import (
     _apply_status_transitions,
     _collect_deferred_threads_for_followup,
@@ -478,46 +478,6 @@ def cmd_check(pr_number: int, repo: str) -> dict[str, Any]:
     if pr.role == "reviewer" and has_delta_diff:
         result["delta_diff"] = delta_diff
     return result
-
-
-def cmd_status(repo: str, as_json: bool = False) -> None:
-    """Print the current monitor state.
-
-    If *as_json* is True, print the full state as JSON.
-    Otherwise print a human-readable table.
-    """
-    state = load_state(repo)
-    if as_json:
-        print(json.dumps(state.to_dict(), indent=2))
-        return
-
-    if not state.monitored:
-        print("No PRs currently monitored.")
-    else:
-        print(f"{'PR':<20} {'ROLE':<10} {'STATUS':<12} {'THREADS':<10} {'REVIEW'}")
-        print("-" * 70)
-        for key, pr in sorted(state.monitored.items()):
-            total = len(pr.thread_status)
-            addressed = sum(1 for ts in pr.thread_status.values() if ts.is_addressed)
-            threads_col = f"{addressed}/{total}" if total else "n/a"
-            review_col = "re-review" if pr.awaiting_rereview else ""
-            print(
-                f"{key:<20} {pr.role:<10} {pr.status:<12}"
-                f" {threads_col:<10} {review_col}"
-            )
-
-    print(f"\n{len(state.completed)} completed PR(s) in history.")
-
-
-def cmd_status_all() -> MonitorState:
-    """Load and merge state from all repo files in the central directory."""
-    repos = cmd_list_repos()
-    combined = MonitorState(monitored={}, completed={})
-    for repo in repos:
-        state = load_state(repo)
-        combined.monitored.update(state.monitored)
-        combined.completed.update(state.completed)
-    return combined
 
 
 # ---------------------------------------------------------------------------

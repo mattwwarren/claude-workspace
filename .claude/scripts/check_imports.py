@@ -29,6 +29,7 @@ GROUPS: list[tuple[str, list[str]]] = [
             "review_monitor_lib.notify",
             "review_monitor_lib.shell",
             "review_monitor_lib.state",
+            "review_monitor_lib.status",
             "review_monitor_lib.threads",
         ],
     ),
