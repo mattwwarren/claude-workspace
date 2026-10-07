@@ -1,0 +1,3036 @@
+{
+ "validation": {
+  "LaneConcurrencyOverride": {
+   "description": "Per-lane overrides from the concurrency override store.",
+   "properties": {
+    "max_parallel": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Max Parallel"
+    },
+    "paused": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Paused"
+    },
+    "consecutive_spawn_errors": {
+     "default": 0,
+     "title": "Consecutive Spawn Errors",
+     "type": "integer"
+    },
+    "lane_starved_notify_next_eligible_at": {
+     "anyOf": [
+      {
+       "format": "date-time",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Lane Starved Notify Next Eligible At"
+    }
+   },
+   "title": "LaneConcurrencyOverride",
+   "type": "object"
+  },
+  "ClientConcurrencyOverride": {
+   "description": "Per-client ceiling override from the concurrency override store.",
+   "properties": {
+    "ceiling": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Ceiling"
+    },
+    "consecutive_freshness_blocks": {
+     "default": 0,
+     "title": "Consecutive Freshness Blocks",
+     "type": "integer"
+    },
+    "dispatch_stale_notify_next_eligible_at": {
+     "anyOf": [
+      {
+       "format": "date-time",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Dispatch Stale Notify Next Eligible At"
+    }
+   },
+   "title": "ClientConcurrencyOverride",
+   "type": "object"
+  },
+  "ConcurrencyOverrides": {
+   "$defs": {
+    "ClientConcurrencyOverride": {
+     "description": "Per-client ceiling override from the concurrency override store.",
+     "properties": {
+      "ceiling": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ceiling"
+      },
+      "consecutive_freshness_blocks": {
+       "default": 0,
+       "title": "Consecutive Freshness Blocks",
+       "type": "integer"
+      },
+      "dispatch_stale_notify_next_eligible_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Dispatch Stale Notify Next Eligible At"
+      }
+     },
+     "title": "ClientConcurrencyOverride",
+     "type": "object"
+    },
+    "LaneConcurrencyOverride": {
+     "description": "Per-lane overrides from the concurrency override store.",
+     "properties": {
+      "max_parallel": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Max Parallel"
+      },
+      "paused": {
+       "anyOf": [
+        {
+         "type": "boolean"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Paused"
+      },
+      "consecutive_spawn_errors": {
+       "default": 0,
+       "title": "Consecutive Spawn Errors",
+       "type": "integer"
+      },
+      "lane_starved_notify_next_eligible_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Lane Starved Notify Next Eligible At"
+      }
+     },
+     "title": "LaneConcurrencyOverride",
+     "type": "object"
+    }
+   },
+   "description": "Runtime concurrency overrides persisted outside orchestrator.yaml.\n\nWritten by ``cw config concurrency set`` and ``cw lane pause/resume``.\nMerged with the declared config by ``load_effective_config()``.\nNOT added to schema.REGISTRY \u2014 test_schema.py must stay unchanged.",
+   "properties": {
+    "max_parallel_clients": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Max Parallel Clients"
+    },
+    "clients": {
+     "additionalProperties": {
+      "$ref": "#/$defs/ClientConcurrencyOverride"
+     },
+     "title": "Clients",
+     "type": "object"
+    },
+    "lanes": {
+     "additionalProperties": {
+      "$ref": "#/$defs/LaneConcurrencyOverride"
+     },
+     "title": "Lanes",
+     "type": "object"
+    }
+   },
+   "title": "ConcurrencyOverrides",
+   "type": "object"
+  },
+  "StageExecutorConfig": {
+   "$defs": {
+    "ReasoningEffort": {
+     "description": "Codex ``model_reasoning_effort`` levels a codex stage may pin.\n\nEmitted as ``-c model_reasoning_effort=<value>`` on every codex reviewer\nand fix invocation (see ``StageExecutorConfig.reasoning_effort``). A closed\nset so a typo fails at config load instead of surfacing mid-run as a\ndegraded review role. Not every model supports every level; an\nunsupported one is a codex runtime error, not a config error.",
+     "enum": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra"
+     ],
+     "title": "ReasoningEffort",
+     "type": "string"
+    }
+   },
+   "additionalProperties": false,
+   "description": "Executor configuration for a single pipeline stage (RFC 0005 A1, dormant).",
+   "properties": {
+    "backend": {
+     "default": "claude-native",
+     "title": "Backend",
+     "type": "string"
+    },
+    "model": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Model"
+    },
+    "endpoint": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Endpoint"
+    },
+    "reasoning_effort": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/ReasoningEffort"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": "high"
+    }
+   },
+   "title": "StageExecutorConfig",
+   "type": "object"
+  },
+  "StagePipelineConfig": {
+   "$defs": {
+    "ReasoningEffort": {
+     "description": "Codex ``model_reasoning_effort`` levels a codex stage may pin.\n\nEmitted as ``-c model_reasoning_effort=<value>`` on every codex reviewer\nand fix invocation (see ``StageExecutorConfig.reasoning_effort``). A closed\nset so a typo fails at config load instead of surfacing mid-run as a\ndegraded review role. Not every model supports every level; an\nunsupported one is a codex runtime error, not a config error.",
+     "enum": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra"
+     ],
+     "title": "ReasoningEffort",
+     "type": "string"
+    },
+    "Stage": {
+     "description": "RFC 0005 pipeline stage. Mutated live by dispatch via\n``_stage_advance_unchecked`` as a task moves through the pipeline.",
+     "enum": [
+      "harden",
+      "plan",
+      "impl",
+      "review",
+      "finalize"
+     ],
+     "title": "Stage",
+     "type": "string"
+    },
+    "StageExecutorConfig": {
+     "additionalProperties": false,
+     "description": "Executor configuration for a single pipeline stage (RFC 0005 A1, dormant).",
+     "properties": {
+      "backend": {
+       "default": "claude-native",
+       "title": "Backend",
+       "type": "string"
+      },
+      "model": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Model"
+      },
+      "endpoint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Endpoint"
+      },
+      "reasoning_effort": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/ReasoningEffort"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": "high"
+      }
+     },
+     "title": "StageExecutorConfig",
+     "type": "object"
+    }
+   },
+   "additionalProperties": false,
+   "description": "Per-client (or per-lane) pipeline configuration (RFC 0005 A1, dormant).",
+   "properties": {
+    "stages": {
+     "items": {
+      "$ref": "#/$defs/Stage"
+     },
+     "title": "Stages",
+     "type": "array"
+    },
+    "executors": {
+     "additionalProperties": {
+      "$ref": "#/$defs/StageExecutorConfig"
+     },
+     "propertyNames": {
+      "$ref": "#/$defs/Stage"
+     },
+     "title": "Executors",
+     "type": "object"
+    }
+   },
+   "title": "StagePipelineConfig",
+   "type": "object"
+  },
+  "LaneConfig": {
+   "$defs": {
+    "ReapPolicy": {
+     "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Requires operator action to clear.\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING, clean worktree.",
+     "enum": [
+      "signal_only",
+      "auto"
+     ],
+     "title": "ReapPolicy",
+     "type": "string"
+    },
+    "ReasoningEffort": {
+     "description": "Codex ``model_reasoning_effort`` levels a codex stage may pin.\n\nEmitted as ``-c model_reasoning_effort=<value>`` on every codex reviewer\nand fix invocation (see ``StageExecutorConfig.reasoning_effort``). A closed\nset so a typo fails at config load instead of surfacing mid-run as a\ndegraded review role. Not every model supports every level; an\nunsupported one is a codex runtime error, not a config error.",
+     "enum": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra"
+     ],
+     "title": "ReasoningEffort",
+     "type": "string"
+    },
+    "Stage": {
+     "description": "RFC 0005 pipeline stage. Mutated live by dispatch via\n``_stage_advance_unchecked`` as a task moves through the pipeline.",
+     "enum": [
+      "harden",
+      "plan",
+      "impl",
+      "review",
+      "finalize"
+     ],
+     "title": "Stage",
+     "type": "string"
+    },
+    "StageExecutorConfig": {
+     "additionalProperties": false,
+     "description": "Executor configuration for a single pipeline stage (RFC 0005 A1, dormant).",
+     "properties": {
+      "backend": {
+       "default": "claude-native",
+       "title": "Backend",
+       "type": "string"
+      },
+      "model": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Model"
+      },
+      "endpoint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Endpoint"
+      },
+      "reasoning_effort": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/ReasoningEffort"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": "high"
+      }
+     },
+     "title": "StageExecutorConfig",
+     "type": "object"
+    },
+    "StagePipelineConfig": {
+     "additionalProperties": false,
+     "description": "Per-client (or per-lane) pipeline configuration (RFC 0005 A1, dormant).",
+     "properties": {
+      "stages": {
+       "items": {
+        "$ref": "#/$defs/Stage"
+       },
+       "title": "Stages",
+       "type": "array"
+      },
+      "executors": {
+       "additionalProperties": {
+        "$ref": "#/$defs/StageExecutorConfig"
+       },
+       "propertyNames": {
+        "$ref": "#/$defs/Stage"
+       },
+       "title": "Executors",
+       "type": "object"
+      }
+     },
+     "title": "StagePipelineConfig",
+     "type": "object"
+    }
+   },
+   "additionalProperties": false,
+   "description": "Configuration for a named dispatch lane.\n\nLanes provide a scheduling boundary for TicketTasks.\nPhase 1 (data model only): no dispatch wiring yet \u2014 see #558.",
+   "properties": {
+    "name": {
+     "title": "Name",
+     "type": "string"
+    },
+    "max_parallel": {
+     "default": 1,
+     "title": "Max Parallel",
+     "type": "integer"
+    },
+    "priority": {
+     "default": 0,
+     "title": "Priority",
+     "type": "integer"
+    },
+    "paused": {
+     "default": false,
+     "title": "Paused",
+     "type": "boolean"
+    },
+    "description": {
+     "default": "",
+     "title": "Description",
+     "type": "string"
+    },
+    "reap_policy": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/ReapPolicy"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "busy_wait_guard_enabled": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Busy Wait Guard Enabled"
+    },
+    "busy_wait_guard_repeat_threshold": {
+     "anyOf": [
+      {
+       "minimum": 2,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Busy Wait Guard Repeat Threshold"
+    },
+    "busy_wait_guard_window_seconds": {
+     "anyOf": [
+      {
+       "minimum": 1,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Busy Wait Guard Window Seconds"
+    },
+    "disposition_drift_check_enabled": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Disposition Drift Check Enabled"
+    },
+    "subagent_spawn_guard_enabled": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Subagent Spawn Guard Enabled"
+    },
+    "background_tool_guard_enabled": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Background Tool Guard Enabled"
+    },
+    "pipeline": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/StagePipelineConfig"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "signoff": {
+     "anyOf": [
+      {
+       "const": "operator",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Signoff"
+    },
+    "finalize_gate": {
+     "anyOf": [
+      {
+       "const": "manual",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Finalize Gate"
+    },
+    "codex_fix_loop_enabled": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Codex Fix Loop Enabled"
+    },
+    "attempt_ceiling": {
+     "anyOf": [
+      {
+       "const": false,
+       "type": "boolean"
+      },
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Attempt Ceiling"
+    },
+    "gate_recipes": {
+     "anyOf": [
+      {
+       "additionalProperties": {
+        "type": "boolean"
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Gate Recipes"
+    },
+    "review_recipes": {
+     "anyOf": [
+      {
+       "additionalProperties": {
+        "type": "boolean"
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Review Recipes"
+    },
+    "park_on_abandoned_exit": {
+     "anyOf": [
+      {
+       "additionalProperties": {
+        "type": "boolean"
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Park On Abandoned Exit"
+    },
+    "codex_review_tiers": {
+     "anyOf": [
+      {
+       "additionalProperties": {
+        "type": "boolean"
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Codex Review Tiers"
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "title": "LaneConfig",
+   "type": "object"
+  },
+  "OperatorChannelForward": {
+   "$defs": {
+    "LivenessBucket": {
+     "description": "RFC 0008 W2 staleness bucket, latched onto ``Session``.\n\nThe bucketed age is transcript-mtime age for a surface-backed session, or\ntime since ``started_at`` for an unobservable one with no transcript at all\n(#2417); ``session.liveness_changed`` names which via ``staleness_source``.\n\nClosed 4-value set: per-stage overrides\n(``OrchestratorConfig.liveness_first_bucket_by_stage``) move the\nentry-point threshold for a stage, but never rename or add labels.\nDownstream consumers of ``session.liveness_changed`` match these\nliterals directly without reading config. See GitHub #1001.",
+     "enum": [
+      "live",
+      "stale_15m",
+      "stale_30m",
+      "stale_45m"
+     ],
+     "title": "LivenessBucket",
+     "type": "string"
+    },
+    "OrchestratorEventType": {
+     "description": "Event types for the orchestrator-level event bus.\n\nCovers PR lifecycle, ticket queue, and cross-session coordination.",
+     "enum": [
+      "ticket.enqueued",
+      "session.spawned",
+      "session.completed",
+      "session.timed_out",
+      "session.needs_attention",
+      "session.message_sent",
+      "ticket.needs_sync",
+      "stage.entered",
+      "stage.errored",
+      "pr.registered",
+      "pr.ci_failed",
+      "pr.review_received",
+      "pr.mergeable",
+      "pr.merged",
+      "dispatch.tick",
+      "dispatch.loop_exited",
+      "dispatch.usage_limit_cleared",
+      "dispatch.usage_limit_armed",
+      "session.phantom_reverted",
+      "session.salvage_skipped",
+      "session.reap_proposed",
+      "session.reap_authorized",
+      "session.spawn_unregistered",
+      "lane.created",
+      "lane.paused",
+      "lane.resumed",
+      "focus.set",
+      "focus.cleared",
+      "ticket.moved",
+      "ticket.reprioritized",
+      "ticket.approved",
+      "plan.approval_revoked",
+      "plan.approval_body_drift_warned",
+      "plan.draft_promoted",
+      "ticket.approval_failed",
+      "ticket.requeued",
+      "ticket.unblocked",
+      "session.stage_timed_out_retried",
+      "wave.collision",
+      "task.transition",
+      "task.stage_changed",
+      "task.deleted",
+      "session.liveness_changed",
+      "guard.busy_wait_blocked",
+      "guard.background_tool_refused",
+      "concierge.recovered",
+      "operator.escalation",
+      "sentinel.stage_mismatch",
+      "session.park_vetoed",
+      "concierge.recovery_backoff_armed",
+      "concierge.hook_context_conflict_refused",
+      "gate.auto_approved",
+      "gate.auto_approve_failed",
+      "gate.auto_approve_held",
+      "pr.action_taken",
+      "pr.action_failed",
+      "session.sentinel_stage_mismatch_vetoed",
+      "session.sentinel_liveness_vetoed",
+      "sentinel.blocked_result_requeued",
+      "gate.ssh_key_bypassed",
+      "gate.disk_pressure_bypassed",
+      "dispatch.scope_routing_decision",
+      "requeue.review_delivery_degraded",
+      "review.finding_voided",
+      "review.treadmill_detected",
+      "review.fix_loop_divergence_detected",
+      "review.finding_disposition_suppressed",
+      "review.finding_claim_shadowed",
+      "review.finding_settled",
+      "review.finding_disposition_reverted",
+      "review.finding_disposition_stale",
+      "watched_pr.collision",
+      "sentinel.race_miss",
+      "worktree.fast_forwarded",
+      "review.fixed_disposition_downgraded",
+      "session.result_emitted",
+      "daemon.leaked_worker_stopped"
+     ],
+     "title": "OrchestratorEventType",
+     "type": "string"
+    },
+    "QueueItemStatus": {
+     "enum": [
+      "pending",
+      "running",
+      "completed",
+      "failed",
+      "cancelled",
+      "blocked_on_user",
+      "awaiting_operator_signoff"
+     ],
+     "title": "QueueItemStatus",
+     "type": "string"
+    }
+   },
+   "additionalProperties": false,
+   "description": "Declarative forward-set for the cw-operator SSE channel (RFC 0008 W3).\n\nConsumed by ``cw.cw_operator_events``'s filter engine, which additionally\napplies the two sub-condition rules referenced above (task.transition's\n``new_status`` and session.liveness_changed's ``new_bucket`` are compared\nagainst ``task_transition_statuses``/``liveness_min_bucket`` respectively;\nevery other admitted type in ``event_types`` forwards unconditionally).\nNo coercion validator by design -- see the field docstring on\n``OrchestratorConfig.operator_channel_forward``. See GitHub #1002.",
+   "properties": {
+    "event_types": {
+     "items": {
+      "$ref": "#/$defs/OrchestratorEventType"
+     },
+     "title": "Event Types",
+     "type": "array",
+     "uniqueItems": true
+    },
+    "task_transition_statuses": {
+     "items": {
+      "$ref": "#/$defs/QueueItemStatus"
+     },
+     "title": "Task Transition Statuses",
+     "type": "array",
+     "uniqueItems": true
+    },
+    "liveness_min_bucket": {
+     "$ref": "#/$defs/LivenessBucket",
+     "default": "stale_30m"
+    }
+   },
+   "title": "OperatorChannelForward",
+   "type": "object"
+  },
+  "OrchestratorConfig": {
+   "$defs": {
+    "LivenessBucket": {
+     "description": "RFC 0008 W2 staleness bucket, latched onto ``Session``.\n\nThe bucketed age is transcript-mtime age for a surface-backed session, or\ntime since ``started_at`` for an unobservable one with no transcript at all\n(#2417); ``session.liveness_changed`` names which via ``staleness_source``.\n\nClosed 4-value set: per-stage overrides\n(``OrchestratorConfig.liveness_first_bucket_by_stage``) move the\nentry-point threshold for a stage, but never rename or add labels.\nDownstream consumers of ``session.liveness_changed`` match these\nliterals directly without reading config. See GitHub #1001.",
+     "enum": [
+      "live",
+      "stale_15m",
+      "stale_30m",
+      "stale_45m"
+     ],
+     "title": "LivenessBucket",
+     "type": "string"
+    },
+    "OperatorChannelForward": {
+     "additionalProperties": false,
+     "description": "Declarative forward-set for the cw-operator SSE channel (RFC 0008 W3).\n\nConsumed by ``cw.cw_operator_events``'s filter engine, which additionally\napplies the two sub-condition rules referenced above (task.transition's\n``new_status`` and session.liveness_changed's ``new_bucket`` are compared\nagainst ``task_transition_statuses``/``liveness_min_bucket`` respectively;\nevery other admitted type in ``event_types`` forwards unconditionally).\nNo coercion validator by design -- see the field docstring on\n``OrchestratorConfig.operator_channel_forward``. See GitHub #1002.",
+     "properties": {
+      "event_types": {
+       "items": {
+        "$ref": "#/$defs/OrchestratorEventType"
+       },
+       "title": "Event Types",
+       "type": "array",
+       "uniqueItems": true
+      },
+      "task_transition_statuses": {
+       "items": {
+        "$ref": "#/$defs/QueueItemStatus"
+       },
+       "title": "Task Transition Statuses",
+       "type": "array",
+       "uniqueItems": true
+      },
+      "liveness_min_bucket": {
+       "$ref": "#/$defs/LivenessBucket",
+       "default": "stale_30m"
+      }
+     },
+     "title": "OperatorChannelForward",
+     "type": "object"
+    },
+    "OrchestratorEventType": {
+     "description": "Event types for the orchestrator-level event bus.\n\nCovers PR lifecycle, ticket queue, and cross-session coordination.",
+     "enum": [
+      "ticket.enqueued",
+      "session.spawned",
+      "session.completed",
+      "session.timed_out",
+      "session.needs_attention",
+      "session.message_sent",
+      "ticket.needs_sync",
+      "stage.entered",
+      "stage.errored",
+      "pr.registered",
+      "pr.ci_failed",
+      "pr.review_received",
+      "pr.mergeable",
+      "pr.merged",
+      "dispatch.tick",
+      "dispatch.loop_exited",
+      "dispatch.usage_limit_cleared",
+      "dispatch.usage_limit_armed",
+      "session.phantom_reverted",
+      "session.salvage_skipped",
+      "session.reap_proposed",
+      "session.reap_authorized",
+      "session.spawn_unregistered",
+      "lane.created",
+      "lane.paused",
+      "lane.resumed",
+      "focus.set",
+      "focus.cleared",
+      "ticket.moved",
+      "ticket.reprioritized",
+      "ticket.approved",
+      "plan.approval_revoked",
+      "plan.approval_body_drift_warned",
+      "plan.draft_promoted",
+      "ticket.approval_failed",
+      "ticket.requeued",
+      "ticket.unblocked",
+      "session.stage_timed_out_retried",
+      "wave.collision",
+      "task.transition",
+      "task.stage_changed",
+      "task.deleted",
+      "session.liveness_changed",
+      "guard.busy_wait_blocked",
+      "guard.background_tool_refused",
+      "concierge.recovered",
+      "operator.escalation",
+      "sentinel.stage_mismatch",
+      "session.park_vetoed",
+      "concierge.recovery_backoff_armed",
+      "concierge.hook_context_conflict_refused",
+      "gate.auto_approved",
+      "gate.auto_approve_failed",
+      "gate.auto_approve_held",
+      "pr.action_taken",
+      "pr.action_failed",
+      "session.sentinel_stage_mismatch_vetoed",
+      "session.sentinel_liveness_vetoed",
+      "sentinel.blocked_result_requeued",
+      "gate.ssh_key_bypassed",
+      "gate.disk_pressure_bypassed",
+      "dispatch.scope_routing_decision",
+      "requeue.review_delivery_degraded",
+      "review.finding_voided",
+      "review.treadmill_detected",
+      "review.fix_loop_divergence_detected",
+      "review.finding_disposition_suppressed",
+      "review.finding_claim_shadowed",
+      "review.finding_settled",
+      "review.finding_disposition_reverted",
+      "review.finding_disposition_stale",
+      "watched_pr.collision",
+      "sentinel.race_miss",
+      "worktree.fast_forwarded",
+      "review.fixed_disposition_downgraded",
+      "session.result_emitted",
+      "daemon.leaked_worker_stopped"
+     ],
+     "title": "OrchestratorEventType",
+     "type": "string"
+    },
+    "QueueItemStatus": {
+     "enum": [
+      "pending",
+      "running",
+      "completed",
+      "failed",
+      "cancelled",
+      "blocked_on_user",
+      "awaiting_operator_signoff"
+     ],
+     "title": "QueueItemStatus",
+     "type": "string"
+    },
+    "ReapPolicy": {
+     "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Requires operator action to clear.\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING, clean worktree.",
+     "enum": [
+      "signal_only",
+      "auto"
+     ],
+     "title": "ReapPolicy",
+     "type": "string"
+    },
+    "Stage": {
+     "description": "RFC 0005 pipeline stage. Mutated live by dispatch via\n``_stage_advance_unchecked`` as a task moves through the pipeline.",
+     "enum": [
+      "harden",
+      "plan",
+      "impl",
+      "review",
+      "finalize"
+     ],
+     "title": "Stage",
+     "type": "string"
+    }
+   },
+   "additionalProperties": false,
+   "description": "Parsed contents of orchestrator.yaml.\n\n``default_max_parallel`` is the cap applied to any client missing from\n``per_client_max_parallel``. The legacy yaml layout placed this value\nunder ``per_client_max_parallel.default``, but that key was treated as\na literal client name and silently ignored (see GitHub issue #145).\nA model validator migrates any stray ``default`` key into the new\ntop-level field so old configs keep working with a one-time warning.",
+   "properties": {
+    "tick_interval_seconds": {
+     "default": 30,
+     "title": "Tick Interval Seconds",
+     "type": "integer"
+    },
+    "usage_limit_backoff_seconds": {
+     "default": 3600,
+     "title": "Usage Limit Backoff Seconds",
+     "type": "integer"
+    },
+    "per_client_max_parallel": {
+     "additionalProperties": {
+      "type": "integer"
+     },
+     "title": "Per Client Max Parallel",
+     "type": "object"
+    },
+    "default_max_parallel": {
+     "default": 1,
+     "title": "Default Max Parallel",
+     "type": "integer"
+    },
+    "linear_prefix_map": {
+     "additionalProperties": {
+      "type": "string"
+     },
+     "title": "Linear Prefix Map",
+     "type": "object"
+    },
+    "operator_github_login_by_repo": {
+     "additionalProperties": {
+      "type": "string"
+     },
+     "title": "Operator Github Login By Repo",
+     "type": "object"
+    },
+    "global_attempt_ceiling": {
+     "default": 10,
+     "title": "Global Attempt Ceiling",
+     "type": "integer"
+    },
+    "lane_circuit_breaker_threshold": {
+     "default": 3,
+     "title": "Lane Circuit Breaker Threshold",
+     "type": "integer"
+    },
+    "lane_starved_notify_interval_minutes": {
+     "default": 15,
+     "title": "Lane Starved Notify Interval Minutes",
+     "type": "integer"
+    },
+    "dispatch_stale_notify_interval_minutes": {
+     "default": 15,
+     "title": "Dispatch Stale Notify Interval Minutes",
+     "type": "integer"
+    },
+    "diagnostics_retention_hours": {
+     "default": 24,
+     "title": "Diagnostics Retention Hours",
+     "type": "integer"
+    },
+    "freshness_block_attention_threshold": {
+     "default": 5,
+     "title": "Freshness Block Attention Threshold",
+     "type": "integer"
+    },
+    "sentinel_mismatch_veto_cap": {
+     "default": 2,
+     "title": "Sentinel Mismatch Veto Cap",
+     "type": "integer"
+    },
+    "review_recipe_repeat_fire_threshold": {
+     "default": 5,
+     "title": "Review Recipe Repeat Fire Threshold",
+     "type": "integer"
+    },
+    "review_recipe_repeat_fire_window_minutes": {
+     "default": 20,
+     "title": "Review Recipe Repeat Fire Window Minutes",
+     "type": "integer"
+    },
+    "inbox_size_warn_bytes": {
+     "default": 5000000,
+     "title": "Inbox Size Warn Bytes",
+     "type": "integer"
+    },
+    "inbox_line_count_warn": {
+     "default": 15000,
+     "title": "Inbox Line Count Warn",
+     "type": "integer"
+    },
+    "sessions_size_warn_bytes": {
+     "default": 15000000,
+     "title": "Sessions Size Warn Bytes",
+     "type": "integer"
+    },
+    "event_inbox_auto_prune_enabled": {
+     "default": true,
+     "title": "Event Inbox Auto Prune Enabled",
+     "type": "boolean"
+    },
+    "event_inbox_retention_bytes": {
+     "default": 5000000,
+     "title": "Event Inbox Retention Bytes",
+     "type": "integer"
+    },
+    "event_inbox_retention_count": {
+     "default": 2000,
+     "title": "Event Inbox Retention Count",
+     "type": "integer"
+    },
+    "reap_policy": {
+     "$ref": "#/$defs/ReapPolicy",
+     "default": "signal_only"
+    },
+    "busy_wait_guard_enabled": {
+     "default": true,
+     "title": "Busy Wait Guard Enabled",
+     "type": "boolean"
+    },
+    "busy_wait_guard_repeat_threshold": {
+     "default": 3,
+     "minimum": 2,
+     "title": "Busy Wait Guard Repeat Threshold",
+     "type": "integer"
+    },
+    "busy_wait_guard_window_seconds": {
+     "default": 300,
+     "minimum": 1,
+     "title": "Busy Wait Guard Window Seconds",
+     "type": "integer"
+    },
+    "disposition_drift_check_enabled": {
+     "default": true,
+     "title": "Disposition Drift Check Enabled",
+     "type": "boolean"
+    },
+    "subagent_spawn_guard_enabled": {
+     "default": true,
+     "title": "Subagent Spawn Guard Enabled",
+     "type": "boolean"
+    },
+    "background_tool_guard_enabled": {
+     "default": true,
+     "title": "Background Tool Guard Enabled",
+     "type": "boolean"
+    },
+    "sentinel_unrouted_check_seconds": {
+     "default": 300,
+     "title": "Sentinel Unrouted Check Seconds",
+     "type": "integer"
+    },
+    "max_parallel_clients": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Max Parallel Clients"
+    },
+    "per_client_ceiling": {
+     "additionalProperties": {
+      "type": "integer"
+     },
+     "title": "Per Client Ceiling",
+     "type": "object"
+    },
+    "default_ceiling": {
+     "default": 1,
+     "title": "Default Ceiling",
+     "type": "integer"
+    },
+    "host_session_budget": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Host Session Budget"
+    },
+    "pr_hydration_interval_seconds": {
+     "default": 150,
+     "title": "Pr Hydration Interval Seconds",
+     "type": "integer"
+    },
+    "default_signoff": {
+     "default": "none",
+     "enum": [
+      "none",
+      "operator"
+     ],
+     "title": "Default Signoff",
+     "type": "string"
+    },
+    "default_finalize_gate": {
+     "default": "auto",
+     "enum": [
+      "auto",
+      "manual"
+     ],
+     "title": "Default Finalize Gate",
+     "type": "string"
+    },
+    "default_codex_fix_loop_enabled": {
+     "default": false,
+     "title": "Default Codex Fix Loop Enabled",
+     "type": "boolean"
+    },
+    "codex_claim_suppression_enabled": {
+     "default": false,
+     "title": "Codex Claim Suppression Enabled",
+     "type": "boolean"
+    },
+    "liveness_buckets_minutes": {
+     "items": {
+      "type": "integer"
+     },
+     "title": "Liveness Buckets Minutes",
+     "type": "array"
+    },
+    "liveness_first_bucket_by_stage": {
+     "additionalProperties": {
+      "type": "integer"
+     },
+     "propertyNames": {
+      "$ref": "#/$defs/Stage"
+     },
+     "title": "Liveness First Bucket By Stage",
+     "type": "object"
+    },
+    "liveness_attention_renotify_interval_minutes": {
+     "default": 60,
+     "title": "Liveness Attention Renotify Interval Minutes",
+     "type": "integer"
+    },
+    "fix_loop_await_deadline_minutes": {
+     "default": 30,
+     "minimum": 1,
+     "title": "Fix Loop Await Deadline Minutes",
+     "type": "integer"
+    },
+    "agent_spawn_verify_poll_seconds": {
+     "default": 20,
+     "minimum": 1,
+     "title": "Agent Spawn Verify Poll Seconds",
+     "type": "integer"
+    },
+    "agent_spawn_verify_poll_interval_seconds": {
+     "default": 2,
+     "minimum": 1,
+     "title": "Agent Spawn Verify Poll Interval Seconds",
+     "type": "integer"
+    },
+    "operator_channel_forward": {
+     "$ref": "#/$defs/OperatorChannelForward"
+    },
+    "concierge_enabled": {
+     "default": false,
+     "title": "Concierge Enabled",
+     "type": "boolean"
+    },
+    "concierge_recoveries": {
+     "additionalProperties": {
+      "type": "boolean"
+     },
+     "title": "Concierge Recoveries",
+     "type": "object"
+    },
+    "gate_recipes_enabled": {
+     "default": true,
+     "title": "Gate Recipes Enabled",
+     "type": "boolean"
+    },
+    "review_recipes_enabled": {
+     "default": false,
+     "title": "Review Recipes Enabled",
+     "type": "boolean"
+    },
+    "park_on_abandoned_exit_enabled": {
+     "default": false,
+     "title": "Park On Abandoned Exit Enabled",
+     "type": "boolean"
+    },
+    "ssh_key_gate_enabled": {
+     "default": true,
+     "title": "Ssh Key Gate Enabled",
+     "type": "boolean"
+    },
+    "disk_pressure_gate_enabled": {
+     "default": true,
+     "title": "Disk Pressure Gate Enabled",
+     "type": "boolean"
+    },
+    "disk_pressure_min_free_gb": {
+     "default": 5.0,
+     "title": "Disk Pressure Min Free Gb",
+     "type": "number"
+    },
+    "disk_pressure_min_free_inodes": {
+     "default": 50000,
+     "title": "Disk Pressure Min Free Inodes",
+     "type": "number"
+    },
+    "disk_pressure_min_free_inode_fraction": {
+     "default": 0.05,
+     "title": "Disk Pressure Min Free Inode Fraction",
+     "type": "number"
+    },
+    "pr_gate_enabled": {
+     "default": true,
+     "title": "Pr Gate Enabled",
+     "type": "boolean"
+    },
+    "occupancy_gate_enabled": {
+     "default": true,
+     "title": "Occupancy Gate Enabled",
+     "type": "boolean"
+    },
+    "disallowed_mcp_tools": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Disallowed Mcp Tools",
+     "type": "array"
+    },
+    "attention_digest_window_tz": {
+     "default": "America/New_York",
+     "title": "Attention Digest Window Tz",
+     "type": "string"
+    },
+    "attention_digest_window_start_hour": {
+     "default": 8,
+     "title": "Attention Digest Window Start Hour",
+     "type": "integer"
+    },
+    "attention_digest_window_end_hour": {
+     "default": 20,
+     "title": "Attention Digest Window End Hour",
+     "type": "integer"
+    },
+    "attention_digest_idle_floor_seconds": {
+     "default": 60,
+     "title": "Attention Digest Idle Floor Seconds",
+     "type": "integer"
+    }
+   },
+   "title": "OrchestratorConfig",
+   "type": "object"
+  },
+  "HookRule": {
+   "description": "A user-defined shell command to run when a lifecycle event fires.",
+   "properties": {
+    "event_type": {
+     "title": "Event Type",
+     "type": "string"
+    },
+    "command": {
+     "title": "Command",
+     "type": "string"
+    },
+    "description": {
+     "default": "",
+     "title": "Description",
+     "type": "string"
+    }
+   },
+   "required": [
+    "event_type",
+    "command"
+   ],
+   "title": "HookRule",
+   "type": "object"
+  },
+  "EventHookRegistry": {
+   "$defs": {
+    "HookRule": {
+     "description": "A user-defined shell command to run when a lifecycle event fires.",
+     "properties": {
+      "event_type": {
+       "title": "Event Type",
+       "type": "string"
+      },
+      "command": {
+       "title": "Command",
+       "type": "string"
+      },
+      "description": {
+       "default": "",
+       "title": "Description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "event_type",
+      "command"
+     ],
+     "title": "HookRule",
+     "type": "object"
+    }
+   },
+   "description": "Persisted event hook rules for a client.",
+   "properties": {
+    "rules": {
+     "items": {
+      "$ref": "#/$defs/HookRule"
+     },
+     "title": "Rules",
+     "type": "array"
+    }
+   },
+   "title": "EventHookRegistry",
+   "type": "object"
+  },
+  "ClientConfig": {
+   "$defs": {
+    "LaneConfig": {
+     "additionalProperties": false,
+     "description": "Configuration for a named dispatch lane.\n\nLanes provide a scheduling boundary for TicketTasks.\nPhase 1 (data model only): no dispatch wiring yet \u2014 see #558.",
+     "properties": {
+      "name": {
+       "title": "Name",
+       "type": "string"
+      },
+      "max_parallel": {
+       "default": 1,
+       "title": "Max Parallel",
+       "type": "integer"
+      },
+      "priority": {
+       "default": 0,
+       "title": "Priority",
+       "type": "integer"
+      },
+      "paused": {
+       "default": false,
+       "title": "Paused",
+       "type": "boolean"
+      },
+      "description": {
+       "default": "",
+       "title": "Description",
+       "type": "string"
+      },
+      "reap_policy": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/ReapPolicy"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "busy_wait_guard_enabled": {
+       "anyOf": [
+        {
+         "type": "boolean"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Busy Wait Guard Enabled"
+      },
+      "busy_wait_guard_repeat_threshold": {
+       "anyOf": [
+        {
+         "minimum": 2,
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Busy Wait Guard Repeat Threshold"
+      },
+      "busy_wait_guard_window_seconds": {
+       "anyOf": [
+        {
+         "minimum": 1,
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Busy Wait Guard Window Seconds"
+      },
+      "disposition_drift_check_enabled": {
+       "anyOf": [
+        {
+         "type": "boolean"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Disposition Drift Check Enabled"
+      },
+      "subagent_spawn_guard_enabled": {
+       "anyOf": [
+        {
+         "type": "boolean"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Subagent Spawn Guard Enabled"
+      },
+      "background_tool_guard_enabled": {
+       "anyOf": [
+        {
+         "type": "boolean"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Background Tool Guard Enabled"
+      },
+      "pipeline": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/StagePipelineConfig"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "signoff": {
+       "anyOf": [
+        {
+         "const": "operator",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Signoff"
+      },
+      "finalize_gate": {
+       "anyOf": [
+        {
+         "const": "manual",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Finalize Gate"
+      },
+      "codex_fix_loop_enabled": {
+       "anyOf": [
+        {
+         "type": "boolean"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Codex Fix Loop Enabled"
+      },
+      "attempt_ceiling": {
+       "anyOf": [
+        {
+         "const": false,
+         "type": "boolean"
+        },
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Attempt Ceiling"
+      },
+      "gate_recipes": {
+       "anyOf": [
+        {
+         "additionalProperties": {
+          "type": "boolean"
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Gate Recipes"
+      },
+      "review_recipes": {
+       "anyOf": [
+        {
+         "additionalProperties": {
+          "type": "boolean"
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Review Recipes"
+      },
+      "park_on_abandoned_exit": {
+       "anyOf": [
+        {
+         "additionalProperties": {
+          "type": "boolean"
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Park On Abandoned Exit"
+      },
+      "codex_review_tiers": {
+       "anyOf": [
+        {
+         "additionalProperties": {
+          "type": "boolean"
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Codex Review Tiers"
+      }
+     },
+     "required": [
+      "name"
+     ],
+     "title": "LaneConfig",
+     "type": "object"
+    },
+    "ReapPolicy": {
+     "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Requires operator action to clear.\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING, clean worktree.",
+     "enum": [
+      "signal_only",
+      "auto"
+     ],
+     "title": "ReapPolicy",
+     "type": "string"
+    },
+    "ReasoningEffort": {
+     "description": "Codex ``model_reasoning_effort`` levels a codex stage may pin.\n\nEmitted as ``-c model_reasoning_effort=<value>`` on every codex reviewer\nand fix invocation (see ``StageExecutorConfig.reasoning_effort``). A closed\nset so a typo fails at config load instead of surfacing mid-run as a\ndegraded review role. Not every model supports every level; an\nunsupported one is a codex runtime error, not a config error.",
+     "enum": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra"
+     ],
+     "title": "ReasoningEffort",
+     "type": "string"
+    },
+    "SessionPurpose": {
+     "enum": [
+      "impl",
+      "idea",
+      "debt",
+      "orchestrate",
+      "fix"
+     ],
+     "title": "SessionPurpose",
+     "type": "string"
+    },
+    "Stage": {
+     "description": "RFC 0005 pipeline stage. Mutated live by dispatch via\n``_stage_advance_unchecked`` as a task moves through the pipeline.",
+     "enum": [
+      "harden",
+      "plan",
+      "impl",
+      "review",
+      "finalize"
+     ],
+     "title": "Stage",
+     "type": "string"
+    },
+    "StageExecutorConfig": {
+     "additionalProperties": false,
+     "description": "Executor configuration for a single pipeline stage (RFC 0005 A1, dormant).",
+     "properties": {
+      "backend": {
+       "default": "claude-native",
+       "title": "Backend",
+       "type": "string"
+      },
+      "model": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Model"
+      },
+      "endpoint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Endpoint"
+      },
+      "reasoning_effort": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/ReasoningEffort"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": "high"
+      }
+     },
+     "title": "StageExecutorConfig",
+     "type": "object"
+    },
+    "StagePipelineConfig": {
+     "additionalProperties": false,
+     "description": "Per-client (or per-lane) pipeline configuration (RFC 0005 A1, dormant).",
+     "properties": {
+      "stages": {
+       "items": {
+        "$ref": "#/$defs/Stage"
+       },
+       "title": "Stages",
+       "type": "array"
+      },
+      "executors": {
+       "additionalProperties": {
+        "$ref": "#/$defs/StageExecutorConfig"
+       },
+       "propertyNames": {
+        "$ref": "#/$defs/Stage"
+       },
+       "title": "Executors",
+       "type": "object"
+      }
+     },
+     "title": "StagePipelineConfig",
+     "type": "object"
+    },
+    "TrackerMcpGateConfig": {
+     "additionalProperties": false,
+     "description": "Per-client opt-in for the #2442 pre-dispatch tracker-MCP gate.\n\nBefore a PLAN/IMPL-stage PENDING ticket is claimed, dispatch reads\n``settings_path`` from the ticket's own branch (``git show``, no checkout)\nand parks the ticket when that file's ``enabledPlugins`` verifiably lacks\n``plugin_id`` -- a worker spawned there could not reach the tracker MCP.\n\n``plugin_id`` is the exact ``enabledPlugins`` key the tracker's MCP plugin\nregisters under (e.g. ``\"linear@acme-marketplace\"``); matching is exact,\nwith no ``@``-suffix stripping and no case folding. Anything ambiguous --\nno branch yet, no settings file, malformed JSON, an unrecognized\n``enabledPlugins`` shape -- fails open (the spawn proceeds).",
+     "properties": {
+      "enabled": {
+       "default": false,
+       "title": "Enabled",
+       "type": "boolean"
+      },
+      "plugin_id": {
+       "title": "Plugin Id",
+       "type": "string"
+      },
+      "settings_path": {
+       "default": ".claude/settings.json",
+       "title": "Settings Path",
+       "type": "string"
+      }
+     },
+     "required": [
+      "plugin_id"
+     ],
+     "title": "TrackerMcpGateConfig",
+     "type": "object"
+    }
+   },
+   "additionalProperties": false,
+   "description": "Configuration for a client workspace.\n\nTwo modes:\n- **Legacy**: ``workspace_path`` points to an existing clone.\n- **Worktree**: ``repo_path`` + ``branch`` are set.  ``workspace_path``\n  is auto-set to ``repo_path`` as a sentinel; the real worktree path is\n  resolved at session start time.",
+   "properties": {
+    "name": {
+     "title": "Name",
+     "type": "string"
+    },
+    "workspace_path": {
+     "default": null,
+     "format": "path",
+     "title": "Workspace Path",
+     "type": "string"
+    },
+    "repo_path": {
+     "anyOf": [
+      {
+       "format": "path",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Repo Path"
+    },
+    "branch": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Branch"
+    },
+    "default_branch": {
+     "default": "main",
+     "title": "Default Branch",
+     "type": "string"
+    },
+    "feature_branch_prefix": {
+     "default": "dev",
+     "title": "Feature Branch Prefix",
+     "type": "string"
+    },
+    "worktree_base": {
+     "anyOf": [
+      {
+       "format": "path",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Worktree Base"
+    },
+    "auto_purposes": {
+     "items": {
+      "$ref": "#/$defs/SessionPurpose"
+     },
+     "title": "Auto Purposes",
+     "type": "array"
+    },
+    "purpose_prompts": {
+     "additionalProperties": {
+      "type": "string"
+     },
+     "title": "Purpose Prompts",
+     "type": "object"
+    },
+    "worker_model": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Worker Model"
+    },
+    "quality_gate_commands": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Quality Gate Commands"
+    },
+    "merge_gate_ignore_paths": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Merge Gate Ignore Paths",
+     "type": "array"
+    },
+    "operator_github_login": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Operator Github Login"
+    },
+    "occupancy_gate_enabled": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Occupancy Gate Enabled"
+    },
+    "blocked_result_requeue_enabled": {
+     "default": false,
+     "title": "Blocked Result Requeue Enabled",
+     "type": "boolean"
+    },
+    "sentinel_mismatch_veto_enabled": {
+     "default": false,
+     "title": "Sentinel Mismatch Veto Enabled",
+     "type": "boolean"
+    },
+    "tracker_mcp_gate": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/TrackerMcpGateConfig"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "auto_background_threshold": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Auto Background Threshold"
+    },
+    "notifications": {
+     "default": false,
+     "title": "Notifications",
+     "type": "boolean"
+    },
+    "lanes": {
+     "items": {
+      "$ref": "#/$defs/LaneConfig"
+     },
+     "title": "Lanes",
+     "type": "array"
+    },
+    "pipeline": {
+     "$ref": "#/$defs/StagePipelineConfig"
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "title": "ClientConfig",
+   "type": "object"
+  }
+ },
+ "serialization": {
+  "OrchestratorConfig": {
+   "$defs": {
+    "LivenessBucket": {
+     "description": "RFC 0008 W2 staleness bucket, latched onto ``Session``.\n\nThe bucketed age is transcript-mtime age for a surface-backed session, or\ntime since ``started_at`` for an unobservable one with no transcript at all\n(#2417); ``session.liveness_changed`` names which via ``staleness_source``.\n\nClosed 4-value set: per-stage overrides\n(``OrchestratorConfig.liveness_first_bucket_by_stage``) move the\nentry-point threshold for a stage, but never rename or add labels.\nDownstream consumers of ``session.liveness_changed`` match these\nliterals directly without reading config. See GitHub #1001.",
+     "enum": [
+      "live",
+      "stale_15m",
+      "stale_30m",
+      "stale_45m"
+     ],
+     "title": "LivenessBucket",
+     "type": "string"
+    },
+    "OperatorChannelForward": {
+     "additionalProperties": false,
+     "description": "Declarative forward-set for the cw-operator SSE channel (RFC 0008 W3).\n\nConsumed by ``cw.cw_operator_events``'s filter engine, which additionally\napplies the two sub-condition rules referenced above (task.transition's\n``new_status`` and session.liveness_changed's ``new_bucket`` are compared\nagainst ``task_transition_statuses``/``liveness_min_bucket`` respectively;\nevery other admitted type in ``event_types`` forwards unconditionally).\nNo coercion validator by design -- see the field docstring on\n``OrchestratorConfig.operator_channel_forward``. See GitHub #1002.",
+     "properties": {
+      "event_types": {
+       "items": {
+        "$ref": "#/$defs/OrchestratorEventType"
+       },
+       "title": "Event Types",
+       "type": "array",
+       "uniqueItems": true
+      },
+      "task_transition_statuses": {
+       "items": {
+        "$ref": "#/$defs/QueueItemStatus"
+       },
+       "title": "Task Transition Statuses",
+       "type": "array",
+       "uniqueItems": true
+      },
+      "liveness_min_bucket": {
+       "$ref": "#/$defs/LivenessBucket",
+       "default": "stale_30m"
+      }
+     },
+     "title": "OperatorChannelForward",
+     "type": "object"
+    },
+    "OrchestratorEventType": {
+     "description": "Event types for the orchestrator-level event bus.\n\nCovers PR lifecycle, ticket queue, and cross-session coordination.",
+     "enum": [
+      "ticket.enqueued",
+      "session.spawned",
+      "session.completed",
+      "session.timed_out",
+      "session.needs_attention",
+      "session.message_sent",
+      "ticket.needs_sync",
+      "stage.entered",
+      "stage.errored",
+      "pr.registered",
+      "pr.ci_failed",
+      "pr.review_received",
+      "pr.mergeable",
+      "pr.merged",
+      "dispatch.tick",
+      "dispatch.loop_exited",
+      "dispatch.usage_limit_cleared",
+      "dispatch.usage_limit_armed",
+      "session.phantom_reverted",
+      "session.salvage_skipped",
+      "session.reap_proposed",
+      "session.reap_authorized",
+      "session.spawn_unregistered",
+      "lane.created",
+      "lane.paused",
+      "lane.resumed",
+      "focus.set",
+      "focus.cleared",
+      "ticket.moved",
+      "ticket.reprioritized",
+      "ticket.approved",
+      "plan.approval_revoked",
+      "plan.approval_body_drift_warned",
+      "plan.draft_promoted",
+      "ticket.approval_failed",
+      "ticket.requeued",
+      "ticket.unblocked",
+      "session.stage_timed_out_retried",
+      "wave.collision",
+      "task.transition",
+      "task.stage_changed",
+      "task.deleted",
+      "session.liveness_changed",
+      "guard.busy_wait_blocked",
+      "guard.background_tool_refused",
+      "concierge.recovered",
+      "operator.escalation",
+      "sentinel.stage_mismatch",
+      "session.park_vetoed",
+      "concierge.recovery_backoff_armed",
+      "concierge.hook_context_conflict_refused",
+      "gate.auto_approved",
+      "gate.auto_approve_failed",
+      "gate.auto_approve_held",
+      "pr.action_taken",
+      "pr.action_failed",
+      "session.sentinel_stage_mismatch_vetoed",
+      "session.sentinel_liveness_vetoed",
+      "sentinel.blocked_result_requeued",
+      "gate.ssh_key_bypassed",
+      "gate.disk_pressure_bypassed",
+      "dispatch.scope_routing_decision",
+      "requeue.review_delivery_degraded",
+      "review.finding_voided",
+      "review.treadmill_detected",
+      "review.fix_loop_divergence_detected",
+      "review.finding_disposition_suppressed",
+      "review.finding_claim_shadowed",
+      "review.finding_settled",
+      "review.finding_disposition_reverted",
+      "review.finding_disposition_stale",
+      "watched_pr.collision",
+      "sentinel.race_miss",
+      "worktree.fast_forwarded",
+      "review.fixed_disposition_downgraded",
+      "session.result_emitted",
+      "daemon.leaked_worker_stopped"
+     ],
+     "title": "OrchestratorEventType",
+     "type": "string"
+    },
+    "QueueItemStatus": {
+     "enum": [
+      "pending",
+      "running",
+      "completed",
+      "failed",
+      "cancelled",
+      "blocked_on_user",
+      "awaiting_operator_signoff"
+     ],
+     "title": "QueueItemStatus",
+     "type": "string"
+    },
+    "ReapPolicy": {
+     "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Requires operator action to clear.\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING, clean worktree.",
+     "enum": [
+      "signal_only",
+      "auto"
+     ],
+     "title": "ReapPolicy",
+     "type": "string"
+    },
+    "Stage": {
+     "description": "RFC 0005 pipeline stage. Mutated live by dispatch via\n``_stage_advance_unchecked`` as a task moves through the pipeline.",
+     "enum": [
+      "harden",
+      "plan",
+      "impl",
+      "review",
+      "finalize"
+     ],
+     "title": "Stage",
+     "type": "string"
+    }
+   },
+   "additionalProperties": false,
+   "description": "Parsed contents of orchestrator.yaml.\n\n``default_max_parallel`` is the cap applied to any client missing from\n``per_client_max_parallel``. The legacy yaml layout placed this value\nunder ``per_client_max_parallel.default``, but that key was treated as\na literal client name and silently ignored (see GitHub issue #145).\nA model validator migrates any stray ``default`` key into the new\ntop-level field so old configs keep working with a one-time warning.",
+   "properties": {
+    "tick_interval_seconds": {
+     "default": 30,
+     "title": "Tick Interval Seconds",
+     "type": "integer"
+    },
+    "usage_limit_backoff_seconds": {
+     "default": 3600,
+     "title": "Usage Limit Backoff Seconds",
+     "type": "integer"
+    },
+    "per_client_max_parallel": {
+     "additionalProperties": {
+      "type": "integer"
+     },
+     "title": "Per Client Max Parallel",
+     "type": "object"
+    },
+    "default_max_parallel": {
+     "default": 1,
+     "title": "Default Max Parallel",
+     "type": "integer"
+    },
+    "linear_prefix_map": {
+     "additionalProperties": {
+      "type": "string"
+     },
+     "title": "Linear Prefix Map",
+     "type": "object"
+    },
+    "operator_github_login_by_repo": {
+     "additionalProperties": {
+      "type": "string"
+     },
+     "title": "Operator Github Login By Repo",
+     "type": "object"
+    },
+    "global_attempt_ceiling": {
+     "default": 10,
+     "title": "Global Attempt Ceiling",
+     "type": "integer"
+    },
+    "lane_circuit_breaker_threshold": {
+     "default": 3,
+     "title": "Lane Circuit Breaker Threshold",
+     "type": "integer"
+    },
+    "lane_starved_notify_interval_minutes": {
+     "default": 15,
+     "title": "Lane Starved Notify Interval Minutes",
+     "type": "integer"
+    },
+    "dispatch_stale_notify_interval_minutes": {
+     "default": 15,
+     "title": "Dispatch Stale Notify Interval Minutes",
+     "type": "integer"
+    },
+    "diagnostics_retention_hours": {
+     "default": 24,
+     "title": "Diagnostics Retention Hours",
+     "type": "integer"
+    },
+    "freshness_block_attention_threshold": {
+     "default": 5,
+     "title": "Freshness Block Attention Threshold",
+     "type": "integer"
+    },
+    "sentinel_mismatch_veto_cap": {
+     "default": 2,
+     "title": "Sentinel Mismatch Veto Cap",
+     "type": "integer"
+    },
+    "review_recipe_repeat_fire_threshold": {
+     "default": 5,
+     "title": "Review Recipe Repeat Fire Threshold",
+     "type": "integer"
+    },
+    "review_recipe_repeat_fire_window_minutes": {
+     "default": 20,
+     "title": "Review Recipe Repeat Fire Window Minutes",
+     "type": "integer"
+    },
+    "inbox_size_warn_bytes": {
+     "default": 5000000,
+     "title": "Inbox Size Warn Bytes",
+     "type": "integer"
+    },
+    "inbox_line_count_warn": {
+     "default": 15000,
+     "title": "Inbox Line Count Warn",
+     "type": "integer"
+    },
+    "sessions_size_warn_bytes": {
+     "default": 15000000,
+     "title": "Sessions Size Warn Bytes",
+     "type": "integer"
+    },
+    "event_inbox_auto_prune_enabled": {
+     "default": true,
+     "title": "Event Inbox Auto Prune Enabled",
+     "type": "boolean"
+    },
+    "event_inbox_retention_bytes": {
+     "default": 5000000,
+     "title": "Event Inbox Retention Bytes",
+     "type": "integer"
+    },
+    "event_inbox_retention_count": {
+     "default": 2000,
+     "title": "Event Inbox Retention Count",
+     "type": "integer"
+    },
+    "reap_policy": {
+     "$ref": "#/$defs/ReapPolicy",
+     "default": "signal_only"
+    },
+    "busy_wait_guard_enabled": {
+     "default": true,
+     "title": "Busy Wait Guard Enabled",
+     "type": "boolean"
+    },
+    "busy_wait_guard_repeat_threshold": {
+     "default": 3,
+     "minimum": 2,
+     "title": "Busy Wait Guard Repeat Threshold",
+     "type": "integer"
+    },
+    "busy_wait_guard_window_seconds": {
+     "default": 300,
+     "minimum": 1,
+     "title": "Busy Wait Guard Window Seconds",
+     "type": "integer"
+    },
+    "disposition_drift_check_enabled": {
+     "default": true,
+     "title": "Disposition Drift Check Enabled",
+     "type": "boolean"
+    },
+    "subagent_spawn_guard_enabled": {
+     "default": true,
+     "title": "Subagent Spawn Guard Enabled",
+     "type": "boolean"
+    },
+    "background_tool_guard_enabled": {
+     "default": true,
+     "title": "Background Tool Guard Enabled",
+     "type": "boolean"
+    },
+    "sentinel_unrouted_check_seconds": {
+     "default": 300,
+     "title": "Sentinel Unrouted Check Seconds",
+     "type": "integer"
+    },
+    "max_parallel_clients": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Max Parallel Clients"
+    },
+    "per_client_ceiling": {
+     "additionalProperties": {
+      "type": "integer"
+     },
+     "title": "Per Client Ceiling",
+     "type": "object"
+    },
+    "default_ceiling": {
+     "default": 1,
+     "title": "Default Ceiling",
+     "type": "integer"
+    },
+    "host_session_budget": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Host Session Budget"
+    },
+    "pr_hydration_interval_seconds": {
+     "default": 150,
+     "title": "Pr Hydration Interval Seconds",
+     "type": "integer"
+    },
+    "default_signoff": {
+     "default": "none",
+     "enum": [
+      "none",
+      "operator"
+     ],
+     "title": "Default Signoff",
+     "type": "string"
+    },
+    "default_finalize_gate": {
+     "default": "auto",
+     "enum": [
+      "auto",
+      "manual"
+     ],
+     "title": "Default Finalize Gate",
+     "type": "string"
+    },
+    "default_codex_fix_loop_enabled": {
+     "default": false,
+     "title": "Default Codex Fix Loop Enabled",
+     "type": "boolean"
+    },
+    "codex_claim_suppression_enabled": {
+     "default": false,
+     "title": "Codex Claim Suppression Enabled",
+     "type": "boolean"
+    },
+    "liveness_buckets_minutes": {
+     "items": {
+      "type": "integer"
+     },
+     "title": "Liveness Buckets Minutes",
+     "type": "array"
+    },
+    "liveness_first_bucket_by_stage": {
+     "additionalProperties": {
+      "type": "integer"
+     },
+     "propertyNames": {
+      "$ref": "#/$defs/Stage"
+     },
+     "title": "Liveness First Bucket By Stage",
+     "type": "object"
+    },
+    "liveness_attention_renotify_interval_minutes": {
+     "default": 60,
+     "title": "Liveness Attention Renotify Interval Minutes",
+     "type": "integer"
+    },
+    "fix_loop_await_deadline_minutes": {
+     "default": 30,
+     "minimum": 1,
+     "title": "Fix Loop Await Deadline Minutes",
+     "type": "integer"
+    },
+    "agent_spawn_verify_poll_seconds": {
+     "default": 20,
+     "minimum": 1,
+     "title": "Agent Spawn Verify Poll Seconds",
+     "type": "integer"
+    },
+    "agent_spawn_verify_poll_interval_seconds": {
+     "default": 2,
+     "minimum": 1,
+     "title": "Agent Spawn Verify Poll Interval Seconds",
+     "type": "integer"
+    },
+    "operator_channel_forward": {
+     "$ref": "#/$defs/OperatorChannelForward"
+    },
+    "concierge_enabled": {
+     "default": false,
+     "title": "Concierge Enabled",
+     "type": "boolean"
+    },
+    "concierge_recoveries": {
+     "additionalProperties": {
+      "type": "boolean"
+     },
+     "title": "Concierge Recoveries",
+     "type": "object"
+    },
+    "gate_recipes_enabled": {
+     "default": true,
+     "title": "Gate Recipes Enabled",
+     "type": "boolean"
+    },
+    "review_recipes_enabled": {
+     "default": false,
+     "title": "Review Recipes Enabled",
+     "type": "boolean"
+    },
+    "park_on_abandoned_exit_enabled": {
+     "default": false,
+     "title": "Park On Abandoned Exit Enabled",
+     "type": "boolean"
+    },
+    "ssh_key_gate_enabled": {
+     "default": true,
+     "title": "Ssh Key Gate Enabled",
+     "type": "boolean"
+    },
+    "disk_pressure_gate_enabled": {
+     "default": true,
+     "title": "Disk Pressure Gate Enabled",
+     "type": "boolean"
+    },
+    "disk_pressure_min_free_gb": {
+     "default": 5.0,
+     "title": "Disk Pressure Min Free Gb",
+     "type": "number"
+    },
+    "disk_pressure_min_free_inodes": {
+     "default": 50000,
+     "title": "Disk Pressure Min Free Inodes",
+     "type": "number"
+    },
+    "disk_pressure_min_free_inode_fraction": {
+     "default": 0.05,
+     "title": "Disk Pressure Min Free Inode Fraction",
+     "type": "number"
+    },
+    "pr_gate_enabled": {
+     "default": true,
+     "title": "Pr Gate Enabled",
+     "type": "boolean"
+    },
+    "occupancy_gate_enabled": {
+     "default": true,
+     "title": "Occupancy Gate Enabled",
+     "type": "boolean"
+    },
+    "disallowed_mcp_tools": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Disallowed Mcp Tools",
+     "type": "array"
+    },
+    "attention_digest_window_tz": {
+     "default": "America/New_York",
+     "title": "Attention Digest Window Tz",
+     "type": "string"
+    },
+    "attention_digest_window_start_hour": {
+     "default": 8,
+     "title": "Attention Digest Window Start Hour",
+     "type": "integer"
+    },
+    "attention_digest_window_end_hour": {
+     "default": 20,
+     "title": "Attention Digest Window End Hour",
+     "type": "integer"
+    },
+    "attention_digest_idle_floor_seconds": {
+     "default": 60,
+     "title": "Attention Digest Idle Floor Seconds",
+     "type": "integer"
+    }
+   },
+   "title": "OrchestratorConfig",
+   "type": "object"
+  },
+  "LaneConfig": {
+   "$defs": {
+    "ReapPolicy": {
+     "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Requires operator action to clear.\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING, clean worktree.",
+     "enum": [
+      "signal_only",
+      "auto"
+     ],
+     "title": "ReapPolicy",
+     "type": "string"
+    },
+    "ReasoningEffort": {
+     "description": "Codex ``model_reasoning_effort`` levels a codex stage may pin.\n\nEmitted as ``-c model_reasoning_effort=<value>`` on every codex reviewer\nand fix invocation (see ``StageExecutorConfig.reasoning_effort``). A closed\nset so a typo fails at config load instead of surfacing mid-run as a\ndegraded review role. Not every model supports every level; an\nunsupported one is a codex runtime error, not a config error.",
+     "enum": [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra"
+     ],
+     "title": "ReasoningEffort",
+     "type": "string"
+    },
+    "Stage": {
+     "description": "RFC 0005 pipeline stage. Mutated live by dispatch via\n``_stage_advance_unchecked`` as a task moves through the pipeline.",
+     "enum": [
+      "harden",
+      "plan",
+      "impl",
+      "review",
+      "finalize"
+     ],
+     "title": "Stage",
+     "type": "string"
+    },
+    "StageExecutorConfig": {
+     "additionalProperties": false,
+     "description": "Executor configuration for a single pipeline stage (RFC 0005 A1, dormant).",
+     "properties": {
+      "backend": {
+       "default": "claude-native",
+       "title": "Backend",
+       "type": "string"
+      },
+      "model": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Model"
+      },
+      "endpoint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Endpoint"
+      },
+      "reasoning_effort": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/ReasoningEffort"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": "high"
+      }
+     },
+     "title": "StageExecutorConfig",
+     "type": "object"
+    },
+    "StagePipelineConfig": {
+     "additionalProperties": false,
+     "description": "Per-client (or per-lane) pipeline configuration (RFC 0005 A1, dormant).",
+     "properties": {
+      "stages": {
+       "items": {
+        "$ref": "#/$defs/Stage"
+       },
+       "title": "Stages",
+       "type": "array"
+      },
+      "executors": {
+       "additionalProperties": {
+        "$ref": "#/$defs/StageExecutorConfig"
+       },
+       "propertyNames": {
+        "$ref": "#/$defs/Stage"
+       },
+       "title": "Executors",
+       "type": "object"
+      }
+     },
+     "title": "StagePipelineConfig",
+     "type": "object"
+    }
+   },
+   "additionalProperties": false,
+   "description": "Configuration for a named dispatch lane.\n\nLanes provide a scheduling boundary for TicketTasks.\nPhase 1 (data model only): no dispatch wiring yet \u2014 see #558.",
+   "properties": {
+    "name": {
+     "title": "Name",
+     "type": "string"
+    },
+    "max_parallel": {
+     "default": 1,
+     "title": "Max Parallel",
+     "type": "integer"
+    },
+    "priority": {
+     "default": 0,
+     "title": "Priority",
+     "type": "integer"
+    },
+    "paused": {
+     "default": false,
+     "title": "Paused",
+     "type": "boolean"
+    },
+    "description": {
+     "default": "",
+     "title": "Description",
+     "type": "string"
+    },
+    "reap_policy": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/ReapPolicy"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "busy_wait_guard_enabled": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Busy Wait Guard Enabled"
+    },
+    "busy_wait_guard_repeat_threshold": {
+     "anyOf": [
+      {
+       "minimum": 2,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Busy Wait Guard Repeat Threshold"
+    },
+    "busy_wait_guard_window_seconds": {
+     "anyOf": [
+      {
+       "minimum": 1,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Busy Wait Guard Window Seconds"
+    },
+    "disposition_drift_check_enabled": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Disposition Drift Check Enabled"
+    },
+    "subagent_spawn_guard_enabled": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Subagent Spawn Guard Enabled"
+    },
+    "background_tool_guard_enabled": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Background Tool Guard Enabled"
+    },
+    "pipeline": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/StagePipelineConfig"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "signoff": {
+     "anyOf": [
+      {
+       "const": "operator",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Signoff"
+    },
+    "finalize_gate": {
+     "anyOf": [
+      {
+       "const": "manual",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Finalize Gate"
+    },
+    "codex_fix_loop_enabled": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Codex Fix Loop Enabled"
+    },
+    "attempt_ceiling": {
+     "anyOf": [
+      {
+       "const": false,
+       "type": "boolean"
+      },
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Attempt Ceiling"
+    },
+    "gate_recipes": {
+     "anyOf": [
+      {
+       "additionalProperties": {
+        "type": "boolean"
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Gate Recipes"
+    },
+    "review_recipes": {
+     "anyOf": [
+      {
+       "additionalProperties": {
+        "type": "boolean"
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Review Recipes"
+    },
+    "park_on_abandoned_exit": {
+     "anyOf": [
+      {
+       "additionalProperties": {
+        "type": "boolean"
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Park On Abandoned Exit"
+    },
+    "codex_review_tiers": {
+     "anyOf": [
+      {
+       "additionalProperties": {
+        "type": "boolean"
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Codex Review Tiers"
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "title": "LaneConfig",
+   "type": "object"
+  }
+ },
+ "default_dumps": {
+  "OrchestratorConfig": {
+   "tick_interval_seconds": 30,
+   "usage_limit_backoff_seconds": 3600,
+   "per_client_max_parallel": {},
+   "default_max_parallel": 1,
+   "linear_prefix_map": {},
+   "operator_github_login_by_repo": {},
+   "global_attempt_ceiling": 10,
+   "lane_circuit_breaker_threshold": 3,
+   "lane_starved_notify_interval_minutes": 15,
+   "dispatch_stale_notify_interval_minutes": 15,
+   "diagnostics_retention_hours": 24,
+   "freshness_block_attention_threshold": 5,
+   "sentinel_mismatch_veto_cap": 2,
+   "review_recipe_repeat_fire_threshold": 5,
+   "review_recipe_repeat_fire_window_minutes": 20,
+   "inbox_size_warn_bytes": 5000000,
+   "inbox_line_count_warn": 15000,
+   "sessions_size_warn_bytes": 15000000,
+   "event_inbox_auto_prune_enabled": true,
+   "event_inbox_retention_bytes": 5000000,
+   "event_inbox_retention_count": 2000,
+   "reap_policy": "signal_only",
+   "busy_wait_guard_enabled": true,
+   "busy_wait_guard_repeat_threshold": 3,
+   "busy_wait_guard_window_seconds": 300,
+   "disposition_drift_check_enabled": true,
+   "subagent_spawn_guard_enabled": true,
+   "background_tool_guard_enabled": true,
+   "sentinel_unrouted_check_seconds": 300,
+   "max_parallel_clients": null,
+   "per_client_ceiling": {},
+   "default_ceiling": 1,
+   "host_session_budget": null,
+   "pr_hydration_interval_seconds": 150,
+   "default_signoff": "none",
+   "default_finalize_gate": "auto",
+   "default_codex_fix_loop_enabled": false,
+   "codex_claim_suppression_enabled": false,
+   "liveness_buckets_minutes": [
+    15,
+    30,
+    45
+   ],
+   "liveness_first_bucket_by_stage": {
+    "impl": 35
+   },
+   "liveness_attention_renotify_interval_minutes": 60,
+   "fix_loop_await_deadline_minutes": 30,
+   "agent_spawn_verify_poll_seconds": 20,
+   "agent_spawn_verify_poll_interval_seconds": 2,
+   "operator_channel_forward": {
+    "event_types": [
+     "gate.auto_approve_failed",
+     "gate.auto_approve_held",
+     "gate.disk_pressure_bypassed",
+     "gate.ssh_key_bypassed",
+     "operator.escalation",
+     "pr.action_failed",
+     "pr.action_taken",
+     "pr.ci_failed",
+     "pr.mergeable",
+     "pr.merged",
+     "pr.registered",
+     "pr.review_received",
+     "requeue.review_delivery_degraded",
+     "session.liveness_changed",
+     "session.needs_attention",
+     "task.deleted",
+     "task.transition",
+     "ticket.approval_failed"
+    ],
+    "task_transition_statuses": [
+     "awaiting_operator_signoff",
+     "blocked_on_user",
+     "cancelled",
+     "completed",
+     "failed"
+    ],
+    "liveness_min_bucket": "stale_30m"
+   },
+   "concierge_enabled": false,
+   "concierge_recoveries": {},
+   "gate_recipes_enabled": true,
+   "review_recipes_enabled": false,
+   "park_on_abandoned_exit_enabled": false,
+   "ssh_key_gate_enabled": true,
+   "disk_pressure_gate_enabled": true,
+   "disk_pressure_min_free_gb": 5.0,
+   "disk_pressure_min_free_inodes": 50000.0,
+   "disk_pressure_min_free_inode_fraction": 0.05,
+   "pr_gate_enabled": true,
+   "occupancy_gate_enabled": true,
+   "disallowed_mcp_tools": [],
+   "attention_digest_window_tz": "America/New_York",
+   "attention_digest_window_start_hour": 8,
+   "attention_digest_window_end_hour": 20,
+   "attention_digest_idle_floor_seconds": 60
+  },
+  "LaneConfig": {
+   "name": "default",
+   "max_parallel": 1,
+   "priority": 0,
+   "paused": false,
+   "description": "",
+   "reap_policy": null,
+   "busy_wait_guard_enabled": null,
+   "busy_wait_guard_repeat_threshold": null,
+   "busy_wait_guard_window_seconds": null,
+   "disposition_drift_check_enabled": null,
+   "subagent_spawn_guard_enabled": null,
+   "background_tool_guard_enabled": null,
+   "pipeline": null,
+   "signoff": null,
+   "finalize_gate": null,
+   "codex_fix_loop_enabled": null,
+   "attempt_ceiling": null,
+   "gate_recipes": null,
+   "review_recipes": null,
+   "park_on_abandoned_exit": null,
+   "codex_review_tiers": null
+  }
+ }
+}
