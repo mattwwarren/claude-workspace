@@ -9,12 +9,13 @@ ADR-0006.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import INTERMEDIATE_ADVANCE_STATUSES, AutoDevResult
 from cw.config import get_client
 from cw.exceptions import CwError
-from cw.models import DEFAULT_LANE, OrchestratorConfig, SessionOrigin
+from cw.models import DEFAULT_LANE, OrchestratorConfig, QueueItemStatus, SessionOrigin
 from cw.reconcile import _shared
 from cw.reconcile._shared import (
     ProposedAction,
@@ -25,6 +26,7 @@ from cw.reconcile._shared import (
     stage_refusal_latched,
     ticket_id_for_session,
 )
+from cw.reconcile.dirty_checks import DirtyCheckUnavailableError, lookup_dirty_reason
 from cw.result import reconstruct_staged_sentinel
 
 _log = logging.getLogger(__name__)
@@ -33,6 +35,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from cw.models import CwState, Session, TicketTask
+    from cw.reconcile.dirty_checks import DirtyChecks
 
 
 def _phantom_advance_sentinel_candidate(
@@ -164,6 +167,227 @@ def _sentinel_mismatch_veto_candidate(
     )
 
 
+@dataclass(frozen=True)
+class _PreDirtyOutcome:
+    """What a phantom's classification decided before its dirty check.
+
+    A non-None *candidate* means the session is terminal for this sweep (a
+    route-emitted sentinel, salvage, stage-advance or veto candidate) and is
+    never dirty-checked. Otherwise the session falls through to the
+    CRASH_COMPLETE tail, carrying the veto fields below (#1449).
+    """
+
+    candidate: ReapCandidate | None
+    ticket_id: str | None
+    lane: str
+    veto_cap_exhausted: bool = False
+    veto_stale_seconds: float | None = None
+
+
+def _classify_before_dirty_check(
+    session: Session,
+    task_by_ticket: dict[str, TicketTask],
+    *,
+    now: datetime,
+    config: OrchestratorConfig,
+) -> _PreDirtyOutcome:
+    """Classify one phantom up to (not including) its worktree dirty check.
+
+    Read-only: transcript reads and a client lookup, never git. Shared by the
+    in-lock detect and the lockless dirty-check capture (#2548), so the two
+    cannot disagree on which sessions reach the dirty check.
+    """
+    ticket_id = ticket_id_for_session(session.name)
+    task = task_by_ticket.get(ticket_id) if ticket_id else None
+    lane = task.lane if task else DEFAULT_LANE
+    # #1149: a session already marked refused (an earlier-stage replay /
+    # unresolvable position stamped by _apply_phantom_routed_mutations on a
+    # prior tick) must not be re-offered to any router. Hoisted above the
+    # staged-sentinel branch by #1762: the refusal stamp is merged INTO
+    # last_result, so it stays terminal-shaped and would otherwise be
+    # reconstructed and re-refused on every tick, forever. Unlike idle.py,
+    # phantom.py's detect phase has no `last_result is None` precondition,
+    # so the apply-phase stamp alone would be inert here.
+    already_refused = stage_refusal_latched(session)
+    # Issue #536 as narrowed by #1762: a session that already pushed a
+    # terminal result (last_result carries a "status") is authoritative and
+    # must never be re-salvaged or re-crashed *over* -- but #536 enforced
+    # that with a bare `continue`, which also denied it any completion path.
+    # session.status is flipped to COMPLETED only by the Stop hook, which a
+    # crashed daemon never reaches, so the owning row stayed RUNNING on
+    # every tick forever, reap_policy never even consulted. Route the staged
+    # result through the same shared authority the #716 stage-advance path
+    # uses instead. A last_result that reconstructs into neither arm of the
+    # AutoDevResult/BlockedResult union carries nothing to route, so it
+    # falls through to the salvage/advance/crash pipeline below rather than
+    # being ignored forever.
+    #
+    # Deliberately NOT DAEMON-gated, unlike the salvage and stage-advance
+    # branches below: this is constructive completion off the session's own
+    # recorded evidence, and it carries no origin-specific hazard --
+    # ticket_id_for_session only resolves for auto-dev/<id> names, so a USER
+    # session produces a ticket-less candidate and _apply_phantom_routed_
+    # mutations never touches the queue for it. Gating would only mean
+    # marking a session that demonstrably emitted `shipped` as CRASHED.
+    if _has_terminal_sentinel(session) and not already_refused:
+        staged = reconstruct_staged_sentinel(session.last_result)
+        if staged is not None:
+            return _PreDirtyOutcome(
+                ReapCandidate(
+                    session_id=session.id,
+                    proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+                    ticket_id=ticket_id,
+                    routed_sentinel=staged,
+                    # May legitimately be None: unlike the transcript-parsing
+                    # producers, this one reads session state, so there is no
+                    # csid to derive. _resolve_routed_sentinel tolerates it.
+                    salvage_csid=session.claude_session_id,
+                    lane=lane,
+                    client=session.client,
+                    worktree_path=session.worktree_path,
+                ),
+                ticket_id,
+                lane,
+            )
+    # Try sentinel salvage before declaring crashed (DAEMON only).
+    salvage = (
+        _shared.salvage_terminal_result(session)
+        if session.origin is SessionOrigin.DAEMON
+        else None
+    )
+    if salvage is not None:
+        result, claude_session_id = salvage
+        return _PreDirtyOutcome(
+            ReapCandidate(
+                session_id=session.id,
+                proposed_action=ProposedAction.SALVAGE_COMPLETION,
+                ticket_id=ticket_id,
+                salvage_result=result,
+                salvage_csid=claude_session_id,
+                lane=lane,
+                client=session.client,
+                worktree_path=session.worktree_path,
+            ),
+            ticket_id,
+            lane,
+        )
+    # Non-terminal advance sentinel (stage_complete): the worker finished a
+    # stage and exited. Route it to advance the stage instead of reverting it
+    # as a crash (DAEMON only; USER sessions have no staged task). See #716.
+    if session.origin is SessionOrigin.DAEMON and not already_refused:
+        advance = _phantom_advance_sentinel_candidate(session, ticket_id, lane)
+        return _PreDirtyOutcome(advance, ticket_id, lane)
+    if session.origin is SessionOrigin.DAEMON and already_refused:
+        # GitHub #1281: this session was already refused on a prior tick
+        # (#1149's already_refused latch above) -- without this check it
+        # falls straight into the CRASH_COMPLETE construction on the very
+        # next tick (the #1281 incident: a valid AUTO_DEV_RESULT landed 56s
+        # after the refusal that burned the task's final attempt). Veto the
+        # crash until the attempt cap is spent (#1449, cap-only since #2405
+        # for opted-in clients -- see _sentinel_mismatch_veto_candidate).
+        try:
+            veto_enabled = get_client(session.client).sentinel_mismatch_veto_enabled
+        except CwError:
+            veto_enabled = False
+        # #1449: veto_cap_exhausted is True when the veto declined on the
+        # tick the cap was reached (as opposed to an already-escalated
+        # session past the cap). veto_stale_seconds is the diagnostic
+        # transcript staleness read on that tick, threaded through so the
+        # CRASH_COMPLETE fallthrough's stale_minutes reports that exact
+        # value -- never re-read (fix cycle 2: avoids both a duplicate
+        # filesystem read and a TOCTOU window). Non-None only when
+        # veto_cap_exhausted is True (fix cycle 3: the helper enforces
+        # this), and None even then when the transcript is unlocatable
+        # (#2405: staleness is diagnostic).
+        veto, veto_cap_exhausted, veto_stale_seconds = (
+            _sentinel_mismatch_veto_candidate(
+                session,
+                ticket_id,
+                lane,
+                now=now,
+                config=config,
+                enabled=veto_enabled,
+            )
+        )
+        return _PreDirtyOutcome(
+            veto, ticket_id, lane, veto_cap_exhausted, veto_stale_seconds
+        )
+    return _PreDirtyOutcome(None, ticket_id, lane)
+
+
+def _needs_dirty_check(session: Session, outcome: _PreDirtyOutcome) -> bool:
+    """True when *session* reaches the CRASH_COMPLETE tail's dirty check.
+
+    DAEMON only; USER sessions have no cw-managed worktree.
+    """
+    return outcome.candidate is None and session.origin is SessionOrigin.DAEMON
+
+
+def _crash_candidate(
+    session: Session,
+    outcome: _PreDirtyOutcome,
+    worktree_dirty_reason: str | None,
+    *,
+    config: OrchestratorConfig,
+) -> ReapCandidate:
+    """The CRASH_COMPLETE candidate for a phantom past its dirty check."""
+    daemon = session.origin is SessionOrigin.DAEMON
+    return ReapCandidate(
+        session_id=session.id,
+        proposed_action=ProposedAction.CRASH_COMPLETE,
+        ticket_id=outcome.ticket_id,
+        worktree_dirty=worktree_dirty_reason is not None,
+        worktree_dirty_reason=worktree_dirty_reason,
+        # #1646: did this worker die with a sub-agent spawn still in flight?
+        # DAEMON-only for the same reason as worktree_dirty -- a USER session
+        # has no cw-managed worktree to have left a stamp in. Reads the same
+        # worktree_path, fail-open to False on any missing evidence.
+        unresolved_subagent_spawn=(
+            _shared.read_unresolved_subagent_spawn(session.worktree_path)
+            if daemon
+            else False
+        ),
+        # Scan for usage-limit text in the transcript so the dispatch loop can
+        # engage its backoff when a phantom was killed by a rate limit, not a
+        # code bug (#804). Only meaningful for DAEMON sessions (USER sessions
+        # have no auto-dev transcript path).
+        usage_limit_detected=(
+            _shared.usage_limit_is_recent(
+                _shared.detect_usage_limit(session),
+                window_seconds=_shared.USAGE_LIMIT_BACKOFF_WINDOW_SECONDS,
+            )
+            if daemon
+            else False
+        ),
+        # #1923: scan for the provider-overload (API 529) signature so the
+        # operator can see the phantom was likely caused by an upstream
+        # outage rather than a code bug. DAEMON-only for the same reason as
+        # worktree_dirty/usage_limit_detected above. Diagnostics-only per
+        # A1/R1 -- see ReapCandidate.provider_overload_detected's doc comment.
+        provider_overload_detected=(
+            _shared.detect_provider_overload(session) if daemon else False
+        ),
+        lane=outcome.lane,
+        client=session.client,
+        worktree_path=session.worktree_path,
+        # #1449: when the sentinel-mismatch veto declined because the cap
+        # was reached this tick (any transcript state, #2405), route
+        # this crash to an immediate operator escalation under SIGNAL_ONLY (see
+        # _route_phantom_by_policy) and stamp the post-escalation counter
+        # value (cap + 1) so the act phase persists it before the veto is
+        # re-checked next tick — edge-triggering the escalation.
+        veto_cap_exhausted=outcome.veto_cap_exhausted,
+        new_veto_count=(
+            config.sentinel_mismatch_veto_cap + 1 if outcome.veto_cap_exhausted else 0
+        ),
+        stale_minutes=(
+            outcome.veto_stale_seconds / 60.0
+            if outcome.veto_stale_seconds is not None
+            else None
+        ),
+    )
+
+
 def _detect_phantom_candidates(
     state: CwState,
     phantom_set: set[str],
@@ -171,12 +395,17 @@ def _detect_phantom_candidates(
     *,
     now: datetime,
     config: OrchestratorConfig | None = None,
+    dirty_checks: DirtyChecks | None = None,
 ) -> list[ReapCandidate]:
     """Pure classification phase for phantom sessions.
 
-    Returns a list of ReapCandidate objects. Makes zero writes.
-    The worktree_dirty check for DAEMON sessions is performed here
-    so the act phase does not need to repeat it. See GitHub #552, ADR-0006.
+    Returns a list of ReapCandidate objects. Makes zero writes. The
+    worktree_dirty flag for DAEMON sessions is a pre-captured lookup in
+    *dirty_checks*, never git (#2548): the lockless pre-pass in reconcile()
+    ran the check, so the act phase does not repeat it. A session with no
+    usable capture (``None`` store included) is skipped for this tick -- no
+    candidate, so no mutation and no event; it stays a live phantom and is
+    re-detected next tick. See GitHub #552, ADR-0006.
 
     task_by_ticket is used to stamp candidate.lane from the owning task's lane
     (GitHub #560). When None or the ticket has no task, lane defaults to DEFAULT_LANE.
@@ -196,199 +425,68 @@ def _detect_phantom_candidates(
     for session in state.sessions:
         if session.id not in phantom_set:
             continue
-        ticket_id = ticket_id_for_session(session.name)
-        task = _task_by_ticket.get(ticket_id) if ticket_id else None
-        lane = task.lane if task else DEFAULT_LANE
-        # #1149: a session already marked refused (an earlier-stage replay /
-        # unresolvable position stamped by _apply_phantom_routed_mutations on a
-        # prior tick) must not be re-offered to any router. Hoisted above the
-        # staged-sentinel branch by #1762: the refusal stamp is merged INTO
-        # last_result, so it stays terminal-shaped and would otherwise be
-        # reconstructed and re-refused on every tick, forever. Unlike idle.py,
-        # phantom.py's detect phase has no `last_result is None` precondition,
-        # so the apply-phase stamp alone would be inert here.
-        already_refused = stage_refusal_latched(session)
-        # Issue #536 as narrowed by #1762: a session that already pushed a
-        # terminal result (last_result carries a "status") is authoritative and
-        # must never be re-salvaged or re-crashed *over* -- but #536 enforced
-        # that with a bare `continue`, which also denied it any completion path.
-        # session.status is flipped to COMPLETED only by the Stop hook, which a
-        # crashed daemon never reaches, so the owning row stayed RUNNING on
-        # every tick forever, reap_policy never even consulted. Route the staged
-        # result through the same shared authority the #716 stage-advance path
-        # uses instead. A last_result that reconstructs into neither arm of the
-        # AutoDevResult/BlockedResult union carries nothing to route, so it
-        # falls through to the salvage/advance/crash pipeline below rather than
-        # being ignored forever.
-        #
-        # Deliberately NOT DAEMON-gated, unlike the salvage and stage-advance
-        # branches below: this is constructive completion off the session's own
-        # recorded evidence, and it carries no origin-specific hazard --
-        # ticket_id_for_session only resolves for auto-dev/<id> names, so a USER
-        # session produces a ticket-less candidate and _apply_phantom_routed_
-        # mutations never touches the queue for it. Gating would only mean
-        # marking a session that demonstrably emitted `shipped` as CRASHED.
-        if _has_terminal_sentinel(session) and not already_refused:
-            staged = reconstruct_staged_sentinel(session.last_result)
-            if staged is not None:
-                candidates.append(
-                    ReapCandidate(
-                        session_id=session.id,
-                        proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
-                        ticket_id=ticket_id,
-                        routed_sentinel=staged,
-                        # May legitimately be None: unlike the transcript-parsing
-                        # producers, this one reads session state, so there is no
-                        # csid to derive. _resolve_routed_sentinel tolerates it.
-                        salvage_csid=session.claude_session_id,
-                        lane=lane,
-                        client=session.client,
-                        worktree_path=session.worktree_path,
-                    )
-                )
-                continue
-        # Try sentinel salvage before declaring crashed (DAEMON only).
-        salvage = (
-            _shared.salvage_terminal_result(session)
-            if session.origin is SessionOrigin.DAEMON
-            else None
+        outcome = _classify_before_dirty_check(
+            session, _task_by_ticket, now=now, config=effective_config
         )
-        if salvage is not None:
-            result, claude_session_id = salvage
-            candidates.append(
-                ReapCandidate(
-                    session_id=session.id,
-                    proposed_action=ProposedAction.SALVAGE_COMPLETION,
-                    ticket_id=ticket_id,
-                    salvage_result=result,
-                    salvage_csid=claude_session_id,
-                    lane=lane,
-                    client=session.client,
-                    worktree_path=session.worktree_path,
-                )
-            )
+        if outcome.candidate is not None:
+            candidates.append(outcome.candidate)
             continue
-        # Non-terminal advance sentinel (stage_complete): the worker finished a
-        # stage and exited. Route it to advance the stage instead of reverting it
-        # as a crash (DAEMON only; USER sessions have no staged task). See #716.
-        # #1449: stamped True on the CRASH_COMPLETE fall-through below when the
-        # veto declined on the tick the cap was reached (as opposed to an
-        # already-escalated session past the cap). Reset per-iteration.
-        veto_cap_exhausted = False
-        # #1449: the diagnostic transcript staleness _sentinel_mismatch_veto_
-        # candidate read on the cap-exhaustion tick, threaded through so the
-        # CRASH_COMPLETE fallthrough's stale_minutes reports that exact value --
-        # never re-read (fix cycle 2: avoids both a duplicate filesystem read
-        # and a TOCTOU window). Non-None only when veto_cap_exhausted is True
-        # this tick (fix cycle 3: the helper enforces this), and None even then
-        # when the transcript is unlocatable (#2405: staleness is diagnostic).
-        veto_stale_seconds: float | None = None
-        if session.origin is SessionOrigin.DAEMON and not already_refused:
-            advance = _phantom_advance_sentinel_candidate(session, ticket_id, lane)
-            if advance is not None:
-                candidates.append(advance)
-                continue
-        elif session.origin is SessionOrigin.DAEMON and already_refused:
-            # GitHub #1281: this session was already refused on a prior tick
-            # (#1149's already_refused latch above) -- without this check it
-            # falls straight into the CRASH_COMPLETE construction below on the
-            # very next tick (the #1281 incident: a valid AUTO_DEV_RESULT landed
-            # 56s after the refusal that burned the task's final attempt). Veto
-            # the crash until the attempt cap is spent (#1449, cap-only since
-            # #2405 for opted-in clients -- see _sentinel_mismatch_veto_candidate).
+        worktree_dirty_reason: str | None = None
+        if _needs_dirty_check(session, outcome):
+            # Why: the capture ran before sessions_lock, and the orphaned
+            # claude --bg process may still be alive and could write to the
+            # worktree between that capture and the BLOCKED_ON_USER routing in
+            # _act_on_phantom_candidates (TOCTOU). The capture is at most
+            # DIRTY_CHECK_MAX_AGE_SECONDS old and a stale one defers. Accepted
+            # tradeoff: block > clobber. See cw.reconcile.dirty_checks.
             try:
-                veto_enabled = get_client(session.client).sentinel_mismatch_veto_enabled
-            except CwError:
-                veto_enabled = False
-            veto, veto_cap_exhausted, veto_stale_seconds = (
-                _sentinel_mismatch_veto_candidate(
-                    session,
-                    ticket_id,
-                    lane,
-                    now=now,
-                    config=effective_config,
-                    enabled=veto_enabled,
-                )
-            )
-            if veto is not None:
-                candidates.append(veto)
+                worktree_dirty_reason = lookup_dirty_reason(dirty_checks, session)
+            except DirtyCheckUnavailableError:
                 continue
-        # Dirty-check for DAEMON sessions only; USER sessions have no worktree.
-        # Why: this check runs inside sessions_lock before the queue mutation, but
-        # the orphaned claude --bg process may still be alive and could write to the
-        # worktree between here and the BLOCKED_ON_USER routing in
-        # _act_on_phantom_candidates (TOCTOU). Accepted tradeoff: block > clobber —
-        # narrow the window, accept the race. See _act_on_phantom_candidates.
-        worktree_dirty_reason = (
-            _shared.worktree_dirty_reason_by_path(session.client, session.worktree_path)
-            if session.origin is SessionOrigin.DAEMON
-            else None
-        )
-        worktree_dirty = worktree_dirty_reason is not None
-        # Scan for usage-limit text in the transcript so the dispatch loop can
-        # engage its backoff when a phantom was killed by a rate limit, not a
-        # code bug (#804). Only meaningful for DAEMON sessions (USER sessions
-        # have no auto-dev transcript path).
-        usage_limit_detected = (
-            _shared.usage_limit_is_recent(
-                _shared.detect_usage_limit(session),
-                window_seconds=_shared.USAGE_LIMIT_BACKOFF_WINDOW_SECONDS,
-            )
-            if session.origin is SessionOrigin.DAEMON
-            else False
-        )
-        # #1646: did this worker die with a sub-agent spawn still in flight?
-        # DAEMON-only for the same reason as worktree_dirty above — a USER
-        # session has no cw-managed worktree to have left a stamp in. Reads the
-        # same worktree_path, fail-open to False on any missing evidence.
-        unresolved_subagent_spawn = (
-            _shared.read_unresolved_subagent_spawn(session.worktree_path)
-            if session.origin is SessionOrigin.DAEMON
-            else False
-        )
-        # #1923: scan for the provider-overload (API 529) signature so the
-        # operator can see the phantom was likely caused by an upstream
-        # outage rather than a code bug. DAEMON-only for the same reason as
-        # worktree_dirty/usage_limit_detected above. Diagnostics-only per
-        # A1/R1 -- see ReapCandidate.provider_overload_detected's doc comment.
-        provider_overload_detected = (
-            _shared.detect_provider_overload(session)
-            if session.origin is SessionOrigin.DAEMON
-            else False
-        )
         candidates.append(
-            ReapCandidate(
-                session_id=session.id,
-                proposed_action=ProposedAction.CRASH_COMPLETE,
-                ticket_id=ticket_id,
-                worktree_dirty=worktree_dirty,
-                worktree_dirty_reason=worktree_dirty_reason,
-                unresolved_subagent_spawn=unresolved_subagent_spawn,
-                usage_limit_detected=usage_limit_detected,
-                provider_overload_detected=provider_overload_detected,
-                lane=lane,
-                client=session.client,
-                worktree_path=session.worktree_path,
-                # #1449: when the sentinel-mismatch veto declined because the cap
-                # was reached this tick (any transcript state, #2405), route
-                # this crash to an immediate operator escalation under SIGNAL_ONLY (see
-                # _route_phantom_by_policy) and stamp the post-escalation counter
-                # value (cap + 1) so the act phase persists it before the veto is
-                # re-checked next tick — edge-triggering the escalation.
-                veto_cap_exhausted=veto_cap_exhausted,
-                new_veto_count=(
-                    effective_config.sentinel_mismatch_veto_cap + 1
-                    if veto_cap_exhausted
-                    else 0
-                ),
-                stale_minutes=(
-                    veto_stale_seconds / 60.0
-                    if veto_stale_seconds is not None
-                    else None
-                ),
+            _crash_candidate(
+                session, outcome, worktree_dirty_reason, config=effective_config
             )
         )
     return candidates
+
+
+def capture_phantom_dirty_checks(
+    state: CwState,
+    phantom_set: set[str],
+    task_by_ticket: dict[str, TicketTask],
+    *,
+    now: datetime,
+    config: OrchestratorConfig,
+    checks: DirtyChecks,
+) -> None:
+    """Lockless pre-pass: capture the dirty checks the phantom detect will read.
+
+    Runs before ``sessions_lock`` (#2548). Selects the phantoms the in-lock
+    detect would dirty-check -- the same classifier, so the predicate cannot
+    drift -- and captures them into *checks*. Sessions whose ticket's row is
+    RUNNING go first: each captured one leaves that group within a tick
+    (reverted or parked), so phantoms that are already parked cannot starve
+    a new crash of the per-tick cap.
+    """
+    selected = [
+        session
+        for session in state.sessions
+        if session.id in phantom_set
+        and _needs_dirty_check(
+            session,
+            _classify_before_dirty_check(
+                session, task_by_ticket, now=now, config=config
+            ),
+        )
+    ]
+
+    def _no_running_row(session: Session) -> bool:
+        ticket_id = ticket_id_for_session(session.name)
+        task = task_by_ticket.get(ticket_id) if ticket_id else None
+        return task is None or task.status is not QueueItemStatus.RUNNING
+
+    checks.capture_all(sorted(selected, key=_no_running_row))
 
 
 def _split_crash_candidates(
