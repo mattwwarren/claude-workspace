@@ -49,15 +49,16 @@ _CONSTANTS = {
 }
 
 # The complete importable surface: every project-defined top-level name the
-# flat ``cli/stop_hook.py`` bound before the split (30 defs and classes, the
-# four constants, and ``logger``). Third-party/stdlib names the old module
-# merely imported (``get_native_daemon_client``, ``load_state``, ...) are
-# deliberately NOT part of the surface -- see
-# ``TestPatchOwnership.test_package_binds_no_patched_global``.
+# flat ``cli/stop_hook.py`` bound before the split, plus the four #2566
+# pre-lock sentinel helpers (34 defs and classes, the four constants, and
+# ``logger``). Third-party/stdlib names the old module merely imported
+# (``get_native_daemon_client``, ``load_state``, ...) are deliberately NOT part
+# of the surface -- see ``TestPatchOwnership.test_package_binds_no_patched_global``.
 EXPECTED_EXPORTS = {
-    # Defs and classes (30)
+    # Defs and classes (34)
     "_HeadlessResolution",
     "_LockedStop",
+    "_PreparedSentinel",
     "_agent_spawn_stamp_is_clear",
     "_armed_running_task",
     "_build_completed_payload",
@@ -73,9 +74,12 @@ EXPECTED_EXPORTS = {
     "_park_if_abandoned",
     "_parse_headless_sentinel",
     "_peek_staged_emit_result",
+    "_prepare_headless_sentinel",
+    "_prepare_sentinel_before_lock",
     "_read_stop_hook_payload",
     "_reconstruct_emitted_sentinel",
     "_resolve_and_complete_headless_session",
+    "_resolve_headless_sentinel",
     "_resolve_signal_stop_context",
     "_resolve_stop_under_lock",
     "_restore_staged_route_outcome",
@@ -129,7 +133,7 @@ class TestPackageExportCompleteness:
     """Guards that ``cw.cli.stop_hook`` keeps its full pre-split surface."""
 
     def test_expected_surface_size(self) -> None:
-        assert len(EXPECTED_EXPORTS) == 35
+        assert len(EXPECTED_EXPORTS) == 39
 
     def test_project_defined_names_match_surface(self) -> None:
         """Every def/class/command bound on the package is in the surface."""
@@ -221,6 +225,14 @@ PATCH_OWNERSHIP = [
     ),
     ("_resolve_stop_under_lock", "load_state", f"{_PKG}.locked"),
     ("_resolve_stop_under_lock", "sessions_lock", f"{_PKG}.locked"),
+    ("_prepare_sentinel_before_lock", "load_state", f"{_PKG}.locked"),
+    ("_verify_headless_scope", "reconcile_result_scope", f"{_PKG}.sentinel"),
+    (
+        "_verify_headless_scope",
+        "resolve_scope_guard_default_branch",
+        f"{_PKG}.sentinel",
+    ),
+    ("_resolve_headless_sentinel", "_parse_headless_sentinel", f"{_PKG}.sentinel"),
     ("signal_stop", "get_native_daemon_client", f"{_PKG}.command"),
     ("signal_stop", "_write_cw_context_locked", f"{_PKG}.command"),
     ("_handle_unrouted_stop", "get_native_daemon_client", f"{_PKG}.command"),
@@ -251,7 +263,7 @@ class TestPatchOwnership:
     def test_package_binds_no_patched_global(self) -> None:
         """A stale ``cw.cli.stop_hook.<global>`` target fails loudly.
 
-        The package re-exports only its own 35 names, never a third-party
+        The package re-exports only its own 39 names, never a third-party
         global a submodule imports, so a patch left on the package raises
         instead of resolving and silently not intercepting. A global with any
         reader still in the package itself is exempt until that reader moves.
@@ -269,7 +281,7 @@ class TestPatchOwnership:
 # ``__name__``-derived child logger (``cw.cli.stop_hook.sentinel``) pass the
 # same assertions -- so these tests pin ``record.name`` exactly, filtered to the
 # record the function under test emits. One case per pre-split ``logger.`` call
-# site (six).
+# site (six pre-split sites plus the #2566 snapshot warning).
 PINNED_LOGGER_NAME = "cw.cli.stop_hook"
 
 
@@ -365,13 +377,41 @@ class TestLoggerNamePinned:
 
         assert _names_of(caplog, "sentinel_unroutable:") == [PINNED_LOGGER_NAME]
 
+    def test_prepare_sentinel_before_lock_snapshot_warning(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """#2566: the lockless snapshot failure warns under the pinned name."""
+
+        def _raise() -> None:
+            message = "state file unreadable"
+            raise OSError(message)
+
+        monkeypatch.setattr("cw.cli.stop_hook.locked.load_state", _raise)
+
+        with caplog.at_level(logging.DEBUG, logger=PINNED_LOGGER_NAME):
+            prepared = stop_hook._prepare_sentinel_before_lock(
+                {"headless": True},
+                cwd_value="/tmp/wt-pin-snapshot",
+                cw_session_id="sess-pin-snapshot",
+                claude_session_id=None,
+                ticket_id_value=None,
+            )
+
+        assert prepared is None
+        assert _names_of(caplog, "pre-lock session snapshot failed") == [
+            PINNED_LOGGER_NAME
+        ]
+
     def test_package_logger_uses_pinned_name(self) -> None:
         assert stop_hook.logger.name == PINNED_LOGGER_NAME
 
 
 # Submodules that log. Each binds its own ``logger`` to the pinned name via
 # ``_constants._LOGGER_NAME``, never ``__name__``.
-LOGGING_SUBMODULES = ["agent_stamp", "command", "sentinel"]
+LOGGING_SUBMODULES = ["agent_stamp", "command", "locked", "sentinel"]
 
 
 class TestLoggerObjectsPinned:

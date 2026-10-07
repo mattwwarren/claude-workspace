@@ -69,7 +69,6 @@ SUBPROCESS_UNDER_SESSIONS_ALLOWLIST: dict[str, str] = {
     "cw.reconcile.phantom._detect": "#2548",  # phantom dirty-check git, #2548
     "cw.reconcile.tasks": "#2548",  # phantom dirty-check git (tasks path), #2548
     "cw.local_runner": "#2565",  # local harvest sentinel synthesis git, #2565
-    "cw.cli.stop_hook.locked": "#2566",  # Stop-hook headless scope git, #2566
 }
 
 
