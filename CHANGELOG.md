@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`cw spawn close` and `cw spawn complete --force` no longer run the daemon stop under `sessions_lock` (#2547).** The surface stop (a `claude stop` subprocess of up to 10s) now runs after the lock releases, on the already-COMPLETED repeat-close path, the live close path and the `--force` no-op path alike, matching `cw done` and the Stop hook. `cw spawn close` now cancels the task and stamps the session COMPLETED before the stop (previously the stop came first), so a stop failure no longer leaves the session un-stamped; a repeat `cw spawn close` retries just the stop.
+
 ### Fixed
 
 - **A classifier-denied auto-merge arm is now reported distinctly (#2625).** When the auto-mode permission classifier denies the `prep_pr_finalize.py arm-automerge` Bash call, the script never starts and the call has no exit status; finalize now emits variant (d) of `automerge_not_armed` (the denial quoted verbatim, the head-pinned by-hand command, and an operator-only allow-rule hint) instead of a generic or misleading `automerge_not_armed`, and `auto-dev.md`'s Tool-Use Denial Exit carves this one call out. Caveat: the ticket's first acceptance clause ("ends with auto-merge armed") is met only for arms the classifier permits; a classifier denial is a human-opened gate, and a cw-side re-arm is deferred to a follow-up (#2638) that needs an operator decision. No change to retry, `pr.auto_merge: false` (#2046) or the fail-closed reader (#2581).

@@ -566,7 +566,7 @@ def done_session(
     :func:`~cw.worktree.live_home_reason` then reports as occupying the
     ticket's worktree forever, blocking re-dispatch. A repeat ``cw done``
     stops that stray surface instead of only raising on it, mirroring
-    :func:`cw.cli.spawn._spawn_close_impl`'s stop-then-return. Idempotent:
+    :func:`cw.cli.spawn._spawn_close_impl`'s post-lock stop-then-return. Idempotent:
     :meth:`~cw.native_daemon.NativeDaemonClient.stop` swallows a missing or
     already-gone surface.
     """
