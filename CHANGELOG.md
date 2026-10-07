@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Haiku 5.5 workers now get `--permission-mode auto` instead of falling back to `bypassPermissions` (#2624).** `claude-haiku-5-5` (and dated or suffixed ids such as `claude-haiku-5-5-20260101`) is added to the auto-capable prefix allowlist in `cw.native_daemon`, per the Claude Code permission-modes docs. Haiku 4.5 remains non-auto-capable. `config/CONFIG_REFERENCE.md` and `config/clients.example.yaml` now recommend `claude-haiku-5-5` for the finalize stage, and the Haiku note in the reference describes only pre-5.5 Haiku.
+
 ## [1.67.3] - 2026-10-07
 
 ### Changed

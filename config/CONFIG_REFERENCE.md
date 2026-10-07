@@ -184,7 +184,7 @@ Scope: forwarded as `--model <id>` to `claude --bg` from both
 `spawn_create_impl` (initial DAEMON spawn) and `resume_session` (DAEMON-origin
 resume of a dead surface). USER-origin sessions ignore this field.
 
-Permission mode: some models (notably Haiku) do not support
+Permission mode: some models (pre-5.5 Haiku, e.g. Haiku 4.5) do not support
 `--permission-mode auto`, which would hang the `claude --bg` spawn
 indefinitely (#1111). When a DAEMON-origin worker is pinned to a
 non-auto-capable model, cw spawns it with `--permission-mode bypassPermissions`
@@ -353,7 +353,7 @@ silently fall back to the client default.
 
 Recommended models per stage:
 - **plan/impl/review**: `claude-sonnet-5-5`
-- **finalize**: `claude-haiku-4-5-20251001`
+- **finalize**: `claude-haiku-5-5`
 
 **Cost Rationale**:
 - `haiku` is cheaper than `sonnet` ($0.25/$1.25 vs $3/$15 per 1M tokens (input/output)).
