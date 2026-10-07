@@ -316,7 +316,7 @@ def _reap_session_by_selector(
     """
     # Why (#2491): *bounded* is the caller's choice. The operator entry points
     # (`cw doctor --reap <SESSION>` in cli/maintenance.py and
-    # doctor/wedge.py::_reap_wedge_findings) pass bounded=True so a wedged
+    # doctor/wedge/reap.py::_reap_daemon_sessions) pass bounded=True so a wedged
     # holder surfaces as an error instead of a hang. The `cw orchestrate run
     # --lane` poll loop (cli/orchestrate.py::_drain_reap_proposals) keeps the
     # default: it is unattended, a timeout would end its reap-authorization
