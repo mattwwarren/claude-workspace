@@ -49,9 +49,12 @@ later reconcile tick, so a durable bind is never silently unaudited.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import logging
 from collections import Counter
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -59,13 +62,14 @@ from cw._hook_context import _read_cw_context
 from cw.atomic import atomic_write_text
 from cw.config import events_dir, load_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
-from cw.events import record_event
+from cw.events import read_events, record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.reconcile._shared import ticket_id_for_session
 from cw.worktree import worktree_path_for
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from datetime import datetime
     from pathlib import Path
 
@@ -79,6 +83,10 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 _ADOPTION_OUTBOX_NAME = "task-session-adopted.outbox.json"
+_ADOPTION_OUTBOX_LOCK_NAME = ".task-session-adopted.outbox.lock"
+_adoption_outbox_lock_depth: ContextVar[int] = ContextVar(
+    "adoption_outbox_lock_depth", default=0
+)
 
 
 @dataclass(frozen=True)
@@ -314,44 +322,90 @@ def _adoption_outbox_path() -> Path:
     return events_dir() / _ADOPTION_OUTBOX_NAME
 
 
+@contextlib.contextmanager
+def _adoption_outbox_lock() -> Iterator[None]:
+    """Serialize outbox delivery and cleanup across reconcile processes."""
+    depth = _adoption_outbox_lock_depth.get()
+    if depth:
+        yield
+        return
+    events_dir().mkdir(parents=True, exist_ok=True)
+    fd = (events_dir() / _ADOPTION_OUTBOX_LOCK_NAME).open("w")
+    token = _adoption_outbox_lock_depth.set(1)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        _adoption_outbox_lock_depth.reset(token)
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+
+
+def _event_identity(record: dict[str, object]) -> tuple[object, ...]:
+    return (
+        record.get("client"),
+        record.get("ticket_id"),
+        record.get("lane"),
+        record.get("session_id"),
+        record.get("session_name"),
+        record.get("attempt"),
+        record.get("claimed_at"),
+    )
+
+
+def _event_key(record: dict[str, object]) -> str:
+    return json.dumps(_event_identity(record), separators=(",", ":"))
+
+
 def _read_adoption_outbox() -> list[dict[str, object]]:
-    path = _adoption_outbox_path()
-    if not path.exists():
-        return []
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, list) or not all(isinstance(entry, dict) for entry in raw):
-        message = "task.session_adopted outbox is not a list of records"
-        raise CwError(message)
-    entries = [cast("dict[str, object]", entry) for entry in raw]
-    required = {
-        "client",
-        "ticket_id",
-        "created_at",
-        "lane",
-        "session_id",
-        "session_name",
-        "attempt",
-        "claimed_at",
-    }
-    if any(
-        not required.issubset(entry)
-        or any(
-            not isinstance(entry[key], str)
-            for key in required - {"attempt", "claimed_at"}
-        )
-        or type(entry["attempt"]) is not int
-        or not (entry["claimed_at"] is None or isinstance(entry["claimed_at"], str))
-        for entry in entries
-    ):
-        message = "task.session_adopted outbox contains an invalid record"
-        raise CwError(message)
-    return entries
+    with _adoption_outbox_lock():
+        path = _adoption_outbox_path()
+        if not path.exists():
+            return []
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, list) or not all(
+            isinstance(entry, dict) for entry in raw
+        ):
+            message = "task.session_adopted outbox is not a list of records"
+            raise CwError(message)
+        entries = [cast("dict[str, object]", entry) for entry in raw]
+        required = {
+            "client",
+            "ticket_id",
+            "created_at",
+            "lane",
+            "session_id",
+            "session_name",
+            "attempt",
+            "claimed_at",
+        }
+        if any(
+            not required.issubset(entry)
+            or any(
+                not isinstance(entry[key], str)
+                for key in required - {"attempt", "claimed_at"}
+            )
+            or type(entry["attempt"]) is not int
+            or not (
+                entry["claimed_at"] is None
+                or isinstance(entry["claimed_at"], str)
+            )
+            for entry in entries
+        ):
+            message = "task.session_adopted outbox contains an invalid record"
+            raise CwError(message)
+        for entry in entries:
+            entry.setdefault("bind_committed", False)
+            entry.setdefault("event_key", _event_key(entry))
+        return entries
 
 
 def _write_adoption_outbox(entries: list[dict[str, object]]) -> None:
-    path = _adoption_outbox_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, json.dumps(entries, sort_keys=True) + "\n")
+    with _adoption_outbox_lock():
+        path = _adoption_outbox_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, json.dumps(entries, sort_keys=True) + "\n")
 
 
 def _outbox_key(record: dict[str, object]) -> tuple[object, ...]:
@@ -366,7 +420,7 @@ def _outbox_key(record: dict[str, object]) -> tuple[object, ...]:
 
 
 def _adoption_record(candidate: UnownedCandidate) -> dict[str, object]:
-    return {
+    record = {
         "client": candidate.client,
         "ticket_id": candidate.ticket_id,
         "created_at": candidate.created_at.isoformat(),
@@ -379,24 +433,78 @@ def _adoption_record(candidate: UnownedCandidate) -> dict[str, object]:
             if candidate.claimed_at is not None
             else None
         ),
+        # This is a write-ahead bind intent.  It is promoted after the queue
+        # save, and a matching row also promotes it after an interrupted tick.
+        "bind_committed": False,
     }
+    record["event_key"] = _event_key(record)
+    return record
 
 
 def _stage_adoption(candidate: UnownedCandidate) -> None:
     """Write the durable marker before the queue bind is allowed."""
     record = _adoption_record(candidate)
-    entries = _read_adoption_outbox()
-    if not any(_outbox_key(entry) == _outbox_key(record) for entry in entries):
-        entries.append(record)
-        _write_adoption_outbox(entries)
+    with _adoption_outbox_lock():
+        entries = _read_adoption_outbox()
+        if not any(_outbox_key(entry) == _outbox_key(record) for entry in entries):
+            entries.append(record)
+            _write_adoption_outbox(entries)
 
 
 def _remove_adoption_record(record: dict[str, object]) -> None:
-    entries = _read_adoption_outbox()
-    remaining = [
-        entry for entry in entries if _outbox_key(entry) != _outbox_key(record)
-    ]
-    if len(remaining) != len(entries):
+    with _adoption_outbox_lock():
+        entries = _read_adoption_outbox()
+        remaining = [
+            entry for entry in entries if _outbox_key(entry) != _outbox_key(record)
+        ]
+        if len(remaining) != len(entries):
+            _write_adoption_outbox(remaining)
+
+
+def _mark_adoption_bound(record: dict[str, object]) -> None:
+    with _adoption_outbox_lock():
+        entries = _read_adoption_outbox()
+        for entry in entries:
+            if _outbox_key(entry) == _outbox_key(record):
+                entry["bind_committed"] = True
+        _write_adoption_outbox(entries)
+
+
+def _event_matches_adoption(
+    event_payload: dict[str, object], record: dict[str, object]
+) -> bool:
+    return _event_key({**record, **event_payload}) == cast(
+        "str", record.get("event_key", _event_key(record))
+    )
+
+
+def _adoption_event_delivered(record: dict[str, object]) -> bool:
+    return any(
+        event.type is OrchestratorEventType.TASK_SESSION_ADOPTED
+        and _event_matches_adoption(event.payload, record)
+        for event in read_events(
+            event_types=[OrchestratorEventType.TASK_SESSION_ADOPTED]
+        )
+    )
+
+
+def _deliver_adoption_record(record: dict[str, object]) -> None:
+    """Deliver and acknowledge one record as one serialized transaction."""
+    with _adoption_outbox_lock():
+        entries = _read_adoption_outbox()
+        current = next(
+            (entry for entry in entries if _outbox_key(entry) == _outbox_key(record)),
+            None,
+        )
+        if current is None:
+            return
+        if not _adoption_event_delivered(current):
+            _emit_adoption_record(current)
+        remaining = [
+            entry
+            for entry in entries
+            if _outbox_key(entry) != _outbox_key(current)
+        ]
         _write_adoption_outbox(remaining)
 
 
@@ -412,6 +520,7 @@ def _drain_adoption_outbox() -> None:
     with dev_queue_lock():
         store = load_dev_queue()
         ready: list[dict[str, object]] = []
+        promoted: list[dict[str, object]] = []
         stale: list[dict[str, object]] = []
         for entry in entries:
             row = next(
@@ -424,14 +533,20 @@ def _drain_adoption_outbox() -> None:
                 ),
                 None,
             )
-            if row is None:
-                stale.append(entry)
-            elif row.status is QueueItemStatus.RUNNING and row.session_id == entry.get(
-                "session_id"
-            ):
+            if entry.get("bind_committed"):
                 ready.append(entry)
+            elif row is not None and row.session_id == entry.get("session_id"):
+                ready.append(entry)
+                promoted.append(entry)
             else:
                 stale.append(entry)
+    for entry in promoted:
+        try:
+            _mark_adoption_bound(entry)
+        except (CwError, OSError, ValueError):
+            _log.exception(
+                "unowned_running: interrupted bind marker could not be promoted"
+            )
     for entry in stale:
         try:
             _remove_adoption_record(entry)
@@ -441,8 +556,7 @@ def _drain_adoption_outbox() -> None:
             )
     for entry in ready:
         try:
-            _emit_adoption_record(entry)
-            _remove_adoption_record(entry)
+            _deliver_adoption_record(entry)
         except (CwError, OSError, ValueError):
             _log.exception(
                 "unowned_running: task.session_adopted remains queued for %s/%s",
@@ -492,6 +606,14 @@ def _act_adopt(candidate: UnownedCandidate) -> bool:
                 candidate.ticket_id,
             )
             return False
+    try:
+        _mark_adoption_bound(_adoption_record(candidate))
+    except (CwError, OSError, ValueError):
+        _log.exception(
+            "unowned_running: %s/%s bind marker could not be acknowledged",
+            candidate.client,
+            candidate.ticket_id,
+        )
     _drain_adoption_outbox()
     _log.info(
         "unowned_running: adopted %s/%s onto session %s (attempt %d)",
