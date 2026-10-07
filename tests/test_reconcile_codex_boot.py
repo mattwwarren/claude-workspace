@@ -1760,8 +1760,10 @@ def test_lookup_disposition_equals_the_live_one_on_a_status_timeout(
         repo, task, client, clients, config, probe_source=probes.lookup
     )
 
-    assert consumed == live == _OrphanDisposition(
-        should_requeue=False, reason=_PARK_REASON_GIT_ERROR
+    assert (
+        consumed
+        == live
+        == _OrphanDisposition(should_requeue=False, reason=_PARK_REASON_GIT_ERROR)
     )
 
 

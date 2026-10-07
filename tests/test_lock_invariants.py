@@ -46,7 +46,9 @@ _TICKET_RE = re.compile(r"^#\d+$")
 
 # Follow-up tickets that track the in-lock subprocess exceptions documented in
 # ADR-0019 (invariant 3): the #1232 follow-ups plus the four the #1233 probe
-# filed. An allowlist entry must cite one of these.
+# filed. An allowlist entry must cite one of these; a ticket stays listed after
+# its entry is deleted (#2563's was), since this is the documented universe,
+# not a mirror of the allowlist.
 _DOCUMENTED_TICKETS = frozenset(
     {
         "#2545",
@@ -352,6 +354,13 @@ def test_allowlist_modules_resolve() -> None:
     for module in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST:
         assert module.startswith("cw."), module
         assert importlib.util.find_spec(module) is not None, module
+
+
+def test_codex_boot_is_not_allowlisted() -> None:
+    """#2563: the codex orphan clean check's git runs in a lockless pre-pass,
+    so no in-lock subprocess under a ``cw.reconcile.codex_boot`` frame is
+    forgiven any more."""
+    assert "cw.reconcile.codex_boot" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
 
 
 def test_allowlist_entries_cite_a_documented_ticket() -> None:

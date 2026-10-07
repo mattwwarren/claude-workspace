@@ -11,11 +11,14 @@ applies the boot pass's own clean-path logic.
 
 from __future__ import annotations
 
+import contextlib
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import psutil
 import pytest
+from freezegun import freeze_time
 
 from cw.config import (
     load_clients,
@@ -39,13 +42,15 @@ from cw.models import (
     Stage,
     TicketTask,
 )
-from cw.reconcile import reconcile
+from cw.reconcile import codex_boot, codex_reparks, reconcile
 from cw.reconcile.codex_boot import (
     _PARK_REASON_DIRTY_WORKTREE,
     _PARK_REASON_PROCESS_SCAN_INCONCLUSIVE,
     _PARK_REASON_REAP_POLICY_NOT_AUTO,
+    CLEAN_PROBE_MAX_AGE_SECONDS,
     CODEX_ORPHAN_CLEAN_REQUEUE_REASON,
     CODEX_ORPHANED_AT_BOOT_DISPOSITION,
+    CleanProbes,
     _OrphanDisposition,
     reap_orphaned_codex_sessions_at_boot,
 )
@@ -55,6 +60,7 @@ from cw.reconcile.codex_reparks import (
     CODEX_ORPHAN_CLOSE_REASON_AT_RECONCILE,
     _act_on_live_writer_repark_candidates,
     _ReparkCandidate,
+    capture_repark_probes,
     run_codex_live_writer_reparks,
 )
 from tests._clients_yaml import review_backend_clients, write_clients_yaml
@@ -65,6 +71,7 @@ from tests._codex_recovery_helpers import (
     _forbid_os_kill,
     _live_writer,
     _no_codex_process,
+    _record_git_lock_state,
     _requeued_events,
     _seed_clean_codex_orphan,
 )
@@ -75,7 +82,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from cw.models import Session
+    from cw.models import ClientConfig, Session
 
 _PARKED_AT = datetime(2026, 1, 1, 0, 30, 0, tzinfo=UTC)
 _NOW = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
@@ -95,13 +102,37 @@ def _config(*, auto: bool) -> OrchestratorConfig:
     )
 
 
-def _run(*, auto: bool, now: datetime = _NOW) -> list[str]:
-    """Run the sweep the way reconcile does: under the held sessions_lock,
-    scoped to every configured client."""
+def _capture(
+    *, auto: bool, now: datetime = _NOW, clients: dict[str, ClientConfig] | None = None
+) -> CleanProbes:
+    """The lockless pre-pass: capture every due candidate's clean probe."""
+    probes = CleanProbes()
+    capture_repark_probes(
+        load_state(),
+        load_dev_queue().tasks,
+        now=now,
+        clients=clients if clients is not None else load_clients(),
+        config=_config(auto=auto),
+        probes=probes,
+    )
+    return probes
+
+
+def _sweep(
+    probes: CleanProbes | None, *, auto: bool = True, now: datetime = _NOW
+) -> list[str]:
+    """The in-lock sweep alone, consuming *probes* under the held lock."""
     with sessions_lock():
         return run_codex_live_writer_reparks(
-            now=now, config=_config(auto=auto), clients=load_clients()
+            now=now, config=_config(auto=auto), clients=load_clients(), probes=probes
         )
+
+
+def _run(*, auto: bool, now: datetime = _NOW) -> list[str]:
+    """Run the sweep the way reconcile does: capture the clean probes before
+    the lock (#2563), then sweep under the held sessions_lock, scoped to every
+    configured client."""
+    return _sweep(_capture(auto=auto, now=now), auto=auto, now=now)
 
 
 def _park_as_live_writer_orphan(
@@ -369,7 +400,9 @@ def test_row_still_in_backoff_window_is_not_rescanned(
 
     assert _run(auto=True, now=eligible_at) == [_TICKET]
 
-    assert len(calls) == 1
+    # Two scans for one due row (#2563): the lockless pre-pass scans before it
+    # captures the probe, and the in-lock sweep re-scans before consuming it.
+    assert len(calls) == 2
     assert _task().status is QueueItemStatus.PENDING
 
 
@@ -671,10 +704,11 @@ def test_a_tick_scoped_to_one_client_never_touches_another_clients_park(
     )
     _no_codex_process(monkeypatch)
     scope = {name: cfg for name, cfg in load_clients().items() if name == _CLIENT}
+    probes = _capture(auto=True, clients=scope)
 
     with sessions_lock():
         requeued = run_codex_live_writer_reparks(
-            now=_NOW, config=_config(auto=True), clients=scope
+            now=_NOW, config=_config(auto=True), clients=scope, probes=probes
         )
 
     assert requeued == [_TICKET]
@@ -715,10 +749,14 @@ def test_each_clients_own_lane_policy_governs_its_own_row(
         },
     )
     _no_codex_process(monkeypatch)
+    probes = _capture(auto=global_auto)
 
     with sessions_lock():
         requeued = run_codex_live_writer_reparks(
-            now=_NOW, config=_config(auto=global_auto), clients=load_clients()
+            now=_NOW,
+            config=_config(auto=global_auto),
+            clients=load_clients(),
+            probes=probes,
         )
 
     assert requeued == [_TICKET]
@@ -880,8 +918,12 @@ def test_dispatch_tick_reconciles_a_live_writer_park(
     assert parked.codex_orphan_rescan_next_eligible_at is None
 
     _no_codex_process(monkeypatch)
+    git_calls = _record_git_lock_state(monkeypatch)
     reconcile()
 
+    # #2563: the clean check's git ran in reconcile()'s lockless pre-pass.
+    assert git_calls
+    assert all(lock_free for _, lock_free in git_calls)
     _assert_session_closed()
     task = _task()
     assert task.status is QueueItemStatus.PENDING
@@ -921,3 +963,130 @@ def test_still_live_writer_rescan_never_repages_the_operator(
     assert task.codex_orphan_rescan_next_eligible_at == later + timedelta(
         seconds=_LIVE_WRITER_RESCAN_BACKOFF_SECONDS
     )
+
+
+# --------------------------------------------------------------------------- #
+# Lockless clean probe (#2563): git runs in the pre-pass, the in-lock sweep
+# only consumes it, and an unusable probe defers the row to the next tick.
+# --------------------------------------------------------------------------- #
+
+
+def test_requeue_runs_its_git_before_the_lock_never_under_it(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_parked(tmp_config_dir, tmp_path, make_git_repo)
+    _no_codex_process(monkeypatch)
+    git_calls = _record_git_lock_state(monkeypatch)
+
+    assert _run(auto=True) == [_TICKET]
+
+    assert {subcommand for subcommand, _ in git_calls} == {"status", "rev-parse"}
+    assert all(lock_free for _, lock_free in git_calls)
+
+
+def _restamp_base_ref() -> None:
+    store = load_dev_queue()
+    store.tasks[0].stage_base_ref = "0" * 40
+    save_dev_queue(store)
+
+
+@pytest.mark.parametrize("unusable", ["missing", "stale", "restamped"])
+def test_unusable_probe_leaves_the_row_for_the_next_tick(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    unusable: str,
+) -> None:
+    """Fail closed by deferring: no requeue, no close, no backoff stamp, no
+    event, only a warning; the in-lock sweep never falls back to live git."""
+    _, session = _seed_parked(tmp_config_dir, tmp_path, make_git_repo)
+    _no_codex_process(monkeypatch)
+    probes = None if unusable == "missing" else _capture(auto=True)
+    if unusable == "restamped":
+        _restamp_base_ref()
+    git_calls = _record_git_lock_state(monkeypatch)
+    clock = (
+        freeze_time(datetime.now(UTC) + timedelta(seconds=CLEAN_PROBE_MAX_AGE_SECONDS))
+        if unusable == "stale"
+        else contextlib.nullcontext()
+    )
+
+    with clock, caplog.at_level(logging.WARNING, logger=codex_reparks.__name__):
+        assert _sweep(probes) == []
+
+    assert git_calls == []
+    _assert_session_active()
+    task = _assert_still_parked(session)
+    assert task.codex_orphan_rescan_next_eligible_at is None
+    assert _completed_events(f"test-reparks-defer-{unusable}-completed") == []
+    assert _requeued_events(f"test-reparks-defer-{unusable}-requeued") == []
+    assert f"{_CLIENT}/{_TICKET}'s orphan session {session.id}" in caplog.text
+    assert "no usable clean probe" in caplog.text
+
+
+def test_a_deferred_row_requeues_once_the_next_tick_captures(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_parked(tmp_config_dir, tmp_path, make_git_repo)
+    _no_codex_process(monkeypatch)
+
+    assert _sweep(None) == []
+    assert _run(auto=True) == [_TICKET]
+
+    _assert_session_closed()
+    assert _task().status is QueueItemStatus.PENDING
+
+
+def test_live_writer_rescan_needs_no_probe(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live writer parks before git is reached, so a missing probe is moot:
+    the backoff is stamped exactly as before."""
+    _, session = _seed_parked(tmp_config_dir, tmp_path, make_git_repo)
+    _live_writer(monkeypatch, 4242)
+
+    assert _sweep(None) == []
+
+    _assert_session_active()
+    task = _assert_still_parked(session)
+    assert task.codex_orphan_rescan_next_eligible_at == _NOW + timedelta(
+        seconds=_LIVE_WRITER_RESCAN_BACKOFF_SECONDS
+    )
+
+
+def test_capture_with_a_spent_budget_records_nothing_and_does_not_raise(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_parked(tmp_config_dir, tmp_path, make_git_repo)
+    _no_codex_process(monkeypatch)
+    clock = {"now": 0.0}
+    monkeypatch.setattr(codex_boot, "monotonic", lambda: clock["now"])
+    probes = CleanProbes(budget_seconds=1.0)
+    clock["now"] = 2.0
+    git_calls = _record_git_lock_state(monkeypatch)
+
+    capture_repark_probes(
+        load_state(),
+        load_dev_queue().tasks,
+        now=_NOW,
+        clients=load_clients(),
+        config=_config(auto=True),
+        probes=probes,
+    )
+
+    assert probes.captured_keys == frozenset()
+    assert git_calls == []
