@@ -1,7 +1,8 @@
 """Top-level reconcile orchestration.
 
-``reconcile`` runs the lockless gh pre-pass and the lockless codex clean-probe
-pre-pass (#2563), then ``_reconcile_locked`` under ``sessions_lock`` (the
+``reconcile`` runs the lockless pre-passes -- gh merge state, the codex clean
+probes (#2563) and the gate recipes' plan-of-record prefetch (#2545) -- then
+``_reconcile_locked`` under ``sessions_lock`` (the
 detect/emit/act sweeps for stalled, idle, and phantom sessions), then the
 post-lock gh/git passes. See the package ``__init__`` docstring and
 ADR-0005/ADR-0006 for the invariants.
@@ -63,7 +64,12 @@ from cw.reconcile.concierge import run_concierge_recoveries
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 from cw.reconcile.escalation import run_escalation_sweep
 from cw.reconcile.fix_dispatch import run_fix_dispatch
-from cw.reconcile.gate_recipes import run_gate_recipes
+from cw.reconcile.gate_plan_probes import (
+    PLAN_PREFETCH_BUDGET_SECONDS,
+    PLAN_PREFETCH_MAX_PER_TICK,
+    PlanProbes,
+)
+from cw.reconcile.gate_recipes import capture_plan_probes, run_gate_recipes
 from cw.reconcile.idle import _act_on_idle_candidates, _detect_idle_candidates
 from cw.reconcile.leaked_workers import sweep_leaked_daemon_workers
 from cw.reconcile.liveness import record_session_liveness_changes
@@ -117,6 +123,7 @@ def _run_terminal_backstops_and_sweeps(
     clients: dict[str, ClientConfig],
     deferred: DeferredReconcileJobs,
     codex_probes: CleanProbes | None,
+    plan_probes: PlanProbes | None,
 ) -> tuple[list[str], list[str]]:
     """Run the post-detect TicketTask backstops + RFC 0008 capstone sweeps.
 
@@ -132,7 +139,9 @@ def _run_terminal_backstops_and_sweeps(
     reusing the (possibly now-stale) locals in ``_reconcile_locked``.
     *clients* is the tick's own client scope; the codex re-park sweep acts
     only within it (#2307 review round 1), and reads its clean checks from
-    *codex_probes*, captured before the lock (#2563).
+    *codex_probes*, captured before the lock (#2563). The gate recipes read
+    each plan-of-record body from *plan_probes*, also captured before the
+    lock (#2545); ``None`` skips every plan candidate for the tick.
     Extracted to one call site (instead of duplicating 4 lines in each
     branch) to keep ``_reconcile_locked``'s statement count under the
     PLR0915 limit.
@@ -160,7 +169,7 @@ def _run_terminal_backstops_and_sweeps(
     run_codex_live_writer_reparks(
         now=now, config=config, clients=clients, probes=codex_probes
     )
-    run_gate_recipes(now=now, config=config, deferred=deferred)
+    run_gate_recipes(now=now, config=config, deferred=deferred, plan_probes=plan_probes)
     run_review_recipes(config=config, jobs=deferred)
     run_escalation_sweep(now=now)
     return timed_out_ticket_ids, completed_silent_ticket_ids
@@ -261,6 +270,43 @@ def _capture_codex_clean_probes(
     return probes
 
 
+def _capture_plan_probes(
+    *, config: OrchestratorConfig, clients: dict[str, ClientConfig]
+) -> PlanProbes:
+    """Lockless pre-pass: prefetch the gate recipes' plan-of-record reads (#2545).
+
+    Runs in ``reconcile()`` before ``sessions_lock`` is taken, so the in-lock
+    plan recipe runs no ``gh``/``git``: ``capture_plan_probes`` re-runs the
+    plan detect here over a fresh snapshot and records each body, which the
+    in-lock detect only reads. Bounded by ``PLAN_PREFETCH_MAX_PER_TICK`` reads
+    and ``PLAN_PREFETCH_BUDGET_SECONDS``. Reads nothing when the gate-recipe
+    master switch is off.
+
+    Like ``_capture_codex_clean_probes`` it must never fail ``reconcile()``
+    (which serves ``cw status``/``list``/``start``/``doctor``) over a state or
+    dev-queue read error: that is logged and yields an empty ``PlanProbes``,
+    so every plan candidate is skipped this tick. Nothing broader is caught.
+    """
+    if not config.gate_recipes_enabled:
+        return PlanProbes()
+    try:
+        state = load_state()
+        tasks = load_dev_queue().tasks
+    except (OSError, ValueError):
+        _log.warning(
+            "reconcile: plan prefetch pre-pass could not read state;"
+            " skipping all plan-gate candidates this tick",
+            exc_info=True,
+        )
+        return PlanProbes()
+    probes = PlanProbes(
+        budget_seconds=PLAN_PREFETCH_BUDGET_SECONDS,
+        max_captures=PLAN_PREFETCH_MAX_PER_TICK,
+    )
+    capture_plan_probes(state, tasks, clients=clients, config=config, probes=probes)
+    return probes
+
+
 def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     """Apply drift reconciliation against the persisted state.
 
@@ -307,6 +353,12 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     COMPLETED with its TicketTask still RUNNING (residual from an older crash
     or the dispatch-consumer path), ``revert_completed_silent_tasks()``
     recovers it within one reconcile tick.  See GitHub #867.
+
+    Lockless pre-passes: before taking ``sessions_lock`` this function runs
+    every ``gh``/``git`` call the in-lock sweeps would otherwise need -- PR
+    merge state, the codex clean probes (#2563), and the gate recipes'
+    plan-of-record reads (#2545). The in-lock code only reads their results,
+    and a candidate with no usable result defers to the next tick.
     """
     # Pre-pass: check PR merge state for ACTIVE/IDLE DAEMON sessions before
     # acquiring sessions_lock. gh subprocess must NOT run under the lock
@@ -377,6 +429,9 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     codex_probes = _capture_codex_clean_probes(
         config=_orchestrator_config, clients=_clients
     )
+    # Third lockless pre-pass (#2545): the gate recipes' plan-of-record read
+    # (`gh issue view`, and `git` for the `.cw/plan.md` fallback).
+    plan_probes = _capture_plan_probes(config=_orchestrator_config, clients=_clients)
 
     jobs = DeferredReconcileJobs(
         review=DeferredReviewDispatch() if dispatch_review_jobs else None
@@ -395,6 +450,7 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
                 clients=_clients,
                 deferred=jobs,
                 codex_probes=codex_probes,
+                plan_probes=plan_probes,
             )
     finally:
         # Post-lock drain (#1232, #1229). Everything in `jobs` was decided and
@@ -482,6 +538,7 @@ def _reconcile_locked(
     clients: dict[str, ClientConfig] | None = None,
     deferred: DeferredReconcileJobs,
     codex_probes: CleanProbes | None = None,
+    plan_probes: PlanProbes | None = None,
 ) -> ReconcileReport:
     """Body of reconcile(), called while sessions_lock is held.
 
@@ -510,6 +567,10 @@ def _reconcile_locked(
     (#2563): the re-park sweep and the local harvest sweep's codex branch
     read their git checks from it, so neither runs git under sessions_lock.
     ``None`` (nothing captured) makes every such candidate defer a tick.
+    plan_probes comes from reconcile()'s lockless plan prefetch pre-pass
+    (#2545): the gate recipes read each plan-of-record body from it, so no
+    gh/git runs for them under sessions_lock; ``None`` skips every plan
+    candidate for the tick.
 
     Since the process-kill-timeout removal, no sweep in here dispositions a
     session off elapsed time or transcript quietness: the foreign-result and
@@ -684,6 +745,7 @@ def _reconcile_locked(
                 clients=clients,
                 deferred=deferred,
                 codex_probes=codex_probes,
+                plan_probes=plan_probes,
             )
         )
         all_reverted = list(
@@ -740,6 +802,7 @@ def _reconcile_locked(
             clients=clients,
             deferred=deferred,
             codex_probes=codex_probes,
+            plan_probes=plan_probes,
         )
     )
     all_reverted = list(

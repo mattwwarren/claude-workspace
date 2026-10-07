@@ -20,11 +20,13 @@ from typing import Any
 import pytest
 
 from cw._lock_guard import LockRank, is_rank_held
-from cw.config import load_state
+from cw.config import load_effective_clients, load_state
+from cw.dev_queue import load_dev_queue
 from cw.events import read_events
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     ClientConfig,
+    CwState,
     LastResultSource,
     OrchestratorConfig,
     OrchestratorEventType,
@@ -34,10 +36,18 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile._shared import _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
+from cw.reconcile.gate_plan_probes import PlanProbes
+from cw.reconcile.gate_recipes import (
+    GateRecipeCandidate,
+    _detect_auto_adopt_plan,
+    capture_plan_probes,
+    run_gate_recipes,
+)
 from cw.reconcile.review_recipes import ReviewRecipeCandidate
 from tests.conftest import (
     _make_daemon_session,
@@ -983,3 +993,74 @@ def _failing_record_event(
 
     monkeypatch.setattr(target, flaky)
     return failures
+
+
+def detect_adopt_plan_prefetched(
+    state: CwState,
+    tasks: list[TicketTask],
+    *,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
+) -> list[GateRecipeCandidate]:
+    """Run the plan detect the way ``reconcile()`` does: capture, then look up.
+
+    The lockless capture pass runs the live plan-of-record read into a fresh
+    ``PlanProbes`` (#2545); the detect then reads only that store, as the
+    in-lock call does. Lets detect tests keep stubbing the live read.
+    """
+    probes = PlanProbes()
+    capture_plan_probes(state, tasks, clients=clients, config=config, probes=probes)
+    return _detect_auto_adopt_plan(
+        state, tasks, clients=clients, config=config, body_source=probes.lookup
+    )
+
+
+def run_gate_recipes_prefetched(
+    *,
+    now: datetime,
+    config: OrchestratorConfig,
+    deferred: DeferredReconcileJobs | None = None,
+) -> list[str]:
+    """Capture the plan prefetch from disk, then run and drain ``run_gate_recipes``.
+
+    Stands in for ``reconcile()``'s lockless plan pre-pass (#2545) followed by
+    the in-lock recipe run, for tests that drive ``run_gate_recipes`` directly.
+    """
+    probes = PlanProbes()
+    capture_plan_probes(
+        load_state(),
+        load_dev_queue().tasks,
+        clients=load_effective_clients(),
+        config=config,
+        probes=probes,
+    )
+    return call_and_drain(
+        run_gate_recipes, now=now, config=config, plan_probes=probes, deferred=deferred
+    )
+
+
+def recording_plan_fetch(
+    calls: list[str], *, body: str | None = None
+) -> Callable[..., str | None]:
+    """A ``fetch_approved_plan_comment`` stand-in that records each ticket id.
+
+    Returns *body* for every call. Install it at
+    ``cw.reconcile.gate_recipes.fetch_approved_plan_comment`` (the binding
+    ``stub_fetch_plan`` patches).
+    """
+
+    def _fetch(ticket_id: str, **_k: object) -> str | None:
+        calls.append(ticket_id)
+        return body
+
+    return _fetch
+
+
+def forbidden_plan_fetch() -> Callable[..., str | None]:
+    """A ``fetch_approved_plan_comment`` stand-in that fails the test if called."""
+
+    def _fetch(ticket_id: str, **_k: object) -> str | None:
+        msg = f"the plan-of-record read must not run here (ticket {ticket_id})"
+        raise AssertionError(msg)
+
+    return _fetch
