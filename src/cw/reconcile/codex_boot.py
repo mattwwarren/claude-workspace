@@ -622,9 +622,7 @@ def _resolve_orphan_action(
 
     *probe_source* supplies the git answers (see ``_gate_clean_requeue``);
     omitted, the boot pass's live git runs. Raises
-    ``CleanProbeUnavailableError`` when a lookup source misses at the git gate
-    or when a captured clean result would otherwise authorize an unsafe
-    requeue.
+    ``CleanProbeUnavailableError`` when a lookup source misses at the git gate.
     """
     if worktree is None:
         # No path to scan is a scan that cannot run, so it is inconclusive. A
@@ -644,8 +642,6 @@ def _resolve_orphan_action(
         auto=policy is ReapPolicy.AUTO,
         probe_source=probe_source,
     )
-    if probe_source is not None and disposition.should_requeue:
-        raise CleanProbeUnavailableError
     return disposition
 
 
