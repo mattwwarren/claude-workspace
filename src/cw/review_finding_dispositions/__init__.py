@@ -120,6 +120,13 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from pydantic import BaseModel
 
+from cw.review_finding_dispositions._constants import (
+    _FIXED,
+    _LOGGER_NAME,
+    _MATCH_CLAIM,
+    _MATCH_EXACT,
+    _MUST_FIX,
+)
 from cw.review_markers import (
     DISPOSITION_SENTINEL,
     RefusedDisposition,
@@ -133,7 +140,7 @@ if TYPE_CHECKING:
     from cw.models.enums import OrchestratorEventType
     from cw.review_findings import AcceptedFinding, ReviewVerdict
 
-_log = logging.getLogger(__name__)
+_log = logging.getLogger(_LOGGER_NAME)
 
 #: The three decisions an operator can record about a finding (#1838 R2,
 #: #2232). Only ``"REJECTED"`` participates in mechanical suppression;
@@ -158,16 +165,6 @@ _REJECTED: Outcome = "REJECTED"
 #: an underscore-prefixed cross-module import. ``_REJECTED`` stays private
 #: because nothing outside this module tests for it.
 REVERSED: Outcome = "REVERSED"
-_MUST_FIX = "MUST_FIX"
-#: ``AcceptedFinding.disposition``'s post-consolidate default — "nothing has
-#: decided anything about this finding yet". The claim tier below refuses to
-#: re-stamp anything else, so a void pass's ``"rejected"`` survives untouched.
-_FIXED = "fixed"
-
-#: Which tier produced a match, carried onto the event payload and the log so
-#: an audit can tell an exact-identity suppression from a fuzzy one.
-_MATCH_EXACT = "exact"
-_MATCH_CLAIM = "claim"
 
 #: Joins the parts of a ledger key — ``file``, the normalized summary and the
 #: verbatim-summary digest (see :func:`_disposition_key`) — into the string a

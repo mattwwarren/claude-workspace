@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 _PKG = "cw.review_finding_dispositions"
+_CONSTANTS_MODULE = f"{_PKG}._constants"
 _LOGGER = "cw.review_finding_dispositions"
 _TICKET = "T-2498"
 
@@ -75,10 +76,10 @@ _OWNER: dict[str, str] = {
     "Outcome": _PKG,
     "_REJECTED": _PKG,
     "REVERSED": _PKG,
-    "_MUST_FIX": _PKG,
-    "_FIXED": _PKG,
-    "_MATCH_EXACT": _PKG,
-    "_MATCH_CLAIM": _PKG,
+    "_MUST_FIX": _CONSTANTS_MODULE,
+    "_FIXED": _CONSTANTS_MODULE,
+    "_MATCH_EXACT": _CONSTANTS_MODULE,
+    "_MATCH_CLAIM": _CONSTANTS_MODULE,
     "_KEY_SEPARATOR": _PKG,
     "_DIGEST_SUFFIX_RE": _PKG,
     "_DISPOSITION_MD_TITLE": _PKG,
@@ -425,6 +426,28 @@ def test_logging_module_logger_has_the_historic_name(name: str) -> None:
     log = vars(_owner(name))["_log"]
     assert isinstance(log, logging.Logger)
     assert log.name == _LOGGER
+
+
+@pytest.mark.parametrize("path", _package_files(), ids=lambda path: path.name)
+def test_no_package_file_logs_under_its_own_name(path: Path) -> None:
+    """``__name__`` would be the submodule's name, not the historic one."""
+    assert "getLogger(__name__)" not in path.read_text(encoding="utf-8")
+
+
+def test_logger_name_is_defined_once_in_constants() -> None:
+    """One literal, in ``_constants``; every other module imports it."""
+    assert vars(importlib.import_module(_CONSTANTS_MODULE))["_LOGGER_NAME"] == _LOGGER
+    defining = [
+        path.name
+        for path in _package_files()
+        for node in ast.parse(path.read_text(encoding="utf-8")).body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "_LOGGER_NAME"
+            for target in node.targets
+        )
+    ]
+    assert defining == ["_constants.py"]
 
 
 # ---------------------------------------------------------------------------
