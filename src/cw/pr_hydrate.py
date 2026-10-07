@@ -7,8 +7,9 @@ push transport — the emit target is the orchestrator bus (``record_event`` ->
 ``inbox.jsonl``), consumed by ``retire_merged_prs``.
 
 The CI-summary and attention-state derivation logic is ported from
-``.claude/scripts/review_monitor.py`` (``_summarize_status_checks`` and
-``_compute_attention_state``), which lives outside ``src/`` and cannot be
+``.claude/scripts/review_monitor_lib/attention.py`` (``_summarize_status_checks``
+and ``_compute_attention_state``, run via ``.claude/scripts/review_monitor.py``),
+which lives outside ``src/`` and cannot be
 imported: every real invocation execs the script directly via its shebang
 under a bare system interpreter with none of this project's dependencies
 installed, and the script is cross-repo by design (state keyed
@@ -45,7 +46,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Ported verbatim from .claude/scripts/review_monitor.py (_summarize_status_checks).
+# Ported verbatim from _summarize_status_checks in
+# .claude/scripts/review_monitor_lib/attention.py.
 _FAILED_CHECKRUN_CONCLUSIONS: frozenset[str] = frozenset(
     {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"}
 )
@@ -131,7 +133,8 @@ def _summarize_status_checks(rollup: list[dict[str, Any]]) -> dict[str, Any]:
     """Collapse a ``statusCheckRollup`` list into a ``failing`` / ``pending`` summary.
 
     Ported verbatim from ``_summarize_status_checks`` in
-    ``.claude/scripts/review_monitor.py`` (un-importable — lives outside src/).
+    ``.claude/scripts/review_monitor_lib/attention.py`` (un-importable — lives
+    outside src/).
     ``ok`` is the sole source of CI truth: in-progress/pending checks never block
     it, only genuine failures do.
 
@@ -260,7 +263,8 @@ def _compute_attention_state(
     """Derive the operator attention-state via the #929 decision table.
 
     Precedence chain + unconditional draft-gate ported from
-    ``_compute_attention_state`` in ``.claude/scripts/review_monitor.py``. cw
+    ``_compute_attention_state`` in
+    ``.claude/scripts/review_monitor_lib/attention.py``. cw
     drops the reference's role/status/unaddressed_count inputs (no subsystem
     exists for them), but does carry a narrow comment-review input (#1195,
     row 2b) — see ``_has_blocking_comment_review``. First matching row wins:
@@ -358,10 +362,9 @@ def _resolve_repo_slug(git_dir: Path) -> str | None:
             ["-C", str(git_dir), "remote", "get-url", "origin"],
             capture_output=True,
             check=False,
-            # Why: this runs under dev_queue_lock (a single, queue-wide lock —
-            # see review_recipes.py call sites); a hung `git` process (stale
-            # credential-helper prompt, NFS-mounted workspace) would otherwise
-            # freeze dispatch for every client, not just the mismatched one.
+            # Why: callers run it lockless but on the tick's path (reconcile's
+            # review repo-slug pre-pass, #2564); a hung `git` (stale credential
+            # prompt, NFS workspace) must not stall every client's tick.
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -374,19 +377,20 @@ def _resolve_repo_slug(git_dir: Path) -> str | None:
     return match.group(1)
 
 
-def _repo_slug_mismatch(pr_repo: str, git_dir: Path) -> str | None:
-    """Return *git_dir*'s resolved slug when it disagrees with *pr_repo*, else None.
+def _slug_mismatch(pr_repo: str, resolved: str | None) -> str | None:
+    """Return *resolved* when it disagrees with *pr_repo*, else None. No git.
 
-    Fail-open (GitHub #1198): an unresolvable remote yields ``None`` (no
-    mismatch, proceed), never *pr_repo*. The compare is case-insensitive so a
-    remote's casing never spuriously trips the guard.
+    Fail-open (GitHub #1198): an unresolvable remote (``None``) is no mismatch,
+    never *pr_repo*. Case-insensitive, so a remote's casing never trips it.
     """
-    resolved = _resolve_repo_slug(git_dir)
-    if resolved is None:
-        return None
-    if resolved.lower() == pr_repo.lower():
+    if resolved is None or resolved.lower() == pr_repo.lower():
         return None
     return resolved
+
+
+def _repo_slug_mismatch(pr_repo: str, git_dir: Path) -> str | None:
+    """:func:`_slug_mismatch` against *git_dir*'s live origin slug (runs git)."""
+    return _slug_mismatch(pr_repo, _resolve_repo_slug(git_dir))
 
 
 def _derive_pr_state(pr_url: str, *, self_login: str | None) -> PrState | None:

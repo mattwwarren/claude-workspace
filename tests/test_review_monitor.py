@@ -1,7 +1,8 @@
 """Tests for .claude/scripts/review_monitor.py.
 
-Uses importlib to load the script directly (it lives outside the src/ tree),
-following tests/test_prep_pr_finalize.py's convention.
+The script lives outside the src/ tree, so it is loaded by path through
+``tests/_review_monitor_helpers.py``, whose ``get``/``patch`` read and patch
+every module binding a name (#2499).
 
 The ``reviews``/``comments`` fixture payloads below are hand-authored literals
 restricted to documented REST fields (``id``, ``pull_request_review_id``,
@@ -12,42 +13,16 @@ this ticket.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import subprocess
 import sys
-import types
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-_SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "review_monitor.py"
-
-
-def _load_module() -> types.ModuleType:
-    spec = importlib.util.spec_from_file_location("review_monitor", _SCRIPT)
-    assert spec is not None
-    assert spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules.setdefault("review_monitor", mod)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_mod = _load_module()
-
-
-def _make_pr() -> Any:
-    return _mod.MonitoredPR(
-        role="author",
-        repo="acme/widgets",
-        repo_path="/tmp/widgets",
-        pr_number=42,
-        last_seen_sha="deadbeef",
-    )
+from tests import _review_monitor_helpers as helpers
 
 
 def test_blank_body_own_review_reconstructed_from_inline_comments(
@@ -67,10 +42,12 @@ def test_blank_body_own_review_reconstructed_from_inline_comments(
             "body": "consider a guard clause",
         },
     ]
-    monkeypatch.setattr(_mod, "_run_gh", lambda *_a, **_k: json.dumps(comments))
-    inline_by_review = _mod._fetch_inline_comment_bodies_by_review("acme/widgets", 42)
+    helpers.patch(monkeypatch, "_run_gh", lambda *_a, **_k: json.dumps(comments))
+    inline_by_review = helpers.get("_fetch_inline_comment_bodies_by_review")(
+        "acme/widgets", 42
+    )
 
-    pr = _make_pr()
+    pr = helpers.make_pr()
     reviews = [
         {
             "id": 100,
@@ -80,7 +57,7 @@ def test_blank_body_own_review_reconstructed_from_inline_comments(
             "user": {"login": "matt-w"},
         }
     ]
-    _mod._collect_new_comment_reviews(
+    helpers.get("_collect_new_comment_reviews")(
         pr,
         reviews,
         formal_cutoff="",
@@ -95,7 +72,7 @@ def test_blank_body_own_review_reconstructed_from_inline_comments(
 
 
 def test_blank_body_other_authors_review_still_skipped() -> None:
-    pr = _make_pr()
+    pr = helpers.make_pr()
     reviews = [
         {
             "id": 100,
@@ -106,7 +83,7 @@ def test_blank_body_other_authors_review_still_skipped() -> None:
         }
     ]
     inline_by_review = {"100": ["a comment"]}
-    _mod._collect_new_comment_reviews(
+    helpers.get("_collect_new_comment_reviews")(
         pr,
         reviews,
         formal_cutoff="",
@@ -119,7 +96,7 @@ def test_blank_body_other_authors_review_still_skipped() -> None:
 def test_no_inline_comments_skips_extra_gh_api_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pr = _make_pr()
+    pr = helpers.make_pr()
     reviews = [
         {
             "id": 200,
@@ -137,8 +114,8 @@ def test_no_inline_comments_skips_extra_gh_api_call(
             return json.dumps(reviews)
         return ""
 
-    monkeypatch.setattr(_mod, "_run_gh", _fake_run_gh)
-    _mod._refresh_comment_reviews(
+    helpers.patch(monkeypatch, "_run_gh", _fake_run_gh)
+    helpers.get("_refresh_comment_reviews")(
         pr, "acme/widgets", 42, sha_changed=False, our_username="matt-w"
     )
 
@@ -163,21 +140,21 @@ def test_outdated_line_none_comments_excluded_from_reconstruction(
             "body": "live comment",
         },
     ]
-    monkeypatch.setattr(_mod, "_run_gh", lambda *_a, **_k: json.dumps(comments))
-    result = _mod._fetch_inline_comment_bodies_by_review("acme/widgets", 42)
+    helpers.patch(monkeypatch, "_run_gh", lambda *_a, **_k: json.dumps(comments))
+    result = helpers.get("_fetch_inline_comment_bodies_by_review")("acme/widgets", 42)
     assert result["100"] == ["live comment"]
 
 
 def test_fetch_inline_comment_bodies_handles_malformed_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_mod, "_run_gh", lambda *_a, **_k: "not json")
-    result = _mod._fetch_inline_comment_bodies_by_review("acme/widgets", 42)
+    helpers.patch(monkeypatch, "_run_gh", lambda *_a, **_k: "not json")
+    result = helpers.get("_fetch_inline_comment_bodies_by_review")("acme/widgets", 42)
     assert result == {}
 
 
 def test_blank_body_own_review_no_matching_inline_comments_still_skipped() -> None:
-    pr = _make_pr()
+    pr = helpers.make_pr()
     reviews = [
         {
             "id": 100,
@@ -188,7 +165,7 @@ def test_blank_body_own_review_no_matching_inline_comments_still_skipped() -> No
         }
     ]
     inline_by_review = {"999": ["unrelated"]}
-    _mod._collect_new_comment_reviews(
+    helpers.get("_collect_new_comment_reviews")(
         pr,
         reviews,
         formal_cutoff="",
@@ -201,67 +178,77 @@ def test_blank_body_own_review_no_matching_inline_comments_still_skipped() -> No
 def test_no_env_var_falls_back_to_given_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv(_mod.CANONICAL_REPO_PATHS_ENV, raising=False)
-    assert _mod._canonical_repo_path("acme/widgets", "/tmp/wt") == "/tmp/wt"
+    monkeypatch.delenv(helpers.get("CANONICAL_REPO_PATHS_ENV"), raising=False)
+    assert helpers.get("_canonical_repo_path")("acme/widgets", "/tmp/wt") == "/tmp/wt"
 
 
 def test_no_env_var_falls_back_to_repo_dict_when_no_given_match(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv(_mod.CANONICAL_REPO_PATHS_ENV, raising=False)
-    monkeypatch.setattr(
-        _mod, "CANONICAL_REPO_PATHS", {"acme/widgets": "/canonical/widgets"}
+    monkeypatch.delenv(helpers.get("CANONICAL_REPO_PATHS_ENV"), raising=False)
+    helpers.patch(
+        monkeypatch, "CANONICAL_REPO_PATHS", {"acme/widgets": "/canonical/widgets"}
     )
-    assert _mod._canonical_repo_path("acme/widgets", "/tmp/wt") == "/canonical/widgets"
+    assert (
+        helpers.get("_canonical_repo_path")("acme/widgets", "/tmp/wt")
+        == "/canonical/widgets"
+    )
 
 
 def test_env_var_overrides_given_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
-        _mod.CANONICAL_REPO_PATHS_ENV,
+        helpers.get("CANONICAL_REPO_PATHS_ENV"),
         json.dumps({"acme/widgets": "/home/x/clones/widgets"}),
     )
     assert (
-        _mod._canonical_repo_path("acme/widgets", "/tmp/wt") == "/home/x/clones/widgets"
+        helpers.get("_canonical_repo_path")("acme/widgets", "/tmp/wt")
+        == "/home/x/clones/widgets"
     )
 
 
 def test_env_var_only_overrides_matching_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
-        _mod.CANONICAL_REPO_PATHS_ENV,
+        helpers.get("CANONICAL_REPO_PATHS_ENV"),
         json.dumps({"other/repo": "/home/x/clones/other"}),
     )
-    assert _mod._canonical_repo_path("acme/widgets", "/tmp/wt") == "/tmp/wt"
+    assert helpers.get("_canonical_repo_path")("acme/widgets", "/tmp/wt") == "/tmp/wt"
 
 
 def test_malformed_json_falls_back_and_warns(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setenv(_mod.CANONICAL_REPO_PATHS_ENV, "{not json")
+    monkeypatch.setenv(helpers.get("CANONICAL_REPO_PATHS_ENV"), "{not json")
     with caplog.at_level("WARNING"):
-        result = _mod._canonical_repo_path("acme/widgets", "/tmp/wt")
+        result = helpers.get("_canonical_repo_path")("acme/widgets", "/tmp/wt")
     assert result == "/tmp/wt"
-    assert any(_mod.CANONICAL_REPO_PATHS_ENV in r.message for r in caplog.records)
+    assert any(
+        helpers.get("CANONICAL_REPO_PATHS_ENV") in r.message for r in caplog.records
+    )
 
 
 def test_non_object_json_falls_back_and_warns(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setenv(_mod.CANONICAL_REPO_PATHS_ENV, json.dumps(["a", "b"]))
+    monkeypatch.setenv(helpers.get("CANONICAL_REPO_PATHS_ENV"), json.dumps(["a", "b"]))
     with caplog.at_level("WARNING"):
-        result = _mod._canonical_repo_path("acme/widgets", "/tmp/wt")
+        result = helpers.get("_canonical_repo_path")("acme/widgets", "/tmp/wt")
     assert result == "/tmp/wt"
-    assert any(_mod.CANONICAL_REPO_PATHS_ENV in r.message for r in caplog.records)
+    assert any(
+        helpers.get("CANONICAL_REPO_PATHS_ENV") in r.message for r in caplog.records
+    )
 
 
 def test_non_string_value_falls_back_and_warns_with_key_and_type(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setenv(_mod.CANONICAL_REPO_PATHS_ENV, json.dumps({"acme/widgets": 123}))
+    monkeypatch.setenv(
+        helpers.get("CANONICAL_REPO_PATHS_ENV"), json.dumps({"acme/widgets": 123})
+    )
     with caplog.at_level("WARNING"):
-        result = _mod._canonical_repo_path("acme/widgets", "/tmp/wt")
+        result = helpers.get("_canonical_repo_path")("acme/widgets", "/tmp/wt")
     assert result == "/tmp/wt"
     messages = [r.message for r in caplog.records]
-    assert any(_mod.CANONICAL_REPO_PATHS_ENV in m for m in messages)
+    assert any(helpers.get("CANONICAL_REPO_PATHS_ENV") in m for m in messages)
     assert any("acme/widgets" in m for m in messages)
     assert any("int" in m for m in messages)
 
@@ -269,22 +256,26 @@ def test_non_string_value_falls_back_and_warns_with_key_and_type(
 def test_empty_string_env_var_warns_and_falls_back(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setenv(_mod.CANONICAL_REPO_PATHS_ENV, "")
+    monkeypatch.setenv(helpers.get("CANONICAL_REPO_PATHS_ENV"), "")
     with caplog.at_level("WARNING"):
-        result = _mod._canonical_repo_path("acme/widgets", "/tmp/wt")
+        result = helpers.get("_canonical_repo_path")("acme/widgets", "/tmp/wt")
     assert result == "/tmp/wt"
-    assert any(_mod.CANONICAL_REPO_PATHS_ENV in r.message for r in caplog.records)
+    assert any(
+        helpers.get("CANONICAL_REPO_PATHS_ENV") in r.message for r in caplog.records
+    )
 
 
 def test_empty_path_entry_warns_and_is_ignored(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setenv(_mod.CANONICAL_REPO_PATHS_ENV, json.dumps({"acme/widgets": ""}))
+    monkeypatch.setenv(
+        helpers.get("CANONICAL_REPO_PATHS_ENV"), json.dumps({"acme/widgets": ""})
+    )
     with caplog.at_level("WARNING"):
-        result = _mod._canonical_repo_path("acme/widgets", "/tmp/wt")
+        result = helpers.get("_canonical_repo_path")("acme/widgets", "/tmp/wt")
     assert result == "/tmp/wt"
     messages = [r.message for r in caplog.records]
-    assert any(_mod.CANONICAL_REPO_PATHS_ENV in m for m in messages)
+    assert any(helpers.get("CANONICAL_REPO_PATHS_ENV") in m for m in messages)
     assert any("acme/widgets" in m for m in messages)
 
 
@@ -292,99 +283,59 @@ def test_empty_path_entry_warns_and_is_ignored(
 # register / drop / complete report a result (#2189)
 # ---------------------------------------------------------------------------
 
-_REPO = "acme/widgets"
-_KEY = "acme/widgets#42"
-
-
-@pytest.fixture
-def state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point review_monitor's state at an isolated per-test directory."""
-    central = tmp_path / "monitor-state"
-    monkeypatch.setattr(_mod, "CENTRAL_STATE_DIR", central)
-    monkeypatch.setattr(_mod, "LEGACY_STATE_FILE", tmp_path / "legacy-state.json")
-    monkeypatch.setattr(_mod, "CANONICAL_REPO_PATHS", {})
-    monkeypatch.delenv(_mod.CANONICAL_REPO_PATHS_ENV, raising=False)
-    return central
-
-
-def _run_cli(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    *argv: str,
-) -> tuple[int, str, str]:
-    """Run the real ``main()`` with *argv*; return (exit code, stdout, stderr)."""
-    monkeypatch.setattr(sys, "argv", ["review_monitor.py", *argv])
-    code = 0
-    try:
-        _mod.main()
-    except SystemExit as exc:
-        code = exc.code if isinstance(exc.code, int) else 1
-    captured = capsys.readouterr()
-    return code, captured.out, captured.err
-
-
-def _register_argv(sha: str = "abc123") -> list[str]:
-    return [
-        "register",
-        "42",
-        "--role",
-        "author",
-        "--repo",
-        _REPO,
-        "--repo-path",
-        "/canon/widgets",
-        "--sha",
-        sha,
-    ]
-
 
 def test_register_cli_prints_one_line_json_on_success(
-    state_dir: Path,
+    review_monitor_state_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code, out, _err = _run_cli(monkeypatch, capsys, *_register_argv())
+    code, out, _err = helpers.run_cli(monkeypatch, capsys, *helpers.register_argv())
 
     assert code == 0
     assert out.count("\n") == 1
     assert json.loads(out) == {
         "registered": True,
-        "key": _KEY,
+        "key": helpers.KEY,
         "sha": "abc123",
         "updated": False,
     }
-    assert _mod.load_state(_REPO).monitored[_KEY].last_seen_sha == "abc123"
+    assert (
+        helpers.get("load_state")(helpers.REPO).monitored[helpers.KEY].last_seen_sha
+        == "abc123"
+    )
 
 
 def test_register_cli_reregister_reports_updated_true(
-    state_dir: Path,
+    review_monitor_state_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _run_cli(monkeypatch, capsys, *_register_argv("abc123"))
-    code, out, _err = _run_cli(monkeypatch, capsys, *_register_argv("def456"))
+    helpers.run_cli(monkeypatch, capsys, *helpers.register_argv("abc123"))
+    code, out, _err = helpers.run_cli(
+        monkeypatch, capsys, *helpers.register_argv("def456")
+    )
 
     assert code == 0
     assert json.loads(out) == {
         "registered": True,
-        "key": _KEY,
+        "key": helpers.KEY,
         "sha": "def456",
         "updated": True,
     }
-    pr = _mod.load_state(_REPO).monitored[_KEY]
+    pr = helpers.get("load_state")(helpers.REPO).monitored[helpers.KEY]
     assert pr.last_seen_sha == "def456"
     assert pr.delta_base_sha == "def456"
 
 
 def test_register_cli_with_threads_and_details_still_one_line(
-    state_dir: Path,
+    review_monitor_state_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code, out, _err = _run_cli(
+    code, out, _err = helpers.run_cli(
         monkeypatch,
         capsys,
-        *_register_argv(),
+        *helpers.register_argv(),
         "--threads",
         "t1",
         "t2",
@@ -395,7 +346,7 @@ def test_register_cli_with_threads_and_details_still_one_line(
     assert code == 0
     assert out.count("\n") == 1
     assert json.loads(out)["registered"] is True
-    pr = _mod.load_state(_REPO).monitored[_KEY]
+    pr = helpers.get("load_state")(helpers.REPO).monitored[helpers.KEY]
     assert pr.our_threads == ["t1", "t2"]
     assert pr.thread_status["t1"].file == "a.py"
     assert pr.thread_status["t1"].line == 3
@@ -403,6 +354,7 @@ def test_register_cli_with_threads_and_details_still_one_line(
 
 def test_register_cli_exits_nonzero_when_state_unwritable(
     tmp_path: Path,
+    review_monitor_state_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -410,103 +362,121 @@ def test_register_cli_exits_nonzero_when_state_unwritable(
     # save_state raises FileExistsError (an OSError) — no mocking needed.
     blocker = tmp_path / "blocker"
     blocker.write_text("x")
-    monkeypatch.setattr(_mod, "CENTRAL_STATE_DIR", blocker)
-    monkeypatch.setattr(_mod, "LEGACY_STATE_FILE", tmp_path / "legacy-state.json")
-    monkeypatch.setattr(_mod, "CANONICAL_REPO_PATHS", {})
-    monkeypatch.delenv(_mod.CANONICAL_REPO_PATHS_ENV, raising=False)
+    helpers.patch(monkeypatch, "CENTRAL_STATE_DIR", blocker)
 
-    code, out, err = _run_cli(monkeypatch, capsys, *_register_argv())
+    code, out, err = helpers.run_cli(monkeypatch, capsys, *helpers.register_argv())
 
     assert code == 1
     assert out == ""
     assert "Error" in err
-    assert _KEY in err
+    assert helpers.KEY in err
     assert "registered" not in out
 
 
 def test_drop_cli_reports_dropped_true(
-    state_dir: Path,
+    review_monitor_state_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _run_cli(monkeypatch, capsys, *_register_argv())
-    code, out, _err = _run_cli(monkeypatch, capsys, "drop", "42", "--repo", _REPO)
-
-    assert code == 0
-    assert out.count("\n") == 1
-    assert json.loads(out) == {"dropped": True, "key": _KEY}
-    assert _KEY not in _mod.load_state(_REPO).monitored
-
-
-def test_drop_cli_not_monitored_reports_false_exit_0(
-    state_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    code, out, _err = _run_cli(monkeypatch, capsys, "drop", "42", "--repo", _REPO)
-
-    assert code == 0
-    assert json.loads(out) == {"dropped": False, "key": _KEY}
-
-
-def test_complete_cli_reports_completed_true_with_reason(
-    state_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _run_cli(monkeypatch, capsys, *_register_argv())
-    code, out, _err = _run_cli(
-        monkeypatch, capsys, "complete", "42", "--repo", _REPO, "--reason", "approved"
+    helpers.run_cli(monkeypatch, capsys, *helpers.register_argv())
+    code, out, _err = helpers.run_cli(
+        monkeypatch, capsys, "drop", "42", "--repo", helpers.REPO
     )
 
     assert code == 0
     assert out.count("\n") == 1
-    assert json.loads(out) == {"completed": True, "key": _KEY, "reason": "approved"}
-    state = _mod.load_state(_REPO)
-    assert _KEY not in state.monitored
-    assert _KEY in state.completed
+    assert json.loads(out) == {"dropped": True, "key": helpers.KEY}
+    assert helpers.KEY not in helpers.get("load_state")(helpers.REPO).monitored
 
 
-def test_complete_cli_not_monitored_reports_false_exit_0(
-    state_dir: Path,
+def test_drop_cli_not_monitored_reports_false_exit_0(
+    review_monitor_state_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code, out, _err = _run_cli(monkeypatch, capsys, "complete", "42", "--repo", _REPO)
+    code, out, _err = helpers.run_cli(
+        monkeypatch, capsys, "drop", "42", "--repo", helpers.REPO
+    )
 
     assert code == 0
-    assert json.loads(out) == {"completed": False, "key": _KEY, "reason": "merged"}
+    assert json.loads(out) == {"dropped": False, "key": helpers.KEY}
+
+
+def test_complete_cli_reports_completed_true_with_reason(
+    review_monitor_state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    helpers.run_cli(monkeypatch, capsys, *helpers.register_argv())
+    code, out, _err = helpers.run_cli(
+        monkeypatch,
+        capsys,
+        "complete",
+        "42",
+        "--repo",
+        helpers.REPO,
+        "--reason",
+        "approved",
+    )
+
+    assert code == 0
+    assert out.count("\n") == 1
+    assert json.loads(out) == {
+        "completed": True,
+        "key": helpers.KEY,
+        "reason": "approved",
+    }
+    state = helpers.get("load_state")(helpers.REPO)
+    assert helpers.KEY not in state.monitored
+    assert helpers.KEY in state.completed
+
+
+def test_complete_cli_not_monitored_reports_false_exit_0(
+    review_monitor_state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, out, _err = helpers.run_cli(
+        monkeypatch, capsys, "complete", "42", "--repo", helpers.REPO
+    )
+
+    assert code == 0
+    assert json.loads(out) == {
+        "completed": False,
+        "key": helpers.KEY,
+        "reason": "merged",
+    }
 
 
 @pytest.mark.parametrize(
     "argv",
     [
-        ["drop", "42", "--repo", _REPO],
-        ["complete", "42", "--repo", _REPO],
+        ["drop", "42", "--repo", helpers.REPO],
+        ["complete", "42", "--repo", helpers.REPO],
     ],
     ids=["drop", "complete"],
 )
 def test_drop_and_complete_cli_exit_nonzero_on_state_write_error(
     argv: list[str],
-    state_dir: Path,
+    review_monitor_state_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _run_cli(monkeypatch, capsys, *_register_argv())
+    helpers.run_cli(monkeypatch, capsys, *helpers.register_argv())
 
     disk_full_message = "disk full"
 
     def _raise_oserror(*_a: object, **_k: object) -> None:
         raise OSError(disk_full_message)
 
-    monkeypatch.setattr(_mod, "save_state", _raise_oserror)
-    code, out, err = _run_cli(monkeypatch, capsys, *argv)
+    helpers.patch(monkeypatch, "save_state", _raise_oserror)
+    code, out, err = helpers.run_cli(monkeypatch, capsys, *argv)
 
     assert code == 1
     assert out == ""
     assert "Error:" in err
     assert argv[0] in err
-    assert _KEY in err
+    assert helpers.KEY in err
     assert "disk full" in err
 
 
@@ -515,9 +485,9 @@ def test_register_subprocess_prints_result_line(tmp_path: Path) -> None:
         **os.environ,
         "GLOBAL_CLAUDE_REVIEW_MONITOR_DIR": str(tmp_path / "state"),
     }
-    env.pop(_mod.CANONICAL_REPO_PATHS_ENV, None)
+    env.pop(helpers.get("CANONICAL_REPO_PATHS_ENV"), None)
     result = subprocess.run(
-        [sys.executable, str(_SCRIPT), *_register_argv()],
+        [sys.executable, str(helpers.ENTRY_SCRIPT), *helpers.register_argv()],
         cwd=tmp_path,
         env=env,
         capture_output=True,
@@ -555,59 +525,59 @@ def _fail_reading(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
 @pytest.mark.parametrize(
     "argv",
     [
-        _register_argv("def456"),
-        ["drop", "42", "--repo", _REPO],
-        ["complete", "42", "--repo", _REPO],
+        helpers.register_argv("def456"),
+        ["drop", "42", "--repo", helpers.REPO],
+        ["complete", "42", "--repo", helpers.REPO],
     ],
     ids=["register", "drop", "complete"],
 )
 def test_mutation_cli_exits_nonzero_when_state_unreadable(
     argv: list[str],
-    state_dir: Path,
+    review_monitor_state_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _run_cli(monkeypatch, capsys, *_register_argv("abc123"))
-    state_file = _mod.state_path_for_repo(_REPO)
+    helpers.run_cli(monkeypatch, capsys, *helpers.register_argv("abc123"))
+    state_file = helpers.get("state_path_for_repo")(helpers.REPO)
     before = state_file.read_bytes()
 
     _fail_reading(monkeypatch, state_file)
-    code, out, err = _run_cli(monkeypatch, capsys, *argv)
+    code, out, err = helpers.run_cli(monkeypatch, capsys, *argv)
 
     assert code == 1
     assert out == ""
     assert "Error:" in err
     assert argv[0] in err
-    assert _KEY in err
+    assert helpers.KEY in err
     assert _UNREADABLE_MESSAGE in err
     # The unreadable file is left exactly as it was — never replaced by fresh state.
     assert state_file.read_bytes() == before
 
 
 def test_load_state_strict_raises_on_unreadable_state_file(
-    state_dir: Path,
+    review_monitor_state_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _run_cli(monkeypatch, capsys, *_register_argv())
-    _fail_reading(monkeypatch, _mod.state_path_for_repo(_REPO))
+    helpers.run_cli(monkeypatch, capsys, *helpers.register_argv())
+    _fail_reading(monkeypatch, helpers.get("state_path_for_repo")(helpers.REPO))
 
     with pytest.raises(OSError, match=_UNREADABLE_MESSAGE):
-        _mod.load_state(_REPO, strict=True)
+        helpers.get("load_state")(helpers.REPO, strict=True)
 
 
 @pytest.mark.parametrize(
     "argv",
     [
-        _register_argv("def456"),
-        ["drop", "42", "--repo", _REPO],
-        ["complete", "42", "--repo", _REPO],
+        helpers.register_argv("def456"),
+        ["drop", "42", "--repo", helpers.REPO],
+        ["complete", "42", "--repo", helpers.REPO],
     ],
     ids=["register", "drop", "complete"],
 )
 def test_mutation_cli_exits_nonzero_when_legacy_state_unreadable(
     argv: list[str],
-    state_dir: Path,
+    review_monitor_state_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -616,18 +586,18 @@ def test_mutation_cli_exits_nonzero_when_legacy_state_unreadable(
     Round 1 only gated the central-file read (#2189); an unreadable legacy
     file reached the same silent-success outcome through the other door.
     """
-    legacy_file = _mod.LEGACY_STATE_FILE
+    legacy_file = helpers.get("LEGACY_STATE_FILE")
     legacy_file.write_text(json.dumps({"monitored": {}, "completed": {}}))
-    assert not _mod.state_path_for_repo(_REPO).exists()
+    assert not helpers.get("state_path_for_repo")(helpers.REPO).exists()
 
     _fail_reading(monkeypatch, legacy_file)
-    code, out, err = _run_cli(monkeypatch, capsys, *argv)
+    code, out, err = helpers.run_cli(monkeypatch, capsys, *argv)
 
     assert code == 1
     assert out == ""
     assert "Error:" in err
     assert argv[0] in err
-    assert _KEY in err
+    assert helpers.KEY in err
     assert _UNREADABLE_MESSAGE in err
     # The unreadable legacy file is left exactly as it was — never migrated
     # (which would delete it) or silently skipped as a successful mutation.
@@ -635,46 +605,46 @@ def test_mutation_cli_exits_nonzero_when_legacy_state_unreadable(
 
 
 def test_load_state_default_degrades_to_empty_on_unreadable_state_file(
-    state_dir: Path,
+    review_monitor_state_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # Every non-mutation caller relies on this graceful fallback.
-    _run_cli(monkeypatch, capsys, *_register_argv())
-    _fail_reading(monkeypatch, _mod.state_path_for_repo(_REPO))
+    helpers.run_cli(monkeypatch, capsys, *helpers.register_argv())
+    _fail_reading(monkeypatch, helpers.get("state_path_for_repo")(helpers.REPO))
 
     with caplog.at_level("WARNING"):
-        state = _mod.load_state(_REPO)
+        state = helpers.get("load_state")(helpers.REPO)
 
     assert state.monitored == {}
     assert any(_UNREADABLE_MESSAGE in r.message for r in caplog.records)
 
 
 def test_load_state_strict_still_starts_fresh_on_corrupt_json(
-    state_dir: Path,
+    review_monitor_state_dir: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # Corrupt-but-readable content is a separate concern: strict does not touch it.
-    state_dir.mkdir(parents=True)
-    _mod.state_path_for_repo(_REPO).write_text("{not json")
+    review_monitor_state_dir.mkdir(parents=True)
+    helpers.get("state_path_for_repo")(helpers.REPO).write_text("{not json")
 
     with caplog.at_level("WARNING"):
-        state = _mod.load_state(_REPO, strict=True)
+        state = helpers.get("load_state")(helpers.REPO, strict=True)
 
     assert state.monitored == {}
     assert any("Corrupt monitor state file" in r.message for r in caplog.records)
 
 
 def test_register_cli_malformed_thread_details_exits_nonzero(
-    state_dir: Path,
+    review_monitor_state_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code, out, err = _run_cli(
+    code, out, err = helpers.run_cli(
         monkeypatch,
         capsys,
-        *_register_argv(),
+        *helpers.register_argv(),
         "--thread-details",
         "[not json",
     )
@@ -682,6 +652,6 @@ def test_register_cli_malformed_thread_details_exits_nonzero(
     assert code == 1
     assert out == ""
     assert "Error:" in err
-    assert _KEY in err
+    assert helpers.KEY in err
     assert "Traceback" not in err
-    assert not _mod.state_path_for_repo(_REPO).exists()
+    assert not helpers.get("state_path_for_repo")(helpers.REPO).exists()

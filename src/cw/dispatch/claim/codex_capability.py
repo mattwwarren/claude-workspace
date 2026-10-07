@@ -15,13 +15,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from cw.dispatch.claim.claimed_row import _park_running_task_blocked_on_user
 from cw.executor import (
     CodexCapabilityDiagnosis,
     codex_capability_diagnosis,
     resolve_executor_config,
 )
 from cw.models import CODEX_BACKEND
+from cw.queue_rows import _park_running_task_blocked_on_user
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, TicketTask

@@ -4693,6 +4693,90 @@ class TestClaimNextPendingAttempts:
         assert claimed.attempts == 3
 
 
+class TestClaimStampsClaimedAt:
+    """#2591: the claim records its own instant on the row (schema v44).
+
+    Reconcile's adoption compares a session's ``started_at`` against it, so it
+    must be the claim's instant, not the start of the claim loop.
+    """
+
+    _TICKET = "GEN-2591-claim"
+
+    def _claim(
+        self, client: ClientConfig, config: OrchestratorConfig
+    ) -> TicketTask | None:
+        from cw.dispatch.claim import _claim_next_pending
+
+        task, _ = _claim_next_pending(
+            "test-client", lane="default", client=client, config=config
+        )
+        return task
+
+    def test_claim_stamps_its_own_instant_and_a_reclaim_overwrites(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from freezegun import freeze_time
+
+        from cw.dispatch.claim import screening
+
+        write_clients_yaml(sample_client_config)
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+        real_ceiling = screening.resolve_attempt_ceiling
+
+        with freeze_time("2026-10-07 09:00:00") as frozen:
+
+            def _ceiling_after_a_pause(
+                client: ClientConfig | None,
+                task: TicketTask,
+                global_cfg: OrchestratorConfig,
+            ) -> int | None:
+                # The last screen before the claim: time moves on after the
+                # claim loop read its own clock.
+                frozen.tick(timedelta(seconds=5))
+                return real_ceiling(client, task, global_cfg)
+
+            monkeypatch.setattr(
+                screening, "resolve_attempt_ceiling", _ceiling_after_a_pause
+            )
+            first = self._claim(sample_client_config, simple_config)
+
+        claimed = datetime(2026, 10, 7, 9, 0, 5, tzinfo=UTC)
+        assert first is not None
+        assert first.claimed_at == claimed
+        assert load_dev_queue().tasks[0].claimed_at == claimed
+
+        _revert_claimed_task_to_pending(
+            "test-client", self._TICKET, created_at=first.created_at
+        )
+        monkeypatch.setattr(screening, "resolve_attempt_ceiling", real_ceiling)
+        with freeze_time("2026-10-07 10:30:00"):
+            second = self._claim(sample_client_config, simple_config)
+
+        reclaimed = datetime(2026, 10, 7, 10, 30, tzinfo=UTC)
+        assert second is not None
+        assert second.claimed_at == reclaimed
+        assert load_dev_queue().tasks[0].claimed_at == reclaimed
+
+    def test_dispatch_tick_stamps_claimed_at(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        write_clients_yaml(sample_client_config)
+        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
+        before = datetime.now(UTC)
+
+        dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+
+        row = load_dev_queue().tasks[0]
+        assert row.status == QueueItemStatus.RUNNING
+        assert row.claimed_at is not None
+        assert before <= row.claimed_at <= datetime.now(UTC)
+
+
 # ---------------------------------------------------------------------------
 # TestGlobalAttemptCeiling
 # ---------------------------------------------------------------------------
@@ -9443,6 +9527,80 @@ class TestStampSpawnSuccessDuplicateRunning:
         )
 
         assert [t.model_dump() for t in load_dev_queue().tasks] == before
+
+
+class TestApplySpawnSuccessFields:
+    """#2591: the spawn-success stamp's field half, shared with reconcile.
+
+    Reconcile's adoption binds a row under ``sessions_lock``, where no git may
+    run (ADR-0019), so the pure field writes are split from the
+    ``stage_base_ref`` git read that only the dispatch stamp performs.
+    """
+
+    def test_writes_every_stamp_field_and_runs_no_git(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import cw.dispatch.claim as claim_mod
+
+        def _no_git(*_args: object, **_kwargs: object) -> str:
+            msg = "the field half must not run git"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.dispatch.claim.claimed_row.git_output", _no_git)
+        task = _make_ticket_task(
+            stage=Stage.REVIEW,
+            spawn_error_count=3,
+            next_eligible_at=datetime(2026, 10, 7, tzinfo=UTC),
+            ever_spawned=False,
+            hook_context_conflict_session_id="sess-old",
+            regressed_into_stage=Stage.REVIEW,
+            scope_drift_approved_extra_files=["src/extra.py"],
+            scope_drift_approved_head="abc123",
+            pending_operator_comment=True,
+            stage_base_ref="base0",
+        )
+
+        claim_mod._apply_spawn_success_fields(task, session_id="sess-new")
+
+        assert task.session_id == "sess-new"
+        assert task.spawn_error_count == 0
+        assert task.next_eligible_at is None
+        assert task.ever_spawned is True
+        assert task.hook_context_conflict_session_id is None
+        assert task.regressed_into_stage is None
+        assert task.scope_drift_approved_extra_files is None
+        assert task.scope_drift_approved_head is None
+        assert task.pending_operator_comment is False
+        assert task.stage_base_ref == "base0"
+
+    def test_pending_operator_comment_survives_outside_review(self) -> None:
+        import cw.dispatch.claim as claim_mod
+
+        task = _make_ticket_task(stage=Stage.IMPL, pending_operator_comment=True)
+
+        claim_mod._apply_spawn_success_fields(task, session_id="sess-new")
+
+        assert task.pending_operator_comment is True
+
+    def test_stamp_still_records_stage_base_ref(
+        self, sample_client_config: ClientConfig
+    ) -> None:
+        import cw.dispatch.claim as claim_mod
+
+        worktree, _row_a, row_b = _seed_duplicate_running_rows(sample_client_config)
+        save_dev_queue(DevQueueStore(tasks=[row_b]))
+
+        claim_mod._stamp_spawn_success(
+            row_b.model_copy(),
+            client_name="test-client",
+            session_id="sess-only",
+            worktree_path=worktree,
+        )
+
+        head = git_in(worktree, "rev-parse", "HEAD")
+        stored = load_dev_queue().tasks[0]
+        assert stored.session_id == "sess-only"
+        assert stored.stage_base_ref == head
 
 
 class TestRevertClaimedTaskDuplicateRunning:
@@ -17622,6 +17780,179 @@ class TestPostLaunchSpawnFailure:
             )
 
         assert post_launch_attention_payload(pages)["session_id"] == "sess-9"
+
+
+class TestStampFailedThenAdopted:
+    """#2591 part 1: reconcile recovers the #2502 stamp-failed row.
+
+    The dev-queue stamp fails on both attempts, so the row stays RUNNING with
+    no ``session_id`` while its recorded session runs, and a completion keyed
+    on that session can never find it. Reconcile adopts the row from the
+    claim's ``cw-context.json``; from then on the completion consumer, the
+    terminal-session backstops and ``_is_never_claimed`` all see a spawned row.
+    """
+
+    _TICKET = "GEN-2591"
+
+    def _launch_unbound(
+        self,
+        client: ClientConfig,
+        config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[Session, FakeNativeDaemonClient]:
+        from cw.dispatch.claim import spawn as claim_spawn
+        from cw.models import HOOK_CONTEXT_RELATIVE_PATH
+
+        write_clients_yaml(client)
+        # dev_queue_add's seed (cli/dev_queue/crud.py); the model default is True.
+        add_ticket(
+            TicketTask(ticket_id=self._TICKET, client="test-client", ever_spawned=False)
+        )
+        real_stamp = claim_spawn._stamp_spawn_success
+        monkeypatch.setattr(claim_spawn, "_stamp_spawn_success", _raise_oserror)
+        daemon = FakeNativeDaemonClient()
+
+        dispatch_tick(config, native_daemon=daemon)
+
+        monkeypatch.setattr(claim_spawn, "_stamp_spawn_success", real_stamp)
+        row = load_dev_queue().tasks[0]
+        assert row.status == QueueItemStatus.RUNNING
+        assert row.session_id is None
+        assert row.ever_spawned is False
+        (session,) = load_state().sessions
+        context_path = daemon.spawn_calls[0][0] / HOOK_CONTEXT_RELATIVE_PATH
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        assert context["session_id"] == session.id
+        assert context["attempt"] == row.attempts == 1
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": f"{session.surface_ref}-6b3a-401b-bc3a"}],
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (False, True),
+        )
+        return session, daemon
+
+    @staticmethod
+    def _finish(session: Session, status: SessionStatus) -> None:
+        """The worker ends; its SESSION_COMPLETED event carries the session id."""
+        state = load_state()
+        stored = state.sessions[0]
+        stored.status = status
+        stored.completed_at = datetime.now(UTC) - timedelta(minutes=2)
+        save_state(state)
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {
+                "ticket_id": TestStampFailedThenAdopted._TICKET,
+                "session_id": session.id,
+                "client": "test-client",
+            },
+        )
+
+    def test_adopted_row_routes_its_completion(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.reconcile import reconcile
+
+        session, daemon = self._launch_unbound(
+            sample_client_config, simple_config, monkeypatch
+        )
+
+        reconcile()
+
+        row = load_dev_queue().tasks[0]
+        assert row.status == QueueItemStatus.RUNNING
+        assert row.session_id == session.id
+        assert row.ever_spawned is True
+        assert daemon.stop_calls == []
+        assert len(daemon.spawn_calls) == 1
+
+        self._finish(session, SessionStatus.COMPLETED)
+        consume_completed_sessions()
+
+        assert load_dev_queue().tasks[0].status != QueueItemStatus.RUNNING
+
+    def test_completion_dropped_before_adoption_is_recovered_when_merged(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Adopt, then the TIMED_OUT backstop reverts and the merged PR completes."""
+        from cw.reconcile import reconcile
+
+        session, _daemon = self._launch_unbound(
+            sample_client_config, simple_config, monkeypatch
+        )
+        self._finish(session, SessionStatus.TIMED_OUT)
+        consume_completed_sessions()
+        dropped = load_dev_queue().tasks[0]
+        assert dropped.status == QueueItemStatus.RUNNING
+        assert dropped.session_id is None
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (True, True),
+        )
+        # The spawn's own .claude/ files are untracked; that is not unsaved work.
+        monkeypatch.setattr(
+            "cw.reconcile._shared.worktree_dirty_reason_by_path",
+            lambda *_args, **_kwargs: None,
+        )
+
+        report = reconcile()
+
+        row = load_dev_queue().tasks[0]
+        assert row.status == QueueItemStatus.COMPLETED
+        assert row.ever_spawned is True
+        assert self._TICKET in report.completed_ticket_ids
+
+    def test_without_adoption_the_merged_completion_is_refused(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Control: released by hand with no adoption, the row still looks
+        never-spawned, so its merged PR is refused as a false match."""
+        from cw.dev_queue import transition_task_status
+        from cw.reconcile import (
+            _NEVER_CLAIMED_COMPLETION_REASON,
+            complete_timed_out_merged_tasks,
+        )
+
+        session, _daemon = self._launch_unbound(
+            sample_client_config, simple_config, monkeypatch
+        )
+        self._finish(session, SessionStatus.TIMED_OUT)
+        with dev_queue_lock():
+            store = load_dev_queue()
+            transition_task_status(store.tasks[0], QueueItemStatus.PENDING)
+            save_dev_queue(store)
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (True, True),
+        )
+
+        assert complete_timed_out_merged_tasks() == []
+
+        row = load_dev_queue().tasks[0]
+        assert row.status == QueueItemStatus.PENDING
+        assert row.ever_spawned is False
+        pages = read_events(
+            consumer="test-2591-never-claimed",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert [p.payload["paused_status"] for p in pages][-1] == (
+            _NEVER_CLAIMED_COMPLETION_REASON
+        )
 
 
 # ---------------------------------------------------------------------------

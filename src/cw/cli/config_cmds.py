@@ -133,7 +133,8 @@ def config_concurrency_set(assignment: str) -> None:
         msg = f"Value for {key!r} must be an integer, got: {value_str!r}"
         raise CwError(msg) from exc
 
-    with concurrency_override_lock():
+    # bounded=True (#2501): operator command; only validation precedes the lock.
+    with concurrency_override_lock(bounded=True):
         current = _load_concurrency_overrides()
         updates = {key: value}
         updated = current.model_copy(update=updates)
@@ -150,8 +151,10 @@ def config_concurrency_clear(key: str | None) -> None:
     Without KEY, clears all overrides.
     With KEY, clears only that specific key (e.g. ``max_parallel_clients``).
     """
+    # bounded=True (#2501) on both branches: operator command, only
+    # validation precedes the lock.
     if key is None:
-        with concurrency_override_lock():
+        with concurrency_override_lock(bounded=True):
             _save_concurrency_overrides(ConcurrencyOverrides())
         click.echo("Cleared all concurrency overrides.")
     else:
@@ -159,7 +162,7 @@ def config_concurrency_clear(key: str | None) -> None:
             valid = ", ".join(sorted(_CONCURRENCY_SET_KEYS))
             msg = f"Unknown concurrency key {key!r}. Supported: {valid}"
             raise CwError(msg)
-        with concurrency_override_lock():
+        with concurrency_override_lock(bounded=True):
             current = _load_concurrency_overrides()
             updated = current.model_copy(update={key: None})
             _save_concurrency_overrides(updated)
@@ -270,7 +273,8 @@ def lane_add(
     effective_max_parallel = max_parallel if max_parallel is not None else 1
     effective_priority = priority if priority is not None else 0
 
-    with clients_lock():
+    # bounded=True (#2501): operator command; nothing precedes the lock.
+    with clients_lock(bounded=True):
         rt = YAML(typ="rt")
         rt.default_flow_style = False
         clients_path = clients_file()
@@ -335,7 +339,10 @@ def lane_rm(positional: tuple[str, ...], client_option: str | None) -> None:
     # omits PENDING (never occupies a lane slot), but lane removal must still
     # block on PENDING work waiting in the lane (#990).
     _active_statuses = OCCUPIED_LANE_STATUSES | {QueueItemStatus.PENDING}
-    with dev_queue_lock():
+    # bounded=True (#2501) on both locks: operator command, only a lane-name
+    # lookup precedes them. The nested clients lock is waited for while the
+    # dev-queue lock is held (up to the timeout per lock).
+    with dev_queue_lock(bounded=True):
         store = load_dev_queue()
         active_in_lane = [
             t
@@ -351,7 +358,7 @@ def lane_rm(positional: tuple[str, ...], client_option: str | None) -> None:
             )
             raise CwError(msg)
 
-        with clients_lock():
+        with clients_lock(bounded=True):
             rt = YAML(typ="rt")
             rt.default_flow_style = False
             clients_path = clients_file()
@@ -408,7 +415,9 @@ def lane_pause(positional: tuple[str, ...], client_option: str | None) -> None:
         raise CwError(msg)
 
     lane_key = f"{client}/{name}"
-    with concurrency_override_lock():
+    # bounded=True (#2501): operator command; only a read-only lane lookup
+    # precedes the lock.
+    with concurrency_override_lock(bounded=True):
         current = _load_concurrency_overrides()
         lane_override = current.lanes.get(lane_key, LaneConcurrencyOverride())
         updated_lane = lane_override.model_copy(update={"paused": True})
@@ -438,7 +447,9 @@ def lane_resume(positional: tuple[str, ...], client_option: str | None) -> None:
         raise CwError(msg)
 
     lane_key = f"{client}/{name}"
-    with concurrency_override_lock():
+    # bounded=True (#2501): operator command; only a read-only lane lookup
+    # precedes the lock.
+    with concurrency_override_lock(bounded=True):
         current = _load_concurrency_overrides()
         lane_override = current.lanes.get(lane_key, LaneConcurrencyOverride())
         # Resume also clears the circuit-breaker counter: resume is the sole

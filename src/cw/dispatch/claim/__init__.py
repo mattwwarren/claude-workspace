@@ -12,27 +12,24 @@ from elsewhere must target the submodule that looks it up at call time
 
 - ``events`` — per-task ``dispatch.tick`` / ``SESSION_NEEDS_ATTENTION``
   emitters shared by the claim screen and the spawn path.
-- ``claimed_row`` — locked load/re-find/mutate/save primitives for one
-  claimed RUNNING row: revert, park, spawn-success stamp.
+- ``claimed_row`` — the spawn-success stamp for one claimed RUNNING row. Its
+  former siblings (the #2219 re-find, revert, park, and the stamp's pure field
+  half shared with ``cw.reconcile.unowned_running``, #2591) moved to the
+  ``cw.queue_rows`` leaf (#2613) and are re-exported here.
 - ``codex_capability`` — TTL-cached codex CLI probe and pre-spawn gate
   (#1238); also holds the ``_SpawnOutcome`` record returned by both the gate
   and the spawn path.
 - ``lane_stats`` — per-lane occupant lists and occupancy counts (ADR-0006).
-- ``screening`` — candidate screening and the atomic claim transaction.
+- ``screening`` — candidate screening and the atomic claim transaction. Its
+  pure fix-dispatch-hold / backstop-exempt predicates moved to the
+  ``cw.queue_rows`` leaf (#2613) and are re-exported here.
 - ``spawn`` — worktree provisioning, the stale/occupied-worktree guards, the
   approved-plan bypass, and the executor spawn for one claimed task.
 """
 
 from __future__ import annotations
 
-from cw.dispatch.claim.claimed_row import (
-    _SPAWN_ERROR_BACKOFF_CAP_SECONDS,
-    _SPAWN_ERROR_BACKOFF_INITIAL_SECONDS,
-    _find_running_row,
-    _park_running_task_blocked_on_user,
-    _revert_claimed_task_to_pending,
-    _stamp_spawn_success,
-)
+from cw.dispatch.claim.claimed_row import _stamp_spawn_success
 from cw.dispatch.claim.codex_capability import (
     _CODEX_CAPABILITY_GATE_TIMEOUT_SECONDS,
     _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD,
@@ -61,8 +58,6 @@ from cw.dispatch.claim.screening import (
     _CLAIM_CLAIMED,
     _CLAIM_SKIPPED,
     _claim_next_pending,
-    _is_backstop_exempt,
-    _is_fix_dispatch_held,
     _is_stale_pr_gated,
     _park_stale_pr_task,
     _screen_and_claim,
@@ -77,6 +72,16 @@ from cw.dispatch.claim.spawn import (
     _raise_if_stale_tree_occupied,
     _spawn_claimed_task,
 )
+from cw.queue_rows import (
+    _SPAWN_ERROR_BACKOFF_CAP_SECONDS,
+    _SPAWN_ERROR_BACKOFF_INITIAL_SECONDS,
+    _apply_spawn_success_fields,
+    _find_running_row,
+    _is_backstop_exempt,
+    _is_fix_dispatch_held,
+    _park_running_task_blocked_on_user,
+    _revert_claimed_task_to_pending,
+)
 
 __all__ = [
     "_CLAIM_BACKOFF",
@@ -90,6 +95,7 @@ __all__ = [
     "_SPAWN_ERROR_BACKOFF_INITIAL_SECONDS",
     "_SpawnOutcome",
     "_apply_plan_bypass_if_available",
+    "_apply_spawn_success_fields",
     "_cached_codex_capability_diagnosis",
     "_claim_next_pending",
     "_codex_capability_cache",

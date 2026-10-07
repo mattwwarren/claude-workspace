@@ -25,7 +25,9 @@ released through ``_approve_ticket_locked``'s #968 same-stage requeue: the
 row-path approval stamped there lets the re-dispatched plan stage pass
 Checkpoint 1 and run Plan Quality Review (the ambiguity scan already ran in
 the round that parked), which can still park the plan. A reviewed plan advances
-to IMPL directly, as before.
+to IMPL directly, as before. The plan-of-record read (``gh``/``git``) runs in
+a lockless pre-pass, never under ``sessions_lock`` (#2545; see
+:mod:`cw.reconcile.gate_plan_probes`).
 
 The recipe follows the repo's detect/act split (see ``concierge.py`` for the
 closest sibling): a pure ``_detect_auto_approve_review`` classification phase,
@@ -64,6 +66,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 
 from cw.config import load_effective_clients, load_state
@@ -86,6 +89,8 @@ from cw.events import record_event
 from cw.exceptions import CwError
 from cw.gh import fetch_approved_plan_comment, post_issue_comment
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.queue_rows import resolve_hold_finalize
+from cw.reconcile.gate_plan_probes import PlanProbeUnavailableError, lookup_plan_probe
 from cw.reconcile.gate_predicates import (
     _PLAN_PENDING_APPROVAL,
     _REVIEW_PENDING_APPROVAL,
@@ -103,7 +108,11 @@ from cw.reconcile.gate_predicates import (
     _predicate_holds,
     _row_eligible,
 )
-from cw.reconcile.gate_recipe_comments import defer_gate_recipe_comment_jobs
+from cw.reconcile.gate_recipe_comments import (
+    AUTO_ADOPT_COMMENT_TEMPLATE,
+    AUTO_APPROVE_COMMENT_TEMPLATE,
+    defer_gate_recipe_comment_jobs,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -118,8 +127,12 @@ if TYPE_CHECKING:
         TicketTask,
     )
     from cw.reconcile.deferred import DeferredReconcileJobs
+    from cw.reconcile.gate_plan_probes import PlanBodySource, PlanProbes
 
 _log = logging.getLogger(__name__)
+_PLAN_PREFETCH_MISS_LOG = (
+    "gate recipe: no usable plan prefetch for %s/%s; skipping this tick (%s)"
+)
 
 # Recipe name constants — the recognised gate-recipe keys. Only the review
 # recipe is wired in P1+P2 (#1065); RECIPE_AUTO_ADOPT_PLAN is defined now so
@@ -197,43 +210,11 @@ def _recipe_gate_open(
     )
 
 
-_AUTO_APPROVE_COMMENT_TEMPLATE = """\
-Auto-approved by gate recipe `{recipe}`.
-
-The review met the clean-review predicate and was approved automatically
-(no human review) by RFC 0009 gate-recipe automation:
-
-- must_fix_initial: {must_fix_initial}
-- deferred: {deferred}
-- recommendation: {recommendation}
-- forbidden_touched: {forbidden_touched}
-- agents_run: {agents_run}
-
-See event `GATE_AUTO_APPROVED` for the full audit trail.
-"""
-
 # The two signoff markers auto-dev-plan appends to the plan-of-record body.
 # Canonical definition now lives in cw.dev_queue.lifecycle (#1567) — imported
 # above rather than redefined here. _PLAN_SPEC_MARKER still mirrors
 # gh._PLAN_MARKER, a genuinely separate definition in a different module;
 # test_plan_spec_marker_matches_gh_marker continues to guard that drift.
-
-_AUTO_ADOPT_COMMENT_TEMPLATE = """\
-Auto-approved by gate recipe `{recipe}`.
-
-The plan met the clean-plan predicate (no forbidden-area touch, no operator
-`scope_hint: large`, and a draft fingerprint the approval is bound to) and was
-approved automatically (no human review) by RFC 0009 gate-recipe automation:
-
-- scope: {tier} ({files} files, ~{lines_estimate} lines)
-- forbidden_touched: {forbidden_touched}
-- plan_draft_fingerprint: {plan_draft_fingerprint}
-- plan_reviewed: {plan_reviewed}
-
-An unreviewed plan returns to the plan stage, which runs Plan Quality Review
-before implementation starts. See event
-`GATE_AUTO_APPROVED` for the full audit trail.
-"""
 
 
 @dataclass(frozen=True)
@@ -275,12 +256,10 @@ def _finalize_hold_armed(
     The review recipe's automatic approve always declines on a held row
     (``_approve_ticket_locked`` returns ``finalize_held``), so such a row is
     never "released": routing must page for it, and detect must not pick it up
-    every tick only to emit another ``GATE_AUTO_APPROVE_HELD``. Deferred import:
-    ``cw.dispatch`` reaches back into ``cw.dev_queue``, which this module
-    imports at top level.
+    every tick only to emit another ``GATE_AUTO_APPROVE_HELD``. The policy
+    resolver lives in the ``cw.queue_rows`` leaf (#2613), so it is imported at
+    module scope rather than reached through ``cw.dispatch``.
     """
-    from cw.dispatch.review_gates import resolve_hold_finalize
-
     return resolve_hold_finalize(task, clients, config) is not None
 
 
@@ -342,7 +321,8 @@ def _plan_of_record_body(
     None. Every miss or read failure degrades to None rather than
     propagating: an unhandled exception here would abort the entire
     reconcile tick, including the unrelated auto_approve_clean_review recipe
-    processed in the same run_gate_recipes() call.
+    processed in the same run_gate_recipes() call. Runs gh/git, so it is
+    called only from the lockless :func:`capture_plan_probes` (#2545).
     """
     if _tracker_allows_github_fetch(client_cfg):
         body = fetch_approved_plan_comment(task.ticket_id)
@@ -351,15 +331,21 @@ def _plan_of_record_body(
     return _local_plan_body(task, client_cfg)
 
 
-def _clean_plan_snapshot(
-    last_result: object, task: TicketTask, client_cfg: ClientConfig | None
-) -> dict[str, object] | None:
-    """Extract the clean-plan predicate snapshot, or None if not fireable.
+def _adoptable_plan_snapshot(
+    session: Session, task: TicketTask
+) -> tuple[dict[str, object], str] | None:
+    """Pure: the plan-gate snapshot and its fingerprint, or None if not fireable."""
+    snapshot = _plan_gate_snapshot(session.last_result)
+    if snapshot is None or not _plan_predicate_holds(snapshot, task):
+        return None
+    fingerprint = snapshot[_SNAPSHOT_KEY_FINGERPRINT]
+    return (snapshot, fingerprint) if isinstance(fingerprint, str) else None
 
-    Returns None (fail-closed) unless *last_result* is at the
-    ``plan_pending_approval`` gate and :func:`_plan_predicate_holds` passes.
-    The predicate is checked before the plan-of-record is read, so a row that
-    cannot fire never pays for the tracker call.
+
+def _clean_plan_snapshot(
+    snapshot: dict[str, object], body: str | None
+) -> dict[str, object]:
+    """Fold the plan-of-record *body*'s signoff reading into *snapshot*.
 
     The plan-of-record read decides only *how* the gate is released, recorded
     as ``plan_reviewed``: a plan whose body carries BOTH signoff markers
@@ -370,10 +356,6 @@ def _clean_plan_snapshot(
     impossible by construction. The raw plan body is never placed in the
     snapshot, the event payload, or the audit comment.
     """
-    snapshot = _plan_gate_snapshot(last_result)
-    if snapshot is None or not _plan_predicate_holds(snapshot, task):
-        return None
-    body = _plan_of_record_body(task, client_cfg)
     reviewed = body is not None and _plan_body_signoff_ok(body)
     snapshot[_SNAPSHOT_KEY_REVIEWED] = reviewed
     snapshot[_SNAPSHOT_KEY_SPEC] = (
@@ -470,6 +452,7 @@ def _detect_auto_adopt_plan(
     *,
     clients: dict[str, ClientConfig],
     config: OrchestratorConfig,
+    body_source: PlanBodySource,
 ) -> list[GateRecipeCandidate]:
     """Read-only classification phase for auto_adopt_clean_plan. Zero writes.
 
@@ -477,11 +460,12 @@ def _detect_auto_adopt_plan(
     ``gate_recipe_failed_at`` latch None, resolvable session) but swaps the
     clean-review snapshot for a clean-plan snapshot: the row's owning session
     must sit at the ``plan_pending_approval`` gate and
-    :func:`_plan_predicate_holds` must pass. The plan-of-record read
-    (tracker-first), which decides only whether the plan is already reviewed,
-    happens here at detect time — unlocked — never under the act-phase lock
-    (R5). Not a pure function (it makes a ``gh`` subprocess call and may read
-    a file), but it performs no writes/mutations.
+    :func:`_plan_predicate_holds` must pass, and the recipe must be enabled
+    for the row. Only then is the plan-of-record body (it decides only whether
+    the plan is already reviewed) asked of *body_source*, which has no default
+    (#2545): a live capture in :func:`capture_plan_probes`, a subprocess-free
+    lookup in :func:`run_gate_recipes`. A lookup with no usable body skips the
+    candidate for this tick, never read live in-lock nor acted on off a clock.
     """
     candidates: list[GateRecipeCandidate] = []
     for task in tasks:
@@ -496,12 +480,16 @@ def _detect_auto_adopt_plan(
         session = state.find_by_name_or_id(task.session_id)
         if session is None:
             continue
-        snapshot = _clean_plan_snapshot(
-            session.last_result, task, clients.get(task.client)
-        )
-        if snapshot is None:
+        adoptable = _adoptable_plan_snapshot(session, task)
+        if adoptable is None:
             continue
         if not _recipe_gate_open(config, task, clients, RECIPE_AUTO_ADOPT_PLAN):
+            continue
+        snapshot, fingerprint = adoptable
+        try:
+            body = body_source(task, fingerprint)
+        except PlanProbeUnavailableError as err:
+            _log.warning(_PLAN_PREFETCH_MISS_LOG, task.client, task.ticket_id, err)
             continue
         candidates.append(
             GateRecipeCandidate(
@@ -509,11 +497,34 @@ def _detect_auto_adopt_plan(
                 client=task.client,
                 lane=task.lane,
                 recipe=RECIPE_AUTO_ADOPT_PLAN,
-                evidence=snapshot,
+                evidence=_clean_plan_snapshot(snapshot, body),
                 session_id=task.session_id,
             )
         )
     return candidates
+
+
+def capture_plan_probes(
+    state: CwState,
+    tasks: list[TicketTask],
+    *,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
+    probes: PlanProbes,
+) -> None:
+    """Lockless pre-pass: read every plan candidate's plan-of-record (#2545).
+
+    Re-runs the plan detect with *probes*' capture as the body source, so the
+    live read happens only for a row the detect would act on, by construction.
+    The candidates are discarded; *probes* keeps the bodies. Runs gh/git:
+    never call it with ``sessions_lock`` held.
+    """
+    live = partial(
+        probes.capture, read=lambda t: _plan_of_record_body(t, clients.get(t.client))
+    )
+    _detect_auto_adopt_plan(
+        state, tasks, clients=clients, config=config, body_source=live
+    )
 
 
 def _post_auto_approve_comment(
@@ -528,7 +539,7 @@ def _post_auto_approve_comment(
 
     *cwd* scopes the gh call to the client's repo (GitHub #1269/#1279).
     """
-    body = _AUTO_APPROVE_COMMENT_TEMPLATE.format(
+    body = AUTO_APPROVE_COMMENT_TEMPLATE.format(
         recipe=RECIPE_AUTO_APPROVE_REVIEW,
         must_fix_initial=snapshot["must_fix_initial"],
         deferred=snapshot["deferred"],
@@ -567,7 +578,7 @@ def _post_auto_adopt_comment(
     # _clean_plan_snapshot with no code change here to acknowledge the new
     # public disclosure, and would raise TypeError if a future key ever
     # collided with the `recipe=` kwarg.
-    body = _AUTO_ADOPT_COMMENT_TEMPLATE.format(
+    body = AUTO_ADOPT_COMMENT_TEMPLATE.format(
         recipe=RECIPE_AUTO_ADOPT_PLAN,
         tier=snapshot.get(_SNAPSHOT_KEY_TIER),
         files=snapshot.get(_SNAPSHOT_KEY_FILES),
@@ -835,9 +846,11 @@ def _act_auto_adopt_plan(
     session still resolves, and ``session.last_result`` still passes the pure
     :func:`_plan_gate_snapshot`/:func:`_plan_predicate_holds` pair. It does
     NOT re-run :func:`_plan_of_record_body`: the plan-of-record read is a
-    ~30s ``gh`` subprocess, and the signoff markers are append-only, so a
-    plan reviewed at detect cannot become unreviewed before act. Only
-    task/session state can change. ``candidate.evidence`` (the detect-time
+    ~30s ``gh`` subprocess that never runs under ``sessions_lock`` (#2545).
+    The signoff markers are append-only per comment, but the newest trusted
+    comment can change between capture and act; that window is bounded by
+    the 120 s probe age plus the lock wait, and a later change is picked up
+    on the next tick. ``candidate.evidence`` (the detect-time
     snapshot) is reused directly as the event's ``predicate_snapshot`` and
     the audit-comment source, and its ``plan_reviewed`` value selects the
     release path: advance to IMPL, or the #968 requeue back to PLAN. As
@@ -870,9 +883,9 @@ def _act_auto_adopt_plan(
             session = state.find_by_name_or_id(task.session_id)
             if session is None:
                 continue
-            # In-memory re-check only (R5): no plan-of-record re-fetch. The
-            # markers are append-only, so only task/session state can have
-            # changed since detect.
+            # In-memory re-check only (R5): no plan-of-record re-fetch, which
+            # would run gh under sessions_lock (#2545). See the docstring for
+            # the capture-to-act window this accepts.
             gate_snapshot = _plan_gate_snapshot(session.last_result)
             if gate_snapshot is None or not _plan_predicate_holds(gate_snapshot, task):
                 continue
@@ -896,8 +909,8 @@ def _act_auto_adopt_plan(
                 # newer AWAITING_OPERATOR_SIGNOFF duplicate and clear a signoff
                 # gate this recipe never checked. plan_reviewed is always an
                 # explicit bool (#968), never None, which documents the
-                # no-refetch contract: detect already read the plan-of-record
-                # (see _clean_plan_snapshot), so the act phase must not
+                # no-refetch contract: the lockless capture already read the
+                # plan-of-record (see capture_plan_probes), so the act phase must not
                 # trigger a second live _plan_is_reviewed() fetch. True
                 # advances a reviewed plan to IMPL; False sends an unreviewed
                 # one back to PLAN for Plan Quality Review.
@@ -925,7 +938,11 @@ def _act_auto_adopt_plan(
 
 
 def run_gate_recipes(
-    *, now: datetime, config: OrchestratorConfig, deferred: DeferredReconcileJobs
+    *,
+    now: datetime,
+    config: OrchestratorConfig,
+    deferred: DeferredReconcileJobs,
+    plan_probes: PlanProbes | None,
 ) -> list[str]:
     """Run all enabled gate recipes for one reconcile tick.
 
@@ -936,9 +953,12 @@ def run_gate_recipes(
     files, so a caller-supplied snapshot would be stale (mirrors
     ``run_concierge_recoveries``). Safe to call while the caller already holds
     ``sessions_lock`` — this function only acquires ``dev_queue_lock`` per act
-    phase, never ``sessions_lock`` itself. It makes no gh call under that
+    phase, never ``sessions_lock`` itself. It runs no subprocess under that
     lock: each released ticket's audit comment is queued on *deferred*, the
-    caller's post-lock sink, and posted after the lock releases (#1232).
+    caller's post-lock sink, and posted after the lock releases (#1232), and
+    plan bodies come from *plan_probes*, captured before the lock (#2545).
+    It has no default, so no caller falls back to a live read by omission;
+    ``None`` skips every plan candidate this tick (review is unaffected).
 
     Returns the list of ticket IDs auto-approved this tick.
     """
@@ -962,7 +982,13 @@ def run_gate_recipes(
         deferred=deferred,
     )
     approved += _act_auto_adopt_plan(
-        _detect_auto_adopt_plan(state, tasks, clients=clients, config=config),
+        _detect_auto_adopt_plan(
+            state,
+            tasks,
+            clients=clients,
+            config=config,
+            body_source=lookup_plan_probe(plan_probes),
+        ),
         now=now,
         clients=clients,
         deferred=deferred,

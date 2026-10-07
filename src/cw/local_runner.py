@@ -508,7 +508,15 @@ def build_env(endpoint: str, worktree: Path) -> dict[str, str]:
     return env
 
 
-class _GitFacts(TypedDict):
+# Bounds each git call ``git_facts`` makes (#2565), mirroring
+# ``codex_boot._GIT_SUBPROCESS_TIMEOUT_SECONDS``: one hung git must not stall
+# the reconcile pre-pass that collects harvest facts.
+GIT_FACTS_TIMEOUT_SECONDS: float = 10.0
+
+
+class GitFacts(TypedDict):
+    """The git metadata ``synthesize_git_result`` builds a result from."""
+
     branch: str
     fork_point: str
     commits: list[str]
@@ -516,11 +524,28 @@ class _GitFacts(TypedDict):
     lines_actual: int
 
 
-def _git_facts(worktree: Path, default_branch: str) -> _GitFacts:
-    """Collect git metadata needed to synthesize an AutoDevResult."""
+def git_facts(
+    worktree: Path,
+    default_branch: str,
+    *,
+    timeout: float = GIT_FACTS_TIMEOUT_SECONDS,
+) -> GitFacts:
+    """Collect git metadata needed to synthesize an AutoDevResult.
+
+    Runs up to four git calls, each bounded by *timeout*. A failed merge-base
+    (``CalledProcessError``) reads as "no fork point"; every other failure,
+    ``subprocess.TimeoutExpired`` included, propagates. Runs git, so it must
+    never be called with ``sessions_lock`` held: the reconcile harvest
+    captures it lockless first (#2565).
+    """
 
     def _git(*args: str) -> str:
-        result = run_git(["-C", str(worktree), *args], capture_output=True, check=True)
+        result = run_git(
+            ["-C", str(worktree), *args],
+            capture_output=True,
+            check=True,
+            timeout=timeout,
+        )
         return result.stdout.strip()
 
     branch = _git("rev-parse", "--abbrev-ref", "HEAD")
@@ -542,7 +567,7 @@ def _git_facts(worktree: Path, default_branch: str) -> _GitFacts:
         # scope.files / scope.lines_actual counts a diff the same way (#1487).
         files, lines_actual = _parse_numstat_totals(numstat_out)
 
-    return _GitFacts(
+    return GitFacts(
         branch=branch,
         fork_point=fork_point,
         commits=commits,
@@ -658,6 +683,7 @@ def synthesize_git_result(
     default_branch: str,
     plan_source: PlanSource = "none",
     session_id: str | None = None,
+    facts: GitFacts | None = None,
 ) -> AutoDevResult:
     """Map the worktree's git state to a typed AutoDevResult (RFC 0005 F3, #888).
 
@@ -679,8 +705,15 @@ def synthesize_git_result(
     session's diagnostics dir, and ``details`` gets a trailing
     ``[diagnostics: <bundle path>]`` pointer appended (#1239). None makes both
     of those a no-op, leaving ``details`` as the bare log tail (or empty).
+
+    *facts* are the git facts captured earlier with :func:`git_facts` (#2565):
+    given, no git runs here, so the reconcile harvest can call this under
+    ``sessions_lock``. ``None`` collects them live, which runs git and is for
+    lockless callers only. Either way the aider.log read and the diagnostics
+    bundle write happen here, when the result is actually built.
     """
-    facts = _git_facts(worktree, default_branch)
+    if facts is None:
+        facts = git_facts(worktree, default_branch)
 
     if not facts["commits"]:
         log_text = ""

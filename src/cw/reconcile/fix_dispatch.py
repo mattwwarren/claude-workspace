@@ -102,6 +102,7 @@ from cw.models import (
     QueueItemStatus,
 )
 from cw.models.enums import StageIdentifier
+from cw.queue_rows import _park_running_task_blocked_on_user
 from cw.reconcile._shared import (
     _FIX_DISPATCH_REF_UNRESOLVED_REASON,
     ticket_id_for_session,
@@ -693,9 +694,8 @@ def _park_for_unresolved_ref(job: _DispatchJob, exc: RemoteRefUnresolvedError) -
     the handoff and the ticket is claimed into a fresh REVIEW session. #2265
     decides whether requeue should resume it instead.
 
-    ``_park_running_task_blocked_on_user`` is imported function-locally for the
-    same import-cycle reason ``cw.reconcile.codex_boot`` does it: ``claim.py``
-    imports ``cw.executor``, which imports ``cw.reconcile``. It matches only a
+    ``_park_running_task_blocked_on_user`` (from the ``cw.queue_rows`` leaf,
+    imported at module scope since #2613) matches only a
     still-RUNNING row under its own lock (so a row already reverted to PENDING
     is left to the ordinary stale-handoff drop), clears ``session_id`` after
     reading it for the attention event, and never touches
@@ -717,8 +717,6 @@ def _park_for_unresolved_ref(job: _DispatchJob, exc: RemoteRefUnresolvedError) -
     passes it (#2075): the REVIEW round behind this handoff produced a real
     action list, and the dispatch failure is infra-side.
     """
-    from cw.dispatch.claim import _park_running_task_blocked_on_user
-
     _park_running_task_blocked_on_user(
         ticket_id=job.ticket_id,
         client_name=job.client,

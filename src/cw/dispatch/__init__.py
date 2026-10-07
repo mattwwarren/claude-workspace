@@ -36,6 +36,14 @@ name is still a package-level attribute.
 (the ``claim`` shape, not the ``routing`` one). The
 ``from cw.dispatch.gating import (...)`` block below is unaffected; a test that
 patches a name a gate looks up must target the owning submodule.
+
+#2613 moved the pure queue-row helpers ``cw.reconcile`` reached for (the
+claimed-row mutators, the backstop-exempt predicates, ``resolve_hold_finalize``
+and the two Rule 5 reason literals) into the top-level ``cw.queue_rows`` leaf,
+and ``productivity`` into ``cw.claim_evidence``, so reconcile imports them at
+module scope instead of through deferred ``cw.dispatch`` imports. Every old
+path still resolves: ``claim`` and ``routing`` re-export their moved names, and
+``resolve_hold_finalize`` is imported below from ``cw.queue_rows`` directly.
 """
 
 from __future__ import annotations
@@ -142,7 +150,6 @@ from cw.dispatch.review_gates import (
     _should_gate_for_review_staleness,
     _should_gate_for_scope_hint,
     _should_gate_for_signoff,
-    resolve_hold_finalize,
     resolve_signoff,
 )
 from cw.dispatch.routing import (
@@ -178,6 +185,7 @@ from cw.dispatch.tick import (
     _sweep_expired_diagnostics,
     dispatch_tick,
 )
+from cw.queue_rows import resolve_hold_finalize
 
 __all__ = [
     "BREADCRUMB_ELIGIBLE_PAUSED_STATUSES",

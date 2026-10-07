@@ -1,7 +1,10 @@
 """Top-level reconcile orchestration.
 
-``reconcile`` runs the lockless gh pre-pass and the lockless codex clean-probe
-pre-pass (#2563), then ``_reconcile_locked`` under ``sessions_lock`` (the
+``reconcile`` runs the lockless pre-passes -- gh merge state, the codex clean
+probes (#2563), the gate recipes' plan-of-record prefetch (#2545), the review
+recipes' repo slugs (#2564) and, last, the local harvest's git facts (#2565)
+-- then
+``_reconcile_locked`` under ``sessions_lock`` (the
 detect/emit/act sweeps for stalled, idle, and phantom sessions), then the
 post-lock gh/git passes. See the package ``__init__`` docstring and
 ADR-0005/ADR-0006 for the invariants.
@@ -63,7 +66,13 @@ from cw.reconcile.concierge import run_concierge_recoveries
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 from cw.reconcile.escalation import run_escalation_sweep
 from cw.reconcile.fix_dispatch import run_fix_dispatch
-from cw.reconcile.gate_recipes import run_gate_recipes
+from cw.reconcile.gate_plan_probes import (
+    PLAN_PREFETCH_BUDGET_SECONDS,
+    PLAN_PREFETCH_MAX_PER_TICK,
+    PlanProbes,
+)
+from cw.reconcile.gate_recipes import capture_plan_probes, run_gate_recipes
+from cw.reconcile.harvest_synthesis import HARVEST_CAPTURE_BUDGET_SECONDS, HarvestFacts
 from cw.reconcile.idle import _act_on_idle_candidates, _detect_idle_candidates
 from cw.reconcile.leaked_workers import sweep_leaked_daemon_workers
 from cw.reconcile.liveness import record_session_liveness_changes
@@ -71,6 +80,7 @@ from cw.reconcile.local import (
     _act_on_local_harvest_candidates,
     _detect_local_harvest_candidates,
     capture_codex_harvest_probes,
+    capture_local_harvest_facts,
 )
 from cw.reconcile.main_drift import (
     _act_on_main_drift_candidates,
@@ -85,6 +95,7 @@ from cw.reconcile.review_recipes import (
     dispatch_deferred_review_jobs,
     run_review_recipes,
 )
+from cw.reconcile.review_recipes.core import capture_review_repo_slugs
 from cw.reconcile.routed_result_sessions import sweep_routed_result_sessions
 from cw.reconcile.stalled import (
     _act_on_stalled_candidates,
@@ -98,6 +109,7 @@ from cw.reconcile.tasks import (
     revert_completed_silent_tasks,
     revert_timed_out_tasks,
 )
+from cw.reconcile.unowned_running import run_unowned_running_recovery
 from cw.reconcile.usage_limit_mid_turn import (
     detect_and_park_mid_turn_usage_limits,
     sessions_with_act_in_flight,
@@ -105,6 +117,7 @@ from cw.reconcile.usage_limit_mid_turn import (
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, OrchestratorConfig, TicketTask
+    from cw.reconcile.review_recipes._shared import RepoSlugs
 
 _log = logging.getLogger(__name__)
 
@@ -117,6 +130,8 @@ def _run_terminal_backstops_and_sweeps(
     clients: dict[str, ClientConfig],
     deferred: DeferredReconcileJobs,
     codex_probes: CleanProbes | None,
+    plan_probes: PlanProbes | None,
+    repo_slugs: RepoSlugs | None,
 ) -> tuple[list[str], list[str]]:
     """Run the post-detect TicketTask backstops + RFC 0008 capstone sweeps.
 
@@ -132,7 +147,11 @@ def _run_terminal_backstops_and_sweeps(
     reusing the (possibly now-stale) locals in ``_reconcile_locked``.
     *clients* is the tick's own client scope; the codex re-park sweep acts
     only within it (#2307 review round 1), and reads its clean checks from
-    *codex_probes*, captured before the lock (#2563).
+    *codex_probes*, captured before the lock (#2563). The gate recipes read
+    each plan-of-record body from *plan_probes*, also captured before the
+    lock (#2545); ``None`` skips every plan candidate for the tick.
+    *repo_slugs*, likewise captured before the lock (#2564), is what the review
+    recipes' cross-repo guard reads instead of running git.
     Extracted to one call site (instead of duplicating 4 lines in each
     branch) to keep ``_reconcile_locked``'s statement count under the
     PLR0915 limit.
@@ -148,8 +167,12 @@ def _run_terminal_backstops_and_sweeps(
     member: their decisions (one-shot latch, gate release) are stamped
     in-lock either way, and ``reconcile()`` always builds and drains the sink.
 
+    First, it adopts any RUNNING row whose launched session was never
+    stamped on it (#2591), so the backstops below see that row bound.
+
     Returns (timed_out_ticket_ids, completed_silent_ticket_ids).
     """
+    run_unowned_running_recovery(clients=clients)
     timed_out_ticket_ids = revert_timed_out_tasks()
     completed_silent_ticket_ids = revert_completed_silent_tasks()
     park_terminal_sibling_tasks()
@@ -160,8 +183,8 @@ def _run_terminal_backstops_and_sweeps(
     run_codex_live_writer_reparks(
         now=now, config=config, clients=clients, probes=codex_probes
     )
-    run_gate_recipes(now=now, config=config, deferred=deferred)
-    run_review_recipes(config=config, jobs=deferred)
+    run_gate_recipes(now=now, config=config, deferred=deferred, plan_probes=plan_probes)
+    run_review_recipes(config=config, jobs=deferred, repo_slugs=repo_slugs)
     run_escalation_sweep(now=now)
     return timed_out_ticket_ids, completed_silent_ticket_ids
 
@@ -261,6 +284,72 @@ def _capture_codex_clean_probes(
     return probes
 
 
+def _capture_plan_probes(
+    *, config: OrchestratorConfig, clients: dict[str, ClientConfig]
+) -> PlanProbes:
+    """Lockless pre-pass: prefetch the gate recipes' plan-of-record reads (#2545).
+
+    Runs in ``reconcile()`` before ``sessions_lock`` is taken, so the in-lock
+    plan recipe runs no ``gh``/``git``: ``capture_plan_probes`` re-runs the
+    plan detect here over a fresh snapshot and records each body, which the
+    in-lock detect only reads. Bounded by ``PLAN_PREFETCH_MAX_PER_TICK`` reads
+    and ``PLAN_PREFETCH_BUDGET_SECONDS``. Reads nothing when the gate-recipe
+    master switch is off.
+
+    Like ``_capture_codex_clean_probes`` it must never fail ``reconcile()``
+    (which serves ``cw status``/``list``/``start``/``doctor``) over a state or
+    dev-queue read error: that is logged and yields an empty ``PlanProbes``,
+    so every plan candidate is skipped this tick. Nothing broader is caught.
+    """
+    if not config.gate_recipes_enabled:
+        return PlanProbes()
+    try:
+        state = load_state()
+        tasks = load_dev_queue().tasks
+    except (OSError, ValueError):
+        _log.warning(
+            "reconcile: plan prefetch pre-pass could not read state;"
+            " skipping all plan-gate candidates this tick",
+            exc_info=True,
+        )
+        return PlanProbes()
+    probes = PlanProbes(
+        budget_seconds=PLAN_PREFETCH_BUDGET_SECONDS,
+        max_captures=PLAN_PREFETCH_MAX_PER_TICK,
+    )
+    capture_plan_probes(state, tasks, clients=clients, config=config, probes=probes)
+    return probes
+
+
+def _capture_harvest_facts() -> HarvestFacts:
+    """Lockless pre-pass: capture the local harvest's git facts (#2565).
+
+    Runs in ``reconcile()`` before ``sessions_lock`` is taken, so the in-lock
+    local harvest runs no git: ``capture_local_harvest_facts`` re-runs the
+    harvest detect here over a fresh snapshot and records each git-backed
+    candidate's facts, which the in-lock act only looks up. Bounded by
+    ``HARVEST_CAPTURE_BUDGET_SECONDS`` plus one candidate's bounded git calls.
+
+    Like ``_capture_codex_clean_probes`` it must never fail ``reconcile()``
+    over a state or dev-queue read error: that is logged and yields an empty
+    ``HarvestFacts``, a miss for every git-backed candidate, which then defers
+    in-lock. Nothing broader is caught.
+    """
+    try:
+        state = load_state()
+        tasks = load_dev_queue().tasks
+    except (OSError, ValueError):
+        _log.warning(
+            "reconcile: harvest-facts pre-pass could not read state;"
+            " deferring all git-backed harvest candidates this tick",
+            exc_info=True,
+        )
+        return HarvestFacts()
+    facts = HarvestFacts(budget_seconds=HARVEST_CAPTURE_BUDGET_SECONDS)
+    capture_local_harvest_facts(state, tasks, facts=facts)
+    return facts
+
+
 def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     """Apply drift reconciliation against the persisted state.
 
@@ -307,6 +396,19 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     COMPLETED with its TicketTask still RUNNING (residual from an older crash
     or the dispatch-consumer path), ``revert_completed_silent_tasks()``
     recovers it within one reconcile tick.  See GitHub #867.
+
+    Lockless pre-passes: before taking ``sessions_lock`` this function runs
+    every ``gh``/``git`` call the in-lock sweeps would otherwise need -- PR
+    merge state, the codex clean probes (#2563), the gate recipes'
+    plan-of-record reads (#2545), the review recipes' repo slugs (#2564) and
+    the local harvest's git facts (#2565). The in-lock code only reads their
+    results, and a candidate with no usable result defers to the next tick.
+    The harvest capture runs last: its facts expire
+    ``HARVEST_FACTS_MAX_AGE_SECONDS`` after capture, so no other pre-pass may
+    run between it and the lock. Stacked worst case before the lock is
+    requested, all lockless: codex probes 60 s, repo slugs 30 s, harvest facts
+    60 s plus one in-flight candidate's four 10 s git calls; only the harvest
+    pass's own span (at most 100 s) counts against its 180 s age limit.
     """
     # Pre-pass: check PR merge state for ACTIVE/IDLE DAEMON sessions before
     # acquiring sessions_lock. gh subprocess must NOT run under the lock
@@ -377,6 +479,17 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     codex_probes = _capture_codex_clean_probes(
         config=_orchestrator_config, clients=_clients
     )
+    # Third lockless pre-pass (#2545): the gate recipes' plan-of-record read
+    # (`gh issue view`, and `git` for the `.cw/plan.md` fallback).
+    plan_probes = _capture_plan_probes(config=_orchestrator_config, clients=_clients)
+    # Fourth (#2564): the review recipes' repo-slug `git remote get-url`.
+    repo_slugs = capture_review_repo_slugs(
+        config=_orchestrator_config, dispatching=dispatch_review_jobs
+    )
+    # Fifth and LAST (#2565): the local harvest's git facts. Last because their
+    # max age is measured from capture, so no other pre-pass may run between
+    # it and the lock.
+    harvest_facts = _capture_harvest_facts()
 
     jobs = DeferredReconcileJobs(
         review=DeferredReviewDispatch() if dispatch_review_jobs else None
@@ -395,6 +508,9 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
                 clients=_clients,
                 deferred=jobs,
                 codex_probes=codex_probes,
+                plan_probes=plan_probes,
+                repo_slugs=repo_slugs,
+                harvest_facts=harvest_facts,
             )
     finally:
         # Post-lock drain (#1232, #1229). Everything in `jobs` was decided and
@@ -482,6 +598,9 @@ def _reconcile_locked(
     clients: dict[str, ClientConfig] | None = None,
     deferred: DeferredReconcileJobs,
     codex_probes: CleanProbes | None = None,
+    plan_probes: PlanProbes | None = None,
+    repo_slugs: RepoSlugs | None = None,
+    harvest_facts: HarvestFacts | None = None,
 ) -> ReconcileReport:
     """Body of reconcile(), called while sessions_lock is held.
 
@@ -510,6 +629,15 @@ def _reconcile_locked(
     (#2563): the re-park sweep and the local harvest sweep's codex branch
     read their git checks from it, so neither runs git under sessions_lock.
     ``None`` (nothing captured) makes every such candidate defer a tick.
+    plan_probes comes from reconcile()'s lockless plan prefetch pre-pass
+    (#2545): the gate recipes read each plan-of-record body from it, so no
+    gh/git runs for them under sessions_lock; ``None`` skips every plan
+    candidate for the tick.
+    repo_slugs comes from reconcile()'s lockless review repo-slug pre-pass
+    (#2564) and is forwarded to the review recipes the same way.
+    harvest_facts comes from reconcile()'s last lockless pre-pass (#2565): the
+    local harvest builds each git-backed result from it, so no git runs for it
+    under sessions_lock; ``None`` makes every git-backed candidate defer a tick.
 
     Since the process-kill-timeout removal, no sweep in here dispositions a
     session off elapsed time or transcript quietness: the foreign-result and
@@ -553,6 +681,7 @@ def _reconcile_locked(
         task_by_ticket=shared_task_by_ticket,
         config=orchestrator_config,
         codex_probes=codex_probes,
+        harvest_facts=harvest_facts,
     )
 
     # Main-checkout drift sweep (#925/#940): flag live worktree workers whose
@@ -684,6 +813,8 @@ def _reconcile_locked(
                 clients=clients,
                 deferred=deferred,
                 codex_probes=codex_probes,
+                plan_probes=plan_probes,
+                repo_slugs=repo_slugs,
             )
         )
         all_reverted = list(
@@ -740,6 +871,8 @@ def _reconcile_locked(
             clients=clients,
             deferred=deferred,
             codex_probes=codex_probes,
+            plan_probes=plan_probes,
+            repo_slugs=repo_slugs,
         )
     )
     all_reverted = list(

@@ -24,11 +24,7 @@ from cw.dev_queue import (
     save_dev_queue,
 )
 from cw.dev_queue.lifecycle import _advance_stage
-from cw.dispatch.claim.claimed_row import (
-    _park_running_task_blocked_on_user,
-    _revert_claimed_task_to_pending,
-    _stamp_spawn_success,
-)
+from cw.dispatch.claim.claimed_row import _stamp_spawn_success
 from cw.dispatch.claim.codex_capability import _codex_capability_gate, _SpawnOutcome
 from cw.dispatch.claim.events import _emit_worktree_occupied_skip_event
 from cw.events import record_event
@@ -43,6 +39,10 @@ from cw.exceptions import (
 )
 from cw.executor import resolve_executor, resolve_pipeline_stages
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.queue_rows import (
+    _park_running_task_blocked_on_user,
+    _revert_claimed_task_to_pending,
+)
 from cw.spawn import emit_spawn_post_launch_attention
 from cw.worktree import (
     check_not_main_checkout,
@@ -456,7 +456,10 @@ def _handle_post_launch_failure(
       ``ValueError``), and that must not cost the page;
     - stamps the row once more (:func:`_stamp_spawn_success` is idempotent),
       logging a ``CwError``/``OSError`` miss. If it still fails, the row stays
-      RUNNING without a ``session_id`` and the page is the recovery signal.
+      RUNNING without a ``session_id`` and the page is the recovery signal;
+      reconcile later adopts the row (``cw.reconcile.unowned_running``,
+      #2591) once the recorded session's ``cw-context.json`` ties it to this
+      claim.
       A ``None`` *worktree_path* skips the stamp; only a raise before
       ``create_worktree`` returned leaves it unset, and that is never
       post-launch.
@@ -495,6 +498,8 @@ def _handle_post_launch_failure(
                 worktree_path=worktree_path,
             )
         except (CwError, OSError):
+            # The row stays unbound; cw.reconcile.unowned_running adopts it
+            # from the worktree's cw-context.json on a later tick (#2591).
             _log.exception(
                 "dispatch_tick: could not record session %s on %s/%s; the"
                 " task stays RUNNING without it",

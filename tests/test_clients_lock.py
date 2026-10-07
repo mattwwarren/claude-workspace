@@ -12,11 +12,78 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from click.testing import CliRunner
 
-from cw.config import clients_lock, init_client, load_clients
+from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
+from cw.cli import main
+from cw.config import (
+    clients_file,
+    clients_lock,
+    clients_lock_file,
+    init_client,
+    load_clients,
+)
+from cw.exceptions import LockTimeoutError
+from tests.conftest import _hold_flock
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+_TINY_TIMEOUT_S = "0.05"
+
+
+class TestInitClientBounded:
+    """``init_client(bounded=True)`` / ``cw init`` under a held clients lock (#2501)."""
+
+    def test_bounded_init_client_times_out_and_writes_nothing(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = make_git_repo("held")
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, _TINY_TIMEOUT_S)
+
+        with (
+            _hold_flock(clients_lock_file()),
+            pytest.raises(LockTimeoutError) as exc_info,
+        ):
+            init_client("held", repo, bounded=True)
+
+        assert exc_info.value.lock_name == "clients"
+        assert not clients_file().exists()
+
+    def test_default_init_client_is_unchanged(
+        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        init_client("plain", make_git_repo("plain"))
+
+        assert "plain" in load_clients()
+
+    def test_cw_init_fails_cleanly_while_held_then_succeeds(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = make_git_repo("cli-held")
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, _TINY_TIMEOUT_S)
+        args = ["init", "cli-held", "--path", str(repo), "--no-onboarding"]
+        runner = CliRunner()
+
+        with _hold_flock(clients_lock_file()):
+            held = runner.invoke(main, args)
+
+        assert held.exit_code != 0
+        assert "clients lock" in held.output
+        assert "Added client" not in held.output
+        assert not clients_file().exists()
+
+        freed = runner.invoke(main, args)
+
+        assert freed.exit_code == 0, freed.output
+        assert "Added client 'cli-held'" in freed.output
+        assert "cli-held" in load_clients()
 
 
 class TestClientsLockConcurrency:

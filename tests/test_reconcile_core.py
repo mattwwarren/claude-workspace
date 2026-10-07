@@ -57,12 +57,20 @@ from cw.reconcile import core as reconcile_core
 from cw.reconcile._shared import ProposedAction, ReapCandidate
 from cw.reconcile.codex_boot import CAPTURE_BUDGET_SECONDS, CleanProbe, CleanProbes
 from cw.reconcile.deferred import DeferredReconcileJobs
+from cw.reconcile.gate_plan_probes import (
+    PLAN_PREFETCH_BUDGET_SECONDS,
+    PLAN_PREFETCH_MAX_PER_TICK,
+    PlanProbes,
+)
+from cw.reconcile.harvest_synthesis import HARVEST_CAPTURE_BUDGET_SECONDS, HarvestFacts
 from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
     RECIPE_AUTO_FIX_CI,
     RECIPE_REQUEST_REVIEWER,
     DeferredReviewDispatch,
+    _shared,
 )
+from cw.reconcile.review_recipes._shared import RepoSlugs
 from cw.review_strategy import ReviewStrategy
 from tests._clients_yaml import ClientSpec, staged_client, write_clients_yaml
 from tests._reconcile_helpers import (
@@ -80,10 +88,10 @@ from tests._reconcile_helpers import (
     _write_transcript_records,
     probe_sessions_lock_free,
 )
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests.conftest import CapturedEvent, _make_daemon_session, _make_ticket_task
 from tests.test_pr_hydrate import _pr_state
 from tests.test_reconcile_codex_reparks import _seed_two_client_parks
-from tests.test_reconcile_gate_recipes import _GATE_LANES, _clean_result
+from tests.test_reconcile_gate_recipes import _GATE_LANES, _clean_result, _plan_result
 from tests.test_reconcile_gate_recipes import _make_session as _gate_session
 from tests.test_reconcile_gate_recipes import _make_task as _gate_task
 from tests.test_reconcile_review_recipes import _cr_task
@@ -1098,8 +1106,13 @@ class TestConciergeAndEscalationWiring:
 
 
 # reconcile()'s dev-queue loads: its gh pre-pass first, then the codex
-# clean-probe pre-pass (#2563).
+# clean-probe pre-pass (#2563), then the gate recipes' plan prefetch
+# pre-pass third (#2545). The review recipes' repo-slug pre-pass (#2564) loads
+# through its own module's binding, so it is not counted here; the local
+# harvest-facts pre-pass (#2565) is the fourth, last before the lock.
 _CODEX_PRE_PASS_LOAD = 2
+_PLAN_PRE_PASS_LOAD = 3
+_HARVEST_PRE_PASS_LOAD = 4
 
 
 class TestCodexLiveWriterRepark:
@@ -1351,6 +1364,275 @@ def test_capture_pre_pass_spends_at_most_its_budget(
     assert len(probes.captured_keys) == 1
 
 
+class TestPlanPrefetchPrePass:
+    """#2545: the gate recipes' plan-of-record read runs in a lockless
+    pre-pass, and the in-lock run_gate_recipes only reads its probes."""
+
+    @pytest.mark.parametrize("phantom", [False, True], ids=["no-phantoms", "phantom"])
+    def test_plan_pre_pass_is_captured_unlocked_and_threaded_through(
+        self, monkeypatch: pytest.MonkeyPatch, phantom: bool
+    ) -> None:
+        if phantom:
+            save_state(CwState(sessions=[_mk_session("phantom-1", "missing-ref")]))
+            monkeypatch.setattr(
+                "cw.reconcile.core._claude_agents_json",
+                lambda: [{"sessionId": "unrelated1"}],
+            )
+        else:
+            save_state(CwState(sessions=[]))
+        sentinel = PlanProbes()
+        lock_free_at_capture: list[bool] = []
+
+        def _fake_capture(
+            *, config: OrchestratorConfig, clients: dict[str, ClientConfig]
+        ) -> PlanProbes:
+            del config, clients
+            lock_free_at_capture.append(probe_sessions_lock_free())
+            return sentinel
+
+        monkeypatch.setattr(reconcile_core, "_capture_plan_probes", _fake_capture)
+        gate_mock = MagicMock(return_value=[])
+        monkeypatch.setattr("cw.reconcile.core.run_gate_recipes", gate_mock)
+
+        report = reconcile()
+
+        assert report.phantom_session_ids == (["phantom-1"] if phantom else [])
+        assert lock_free_at_capture == [True]
+        gate_mock.assert_called_once()
+        assert gate_mock.call_args.kwargs["plan_probes"] is sentinel
+
+    def test_plan_pre_pass_is_bounded_by_the_explicit_cap_and_budget(self) -> None:
+        save_state(CwState(sessions=[]))
+
+        probes = reconcile_core._capture_plan_probes(
+            config=OrchestratorConfig(gate_recipes_enabled=True), clients={}
+        )
+
+        assert probes.max_captures == PLAN_PREFETCH_MAX_PER_TICK
+        assert probes.budget_seconds == PLAN_PREFETCH_BUDGET_SECONDS
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            OSError("state unreadable"),
+            json.JSONDecodeError("bad", "{", 0),
+            _validation_error(),
+        ],
+        ids=["os-error", "json-decode-error", "validation-error"],
+    )
+    def test_capture_plan_pre_pass_contains_state_read_errors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        error: Exception,
+    ) -> None:
+        def _fail() -> CwState:
+            raise error
+
+        monkeypatch.setattr(reconcile_core, "load_state", _fail)
+
+        with caplog.at_level(logging.WARNING, logger=reconcile_core.__name__):
+            probes = reconcile_core._capture_plan_probes(
+                config=OrchestratorConfig(gate_recipes_enabled=True), clients={}
+            )
+
+        assert probes.captured_keys == frozenset()
+        assert probes.budget_seconds is None
+        assert probes.max_captures is None
+        assert "plan prefetch pre-pass could not read state" in caplog.text
+
+    def test_capture_plan_pre_pass_does_not_swallow_unexpected_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only state/dev-queue read errors are contained: a reader bug
+        propagates out of the pre-pass, as it did from the old in-lock read."""
+        save_dev_queue(DevQueueStore(tasks=[_gate_task(stage=Stage.PLAN)]))
+        save_state(CwState(sessions=[_gate_session(last_result=_plan_result())]))
+
+        def _boom(_task: TicketTask, _client_cfg: ClientConfig | None) -> str | None:
+            msg = "a reader bug, not an unreadable file"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("cw.reconcile.gate_recipes._plan_of_record_body", _boom)
+
+        with pytest.raises(RuntimeError, match="a reader bug"):
+            reconcile_core._capture_plan_probes(
+                config=OrchestratorConfig(gate_recipes_enabled=True), clients={}
+            )
+
+    def test_capture_plan_pre_pass_reads_nothing_when_gate_recipes_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reads: list[str] = []
+
+        def _spy() -> CwState:
+            reads.append("state")
+            return CwState(sessions=[])
+
+        monkeypatch.setattr(reconcile_core, "load_state", _spy)
+
+        probes = reconcile_core._capture_plan_probes(
+            config=OrchestratorConfig(gate_recipes_enabled=False), clients={}
+        )
+
+        assert reads == []
+        assert probes.captures == 0
+        assert probes.max_captures is None
+
+    def test_unreadable_dev_queue_in_the_plan_pre_pass_does_not_fail_reconcile(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        save_state(CwState(sessions=[]))
+        real_load = reconcile_core.load_dev_queue
+        loads: list[int] = []
+
+        def _third_load_fails() -> DevQueueStore:
+            loads.append(1)
+            if len(loads) == _PLAN_PRE_PASS_LOAD:
+                msg = "dev queue unreadable"
+                raise OSError(msg)
+            return real_load()
+
+        monkeypatch.setattr(reconcile_core, "load_dev_queue", _third_load_fails)
+        gate_mock = MagicMock(return_value=[])
+        monkeypatch.setattr("cw.reconcile.core.run_gate_recipes", gate_mock)
+
+        with caplog.at_level(logging.WARNING, logger=reconcile_core.__name__):
+            report = reconcile()
+
+        assert isinstance(report, ReconcileReport)
+        probes = gate_mock.call_args.kwargs["plan_probes"]
+        assert isinstance(probes, PlanProbes)
+        assert probes.captured_keys == frozenset()
+        assert probes.budget_seconds is None
+        assert "plan prefetch pre-pass could not read state" in caplog.text
+
+
+class TestHarvestFactsPrePass:
+    """#2565: the local harvest's git facts are captured in reconcile()'s last
+    lockless pre-pass, and the in-lock act only looks them up."""
+
+    def test_harvest_facts_captured_unlocked_and_threaded_through(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(CwState(sessions=[]))
+        sentinel = HarvestFacts()
+        lock_free_at_capture: list[bool] = []
+
+        def _fake_capture() -> HarvestFacts:
+            lock_free_at_capture.append(probe_sessions_lock_free())
+            return sentinel
+
+        monkeypatch.setattr(reconcile_core, "_capture_harvest_facts", _fake_capture)
+        harvest_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "cw.reconcile.core._act_on_local_harvest_candidates", harvest_mock
+        )
+
+        reconcile()
+
+        assert lock_free_at_capture == [True]
+        assert harvest_mock.call_args.kwargs["harvest_facts"] is sentinel
+
+    def test_harvest_capture_runs_last_before_the_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Its facts age from capture, so no other pre-pass may run after it."""
+        save_state(CwState(sessions=[]))
+        order: list[str] = []
+
+        def _step(name: str, result: object) -> Callable[..., object]:
+            def _record(*_args: object, **_kwargs: object) -> object:
+                order.append(name)
+                return result
+
+            return _record
+
+        monkeypatch.setattr(
+            reconcile_core, "_capture_codex_clean_probes", _step("codex", None)
+        )
+        monkeypatch.setattr(
+            reconcile_core, "capture_review_repo_slugs", _step("slugs", None)
+        )
+        monkeypatch.setattr(
+            reconcile_core, "_capture_harvest_facts", _step("harvest", None)
+        )
+        monkeypatch.setattr(
+            reconcile_core, "_act_on_local_harvest_candidates", _step("locked", [])
+        )
+
+        reconcile()
+
+        assert order == ["codex", "slugs", "harvest", "locked"]
+
+    def test_unreadable_state_in_harvest_pre_pass_defers_without_failing_reconcile(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        save_state(CwState(sessions=[]))
+        real_load = reconcile_core.load_dev_queue
+        loads: list[int] = []
+
+        def _harvest_load_fails() -> DevQueueStore:
+            loads.append(1)
+            if len(loads) == _HARVEST_PRE_PASS_LOAD:
+                msg = "dev queue unreadable"
+                raise OSError(msg)
+            return real_load()
+
+        monkeypatch.setattr(reconcile_core, "load_dev_queue", _harvest_load_fails)
+        harvest_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "cw.reconcile.core._act_on_local_harvest_candidates", harvest_mock
+        )
+
+        with caplog.at_level(logging.WARNING, logger=reconcile_core.__name__):
+            report = reconcile()
+
+        assert isinstance(report, ReconcileReport)
+        facts = harvest_mock.call_args.kwargs["harvest_facts"]
+        assert isinstance(facts, HarvestFacts)
+        assert facts.budget_seconds is None
+        assert "harvest-facts pre-pass could not read state" in caplog.text
+
+    def test_capture_harvest_pre_pass_does_not_swallow_unexpected_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _fail() -> CwState:
+            msg = "a bug, not an unreadable file"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(reconcile_core, "load_state", _fail)
+
+        with pytest.raises(RuntimeError, match="a bug"):
+            reconcile_core._capture_harvest_facts()
+
+    def test_capture_harvest_pre_pass_builds_a_budgeted_store(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(CwState(sessions=[]))
+        driver = MagicMock()
+        monkeypatch.setattr(reconcile_core, "capture_local_harvest_facts", driver)
+
+        facts = reconcile_core._capture_harvest_facts()
+
+        assert facts.budget_seconds == HARVEST_CAPTURE_BUDGET_SECONDS
+        assert driver.call_args.kwargs["facts"] is facts
+
+    def test_reconcile_locked_without_harvest_facts_passes_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(CwState(sessions=[]))
+        harvest_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "cw.reconcile.core._act_on_local_harvest_candidates", harvest_mock
+        )
+
+        with sessions_lock():
+            reconcile_core._reconcile_locked(deferred=DeferredReconcileJobs())
+
+        assert harvest_mock.call_args.kwargs["harvest_facts"] is None
+
+
 class TestFixDispatchRunsPostLock:
     """#2064: run_fix_dispatch's spawn reaches spawn_create_impl's own
     sessions_lock() acquisition, so it must run strictly AFTER reconcile()'s
@@ -1530,9 +1812,12 @@ class TestReviewRecipeDispatchRunsPostLock:
         real_prepare = reconcile_core.run_review_recipes
 
         def _prepare_spy(
-            *, config: OrchestratorConfig, jobs: DeferredReconcileJobs
+            *,
+            config: OrchestratorConfig,
+            jobs: DeferredReconcileJobs,
+            repo_slugs: RepoSlugs | None = None,
         ) -> list[str]:
-            result = real_prepare(config=config, jobs=jobs)
+            result = real_prepare(config=config, jobs=jobs, repo_slugs=repo_slugs)
             held_at_prepare.append(_sessions_lock_held())
             return result
 
@@ -1985,6 +2270,157 @@ class TestReviewRecipeDispatchRunsPostLock:
         reconcile(dispatch_review_jobs=True)  # the dispatch loop's tick
 
         assert [prompt for _cwd, prompt in daemon.spawn_calls] == ["/address-review 42"]
+
+
+# --- GitHub #2564: review-recipe repo slugs resolved before sessions_lock ----
+
+
+def _spy_slug_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[Path, bool]]:
+    """Wrap the pre-pass's real slug resolver; record (git_dir, lock_held)."""
+    calls: list[tuple[Path, bool]] = []
+    real_resolve = _shared._resolve_repo_slug
+
+    def _spy(git_dir: Path) -> str | None:
+        calls.append((git_dir, _sessions_lock_held()))
+        return real_resolve(git_dir)
+
+    monkeypatch.setattr("cw.reconcile.review_recipes._shared._resolve_repo_slug", _spy)
+    return calls
+
+
+def _set_origin(repo: Path, url: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", url],
+        capture_output=True,
+        check=True,
+    )
+
+
+_PostLock = TestReviewRecipeDispatchRunsPostLock
+
+
+class TestReviewRepoSlugsResolvedBeforeTheLock:
+    """#2564: the address_review / auto_fix_ci cross-repo guard reads each
+    candidate's origin slug from a pre-pass ``reconcile()`` runs before it
+    takes ``sessions_lock``; nothing under the lock runs ``git``."""
+
+    @staticmethod
+    def _seed_both_rows(worktree: Path, workspace: Path) -> None:
+        write_clients_yaml(ClientSpec("acme", workspace, default_branch="main"))
+        ar_task = _cr_task(
+            ticket_id="GEN-1",
+            review_recipes={RECIPE_ADDRESS_REVIEW: True},
+            worktree_path=worktree,
+        )
+        ci_task = _cr_task(
+            ticket_id="GEN-2",
+            review_recipes={RECIPE_AUTO_FIX_CI: True},
+            status=QueueItemStatus.COMPLETED,
+            pr_state=_pr_state(
+                state="OPEN", attention_state="ci_failing", failing_checks=["lint"]
+            ),
+        )
+        save_dev_queue(DevQueueStore(tasks=[ar_task, ci_task]))
+
+    def test_every_slug_resolve_runs_with_the_lock_free(
+        self,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        worktree = make_git_repo("slug-ar")
+        workspace = make_git_repo("slug-ws")
+        self._seed_both_rows(worktree, workspace)
+        _PostLock._enable_recipes(monkeypatch)
+        calls = _spy_slug_resolver(monkeypatch)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
+
+        reconcile(dispatch_review_jobs=True)
+
+        assert {git_dir for git_dir, _held in calls} == {worktree, workspace}
+        assert all(held is False for _git_dir, held in calls)
+        assert [prompt for _cwd, prompt in daemon.spawn_calls] == ["/address-review 42"]
+        rows = {t.ticket_id: t for t in load_dev_queue().tasks}
+        assert rows["GEN-1"].address_review_fired_at is not None
+        assert rows["GEN-2"].auto_fix_ci_fired_at is not None
+        assert rows["GEN-2"].status is QueueItemStatus.PENDING
+        assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+    def test_a_mismatched_origin_still_trips_the_guard_end_to_end(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        worktree = make_git_repo("slug-mismatch")
+        _set_origin(worktree, "https://github.com/other/repo.git")
+        _PostLock._seed_address_review_row(tmp_config_dir, worktree)
+        _PostLock._enable_recipes(monkeypatch)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.spawn.get_native_daemon_client", lambda: daemon)
+
+        reconcile(dispatch_review_jobs=True)
+
+        assert daemon.spawn_calls == []
+        assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+        failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+        assert [e.correlation_id for e in failed] == ["GEN-1"]
+        assert "repo mismatch" in str(failed[0].payload["error"])
+        assert load_dev_queue().tasks[0].address_review_fired_at is None
+
+    def test_a_non_dispatching_reconcile_resolves_no_slug(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _PostLock._seed_address_review_row(
+            tmp_config_dir, make_git_repo("slug-readonly")
+        )
+        _PostLock._enable_recipes(monkeypatch)
+        calls = _spy_slug_resolver(monkeypatch)
+
+        reconcile()
+
+        assert calls == []
+
+    @pytest.mark.parametrize("phantom", [False, True], ids=["no_phantom", "phantom"])
+    def test_the_captured_slugs_are_threaded_to_the_recipes(
+        self, monkeypatch: pytest.MonkeyPatch, *, phantom: bool
+    ) -> None:
+        """Both ``_run_terminal_backstops_and_sweeps`` call sites hand the
+        recipes the one object the pre-lock capture returned."""
+        save_dev_queue(DevQueueStore(tasks=[]))
+        if phantom:
+            save_state(CwState(sessions=[_mk_session("phantom-1", "missing-ref")]))
+            monkeypatch.setattr(
+                "cw.reconcile.core._claude_agents_json",
+                lambda: [{"sessionId": "unrelated1"}],
+            )
+        else:
+            save_state(CwState(sessions=[]))
+        sentinel = RepoSlugs()
+        captured_with: list[tuple[bool, bool]] = []
+
+        def _fake_capture(
+            *, config: OrchestratorConfig, dispatching: bool
+        ) -> RepoSlugs:
+            del config
+            captured_with.append((dispatching, probe_sessions_lock_free()))
+            return sentinel
+
+        recipes_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(reconcile_core, "capture_review_repo_slugs", _fake_capture)
+        monkeypatch.setattr("cw.reconcile.core.run_review_recipes", recipes_mock)
+
+        report = reconcile(dispatch_review_jobs=True)
+
+        assert report.phantom_session_ids == (["phantom-1"] if phantom else [])
+        assert captured_with == [(True, True)]
+        recipes_mock.assert_called_once()
+        assert recipes_mock.call_args.kwargs["repo_slugs"] is sentinel
 
 
 # --- GitHub #1762: session-id-namespace advisory sweep ------------------------
@@ -2977,3 +3413,129 @@ def test_reconcile_recipe_gh_calls_run_with_sessions_lock_free(
     assert rows["GEN-1"].stage == Stage.FINALIZE
     assert rows["GEN-2"].request_reviewer_fired_at is not None
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+class TestUnownedRunningSweepWiring:
+    """#2591: the unbound-row adoption sweep runs in both terminal tails,
+    before the TIMED_OUT backstop, and not on the daemon-outage early return."""
+
+    @staticmethod
+    def _record_order(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        order: list[str] = []
+        real_adopt = reconcile_core.run_unowned_running_recovery
+        real_revert = reconcile_core.revert_timed_out_tasks
+
+        def _adopt(*, clients: dict[str, ClientConfig]) -> list[str]:
+            order.append("unowned_running")
+            return real_adopt(clients=clients)
+
+        def _revert() -> list[str]:
+            order.append("revert_timed_out")
+            return real_revert()
+
+        monkeypatch.setattr(reconcile_core, "run_unowned_running_recovery", _adopt)
+        monkeypatch.setattr(reconcile_core, "revert_timed_out_tasks", _revert)
+        return order
+
+    def test_runs_before_the_timed_out_backstop_without_phantoms(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        order = self._record_order(monkeypatch)
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+
+        report = reconcile()
+
+        assert report.phantom_session_ids == []
+        assert order == ["unowned_running", "revert_timed_out"]
+
+    def test_runs_before_the_timed_out_backstop_with_phantoms(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+        save_state(CwState(sessions=[_mk_session("s1", "missing-ref")]))
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "decoy000"}],
+        )
+        order = self._record_order(monkeypatch)
+
+        report = reconcile()
+
+        assert report.phantom_session_ids == ["s1"]
+        assert order == ["unowned_running", "revert_timed_out"]
+
+    def test_skipped_on_the_daemon_outage_early_return(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(CwState(sessions=[_mk_session("s1", "live-ref")]))
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+        order = self._record_order(monkeypatch)
+
+        reconcile()
+
+        assert order == []
+
+    def test_phantom_sweep_reverts_an_unbound_phantom_row_first(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """A row whose claim session is a phantom is the phantom sweep's (keyed
+        by ticket id); adoption then finds no RUNNING row and does nothing."""
+        from cw.worktree import worktree_path_for
+        from tests.conftest import _write_hook_context_file
+
+        monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+        client = ClientConfig(
+            name="client-a",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "worktrees",
+        )
+        write_clients_yaml(client)
+        wt = worktree_path_for(client, f"{client.feature_branch_prefix}/TKT-1")
+        wt.mkdir(parents=True)
+        _write_hook_context_file(
+            wt,
+            session_id="sess-daemon",
+            ticket_id="TKT-1",
+            client="client-a",
+            task=_make_ticket_task(ticket_id="TKT-1", client="client-a", attempts=1),
+        )
+        sess = _mk_session("sess-daemon", "dead-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.name = "client-a/auto-dev/TKT-1"
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="TKT-1",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        attempts=1,
+                    )
+                ]
+            )
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (False, True),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "decoy000"}],
+        )
+        adopted = capture_events(
+            "cw.reconcile.unowned_running",
+            OrchestratorEventType.TASK_SESSION_ADOPTED,
+        )
+
+        report = reconcile()
+
+        assert "TKT-1" in report.reverted_ticket_ids
+        row = load_dev_queue().tasks[0]
+        assert row.status == QueueItemStatus.PENDING
+        assert row.session_id is None
+        assert adopted == []

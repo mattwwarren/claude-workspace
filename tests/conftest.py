@@ -60,6 +60,7 @@ from tests import _lock_invariants as lock_invariants
 if TYPE_CHECKING:
     import types
     from collections.abc import Callable, Iterator, Mapping, Sequence
+    from typing import IO
 
 
 # A captured record_event invocation: (event_type, payload, correlation_id).
@@ -1071,6 +1072,11 @@ def _write_hook_context_file(
     lane: str | None = None,
     stamp: object = _STAMP_UNCHANGED,
     headless: bool = False,
+    *,
+    session_id: str = "sess940g",
+    ticket_id: str = "940",
+    client: str = "client-a",
+    task: TicketTask | None = None,
 ) -> None:
     """Materialize ``<worktree>/.claude/cw-context.json`` via the real writer.
 
@@ -1094,18 +1100,29 @@ def _write_hook_context_file(
     ``cw agent-spawn-pre``'s spawn-shape policy — which applies only to
     headless dispatch workers — reads the same ``"headless"`` key production
     stamps, for the same anti-drift reason as *lane* above.
+
+    *session_id*, *ticket_id* and *client* (#2591) default to the literals
+    every earlier caller relied on, and *task* defaults to ``None``, which
+    passes nothing extra to the real writer, so those callers' files are
+    byte-identical. A claim's context passes the claim's own values plus
+    ``task=`` (the claimed row): the writer then stamps the ``attempt`` key
+    from ``task.attempts``, as a dispatch spawn does, and runs
+    ``git rev-parse`` (outside any lock here). ``session_name`` stays
+    ``client-a/impl`` whatever *client* is: reconcile's adoption reads the
+    Session's own name, never this one.
     """
     from cw.spawn import _write_hook_context
 
     _write_hook_context(
         worktree,
-        session_id="sess940g",
+        session_id=session_id,
         session_name="client-a/impl",
-        client="client-a",
+        client=client,
         purpose="impl",
-        ticket_id="940",
+        ticket_id=ticket_id,
         origin=SessionOrigin.DAEMON,
         headless=headless,
+        task=task,
         workspace_path=workspace_path,
         lane=lane,
     )
@@ -1252,6 +1269,53 @@ def held_sessions_lock() -> Iterator[Path]:
     """Fixture form of :func:`_hold_sessions_lock` for whole-test contention."""
     with _hold_sessions_lock() as lock_path:
         yield lock_path
+
+
+class _RecordingLockPath:
+    """Duck-typed lock path that remembers every handle a lock opens on it.
+
+    Hoisted from ``test_config.py`` (#2501) so every bounded lock's
+    "timeout closes its fd" test shares it.
+    """
+
+    def __init__(self, real: Path) -> None:
+        self._real = real
+        self.handles: list[IO[str]] = []
+
+    def open(self, mode: str) -> IO[str]:
+        handle = self._real.open(mode)
+        self.handles.append(handle)
+        return handle
+
+    def __str__(self) -> str:
+        return str(self._real)
+
+
+@pytest.fixture
+def record_lock_path(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> Callable[[str, Path], _RecordingLockPath]:
+    """Factory: patch the lock-path function *patch_target* to a recorder.
+
+    ``record_lock_path("cw.config.clients_lock_file", clients_lock_file())``
+    wraps the real path in a :class:`_RecordingLockPath`, makes the patched
+    function return it, and returns the recorder.
+    """
+
+    def _install(patch_target: str, real: Path) -> _RecordingLockPath:
+        recorder = _RecordingLockPath(real)
+        monkeypatch.setattr(patch_target, lambda: recorder)
+        return recorder
+
+    return _install
+
+
+@pytest.fixture
+def recording_lock_path(
+    record_lock_path: Callable[[str, Path], _RecordingLockPath],
+) -> _RecordingLockPath:
+    """The sessions-lock form of :func:`record_lock_path`."""
+    return record_lock_path("cw.config.sessions_lock_file", sessions_lock_file())
 
 
 @contextlib.contextmanager
@@ -2662,3 +2726,24 @@ def simple_config() -> OrchestratorConfig:
         tick_interval_seconds=30,
         per_client_max_parallel={"test-client": 1},
     )
+
+
+@pytest.fixture
+def review_monitor_state_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Path]:
+    """Isolate every path ``.claude/scripts/review_monitor.py`` writes (#2499).
+
+    Points the script's central state dir, legacy state file, ship-it pending
+    inbox and Desktop action queue under *tmp_path* (all are bound at import,
+    so the autouse ``tmp_config_dir`` / ``_isolate_home`` never reach them),
+    empties the canonical repo-path overrides, and clears the
+    ``functools.lru_cache`` on ``_get_our_username`` at setup and teardown so
+    no test sees another's faked GitHub login. Returns the central state dir.
+    Logic: ``tests/_review_monitor_helpers.isolate_state``.
+    """
+    from tests import _review_monitor_helpers as helpers
+
+    central = helpers.isolate_state(monkeypatch, tmp_path)
+    yield central
+    helpers.get("_get_our_username").cache_clear()

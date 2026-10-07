@@ -48,7 +48,9 @@ _TICKET_RE = re.compile(r"^#\d+$")
 # ADR-0019 (invariant 3): the #1232 follow-ups plus the four the #1233 probe
 # filed. An allowlist entry must cite one of these; a ticket stays listed after
 # its entry is deleted (#2563's was), since this is the documented universe,
-# not a mirror of the allowlist.
+# not a mirror of the allowlist. #2545 is also closed, by deletion-free means:
+# it never had an entry (the probe never recorded the stubbed in-lock plan
+# read), and its read now runs in a lockless pre-pass.
 _DOCUMENTED_TICKETS = frozenset(
     {
         "#2545",
@@ -361,6 +363,49 @@ def test_codex_boot_is_not_allowlisted() -> None:
     so no in-lock subprocess under a ``cw.reconcile.codex_boot`` frame is
     forgiven any more."""
     assert "cw.reconcile.codex_boot" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+
+
+def test_gate_recipes_is_not_allowlisted() -> None:
+    """#2545: the gate recipes' plan-of-record read (``gh``, and ``git`` for
+    the ``.cw/plan.md`` fallback) runs in a lockless pre-pass, so no in-lock
+    subprocess under either gate-recipe module is forgiven."""
+    assert "cw.reconcile.gate_recipes" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+    assert "cw.reconcile.gate_plan_probes" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+
+
+def test_pr_hydrate_is_not_allowlisted() -> None:
+    """#2564: the review recipes' repo-slug ``git remote get-url`` runs in a
+    lockless pre-pass, so no in-lock subprocess under a ``cw.pr_hydrate``
+    frame is forgiven any more."""
+    assert "cw.pr_hydrate" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+
+
+def test_local_runner_is_not_allowlisted() -> None:
+    """#2565: the local harvest's git facts are captured in a lockless
+    pre-pass, so no in-lock subprocess under a ``cw.local_runner`` frame is
+    forgiven any more."""
+    assert "cw.local_runner" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+
+
+def test_stop_hook_is_not_allowlisted() -> None:
+    """#2566: the Stop hook's headless scope verification runs before
+    sessions_lock, so no in-lock subprocess under any ``cw.cli.stop_hook``
+    frame is forgiven any more."""
+    assert "cw.cli.stop_hook.locked" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+    assert not any(
+        module.startswith("cw.cli.stop_hook")
+        for module in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+    )
+
+
+def test_stop_hook_headless_context_readers_share_one_key() -> None:
+    """The Stop hook's two persisted headless reads use one key symbol."""
+    source = (_REPO_ROOT / "src" / "cw" / "cli" / "stop_hook" / "locked.py").read_text(
+        encoding="utf-8"
+    )
+    assert source.count('_HEADLESS_CONTEXT_KEY = "headless"') == 1
+    assert source.count("context.get(_HEADLESS_CONTEXT_KEY)") == 2
+    assert 'context.get("headless")' not in source
 
 
 def test_allowlist_entries_cite_a_documented_ticket() -> None:

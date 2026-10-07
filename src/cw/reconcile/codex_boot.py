@@ -53,11 +53,11 @@ the same worktree raise ``HookContextConflictError``.
 
 Two existing primitives carry the task transition rather than a new path:
 
-- ``cw.dispatch.claim._park_running_task_blocked_on_user`` — the shared
+- ``cw.queue_rows._park_running_task_blocked_on_user`` — the shared
   "park this task for operator inspection and emit SESSION_NEEDS_ATTENTION"
   primitive already used by the dirty-worktree guard and the codex capability
   gate (#1238, #1257).
-- ``cw.dispatch.claim._revert_claimed_task_to_pending`` — the shared
+- ``cw.queue_rows._revert_claimed_task_to_pending`` — the shared
   RUNNING -> PENDING revert, which charges an unproductive attempt so a serve
   crash loop stays bounded by the global attempt ceiling.
 
@@ -143,6 +143,10 @@ from cw.models import (
     ReapReason,
     SessionOrigin,
     SessionStatus,
+)
+from cw.queue_rows import (
+    _park_running_task_blocked_on_user,
+    _revert_claimed_task_to_pending,
 )
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
@@ -763,7 +767,7 @@ def _row_still_bound(ticket_id: str, client_name: str, session_id: str) -> bool:
     """Whether the task row is still RUNNING under *session_id*.
 
     The same predicate the identity-checked row transitions re-verify
-    (``expected_session_id`` in ``cw.dispatch.claim``). Caller holds
+    (``expected_session_id`` in ``cw.queue_rows``). Caller holds
     ``dev_queue_lock``.
     """
     return any(
@@ -837,8 +841,6 @@ def _requeue_clean_orphan(
     *, session_id: str, ticket_id: str, client_name: str, stage: Stage
 ) -> None:
     """Revert the task to PENDING; report it only if the revert happened."""
-    from cw.dispatch.claim import _revert_claimed_task_to_pending
-
     if not _revert_claimed_task_to_pending(
         client_name, ticket_id, expected_session_id=session_id
     ):
@@ -891,10 +893,6 @@ def _close_orphaned_session_and_dispose(
     session would be skipped by every later boot's identity check, which is
     the stranded-session bug #2285 closes.
     """
-    # Deferred for the same import-cycle reason as in
-    # reap_orphaned_codex_sessions_at_boot below.
-    from cw.dispatch.claim import _park_running_task_blocked_on_user
-
     # Why not mutate_state: dev_queue_lock is nested inside this sessions_lock
     # window (mirrors cli/spawn.py:_spawn_complete_impl's identical nesting) so
     # the session close and the task transition land under one lock scope.
@@ -938,9 +936,10 @@ def reap_orphaned_codex_sessions_at_boot() -> int:
     strictly worse than skipping one ambiguous session.
     """
     # Deferred for import-cycle reasons: cw.executor imports cw.reconcile at
-    # module level, so this module (inside the cw.reconcile package) must not
-    # reach into it at import time. Mirrors _shared/_routing.py's own deferred
-    # cw.dispatch import (#698).
+    # module level (executor/core.py), and cw.reconcile imports this module, so
+    # a module-level import here would hit a partially initialized
+    # cw.executor. This module's only remaining function-level import; its
+    # former cw.dispatch.claim deferrals moved to cw.queue_rows (#2613).
     from cw.executor import resolve_executor_config
 
     state = load_state()

@@ -250,7 +250,7 @@ def _fill_session_local_liveness_backend_default(session_raw: dict[str, Any]) ->
     field, it is a placeholder, not evidence. The raw payload cannot say which
     executor launched the process and, once saved, the value is
     indistinguishable from a genuine aider handle, so this pass does not decide:
-    ``cw.reconcile.local._resolve_harvest_backend`` verifies it at harvest
+    ``cw.reconcile.harvest_synthesis._resolve_harvest_backend`` verifies it at harvest
     against the worktree's launch logs and the session's spawn stage (#2512).
     A None handle is left untouched. Idempotent.
     """

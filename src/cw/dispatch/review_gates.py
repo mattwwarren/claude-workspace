@@ -63,6 +63,7 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
 )
+from cw.queue_rows import resolve_hold_finalize
 from cw.worktree import resolve_task_worktree
 
 if TYPE_CHECKING:
@@ -437,36 +438,6 @@ def _gate_recipe_will_release(
     from cw.reconcile.gate_recipes import gate_recipe_will_release
 
     return gate_recipe_will_release(task, last_result, clients, load_effective_config())
-
-
-def resolve_hold_finalize(
-    task: TicketTask,
-    clients: dict[str, ClientConfig],
-    config: OrchestratorConfig,
-) -> Literal["manual"] | None:
-    """Resolve the effective proactive finalize-hold policy for *task*.
-
-    Precedence (highest to lowest), mirroring ``resolve_signoff`` above:
-      1. ``TicketTask.hold_finalize`` -- per-ticket override (``cw dev-queue
-         add --hold-finalize``).
-      2. ``LaneConfig.finalize_gate`` in the task's client config.
-      3. ``OrchestratorConfig.default_finalize_gate`` -- global default;
-         ``"auto"`` resolves to ``None`` (no hold).
-
-    A task whose client is absent from *clients*, or whose lane name is not
-    declared in that client's lanes, falls through to the global default --
-    identical fall-through semantics to ``resolve_signoff``. See GitHub #1160
-    (RFC 0011 A3).
-    """
-    if task.hold_finalize is not None:
-        return task.hold_finalize
-    client_cfg = clients.get(task.client)
-    if client_cfg is not None:
-        for lane_cfg in client_cfg.effective_lanes:
-            if lane_cfg.name == task.lane and lane_cfg.finalize_gate is not None:
-                return lane_cfg.finalize_gate
-    default = config.default_finalize_gate
-    return default if default != "auto" else None
 
 
 def _should_force_hold_finalize(

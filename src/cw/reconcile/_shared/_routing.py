@@ -462,9 +462,13 @@ def _apply_sentinel_to_task(
             # Delegate to the shared B2 staged advance decision so both the
             # consume path (_apply_events_to_store) and the reconcile
             # ROUTE_EMITTED_SENTINEL path use the same routing table (#698).
-            # Why function-level import: cw.dispatch imports reconcile at
-            # module level (see reconcile.py module docstring); a module-level
-            # import here would create a circular dependency.
+            # Why function-level import: this is the dispatch routing engine,
+            # not a pure queue-row helper, so it cannot move to cw.queue_rows
+            # (#2613). The engine imports cw.executor (routing/stage_walk.py),
+            # cw.executor imports cw.reconcile at module top
+            # (executor/core.py), and cw.dispatch's package __init__ imports
+            # cw.reconcile, so a module-level import here is circular. The
+            # dependency inversion is tracked in #2619.
             from cw.dispatch import _route_staged_decision, apply_staged_decision
 
             clients = _deps.load_effective_clients()

@@ -55,6 +55,7 @@ from cw.reconcile import (
     _act_on_local_harvest_candidates,
     _detect_local_harvest_candidates,
     codex_boot,
+    harvest_synthesis,
     reconcile,
 )
 from cw.reconcile import local as reconcile_local
@@ -68,6 +69,7 @@ from cw.reconcile.codex_boot import (
     CleanProbes,
     probe_clean_state,
 )
+from cw.reconcile.harvest_synthesis import HarvestFacts
 from cw.reconcile.local import (
     CODEX_HARVEST_CLEAN_REQUEUE_REASON,
     CODEX_HARVEST_ORPHANED_DISPOSITION,
@@ -75,6 +77,7 @@ from cw.reconcile.local import (
     _harvest_codex_candidate,
     act_on_codex_harvest_candidate,
     capture_codex_harvest_probes,
+    capture_local_harvest_facts,
 )
 from cw.reconcile.tasks import revert_completed_silent_tasks
 from tests._codex_recovery_helpers import (
@@ -91,6 +94,7 @@ from tests._codex_recovery_helpers import (
     _use_auto_reap_policy,
     _use_config,
 )
+from tests._reconcile_helpers import _local_git_worktree, _save_dead_local_session
 from tests.conftest import commit_tracked_file
 
 if TYPE_CHECKING:
@@ -399,13 +403,13 @@ def test_failed_task_disposition_after_session_close_preserves_park(
     """The completed-session backstop honors a persisted codex park intent."""
     _seed(tmp_config_dir, tmp_path, make_git_repo)
 
-    from cw.dispatch import claim
-
     def _fail_park(**_kwargs: object) -> None:
         message = "simulated crash after session close"
         raise RuntimeError(message)
 
-    monkeypatch.setattr(claim, "_park_running_task_blocked_on_user", _fail_park)
+    monkeypatch.setattr(
+        reconcile_local, "_park_running_task_blocked_on_user", _fail_park
+    )
     with pytest.raises(RuntimeError, match="simulated crash"):
         _harvest(_SIGNAL_ONLY)
 
@@ -426,33 +430,101 @@ def test_failed_task_disposition_after_session_close_preserves_park(
     assert _PARK_REASON_REAP_POLICY_NOT_AUTO in str(attention[0]["breadcrumbs"])
 
 
+def _forbidden(*_args: object, **_kwargs: object) -> None:
+    msg = "codex harvest must not synthesize a sentinel"
+    raise AssertionError(msg)
+
+
+def _forbid_synthesis_everywhere(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every result-synthesis path fail the test, patched where it is looked up.
+
+    ``_synthesize_harvest_sentinel`` is reached from ``cw.reconcile.local``
+    (through ``_harvest_sentinel_or_defer``); the synthesizers and their table
+    are resolved inside ``cw.reconcile.harvest_synthesis`` since #2565. A name
+    patched in the wrong module would silently intercept nothing.
+    """
+    monkeypatch.setattr(reconcile_local, "_synthesize_harvest_sentinel", _forbidden)
+    for name in ("synthesize_git_result", "synthesize_opencode_result"):
+        monkeypatch.setattr(harvest_synthesis, name, _forbidden)
+    monkeypatch.setattr(cw_result, "emit_result_on", _forbidden)
+    for backend in ("aider", "opencode"):
+        monkeypatch.setitem(
+            harvest_synthesis._HARVEST_SYNTHESIZERS, backend, _forbidden
+        )
+
+
 def test_codex_candidate_never_reaches_git_synthesis_or_opencode_parse(
     tmp_config_dir: Path,
     tmp_path: Path,
     make_git_repo: Callable[..., Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _seed(tmp_config_dir, tmp_path, make_git_repo)
-
-    def _forbidden(*_args: object, **_kwargs: object) -> None:
-        msg = "codex harvest must not synthesize a sentinel"
-        raise AssertionError(msg)
-
-    for name in (
-        "_synthesize_harvest_sentinel",
-        "synthesize_git_result",
-        "synthesize_opencode_result",
+    # Ownership guard: each patched name lives where _forbid_synthesis_everywhere
+    # patches it, and no stale copy in local.py could make a patch a no-op.
+    assert reconcile_local._harvest_sentinel_or_defer.__globals__ is vars(
+        reconcile_local
+    )
+    for fn in (
+        harvest_synthesis._harvest_via_git,
+        harvest_synthesis._harvest_via_opencode_log,
+        harvest_synthesis._synthesize_harvest_sentinel,
     ):
-        monkeypatch.setattr(reconcile_local, name, _forbidden)
-    monkeypatch.setattr(cw_result, "emit_result_on", _forbidden)
-    for backend in ("aider", "opencode"):
-        monkeypatch.setitem(reconcile_local._HARVEST_SYNTHESIZERS, backend, _forbidden)
+        assert fn.__globals__ is vars(harvest_synthesis), fn
+    assert "synthesize_git_result" not in vars(reconcile_local)
+    assert "synthesize_opencode_result" not in vars(reconcile_local)
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+    _forbid_synthesis_everywhere(monkeypatch)
 
     _harvest(_AUTO)
 
     session = load_state().sessions[0]
     assert session.last_result is None
     assert session.status is SessionStatus.COMPLETED
+
+
+def test_forbidden_synthesis_patches_do_intercept_an_aider_harvest(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Control: the same patch set stops a git-backed harvest that has facts,
+    so the codex "never synthesizes" assertion above cannot pass vacuously."""
+    worktree = _local_git_worktree(make_git_repo, "wt-control", with_commit=True)
+    tbt = _save_dead_local_session(
+        worktree,
+        "T-CONTROL",
+        backend="aider",
+        session_stage=Stage.IMPL,
+        row_stage=Stage.IMPL,
+    )
+    state = load_state()
+    candidates = _detect_local_harvest_candidates(state, list(tbt.values()))
+    # Captured before the patches go in, so the candidate really has facts.
+    facts = HarvestFacts()
+    capture_local_harvest_facts(state, list(tbt.values()), facts=facts)
+    _forbid_synthesis_everywhere(monkeypatch)
+
+    with pytest.raises(AssertionError, match="must not synthesize"):
+        _act_on_local_harvest_candidates(
+            state, candidates, now=_NOW, task_by_ticket=tbt, harvest_facts=facts
+        )
+
+
+def test_codex_candidate_is_not_a_harvest_facts_target(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The driver's explicit codex exclusion is load-bearing: codex is
+    unregistered in the synthesizer table, so it alone would read as git-backed."""
+    assert harvest_synthesis.harvest_uses_git("codex")
+    _seed(tmp_config_dir, tmp_path, make_git_repo)
+    monkeypatch.setattr(harvest_synthesis, "git_facts", _forbidden)
+
+    capture_local_harvest_facts(
+        load_state(), load_dev_queue().tasks, facts=HarvestFacts()
+    )
 
 
 @pytest.mark.parametrize("config", [_AUTO, _SIGNAL_ONLY], ids=["requeue", "park"])

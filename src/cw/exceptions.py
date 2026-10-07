@@ -20,6 +20,15 @@ if TYPE_CHECKING:
     from cw.models import Session
     from cw.sprint import AppliedBuildout
 
+
+# Canonical identities for the state locks.  Keep these in the dependency-light
+# lock/error layer so the guard, acquisition helpers, and timeout exceptions
+# all use the same names without importing the configuration module.
+SESSIONS_LOCK_NAME = "sessions"
+DEV_QUEUE_LOCK_NAME = "dev_queue"
+CLIENTS_LOCK_NAME = "clients"
+CONCURRENCY_OVERRIDE_LOCK_NAME = "concurrency_override"
+
 # Usage-limit detection regex. Matches all documented Claude usage-limit phrasings:
 # - "You've hit your session limit · resets 3:45pm"   (verified against errors.md)
 # - "You've hit your weekly limit · resets Mon 12:00am" (verified against errors.md)
@@ -863,7 +872,31 @@ class CwLockOrderError(CwError):
         self.held = held
 
 
-class SessionsLockTimeoutError(CwError):
+class LockTimeoutError(CwError):
+    """Raised when a bounded state-lock acquisition cannot take the lock in time.
+
+    The opt-in ``bounded=True`` mode of the sessions, dev_queue, clients and
+    concurrency_override locks polls for up to ``CW_SESSIONS_LOCK_TIMEOUT_S``
+    and then raises this rather than hanging behind a stuck holder (GitHub
+    #2491, #2501). The default unbounded acquisition blocks and never raises
+    it. The message is operator-facing and names the lock; ``lock_name``,
+    ``lock_path`` and ``waited_s`` (the wait of THIS acquisition only) are
+    carried for callers that log structured fields. The sessions lock raises
+    the :class:`SessionsLockTimeoutError` subclass.
+    """
+
+    __slots__ = ("lock_name", "lock_path", "waited_s")
+
+    def __init__(
+        self, message: str, *, lock_name: str, lock_path: Path, waited_s: float
+    ) -> None:
+        super().__init__(message)
+        self.lock_name = lock_name
+        self.lock_path = lock_path
+        self.waited_s = waited_s
+
+
+class SessionsLockTimeoutError(LockTimeoutError):
     """Raised when a bounded ``sessions_lock`` cannot acquire the lock in time.
 
     Only ``sessions_lock(bounded=True)`` (and ``mutate_state(..., bounded=True)``)
@@ -875,15 +908,19 @@ class SessionsLockTimeoutError(CwError):
     The message is operator-facing: it names the lock path and the wait, says
     how to find the holder (``lsof``; the lock file records no PID), and what
     to do if the holder is wedged or merely slow. Carries ``lock_path`` and
-    ``waited_s`` for callers that log structured fields.
+    ``waited_s`` for callers that log structured fields; ``lock_name`` is
+    always ``"sessions"``.
     """
 
-    __slots__ = ("lock_path", "waited_s")
+    __slots__ = ()
 
     def __init__(self, message: str, *, lock_path: Path, waited_s: float) -> None:
-        super().__init__(message)
-        self.lock_path = lock_path
-        self.waited_s = waited_s
+        super().__init__(
+            message,
+            lock_name=SESSIONS_LOCK_NAME,
+            lock_path=lock_path,
+            waited_s=waited_s,
+        )
 
 
 class ClaimTierArmingError(CwError):
