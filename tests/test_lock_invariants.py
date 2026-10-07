@@ -363,6 +363,13 @@ def test_codex_boot_is_not_allowlisted() -> None:
     assert "cw.reconcile.codex_boot" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
 
 
+def test_pr_hydrate_is_not_allowlisted() -> None:
+    """#2564: the review recipes' repo-slug ``git remote get-url`` runs in a
+    lockless pre-pass, so no in-lock subprocess under a ``cw.pr_hydrate``
+    frame is forgiven any more."""
+    assert "cw.pr_hydrate" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+
+
 def test_allowlist_entries_cite_a_documented_ticket() -> None:
     source_lines = _HARNESS_SOURCE.read_text(encoding="utf-8").splitlines()
     for module, ticket in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST.items():

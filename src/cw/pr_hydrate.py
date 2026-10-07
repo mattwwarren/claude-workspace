@@ -358,10 +358,9 @@ def _resolve_repo_slug(git_dir: Path) -> str | None:
             ["-C", str(git_dir), "remote", "get-url", "origin"],
             capture_output=True,
             check=False,
-            # Why: this runs under dev_queue_lock (a single, queue-wide lock —
-            # see review_recipes.py call sites); a hung `git` process (stale
-            # credential-helper prompt, NFS-mounted workspace) would otherwise
-            # freeze dispatch for every client, not just the mismatched one.
+            # Why: callers run it lockless but on the tick's path (reconcile's
+            # review repo-slug pre-pass, #2564); a hung `git` (stale credential
+            # prompt, NFS workspace) must not stall every client's tick.
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -374,19 +373,20 @@ def _resolve_repo_slug(git_dir: Path) -> str | None:
     return match.group(1)
 
 
-def _repo_slug_mismatch(pr_repo: str, git_dir: Path) -> str | None:
-    """Return *git_dir*'s resolved slug when it disagrees with *pr_repo*, else None.
+def _slug_mismatch(pr_repo: str, resolved: str | None) -> str | None:
+    """Return *resolved* when it disagrees with *pr_repo*, else None. No git.
 
-    Fail-open (GitHub #1198): an unresolvable remote yields ``None`` (no
-    mismatch, proceed), never *pr_repo*. The compare is case-insensitive so a
-    remote's casing never spuriously trips the guard.
+    Fail-open (GitHub #1198): an unresolvable remote (``None``) is no mismatch,
+    never *pr_repo*. Case-insensitive, so a remote's casing never trips it.
     """
-    resolved = _resolve_repo_slug(git_dir)
-    if resolved is None:
-        return None
-    if resolved.lower() == pr_repo.lower():
+    if resolved is None or resolved.lower() == pr_repo.lower():
         return None
     return resolved
+
+
+def _repo_slug_mismatch(pr_repo: str, git_dir: Path) -> str | None:
+    """:func:`_slug_mismatch` against *git_dir*'s live origin slug (runs git)."""
+    return _slug_mismatch(pr_repo, _resolve_repo_slug(git_dir))
 
 
 def _derive_pr_state(pr_url: str, *, self_login: str | None) -> PrState | None:
