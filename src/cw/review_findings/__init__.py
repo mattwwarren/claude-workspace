@@ -93,7 +93,7 @@ preserved: pinning an import order would be pinning a symptom. The invariant
 that actually matters is that ``cw.review_finding_dispositions`` holds no
 module-scope ``cw`` import, which makes the cycle unclosable in EVERY order
 rather than in the one order we happened to ship.
-``tests/test_review_finding_dispositions.py::test_module_imports_cleanly_whichever_module_loads_first``
+``tests/test_review_finding_dispositions_package.py::test_module_imports_cleanly_whichever_module_loads_first``
 is the regression guard: it imports each participant first in a cold
 interpreter, so an order-dependent cycle fails there regardless of which
 submodule this block happens to load first.

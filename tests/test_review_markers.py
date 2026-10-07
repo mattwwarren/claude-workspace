@@ -144,7 +144,7 @@ class TestTheLeafStaysALeaf:
     """#2210 round 4: the whole reason this module exists.
 
     Asserted on the SOURCE, in the style of the sentinel-drift guard in
-    ``test_review_finding_dispositions``: the runtime behaviour is identical
+    ``test_review_finding_dispositions_parse``: the runtime behaviour is identical
     whichever module a constant comes from, which is exactly why the
     dependency direction has to be pinned by something other than behaviour.
     """

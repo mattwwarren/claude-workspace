@@ -23,7 +23,7 @@ therefore goes through :func:`~cw.review_markers.neutralise_marker_syntax`
 delimiters visibly rather than dropping them. The settle payload is the one
 exception and has its own, lossless treatment — see
 :func:`_settle_payload_block`. The reader enforces the same contract
-independently, by position; see ``review_finding_dispositions``'
+independently, by position; see ``review_finding_dispositions.parse``'
 ``_DISPOSITION_BLOCK_RE``.
 """
 

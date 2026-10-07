@@ -476,7 +476,7 @@ class OrchestratorEventType(StrEnum):
     FIX_LOOP_DIVERGENCE_DETECTED = "review.fix_loop_divergence_detected"
     # GitHub #1838 -- one re-derived review finding was suppressed because a
     # prior round's operator adjudication had already REJECTED it. Namespaced
-    # by its owning module (review_finding_dispositions.py), same convention as
+    # by its owning package (review_finding_dispositions), same convention as
     # REVIEW_FINDING_VOIDED / REVIEW_TREADMILL_DETECTED above.
     # Mandatory, not optional, and for the identical reason REVIEW_FINDING_VOIDED
     # is: this is the second mechanism by which a finding stops blocking with

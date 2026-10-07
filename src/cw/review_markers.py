@@ -164,7 +164,7 @@ class RefusedDisposition(BaseModel):
     (``file::normalized summary::digest`` — or the digest-less legacy shape,
     which is itself one of the things refused), ``missing`` the provenance
     fields it could not produce, in the fixed order
-    ``cw.review_finding_dispositions._provenance_gaps`` checks them.
+    ``cw.review_finding_dispositions.provenance._provenance_gaps`` checks them.
 
     Lives here rather than in :mod:`cw.review_findings` because that package is
     the EXECUTOR-NEUTRAL finding contract and must not depend on one executor's
