@@ -56,18 +56,6 @@ _DEFERRED_DISPATCH_IMPORTS: Counter[_ImportKey] = Counter(
             "cw.dispatch",
             ("_classify_sentinel_stage_position",),
         ): 1,
-        (
-            "src/cw/reconcile/codex_boot.py",
-            "_requeue_clean_orphan",
-            "cw.dispatch.claim",
-            ("_revert_claimed_task_to_pending",),
-        ): 1,
-        (
-            "src/cw/reconcile/codex_boot.py",
-            "_close_orphaned_session_and_dispose",
-            "cw.dispatch.claim",
-            ("_park_running_task_blocked_on_user",),
-        ): 1,
     }
 )
 

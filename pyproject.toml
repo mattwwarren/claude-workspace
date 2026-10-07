@@ -272,11 +272,13 @@ ignore = [
 # below executor.py's own import block, so a module-level import here would hit
 # a partially initialized module. Inline import is the sanctioned mechanism.
 "src/cw/codex_background.py" = ["PLC0415"]
-# codex_boot defers cw.dispatch.claim._park_running_task_blocked_on_user and
-# cw.executor.resolve_executor_config inside reap_orphaned_codex_sessions_at_boot
-# (#1727): cw.executor imports cw.reconcile at module top, so this module (inside
-# the cw.reconcile package) must not reach back at import time. Mirrors
-# _shared/_routing.py's own deferred cw.dispatch import (#698).
+# codex_boot defers cw.executor.resolve_executor_config inside
+# reap_orphaned_codex_sessions_at_boot (#1727): cw.executor imports cw.reconcile
+# at module top (executor/core.py) and cw.reconcile imports this module, so a
+# module-level import here would hit a partially initialized cw.executor. Its
+# former cw.dispatch.claim deferrals were hoisted to the cw.queue_rows leaf
+# (#2613); only this cw.executor deferral remains. Inline import at function
+# level is the sanctioned mechanism, not a workaround.
 "src/cw/reconcile/codex_boot.py" = ["PLC0415"]
 # claim defers the cw.dispatch.gating import inside _spawn_claimed_task to break
 # the gating ↔ claim circular dependency (#1310): gating imports claim at module
