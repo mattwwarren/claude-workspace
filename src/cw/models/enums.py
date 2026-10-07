@@ -430,8 +430,8 @@ class OrchestratorEventType(StrEnum):
     # rule fired, and the resulting disposition -- so a bypass (a gate that
     # should have fired but didn't) is diagnosable after the fact instead of
     # requiring a forensic sweep. Deliberately NOT added to
-    # _DEFAULT_OPERATOR_EVENT_TYPES (orchestrator_config.py): this is an
-    # audit/diagnostic trail, not an operator alert, and it fires on
+    # _DEFAULT_OPERATOR_EVENT_TYPES (orchestrator_config/operator_forward.py):
+    # this is an audit/diagnostic trail, not an operator alert, and it fires on
     # effectively every stage transition for every ticket -- far higher volume
     # than any currently-forwarded member.
     SCOPE_ROUTING_DECISION = "dispatch.scope_routing_decision"
@@ -444,7 +444,7 @@ class OrchestratorEventType(StrEnum):
     # would invert it (#1730/#1717 comment 6 rejected exactly that). The event
     # is therefore the ONLY signal that the operator's send-back never reached
     # the reviewer, which is why -- unlike SCOPE_ROUTING_DECISION -- it IS in
-    # _DEFAULT_OPERATOR_EVENT_TYPES (orchestrator_config.py).
+    # _DEFAULT_OPERATOR_EVENT_TYPES (orchestrator_config/operator_forward.py).
     REQUEUE_REVIEW_DELIVERY_DEGRADED = "requeue.review_delivery_degraded"
     # GitHub #1814 -- one re-derived review finding was suppressed because it
     # matched a VoidedFinding the operator had already settled. Namespaced by
@@ -564,9 +564,9 @@ class OrchestratorEventType(StrEnum):
     # (already current, ahead, diverged, refused, occupied, not refreshed): a
     # record per turn would be noise. Namespaced by its owning module
     # (worktree.py), same convention as SCOPE_ROUTING_DECISION. Deliberately
-    # NOT added to _DEFAULT_OPERATOR_EVENT_TYPES (orchestrator_config.py): it
-    # is an audit trail of a mechanical, strictly-forward move, not an
-    # operator alert.
+    # NOT added to _DEFAULT_OPERATOR_EVENT_TYPES
+    # (orchestrator_config/operator_forward.py): it is an audit trail of a
+    # mechanical, strictly-forward move, not an operator alert.
     WORKTREE_FAST_FORWARDED = "worktree.fast_forwarded"
     # GitHub #2009 -- `cw review verify-fixes` walked one "fixed" disposition
     # back to "dropped" because the fix-cycle diff never touched the finding's
@@ -579,9 +579,9 @@ class OrchestratorEventType(StrEnum):
     # rather than a reuse of it: a downgrade corrects a false fix claim, a
     # void suppresses a finding, and one type would make an audit trail that
     # cannot say which mechanism fired. Deliberately NOT added to
-    # _DEFAULT_OPERATOR_EVENT_TYPES (orchestrator_config.py): it is an audit
-    # record, not an operator page -- Step 3c already surfaces each downgrade
-    # in friction_highlights.
+    # _DEFAULT_OPERATOR_EVENT_TYPES (orchestrator_config/operator_forward.py):
+    # it is an audit record, not an operator page -- Step 3c already surfaces
+    # each downgrade in friction_highlights.
     REVIEW_FIXED_DISPOSITION_DOWNGRADED = "review.fixed_disposition_downgraded"
     # GitHub #2439 -- audit-only record of every accepted `emit_result_locked`
     # write (session_id, ticket_id, client, lane, stage, last_result_source,
@@ -606,9 +606,9 @@ class OrchestratorEventType(StrEnum):
     # that the sweep cleared one, so an upgrade's automatic cleanup is
     # diagnosable after the fact. Emitted per stop, mandatory (not gated by a
     # feature flag), and deliberately NOT added to
-    # _DEFAULT_OPERATOR_EVENT_TYPES (orchestrator_config.py): a mechanical
-    # cleanup of a worker that was never going to do anything else is an
-    # audit trail, not an operator page -- same convention as
+    # _DEFAULT_OPERATOR_EVENT_TYPES (orchestrator_config/operator_forward.py):
+    # a mechanical cleanup of a worker that was never going to do anything
+    # else is an audit trail, not an operator page -- same convention as
     # WORKTREE_FAST_FORWARDED above.
     DAEMON_LEAKED_WORKER_STOPPED = "daemon.leaked_worker_stopped"
 

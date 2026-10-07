@@ -401,7 +401,7 @@ def _record_scope_routing_decision(
     the stage-walk's REVIEW rung, the last of which lives in
     ``routing/stage_walk.py`` and reaches this function through a deferred
     import) -- this is why the event is excluded from
-    ``_DEFAULT_OPERATOR_EVENT_TYPES`` (``orchestrator_config.py``): an
+    ``_DEFAULT_OPERATOR_EVENT_TYPES`` (``orchestrator_config/operator_forward.py``): an
     audit/diagnostic trail, not an operator alert, at far higher volume than
     any currently-forwarded member.
     """
