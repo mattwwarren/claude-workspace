@@ -673,8 +673,7 @@ def _codex_gate_target(
         real_task is None
         or client is None
         or real_task.client != session.client
-        or (real_task.session_id or real_task.codex_orphan_session_id)
-        != session.id
+        or (real_task.session_id or real_task.codex_orphan_session_id) != session.id
     ):
         return None
     return real_task, client

@@ -418,9 +418,7 @@ class CleanProbes:
         self._deadline = (
             None if budget_seconds is None else monotonic() + budget_seconds
         )
-        self._probes: dict[
-            tuple[str, str, str | None, str | None], CleanProbe
-        ] = {}
+        self._probes: dict[tuple[str, str, str | None, str | None], CleanProbe] = {}
 
     @property
     def captured_keys(self) -> frozenset[tuple[str, str]]:
@@ -633,7 +631,7 @@ def _resolve_orphan_action(
     if live_writer is not None:
         return live_writer
     policy = _resolve_task_policy(task.client, task.lane, clients, config)
-    disposition = _gate_clean_requeue(
+    return _gate_clean_requeue(
         worktree,
         task,
         client,
@@ -642,7 +640,6 @@ def _resolve_orphan_action(
         auto=policy is ReapPolicy.AUTO,
         probe_source=probe_source,
     )
-    return disposition
 
 
 def _gate_clean_requeue(
