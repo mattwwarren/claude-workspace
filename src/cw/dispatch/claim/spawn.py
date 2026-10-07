@@ -494,7 +494,7 @@ def _handle_post_launch_failure(
                 session_id=session_id,
                 worktree_path=worktree_path,
             )
-        except (CwError, OSError):
+        except (CwError, OSError, ValueError):
             _log.exception(
                 "dispatch_tick: could not record session %s on %s/%s; the"
                 " task stays RUNNING without it",
