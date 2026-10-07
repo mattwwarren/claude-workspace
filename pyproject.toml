@@ -259,10 +259,16 @@ ignore = [
 # result defers the cli._hook_io import to break the cli <-> result circular
 # dependency; inline import is the sanctioned mechanism, not a workaround.
 "src/cw/result.py" = ["PLC0415"]
-# reconcile/_shared defers the dispatch import inside _apply_sentinel_to_task
-# (_routing) and classify_sentinel_stage_position (_sentinels) to break the
-# reconcile ↔ dispatch circular dependency (#698). Inline import at function
-# level is the sanctioned mechanism, not a workaround.
+# reconcile/_shared defers the cw.dispatch import inside _apply_sentinel_to_task
+# (_routing: _route_staged_decision / apply_staged_decision) and
+# classify_sentinel_stage_position (_sentinels: _classify_sentinel_stage_position).
+# This is a real cycle, not a pure queue-row helper: the dispatch routing engine
+# imports cw.executor (routing/stage_walk.py), cw.executor imports cw.reconcile at
+# module top (executor/core.py), and cw.dispatch's package __init__ imports
+# cw.reconcile (claim/screening.py). Hoisting needs a registration seam or a move
+# of the ~1,800-line routing engine, neither of which is a pure move; the
+# dependency inversion is tracked in #2619. Inline import at function level is the
+# sanctioned mechanism, not a workaround (#698).
 "src/cw/reconcile/_shared/_routing.py" = ["PLC0415"]
 "src/cw/reconcile/_shared/_sentinels.py" = ["PLC0415"]
 # codex_background defers cw.executor's _complete_session_via_door /
@@ -317,11 +323,15 @@ ignore = [
 # for the identical reason as address_review.py above (#2017). Inline import at
 # function level is the sanctioned mechanism, not a workaround.
 "src/cw/reconcile/review_recipes/fix_agent.py" = ["PLC0415"]
-# review_recipes.auto_fix_ci defers cw.dev_queue.add_ticket / cw.dispatch
-# .run_dispatch_loop / cw.models.TicketTask inside _dispatch_auto_fix_ci: the
-# add_ticket lock IS dev_queue_lock (nesting would self-deadlock), and dispatch
-# imports cw.reconcile at module top. Inline imports at function level are the
-# sanctioned mechanism, not a workaround.
+# review_recipes.auto_fix_ci defers cw.dev_queue.requeue_ticket (inside
+# _requeue_existing_row) and cw.dev_queue.classify_requeue_live_session_error
+# (inside _dispatch_auto_fix_ci). Not a cycle: the module already imports
+# cw.dev_queue at module scope. The deferral is patch-coupled: tests patch
+# cw.dev_queue.requeue_ticket by string (tests/test_reconcile_review_recipes.py),
+# which a module-level `from cw.dev_queue import requeue_ticket` would bypass by
+# binding the name at import time. The classify import stays beside it so both
+# cw.dev_queue deferrals in this module follow one pattern. Inline imports at
+# function level are the sanctioned mechanism, not a workaround.
 "src/cw/reconcile/review_recipes/auto_fix_ci.py" = ["PLC0415"]
 # review_recipes.request_reviewer defers cw.gh.add_pr_reviewer inside
 # _dispatch_request_reviewer to keep the cw.gh dependency off module import.

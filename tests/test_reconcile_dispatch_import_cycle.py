@@ -135,6 +135,33 @@ _COLD_IMPORT_FIRST = (
 )
 
 
+# The two retained routing-engine deferrals. Their shared pyproject comment
+# must cite the dependency-inversion follow-up that would let them go.
+_ROUTING_ENGINE_KEYS = (
+    "src/cw/reconcile/_shared/_routing.py",
+    "src/cw/reconcile/_shared/_sentinels.py",
+)
+_ROUTING_FOLLOW_UP = "#2619"
+
+
+def _pyproject_comment_above(key: str) -> str:
+    """The ``#`` comment block above *key*'s per-file-ignore line.
+
+    Sibling key lines directly above *key* are skipped, so keys that share one
+    comment block (the two ``_shared`` entries) resolve to the same comment.
+    """
+    lines = _PYPROJECT_PATH.read_text(encoding="utf-8").splitlines()
+    index = next(i for i, line in enumerate(lines) if line.startswith(f'"{key}"'))
+    index -= 1
+    while index >= 0 and lines[index].startswith('"'):
+        index -= 1
+    comment: list[str] = []
+    while index >= 0 and lines[index].startswith("#"):
+        comment.append(lines[index])
+        index -= 1
+    return "\n".join(reversed(comment))
+
+
 def _is_dispatch_module(module: str) -> bool:
     return module == "cw.dispatch" or module.startswith("cw.dispatch.")
 
@@ -226,6 +253,17 @@ def test_every_plc0415_ignore_still_covers_a_deferred_import() -> None:
         key[0] for key in _DEFERRED_DISPATCH_IMPORTS + _DEFERRED_OTHER_IMPORTS
     }
     assert deferring_files == _RECONCILE_PLC0415_KEYS
+
+
+def test_only_routing_engine_dispatch_deferrals_remain() -> None:
+    """Every remaining ``cw.dispatch`` deferral is a routing-engine site."""
+    assert {key[0] for key in _DEFERRED_DISPATCH_IMPORTS} == set(_ROUTING_ENGINE_KEYS)
+
+
+@pytest.mark.parametrize("key", _ROUTING_ENGINE_KEYS)
+def test_routing_engine_ignore_cites_follow_up(key: str) -> None:
+    """The routing-engine PLC0415 comment cites the #2619 follow-up."""
+    assert _ROUTING_FOLLOW_UP in _pyproject_comment_above(key)
 
 
 @pytest.mark.parametrize("module", _COLD_IMPORT_FIRST)
