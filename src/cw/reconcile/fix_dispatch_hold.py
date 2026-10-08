@@ -34,7 +34,6 @@ from typing import TYPE_CHECKING, NamedTuple
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
-from cw.native_daemon import RealNativeDaemonClient
 from cw.reconcile import _deps
 
 if TYPE_CHECKING:
@@ -96,22 +95,9 @@ def read_live_worker_roster() -> set[str] | None:
     gone. The client is constructed inside the same ``try`` so a construction
     failure also fails closed instead of escaping the reconcile tick.
 
-    The native reader maps an ABSENT roster file to an empty set ("no daemon has
-    ever run"). Here a worker is known to have been launched, so a missing file
-    is a lost roster, not proof the worker stopped: it fails closed too.
     """
     try:
         daemon = _deps.get_native_daemon_client()
-        roster_absent = (
-            isinstance(daemon, RealNativeDaemonClient)
-            and not daemon.roster_path.exists()
-        )
-        if roster_absent:
-            _log.warning(
-                "fix_dispatch_hold: daemon roster file is absent, "
-                "treating it as unreadable"
-            )
-            return None
         return daemon.list_live_session_short_ids_fail_closed()
     except (OSError, ValueError):
         _log.warning(
