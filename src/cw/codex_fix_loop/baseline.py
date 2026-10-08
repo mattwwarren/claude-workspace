@@ -110,6 +110,18 @@ def _dirty_lines(worktree: Path) -> tuple[str, ...]:
     )
 
 
+def unstage_review_artifacts(worktree: Path) -> None:
+    """Keep cw's untracked review artifacts out of cycle staging."""
+    staged = git_output(
+        ["diff", "--cached", "--name-only", "--no-renames"], cwd=worktree
+    )
+    artifacts = sorted(
+        path for path in staged.splitlines() if path in _CW_REVIEW_ARTIFACTS
+    )
+    if artifacts:
+        git_output(["restore", "--staged", "--", *artifacts], cwd=worktree)
+
+
 def capture_cycle_baseline(worktree: Path) -> CycleBaseline | DirtyStart:
     """Return the cycle's clean-start baseline, or what makes the tree dirty.
 
@@ -138,6 +150,7 @@ def cycle_touched_paths(worktree: Path, baseline: CycleBaseline) -> set[str]:
     :func:`cw.codex_fix_loop.fence._name_only`.
     """
     git_output(["add", "-A"], cwd=worktree)
+    unstage_review_artifacts(worktree)
     new_tree = git_output(["write-tree"], cwd=worktree).strip()
     out = git_output(
         ["diff-tree", "-r", "--name-only", "--no-renames", baseline.tree_sha, new_tree],

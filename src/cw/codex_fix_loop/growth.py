@@ -28,7 +28,12 @@ from cw.codex_fix_loop.posted_text import (
     describe_added_line,
     redact_and_cap,
 )
-from cw.codex_review import CODEX_FIX_GROWTH_BUDGET, _parse_unified_diff, is_test_path
+from cw.codex_review import (
+    CODEX_FIX_GROWTH_BUDGET,
+    CODEX_FIX_LOOP_GROWTH_GUARD_KEY,
+    _parse_unified_diff,
+    is_test_path,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -199,7 +204,7 @@ def check_growth_budget(
         "for it, then requeue REVIEW; otherwise settle the finding that led to it "
         "(`cw review settle`). To raise the net-line budget set "
         "`codex_fix_loop_growth_budget_lines` in orchestrator.yaml. To disable "
-        "this guard for a lane, set `codex_fix_loop_growth_guard_enabled: false` "
+        f"this guard for a lane, set `{CODEX_FIX_LOOP_GROWTH_GUARD_KEY}: false` "
         "on that lane in clients.yaml (or globally in orchestrator.yaml). "
         f"{LEFT_STAGED_HINT}"
     )

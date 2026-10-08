@@ -41,6 +41,7 @@ from cw.codex_fix_loop.posted_text import (
 )
 from cw.codex_review import (
     CODEX_FIX_CONSTRAINT_VIOLATION,
+    CODEX_FIX_LOOP_GROWTH_GUARD_KEY,
     _parse_unified_diff,
 )
 from cw.gh import is_agent_authored
@@ -369,7 +370,7 @@ def constraint_breach(
         "stale, post a newer `auto-dev-preflight-resolutions` comment that "
         "supersedes it and requeue REVIEW; otherwise settle the finding that "
         "asked for the mechanism (`cw review settle`). To disable this guard for "
-        "a lane, set `codex_fix_loop_growth_guard_enabled: false` on that lane in "
+        f"a lane, set `{CODEX_FIX_LOOP_GROWTH_GUARD_KEY}: false` on that lane in "
         "clients.yaml (or globally in orchestrator.yaml). "
         f"{LEFT_STAGED_HINT}"
     )

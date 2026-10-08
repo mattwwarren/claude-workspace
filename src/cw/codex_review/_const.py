@@ -127,6 +127,7 @@ CODEX_FIX_GROWTH_BUDGET = "codex_fix_growth_budget_exceeded"
 # A fix cycle introduced something a binding operator constraint (the
 # operator's ``auto-dev-preflight-resolutions`` comment) rules out.
 CODEX_FIX_CONSTRAINT_VIOLATION = "codex_fix_constraint_violation"
+CODEX_FIX_LOOP_GROWTH_GUARD_KEY = "codex_fix_loop_growth_guard_enabled"
 
 # Subject prefix of every fix-cycle commit (``<prefix> <N> — <summary>``).
 # Shared so the empty-diff recovery hint (#2492) can pick fix-cycle commits out

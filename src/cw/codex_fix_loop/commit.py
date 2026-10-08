@@ -25,6 +25,7 @@ from cw.codex_fix_loop.baseline import (
     DirtyStart,
     capture_cycle_baseline,
     cycle_touched_paths,
+    unstage_review_artifacts,
 )
 from cw.codex_fix_loop.constraints import constraint_breach, render_section
 from cw.codex_fix_loop.fence import (
@@ -245,9 +246,17 @@ def _commit_fix_cycle(
         )
         return None
     git_output(["add", "-A"], cwd=worktree)
+    unstage_review_artifacts(worktree)
     staged = _staged_paths(worktree)
     if staged != measured_paths:
         raise StagedSetMismatchError(measured_paths, staged)
+    if not staged:
+        _log.warning(
+            "codex fix cycle %d produced no changes; skipping commit "
+            "(cycle still counts toward the cap)",
+            cycle,
+        )
+        return None
     message = f"{FIX_CYCLE_COMMIT_PREFIX} {cycle} — {_fix_commit_summary(findings)}"
     try:
         _git_commit(worktree, message)
@@ -266,6 +275,7 @@ def _commit_fix_cycle(
             cycle,
         )
         git_output(["add", "-A"], cwd=worktree)
+        unstage_review_artifacts(worktree)
         try:
             _git_commit(worktree, message)
         except subprocess.CalledProcessError as exc:
