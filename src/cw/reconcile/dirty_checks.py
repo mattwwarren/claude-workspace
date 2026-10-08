@@ -43,9 +43,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from pathlib import Path
+from stat import S_ISDIR
+from typing import TYPE_CHECKING, Literal
 
 from cw.models import SessionOrigin
 from cw.reconcile import _shared
@@ -59,7 +62,6 @@ from cw.reconcile.probe_store import BoundedProbeStore, ProbeStoreUnavailableErr
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from datetime import datetime
-    from pathlib import Path
 
     from cw.models import CwState, Session
 
@@ -94,7 +96,15 @@ DIRTY_CHECK_LOOKAHEAD_SECONDS: float = 15.0
 type RosterReader = Callable[[], list[dict[str, object]]]
 
 type _DirtyKey = tuple[str, Path]
-type _WorktreeGeneration = tuple[tuple[str, int, int, int], ...] | None
+type _GenerationEntry = tuple[str, int, int, int, int, int]
+type _WorktreeGeneration = tuple[_GenerationEntry, ...] | Literal["unavailable"]
+type _GenerationValidation = Literal["same", "changed", "unavailable"]
+
+# A larger worktree is not safely revalidated under the lock. Its capture is
+# treated as unavailable instead of making the lock-held path proportional to
+# the worktree size.
+_MAX_GENERATION_ENTRIES = 4096
+_UNAVAILABLE_GENERATION: Literal["unavailable"] = "unavailable"
 
 
 class DirtyCheckUnavailableError(Exception):
@@ -121,35 +131,108 @@ def normalize_roster(
 
 
 def _worktree_generation(worktree: Path) -> _WorktreeGeneration:
-    """Return a cheap metadata generation for files in *worktree*.
+    """Return a bounded metadata generation for files in *worktree*.
 
-    This is deliberately filesystem-only: consumers run it after acquiring
-    ``sessions_lock`` and immediately before the queue mutation. The git
-    cleanliness probe remains the lockless source of truth; this generation
-    only prevents a changed worktree from authorizing a captured clean result.
+    This runs during the lockless capture pass. The returned entries include
+    directories, so checking their metadata later detects additions and
+    removals without recursively scanning the worktree under the lock. A
+    missing worktree is a valid generation (the dirty helper treats it as
+    clean); filesystem errors and snapshots above the bound are unavailable.
     """
     try:
-        if not worktree.is_dir():
-            return None
-        entries: list[tuple[str, int, int, int]] = []
-        for path in worktree.rglob("*"):
-            if ".git" in path.relative_to(worktree).parts:
-                continue
-            try:
-                stat = path.lstat()
-            except OSError:
-                return None
-            entries.append(
-                (
-                    str(path.relative_to(worktree)),
-                    stat.st_mtime_ns,
-                    stat.st_size,
-                    stat.st_mode,
-                )
-            )
+        root = worktree.lstat()
+    except FileNotFoundError:
+        # A missing worktree is a stable, valid generation.
+        return ()
+    except OSError:
+        return _UNAVAILABLE_GENERATION
+    root_entry = (
+        "",
+        root.st_mtime_ns,
+        root.st_ctime_ns,
+        root.st_size,
+        root.st_mode,
+        root.st_ino,
+    )
+    if not worktree.is_dir():
+        return (root_entry,)
+    return _scan_worktree_generation(worktree, root_entry)
+
+
+def _scan_worktree_generation(
+    worktree: Path, root_entry: _GenerationEntry
+) -> _WorktreeGeneration:
+    entries: list[_GenerationEntry] = [root_entry]
+    directories = [worktree]
+    try:
+        while directories:
+            directory = directories.pop()
+            with os.scandir(directory) as children:
+                for child in children:
+                    path = Path(child.path)
+                    if ".git" in path.relative_to(worktree).parts:
+                        continue
+                    if len(entries) >= _MAX_GENERATION_ENTRIES:
+                        return _UNAVAILABLE_GENERATION
+                    stat = child.stat(follow_symlinks=False)
+                    entries.append(
+                        (
+                            str(path.relative_to(worktree)),
+                            stat.st_mtime_ns,
+                            stat.st_ctime_ns,
+                            stat.st_size,
+                            stat.st_mode,
+                            stat.st_ino,
+                        )
+                    )
+                    if S_ISDIR(stat.st_mode):
+                        directories.append(path)
         return tuple(sorted(entries))
     except OSError:
-        return None
+        # Other failures must not be represented by a value that can compare
+        # equal later.
+        return _UNAVAILABLE_GENERATION
+
+
+def _revalidate_generation(
+    worktree: Path, generation: tuple[_GenerationEntry, ...]
+) -> _GenerationValidation:
+    """Check a captured generation with bounded, non-recursive metadata reads."""
+    if not generation:
+        try:
+            worktree.lstat()
+        except FileNotFoundError:
+            return "same"
+        except OSError:
+            return "unavailable"
+        return "changed"
+    for relative, mtime_ns, ctime_ns, size, mode, inode in generation:
+        path = worktree / relative if relative else worktree
+        validation = _validate_generation_entry(
+            path, (mtime_ns, ctime_ns, size, mode, inode)
+        )
+        if validation != "same":
+            return validation
+    return "same"
+
+
+def _validate_generation_entry(
+    path: Path, expected: tuple[int, int, int, int, int]
+) -> _GenerationValidation:
+    try:
+        stat = path.lstat()
+    except FileNotFoundError:
+        return "changed"
+    except OSError:
+        return "unavailable"
+    actual = (
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+        stat.st_size,
+        stat.st_mode,
+        stat.st_ino,
+    )
+    return "same" if actual == expected else "changed"
 
 
 class DirtyChecks:
@@ -200,6 +283,9 @@ class DirtyChecks:
         if worktree is None:
             return None
         generation = _worktree_generation(worktree)
+        if generation == _UNAVAILABLE_GENERATION:
+            msg = f"the worktree generation was unavailable for {_who(session)}"
+            raise DirtyCheckUnavailableError(msg)
         try:
             reason = self._store.capture(
                 (session.id, worktree),
@@ -237,16 +323,14 @@ class DirtyChecks:
             reason = self._store.lookup((session.id, worktree))
             key = (session.id, worktree)
             before = self._generations.get(key)
-            after = _worktree_generation(worktree)
-            if before != after:
-                before_decision = "clean" if reason is None else "dirty"
-                _log.warning(
-                    "dirty_check_revalidation: session=%s worktree=%s; %s -> changed;"
-                    " deferring to the next tick",
-                    session.id,
-                    worktree,
-                    before_decision,
-                )
+            if before is None or before == _UNAVAILABLE_GENERATION:
+                msg = f"the worktree generation was unavailable for {_who(session)}"
+                raise DirtyCheckUnavailableError(msg)
+            validation = _revalidate_generation(worktree, before)
+            if validation == "unavailable":
+                msg = f"the worktree generation was unavailable for {_who(session)}"
+                raise DirtyCheckUnavailableError(msg)
+            if validation == "changed":
                 msg = f"the worktree changed since its dirty check for {_who(session)}"
                 raise DirtyCheckUnavailableError(msg)
         except ProbeStoreUnavailableError as err:
