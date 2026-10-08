@@ -3223,6 +3223,37 @@ class TestDispositionDriftCheckConfigFields:
             )
 
 
+class TestCodexFixLoopStallCyclesConfig:
+    """#2633: the divergence stall count, global default 1 with a lane override."""
+
+    def test_lane_override_round_trips_via_clients_yaml(
+        self, tmp_config_dir: Path
+    ) -> None:
+        ws_dir = tmp_config_dir / "ws"
+        ws_dir.mkdir()
+        clients_path = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_path.write_text(
+            "clients:\n"
+            "  acme:\n"
+            f"    workspace_path: {ws_dir}\n"
+            "    lanes:\n"
+            "      - name: fast\n"
+            "        codex_fix_loop_stall_cycles: 2\n"
+        )
+
+        assert load_clients()["acme"].lanes[0].codex_fix_loop_stall_cycles == 2
+
+    def test_wrong_type_raises_validation_error(self) -> None:
+        from pydantic import ValidationError
+
+        from cw.models import LaneConfig
+
+        with pytest.raises(ValidationError):
+            LaneConfig.model_validate(
+                {"name": "fast", "codex_fix_loop_stall_cycles": "two"}
+            )
+
+
 # ---------------------------------------------------------------------------
 # TestSubagentSpawnGuardConfig
 # ---------------------------------------------------------------------------

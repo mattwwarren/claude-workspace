@@ -314,6 +314,15 @@ class OrchestratorConfig(BaseModel):
     # (lane -> global) resolver -- see
     # cw.codex_background._resolve_codex_fix_loop_enabled.
     default_codex_fix_loop_enabled: bool = False
+    # #2633 — consecutive fix cycles that resolve no originally-found MUST_FIX
+    # while the diff grows before the fix loop parks fix_loop_diverging. Was a
+    # hardcoded 2; 1 now, since a stalled, growing cycle is already the
+    # signature of a loop building unplanned code. A lane may override it
+    # (LaneConfig.codex_fix_loop_stall_cycles; 2 restores the old tolerance),
+    # resolved by cw.codex_background._resolve_codex_fix_loop_stall_cycles.
+    # The literal is pinned to codex_fix_loop.divergence._DIVERGENCE_STALL_CYCLES
+    # by a lockstep test.
+    codex_fix_loop_stall_cycles: int = Field(default=1, ge=1)
     # #2210 — master opt-in for the codex review ledger's fuzzy claim-match
     # suppression tier. Default False, mirroring concierge_enabled's
     # fail-safe posture. BOTH this and the task's lane

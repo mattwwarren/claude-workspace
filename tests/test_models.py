@@ -1596,6 +1596,20 @@ class TestCodexFixLoopEnabledGate:
         )
 
 
+class TestCodexFixLoopStallCycles:
+    """#2633: divergence stall count, ``ge=1`` globally and per lane."""
+
+    def test_global_default_is_one_and_zero_is_rejected(self) -> None:
+        assert OrchestratorConfig().codex_fix_loop_stall_cycles == 1
+        with pytest.raises(ValidationError):
+            OrchestratorConfig(codex_fix_loop_stall_cycles=0)
+
+    def test_lane_override_defaults_none_and_rejects_zero(self) -> None:
+        assert LaneConfig(name="fast").codex_fix_loop_stall_cycles is None
+        with pytest.raises(ValidationError):
+            LaneConfig(name="fast", codex_fix_loop_stall_cycles=0)
+
+
 class TestCodexClaimSuppressionGate:
     """Lane-scoped codex claim-match suppression tier (#2210, ADR-0016)."""
 

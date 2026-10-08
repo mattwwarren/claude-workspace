@@ -33,6 +33,7 @@ from cw.codex_background import (
     _resolve_claim_tier_enabled,
     _resolve_codex_fix_loop,
     _resolve_codex_fix_loop_enabled,
+    _resolve_codex_fix_loop_stall_cycles,
     _resolve_disposition_drift_check_enabled,
     _run_codex_review_and_complete,
     _stamp_session_id_on_running_task,
@@ -40,6 +41,7 @@ from cw.codex_background import (
     _sync_finding_dispositions_to_running_task,
     join_outstanding_codex_threads,
 )
+from cw.codex_fix_loop.divergence import _DIVERGENCE_STALL_CYCLES
 from cw.codex_review import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     CODEX_MUST_FIX_FINDINGS,
@@ -2002,3 +2004,45 @@ def test_run_codex_review_and_complete_guard_skipped_on_detached_head(
     tip_mock.assert_not_called()
     push_mock.assert_not_called()
     assert persisted == returned[0]
+
+
+# ---------------------------------------------------------------------------
+# #2633: codex_fix_loop_stall_cycles (global + lane override)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("lanes", "task_lane", "global_cycles", "expected"),
+    [
+        # The case the override exists for: one lane keeps the old tolerance.
+        ([LaneConfig(name="trial", codex_fix_loop_stall_cycles=2)], "trial", 1, 2),
+        ([LaneConfig(name="trial", codex_fix_loop_stall_cycles=1)], "trial", 3, 1),
+        ([LaneConfig(name="trial")], "trial", 3, 3),
+        ([LaneConfig(name="other", codex_fix_loop_stall_cycles=4)], "trial", 1, 1),
+    ],
+)
+def test_resolve_codex_fix_loop_stall_cycles_table(
+    lanes: list[LaneConfig], task_lane: str, global_cycles: int, expected: int
+) -> None:
+    config = OrchestratorConfig(codex_fix_loop_stall_cycles=global_cycles)
+    resolved = _resolve_codex_fix_loop_stall_cycles(
+        _claim_client(*lanes), _claim_task(task_lane), config
+    )
+    assert resolved == expected
+
+
+def test_fix_loop_receives_configured_stall_cycles(
+    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+) -> None:
+    fix_loop_mock = _run_with_config(
+        make_git_repo("wt-bg-stall"),
+        sid="bg-stall",
+        lanes=[LaneConfig(name="trial", codex_fix_loop_stall_cycles=2)],
+        config=OrchestratorConfig(),
+    )
+
+    assert fix_loop_mock.call_args.kwargs["stall_cycles"] == 2
+
+
+def test_stall_cycles_default_matches_the_fix_loop_constant() -> None:
+    assert OrchestratorConfig().codex_fix_loop_stall_cycles == _DIVERGENCE_STALL_CYCLES
