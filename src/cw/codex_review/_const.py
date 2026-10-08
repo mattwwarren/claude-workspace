@@ -107,6 +107,27 @@ CODEX_FIX_SCOPE_DRIFT = "codex_fix_scope_drift"
 # undoes the feature instead of patching it.
 CODEX_FIX_REVERTED_BRANCH = "codex_fix_reverted_branch"
 
+# Fix-loop guards (#2633). None of these belongs in _CATEGORY_TO_REASON (they
+# park a cycle cw refused, not a failed codex invocation) or in
+# _TRANSIENT_FAILURE_REASONS (a blind retry meets the same refusal).
+#
+# The worktree was not clean when a fix cycle was about to start (an
+# unfinished merge, cherry-pick or revert, unmerged paths, or uncommitted
+# changes), so the cycle's own edits could not be told apart from work already
+# there. No fix invocation ran.
+CODEX_FIX_DIRTY_START = "codex_fix_dirty_start"
+# A fix cycle's ``git commit`` was rejected by a repo commit hook (pre-commit,
+# commit-msg) after the one re-stage retry. Before #2633 this read as a bare
+# ``codex_error`` with the hook output lost to the driver log.
+CODEX_FIX_HOOK_FAILED = "codex_fix_hook_failed"
+# A fix cycle added code inside an allowed file beyond what the open findings
+# justify: a new lock, on-disk state file or path constant, too many new
+# top-level definitions, or more net source lines than the per-cycle budget.
+CODEX_FIX_GROWTH_BUDGET = "codex_fix_growth_budget_exceeded"
+# A fix cycle introduced something a binding operator constraint (the
+# operator's ``auto-dev-preflight-resolutions`` comment) rules out.
+CODEX_FIX_CONSTRAINT_VIOLATION = "codex_fix_constraint_violation"
+
 # Subject prefix of every fix-cycle commit (``<prefix> <N> — <summary>``).
 # Shared so the empty-diff recovery hint (#2492) can pick fix-cycle commits out
 # of a branch's log by the same literal the commit step writes.
@@ -117,10 +138,11 @@ FIX_CYCLE_COMMIT_PREFIX = "fix(review): codex fix cycle"
 # clean result anyway would hand a later stage work that exists only locally.
 CODEX_UNPUSHED_AT_EXIT = "codex_unpushed_at_exit"
 
-# Fix-loop divergence guard (#2394): the fix loop grew the diff for 2+
-# consecutive cycles while resolving none of the originally-found MUST_FIX
-# findings — distinct from CODEX_MUST_FIX_FINDINGS (the cap was reached but
-# findings may still be shrinking) and from REVIEW_TREADMILL_DETECTED (a
+# Fix-loop divergence guard (#2394): the fix loop grew the diff for a
+# configured number of consecutive cycles (default 1 since #2633,
+# ``codex_fix_loop_stall_cycles``) while resolving none of the originally-found
+# MUST_FIX findings — distinct from CODEX_MUST_FIX_FINDINGS (the cap was reached
+# but findings may still be shrinking) and from REVIEW_TREADMILL_DETECTED (a
 # single refused self-inflicted finding, not a loop-wide progress signal).
 # Stops the loop BEFORE the cycle cap, unlike every other reason above.
 FIX_LOOP_DIVERGING = "fix_loop_diverging"

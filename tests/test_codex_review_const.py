@@ -4,11 +4,17 @@ from __future__ import annotations
 
 from typing import get_args
 
+import pytest
+
 from cw.codex_review import (
     _CATEGORY_TO_REASON,
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     _TRANSIENT_FAILURE_REASONS,
     CODEX_ERROR,
+    CODEX_FIX_CONSTRAINT_VIOLATION,
+    CODEX_FIX_DIRTY_START,
+    CODEX_FIX_GROWTH_BUDGET,
+    CODEX_FIX_HOOK_FAILED,
     CODEX_MODEL_CAPACITY,
 )
 from cw.executor_diagnostics import ExecutorFailureCategory
@@ -44,3 +50,24 @@ def test_codex_model_capacity_is_its_own_reason_code() -> None:
     fine-grained category taxonomy stays untouched."""
     assert CODEX_MODEL_CAPACITY != CODEX_ERROR
     assert CODEX_MODEL_CAPACITY not in _CATEGORY_TO_REASON.values()
+
+
+_FIX_LOOP_GUARD_REASONS = (
+    CODEX_FIX_DIRTY_START,
+    CODEX_FIX_HOOK_FAILED,
+    CODEX_FIX_GROWTH_BUDGET,
+    CODEX_FIX_CONSTRAINT_VIOLATION,
+)
+
+
+def test_fix_loop_guard_reasons_are_distinct() -> None:
+    """#2633: each new fix-loop guard parks under its own reason code."""
+    assert len(set(_FIX_LOOP_GUARD_REASONS)) == len(_FIX_LOOP_GUARD_REASONS)
+
+
+@pytest.mark.parametrize("reason", _FIX_LOOP_GUARD_REASONS)
+def test_fix_loop_guard_reasons_are_operator_parks(reason: str) -> None:
+    """#2633: a guard-rejected cycle needs an operator, never a blind retry,
+    and is not a codex-invocation failure category."""
+    assert reason not in _TRANSIENT_FAILURE_REASONS
+    assert reason not in _CATEGORY_TO_REASON.values()
