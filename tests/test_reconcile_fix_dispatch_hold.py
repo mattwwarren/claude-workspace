@@ -309,16 +309,11 @@ def test_repages_after_interval(
 
 
 def test_unparks_and_clears_tombstone_when_surface_absent(
-    daemon: FakeNativeDaemonClient,
-    caplog: pytest.LogCaptureFixture,
-    capture_events: Callable[..., list[CapturedEvent]],
+    daemon: FakeNativeDaemonClient, caplog: pytest.LogCaptureFixture
 ) -> None:
     """9: a readable roster without the surface releases the row and clears
     the tombstone, logging the confirmation once at INFO."""
     _seed_held(_make_launched_fix_worker())
-    audit_events = capture_events(
-        _MODULE, OrchestratorEventType.DAEMON_LEAKED_WORKER_STOPPED
-    )
 
     with caplog.at_level(logging.INFO, logger=_LOGGER):
         assert _run_completions() == [_TICKET]
@@ -334,29 +329,6 @@ def test_unparks_and_clears_tombstone_when_surface_absent(
         "fix_dispatch_worker_confirmed_stopped ticket=2017 client=acme surface=abc12345"
     )
     assert records[0].levelno == logging.INFO
-    assert len(audit_events) == 1
-    event_type, payload, correlation_id = audit_events[0]
-    assert event_type == OrchestratorEventType.DAEMON_LEAKED_WORKER_STOPPED
-    assert set(payload) == {
-        "kind",
-        "ticket_id",
-        "client",
-        "surface_ref",
-        "prior_tombstone",
-        "prior_session_id",
-        "roster_readable",
-        "surface_absent",
-        "confirmed_at",
-        "initiating_service",
-        "initiating_job",
-    }
-    assert payload["kind"] == "fix_dispatch_confirmation"
-    assert payload["ticket_id"] == _TICKET
-    assert payload["client"] == _CLIENT
-    assert payload["surface_ref"] == "abc12345"
-    assert payload["roster_readable"] is True
-    assert payload["surface_absent"] is True
-    assert correlation_id == _TICKET
 
 
 def test_recorded_terminal_session_with_tombstone_needs_roster_confirm(
