@@ -18,9 +18,11 @@ without an exemption.
 Two phases, in this order:
 
 1. **Completions** — a row whose ``fix_dispatch_session_id`` names a now-terminal
-   session is unparked back to PENDING, so ``dispatch/claim.py`` dispatches a
-   fresh REVIEW session that resumes at ``s3_fix_loop, cycle_{N+1}`` via the
-   existing ``Auto-Dev-Fix-Cycle`` trailer detection.
+   (or unresolvable) session is unparked back to PENDING, so
+   ``dispatch/claim.py`` dispatches a fresh REVIEW session that resumes at
+   ``s3_fix_loop, cycle_{N+1}`` via the existing ``Auto-Dev-Fix-Cycle``
+   trailer detection — unless the row carries a launched-worker tombstone,
+   which must first be confirmed stopped (#2590, below).
 2. **Pending dispatches** — a row carrying a ``pending_fix_dispatch`` gets its
    fix agent spawned, unless the row has drifted off RUNNING since the handoff
    was recorded, in which case the handoff is dropped instead (#2142; see
@@ -74,6 +76,17 @@ re-dispatched as a second REVIEW session while the fix agent is still working.
 RUNNING tenure early (RUNNING->BLOCKED_ON_USER), and it is safe for the same
 reason: BLOCKED_ON_USER is not claimable either, so the row still cannot be
 re-dispatched — it waits for the operator instead of for a fix agent.
+
+A fix worker that launched but was never recorded (``WorkerLaunchedError``,
+#2502) leaves no session row to go terminal, so "unresolvable means finished"
+would unpark its row while the worker may still run. The pending-dispatch
+phase therefore stamps a ``fix_dispatch_launched_worker`` tombstone carrying
+the worker's daemon surface, and the completions phase unparks such a row only
+once a readable roster no longer lists that surface (#2590). The decision, the
+tombstone clear and the unconfirmed-worker page live in
+``cw.reconcile.fix_dispatch_hold``; the roster is read once per call, before
+``dev_queue_lock``, and only when some candidate carries a tombstone. Stopping
+the worker stays with the leaked-worker sweep.
 """
 
 from __future__ import annotations
@@ -98,6 +111,7 @@ from cw.exceptions import (
 )
 from cw.models import (
     TERMINAL_SESSION_STATUSES,
+    LaunchedFixWorker,
     OrchestratorEventType,
     QueueItemStatus,
 )
@@ -106,6 +120,10 @@ from cw.queue_rows import _park_running_task_blocked_on_user
 from cw.reconcile._shared import (
     _FIX_DISPATCH_REF_UNRESOLVED_REASON,
     ticket_id_for_session,
+)
+from cw.reconcile.fix_dispatch_hold import (
+    apply_launched_worker_hold,
+    read_live_worker_roster,
 )
 from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
 
@@ -178,6 +196,10 @@ class _FixDispatchCandidate(NamedTuple):
 
     ticket_id: str
     client: str
+    # The row's launched-worker tombstone surface at detect time (#2590), or
+    # None. Doubles as the identity check the completions phase re-runs under
+    # its lock. Defaulted so the two-field constructors stay valid.
+    launched_surface_ref: str | None = None
 
 
 def _find_task(store: DevQueueStore, ticket_id: str, client: str) -> TicketTask | None:
@@ -256,7 +278,15 @@ def _detect_fix_dispatch_completions(
 ) -> list[_FixDispatchCandidate]:
     """Rows whose dispatched fix session is being waited on."""
     return [
-        _FixDispatchCandidate(ticket_id=t.ticket_id, client=t.client)
+        _FixDispatchCandidate(
+            ticket_id=t.ticket_id,
+            client=t.client,
+            launched_surface_ref=(
+                t.fix_dispatch_launched_worker.surface_ref
+                if t.fix_dispatch_launched_worker is not None
+                else None
+            ),
+        )
         for t in tasks
         if t.fix_dispatch_session_id is not None
     ]
@@ -626,8 +656,15 @@ def _build_dispatch_jobs(
     return jobs, stale
 
 
-def _stamp_dispatch_success(job: _DispatchJob, session_id: str) -> None:
-    """Consume the handoff record and point the completion watcher at the spawn."""
+def _stamp_dispatch_success(
+    job: _DispatchJob, session_id: str, launched_surface_ref: str | None = None
+) -> None:
+    """Consume the handoff record and point the completion watcher at the spawn.
+
+    *launched_surface_ref* is set only on the ``WorkerLaunchedError`` path
+    (#2590): the worker's surface is then recorded as the row's tombstone, so
+    the completions phase holds the row until the roster confirms it stopped.
+    """
     with dev_queue_lock():
         store = load_dev_queue()
         task = _find_task(store, job.ticket_id, job.client)
@@ -635,6 +672,10 @@ def _stamp_dispatch_success(job: _DispatchJob, session_id: str) -> None:
             return
         task.pending_fix_dispatch = None
         task.fix_dispatch_session_id = session_id
+        if launched_surface_ref is not None:
+            task.fix_dispatch_launched_worker = LaunchedFixWorker(
+                surface_ref=launched_surface_ref, launched_at=datetime.now(UTC)
+            )
         save_dev_queue(store)
 
 
@@ -773,6 +814,7 @@ def _act_on_pending_fix_dispatches(
     _drop_stale_handoffs(stale)
     jobs = _revalidate_dispatch_jobs(jobs)
     for job in jobs:
+        launched_surface_ref: str | None = None
         try:
             session_id = dispatch_fix_agent(
                 client=job.client_cfg,
@@ -823,6 +865,9 @@ def _act_on_pending_fix_dispatches(
             # Must precede the broad CwError clause below (#2502): the fix
             # worker is live and spawn_create_impl already paged, so record
             # its session like a success instead of clearing the handoff.
+            # The session is essentially never in sessions.json, so its
+            # surface is recorded too and holds the row until the roster
+            # confirms the worker stopped (#2590).
             _log.warning(
                 "fix_dispatch_worker_launched ticket=%s session=%s",
                 job.ticket_id,
@@ -830,11 +875,12 @@ def _act_on_pending_fix_dispatches(
                 exc_info=True,
             )
             session_id = exc.session_id
+            launched_surface_ref = exc.surface_ref
         except CwError as exc:
             _log.warning("fix_dispatch_failed ticket=%s", job.ticket_id, exc_info=True)
             _stamp_dispatch_failure(job, exc)
             continue
-        _stamp_dispatch_success(job, session_id)
+        _stamp_dispatch_success(job, session_id, launched_surface_ref)
         acted.append(job.ticket_id)
     return acted
 
@@ -844,15 +890,31 @@ def _act_on_fix_dispatch_completions(
 ) -> list[str]:
     """Unpark rows whose fix session has gone terminal; return their ticket_ids.
 
-    A session cw cannot resolve at all counts as finished: the fix agent is a
-    first-class DAEMON session, so an unresolvable id means it is gone. Leaving
-    the row RUNNING on that evidence would strand the ticket forever, since
-    nothing else clears this field.
+    For a tombstone-less row, a session cw cannot resolve at all counts as
+    finished: the fix agent is a first-class DAEMON session, so an
+    unresolvable id means it is gone. Leaving the row RUNNING on that evidence
+    would strand the ticket forever, since nothing else clears this field.
+
+    A row carrying a ``fix_dispatch_launched_worker`` tombstone (#2590) is
+    different: its session was launched but never recorded, so an unresolvable
+    (or terminal) session proves nothing. It unparks only once
+    ``apply_launched_worker_hold`` sees a readable roster without the
+    tombstone's surface; until then it stays held, and any page stamp the hold
+    writes is saved even when nothing unparks.
     """
     if not candidates:
         return []
     state = load_state()
+    # One fail-closed roster read per call, before the lock, and only when a
+    # tombstone needs confirming.
+    live = (
+        read_live_worker_roster()
+        if any(c.launched_surface_ref is not None for c in candidates)
+        else None
+    )
+    now = datetime.now(UTC)
     unparked: list[str] = []
+    dirty = False
     with dev_queue_lock():
         store = load_dev_queue()
         for candidate in candidates:
@@ -861,6 +923,12 @@ def _act_on_fix_dispatch_completions(
                 continue
             session = state.find_by_name_or_id(task.fix_dispatch_session_id)
             if session is not None and session.status not in TERMINAL_SESSION_STATUSES:
+                continue
+            hold = apply_launched_worker_hold(
+                task, candidate.launched_surface_ref, live, now=now
+            )
+            if not hold.release:
+                dirty = dirty or hold.dirty
                 continue
             task.fix_dispatch_session_id = None
             if task.status == QueueItemStatus.RUNNING:
@@ -874,7 +942,7 @@ def _act_on_fix_dispatch_completions(
                     task, QueueItemStatus.PENDING, unproductive=False
                 )
             unparked.append(task.ticket_id)
-        if unparked:
+        if unparked or dirty:
             save_dev_queue(store)
     return unparked
 
