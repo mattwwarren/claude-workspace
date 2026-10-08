@@ -57,9 +57,11 @@ from cw._git import git_output
 from cw.codex_fix_loop.commit import _run_fix_and_commit
 from cw.codex_fix_loop.convergence import _track_open_findings
 from cw.codex_fix_loop.divergence import (
+    _DIVERGENCE_STALL_CYCLES,
     emit_divergence_event,
     initial_divergence_state,
     is_diverging,
+    loop_generated_findings,
     net_lines_for_commit,
     record_divergence_cycle,
     render_divergence_report,
@@ -264,7 +266,13 @@ def _cycle_exit(
         )
     if not is_diverging(divergence_state):
         return None
-    emit_divergence_event(state=divergence_state, ticket_id=task.ticket_id)
+    # #2633: computed once so the event and the park text cannot disagree.
+    loop_generated = loop_generated_findings(
+        worktree, divergence_state, list(open_findings.values())
+    )
+    emit_divergence_event(
+        state=divergence_state, ticket_id=task.ticket_id, loop_generated=loop_generated
+    )
     return _park_survivors(
         task=task,
         worktree=worktree,
@@ -277,7 +285,7 @@ def _cycle_exit(
         retry_eligible=None,
         snapshot=snapshot,
         had_real_commit=had_real_commit,
-        extra_details=render_divergence_report(divergence_state),
+        extra_details=render_divergence_report(divergence_state, loop_generated),
     )
 
 
@@ -294,6 +302,7 @@ def run_review_with_fix_loop(
     fix_loop_enabled: bool,
     claim_tier_enabled: bool = False,
     disposition_drift_check_enabled: bool = True,
+    stall_cycles: int = _DIVERGENCE_STALL_CYCLES,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the initial review pass plus a bounded MUST_FIX fix loop.
 
@@ -309,7 +318,8 @@ def run_review_with_fix_loop(
     and every re-review. A non-blocking or unparseable cycle-0 verdict passes
     straight through with zero fix invocations attempted. When
     ``fix_loop_enabled`` is False and cycle 0 blocks, returns cycle 0's tuple
-    unchanged with zero fix cycles attempted.
+    unchanged with zero fix cycles attempted. ``stall_cycles`` (#2633) is the
+    lane-resolved divergence stall count (``codex_fix_loop_stall_cycles``).
     """
     deadline = (
         None
@@ -366,6 +376,7 @@ def run_review_with_fix_loop(
         original_keys=frozenset(open_findings),
         pre_loop_diff_lines=pre_loop_diff_lines,
         pre_loop_head_sha=verdict.reviewed_sha,
+        stall_cycles=stall_cycles,
     )
     # #1723: true iff at least one fix cycle so far produced a real commit
     # (OR'd across cycles) — distinguishes a genuine fix from a fix loop
