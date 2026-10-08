@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.69.0] - 2026-10-08
+
 ### Added
 
 - **The codex fix loop refuses a dirty start, holds a cycle to its plan, and honours the operator's binding constraints (#2633).** A fix cycle now starts only from a clean worktree: unmerged entries, `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD` or any porcelain change parks the cycle as `codex_fix_dirty_start` before the fix invocation runs, and a cycle commits and pushes only the paths it was measured to touch (a staged-set mismatch parks as `codex_fix_scope_drift`). When the plan has a `## Files Modified` manifest, an in-file growth guard parks a cycle that adds a lock, state file, path constant, more than 3 top-level definitions, or more net lines than `codex_fix_loop_growth_budget_lines` (default 40 per open finding) as `codex_fix_growth_budget_exceeded`. The newest operator `auto-dev-preflight-resolutions` comment is rendered into the fix prompt, and a cycle that introduces something it rules out in non-test source parks as `codex_fix_constraint_violation`. A commit hook that rejects a fix commit parks as `codex_fix_hook_failed` with the hook id, exit code and capped, redacted output (name and exit code only for secret scanners); the full output stays in `.cw/codex_driver.log`. New config: `codex_fix_loop_growth_guard_enabled` (default true) and `codex_fix_loop_stall_cycles` (default 1), both with a lane override in `clients.yaml`, and `codex_fix_loop_growth_budget_lines` in `orchestrator.yaml`. The four new reasons and `codex_fix_scope_violation` are registered in `KNOWN_BLOCKER_REASONS`. See `config/CONFIG_REFERENCE.md`, "Codex Fix-Loop Guards (#2633)".
