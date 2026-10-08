@@ -67,6 +67,7 @@ _DOCUMENTED_TICKETS = frozenset(
         "#2564",
         "#2565",
         "#2566",
+        "#2641",
     }
 )
 
@@ -387,6 +388,15 @@ def test_local_runner_is_not_allowlisted() -> None:
     pre-pass, so no in-lock subprocess under a ``cw.local_runner`` frame is
     forgiven any more."""
     assert "cw.local_runner" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+
+
+def test_phantom_detect_and_tasks_are_not_allowlisted() -> None:
+    """#2548: the phantom and task-backstop worktree dirty checks are captured
+    in a lockless pre-pass, so no in-lock subprocess under either module's
+    frame is forgiven any more."""
+    assert "cw.reconcile.phantom._detect" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+    assert "cw.reconcile.tasks" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+    assert "#2548" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST.values()
 
 
 def test_cli_spawn_is_not_allowlisted() -> None:

@@ -2930,8 +2930,8 @@ class TestDispatchTickSpawnErrors:
         decision is accept-and-document, not survive-the-death, so this test
         characterizes the CURRENT (unchanged) behavior."""
         from cw.dev_queue import _stage_regress
-        from cw.reconcile import revert_timed_out_tasks
         from cw.worktree import worktree_path_for
+        from tests._dirty_check_helpers import revert_timed_out_prefetched
         from tests._reconcile_helpers import _mk_daemon_session_with_worktree
 
         write_clients_yaml(sample_client_config)
@@ -2978,7 +2978,7 @@ class TestDispatchTickSpawnErrors:
             lambda _c, _b, **_kw: None,
         )
 
-        reverted = revert_timed_out_tasks()
+        reverted = revert_timed_out_prefetched()
         assert ticket_id in reverted
 
         pending_task = load_dev_queue().tasks[0]
@@ -17886,7 +17886,11 @@ class TestStampFailedThenAdopted:
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Adopt, then the TIMED_OUT backstop reverts and the merged PR completes."""
+        """Adopt, then the TIMED_OUT backstop reverts and the merged PR completes.
+
+        Two ticks (#2548): the row is bound in-lock, after the dirty-check
+        pre-pass ran, so the first tick only adopts it and defers its
+        backstop; the second captures the bound session and reverts it."""
         from cw.reconcile import reconcile
 
         session, _daemon = self._launch_unbound(
@@ -17906,6 +17910,12 @@ class TestStampFailedThenAdopted:
             "cw.reconcile._shared.worktree_dirty_reason_by_path",
             lambda *_args, **_kwargs: None,
         )
+
+        reconcile()
+
+        adopted = load_dev_queue().tasks[0]
+        assert adopted.status == QueueItemStatus.RUNNING
+        assert adopted.session_id == session.id
 
         report = reconcile()
 

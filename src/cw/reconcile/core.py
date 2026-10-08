@@ -2,8 +2,8 @@
 
 ``reconcile`` runs the lockless pre-passes -- gh merge state, the codex clean
 probes (#2563), the gate recipes' plan-of-record prefetch (#2545), the review
-recipes' repo slugs (#2564) and, last, the local harvest's git facts (#2565)
--- then
+recipes' repo slugs (#2564), the worktree dirty checks (#2548) and, last, the
+local harvest's git facts (#2565) -- then
 ``_reconcile_locked`` under ``sessions_lock`` (the
 detect/emit/act sweeps for stalled, idle, and phantom sessions), then the
 post-lock gh/git passes. See the package ``__init__`` docstring and
@@ -64,6 +64,13 @@ from cw.reconcile.codex_reparks import (
 )
 from cw.reconcile.concierge import run_concierge_recoveries
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
+from cw.reconcile.dirty_checks import (
+    DIRTY_CHECK_BUDGET_SECONDS,
+    DIRTY_CHECK_MAX_PER_TICK,
+    DirtyChecks,
+    normalize_roster,
+    prepass_phantom_ids,
+)
 from cw.reconcile.escalation import run_escalation_sweep
 from cw.reconcile.fix_dispatch import run_fix_dispatch
 from cw.reconcile.gate_plan_probes import (
@@ -89,6 +96,7 @@ from cw.reconcile.main_drift import (
 from cw.reconcile.phantom import (
     _act_on_phantom_candidates,
     _detect_phantom_candidates,
+    capture_phantom_dirty_checks,
 )
 from cw.reconcile.review_recipes import (
     DeferredReviewDispatch,
@@ -104,6 +112,7 @@ from cw.reconcile.stalled import (
 from cw.reconcile.tasks import (
     _client_cwd,
     _is_dangling_client,
+    capture_backstop_dirty_checks,
     complete_timed_out_merged_tasks,
     park_terminal_sibling_tasks,
     revert_completed_silent_tasks,
@@ -132,6 +141,7 @@ def _run_terminal_backstops_and_sweeps(
     codex_probes: CleanProbes | None,
     plan_probes: PlanProbes | None,
     repo_slugs: RepoSlugs | None,
+    dirty_checks: DirtyChecks | None = None,
 ) -> tuple[list[str], list[str]]:
     """Run the post-detect TicketTask backstops + RFC 0008 capstone sweeps.
 
@@ -151,7 +161,10 @@ def _run_terminal_backstops_and_sweeps(
     each plan-of-record body from *plan_probes*, also captured before the
     lock (#2545); ``None`` skips every plan candidate for the tick.
     *repo_slugs*, likewise captured before the lock (#2564), is what the review
-    recipes' cross-repo guard reads instead of running git.
+    recipes' cross-repo guard reads instead of running git. The TIMED_OUT and
+    COMPLETED backstops read each worktree dirty check from *dirty_checks*,
+    captured before the lock too (#2548); a session with no usable capture
+    defers a tick.
     Extracted to one call site (instead of duplicating 4 lines in each
     branch) to keep ``_reconcile_locked``'s statement count under the
     PLR0915 limit.
@@ -173,8 +186,8 @@ def _run_terminal_backstops_and_sweeps(
     Returns (timed_out_ticket_ids, completed_silent_ticket_ids).
     """
     run_unowned_running_recovery(clients=clients)
-    timed_out_ticket_ids = revert_timed_out_tasks()
-    completed_silent_ticket_ids = revert_completed_silent_tasks()
+    timed_out_ticket_ids = revert_timed_out_tasks(dirty_checks)
+    completed_silent_ticket_ids = revert_completed_silent_tasks(dirty_checks)
     park_terminal_sibling_tasks()
     run_concierge_recoveries(now=now, native_live=native_live, config=config)
     # #2307: re-evaluate codex-orphan parks the boot pass left with an ACTIVE
@@ -321,6 +334,54 @@ def _capture_plan_probes(
     return probes
 
 
+def _capture_dirty_checks(*, config: OrchestratorConfig) -> DirtyChecks:
+    """Lockless pre-pass: capture the worktree dirty checks (#2548).
+
+    Runs in ``reconcile()`` before ``sessions_lock`` is taken, so neither the
+    TIMED_OUT/COMPLETED backstops nor the phantom detect runs git in-lock.
+    Backstop sessions with a RUNNING row are captured first, then the
+    phantoms; the phantom set comes from a lockless roster call made only
+    when a live DAEMON session has a worktree. Bounded by
+    ``DIRTY_CHECK_MAX_PER_TICK`` checks and ``DIRTY_CHECK_BUDGET_SECONDS``.
+
+    Like ``_capture_codex_clean_probes`` it must never fail ``reconcile()``
+    over a state or dev-queue read error: that is logged and yields an empty
+    ``DirtyChecks``, a miss for every worktree session, which then defers
+    in-lock. Nothing broader is caught.
+    """
+    try:
+        state = load_state()
+        tasks = load_dev_queue().tasks
+    except (OSError, ValueError):
+        _log.warning(
+            "reconcile: dirty-check pre-pass could not read state;"
+            " deferring all dirty-checked sessions this tick",
+            exc_info=True,
+        )
+        return DirtyChecks()
+    checks = DirtyChecks(
+        budget_seconds=DIRTY_CHECK_BUDGET_SECONDS,
+        max_captures=DIRTY_CHECK_MAX_PER_TICK,
+    )
+    now = datetime.now(UTC)
+    capture_backstop_dirty_checks(state, tasks, now=now, checks=checks)
+    phantom_set = prepass_phantom_ids(
+        state,
+        roster=_claude_agents_json,
+        acting=sessions_with_act_in_flight(tasks),
+        now=now,
+    )
+    capture_phantom_dirty_checks(
+        state,
+        phantom_set,
+        {t.ticket_id: t for t in tasks},
+        now=now,
+        config=config,
+        checks=checks,
+    )
+    return checks
+
+
 def _capture_harvest_facts() -> HarvestFacts:
     """Lockless pre-pass: capture the local harvest's git facts (#2565).
 
@@ -400,15 +461,18 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     Lockless pre-passes: before taking ``sessions_lock`` this function runs
     every ``gh``/``git`` call the in-lock sweeps would otherwise need -- PR
     merge state, the codex clean probes (#2563), the gate recipes'
-    plan-of-record reads (#2545), the review recipes' repo slugs (#2564) and
-    the local harvest's git facts (#2565). The in-lock code only reads their
-    results, and a candidate with no usable result defers to the next tick.
-    The harvest capture runs last: its facts expire
-    ``HARVEST_FACTS_MAX_AGE_SECONDS`` after capture, so no other pre-pass may
-    run between it and the lock. Stacked worst case before the lock is
-    requested, all lockless: codex probes 60 s, repo slugs 30 s, harvest facts
-    60 s plus one in-flight candidate's four 10 s git calls; only the harvest
-    pass's own span (at most 100 s) counts against its 180 s age limit.
+    plan-of-record reads (#2545), the review recipes' repo slugs (#2564), the
+    worktree dirty checks (#2548) and the local harvest's git facts (#2565).
+    The in-lock code only reads their results, and a candidate with no usable
+    result defers to the next tick. The harvest capture runs last: its facts
+    expire ``HARVEST_FACTS_MAX_AGE_SECONDS`` after capture, so no other
+    pre-pass may run between it and the lock. Stacked worst case before the
+    lock is requested, all lockless: codex probes 60 s, repo slugs 30 s, dirty
+    checks 30 s plus one in-flight check, and one 15 s roster call, harvest
+    facts 60 s plus one in-flight candidate's four 10 s git calls; only the
+    harvest pass's own span (at most 100 s) counts against its 180 s age
+    limit. The dirty checks expire ``DIRTY_CHECK_MAX_AGE_SECONDS`` after
+    capture; one aged out by a slow harvest pass or lock wait only defers.
     """
     # Pre-pass: check PR merge state for ACTIVE/IDLE DAEMON sessions before
     # acquiring sessions_lock. gh subprocess must NOT run under the lock
@@ -486,7 +550,10 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     repo_slugs = capture_review_repo_slugs(
         config=_orchestrator_config, dispatching=dispatch_review_jobs
     )
-    # Fifth and LAST (#2565): the local harvest's git facts. Last because their
+    # Fifth (#2548): the worktree dirty checks the phantom sweep and the
+    # TIMED_OUT/COMPLETED backstops read in-lock.
+    dirty_checks = _capture_dirty_checks(config=_orchestrator_config)
+    # Sixth and LAST (#2565): the local harvest's git facts. Last because their
     # max age is measured from capture, so no other pre-pass may run between
     # it and the lock.
     harvest_facts = _capture_harvest_facts()
@@ -511,6 +578,7 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
                 plan_probes=plan_probes,
                 repo_slugs=repo_slugs,
                 harvest_facts=harvest_facts,
+                dirty_checks=dirty_checks,
             )
     finally:
         # Post-lock drain (#1232, #1229). Everything in `jobs` was decided and
@@ -601,6 +669,7 @@ def _reconcile_locked(
     plan_probes: PlanProbes | None = None,
     repo_slugs: RepoSlugs | None = None,
     harvest_facts: HarvestFacts | None = None,
+    dirty_checks: DirtyChecks | None = None,
 ) -> ReconcileReport:
     """Body of reconcile(), called while sessions_lock is held.
 
@@ -638,6 +707,10 @@ def _reconcile_locked(
     harvest_facts comes from reconcile()'s last lockless pre-pass (#2565): the
     local harvest builds each git-backed result from it, so no git runs for it
     under sessions_lock; ``None`` makes every git-backed candidate defer a tick.
+    dirty_checks comes from reconcile()'s lockless dirty-check pre-pass
+    (#2548): the phantom detect and the TIMED_OUT/COMPLETED backstops read
+    each worktree dirty check from it; ``None`` makes every worktree session
+    they would check defer a tick.
 
     Since the process-kill-timeout removal, no sweep in here dispositions a
     session off elapsed time or transcript quietness: the foreign-result and
@@ -717,12 +790,7 @@ def _reconcile_locked(
         # comparison; otherwise reconcile sees every native session as a
         # phantom because UUID != short-id.
         _agents = _claude_agents_json()
-        native_live = {
-            sid[:8] for a in _agents if isinstance(sid := a.get("sessionId"), str)
-        }
-        surface_to_full = {
-            sid[:8]: sid for a in _agents if isinstance(sid := a.get("sessionId"), str)
-        }
+        native_live, surface_to_full = normalize_roster(_agents)
         daemon_errored = False
     except (
         subprocess.CalledProcessError,
@@ -815,6 +883,7 @@ def _reconcile_locked(
                 codex_probes=codex_probes,
                 plan_probes=plan_probes,
                 repo_slugs=repo_slugs,
+                dirty_checks=dirty_checks,
             )
         )
         all_reverted = list(
@@ -836,6 +905,7 @@ def _reconcile_locked(
         task_by_ticket=shared_task_by_ticket,
         now=now,
         config=orchestrator_config,
+        dirty_checks=dirty_checks,
     )
     _emit_reap_proposed(state, phantom_candidates, native_live=native_live, now=now)
     (
@@ -873,6 +943,7 @@ def _reconcile_locked(
             codex_probes=codex_probes,
             plan_probes=plan_probes,
             repo_slugs=repo_slugs,
+            dirty_checks=dirty_checks,
         )
     )
     all_reverted = list(

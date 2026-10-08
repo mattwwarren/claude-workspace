@@ -30,7 +30,7 @@ from cw.models import (
     Stage,
     TicketTask,
 )
-from cw.reconcile import gate_plan_probes
+from cw.reconcile import probe_store
 from cw.reconcile.deferred import DeferredReconcileJobs
 from cw.reconcile.gate_plan_probes import (
     PLAN_PREFETCH_BUDGET_SECONDS,
@@ -214,7 +214,7 @@ class TestPlanProbes:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         clock = {"now": 0.0}
-        monkeypatch.setattr(gate_plan_probes, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(probe_store, "monotonic", lambda: clock["now"])
         probes = PlanProbes(budget_seconds=PLAN_PREFETCH_BUDGET_SECONDS)
         clock["now"] = PLAN_PREFETCH_BUDGET_SECONDS
         reads: list[TicketTask] = []
@@ -630,7 +630,7 @@ class TestPerTickCap:
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         clock = {"now": 0.0}
-        monkeypatch.setattr(gate_plan_probes, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(probe_store, "monotonic", lambda: clock["now"])
         calls: list[str] = []
 
         def _slow_fetch(ticket_id: str, **_k: object) -> str | None:

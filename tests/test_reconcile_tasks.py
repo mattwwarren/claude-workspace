@@ -55,6 +55,10 @@ from cw.reconcile.tasks import (
     _closed_pr_numbers_by_client,
     _merged_pr_numbers_by_client,
 )
+from tests._dirty_check_helpers import (
+    revert_completed_silent_prefetched,
+    revert_timed_out_prefetched,
+)
 from tests._reconcile_helpers import (
     _client_with_lane,
     _make_pending_fix_dispatch,
@@ -514,7 +518,7 @@ def test_revert_timed_out_dirty_worktree_routes_to_blocked_on_user(
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
-    reverted = revert_timed_out_tasks()
+    reverted = revert_timed_out_prefetched()
 
     store = load_dev_queue()
     updated_task = next(t for t in store.tasks if t.ticket_id == "to-dirty")
@@ -568,7 +572,7 @@ def test_revert_timed_out_clean_worktree_routes_to_pending(
         lambda _c, _b, **_kw: None,
     )
 
-    reverted = revert_timed_out_tasks()
+    reverted = revert_timed_out_prefetched()
 
     store = load_dev_queue()
     updated_task = next(t for t in store.tasks if t.ticket_id == "to-clean")
@@ -614,7 +618,7 @@ def test_revert_timed_out_does_not_touch_regressed_into_stage(
         lambda _c, _b, **_kw: None,
     )
 
-    reverted = revert_timed_out_tasks()
+    reverted = revert_timed_out_prefetched()
 
     store = load_dev_queue()
     updated_task = next(t for t in store.tasks if t.ticket_id == "to-clean-marker")
@@ -656,7 +660,7 @@ def test_revert_completed_silent_dirty_worktree_routes_to_blocked_on_user(
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
-    reverted = revert_completed_silent_tasks()
+    reverted = revert_completed_silent_prefetched()
 
     store = load_dev_queue()
     updated_task = next(t for t in store.tasks if t.ticket_id == "cs-dirty")
@@ -705,7 +709,7 @@ def test_revert_completed_silent_clean_worktree_routes_to_pending(
         lambda _c, _b, **_kw: None,
     )
 
-    reverted = revert_completed_silent_tasks()
+    reverted = revert_completed_silent_prefetched()
 
     store = load_dev_queue()
     updated_task = next(t for t in store.tasks if t.ticket_id == "cs-clean")
@@ -860,7 +864,7 @@ def test_revert_completed_silent_tasks_past_grace_window_dirty_still_parks(
     )
 
     with freezegun.freeze_time(completed_at + timedelta(seconds=61)):
-        reverted = revert_completed_silent_tasks()
+        reverted = revert_completed_silent_prefetched()
 
     store = load_dev_queue()
     updated_task = next(t for t in store.tasks if t.ticket_id == "grace-dirty-past")
@@ -912,7 +916,7 @@ def test_revert_completed_silent_tasks_past_grace_window_clean_still_reverts(
     )
 
     with freezegun.freeze_time(completed_at + timedelta(seconds=61)):
-        reverted = revert_completed_silent_tasks()
+        reverted = revert_completed_silent_prefetched()
 
     store = load_dev_queue()
     updated_task = next(t for t in store.tasks if t.ticket_id == "grace-clean-past")
@@ -956,7 +960,7 @@ def test_revert_completed_silent_tasks_missing_completed_at_gets_no_grace(
         lambda _c, _b, **_kw: "2 uncommitted path(s)",
     )
 
-    reverted = revert_completed_silent_tasks()
+    reverted = revert_completed_silent_prefetched()
 
     store = load_dev_queue()
     updated_task = next(
@@ -1023,44 +1027,6 @@ def test_revert_timed_out_tasks_within_grace_window_skips_dirty_check(
         event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
     )
     assert events == []
-
-
-def test_build_dirty_session_ids_and_notify_returns_reason_dict(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """_build_dirty_session_ids_and_notify returns {session.id: reason} for
-    dirty sessions and omits clean ones (dict[str, str] shape, #2118)."""
-    from cw.reconcile.tasks import _build_dirty_session_ids_and_notify
-
-    wt_dirty = tmp_path / "wt-bd-dirty"
-    wt_clean = tmp_path / "wt-bd-clean"
-    dirty_sess = _mk_daemon_session_with_worktree(
-        "bd-dirty", SessionStatus.TIMED_OUT, wt_dirty
-    )
-    clean_sess = _mk_daemon_session_with_worktree(
-        "bd-clean", SessionStatus.TIMED_OUT, wt_clean
-    )
-
-    monkeypatch.setattr(
-        "cw.reconcile._deps.checked_out_branch",
-        lambda p: "auto-dev/bd-dirty" if p == wt_dirty else "auto-dev/bd-clean",
-    )
-    monkeypatch.setattr(
-        "cw.reconcile._shared._worktree_evidence.get_client",
-        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
-    )
-    monkeypatch.setattr(
-        "cw.reconcile._shared._worktree_evidence.unsaved_work_reason",
-        lambda _c, branch, **_kw: (
-            "2 uncommitted path(s)" if branch == "auto-dev/bd-dirty" else None
-        ),
-    )
-
-    result = _build_dirty_session_ids_and_notify([dirty_sess, clean_sess])
-
-    assert result == {"bd-dirty": "2 uncommitted path(s)"}
 
 
 # ---------------------------------------------------------------------------

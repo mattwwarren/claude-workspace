@@ -79,7 +79,6 @@ from cw.reconcile.local import (
     capture_codex_harvest_probes,
     capture_local_harvest_facts,
 )
-from cw.reconcile.tasks import revert_completed_silent_tasks
 from tests._codex_recovery_helpers import (
     _assert_session_closed,
     _assert_session_left_active,
@@ -94,6 +93,7 @@ from tests._codex_recovery_helpers import (
     _use_auto_reap_policy,
     _use_config,
 )
+from tests._dirty_check_helpers import revert_completed_silent_prefetched
 from tests._reconcile_helpers import _local_git_worktree, _save_dead_local_session
 from tests.conftest import commit_tracked_file
 
@@ -419,7 +419,7 @@ def test_failed_task_disposition_after_session_close_preserves_park(
     assert session.recovery_reason == _PARK_REASON_REAP_POLICY_NOT_AUTO
     assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
 
-    assert revert_completed_silent_tasks() == []
+    assert revert_completed_silent_prefetched() == []
 
     task = load_dev_queue().tasks[0]
     assert task.status is QueueItemStatus.BLOCKED_ON_USER
