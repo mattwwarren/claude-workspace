@@ -747,6 +747,7 @@ class TestSplitResolvableRoutedSessions:
     def test_split_is_pure(self, tmp_path: Path) -> None:
         sess = _orphan(tmp_path)
         save_state(CwState(sessions=[sess]))
+        save_dev_queue(DevQueueStore(tasks=[]))
         before = _state_queue_snapshot()
 
         _split([sess], [], native_live={_ORPHAN_LIVE})
