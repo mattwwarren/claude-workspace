@@ -314,6 +314,30 @@ class OrchestratorConfig(BaseModel):
     # (lane -> global) resolver -- see
     # cw.codex_background._resolve_codex_fix_loop_enabled.
     default_codex_fix_loop_enabled: bool = False
+    # #2633 — consecutive fix cycles that resolve no originally-found MUST_FIX
+    # while the diff grows before the fix loop parks fix_loop_diverging. Was a
+    # hardcoded 2; 1 now, since a stalled, growing cycle is already the
+    # signature of a loop building unplanned code. A lane may override it
+    # (LaneConfig.codex_fix_loop_stall_cycles; 2 restores the old tolerance),
+    # resolved by cw.codex_background._resolve_codex_fix_loop_stall_cycles.
+    # The literal is pinned to codex_fix_loop.divergence._DIVERGENCE_STALL_CYCLES
+    # by a lockstep test.
+    codex_fix_loop_stall_cycles: int = Field(default=1, ge=1)
+    # #2633 — net non-test source lines one fix cycle may add per open
+    # MUST_FIX finding before the in-file growth guard parks it
+    # codex_fix_growth_budget_exceeded (only when the plan has a `## Files
+    # Modified` manifest). No lane override. The literal is pinned to
+    # codex_fix_loop.growth.DEFAULT_GROWTH_BUDGET_LINES by a lockstep test.
+    codex_fix_loop_growth_budget_lines: int = Field(default=40, ge=1)
+    # #2633 — kill switch for the fix loop's heuristic guards: the growth
+    # budget (net lines, top-level def count), the lock, state-file and
+    # path-constant detectors, and the operator-constraint violation check.
+    # It does not cover the constraint prompt section, the clean-start
+    # refusal, the staged-set guard, the scope fence, revert guard,
+    # sensitive-path guard, hook-failure park or divergence guard. A lane may
+    # override in either direction (LaneConfig.codex_fix_loop_growth_guard_enabled),
+    # resolved by cw.codex_background._resolve_codex_fix_loop_growth_guard_enabled.
+    codex_fix_loop_growth_guard_enabled: bool = True
     # #2210 — master opt-in for the codex review ledger's fuzzy claim-match
     # suppression tier. Default False, mirroring concierge_enabled's
     # fail-safe posture. BOTH this and the task's lane

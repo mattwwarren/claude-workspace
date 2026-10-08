@@ -10,8 +10,14 @@ diff past a size threshold.
 
 from __future__ import annotations
 
+import logging
+import subprocess
 from typing import TYPE_CHECKING
 
+import pytest
+
+from cw.codex_fix_loop import divergence
+from cw.codex_fix_loop.convergence import _open_finding_key
 from cw.codex_fix_loop.divergence import (
     _DIVERGENCE_MIN_LINES,
     _DIVERGENCE_PRE_LOOP_FRACTION,
@@ -20,13 +26,17 @@ from cw.codex_fix_loop.divergence import (
     emit_divergence_event,
     initial_divergence_state,
     is_diverging,
+    loop_generated_findings,
     net_lines_for_commit,
     record_divergence_cycle,
     render_divergence_report,
 )
+from cw.codex_review import _parse_unified_diff
 from cw.events import read_events
 from cw.models.enums import OrchestratorEventType
-from tests.conftest import git_in
+from cw.review_findings import AcceptedFinding
+from tests._codex_review_helpers import _write
+from tests.conftest import _make_finding, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -46,11 +56,19 @@ _BIG_CYCLE_LINES = _DIVERGENCE_MIN_LINES // 2 + 10
 _TICKET = "T-2394"
 
 
-def _state(pre_loop_diff_lines: int = 10) -> DivergenceState:
+# #2633 lowered the default stall count to 1; the legacy sequences below keep
+# their two-cycle semantics by passing it explicitly.
+_LEGACY_STALL_CYCLES = 2
+
+
+def _state(
+    pre_loop_diff_lines: int = 10, stall_cycles: int = _LEGACY_STALL_CYCLES
+) -> DivergenceState:
     return initial_divergence_state(
         original_keys=_ORIGINAL,
         pre_loop_diff_lines=pre_loop_diff_lines,
         pre_loop_head_sha=_PRE_LOOP_SHA,
+        stall_cycles=stall_cycles,
     )
 
 
@@ -73,7 +91,7 @@ def _step(
 
 class TestDivergenceThresholds:
     def test_thresholds_match_the_documented_defaults(self) -> None:
-        assert _DIVERGENCE_STALL_CYCLES == 2
+        assert _DIVERGENCE_STALL_CYCLES == 1
         assert _DIVERGENCE_MIN_LINES == 150
         assert _DIVERGENCE_PRE_LOOP_FRACTION == 0.5
 
@@ -115,7 +133,7 @@ class TestRecordDivergenceCycle:
         state = _step(
             state, cycle=2, pre=_ORIGINAL, post=_ORIGINAL, lines=_BIG_CYCLE_LINES
         )
-        assert state.stall_streak == _DIVERGENCE_STALL_CYCLES
+        assert state.stall_streak == _LEGACY_STALL_CYCLES
         assert is_diverging(state) is True
 
         state = _step(state, cycle=3, pre=_ORIGINAL, post=_ORIGINAL, lines=0)
@@ -145,7 +163,7 @@ class TestRecordDivergenceCycle:
         assert is_diverging(state) is False
 
         state = _step(state, cycle=4, pre=after_progress, post=after_progress, lines=1)
-        assert state.stall_streak == _DIVERGENCE_STALL_CYCLES
+        assert state.stall_streak == _LEGACY_STALL_CYCLES
         assert is_diverging(state) is True
 
     def test_lines_below_floor_never_trips_even_with_full_stall_streak(
@@ -275,3 +293,152 @@ class TestEmitDivergenceEvent:
         assert isinstance(cycles, list)
         assert [c["cycle"] for c in cycles] == [1, 2]
         assert cycles[1]["net_lines_added"] == 80
+        assert event.payload["loop_generated_findings"] == []
+
+    def test_event_payload_carries_loop_generated_findings(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            divergence, "record_event", lambda *_a, **kw: calls.append(kw)
+        )
+        found = _af("new.py", 3, "loop bug")
+
+        emit_divergence_event(state=_state(), ticket_id=_TICKET, loop_generated=[found])
+
+        [call] = calls
+        payload = call["payload"]
+        assert isinstance(payload, dict)
+        assert payload["loop_generated_findings"] == [
+            {"file": "new.py", "line_start": 3, "summary": "loop bug"}
+        ]
+
+
+class TestStallCyclesParameter:
+    def test_state_carries_configured_stall_cycles(self) -> None:
+        assert _state(stall_cycles=3).stall_cycles == 3
+
+    def test_one_stalled_cycle_trips_when_growth_clears_floor(self) -> None:
+        state = _step(
+            _state(stall_cycles=1), cycle=1, pre=_ORIGINAL, post=_ORIGINAL, lines=200
+        )
+        assert is_diverging(state) is True
+
+    def test_stall_cycles_two_requires_two(self) -> None:
+        state = _step(
+            _state(stall_cycles=2), cycle=1, pre=_ORIGINAL, post=_ORIGINAL, lines=200
+        )
+        assert is_diverging(state) is False
+
+    def test_default_state_uses_module_constant(self) -> None:
+        state = initial_divergence_state(
+            original_keys=_ORIGINAL, pre_loop_diff_lines=0, pre_loop_head_sha="x"
+        )
+        assert state.stall_cycles == _DIVERGENCE_STALL_CYCLES
+
+
+def _af(
+    file: str, line: int | None, summary: str, *, no_anchor: bool = False
+) -> AcceptedFinding:
+    extra: dict[str, object] = {"no_diff_anchor": True} if no_anchor else {}
+    return AcceptedFinding(
+        finding=_make_finding(
+            file=file, line_start=line, line_end=line, summary=summary, **extra
+        ),
+        reviewers=["Code Quality Reviewer"],
+    )
+
+
+_ORIGINAL_FINDING = _af("base.py", 7, "original finding")
+
+
+@pytest.fixture
+def loop_repo(make_git_repo: Callable[..., Path]) -> tuple[Path, DivergenceState]:
+    """``base.py`` at the pre-loop head; one fix cycle grows it and adds files."""
+    repo = make_git_repo("wt-loopgen")
+    _write(repo / "base.py", "".join(f"b{i} = {i}\n" for i in range(1, 6)))
+    git_in(repo, "add", "base.py")
+    git_in(repo, "commit", "-m", "pre-loop")
+    pre = git_in(repo, "rev-parse", "HEAD")
+    _write(repo / "base.py", "".join(f"b{i} = {i}\n" for i in range(1, 9)))
+    _write(repo / "loop_new.py", "n = 1\n")
+    _write(repo / "copy.py", (repo / "base.py").read_text())
+    git_in(repo, "add", "-A")
+    git_in(repo, "commit", "-m", "fix cycle 1")
+    state = initial_divergence_state(
+        original_keys=frozenset({_open_finding_key(_ORIGINAL_FINDING.finding)}),
+        pre_loop_diff_lines=5,
+        pre_loop_head_sha=pre,
+    )
+    return repo, state
+
+
+class TestLoopGeneratedFindings:
+    @pytest.mark.parametrize(
+        ("finding", "expected"),
+        [
+            (_af("base.py", 7, "on an added line"), True),
+            (_af("base.py", 2, "on an untouched line"), False),
+            (_af("loop_new.py", None, "file-level, created file"), True),
+            (_af("base.py", None, "file-level, pre-existing file"), False),
+            (_af("copy.py", None, "file-level, copied file"), True),
+            (_ORIGINAL_FINDING, False),
+            (_af("N/A", None, "no diff anchor", no_anchor=True), False),
+        ],
+    )
+    def test_classification(
+        self,
+        loop_repo: tuple[Path, DivergenceState],
+        finding: AcceptedFinding,
+        expected: bool,
+    ) -> None:
+        repo, state = loop_repo
+
+        assert (loop_generated_findings(repo, state, [finding]) == [finding]) is (
+            expected
+        )
+
+    def test_new_file_mode_never_survives_the_parser(
+        self, loop_repo: tuple[Path, DivergenceState]
+    ) -> None:
+        """Why created files come from --diff-filter=A, not the parsed diff."""
+        repo, state = loop_repo
+        diff = git_in(repo, "diff", "-U0", f"{state.pre_loop_head_sha}..HEAD")
+        file_diffs, *_ = _parse_unified_diff(diff)
+
+        assert "new file mode" not in file_diffs["loop_new.py"]
+        assert "@@ -0,0 +1" in file_diffs["loop_new.py"]
+
+    def test_git_failure_returns_empty_list_and_warns(
+        self,
+        loop_repo: tuple[Path, DivergenceState],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        repo, state = loop_repo
+        exc = subprocess.CalledProcessError(128, ["git", "diff"])
+
+        def _boom(*_a: object, **_k: object) -> str:
+            raise exc
+
+        monkeypatch.setattr(divergence, "git_output", _boom)
+        with caplog.at_level(logging.WARNING, logger="cw.codex_fix_loop.divergence"):
+            found = loop_generated_findings(repo, state, [_af("base.py", 7, "x")])
+
+        assert found == []
+        [record] = caplog.records
+        assert record.args == (state.pre_loop_head_sha, exc)
+
+
+class TestRenderLoopGenerated:
+    def test_lists_loop_generated_findings(self) -> None:
+        state = _state()
+        state = _step(state, cycle=1, pre=_ORIGINAL, post=_ORIGINAL, lines=90)
+
+        report = render_divergence_report(state, [_af("new.py", 3, "loop bug")])
+
+        assert "Findings generated by the loop's own code (1 of 3 open)" in report
+        assert "- new.py:3 loop bug" in report
+
+    def test_omits_section_when_none(self) -> None:
+        assert "generated by the loop" not in render_divergence_report(_state())

@@ -23,6 +23,22 @@ class _FileCategories(NamedTuple):
     config: bool
 
 
+def is_test_path(path: str) -> bool:
+    """Whether *path* is a test file (the /review Step 2 ``tests`` rule).
+
+    Shared with the codex fix loop's growth and constraint guards (#2633),
+    which exclude test files from what a cycle is held to.
+    """
+    base = path.rsplit("/", 1)[-1]
+    return (
+        base.startswith("test_")
+        or "_test." in base
+        or path.startswith("tests/")
+        or "/tests/" in path
+        or "__tests__/" in path
+    )
+
+
 def _categorize_changed_files(files: Iterable[str]) -> _FileCategories:
     """Classify *files* into the /review Step 2 category flags."""
     python = frontend = tests = infra = config = False
@@ -32,13 +48,7 @@ def _categorize_changed_files(files: Iterable[str]) -> _FileCategories:
             python = True
         if path.endswith((".ts", ".tsx", ".js", ".jsx", ".css")):
             frontend = True
-        if (
-            base.startswith("test_")
-            or "_test." in base
-            or path.startswith("tests/")
-            or "/tests/" in path
-            or "__tests__/" in path
-        ):
+        if is_test_path(path):
             tests = True
         if (
             base.startswith("Dockerfile")

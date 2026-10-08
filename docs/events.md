@@ -2593,11 +2593,16 @@ run, immediately before the loop parks with `blocker.reason =
     }
   ],
   "cumulative_net_lines_added": 200,
-  "stall_streak": 2
+  "stall_streak": 1,
+  "loop_generated_findings": [
+    {"file": "fix1.py", "line_start": 1, "summary": "<str>"}
+  ]
 }
 ```
 **Semantics:** GitHub #2394. The fix loop resolved none of the originally-found
-(cycle-0) MUST_FIX findings for 2 consecutive cycles while its cumulative fix
+(cycle-0) MUST_FIX findings for the configured number of consecutive cycles
+(`codex_fix_loop_stall_cycles`, default 1 since #2633; a lane can override it)
+while its cumulative fix
 churn (added + removed lines across the cycles' commits, via `git diff
 --numstat`) exceeded `max(150, 0.5 × the pre-loop branch diff)`. Both
 conditions are required. The loop parks before reaching its cycle cap instead
@@ -2608,6 +2613,12 @@ it and discard every fix cycle's commits. `cycles` has one entry per fix cycle
 that ran. Resolving a finding the loop itself introduced does not count as
 progress. `cumulative_net_lines_added` never resets. Only `stall_streak`
 resets when a cycle resolves an original finding.
+
+`loop_generated_findings` (#2633) lists the open MUST_FIX findings that are not
+originally-found and point at code the loop itself added since
+`pre_loop_head_sha` (an added line, or a file the loop created). It is the
+same list the park appends to `blocker.details`, and is `[]` when detection's
+`git diff` fails (a WARNING is logged instead).
 
 Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
 (`orchestrator_config/operator_forward.py`), matching `review.treadmill_detected`. The park

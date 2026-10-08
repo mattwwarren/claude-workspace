@@ -113,6 +113,17 @@ class LaneConfig(BaseModel):
     # globally enabled default_codex_fix_loop_enabled (no workspace-write fix
     # pass ever runs on that lane), and None defers to the global.
     codex_fix_loop_enabled: bool | None = None
+    # Lane-level override for the fix loop's divergence stall count (#2633).
+    # None defers to OrchestratorConfig.codex_fix_loop_stall_cycles (default
+    # 1); a lane can set 2 to keep the pre-#2633 two-cycle tolerance. Resolved
+    # by cw.codex_background._resolve_codex_fix_loop_stall_cycles.
+    codex_fix_loop_stall_cycles: int | None = Field(default=None, ge=1)
+    # Lane-level override for the fix loop's heuristic growth guards (#2633).
+    # Same bidirectional shape as disposition_drift_check_enabled above: None
+    # defers to OrchestratorConfig.codex_fix_loop_growth_guard_enabled
+    # (default True), False turns the guards off for this lane. Resolved by
+    # cw.codex_background._resolve_codex_fix_loop_growth_guard_enabled.
+    codex_fix_loop_growth_guard_enabled: bool | None = None
     # Lane-level override for the global attempt ceiling (#1751, scoping the
     # flat #786 bound that #1750 re-pointed at unproductive_attempts).
     # Precedence: lane > OrchestratorConfig.global_attempt_ceiling. Resolved by

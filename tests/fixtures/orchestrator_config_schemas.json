@@ -647,6 +647,31 @@
      "default": null,
      "title": "Codex Fix Loop Enabled"
     },
+    "codex_fix_loop_stall_cycles": {
+     "anyOf": [
+      {
+       "minimum": 1,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Codex Fix Loop Stall Cycles"
+    },
+    "codex_fix_loop_growth_guard_enabled": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Codex Fix Loop Growth Guard Enabled"
+    },
     "attempt_ceiling": {
      "anyOf": [
       {
@@ -1249,6 +1274,23 @@
      "title": "Default Codex Fix Loop Enabled",
      "type": "boolean"
     },
+    "codex_fix_loop_stall_cycles": {
+     "default": 1,
+     "minimum": 1,
+     "title": "Codex Fix Loop Stall Cycles",
+     "type": "integer"
+    },
+    "codex_fix_loop_growth_budget_lines": {
+     "default": 40,
+     "minimum": 1,
+     "title": "Codex Fix Loop Growth Budget Lines",
+     "type": "integer"
+    },
+    "codex_fix_loop_growth_guard_enabled": {
+     "default": true,
+     "title": "Codex Fix Loop Growth Guard Enabled",
+     "type": "boolean"
+    },
     "codex_claim_suppression_enabled": {
      "default": false,
      "title": "Codex Claim Suppression Enabled",
@@ -1617,6 +1659,31 @@
        ],
        "default": null,
        "title": "Codex Fix Loop Enabled"
+      },
+      "codex_fix_loop_stall_cycles": {
+       "anyOf": [
+        {
+         "minimum": 1,
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Codex Fix Loop Stall Cycles"
+      },
+      "codex_fix_loop_growth_guard_enabled": {
+       "anyOf": [
+        {
+         "type": "boolean"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Codex Fix Loop Growth Guard Enabled"
       },
       "attempt_ceiling": {
        "anyOf": [
@@ -2414,6 +2481,23 @@
      "title": "Default Codex Fix Loop Enabled",
      "type": "boolean"
     },
+    "codex_fix_loop_stall_cycles": {
+     "default": 1,
+     "minimum": 1,
+     "title": "Codex Fix Loop Stall Cycles",
+     "type": "integer"
+    },
+    "codex_fix_loop_growth_budget_lines": {
+     "default": 40,
+     "minimum": 1,
+     "title": "Codex Fix Loop Growth Budget Lines",
+     "type": "integer"
+    },
+    "codex_fix_loop_growth_guard_enabled": {
+     "default": true,
+     "title": "Codex Fix Loop Growth Guard Enabled",
+     "type": "boolean"
+    },
     "codex_claim_suppression_enabled": {
      "default": false,
      "title": "Codex Claim Suppression Enabled",
@@ -2828,6 +2912,31 @@
      "default": null,
      "title": "Codex Fix Loop Enabled"
     },
+    "codex_fix_loop_stall_cycles": {
+     "anyOf": [
+      {
+       "minimum": 1,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Codex Fix Loop Stall Cycles"
+    },
+    "codex_fix_loop_growth_guard_enabled": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Codex Fix Loop Growth Guard Enabled"
+    },
     "attempt_ceiling": {
      "anyOf": [
       {
@@ -2951,6 +3060,9 @@
    "default_signoff": "none",
    "default_finalize_gate": "auto",
    "default_codex_fix_loop_enabled": false,
+   "codex_fix_loop_stall_cycles": 1,
+   "codex_fix_loop_growth_budget_lines": 40,
+   "codex_fix_loop_growth_guard_enabled": true,
    "codex_claim_suppression_enabled": false,
    "liveness_buckets_minutes": [
     15,
@@ -3029,6 +3141,8 @@
    "signoff": null,
    "finalize_gate": null,
    "codex_fix_loop_enabled": null,
+   "codex_fix_loop_stall_cycles": null,
+   "codex_fix_loop_growth_guard_enabled": null,
    "attempt_ceiling": null,
    "gate_recipes": null,
    "review_recipes": null,

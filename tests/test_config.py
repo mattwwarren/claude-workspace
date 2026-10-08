@@ -3230,6 +3230,87 @@ class TestDispositionDriftCheckConfigFields:
             )
 
 
+class TestCodexFixLoopStallCyclesConfig:
+    """#2633: the divergence stall count, global default 1 with a lane override."""
+
+    def test_lane_override_round_trips_via_clients_yaml(
+        self, tmp_config_dir: Path
+    ) -> None:
+        ws_dir = tmp_config_dir / "ws"
+        ws_dir.mkdir()
+        clients_path = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_path.write_text(
+            "clients:\n"
+            "  acme:\n"
+            f"    workspace_path: {ws_dir}\n"
+            "    lanes:\n"
+            "      - name: fast\n"
+            "        codex_fix_loop_stall_cycles: 2\n"
+        )
+
+        assert load_clients()["acme"].lanes[0].codex_fix_loop_stall_cycles == 2
+
+    def test_wrong_type_raises_validation_error(self) -> None:
+        from pydantic import ValidationError
+
+        from cw.models import LaneConfig
+
+        with pytest.raises(ValidationError):
+            LaneConfig.model_validate(
+                {"name": "fast", "codex_fix_loop_stall_cycles": "two"}
+            )
+
+
+class TestCodexFixLoopGrowthGuardConfig:
+    """#2633: the growth-guard switch, default on with a bidirectional lane override."""
+
+    def test_global_default_is_on(self) -> None:
+        from cw.models import OrchestratorConfig
+
+        assert OrchestratorConfig().codex_fix_loop_growth_guard_enabled is True
+
+    def test_lane_override_defaults_to_none(self) -> None:
+        from cw.models import LaneConfig
+
+        assert LaneConfig(name="fast").codex_fix_loop_growth_guard_enabled is None
+
+    def test_global_override_round_trips(self) -> None:
+        from cw.models import OrchestratorConfig
+
+        config = OrchestratorConfig.model_validate(
+            {"codex_fix_loop_growth_guard_enabled": False}
+        )
+        assert config.codex_fix_loop_growth_guard_enabled is False
+
+    def test_lane_override_round_trips_via_clients_yaml(
+        self, tmp_config_dir: Path
+    ) -> None:
+        ws_dir = tmp_config_dir / "ws"
+        ws_dir.mkdir()
+        clients_path = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_path.write_text(
+            "clients:\n"
+            "  acme:\n"
+            f"    workspace_path: {ws_dir}\n"
+            "    lanes:\n"
+            "      - name: fast\n"
+            "        codex_fix_loop_growth_guard_enabled: false\n"
+        )
+
+        lane = load_clients()["acme"].lanes[0]
+        assert lane.codex_fix_loop_growth_guard_enabled is False
+
+    def test_wrong_type_raises_validation_error(self) -> None:
+        from pydantic import ValidationError
+
+        from cw.models import LaneConfig
+
+        with pytest.raises(ValidationError):
+            LaneConfig.model_validate(
+                {"name": "fast", "codex_fix_loop_growth_guard_enabled": "maybe"}
+            )
+
+
 # ---------------------------------------------------------------------------
 # TestSubagentSpawnGuardConfig
 # ---------------------------------------------------------------------------
