@@ -94,7 +94,6 @@ DIRTY_CHECK_LOOKAHEAD_SECONDS: float = 15.0
 type RosterReader = Callable[[], list[dict[str, object]]]
 
 type _DirtyKey = tuple[str, Path]
-type _WorktreeGeneration = tuple[tuple[str, int, int, int], ...] | None
 
 
 class DirtyCheckUnavailableError(Exception):
@@ -108,48 +107,6 @@ class DirtyCheckUnavailableError(Exception):
 
 def _who(session: Session) -> str:
     return f"{session.name} ({session.id})"
-
-
-def normalize_roster(
-    agents: list[dict[str, object]],
-) -> tuple[set[str], dict[str, str]]:
-    """Return the short live ids and full ids from a native roster."""
-    surface_to_full = {
-        sid[:8]: sid for a in agents if isinstance(sid := a.get("sessionId"), str)
-    }
-    return set(surface_to_full), surface_to_full
-
-
-def _worktree_generation(worktree: Path) -> _WorktreeGeneration:
-    """Return a cheap metadata generation for files in *worktree*.
-
-    This is deliberately filesystem-only: consumers run it after acquiring
-    ``sessions_lock`` and immediately before the queue mutation. The git
-    cleanliness probe remains the lockless source of truth; this generation
-    only prevents a changed worktree from authorizing a captured clean result.
-    """
-    try:
-        if not worktree.is_dir():
-            return None
-        entries: list[tuple[str, int, int, int]] = []
-        for path in worktree.rglob("*"):
-            if ".git" in path.relative_to(worktree).parts:
-                continue
-            try:
-                stat = path.lstat()
-            except OSError:
-                return None
-            entries.append(
-                (
-                    str(path.relative_to(worktree)),
-                    stat.st_mtime_ns,
-                    stat.st_size,
-                    stat.st_mode,
-                )
-            )
-        return tuple(sorted(entries))
-    except OSError:
-        return None
 
 
 class DirtyChecks:
@@ -174,7 +131,6 @@ class DirtyChecks:
             max_captures=max_captures,
             max_age_seconds=DIRTY_CHECK_MAX_AGE_SECONDS,
         )
-        self._generations: dict[_DirtyKey, _WorktreeGeneration] = {}
 
     @property
     def budget_seconds(self) -> float | None:
@@ -199,9 +155,8 @@ class DirtyChecks:
         worktree = session.worktree_path
         if worktree is None:
             return None
-        generation = _worktree_generation(worktree)
         try:
-            reason = self._store.capture(
+            return self._store.capture(
                 (session.id, worktree),
                 read=lambda _captured_at: _shared.worktree_dirty_reason_by_path(
                     session.client, worktree
@@ -219,9 +174,6 @@ class DirtyChecks:
                     f" reached; {_who(session)} was not checked"
                 )
             raise DirtyCheckUnavailableError(msg) from err
-        else:
-            self._generations[(session.id, worktree)] = generation
-            return reason
 
     def lookup(self, session: Session) -> str | None:
         """Return *session*'s captured dirty reason if usable. Never runs git.
@@ -234,21 +186,7 @@ class DirtyChecks:
         if worktree is None:
             return None
         try:
-            reason = self._store.lookup((session.id, worktree))
-            key = (session.id, worktree)
-            before = self._generations.get(key)
-            after = _worktree_generation(worktree)
-            if before != after:
-                before_decision = "clean" if reason is None else "dirty"
-                _log.warning(
-                    "dirty_check_revalidation: session=%s worktree=%s; %s -> changed;"
-                    " deferring to the next tick",
-                    session.id,
-                    worktree,
-                    before_decision,
-                )
-                msg = f"the worktree changed since its dirty check for {_who(session)}"
-                raise DirtyCheckUnavailableError(msg)
+            return self._store.lookup((session.id, worktree))
         except ProbeStoreUnavailableError as err:
             if err.age is None:
                 msg = (
@@ -260,8 +198,6 @@ class DirtyChecks:
                     f" {err.age:.1f}s"
                 )
             raise DirtyCheckUnavailableError(msg) from err
-        else:
-            return reason
 
     def capture_all(self, sessions: Iterable[Session]) -> None:
         """Capture *sessions* in order, stopping at the first budget/cap refusal.
@@ -361,7 +297,9 @@ def prepass_phantom_ids(
         subprocess.TimeoutExpired,
     ):
         return set()
-    native_live, _surface_to_full = normalize_roster(agents)
+    native_live = {
+        sid[:8] for a in agents if isinstance(sid := a.get("sessionId"), str)
+    }
     if _looks_like_daemon_outage(state, False, native_live):
         return set()
     lookahead = now + timedelta(seconds=DIRTY_CHECK_LOOKAHEAD_SECONDS)

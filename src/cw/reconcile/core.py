@@ -68,7 +68,6 @@ from cw.reconcile.dirty_checks import (
     DIRTY_CHECK_BUDGET_SECONDS,
     DIRTY_CHECK_MAX_PER_TICK,
     DirtyChecks,
-    normalize_roster,
     prepass_phantom_ids,
 )
 from cw.reconcile.escalation import run_escalation_sweep
@@ -790,7 +789,12 @@ def _reconcile_locked(
         # comparison; otherwise reconcile sees every native session as a
         # phantom because UUID != short-id.
         _agents = _claude_agents_json()
-        native_live, surface_to_full = normalize_roster(_agents)
+        native_live = {
+            sid[:8] for a in _agents if isinstance(sid := a.get("sessionId"), str)
+        }
+        surface_to_full = {
+            sid[:8]: sid for a in _agents if isinstance(sid := a.get("sessionId"), str)
+        }
         daemon_errored = False
     except (
         subprocess.CalledProcessError,
