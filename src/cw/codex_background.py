@@ -54,6 +54,7 @@ from cw.gh import post_issue_comment
 from cw.local_runner import UNEXPECTED_ERROR
 from cw.models import OrchestratorEventType
 from cw.models.orchestrator_config import CODEX_TIER_CLAIM_SUPPRESSION
+from cw.operator_identity import resolve_operator_login
 from cw.review_finding_dispositions import merge_finding_dispositions
 from cw.review_findings import (
     REVIEW_VERDICT_JSON_RELATIVE_PATH,
@@ -356,6 +357,41 @@ def _resolve_disposition_drift_check_enabled(
         if lane_cfg.disposition_drift_check_enabled is not None:
             return lane_cfg.disposition_drift_check_enabled
     return config.disposition_drift_check_enabled
+
+
+def _resolve_codex_fix_loop_stall_cycles(
+    client: ClientConfig, task: TicketTask, config: OrchestratorConfig
+) -> int:
+    """Resolve the fix loop's divergence stall count for *task* (#2633).
+
+    A non-``None`` ``LaneConfig.codex_fix_loop_stall_cycles`` for the task's
+    lane wins, otherwise ``OrchestratorConfig.codex_fix_loop_stall_cycles``
+    (default 1). Same lane-then-global shape as
+    :func:`_resolve_disposition_drift_check_enabled`.
+    """
+    for lane_cfg in client.effective_lanes:
+        lane_cycles = lane_cfg.codex_fix_loop_stall_cycles
+        if lane_cfg.name == task.lane and lane_cycles is not None:
+            return lane_cycles
+    return config.codex_fix_loop_stall_cycles
+
+
+def _resolve_codex_fix_loop_growth_guard_enabled(
+    client: ClientConfig, task: TicketTask, config: OrchestratorConfig
+) -> bool:
+    """Resolve the fix loop's heuristic growth-guard switch for *task* (#2633).
+
+    A non-``None`` ``LaneConfig.codex_fix_loop_growth_guard_enabled`` for the
+    task's lane wins, otherwise
+    ``OrchestratorConfig.codex_fix_loop_growth_guard_enabled`` (default
+    ``True``). Same lane-then-global shape as
+    :func:`_resolve_disposition_drift_check_enabled`.
+    """
+    for lane_cfg in client.effective_lanes:
+        lane_enabled = lane_cfg.codex_fix_loop_growth_guard_enabled
+        if lane_cfg.name == task.lane and lane_enabled is not None:
+            return lane_enabled
+    return config.codex_fix_loop_growth_guard_enabled
 
 
 #: The arming refusal's message. Spelled once, here, because it is the ONLY
@@ -764,6 +800,14 @@ def _run_codex_review_and_complete(
             fix_loop_enabled=fix_loop_enabled,
             claim_tier_enabled=claim_tier_enabled,
             disposition_drift_check_enabled=disposition_drift_check_enabled,
+            stall_cycles=_resolve_codex_fix_loop_stall_cycles(client, task, config),
+            growth_budget_lines=config.codex_fix_loop_growth_budget_lines,
+            growth_guard_enabled=_resolve_codex_fix_loop_growth_guard_enabled(
+                client, task, config
+            ),
+            # #2633: resolved only when the loop runs (gh api user otherwise
+            # never needs to run); outside every lock.
+            operator_login=resolve_operator_login(client) if fix_loop_enabled else None,
         )
         if fix_loop_enabled and result.blocker is None:
             result, verdict = _refuse_unpushed_clean_exit(

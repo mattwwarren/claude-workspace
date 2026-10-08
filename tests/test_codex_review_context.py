@@ -28,6 +28,7 @@ from cw.codex_review import (
     _resolve_agent_spec,
     _RuffLintConfig,
     _select_reviewer_roles,
+    is_test_path,
 )
 from cw.codex_review._capability import _PROBE_SENTINEL
 from cw.codex_review._context import (
@@ -105,6 +106,31 @@ def _write_real_hook_context(worktree: Path, *, pending: bool) -> None:
 
 
 class TestCategorizeChangedFiles:
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("tests/x.py", True),
+            ("a/tests/b.py", True),
+            ("test_x.py", True),
+            ("x_test.py", True),
+            ("__tests__/a.ts", True),
+            ("src/cw/contest.py", False),
+        ],
+    )
+    def test_is_test_path(self, path: str, expected: bool) -> None:
+        """#2633: the extracted predicate is the one the categorizer uses."""
+        assert is_test_path(path) is expected
+        assert _categorize_changed_files([path]).tests is expected
+
+    def test_fetch_ticket_comments_is_reexported(self) -> None:
+        import cw.codex_review
+        import cw.codex_review._context
+        from cw.codex_review._context import core
+
+        assert cw.codex_review._fetch_ticket_comments is core._fetch_ticket_comments
+        assert "_fetch_ticket_comments" in cw.codex_review.__all__
+        assert "_fetch_ticket_comments" in cw.codex_review._context.__all__
+
     def test_python_and_tests(self) -> None:
         cats = _categorize_changed_files(["src/cw/foo.py", "tests/test_foo.py"])
         assert cats.python

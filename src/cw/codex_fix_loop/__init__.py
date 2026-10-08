@@ -20,8 +20,17 @@ must target the submodule that looks it up at call time
   wall-clock budget helpers, and the per-cycle exit decision.
 - ``commit`` — one cycle's fix invocation, out-of-scope sensitive-path check,
   and commit (argv/prompt builders included).
+- ``baseline`` — the per-cycle clean-start baseline and the measurement of
+  what a cycle itself changed (#2633).
 - ``fence`` — the fix-cycle scope fence (#2485) and revert guard (#2492),
-  checked on the branch's net diff before a cycle is committed.
+  checked on the cycle's measured changes before it is committed.
+- ``growth`` — the in-file growth budget and its lock, state-file and
+  path-constant detectors (#2633).
+- ``constraints`` — the operator's binding constraints from the resolutions
+  comment: prompt section and forbidden-token check (#2633).
+- ``hook_failure`` — a rejected commit hook parked as ``codex_fix_hook_failed``
+  with capped, redacted output (#2633).
+- ``posted_text`` — the one redact-and-cap helper for text a guard posts.
 - ``park`` — the terminal park/clean-exit builders and the terminal
   ``Review`` reconstruction.
 - ``snapshot`` — per-cycle ``ReviewVerdict`` snapshot persist/finalize and the

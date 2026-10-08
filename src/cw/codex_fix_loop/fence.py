@@ -21,6 +21,13 @@ default branch, with the cycle's pending changes staged:
 The fence is skipped when the plan has no parseable manifest, matching
 :mod:`cw.plan_files`'s "empty manifest means no file fence" convention; the
 revert guard always runs.
+
+Since #2633 the fence measures the cycle from its own start: the caller
+measures the cycle's touched paths once against the clean-start baseline
+(:mod:`cw.codex_fix_loop.baseline`) and hands them in. This module also builds
+the breach records for the other guards that park a cycle uncommitted: the
+dirty-start refusal, the sensitive-path scope violation and the staged-set
+mismatch.
 """
 
 from __future__ import annotations
@@ -29,30 +36,77 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from cw._git import git_output
-from cw.codex_review import CODEX_FIX_REVERTED_BRANCH, CODEX_FIX_SCOPE_DRIFT
+from cw.codex_review import (
+    CODEX_FIX_DIRTY_START,
+    CODEX_FIX_REVERTED_BRANCH,
+    CODEX_FIX_SCOPE_DRIFT,
+    CODEX_FIX_SCOPE_VIOLATION,
+)
 from cw.plan_files import parse_plan_files_modified
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
     from pathlib import Path
 
-# Shared tail for every fence breach's recovery hint: the rejected changes are
+    from cw.codex_fix_loop.baseline import DirtyStart
+    from cw.codex_review import _SensitiveHit
+
+# Shared tail for every guard park's recovery hint: the rejected changes are
 # left staged (never committed or pushed), so the operator can inspect them.
-_LEFT_STAGED_HINT = (
+# The hard-reset advice is only correct because a cycle starts from a clean
+# tree (#2633, `baseline.capture_cycle_baseline`), and the hint says so.
+LEFT_STAGED_HINT = (
     "The rejected fix-cycle changes are left staged and uncommitted in the "
-    "worktree (inspect with `git diff --cached`); discard them with "
-    "`git reset --hard HEAD` before requeueing."
+    "worktree (inspect with `git diff --cached`). This cycle began from a clean "
+    "tree (checked at cycle start), so everything staged is this cycle's own "
+    "work and `git reset --hard HEAD` discards only that; run it before "
+    "requeueing."
+)
+# Listing cap for the dirty-start and staged-set park details.
+_MAX_LISTED = 20
+_PORCELAIN_PATH_OFFSET = 3
+_MARKER_LINES = {
+    "MERGE_HEAD": "MERGE_HEAD is set (an uncommitted merge)",
+    "CHERRY_PICK_HEAD": "CHERRY_PICK_HEAD is set (an unfinished cherry-pick)",
+    "REVERT_HEAD": "REVERT_HEAD is set (an unfinished revert)",
+}
+_MARKER_HINTS = {
+    "MERGE_HEAD": (
+        "Finish the merge (resolve conflicts, `git add` them, then `git commit`) "
+        "or abandon it with `git merge --abort`."
+    ),
+    "CHERRY_PICK_HEAD": (
+        "Finish the cherry-pick or abandon it with `git cherry-pick --abort`."
+    ),
+    "REVERT_HEAD": "Finish the revert or abandon it with `git revert --abort`.",
+}
+_NO_MARKER_HINT = (
+    "Commit the changes you want to keep, or set them aside yourself (for "
+    "example on a scratch branch) after checking `git diff HEAD`; cw does not "
+    "know which of them are wanted, and it names no discard command because it "
+    "cannot say what one would lose."
 )
 
 
 @dataclass(frozen=True)
 class FenceBreach:
-    """A fix cycle the fence rejected: the park reason, paths, and operator text."""
+    """A fix cycle a guard rejected: the park reason, paths, and operator text."""
 
     reason: str
     paths: tuple[str, ...]
     details: str
     recovery_hint: str
+
+
+class StagedSetMismatchError(Exception):
+    """The staged set differs from the paths the cycle was measured to touch."""
+
+    def __init__(self, measured: frozenset[str], staged: frozenset[str]) -> None:
+        self.measured = measured
+        self.staged = staged
+        super().__init__(
+            f"staged {sorted(staged)} != measured {sorted(measured)}",
+        )
 
 
 def fix_scope_allowlist(
@@ -109,7 +163,7 @@ def _revert_breach(
         "Compare the branch HEAD (the last good commit before this fix cycle) "
         "with the staged changes to see what the fix tried to undo, then "
         "requeue REVIEW, or settle the finding (`cw review settle`) if it "
-        f"cannot be fixed without reverting the feature. {_LEFT_STAGED_HINT}"
+        f"cannot be fixed without reverting the feature. {LEFT_STAGED_HINT}"
     )
     return FenceBreach(CODEX_FIX_REVERTED_BRANCH, paths, details, hint)
 
@@ -137,7 +191,7 @@ def _scope_breach(
         "If the out-of-scope change is wanted, add the path(s) to the plan's "
         "Files Modified section and requeue REVIEW; otherwise settle the "
         "finding that asked for it (`cw review settle`) or file it as a "
-        f"follow-up ticket. {_LEFT_STAGED_HINT}"
+        f"follow-up ticket. {LEFT_STAGED_HINT}"
     )
     return FenceBreach(CODEX_FIX_SCOPE_DRIFT, drifted, details, hint)
 
@@ -149,17 +203,17 @@ def check_fix_fence(
     allowed_files: frozenset[str] | None,
     finding_files: frozenset[str],
     cycle: int,
+    touched: set[str],
 ) -> FenceBreach | None:
-    """Stage the cycle's changes and return the first fence breach, or ``None``.
+    """Return the first fence breach for the cycle's staged changes, or ``None``.
 
-    Stages with ``git add -A`` so new files count toward the net diff; the
-    commit step stages the same way, so a passing cycle loses nothing. The
-    revert guard is checked first: a cycle that undoes the branch is the more
-    fundamental failure, and its restored files would otherwise read as
-    in-scope.
+    *touched* is the set :func:`~cw.codex_fix_loop.baseline.cycle_touched_paths`
+    measured against the cycle's clean-start baseline; that call also staged
+    the cycle's changes (``git add -A``) so new files count toward the net
+    diff. The revert guard is checked first: a cycle that undoes the branch is
+    the more fundamental failure, and its restored files would otherwise read
+    as in-scope.
     """
-    git_output(["add", "-A"], cwd=worktree)
-    touched = _name_only(worktree, ["--cached", "HEAD"])
     if not touched:
         return None
     base = git_output(["merge-base", default_branch, "HEAD"], cwd=worktree).strip()
@@ -169,3 +223,149 @@ def check_fix_fence(
     if breach is None and allowed_files is not None:
         breach = _scope_breach(after, touched, allowed_files, cycle)
     return breach
+
+
+def _capped(entries: Sequence[str]) -> list[str]:
+    """``- <entry>`` lines, at most :data:`_MAX_LISTED`, then a remainder count."""
+    lines = [f"- {entry}" for entry in entries[:_MAX_LISTED]]
+    if len(entries) > _MAX_LISTED:
+        lines.append(f"- ... and {len(entries) - _MAX_LISTED} more")
+    return lines
+
+
+def _porcelain_paths(line: str) -> list[str]:
+    """Both sides of a porcelain rename line, else the one path it names."""
+    return line[_PORCELAIN_PATH_OFFSET:].split(" -> ")
+
+
+def cycle_start_breach(start: DirtyStart, cycle: int) -> FenceBreach:
+    """Return the park for a cycle refused because the tree was dirty (#2633).
+
+    The hint never advises ``git reset --hard``: the state predates the cycle,
+    so cw cannot say what a hard reset would lose. It names the state to
+    inspect and each unfinished operation's own abort command.
+    """
+    sections = [
+        f"codex fix cycle {cycle} was not started: the worktree was not clean at "
+        "cycle start, so the cycle's own edits could not be told apart from work "
+        "already there. No fix invocation ran, and cw staged, committed and "
+        "pushed nothing."
+    ]
+    if start.markers:
+        sections.append(
+            "\n".join(
+                [
+                    "Unfinished operation(s):",
+                    *_capped([_MARKER_LINES[m] for m in start.markers]),
+                ]
+            )
+        )
+    if start.unmerged:
+        sections.append(
+            "\n".join(["Unresolved (unmerged) path(s):", *_capped(start.unmerged)])
+        )
+    if start.dirty:
+        sections.append(
+            "\n".join(
+                ["Uncommitted changes (git status --porcelain):", *_capped(start.dirty)]
+            )
+        )
+    operations = " ".join(_MARKER_HINTS[m] for m in start.markers) or _NO_MARKER_HINT
+    hint = (
+        "Inspect the state first: `git status`, `git diff --cached` and "
+        f"`git ls-files -u` show what is there. {operations} Then requeue REVIEW."
+    )
+    paths = {*start.unmerged, *(p for d in start.dirty for p in _porcelain_paths(d))}
+    return FenceBreach(
+        CODEX_FIX_DIRTY_START, tuple(sorted(paths)), "\n\n".join(sections), hint
+    )
+
+
+def _staged_set_hint(
+    measured: frozenset[str], staged: frozenset[str], start_head: str
+) -> str:
+    """The staged-set park's hint for the case the two sets reveal."""
+    if staged - measured:
+        return (
+            "Some staged paths were not measured as this cycle's work, so cw "
+            "cannot say whether discarding them is safe. Compare "
+            "`git diff --cached --name-only` with the paths above, then unstage "
+            "the unmeasured paths yourself (`git restore --staged <path>`) or "
+            "commit them deliberately, and requeue REVIEW."
+        )
+    if not staged:
+        return (
+            "The fix invocation committed its change itself, so nothing is staged "
+            "and a hard reset to HEAD would not undo that local commit. Inspect it "
+            f"with `git log {start_head}..HEAD` and `git show`; if it is unwanted, "
+            f"move the branch back to `{start_head}` yourself after checking "
+            "nothing else sits on top, then requeue REVIEW."
+        )
+    return (
+        "Only part of what this cycle was measured to touch is staged, so a "
+        "commit would be partial and cw does not know where the rest went. "
+        "Compare `git diff --cached --name-only` with the paths above and run "
+        f"`git log {start_head}..HEAD` to see whether the fix invocation "
+        "committed the remainder itself; resolve it by hand (commit, unstage or "
+        "move the branch yourself) and requeue REVIEW."
+    )
+
+
+def staged_set_breach(
+    measured: frozenset[str], staged: frozenset[str], cycle: int, *, start_head: str
+) -> FenceBreach:
+    """Return the park for a cycle whose staged set is not its measured set.
+
+    Parks under ``codex_fix_scope_drift``: the commit would carry (or miss) a
+    path the cycle was not measured to touch. Unreachable under the
+    clean-start invariant except through a race or a fix invocation that
+    committed on its own, so its hint does NOT append :data:`LEFT_STAGED_HINT`
+    — that hint's premise is exactly what failed here.
+    """
+    sections = [
+        f"codex fix cycle {cycle} was not committed: the staged set does not "
+        "equal the set of paths this cycle was measured to touch. A fix cycle "
+        "commits and pushes only paths it measured."
+    ]
+    extra = sorted(staged - measured)
+    missing = sorted(measured - staged)
+    if extra:
+        sections.append("\n".join(["Staged but not measured:", *_capped(extra)]))
+    if missing:
+        sections.append("\n".join(["Measured but not staged:", *_capped(missing)]))
+    return FenceBreach(
+        CODEX_FIX_SCOPE_DRIFT,
+        tuple(sorted(measured ^ staged)),
+        "\n\n".join(sections),
+        _staged_set_hint(measured, staged, start_head),
+    )
+
+
+def scope_violation_breach(violations: list[_SensitiveHit], cycle: int) -> FenceBreach:
+    """Return the park for a cycle touching an out-of-scope sensitive path.
+
+    The gate is AND-only: the caller passes hits already computed over the
+    out-of-scope subset, so both conditions (out of the cycle-0 reviewed
+    diff's scope, and a sensitive-registry match) hold for every listed path.
+    Measuring the cycle stages its changes (#2633), so the hint says where
+    they are.
+    """
+    details = "\n".join(
+        [
+            f"codex fix cycle {cycle} touched path(s) that are both out of the "
+            "cycle-0 reviewed diff's scope AND match the sensitive-files "
+            "registry:",
+            *(f"- {hit.path} ({hit.category}): {hit.reason}" for hit in violations),
+        ]
+    )
+    hint = (
+        "If the sensitive change is wanted, add the path(s) to the plan and get "
+        "it reviewed, then requeue REVIEW; otherwise settle the finding that "
+        f"asked for it (`cw review settle`). {LEFT_STAGED_HINT}"
+    )
+    return FenceBreach(
+        CODEX_FIX_SCOPE_VIOLATION,
+        tuple(hit.path for hit in violations),
+        details,
+        hint,
+    )

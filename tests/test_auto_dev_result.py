@@ -52,7 +52,15 @@ from cw.auto_dev_result import (
     parse_stdout,
     queue_status_for_terminal_sentinel,
 )
-from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED, FIX_LOOP_DIVERGING
+from cw.codex_review import (
+    CODEX_FIX_CONSTRAINT_VIOLATION,
+    CODEX_FIX_DIRTY_START,
+    CODEX_FIX_GROWTH_BUDGET,
+    CODEX_FIX_HOOK_FAILED,
+    CODEX_FIX_SCOPE_VIOLATION,
+    CODEX_MUST_FIX_MECHANICALLY_REJECTED,
+    FIX_LOOP_DIVERGING,
+)
 from cw.models import QueueItemStatus
 from tests.conftest import _plan_pending_payload
 
@@ -973,6 +981,15 @@ class TestKnownBlockerReasons:
         """Same lockstep for cw.codex_review._const's blocker reasons."""
         assert CODEX_MUST_FIX_MECHANICALLY_REJECTED in KNOWN_BLOCKER_REASONS
         assert FIX_LOOP_DIVERGING in KNOWN_BLOCKER_REASONS
+        # #2633: the four new fix-loop guard reasons, plus the sensitive-path
+        # park that rendered "(unrecognized)" before it was registered.
+        assert {
+            CODEX_FIX_CONSTRAINT_VIOLATION,
+            CODEX_FIX_DIRTY_START,
+            CODEX_FIX_GROWTH_BUDGET,
+            CODEX_FIX_HOOK_FAILED,
+            CODEX_FIX_SCOPE_VIOLATION,
+        } <= KNOWN_BLOCKER_REASONS
 
 
 # ---------------------------------------------------------------------------

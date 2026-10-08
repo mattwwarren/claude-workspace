@@ -16,7 +16,7 @@ from cw.codex_fix_loop.snapshot import _finalize_snapshot, _with_snapshot_pointe
 from cw.codex_review import (
     _CATEGORY_TO_REASON,
     _TRANSIENT_FAILURE_REASONS,
-    CODEX_FIX_SCOPE_VIOLATION,
+    CODEX_FIX_DIRTY_START,
     make_codex_blocked,
     render_verdict_comment,
 )
@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from cw.codex_fix_loop.convergence import _OpenFindingKey
     from cw.codex_fix_loop.fence import FenceBreach
     from cw.codex_fix_loop.snapshot import _PersistedSnapshot
-    from cw.codex_review import _SensitiveHit
     from cw.executor_diagnostics import ExecutorFailureCategory
     from cw.models import TicketTask
     from cw.review_findings import AcceptedFinding, ReviewVerdict
@@ -93,6 +92,7 @@ def _park_fix_failure(
     verdict: ReviewVerdict | None,
     snapshot: _PersistedSnapshot,
     reasoning_effort: str | None,
+    left_edits: bool = False,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Park the ticket on a failed fix invocation, persisting a diagnostics bundle.
 
@@ -101,7 +101,12 @@ def _park_fix_failure(
     writes the typed ``ExecutorFailure`` bundle under ``reviewer_role`` =
     ``fix-cycle-N`` (mirroring ``_persist_codex_role_diagnostics``).
 
-    Why: unlike ``_clean_exit``/``_park_scope_violation``, this function does
+    ``left_edits`` (#2633): the failed invocation left the worktree dirty. A
+    retried REVIEW would then meet the clean-start refusal
+    (``codex_fix_dirty_start``) before its first fix, so the park is never
+    retry-eligible and its details say what the operator must clean up.
+
+    Why: unlike ``_clean_exit``/``_park_fence_breach``, this function does
     NOT stamp a finalized ``review`` onto the returned ``verdict`` (#1705) —
     it never calls ``_finalize_review`` and has no ``cycle0_review``/
     ``open_findings`` in scope to build one from. Enriching it would need a
@@ -133,10 +138,16 @@ def _park_fix_failure(
     persist_diagnostics_bundle(
         session_id=session_id, role_slug=f"fix-cycle-{cycle}", failure=failure
     )
-    detail = append_diagnostics_pointer(
-        f"codex fix cycle {cycle} failed ({reason})", session_id=session_id
-    )
-    transient = reason in _TRANSIENT_FAILURE_REASONS
+    headline = f"codex fix cycle {cycle} failed ({reason})"
+    if left_edits:
+        headline = (
+            f"{headline}. The failed invocation left uncommitted edits in the "
+            "worktree (`git status`); a retried REVIEW would refuse to start a "
+            f"fix cycle on a dirty tree ({CODEX_FIX_DIRTY_START}), so inspect "
+            "them, commit or discard them yourself, then requeue REVIEW"
+        )
+    detail = append_diagnostics_pointer(headline, session_id=session_id)
+    transient = reason in _TRANSIENT_FAILURE_REASONS and not left_edits
     blocked = make_codex_blocked(
         ticket_id=task.ticket_id,
         worktree=worktree,
@@ -219,59 +230,6 @@ def _park_survivors(
     return patched, survivors
 
 
-def _park_scope_violation(
-    *,
-    task: TicketTask,
-    worktree: Path,
-    session_id: str,
-    cycle: int,
-    violations: list[_SensitiveHit],
-    cycle0_review: Review,
-    open_findings: dict[_OpenFindingKey, AcceptedFinding],
-    verdict: ReviewVerdict,
-    snapshot: _PersistedSnapshot,
-    had_real_commit: bool,
-) -> tuple[AutoDevResult, ReviewVerdict]:
-    """Park a fix cycle whose commit would touch a sensitive out-of-scope path.
-
-    The gate is AND-only: ``_scope_violations`` only ever returns hits already
-    computed over the out-of-scope subset, so both conditions (out of the
-    cycle-0 reviewed diff's scope, and a sensitive-registry match) hold for
-    every listed path — the details string says so explicitly rather than
-    leaving it implicit. Follows ``_park_survivors``'s pattern verbatim:
-    reconstruct the terminal ``Review`` via ``_finalize_review``, build the
-    ``Blocker`` via ``make_blocked``, then patch review/health onto the
-    result. ``had_real_commit`` is the pre-this-cycle OR-across-cycles
-    real-commit tracker (#1723) — this cycle's own commit never landed (that
-    is why it is being parked), so the caller's already-accumulated value is
-    what is forwarded, not a fresh computation. Snapshot ordering (#1763)
-    is owned by :func:`_park_uncommitted_cycle`.
-    """
-    lines = [f"- {hit.path} ({hit.category}): {hit.reason}" for hit in violations]
-    details = "\n".join(
-        [
-            f"codex fix cycle {cycle} touched path(s) that are both out of the "
-            "cycle-0 reviewed diff's scope AND match the sensitive-files "
-            "registry:",
-            *lines,
-        ]
-    )
-    return _park_uncommitted_cycle(
-        task=task,
-        worktree=worktree,
-        session_id=session_id,
-        cycle=cycle,
-        reason=CODEX_FIX_SCOPE_VIOLATION,
-        details=details,
-        recovery_hint=None,
-        cycle0_review=cycle0_review,
-        open_findings=open_findings,
-        verdict=verdict,
-        snapshot=snapshot,
-        had_real_commit=had_real_commit,
-    )
-
-
 def _park_fence_breach(
     *,
     task: TicketTask,
@@ -285,12 +243,16 @@ def _park_fence_breach(
     snapshot: _PersistedSnapshot,
     had_real_commit: bool,
 ) -> tuple[AutoDevResult, ReviewVerdict]:
-    """Park a fix cycle the scope fence or revert guard rejected (#2485, #2492).
+    """Park any guard-rejected fix cycle uncommitted (#2485, #2492, #2633).
 
-    Same shape as :func:`_park_scope_violation`, plus the breach's
-    ``recovery_hint`` on the ``Blocker`` so the operator is told where the
-    rejected changes are and what to compare, instead of diffing the branch
-    by hand (#2492).
+    The one park for every guard: the scope fence, the revert guard, the
+    sensitive-path scope violation, the dirty-start refusal, the staged-set
+    mismatch, the hook failure, the growth budget and the constraint
+    violation. Each guard renders its own :class:`FenceBreach`; this puts the
+    breach's ``recovery_hint`` on the ``Blocker`` so the operator is told
+    where the rejected changes are and what to compare, instead of diffing
+    the branch by hand (#2492). ``had_real_commit`` is the pre-this-cycle
+    OR-across-cycles tracker (#1723): this cycle's own commit never landed.
     """
     return _park_uncommitted_cycle(
         task=task,

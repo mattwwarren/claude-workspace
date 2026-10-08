@@ -43,7 +43,12 @@ from cw.review_findings import (
     _dedup_key,
 )
 from tests._codex_review_helpers import _task
-from tests.conftest import _make_diff, _make_finding, add_bare_origin
+from tests.conftest import (
+    _make_diff,
+    _make_finding,
+    add_bare_origin,
+    commit_tracked_file,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -631,9 +636,10 @@ class TestConvergence:
     def test_release_critical_exception_admits_old_code_blocker(
         self, monkeypatch: pytest.MonkeyPatch, loop_repo: Path
     ) -> None:
-        (loop_repo / "src" / "cw").mkdir(parents=True, exist_ok=True)
-        (loop_repo / "src" / "cw" / "consumer.py").write_text(
-            "before\ndef broken():\nafter\n", encoding="utf-8"
+        # Committed, not left untracked: a fix cycle refuses to start on a
+        # dirty worktree (#2633).
+        commit_tracked_file(
+            loop_repo, "src/cw/consumer.py", "before\ndef broken():\nafter\n"
         )
         original = _accepted(summary="Original bug", file="src/cw/producer.py")
         release_critical = _accepted(
