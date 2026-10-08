@@ -13,16 +13,22 @@ construction.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from freezegun import freeze_time
 
 from cw.config import load_state, save_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.events import record_event as _real_record_event
-from cw.exceptions import CwError, HookContextConflictError, RemoteRefUnresolvedError
+from cw.exceptions import (
+    CwError,
+    HookContextConflictError,
+    RemoteRefUnresolvedError,
+    WorkerLaunchedError,
+)
 from cw.models import (
     ClientConfig,
     CwState,
@@ -38,7 +44,17 @@ from cw.models import (
 from cw.models.enums import StageIdentifier
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import fix_dispatch, reconcile
-from tests._reconcile_helpers import _make_pending_fix_dispatch
+from cw.reconcile.fix_dispatch_hold import FIX_DISPATCH_WORKER_UNCONFIRMED_REASON
+from tests._reconcile_helpers import _FIX_LOOP_CLIENT as _CLIENT
+from tests._reconcile_helpers import _FIX_LOOP_TICKET as _TICKET
+from tests._reconcile_helpers import (
+    _make_launched_fix_worker,
+    _make_pending_fix_dispatch,
+    _only_task,
+    _save_fix_session,
+    _seed_task,
+    use_reconcile_daemon,
+)
 from tests.conftest import (
     _make_daemon_session,
     _make_ticket_task,
@@ -57,8 +73,6 @@ if TYPE_CHECKING:
 
     from tests.conftest import CapturedEvent
 
-_TICKET = "2017"
-_CLIENT = "acme"
 _FIX_LOOP_PHASE = "fix_loop"
 
 
@@ -69,23 +83,6 @@ def _pending(**overrides: Any) -> PendingFixDispatch:
     }
     kwargs.update(overrides)
     return _make_pending_fix_dispatch(**kwargs)
-
-
-def _seed_task(**overrides: Any) -> None:
-    """Persist a single dev-queue row built from the canonical task builder."""
-    kwargs: dict[str, Any] = {
-        "ticket_id": _TICKET,
-        "client": _CLIENT,
-        "status": QueueItemStatus.RUNNING,
-    }
-    kwargs.update(overrides)
-    save_dev_queue(DevQueueStore(tasks=[_make_ticket_task(**kwargs)]))
-
-
-def _only_task() -> Any:
-    tasks = load_dev_queue().tasks
-    assert len(tasks) == 1
-    return tasks[0]
 
 
 @pytest.fixture
@@ -146,6 +143,25 @@ def test_detect_fix_dispatch_completions_finds_dispatched_task() -> None:
     candidates = fix_dispatch._detect_fix_dispatch_completions([task])
 
     assert [(c.ticket_id, c.client) for c in candidates] == [(_TICKET, _CLIENT)]
+    # A plain (tombstone-less) row carries no launched surface (#2590).
+    assert candidates[0].launched_surface_ref is None
+
+
+def test_detect_fix_dispatch_completions_carries_launched_surface_ref() -> None:
+    """#2590: detect snapshots the tombstone's surface for the identity recheck."""
+    task = _make_ticket_task(ticket_id=_TICKET, client=_CLIENT)
+    task.fix_dispatch_session_id = "fix-sess"
+    task.fix_dispatch_launched_worker = _make_launched_fix_worker(
+        surface_ref="feed0001"
+    )
+
+    candidates = fix_dispatch._detect_fix_dispatch_completions([task])
+
+    assert candidates == [
+        fix_dispatch._FixDispatchCandidate(
+            ticket_id=_TICKET, client=_CLIENT, launched_surface_ref="feed0001"
+        )
+    ]
 
 
 def test_detect_fix_dispatch_completions_skips_undispatched_task() -> None:
@@ -182,6 +198,45 @@ def test_act_on_pending_fix_dispatches_spawns_and_clears_latch(
     assert task.fix_dispatch_session_id == "fix-sess"
     # The row must stay RUNNING: that is what keeps claim.py's PENDING-only
     # reclaim from dispatching a second REVIEW session mid-fix.
+    assert task.status == QueueItemStatus.RUNNING
+    # #2590: an ordinary, recorded spawn leaves no launched-worker tombstone.
+    assert task.fix_dispatch_launched_worker is None
+
+
+def test_act_on_pending_fix_dispatches_stamps_tombstone_on_worker_launched_error(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+) -> None:
+    """#2590: a launched-but-unrecorded worker leaves a durable tombstone.
+
+    The row records the worker's daemon surface so the completions phase can
+    hold it until a readable roster no longer lists that surface.
+    """
+
+    def _launched(**_kwargs: Any) -> None:
+        msg = "sessions.json write failed after launch"
+        raise WorkerLaunchedError(msg, session_id="fix-sess", surface_ref="abc12345")
+
+    stub_dispatch.side_effect = _launched
+    _seed_task(pending_fix_dispatch=_pending())
+    frozen_now = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
+
+    with freeze_time(frozen_now):
+        acted = fix_dispatch._act_on_pending_fix_dispatches(
+            [fix_dispatch._FixDispatchCandidate(ticket_id=_TICKET, client=_CLIENT)],
+            clients={_CLIENT: acme_client},
+        )
+
+    assert acted == [_TICKET]
+    task = _only_task()
+    assert task.pending_fix_dispatch is None
+    assert task.fix_dispatch_session_id == "fix-sess"
+    worker = task.fix_dispatch_launched_worker
+    assert worker is not None
+    assert worker.surface_ref == "abc12345"
+    assert worker.launched_at == frozen_now
+    assert worker.attention_paged_at is None
     assert task.status == QueueItemStatus.RUNNING
 
 
@@ -894,23 +949,6 @@ def test_stamp_helpers_tolerate_a_row_removed_after_dispatch(
 # --- completion act phase ---------------------------------------------------
 
 
-def _save_fix_session(status: SessionStatus) -> None:
-    from cw.config import save_state
-
-    save_state(
-        CwState(
-            sessions=[
-                _make_daemon_session(
-                    id="fix-sess",
-                    name=f"{_CLIENT}/fix/{_TICKET}",
-                    client=_CLIENT,
-                    status=status,
-                )
-            ]
-        )
-    )
-
-
 def test_act_on_fix_dispatch_completions_unparks_task(tmp_config_dir: Path) -> None:
     _seed_task(fix_dispatch_session_id="fix-sess")
     _save_fix_session(SessionStatus.COMPLETED)
@@ -1073,16 +1111,16 @@ def test_unrecorded_fix_worker_is_stopped_before_its_row_unparks(
     next reconcile treats it as finished and unparks the row for a fresh
     REVIEW round. With a readable roster, that same reconcile stops the
     unrecorded worker first: the leaked-worker stop is drained after the
-    sessions lock releases, before ``run_fix_dispatch`` runs. The window stays
-    open when the roster is unreadable or the stop fails; this test does not
-    cover those cases.
+    sessions lock releases, before ``run_fix_dispatch`` runs, and the #2590
+    hold then confirms the surface gone before it unparks. The unreadable
+    roster and failed-stop cases are pinned by
+    ``test_unrecorded_fix_worker_row_stays_held_while_roster_unreadable`` and
+    ``test_unrecorded_fix_worker_row_stays_held_when_stop_fails``.
     """
     _seed_fix_handoff_after_failed_session_write(
         make_git_repo, tmp_path, mock_native_daemon, monkeypatch
     )
-    monkeypatch.setattr(
-        "cw.reconcile._deps.get_native_daemon_client", lambda: mock_native_daemon
-    )
+    use_reconcile_daemon(monkeypatch, mock_native_daemon)
     order: list[str] = []
     real_stop = mock_native_daemon.stop
     real_unpark = fix_dispatch._act_on_fix_dispatch_completions
@@ -1105,6 +1143,107 @@ def test_unrecorded_fix_worker_is_stopped_before_its_row_unparks(
 
     assert order == ["stop 00000001", "unpark 2502"]
     assert _only_task().status == QueueItemStatus.PENDING
+    assert len(mock_native_daemon.spawn_calls) == 1
+
+
+def _unconfirmed_worker_pages() -> list[dict[str, Any]]:
+    """Every persisted unconfirmed-worker page (#2590)."""
+    return [
+        event.payload
+        for event in read_events(
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
+        )
+        if event.payload.get("paused_status") == FIX_DISPATCH_WORKER_UNCONFIRMED_REASON
+    ]
+
+
+def test_unrecorded_fix_worker_row_stays_held_while_roster_unreadable(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    fail_state_write_after_launch: None,
+) -> None:
+    """#2590: an unreadable roster can neither stop nor confirm the worker, so
+    the row stays RUNNING and held; once the roster reads again the sweep
+    stops the worker and the same tick confirms it gone and unparks."""
+    _seed_fix_handoff_after_failed_session_write(
+        make_git_repo, tmp_path, mock_native_daemon, monkeypatch
+    )
+    use_reconcile_daemon(monkeypatch, mock_native_daemon)
+
+    reconcile()
+    launched = _only_task()
+    assert launched.fix_dispatch_launched_worker is not None
+    session_id = launched.fix_dispatch_session_id
+    assert session_id is not None
+
+    mock_native_daemon.roster_unreadable = True
+    reconcile()
+    reconcile()
+
+    held = _only_task()
+    assert held.status == QueueItemStatus.RUNNING
+    assert held.fix_dispatch_session_id == session_id
+    assert held.fix_dispatch_launched_worker == launched.fix_dispatch_launched_worker
+    assert len(mock_native_daemon.spawn_calls) == 1
+    assert mock_native_daemon.stop_calls == []
+
+    mock_native_daemon.roster_unreadable = False
+    reconcile()
+
+    assert mock_native_daemon.stop_calls == ["00000001"]
+    released = _only_task()
+    assert released.status == QueueItemStatus.PENDING
+    assert released.fix_dispatch_session_id is None
+    assert released.fix_dispatch_launched_worker is None
+
+
+def test_unrecorded_fix_worker_row_stays_held_when_stop_fails(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    fail_state_write_after_launch: None,
+) -> None:
+    """#2590: a stop that leaves the surface in the roster keeps the row held,
+    pages once after the grace, and releases once the worker really stops."""
+    _seed_fix_handoff_after_failed_session_write(
+        make_git_repo, tmp_path, mock_native_daemon, monkeypatch
+    )
+    use_reconcile_daemon(monkeypatch, mock_native_daemon)
+    attempted: list[str] = []
+    real_stop = mock_native_daemon.stop
+    monkeypatch.setattr(mock_native_daemon, "stop", attempted.append)
+
+    reconcile()
+    reconcile()
+    reconcile()
+
+    held = _only_task()
+    assert held.status == QueueItemStatus.RUNNING
+    assert held.fix_dispatch_session_id is not None
+    worker = held.fix_dispatch_launched_worker
+    assert worker is not None
+    assert attempted
+    assert _unconfirmed_worker_pages() == []
+
+    with freeze_time(worker.launched_at + timedelta(minutes=6)):
+        reconcile()
+        reconcile()
+
+    assert len(_unconfirmed_worker_pages()) == 1
+    assert _only_task().status == QueueItemStatus.RUNNING
+
+    monkeypatch.setattr(mock_native_daemon, "stop", real_stop)
+    reconcile()
+
+    released = _only_task()
+    assert released.status == QueueItemStatus.PENDING
+    assert released.fix_dispatch_session_id is None
+    assert released.fix_dispatch_launched_worker is None
     assert len(mock_native_daemon.spawn_calls) == 1
 
 

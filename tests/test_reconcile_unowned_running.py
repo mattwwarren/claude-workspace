@@ -49,10 +49,12 @@ from cw.worktree import worktree_path_for
 from tests._clients_yaml import write_clients_yaml
 from tests._dirty_check_helpers import DIRTY_CHECKS_LOGGER, unavailable_records
 from tests._reconcile_helpers import (
+    EVENTS_DOC,
     _attention_events,
     _failing_record_event,
     _state_queue_snapshot,
     _write_agent_spawn_stamp,
+    events_doc_bullet,
     mk_unowned_running_row,
     write_unreadable_claim_context,
 )
@@ -70,7 +72,6 @@ _SID = "sess-2591"
 _CLAIM = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
 # A naive timestamp, as a legacy or hand-edited state file can carry.
 _NAIVE_START = (_CLAIM + timedelta(hours=1)).replace(tzinfo=None)
-_EVENTS_DOC = Path(__file__).resolve().parents[1] / "docs" / "events.md"
 _MODULE = "cw.reconcile.unowned_running"
 
 
@@ -886,7 +887,7 @@ class TestNoOpAndInvariants:
 
 
 def _events_section(heading: str) -> str:
-    text = _EVENTS_DOC.read_text(encoding="utf-8")
+    text = EVENTS_DOC.read_text(encoding="utf-8")
     start = text.index(f"### `{heading}`")
     end = text.find("\n### ", start + 1)
     return text[start : end if end != -1 else len(text)]
@@ -913,9 +914,7 @@ class TestDocsNameValidCommands:
 
     @staticmethod
     def _bullet() -> str:
-        text = _EVENTS_DOC.read_text(encoding="utf-8")
-        start = text.index('- `"spawn_post_launch_failed"`')
-        return text[start : text.index('\n- `"', start + 1)]
+        return events_doc_bullet('- `"spawn_post_launch_failed"`')
 
     def test_bullet_names_cancel_then_requeue_from_cancelled(self) -> None:
         bullet = " ".join(self._bullet().split())

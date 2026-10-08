@@ -932,20 +932,47 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `sessions.json`: the leaked-worker sweep stops the unrecorded worker on the
   next reconcile tick, the row stays RUNNING bound to that id, and
   `cw dev-queue tasks` shows the `?session_mismatch` advisory. For a fix-loop
-  handoff, the next reconcile instead treats that unrecorded session as
-  finished and unparks the row for a fresh REVIEW round; with a readable
-  roster the same reconcile stops the worker first, but an unreadable roster
-  or a failed stop can leave both workers running. When only the dev-queue
-  stamp failed, the worker keeps running and the row stays RUNNING with no
-  `session_id`; reconcile then adopts the row (`task.session_adopted`) once
-  the recorded session's `cw-context.json` ties it to this claim and the
-  session did not predate the claim, and until it does the operator inspects
-  the worker and, if none is running, releases the row with
-  `cw dev-queue cancel <ticket> -c <client>` followed by
+  handoff (#2590) the row is instead held: it records the launched worker's
+  surface (`fix_dispatch_launched_worker`) and stays RUNNING, keeping its lane
+  slot, with no new REVIEW round claimed, until a readable daemon roster no
+  longer lists that surface. The next reconcile tick stops the worker through
+  the leaked-worker sweep and then confirms it gone, so the hold normally
+  clears within a tick; if the roster is unreadable or the stop fails the row
+  stays held and `fix_dispatch_worker_unconfirmed` pages. `cancel` followed by
+  `requeue --from-cancelled` does not release a held fix-loop row (the hold
+  follows `fix_dispatch_session_id`, not the row's status); only
+  `claude stop <surface_ref>` (the roster still lists the worker) or repairing
+  the roster file (roster unreadable) does. For a dispatch claim whose
+  dev-queue stamp failed (not a fix-loop handoff), the worker keeps running
+  and the row stays RUNNING with no `session_id`; reconcile then adopts the
+  row (`task.session_adopted`) once the recorded session's `cw-context.json`
+  ties it to this claim and the session did not predate the claim, and until
+  it does the operator inspects the worker and, if none is running, releases
+  the row with `cw dev-queue cancel <ticket> -c <client>` followed by
   `cw dev-queue requeue <ticket> -c <client> --from-cancelled` (plain
   `cw dev-queue requeue` refuses a RUNNING row). When the `sessions.json`
-  write failed, the same operator release applies; nothing yet recovers that
-  case automatically (#2591 follow-up). No push notification is fired
+  write failed on a dispatch claim, the same operator release applies;
+  nothing yet recovers that case automatically (#2591 follow-up). No push
+  notification is fired (`fire_push_notification` is not called).
+- `"fix_dispatch_worker_unconfirmed"` — a fix-loop worker that launched but
+  was never recorded (#2590) is not yet confirmed stopped, so its row is held:
+  `breadcrumbs` names the one action that releases it,
+  `claude stop <surface_ref>` while the daemon roster still lists the surface,
+  or repairing the roster file when it cannot be read (roster unreadable;
+  stopping the worker does not release the row in that case). The row stays
+  RUNNING and keeps its lane slot and `fix_dispatch_session_id`, whatever its
+  status, until a readable roster no longer lists the surface; the next
+  reconcile tick then clears `fix_dispatch_launched_worker`, logs
+  `fix_dispatch_worker_confirmed_stopped` at WARNING, and unparks the row for a
+  fresh REVIEW round. The page fires once the launch is 5 minutes old, then
+  every 60 minutes while the row stays held. `session_id` is the launched cw
+  session's id, `session_name` is `""`, `claude_session_id` is `null`, and
+  `crashed` is `false`. `cancel` followed by `requeue --from-cancelled` does
+  not release it, and there is no force-release flag. If
+  `claude stop <surface_ref>` fails or the entry stays in the roster, the
+  entry itself is stale: repair the roster file as in the unreadable case (fix
+  the corrupt content or remove the stale entry; do not delete the whole
+  roster, it lists every live worker). No push notification is fired
   (`fire_push_notification` is not called).
 - `"plan_parked"` — A headless worker completed its plan stage with open
   ambiguities or unverified premises (`ambiguities_pending_resolution` or
@@ -1207,8 +1234,9 @@ open enum; consumers MUST tolerate unknown values. Known values:
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 A push notification is fired for most emissions (via `fire_push_notification`)
 — **except** `"freshness_gate_blocked"`, `"salvage_skip_escalated"`,
-`"dispatch_loop_stale"`, `"stopped_without_sentinel"`, and
-`"spawn_post_launch_failed"`, which deliberately do not push. (`stopped_without_sentinel` is emitted from the short-lived
+`"dispatch_loop_stale"`, `"stopped_without_sentinel"`,
+`"spawn_post_launch_failed"`, and `"fix_dispatch_worker_unconfirmed"`, which
+deliberately do not push. (`stopped_without_sentinel` is emitted from the short-lived
 `cw signal-stop` hook process, whose backgrounded push thread would be
 dropped when it exits.) The liveness sweep's distress fire — and therefore
 its push — is skipped entirely for a row parked with

@@ -31,6 +31,7 @@ from cw.models import (
     CwState,
     DevQueueStore,
     LastResultSource,
+    LaunchedFixWorker,
     LocalLivenessHandle,
     OrchestratorConfig,
     OrchestratorEventType,
@@ -73,6 +74,7 @@ from cw.reconcile.review_recipes.auto_fix_ci import (
 from tests._clients_yaml import staged_client, write_clients_yaml
 from tests.conftest import (
     _make_daemon_session,
+    _make_ticket_task,
     _write_idle_transcript,
     _write_stop_hook_transcript,
 )
@@ -398,6 +400,82 @@ def _make_pending_fix_dispatch(**overrides: Any) -> PendingFixDispatch:
     }
     kwargs.update(overrides)
     return PendingFixDispatch(**kwargs)
+
+
+def _make_launched_fix_worker(**overrides: Any) -> LaunchedFixWorker:
+    """Minimal-but-valid ``LaunchedFixWorker`` tombstone (#2590) with overrides.
+
+    Same dict-merge idiom as ``_make_pending_fix_dispatch``. The default
+    ``surface_ref`` is never seeded into a ``FakeNativeDaemonClient``, so a
+    readable fake roster reports it absent unless a test seeds it.
+    """
+    kwargs: dict[str, Any] = {
+        "surface_ref": "abc12345",
+        "launched_at": datetime(2026, 1, 1, tzinfo=UTC),
+    }
+    kwargs.update(overrides)
+    return LaunchedFixWorker(**kwargs)
+
+
+# Default (ticket, client) key of the fix-loop row the fix-dispatch tests seed
+# (``tests/test_reconcile_fix_dispatch.py``, ``..._fix_dispatch_hold.py``).
+_FIX_LOOP_TICKET = "2017"
+_FIX_LOOP_CLIENT = "acme"
+
+
+def _seed_task(**overrides: Any) -> None:
+    """Persist a single dev-queue row built from the canonical task builder."""
+    kwargs: dict[str, Any] = {
+        "ticket_id": _FIX_LOOP_TICKET,
+        "client": _FIX_LOOP_CLIENT,
+        "status": QueueItemStatus.RUNNING,
+    }
+    kwargs.update(overrides)
+    save_dev_queue(DevQueueStore(tasks=[_make_ticket_task(**kwargs)]))
+
+
+def _only_task() -> TicketTask:
+    """Return the dev queue's one row, asserting there is exactly one."""
+    tasks = load_dev_queue().tasks
+    assert len(tasks) == 1
+    return tasks[0]
+
+
+def _save_fix_session(status: SessionStatus) -> None:
+    """Persist the fix-loop row's ``fix-sess`` session at *status*."""
+    save_state(
+        CwState(
+            sessions=[
+                _make_daemon_session(
+                    id="fix-sess",
+                    name=f"{_FIX_LOOP_CLIENT}/fix/{_FIX_LOOP_TICKET}",
+                    client=_FIX_LOOP_CLIENT,
+                    status=status,
+                )
+            ]
+        )
+    )
+
+
+def use_reconcile_daemon(
+    monkeypatch: pytest.MonkeyPatch, daemon: FakeNativeDaemonClient
+) -> None:
+    """Make reconcile's ``_deps.get_native_daemon_client`` return *daemon*."""
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
+
+
+EVENTS_DOC = Path(__file__).resolve().parents[1] / "docs" / "events.md"
+
+
+def events_doc_bullet(marker: str) -> str:
+    """Slice the ``docs/events.md`` bullet starting at *marker*.
+
+    The bullet runs to the next line that opens another quoted-status bullet
+    (``\\n- `"``). Pass the full marker, e.g. ``'- `"spawn_post_launch_failed"`'``.
+    """
+    text = EVENTS_DOC.read_text(encoding="utf-8")
+    start = text.index(marker)
+    return text[start : text.index('\n- `"', start + 1)]
 
 
 def _shipped_salvage_payload(ticket_id: str = "salv-1") -> dict[str, Any]:
