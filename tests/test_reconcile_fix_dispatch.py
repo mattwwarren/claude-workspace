@@ -44,6 +44,7 @@ from cw.models import (
 from cw.models.enums import StageIdentifier
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import fix_dispatch, reconcile
+from cw.reconcile.fix_dispatch_hold import FIX_DISPATCH_WORKER_UNCONFIRMED_REASON
 from tests._reconcile_helpers import _FIX_LOOP_CLIENT as _CLIENT
 from tests._reconcile_helpers import _FIX_LOOP_TICKET as _TICKET
 from tests._reconcile_helpers import (
@@ -1146,13 +1147,13 @@ def test_unrecorded_fix_worker_is_stopped_before_its_row_unparks(
 
 
 def _unconfirmed_worker_pages() -> list[dict[str, Any]]:
-    """Every persisted ``fix_dispatch_worker_unconfirmed`` page (#2590)."""
+    """Every persisted unconfirmed-worker page (#2590)."""
     return [
         event.payload
         for event in read_events(
             event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
         )
-        if event.payload.get("paused_status") == "fix_dispatch_worker_unconfirmed"
+        if event.payload.get("paused_status") == FIX_DISPATCH_WORKER_UNCONFIRMED_REASON
     ]
 
 

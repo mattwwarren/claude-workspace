@@ -963,7 +963,7 @@ open enum; consumers MUST tolerate unknown values. Known values:
   RUNNING and keeps its lane slot and `fix_dispatch_session_id`, whatever its
   status, until a readable roster no longer lists the surface; the next
   reconcile tick then clears `fix_dispatch_launched_worker`, logs
-  `fix_dispatch_worker_confirmed_stopped` at INFO, and unparks the row for a
+  `fix_dispatch_worker_confirmed_stopped` at WARNING, and unparks the row for a
   fresh REVIEW round. The page fires once the launch is 5 minutes old, then
   every 60 minutes while the row stays held. `session_id` is the launched cw
   session's id, `session_name` is `""`, `claude_session_id` is `null`, and

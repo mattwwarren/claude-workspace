@@ -49,9 +49,7 @@ from cw.worktree import worktree_path_for
 from tests._clients_yaml import write_clients_yaml
 from tests._dirty_check_helpers import DIRTY_CHECKS_LOGGER, unavailable_records
 from tests._reconcile_helpers import (
-    EVENTS_DOC as _EVENTS_DOC,
-)
-from tests._reconcile_helpers import (
+    EVENTS_DOC,
     _attention_events,
     _failing_record_event,
     _state_queue_snapshot,
@@ -889,7 +887,7 @@ class TestNoOpAndInvariants:
 
 
 def _events_section(heading: str) -> str:
-    text = _EVENTS_DOC.read_text(encoding="utf-8")
+    text = EVENTS_DOC.read_text(encoding="utf-8")
     start = text.index(f"### `{heading}`")
     end = text.find("\n### ", start + 1)
     return text[start : end if end != -1 else len(text)]

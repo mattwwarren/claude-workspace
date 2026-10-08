@@ -312,7 +312,7 @@ def test_unparks_and_clears_tombstone_when_surface_absent(
     daemon: FakeNativeDaemonClient, caplog: pytest.LogCaptureFixture
 ) -> None:
     """9: a readable roster without the surface releases the row and clears
-    the tombstone, logging the confirmation once at INFO."""
+    the tombstone, logging the confirmation once at WARNING."""
     _seed_held(_make_launched_fix_worker())
 
     with caplog.at_level(logging.INFO, logger=_LOGGER):
@@ -328,7 +328,7 @@ def test_unparks_and_clears_tombstone_when_surface_absent(
     assert records[0].getMessage() == (
         "fix_dispatch_worker_confirmed_stopped ticket=2017 client=acme surface=abc12345"
     )
-    assert records[0].levelno == logging.INFO
+    assert records[0].levelno == logging.WARNING
 
 
 def test_recorded_terminal_session_with_tombstone_needs_roster_confirm(

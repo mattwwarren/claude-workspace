@@ -132,7 +132,9 @@ def apply_launched_worker_hold(
         return HoldDecision(release=False, dirty=False)
     if live is not None and worker.surface_ref not in live:
         task.fix_dispatch_launched_worker = None
-        _log.info(
+        # Why: WARNING, not INFO: this line is the only audit record of the
+        # release, and cw's default logging drops INFO (see native_daemon.py:235).
+        _log.warning(
             "fix_dispatch_worker_confirmed_stopped ticket=%s client=%s surface=%s",
             task.ticket_id,
             task.client,
