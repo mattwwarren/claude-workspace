@@ -81,7 +81,7 @@ from tests._reconcile_helpers import (
     _write_salvage_transcript,
     probe_sessions_lock_free,
 )
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests.conftest import _make_daemon_session, _make_ticket_task, commit_tracked_file
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -322,6 +322,26 @@ class TestDirtyChecksStore:
             "at this worktree",
         ):
             checks.lookup(moved)
+
+    def test_git_commit_invalidates_a_clean_capture(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = make_git_repo("generation")
+        session = _backstop_session("git", tmp_path, worktree_path=repo)
+        _live(monkeypatch, {"git": None})
+        checks = DirtyChecks()
+
+        assert checks.capture(session) is None
+        commit_tracked_file(repo, "committed.txt")
+
+        with pytest.raises(
+            DirtyCheckUnavailableError,
+            match="the worktree changed since its dirty check",
+        ):
+            checks.lookup(session)
 
     @pytest.mark.parametrize("reason", [None, _DIRTY])
     def test_strict_freshness_bound(

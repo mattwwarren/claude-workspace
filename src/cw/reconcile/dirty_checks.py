@@ -100,10 +100,6 @@ type _GenerationEntry = tuple[str, int, int, int, int, int]
 type _WorktreeGeneration = tuple[_GenerationEntry, ...] | Literal["unavailable"]
 type _GenerationValidation = Literal["same", "changed", "unavailable"]
 
-# A larger worktree is not safely revalidated under the lock. Its capture is
-# treated as unavailable instead of making the lock-held path proportional to
-# the worktree size.
-_MAX_GENERATION_ENTRIES = 4096
 _UNAVAILABLE_GENERATION: Literal["unavailable"] = "unavailable"
 
 
@@ -114,6 +110,10 @@ class DirtyCheckUnavailableError(Exception):
     ``except CwError`` swallows it: the consumers catch it by name and defer
     the session to the next tick.
     """
+
+    def __init__(self, message: str, *, stop_capture: bool = True) -> None:
+        super().__init__(message)
+        self.stop_capture = stop_capture
 
 
 def _who(session: Session) -> str:
@@ -131,13 +131,14 @@ def normalize_roster(
 
 
 def _worktree_generation(worktree: Path) -> _WorktreeGeneration:
-    """Return a bounded metadata generation for files in *worktree*.
+    """Return a metadata generation for files and Git state in *worktree*.
 
     This runs during the lockless capture pass. The returned entries include
     directories, so checking their metadata later detects additions and
-    removals without recursively scanning the worktree under the lock. A
-    missing worktree is a valid generation (the dirty helper treats it as
-    clean); filesystem errors and snapshots above the bound are unavailable.
+    removals without recursively scanning the worktree under the lock. Git's
+    HEAD, index and refs metadata are included too, so a commit or ref change
+    invalidates a clean capture. A missing worktree is a valid generation (the
+    dirty helper treats it as clean); filesystem errors are unavailable.
     """
     try:
         root = worktree.lstat()
@@ -172,8 +173,6 @@ def _scan_worktree_generation(
                     path = Path(child.path)
                     if ".git" in path.relative_to(worktree).parts:
                         continue
-                    if len(entries) >= _MAX_GENERATION_ENTRIES:
-                        return _UNAVAILABLE_GENERATION
                     stat = child.stat(follow_symlinks=False)
                     entries.append(
                         (
@@ -187,11 +186,126 @@ def _scan_worktree_generation(
                     )
                     if S_ISDIR(stat.st_mode):
                         directories.append(path)
-        return tuple(sorted(entries))
+        git_entries = _git_metadata_generation(worktree)
+        if git_entries == _UNAVAILABLE_GENERATION:
+            return _UNAVAILABLE_GENERATION
+        return tuple(sorted((*entries, *git_entries)))
     except OSError:
         # Other failures must not be represented by a value that can compare
         # equal later.
         return _UNAVAILABLE_GENERATION
+
+
+def _git_metadata_generation(
+    worktree: Path,
+) -> list[_GenerationEntry] | Literal["unavailable"]:
+    """Return cheap metadata entries whose changes invalidate Git state.
+
+    Only Git's control files are traversed here; the worktree file snapshot is
+    handled by the caller. ``refs`` directory entries are included so both
+    existing ref updates and newly-created refs change the generation.
+    """
+    marker = worktree / ".git"
+    try:
+        marker_stat = marker.lstat()
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return _UNAVAILABLE_GENERATION
+
+    git_dir = _git_dir_from_marker(marker, marker_stat)
+    if git_dir == _UNAVAILABLE_GENERATION:
+        return _UNAVAILABLE_GENERATION
+    entries = (
+        []
+        if S_ISDIR(marker_stat.st_mode)
+        else [_generation_entry(str(marker), marker_stat)]
+    )
+
+    metadata_roots = [git_dir]
+    common = _common_git_dir(git_dir)
+    if common == _UNAVAILABLE_GENERATION:
+        return _UNAVAILABLE_GENERATION
+    if common is not None:
+        metadata_roots.append(common)
+
+    for root in metadata_roots:
+        try:
+            entries.extend(_git_metadata_entries(root))
+        except OSError:
+            return _UNAVAILABLE_GENERATION
+    return entries
+
+
+def _git_dir_from_marker(
+    marker: Path, marker_stat: os.stat_result
+) -> Path | Literal["unavailable"]:
+    if S_ISDIR(marker_stat.st_mode):
+        return marker
+    try:
+        contents = marker.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return _UNAVAILABLE_GENERATION
+    prefix = "gitdir:"
+    if not contents.lower().startswith(prefix):
+        return _UNAVAILABLE_GENERATION
+    git_dir = Path(contents[len(prefix) :].strip())
+    return git_dir if git_dir.is_absolute() else marker.parent / git_dir
+
+
+def _common_git_dir(git_dir: Path) -> Path | None | Literal["unavailable"]:
+    commondir = git_dir / "commondir"
+    try:
+        commondir.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return _UNAVAILABLE_GENERATION
+    try:
+        common = Path(commondir.read_text(encoding="utf-8").strip())
+    except (OSError, UnicodeError):
+        return _UNAVAILABLE_GENERATION
+    return common if common.is_absolute() else git_dir / common
+
+
+def _git_metadata_entries(root: Path) -> list[_GenerationEntry]:
+    entries: list[_GenerationEntry] = []
+    for name in ("HEAD", "index", "packed-refs", "commondir"):
+        path = root / name
+        try:
+            stat = path.lstat()
+        except FileNotFoundError:
+            continue
+        entries.append(_generation_entry(str(path), stat))
+
+    refs = root / "refs"
+    try:
+        refs_stat = refs.lstat()
+    except FileNotFoundError:
+        return entries
+    entries.append(_generation_entry(str(refs), refs_stat))
+    directories = [refs]
+    while directories:
+        directory = directories.pop()
+        with os.scandir(directory) as children:
+            for child in children:
+                path = Path(child.path)
+                stat = child.stat(follow_symlinks=False)
+                entries.append(_generation_entry(str(path), stat))
+                if S_ISDIR(stat.st_mode):
+                    directories.append(path)
+    return entries
+
+
+def _generation_entry(path: str, stat: os.stat_result) -> _GenerationEntry:
+    return (
+        path,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+        stat.st_size,
+        stat.st_mode,
+        stat.st_ino,
+    )
 
 
 def _revalidate_generation(
@@ -282,10 +396,14 @@ class DirtyChecks:
         worktree = session.worktree_path
         if worktree is None:
             return None
+        try:
+            self._store.ensure_capture_available()
+        except ProbeStoreUnavailableError as err:
+            raise self._capture_unavailable(err, session) from err
         generation = _worktree_generation(worktree)
         if generation == _UNAVAILABLE_GENERATION:
             msg = f"the worktree generation was unavailable for {_who(session)}"
-            raise DirtyCheckUnavailableError(msg)
+            raise DirtyCheckUnavailableError(msg, stop_capture=False)
         try:
             reason = self._store.capture(
                 (session.id, worktree),
@@ -308,6 +426,21 @@ class DirtyChecks:
         else:
             self._generations[(session.id, worktree)] = generation
             return reason
+
+    def _capture_unavailable(
+        self, err: ProbeStoreUnavailableError, session: Session
+    ) -> DirtyCheckUnavailableError:
+        if err.reason == "budget":
+            msg = (
+                f"the {self.budget_seconds or 0:.0f}s dirty-check budget is"
+                f" spent; {_who(session)} was not checked"
+            )
+        else:
+            msg = (
+                f"the {self.max_captures}-check per-tick dirty-check cap is"
+                f" reached; {_who(session)} was not checked"
+            )
+        return DirtyCheckUnavailableError(msg)
 
     def lookup(self, session: Session) -> str | None:
         """Return *session*'s captured dirty reason if usable. Never runs git.
@@ -359,6 +492,13 @@ class DirtyChecks:
             try:
                 self.capture(session)
             except DirtyCheckUnavailableError as exc:
+                if not exc.stop_capture:
+                    _log.warning(
+                        "reconcile: dirty-check capture unavailable for %s;"
+                        " continuing with the remaining session(s)",
+                        session.id,
+                    )
+                    continue
                 _log.warning(
                     "reconcile: dirty-check capture stopped: %s; %d of %d"
                     " session(s) left unchecked and deferred to the next tick",
