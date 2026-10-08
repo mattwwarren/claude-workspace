@@ -538,11 +538,12 @@ def _queue_close_audit_intent(session: Session, call: _OrphanCloseCall) -> None:
             session.id,
             call.command,
         )
-        raise CwError(
+        message = (
             f"Could not prepare the durable audit record for routed-result session"
             f" {session.id} before closing it: {exc}. Fix the audit outbox and"
             " retry the command."
-        ) from exc
+        )
+        raise CwError(message) from exc
 
 
 def _finalize_close_audit_intent(session: Session, *, stop_succeeded: bool) -> None:
