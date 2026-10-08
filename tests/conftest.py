@@ -2207,6 +2207,35 @@ def mock_native_daemon() -> FakeNativeDaemonClient:
     return FakeNativeDaemonClient()
 
 
+def _stop_leaves_worker_listed(
+    monkeypatch: pytest.MonkeyPatch, fake: FakeNativeDaemonClient
+) -> None:
+    """Make *fake*'s ``stop`` record the call but never drop the worker.
+
+    The "``claude stop`` returned yet the roster still lists the worker"
+    shape: :meth:`NativeDaemonClient.stop` swallows every failure, so a
+    caller that must know the worker is gone has to confirm it in the roster
+    (#2324, #2517). One shared fake for every such test (N6).
+    """
+    monkeypatch.setattr(fake, "stop", fake.stop_calls.append)
+
+
+def _stop_makes_roster_unreadable(
+    monkeypatch: pytest.MonkeyPatch, fake: FakeNativeDaemonClient
+) -> None:
+    """Make *fake*'s ``stop`` record the call and leave the roster unreadable.
+
+    The worker stays listed and every fail-closed roster read afterwards
+    returns ``None``, so the stop can never be confirmed (#2517).
+    """
+
+    def _stop(short_id: str) -> None:
+        fake.stop_calls.append(short_id)
+        fake.roster_unreadable = True
+
+    monkeypatch.setattr(fake, "stop", _stop)
+
+
 # The canonical SESSION_NEEDS_ATTENTION payload keys (docs/events.md), with
 # ``lane`` as the ninth.
 _CANONICAL_ATTENTION_KEYS: frozenset[str] = frozenset(
