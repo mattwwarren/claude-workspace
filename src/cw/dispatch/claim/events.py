@@ -136,8 +136,10 @@ def _emit_worktree_occupied_skip_event(client_name: str, ticket_id: str) -> None
     held by a live session or daemon worker (#2077).
 
     Sibling of _emit_stale_dispatch_blocked_event: per-task, outside the
-    precedence chain, no SESSION_NEEDS_ATTENTION sibling -- nothing here
-    needs operator action, the condition resolves itself. Shared by the
+    precedence chain, no SESSION_NEEDS_ATTENTION sibling -- a genuinely
+    working session resolves itself; a routed-but-never-completed orphan
+    (#2517) does not and is closed by the operator-run ``cw dev-queue
+    approve`` / ``requeue`` or ``cw spawn close --confirmed-dead``. Shared by the
     pre-claim occupancy screen, the genuinely-live HookContextConflictError
     release, and the pre-existing WorktreeOccupiedError release.
     """
