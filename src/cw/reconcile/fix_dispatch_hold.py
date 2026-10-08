@@ -34,7 +34,6 @@ from typing import TYPE_CHECKING, NamedTuple
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
-from cw.native_daemon import RealNativeDaemonClient
 from cw.reconcile import _deps
 
 if TYPE_CHECKING:
@@ -98,31 +97,13 @@ def read_live_worker_roster() -> set[str] | None:
     """
     try:
         daemon = _deps.get_native_daemon_client()
-        # The native daemon reader deliberately treats a missing roster as an
-        # empty set for callers that only need liveness.  This hold is
-        # different: an absent roster provides no evidence that the launched
-        # worker stopped, so it must fail closed.  The fake daemon keeps an
-        # in-memory roster and intentionally has no backing file; its returned
-        # set is the test double's roster evidence.
-        if (
-            isinstance(daemon, RealNativeDaemonClient)
-            and not daemon.roster_path.is_file()
-        ):
-            return None
-        live = daemon.list_live_session_short_ids_fail_closed()
-        if (
-            isinstance(daemon, RealNativeDaemonClient)
-            and not daemon.roster_path.is_file()
-        ):
-            return None
+        return daemon.list_live_session_short_ids_fail_closed()
     except (OSError, ValueError):
         _log.warning(
             "fix_dispatch_hold: daemon roster read failed, treating it as unreadable",
             exc_info=True,
         )
         return None
-    else:
-        return live
 
 
 def apply_launched_worker_hold(
