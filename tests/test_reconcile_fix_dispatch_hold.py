@@ -30,6 +30,7 @@ from cw.models import (
     QueueItemStatus,
     SessionStatus,
 )
+from cw.native_daemon import RealNativeDaemonClient
 from cw.queue_rows import _is_fix_dispatch_held
 from cw.reconcile import fix_dispatch, fix_dispatch_hold
 from cw.reconcile.fix_dispatch_hold import (
@@ -142,6 +143,29 @@ def test_holds_when_roster_unreadable(daemon: FakeNativeDaemonClient) -> None:
 
     _assert_held(worker)
     assert daemon.stop_calls == []
+
+
+def test_holds_when_roster_file_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """2b: the native reader maps an absent roster to set(); the hold must not."""
+    client = RealNativeDaemonClient(roster_path=tmp_path / "absent-roster.json")
+    assert client.list_live_session_short_ids_fail_closed() == set()
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: client)
+    worker = _make_launched_fix_worker()
+    _seed_held(worker)
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        assert _run_completions() == []
+
+    _assert_held(worker)
+    assert _release_records(caplog) == []
+    assert any(
+        r.name == _LOGGER and "daemon roster file is absent" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 @pytest.mark.parametrize(
