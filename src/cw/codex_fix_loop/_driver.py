@@ -46,15 +46,25 @@ from any single ``derive_review_counts`` call: ``must_fix_initial`` is cycle 0's
 pre-defer snapshot, ``deferred`` is the cross-cycle survivor count, and
 ``fix_cycles_used`` is the loop's own cycle counter — three values no single
 formula pass over one loop-exit-state finding list can produce together.
+
+The operator's binding constraints (#2633) are loaded once per run, before
+cycle 1, from the ticket's newest marker-bearing resolutions comment by the
+operator login (:mod:`cw.codex_fix_loop.constraints`); a comment posted while
+the loop runs is not seen until the next run.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING
 
 from cw._git import git_output
 from cw.codex_fix_loop.commit import _run_fix_and_commit
+from cw.codex_fix_loop.constraints import (
+    constraints_from_comment,
+    select_constraint_comment,
+)
 from cw.codex_fix_loop.convergence import _track_open_findings
 from cw.codex_fix_loop.divergence import (
     _DIVERGENCE_STALL_CYCLES,
@@ -67,6 +77,7 @@ from cw.codex_fix_loop.divergence import (
     render_divergence_report,
 )
 from cw.codex_fix_loop.fence import fix_scope_allowlist
+from cw.codex_fix_loop.growth import DEFAULT_GROWTH_BUDGET_LINES
 from cw.codex_fix_loop.park import _clean_exit, _park_survivors
 from cw.codex_fix_loop.snapshot import _persist_cycle_snapshot, _with_snapshot_pointer
 from cw.codex_review import (
@@ -75,6 +86,7 @@ from cw.codex_review import (
     CODEX_MUST_FIX_FINDINGS,
     FIX_LOOP_DIVERGING,
     _capture_diff,
+    _fetch_ticket_comments,
     _load_ticket_context,
     _prepare_review_pass,
     run_codex_roles,
@@ -89,6 +101,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult, Review
+    from cw.codex_fix_loop.constraints import OperatorConstraints
     from cw.codex_fix_loop.convergence import _OpenFindingKey
     from cw.codex_fix_loop.divergence import DivergenceState
     from cw.codex_fix_loop.snapshot import _PersistedSnapshot
@@ -110,6 +123,8 @@ _MAX_FIX_CYCLES = 5
 _FIX_CYCLE_FLOOR_SECONDS = 2 * _MIN_ROLE_TIMEOUT_SECONDS
 
 _MUST_FIX = "MUST_FIX"
+
+_log = logging.getLogger(__name__)
 
 
 def _remaining_budget(deadline: float | None) -> float | None:
@@ -289,6 +304,60 @@ def _cycle_exit(
     )
 
 
+def _load_constraints(
+    worktree: Path,
+    task: TicketTask,
+    operator_login: str | None,
+    ticket_text: str | None,
+) -> OperatorConstraints | None:
+    """Load the operator's binding constraints once per run (#2633).
+
+    Each fail-open path logs one WARNING so "no constraints" can be told apart
+    from "constraints we could not load"; the normal no-marker case is silent.
+    """
+    if operator_login is None:
+        _log.warning(
+            "codex fix loop: operator login unresolved (ticket=%s); marker "
+            "comments are ignored (fail closed)",
+            task.ticket_id,
+        )
+        return None
+    comments = _fetch_ticket_comments(worktree, task.ticket_id)
+    if comments is None:
+        _log.warning(
+            "codex fix loop: operator-constraint comments unavailable "
+            "(ticket=%s); continuing without operator constraints",
+            task.ticket_id,
+        )
+        return None
+    comment = select_constraint_comment(
+        comments, operator_login=operator_login, ticket_text=ticket_text
+    )
+    if comment is None:
+        return None
+    constraints = constraints_from_comment(comment)
+    tokens, kinds = constraints.forbidden_tokens, constraints.forbidden_kinds
+    if not tokens and not kinds:
+        _log.warning(
+            "codex fix loop: operator comment %s selected as constraints but "
+            "yielded no forbidden tokens or kinds (ticket=%s, created_at=%s); "
+            "the constraint guard has nothing to enforce",
+            constraints.comment_id,
+            task.ticket_id,
+            constraints.created_at,
+        )
+    else:
+        _log.info(
+            "codex fix loop: operator constraints active (ticket=%s, "
+            "comment_created_at=%s, tokens=%d, kinds=%d)",
+            task.ticket_id,
+            constraints.created_at,
+            len(tokens),
+            len(kinds),
+        )
+    return constraints
+
+
 def run_review_with_fix_loop(
     *,
     runner: CodexRunner,
@@ -303,6 +372,9 @@ def run_review_with_fix_loop(
     claim_tier_enabled: bool = False,
     disposition_drift_check_enabled: bool = True,
     stall_cycles: int = _DIVERGENCE_STALL_CYCLES,
+    growth_budget_lines: int = DEFAULT_GROWTH_BUDGET_LINES,
+    growth_guard_enabled: bool = True,
+    operator_login: str | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the initial review pass plus a bounded MUST_FIX fix loop.
 
@@ -319,7 +391,11 @@ def run_review_with_fix_loop(
     straight through with zero fix invocations attempted. When
     ``fix_loop_enabled`` is False and cycle 0 blocks, returns cycle 0's tuple
     unchanged with zero fix cycles attempted. ``stall_cycles`` (#2633) is the
-    lane-resolved divergence stall count (``codex_fix_loop_stall_cycles``).
+    lane-resolved divergence stall count (``codex_fix_loop_stall_cycles``);
+    ``growth_budget_lines`` and ``growth_guard_enabled`` (#2633) set the
+    in-file growth budget and its lane-resolved switch, and ``operator_login``
+    is the identity whose marker-bearing comment carries binding constraints
+    (``None`` fails closed: no constraints).
     """
     deadline = (
         None
@@ -347,6 +423,7 @@ def run_review_with_fix_loop(
     cycle0_files = frozenset(cycle0_changed)
     scope_tier = resolve_tier(task.scope_hint)
     plan_text, ticket_text = _load_ticket_context(worktree)
+    constraints = _load_constraints(worktree, task, operator_login, ticket_text)
     # #2485: the file fence every fix cycle is held to — plan manifest plus
     # cycle-0 diff; None (no fence) when the plan has no manifest.
     allowed_files = fix_scope_allowlist(plan_text, cycle0_files)
@@ -419,6 +496,9 @@ def run_review_with_fix_loop(
             had_real_commit_so_far=had_real_commit,
             default_branch=default_branch,
             allowed_files=allowed_files,
+            growth_budget_lines=growth_budget_lines,
+            growth_guard_enabled=growth_guard_enabled,
+            constraints=constraints,
         )
         if park is not None:
             return park

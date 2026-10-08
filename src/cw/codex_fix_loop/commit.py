@@ -2,10 +2,12 @@
 
 Refuses to start a cycle on a dirty worktree (#2633,
 :mod:`cw.codex_fix_loop.baseline`), builds the write-capable ``codex exec``
-argv and the fix prompt, runs the fix invocation, measures the cycle against
-its clean-start baseline, rejects a cycle whose changes touch a sensitive
-out-of-scope path or breach the scope fence / revert guard
-(:mod:`cw.codex_fix_loop.fence`), and commits (then pushes and verifies,
+argv and the fix prompt (with the operator's binding constraints, #2633),
+runs the fix invocation, measures the cycle against its clean-start baseline,
+rejects a cycle whose changes touch a sensitive out-of-scope path, breach the
+scope fence / revert guard (:mod:`cw.codex_fix_loop.fence`), or trip the
+switchable growth and constraint guards (:mod:`cw.codex_fix_loop.growth`,
+:mod:`cw.codex_fix_loop.constraints`), and commits (then pushes and verifies,
 #2354) exactly the paths the cycle was measured to touch. A failure at any
 step parks through the builders in :mod:`cw.codex_fix_loop.park`.
 """
@@ -24,6 +26,7 @@ from cw.codex_fix_loop.baseline import (
     capture_cycle_baseline,
     cycle_touched_paths,
 )
+from cw.codex_fix_loop.constraints import constraint_breach, render_section
 from cw.codex_fix_loop.fence import (
     StagedSetMismatchError,
     check_fix_fence,
@@ -31,6 +34,7 @@ from cw.codex_fix_loop.fence import (
     scope_violation_breach,
     staged_set_breach,
 )
+from cw.codex_fix_loop.growth import DEFAULT_GROWTH_BUDGET_LINES, check_growth_budget
 from cw.codex_fix_loop.hook_failure import (
     CommitHookFailedError,
     as_hook_failure,
@@ -50,6 +54,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult, Review, ScopeTier
+    from cw.codex_fix_loop.constraints import OperatorConstraints
     from cw.codex_fix_loop.convergence import _OpenFindingKey
     from cw.codex_fix_loop.fence import FenceBreach
     from cw.codex_fix_loop.snapshot import _PersistedSnapshot
@@ -121,6 +126,7 @@ def _build_fix_prompt(
     ticket_text: str | None,
     cycle: int,
     allowed_files: frozenset[str] | None = None,
+    constraints_section: str | None = None,
 ) -> str:
     """Render the fix-invocation prompt for one cycle's open MUST_FIX findings.
 
@@ -135,6 +141,9 @@ def _build_fix_prompt(
     worktree (#1709). The scope rules and, when a plan manifest exists, the
     file fence (#2485) follow the context, so the fix sees the same limits
     :func:`~cw.codex_fix_loop.fence.check_fix_fence` enforces afterwards.
+    ``constraints_section`` (#2633, the operator's binding resolutions) sits
+    between the scope rules and the fence; without it the prompt is
+    byte-identical to the pre-#2633 one.
     """
     parts = [
         f"# Codex Fix Cycle {cycle}",
@@ -149,6 +158,8 @@ def _build_fix_prompt(
     if plan_text:
         parts.append(f"## Approved Plan\n{plan_text}")
     parts.append(_FIX_SCOPE_RULES)
+    if constraints_section is not None:
+        parts.append(constraints_section)
     if allowed_files is not None:
         parts.append(_render_allowed_files(allowed_files))
     parts.append("## MUST_FIX Findings")
@@ -395,6 +406,45 @@ def _park_invocation_failure(ctx: _CycleContext, result: CodexRunResult) -> _Par
     )
 
 
+@dataclass(frozen=True)
+class _GrowthGuards:
+    """The switchable heuristic guards' settings for one run (#2633)."""
+
+    enabled: bool
+    budget_lines: int
+    constraints: OperatorConstraints | None
+
+
+def _growth_breach(
+    ctx: _CycleContext,
+    baseline: CycleBaseline,
+    *,
+    findings: list[Finding],
+    allowed_files: frozenset[str] | None,
+    guards: _GrowthGuards,
+) -> FenceBreach | None:
+    """Return the growth-budget or constraint breach, unless switched off.
+
+    The growth budget runs only with a plan manifest (like the fence); the
+    constraint check only when the operator posted binding constraints.
+    """
+    if not guards.enabled:
+        return None
+    if allowed_files is not None:
+        breach = check_growth_budget(
+            ctx.worktree,
+            baseline,
+            open_findings=findings,
+            budget_lines=guards.budget_lines,
+            cycle=ctx.cycle,
+        )
+        if breach is not None:
+            return breach
+    if guards.constraints is None:
+        return None
+    return constraint_breach(ctx.worktree, baseline, guards.constraints, ctx.cycle)
+
+
 def _cycle_breach(
     ctx: _CycleContext,
     baseline: CycleBaseline,
@@ -404,11 +454,12 @@ def _cycle_breach(
     scope_tier: ScopeTier,
     default_branch: str,
     allowed_files: frozenset[str] | None,
+    guards: _GrowthGuards,
 ) -> tuple[FenceBreach | None, frozenset[str]]:
     """Measure the cycle once and return its first guard breach plus the paths.
 
     The sensitive-path scope violation is checked before the fence and revert
-    guard, as before #2633.
+    guard, as before #2633; the switchable growth and constraint guards last.
     """
     touched = cycle_touched_paths(ctx.worktree, baseline)
     violations = _scope_violations(ctx.worktree, touched, cycle0_files, scope_tier)
@@ -422,6 +473,10 @@ def _cycle_breach(
         cycle=ctx.cycle,
         touched=touched,
     )
+    if breach is None:
+        breach = _growth_breach(
+            ctx, baseline, findings=findings, allowed_files=allowed_files, guards=guards
+        )
     return breach, frozenset(touched)
 
 
@@ -462,6 +517,9 @@ def _run_fix_and_commit(
     had_real_commit_so_far: bool,
     default_branch: str,
     allowed_files: frozenset[str] | None,
+    growth_budget_lines: int = DEFAULT_GROWTH_BUDGET_LINES,
+    growth_guard_enabled: bool = True,
+    constraints: OperatorConstraints | None = None,
 ) -> tuple[_Park | None, str | None]:
     """Run one cycle's fix invocation and commit; return ``(park, commit_sha)``.
 
@@ -472,8 +530,10 @@ def _run_fix_and_commit(
     is the terminal park result for a dirty start (#2633), a failed fix
     invocation, a scope violation (an out-of-scope change that also matches
     the sensitive-files registry), a fence breach (#2485 scope fence, #2492
-    revert guard), a staged-set mismatch, or a failed commit —
-    ``commit_sha`` is always ``None`` alongside it.
+    revert guard), a growth-budget or operator-constraint breach (#2633,
+    skipped when ``growth_guard_enabled`` is False), a staged-set mismatch, or
+    a failed commit — ``commit_sha`` is always ``None`` alongside it.
+    *constraints* also reach the fix prompt regardless of the switch.
     """
     ctx = _CycleContext(
         task=task,
@@ -497,6 +557,7 @@ def _run_fix_and_commit(
         ticket_text=ticket_text,
         cycle=cycle,
         allowed_files=allowed_files,
+        constraints_section=render_section(constraints),
     )
     argv = _build_fix_codex_argv(model=model, reasoning_effort=reasoning_effort)
     result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
@@ -510,6 +571,7 @@ def _run_fix_and_commit(
         scope_tier=scope_tier,
         default_branch=default_branch,
         allowed_files=allowed_files,
+        guards=_GrowthGuards(growth_guard_enabled, growth_budget_lines, constraints),
     )
     if breach is not None:
         return ctx.park_breach(breach), None

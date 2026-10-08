@@ -162,6 +162,9 @@ def _fix_loop_client(worktree: Path, *, lane_flag: bool | None = True) -> Client
         workspace_path=worktree,
         default_branch="main",
         lanes=[LaneConfig(name=_FIX_LOOP_LANE, codex_fix_loop_enabled=lane_flag)],
+        # #2633: resolve_operator_login returns this override, so a fix-loop
+        # run never reaches cached_gh_login's real `gh api user`.
+        operator_github_login="operator-login",
     )
 
 

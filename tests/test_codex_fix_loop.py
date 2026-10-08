@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +29,9 @@ from cw.codex_review import (
     _MIN_ROLE_TIMEOUT_SECONDS,
     _REVIEWER_ROLE_AGENT_FILES,
     CODEX_BUDGET_EXHAUSTED,
+    CODEX_FIX_CONSTRAINT_VIOLATION,
+    CODEX_FIX_DIRTY_START,
+    CODEX_FIX_GROWTH_BUDGET,
     CODEX_FIX_REVERTED_BRANCH,
     CODEX_FIX_SCOPE_DRIFT,
     CODEX_FIX_SCOPE_VIOLATION,
@@ -62,7 +66,9 @@ from tests._codex_review_helpers import (
     _Clock,
     _install_pre_commit_hook,
     _measured_from_head,
+    _observed_comments,
     _SequencedRunner,
+    _stage_merge_from_other_branch,
     _write,
 )
 from tests.conftest import (
@@ -266,8 +272,12 @@ def _run_loop(
     claim_tier_enabled: bool = False,
     disposition_drift_check_enabled: bool = True,
     stall_cycles: int | None = None,
+    **guard_kwargs: object,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
-    extra: dict[str, int] = {}
+    """Run the loop; *guard_kwargs* (#2633: ``growth_budget_lines``,
+    ``growth_guard_enabled``, ``operator_login``) are forwarded only when given.
+    """
+    extra: dict[str, object] = dict(guard_kwargs)
     if stall_cycles is not None:
         extra["stall_cycles"] = stall_cycles
     return run_review_with_fix_loop(
@@ -1645,6 +1655,7 @@ class TestFixLoopDisabledGate:
             raise AssertionError
 
         monkeypatch.setattr(commit, "capture_cycle_baseline", _unreachable)
+        monkeypatch.setattr(_driver, "_fetch_ticket_comments", _unreachable)
         runner = _FixLoopRunner([_MF_DOC])
 
         out, _ = _run_loop(
@@ -2690,3 +2701,355 @@ class TestDispositionDriftCheckGateReachesAllSynthesisHops:
         assert seen == [drift_check_enabled, drift_check_enabled]
         # Hop 2: run_review_with_fix_loop's own call into _rereview.
         assert rereview_seen == [drift_check_enabled]
+
+
+# ---------------------------------------------------------------------------
+# #2633: growth budget, constraint guard and the guard switch through the loop
+# ---------------------------------------------------------------------------
+
+_LOCK_CONTENT = "import threading\n_L = threading.Lock()\n"
+_FOO_BAR_CONTENT = "def foo_bar():\n    pass\n"
+_LOGIN = "operator-login"
+_DRIVER_LOGGER = "cw.codex_fix_loop._driver"
+_CONSTRAINTS_HEADING = "## Binding Operator Constraints"
+
+
+def _fix_prompts(runner: _FixLoopRunner) -> list[str]:
+    prompts = [str(call["stdin"]) for call in runner.calls]
+    return [p for p in prompts if p.startswith("# Codex Fix Cycle")]
+
+
+def _foo_bar_comment() -> dict[str, object]:
+    """Hand-built boundary case: the capture forbids no token a test can add."""
+    return {
+        "author": {"login": _LOGIN},
+        "body": (
+            "## Pre-flight Resolutions (operator)\n\nDo not add `foo_bar`.\n"
+            "<!-- auto-dev-preflight-resolutions -->"
+        ),
+        "createdAt": "2026-10-08T00:00:00Z",
+        "id": "IC_kwDOPLACEHOLDER000000077",
+    }
+
+
+def _serve_comments(
+    monkeypatch: pytest.MonkeyPatch, comments: list[dict[str, object]] | None
+) -> list[str]:
+    """Patch the driver's comments fetch; return the ticket ids it was asked for."""
+    asked: list[str] = []
+
+    def _fetch(_worktree: Path, ticket_id: str) -> list[dict[str, object]] | None:
+        asked.append(ticket_id)
+        return comments
+
+    monkeypatch.setattr(_driver, "_fetch_ticket_comments", _fetch)
+    return asked
+
+
+class TestGrowthBudgetThroughLoop:
+    def test_lock_added_in_allowed_file_parks_before_commit(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _with_plan(_worktree(make_git_repo, "wt-growth-lock"))
+        head_before = git_in(worktree, "rev-parse", "HEAD")
+        runner = _FixLoopRunner(
+            [_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor("new.py", _LOCK_CONTENT)]
+        )
+
+        out, _ = _run_loop(runner, worktree, session_id="s-growth-lock")
+
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_GROWTH_BUDGET
+        assert "new.py:2 new lock" in out.blocker.details
+        assert git_in(worktree, "rev-parse", "HEAD") == head_before
+        assert out.review.had_real_commit is False
+
+    def test_no_manifest_means_no_growth_guard(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-growth-noplan")
+        runner = _FixLoopRunner(
+            [_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor("new.py", _LOCK_CONTENT)]
+        )
+
+        out, _ = _run_loop(runner, worktree, session_id="s-growth-noplan")
+
+        assert out.status == "stage_complete"
+        assert out.review.had_real_commit is True
+
+
+class TestGuardSwitch:
+    def test_switch_off_lets_a_growth_cycle_proceed(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _with_plan(_worktree(make_git_repo, "wt-switch-growth"))
+        head_before = git_in(worktree, "rev-parse", "HEAD")
+        runner = _FixLoopRunner(
+            [_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor("new.py", _LOCK_CONTENT)]
+        )
+
+        out, _ = _run_loop(
+            runner, worktree, session_id="s-switch-growth", growth_guard_enabled=False
+        )
+
+        assert out.status == "stage_complete"
+        assert git_in(worktree, "rev-parse", "HEAD") != head_before
+
+    def test_switch_off_lets_a_constraint_violating_cycle_proceed(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-switch-constraint")
+        _serve_comments(monkeypatch, [_foo_bar_comment()])
+        runner = _FixLoopRunner(
+            [_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor("new.py", _FOO_BAR_CONTENT)]
+        )
+
+        out, _ = _run_loop(
+            runner,
+            worktree,
+            session_id="s-switch-constraint",
+            growth_guard_enabled=False,
+            operator_login=_LOGIN,
+        )
+
+        assert out.status == "stage_complete"
+        assert out.review.had_real_commit is True
+        assert _CONSTRAINTS_HEADING in _fix_prompts(runner)[0]
+
+    def test_switch_off_keeps_dirty_start_refusal_and_fences_always_on(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        dirty = _worktree(make_git_repo, "wt-switch-dirty")
+        _stage_merge_from_other_branch(dirty, {"other.py": "x = 1\n"})
+        fenced = _with_plan(_worktree(make_git_repo, "wt-switch-fence"))
+        drift = _editor(filename="server/route.py", content="r = 1\n")
+
+        dirty_out, _ = _run_loop(
+            _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()]),
+            dirty,
+            session_id="s-switch-dirty",
+            growth_guard_enabled=False,
+        )
+        fenced_out, _ = _run_loop(
+            _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[drift]),
+            fenced,
+            session_id="s-switch-fence",
+            growth_guard_enabled=False,
+        )
+
+        assert dirty_out.blocker is not None
+        assert dirty_out.blocker.reason == CODEX_FIX_DIRTY_START
+        assert fenced_out.blocker is not None
+        assert fenced_out.blocker.reason == CODEX_FIX_SCOPE_DRIFT
+
+
+class TestConstraintsThroughLoop:
+    def test_marker_constraint_in_fix_prompt(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-constraint-prompt")
+        asked = _serve_comments(monkeypatch, _observed_comments())
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC])
+
+        _run_loop(runner, worktree, session_id="s-c-prompt", operator_login=_LOGIN)
+
+        assert asked == ["T-1"]
+        prompt = _fix_prompts(runner)[0]
+        assert _CONSTRAINTS_HEADING in prompt
+        assert "Do not attach up to 4,000 characters" in prompt
+
+    def test_unmarked_comment_not_in_fix_prompt(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-constraint-unmarked")
+        unmarked = [
+            c
+            for c in _observed_comments()
+            if str(c["body"]).startswith("Round-2 plan approved")
+        ]
+        _serve_comments(monkeypatch, unmarked)
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC])
+
+        _run_loop(runner, worktree, session_id="s-c-unmarked", operator_login=_LOGIN)
+
+        assert _CONSTRAINTS_HEADING not in _fix_prompts(runner)[0]
+
+    def test_cycle_readding_ruled_out_token_parks(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-constraint-park")
+        head_before = git_in(worktree, "rev-parse", "HEAD")
+        _serve_comments(monkeypatch, [_foo_bar_comment()])
+        runner = _FixLoopRunner(
+            [_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor("new.py", _FOO_BAR_CONTENT)]
+        )
+
+        out, _ = _run_loop(
+            runner, worktree, session_id="s-c-park", operator_login=_LOGIN
+        )
+
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_CONSTRAINT_VIOLATION
+        assert "new.py:1 adds foo_bar" in out.blocker.details
+        assert git_in(worktree, "rev-parse", "HEAD") == head_before
+
+    def test_operator_login_none_fails_closed_no_constraints(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-constraint-nologin")
+        asked = _serve_comments(monkeypatch, [_foo_bar_comment()])
+        runner = _FixLoopRunner(
+            [_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor("new.py", _FOO_BAR_CONTENT)]
+        )
+
+        out, _ = _run_loop(runner, worktree, session_id="s-c-nologin")
+
+        assert asked == []
+        assert out.status == "stage_complete"
+        assert _CONSTRAINTS_HEADING not in _fix_prompts(runner)[0]
+
+
+def _load(worktree: Path, operator_login: str | None = _LOGIN) -> object:
+    return _driver._load_constraints(worktree, _task(), operator_login, None)
+
+
+def _driver_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == _DRIVER_LOGGER]
+
+
+class TestLoadConstraintsObservability:
+    def test_comments_fetch_none_logs_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _serve_comments(monkeypatch, None)
+
+        with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
+            loaded = _load(tmp_path)
+
+        (record,) = _driver_records(caplog)
+        assert loaded is None
+        assert record.levelname == "WARNING"
+        assert record.msg == (
+            "codex fix loop: operator-constraint comments unavailable "
+            "(ticket=%s); continuing without operator constraints"
+        )
+        assert record.args == ("T-1",)
+
+    def test_operator_login_none_logs_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        asked = _serve_comments(monkeypatch, _observed_comments())
+
+        with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
+            loaded = _load(tmp_path, operator_login=None)
+
+        (record,) = _driver_records(caplog)
+        assert loaded is None
+        assert asked == []
+        assert record.levelname == "WARNING"
+        assert record.msg == (
+            "codex fix loop: operator login unresolved (ticket=%s); marker "
+            "comments are ignored (fail closed)"
+        )
+        assert record.args == ("T-1",)
+
+    def test_marker_comment_with_zero_tokens_logs_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        comment = _foo_bar_comment()
+        comment["body"] = "Proceed.\n<!-- auto-dev-preflight-resolutions -->"
+        _serve_comments(monkeypatch, [comment])
+
+        with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
+            loaded = _load(tmp_path)
+
+        (record,) = _driver_records(caplog)
+        assert loaded is not None
+        assert record.levelname == "WARNING"
+        assert "yielded no forbidden tokens or kinds" in record.getMessage()
+        assert record.args == (
+            "IC_kwDOPLACEHOLDER000000077",
+            "T-1",
+            "2026-10-08T00:00:00Z",
+        )
+
+    def test_active_constraints_log_info(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _serve_comments(monkeypatch, _observed_comments())
+
+        with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
+            loaded = _load(tmp_path)
+
+        (record,) = _driver_records(caplog)
+        assert loaded is not None
+        assert record.levelname == "INFO"
+        assert record.msg == (
+            "codex fix loop: operator constraints active (ticket=%s, "
+            "comment_created_at=%s, tokens=%d, kinds=%d)"
+        )
+        assert record.args == ("T-1", "2026-10-07T22:06:12Z", 2, 1)
+
+    def test_no_marker_comment_logs_nothing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        unmarked = [
+            c
+            for c in _observed_comments()
+            if "auto-dev-preflight-resolutions" not in str(c["body"])
+        ]
+        _serve_comments(monkeypatch, unmarked)
+
+        with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
+            loaded = _load(tmp_path)
+
+        assert loaded is None
+        assert _driver_records(caplog) == []
+
+
+def test_driver_threads_stall_and_budget_to_state(
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = _worktree(make_git_repo, "wt-thread-knobs")
+    seen: dict[str, object] = {}
+    real_cycle = _driver._run_fix_and_commit
+    real_state = _driver.initial_divergence_state
+
+    def _spy_cycle(**kwargs: object) -> object:
+        seen.update(kwargs)
+        return real_cycle(**kwargs)
+
+    def _spy_state(**kwargs: object) -> object:
+        seen["stall_cycles"] = kwargs["stall_cycles"]
+        return real_state(**kwargs)
+
+    monkeypatch.setattr(_driver, "_run_fix_and_commit", _spy_cycle)
+    monkeypatch.setattr(_driver, "initial_divergence_state", _spy_state)
+
+    _run_loop(
+        _FixLoopRunner([_MF_DOC, _CLEAN_DOC]),
+        worktree,
+        stall_cycles=3,
+        growth_budget_lines=7,
+        growth_guard_enabled=False,
+    )
+
+    assert seen["stall_cycles"] == 3
+    assert seen["growth_budget_lines"] == 7
+    assert seen["growth_guard_enabled"] is False
+    assert seen["constraints"] is None

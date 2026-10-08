@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.codex_fix_loop import _commit_fix_cycle, commit
+from cw.codex_fix_loop import _build_fix_prompt, _commit_fix_cycle, commit
 from cw.codex_fix_loop.baseline import CycleBaseline, DirtyStart
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, StagedSetMismatchError
 from cw.codex_review import (
@@ -488,3 +488,36 @@ class TestHookFailure:
         out, _ = _run_loop(runner, worktree, session_id="s-hook-push")
 
         assert _blocker_reason(out) == "codex_error"
+
+
+class TestFixPromptConstraints:
+    _FINDINGS = (_make_finding(file="new.py", summary="MFA"),)
+
+    def _prompt(self, **extra: str | None) -> str:
+        return _build_fix_prompt(
+            list(self._FINDINGS),
+            plan_text="plan body",
+            ticket_text="ticket body",
+            cycle=1,
+            allowed_files=frozenset({"new.py"}),
+            **extra,
+        )
+
+    def test_default_prompt_is_byte_identical(self) -> None:
+        default = self._prompt()
+
+        assert default == self._prompt(constraints_section=None)
+        assert "Binding Operator Constraints" not in default
+
+    def test_constraints_section_rendered_after_scope_rules_before_fence(
+        self,
+    ) -> None:
+        section = "## Binding Operator Constraints\nDo not add `foo_bar`."
+
+        prompt = self._prompt(constraints_section=section)
+
+        assert prompt.replace(f"{section}\n\n", "") == self._prompt()
+        scope = prompt.index("## Scope Rules")
+        constraints = prompt.index("## Binding Operator Constraints")
+        fence = prompt.index("## Files You May Change")
+        assert scope < constraints < fence

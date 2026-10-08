@@ -33,6 +33,7 @@ from cw.codex_background import (
     _resolve_claim_tier_enabled,
     _resolve_codex_fix_loop,
     _resolve_codex_fix_loop_enabled,
+    _resolve_codex_fix_loop_growth_guard_enabled,
     _resolve_codex_fix_loop_stall_cycles,
     _resolve_disposition_drift_check_enabled,
     _run_codex_review_and_complete,
@@ -42,6 +43,7 @@ from cw.codex_background import (
     join_outstanding_codex_threads,
 )
 from cw.codex_fix_loop.divergence import _DIVERGENCE_STALL_CYCLES
+from cw.codex_fix_loop.growth import DEFAULT_GROWTH_BUDGET_LINES
 from cw.codex_review import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     CODEX_MUST_FIX_FINDINGS,
@@ -84,6 +86,18 @@ if TYPE_CHECKING:
 
     from cw.codex_runner import CodexRunResult
     from cw.review_findings import ReviewVerdict
+
+
+@pytest.fixture(autouse=True)
+def _no_real_gh_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test in this module may run a real ``gh api user`` (#2633).
+
+    Patches the name ``codex_background`` imports and looks up at call time.
+    """
+    monkeypatch.setattr(
+        "cw.codex_background.resolve_operator_login",
+        MagicMock(return_value="operator-login"),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -2044,5 +2058,94 @@ def test_fix_loop_receives_configured_stall_cycles(
     assert fix_loop_mock.call_args.kwargs["stall_cycles"] == 2
 
 
-def test_stall_cycles_default_matches_the_fix_loop_constant() -> None:
-    assert OrchestratorConfig().codex_fix_loop_stall_cycles == _DIVERGENCE_STALL_CYCLES
+def test_new_knob_defaults_match_fix_loop_constants() -> None:
+    config = OrchestratorConfig()
+
+    assert config.codex_fix_loop_stall_cycles == _DIVERGENCE_STALL_CYCLES
+    assert config.codex_fix_loop_growth_budget_lines == DEFAULT_GROWTH_BUDGET_LINES
+
+
+# ---------------------------------------------------------------------------
+# #2633: growth budget, growth-guard switch (global + lane) and operator login
+# ---------------------------------------------------------------------------
+
+
+def _login_mock() -> MagicMock:
+    login = codex_background.resolve_operator_login
+    assert isinstance(login, MagicMock)
+    return login
+
+
+def test_fix_loop_receives_budget_switch_and_login(
+    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+) -> None:
+    fix_loop_mock = _run_with_config(
+        make_git_repo("wt-bg-guards"),
+        sid="bg-guards",
+        lanes=[
+            LaneConfig(
+                name="trial",
+                codex_fix_loop_enabled=True,
+                codex_fix_loop_stall_cycles=2,
+                codex_fix_loop_growth_guard_enabled=False,
+            )
+        ],
+        config=OrchestratorConfig(codex_fix_loop_growth_budget_lines=25),
+    )
+
+    kwargs = fix_loop_mock.call_args.kwargs
+    assert kwargs["stall_cycles"] == 2
+    assert kwargs["growth_budget_lines"] == 25
+    assert kwargs["growth_guard_enabled"] is False
+    assert kwargs["operator_login"] == "operator-login"
+    assert _login_mock().call_count == 1
+
+
+def test_disabled_fix_loop_does_not_resolve_operator_login(
+    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+) -> None:
+    fix_loop_mock = _run_with_config(
+        make_git_repo("wt-bg-nologin"),
+        sid="bg-nologin",
+        lanes=[LaneConfig(name="trial", codex_fix_loop_enabled=False)],
+        config=OrchestratorConfig(),
+    )
+
+    assert fix_loop_mock.call_args.kwargs["operator_login"] is None
+    _login_mock().assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("lanes", "task_lane", "global_enabled", "expected"),
+    [
+        (
+            [LaneConfig(name="trial", codex_fix_loop_growth_guard_enabled=False)],
+            "trial",
+            True,
+            False,
+        ),
+        (
+            [LaneConfig(name="trial", codex_fix_loop_growth_guard_enabled=True)],
+            "trial",
+            False,
+            True,
+        ),
+        ([LaneConfig(name="trial")], "trial", False, False),
+        (
+            [LaneConfig(name="other", codex_fix_loop_growth_guard_enabled=False)],
+            "trial",
+            True,
+            True,
+        ),
+    ],
+)
+def test_resolve_codex_fix_loop_growth_guard_enabled_table(
+    lanes: list[LaneConfig], task_lane: str, global_enabled: bool, expected: bool
+) -> None:
+    config = OrchestratorConfig(codex_fix_loop_growth_guard_enabled=global_enabled)
+
+    resolved = _resolve_codex_fix_loop_growth_guard_enabled(
+        _claim_client(*lanes), _claim_task(task_lane), config
+    )
+
+    assert resolved is expected
