@@ -823,6 +823,22 @@ def test_revalidation_sees_fresh_draining_stamp(tmp_path: Path) -> None:
     assert daemon.stop_calls == []
 
 
+def test_revalidation_leaves_fresh_draining_session_running_after_approve(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    daemon = FakeNativeDaemonClient()
+    (orphan,) = _seed_orphans(tmp_path, daemon)
+
+    def _fresh_stamp(_ids: frozenset[str]) -> None:
+        _stamp(orphan, minutes_ago=1)
+
+    assert _close(daemon, after_transition=True, precheck=_fresh_stamp) == []
+
+    assert daemon.stop_calls == []
+    assert _status_of(orphan.id) == SessionStatus.ACTIVE
+    assert "Left running" in capsys.readouterr().err
+
+
 def test_revalidation_skips_a_session_no_longer_a_candidate(
     tmp_path: Path, orphan_logs: pytest.LogCaptureFixture
 ) -> None:
