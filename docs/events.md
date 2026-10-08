@@ -972,8 +972,14 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `claude stop <surface_ref>` fails or the entry stays in the roster, the
   entry itself is stale: repair the roster file as in the unreadable case (fix
   the corrupt content or remove the stale entry; do not delete the whole
-  roster, it lists every live worker). No push notification is fired
-  (`fire_push_notification` is not called).
+  roster, it lists every live worker). On release, the existing
+  `daemon.leaked_worker_stopped` audit event is also recorded with
+  `kind: "fix_dispatch_confirmation"` and the confirmation payload
+  `{kind, ticket_id, client, surface_ref, prior_tombstone, prior_session_id,
+  roster_readable, surface_absent, confirmed_at, initiating_service,
+  initiating_job}`; this discriminator means the event confirms a stop rather
+  than recording that this module stopped a worker. No push notification is
+  fired (`fire_push_notification` is not called).
 - `"plan_parked"` — A headless worker completed its plan stage with open
   ambiguities or unverified premises (`ambiguities_pending_resolution` or
   `premises_pending_verification` sentinel status). The task is BLOCKED_ON_USER.

@@ -19,9 +19,13 @@ actually releases the row.
 
 This module only CONFIRMS. Stopping the worker stays with the leaked-worker
 sweep (``cw.reconcile.leaked_workers``), which runs earlier in the same
-reconcile tick. Apart from the row fields it is handed, it writes nothing: no
-subprocess, no lock of its own (the caller holds ``dev_queue_lock``; the
-event inbox lock is a leaf), and it never stops a worker. It must not import
+reconcile tick. On confirmation it records the existing
+``daemon.leaked_worker_stopped`` audit event with
+``kind="fix_dispatch_confirmation"`` and a confirmation payload; the kind
+distinguishes this record from the sweep's actual worker-stop audit. Apart
+from the row fields and that audit event, it writes nothing: no subprocess,
+no lock of its own (the caller holds ``dev_queue_lock``; the event inbox lock
+is a leaf), and it never stops a worker. It must not import
 ``cw.reconcile.fix_dispatch`` (that module imports this one).
 """
 
@@ -55,6 +59,9 @@ _ATTENTION_GRACE = timedelta(minutes=5)
 # Re-page cadence while the row stays held; matches the liveness sweep's
 # default liveness_attention_renotify_interval_minutes.
 _ATTENTION_REPAGE = timedelta(minutes=60)
+# Discriminator on the shared daemon-leak audit event. The hold confirms that
+# the sweep's stop took effect; it does not perform the stop itself.
+FIX_DISPATCH_CONFIRMATION_KIND = "fix_dispatch_confirmation"
 
 _LISTED_BREADCRUMB = (
     "fix-loop worker {surface_ref} was launched but never recorded and is "
@@ -154,6 +161,7 @@ def _record_worker_confirmation(
 ) -> bool:
     """Append the durable audit record before clearing a confirmed tombstone."""
     payload: dict[str, object] = {
+        "kind": FIX_DISPATCH_CONFIRMATION_KIND,
         "ticket_id": task.ticket_id,
         "client": task.client,
         "surface_ref": worker.surface_ref,
