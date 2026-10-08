@@ -13046,10 +13046,11 @@ def _seed_cli_orphan(
         blocked_reason=blocked_reason,
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
-    monkeypatch.setattr("cw.cli.spawn.get_native_daemon_client", lambda: fake)
+    orphan_close = "cw.cli.routed_orphan_close"
+    monkeypatch.setattr(f"{orphan_close}.get_native_daemon_client", lambda: fake)
     monkeypatch.setattr("cw.cli.dev_queue.crud.get_native_daemon_client", lambda: fake)
-    monkeypatch.setattr("cw.cli.spawn._ROUTED_STOP_CONFIRM_TIMEOUT_SECS", 0.0)
-    monkeypatch.setattr("cw.cli.spawn._ROUTED_STOP_CONFIRM_INTERVAL_SECS", 0.0)
+    monkeypatch.setattr(f"{orphan_close}._ROUTED_STOP_CONFIRM_TIMEOUT_SECS", 0.0)
+    monkeypatch.setattr(f"{orphan_close}._ROUTED_STOP_CONFIRM_INTERVAL_SECS", 0.0)
     return _OrphanWorld(fake, surface, worktree, client_cfg, task)
 
 
