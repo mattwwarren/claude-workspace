@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
 DEFAULT_GROWTH_BUDGET_LINES = 40
 _MAX_NEW_TOP_LEVEL_DEFS = 3
-_DOC_SUFFIXES = (".md", ".rst", ".txt")
+_DOC_SUFFIXES = (".md", ".mdx", ".rst", ".txt", ".adoc")
 
 
 class AdditionKind(StrEnum):
@@ -87,9 +87,19 @@ def _matches(kind: AdditionKind, text: str) -> bool:
     return bool(_TOP_LEVEL_DEF.match(text))
 
 
-def _counted(path: str) -> bool:
-    """Non-test, non-doc files are what a cycle is held to."""
-    return not is_test_path(path) and not path.endswith(_DOC_SUFFIXES)
+def is_source_path(path: str) -> bool:
+    """Whether *path* is non-test, non-prose source: what a cycle is held to.
+
+    Prose (markdown and friends, anything under a ``docs/`` directory) is
+    excluded so a cycle that merely documents or mentions a construct is never
+    parked for it (#2633). Shared with :mod:`cw.codex_fix_loop.constraints`.
+    """
+    return (
+        not is_test_path(path)
+        and not path.endswith(_DOC_SUFFIXES)
+        and not path.startswith("docs/")
+        and "/docs/" not in path
+    )
 
 
 def _removed_lines(file_diff: str) -> list[str]:
@@ -108,7 +118,7 @@ def detect_additions(
     """
     additions: list[Addition] = []
     for path, lines in file_line_text.items():
-        if not path.endswith(".py") or not _counted(path):
+        if not path.endswith(".py") or not is_source_path(path):
             continue
         removed = _removed_lines(file_diffs.get(path, ""))
         for kind in AdditionKind:
@@ -125,7 +135,7 @@ def net_source_lines(
     return sum(
         len(lines) - len(_removed_lines(file_diffs.get(path, "")))
         for path, lines in file_line_text.items()
-        if _counted(path)
+        if is_source_path(path)
     )
 
 

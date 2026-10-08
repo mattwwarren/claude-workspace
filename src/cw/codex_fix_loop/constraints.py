@@ -19,7 +19,9 @@ explicit state-file phrase forbids that detector kind. A token or kind only
 triggers when the cycle INTRODUCES it (a new file at that path, or an added
 line naming a token absent from that file at the cycle's base, or a net-new
 detector hit), so a cycle that merely edits something the file already holds
-is never parked. The rest of the comment is advisory prompt text.
+is never parked. Only non-test source files are checked: a cycle that
+mentions a forbidden token in documentation or prose is never parked. The rest
+of the comment is advisory prompt text.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from cw._git import git_output
 from cw.codex_fix_loop.baseline import cycle_diff
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
-from cw.codex_fix_loop.growth import AdditionKind, detect_additions
+from cw.codex_fix_loop.growth import AdditionKind, detect_additions, is_source_path
 from cw.codex_fix_loop.posted_text import (
     POSTED_TEXT_MAX_CHARS,
     describe_added_line,
@@ -40,7 +42,6 @@ from cw.codex_fix_loop.posted_text import (
 from cw.codex_review import (
     CODEX_FIX_CONSTRAINT_VIOLATION,
     _parse_unified_diff,
-    is_test_path,
 )
 from cw.gh import is_agent_authored
 
@@ -273,7 +274,7 @@ def _path_violations(
     return [
         ConstraintViolation(path, None, token, "", _rule_for(constraints.rules, token))
         for path in sorted(new_files)
-        if not is_test_path(path)
+        if is_source_path(path)
         for token in sorted(constraints.forbidden_tokens)
         if path == token or path.endswith(f"/{token}")
     ]
@@ -289,7 +290,7 @@ def _token_violations(
     found: list[ConstraintViolation] = []
     patterns = {t: _word(t) for t in sorted(constraints.forbidden_tokens)}
     for path, lines in sorted(added.items()):
-        if is_test_path(path):
+        if not is_source_path(path):
             continue
         hits = [
             (n, text, token)

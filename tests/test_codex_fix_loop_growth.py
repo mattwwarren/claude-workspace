@@ -14,6 +14,7 @@ from cw.codex_fix_loop.growth import (
     check_growth_budget,
     detect_additions,
     effective_budget,
+    is_source_path,
     justified_kinds,
     net_source_lines,
 )
@@ -110,6 +111,31 @@ class TestDetectAdditions:
             removed=("_L = threading.Lock()",),
         )
         assert _kinds(diff) == [AdditionKind.LOCK]
+
+
+class TestIsSourcePath:
+    @pytest.mark.parametrize(
+        "path", ["src/a.py", "pkg/mod.ts", "docsify/a.py", "src/documents.py"]
+    )
+    def test_source_paths_are_counted(self, path: str) -> None:
+        assert is_source_path(path)
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "tests/test_a.py",
+            "README.md",
+            "notes.mdx",
+            "guide.rst",
+            "n.txt",
+            "man.adoc",
+            "docs/events.md",
+            "docs/notes.yaml",
+            "pkg/docs/notes.yaml",
+        ],
+    )
+    def test_tests_and_prose_are_not(self, path: str) -> None:
+        assert not is_source_path(path)
 
 
 class TestNetLines:

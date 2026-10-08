@@ -415,6 +415,28 @@ class TestFindViolations:
 
         assert _violations(repo, _FOO) == []
 
+    def test_docs_only_mention_of_a_forbidden_token_never_parks(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        _write(repo / "README.md", "We removed `foo_bar` on purpose.\n")
+        _write(repo / "docs" / "notes.yaml", "foo_bar: gone\n")
+        _write(repo / "docs" / "foo_bar", "x\n")
+        _write(repo / "pkg" / "docs" / "foo_bar.rst", "foo_bar\n")
+
+        assert _violations(repo, _FOO) == []
+
+    def test_source_mention_still_parks_next_to_a_docs_mention(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        _write(repo / "README.md", "foo_bar is gone\n")
+        _write(repo / "src" / "a.py", "a = 1\ndef foo_bar():\n    pass\n")
+
+        found = _violations(repo, _FOO)
+
+        assert [(v.path, v.line) for v in found] == [("src/a.py", 2)]
+
     def test_removed_line_is_not_violation(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
