@@ -527,7 +527,22 @@ def _queue_close_audit_intent(session: Session, call: _OrphanCloseCall) -> None:
         stale_minutes=0.0,
         surface_ref=surface_ref,
     )
-    _queue_audit_intents([hit])
+    try:
+        _queue_audit_intents([hit])
+    except (OSError, ValueError) as exc:
+        logger.exception(
+            "routed_orphan_close_audit_intent_failed: ticket_id=%s client=%s"
+            " session_id=%s command=%s",
+            call.ticket_id,
+            call.client,
+            session.id,
+            call.command,
+        )
+        raise CwError(
+            f"Could not prepare the durable audit record for routed-result session"
+            f" {session.id} before closing it: {exc}. Fix the audit outbox and"
+            " retry the command."
+        ) from exc
 
 
 def _finalize_close_audit_intent(session: Session, *, stop_succeeded: bool) -> None:
