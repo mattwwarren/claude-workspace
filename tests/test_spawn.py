@@ -2191,6 +2191,61 @@ class TestSpawnClose:
 
         assert daemon.stop_calls == ["abc12345", "abc12345"]
 
+    # -- #2517: surface_already_stopped suppresses the post-lock stop ------
+
+    def test_surface_already_stopped_flips_live_session_without_stop(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The caller already stopped (or proved absent) the worker, so the
+        cancel and stamp land as usual and no second stop is made -- and no
+        daemon client is resolved for one."""
+        from cw.cli import _spawn_close_impl
+
+        def _no_client() -> NativeDaemonClient:
+            pytest.fail("surface_already_stopped must not resolve a daemon client")
+
+        monkeypatch.setattr("cw.cli.spawn.get_native_daemon_client", _no_client)
+        sess = self._seed_daemon_session(tmp_path, tmp_config_dir)
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
+        daemon = LockProbeDaemon()
+
+        _spawn_close_impl(
+            session_id=sess.id, native_daemon=daemon, surface_already_stopped=True
+        )
+        _spawn_close_impl(session_id=sess.id, surface_already_stopped=True)
+
+        assert daemon.probes == []
+        assert daemon.stop_calls == []
+        closed = load_state().find_by_name_or_id(sess.id)
+        assert closed is not None
+        assert closed.status == SessionStatus.COMPLETED
+        assert closed.completed_reason == CompletionReason.USER
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-42")
+        assert task.status == QueueItemStatus.CANCELLED
+
+    def test_surface_already_stopped_on_completed_session_makes_no_stop(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2480's already-COMPLETED branch also skips its stop."""
+        from cw.cli import _spawn_close_impl
+
+        sess = _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            status=SessionStatus.COMPLETED,
+            surface_ref="deadbeef",
+        )
+        daemon = FakeNativeDaemonClient()
+
+        _spawn_close_impl(
+            session_id=sess.id, native_daemon=daemon, surface_already_stopped=True
+        )
+
+        assert daemon.stop_calls == []
+
     # -- #2458: a staged emit_cli result is routed, not thrown away ---------
 
     _CLOSE_TICKET = "GEN-1234"

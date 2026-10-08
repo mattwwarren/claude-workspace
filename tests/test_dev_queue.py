@@ -8,7 +8,7 @@ import logging
 import threading
 import time
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 import pytest
 from click.testing import CliRunner
@@ -51,6 +51,7 @@ from cw.dispatch import (
     FRESHNESS_NON_MAIN_HEAD,
     _lane_stats_for_client,
 )
+from cw.dispatch.claim.screening import resolve_occupied_ticket_ids
 from cw.exceptions import CwError
 from cw.models import (
     DEFAULT_LANE,
@@ -66,15 +67,21 @@ from cw.models import (
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
+    SessionStatus,
     Stage,
     TicketTask,
     UsageLimitAct,
     WatchedPr,
 )
+from cw.reconcile.liveness_page import close_command
+from cw.worktree import is_genuinely_live_home_reason, worktree_path_for
+from tests._reconcile_helpers import _routed_last_result, _write_agent_spawn_stamp
 from tests._worktree_helpers import patch_worktree
 from tests.conftest import (
     _make_daemon_session,
     _make_ticket_task,
+    _stop_leaves_worker_listed,
+    _stop_makes_roster_unreadable,
     _write_project_config_yaml,
     plan_body,
     stub_fetch_plan,
@@ -83,6 +90,8 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from click.testing import Result
 
     from cw.models import ReapReason, Session
     from cw.native_daemon import FakeNativeDaemonClient
@@ -10572,19 +10581,35 @@ def _seed_live_ticket_session(
     *,
     session_id: str = "sess-stray",
     surface_ref: str = _LIVE_SURFACE_REF,
+    last_result: dict[str, object] | None = None,
+    worktree_path: Path | None = None,
 ) -> Session:
     """Append a daemon session named for *ticket_id* to state and return it.
 
     The session is deliberately unbound: no dev-queue row's ``session_id``
-    points at it (the #2275 shape).
+    points at it (the #2275 shape). *last_result* and *worktree_path* are
+    forwarded only when given (#2517); a *last_result* without a
+    *worktree_path* raises, so a marker session never reads the host-global
+    default worktree (N5).
     """
     from cw.config import load_state, save_state
+    from cw.models import LastResultSource
 
+    if last_result is not None and worktree_path is None:
+        msg = "a last_result session needs a tmp worktree_path (N5)"
+        raise ValueError(msg)
+    overrides: dict[str, object] = {}
+    if last_result is not None:
+        overrides["last_result"] = last_result
+        overrides["last_result_source"] = LastResultSource.EMIT_CLI
+    if worktree_path is not None:
+        overrides["worktree_path"] = worktree_path
     session = _make_daemon_session(
         id=session_id,
         name=f"{client}/auto-dev/{ticket_id}",
         client=client,
         surface_ref=surface_ref,
+        **overrides,
     )
     state = load_state()
     state.sessions.append(session)
@@ -10903,6 +10928,161 @@ class TestRequeueRosterUnreadableGuard:
             "skipped_live_session",
             "live",
         )
+
+
+# ---------------------------------------------------------------------------
+# TestPrecheckRequeue — #2517 lock-free prediction of requeue_ticket refusals
+# ---------------------------------------------------------------------------
+
+# (row status, row stage, requeue kwargs, expected exception class name)
+_PRECHECK_REFUSALS: list[
+    tuple[QueueItemStatus | None, Stage, dict[str, object], str]
+] = [
+    (None, Stage.REVIEW, {}, "CwError"),
+    (QueueItemStatus.PENDING, Stage.REVIEW, {}, "RequeueStateError"),
+    (
+        QueueItemStatus.BLOCKED_ON_USER,
+        Stage.REVIEW,
+        {"allow_regress": True},
+        "RequeueStageError",
+    ),
+    (
+        QueueItemStatus.BLOCKED_ON_USER,
+        Stage.REVIEW,
+        {"stage_override": "plan"},
+        "RequeueStageError",
+    ),
+    (
+        QueueItemStatus.PENDING,
+        Stage.REVIEW,
+        {"stage_override": "impl", "allow_regress": True},
+        "RequeueStageError",
+    ),
+    (
+        QueueItemStatus.BLOCKED_ON_USER,
+        Stage.REVIEW,
+        {"stage_override": "harden"},
+        "RequeueStageError",
+    ),
+    (QueueItemStatus.CANCELLED, Stage.REVIEW, {}, "RequeueStateError"),
+]
+
+
+class TestPrecheckRequeue:
+    """``precheck_requeue`` raises exactly what ``requeue_ticket`` would (#2517)."""
+
+    def _seed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        status: QueueItemStatus | None,
+        stage: Stage,
+    ) -> None:
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        tasks = (
+            []
+            if status is None
+            else [_make_blocked_task(stage=stage, status=status, session_id="s-row")]
+        )
+        save_dev_queue(DevQueueStore(tasks=tasks))
+
+    @pytest.mark.parametrize(
+        ("status", "stage", "kwargs", "expected"), _PRECHECK_REFUSALS
+    )
+    @pytest.mark.parametrize("entry", ["precheck_requeue", "requeue_ticket"])
+    def test_same_refusal_as_requeue_ticket(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        status: QueueItemStatus | None,
+        stage: Stage,
+        kwargs: dict[str, object],
+        expected: str,
+        entry: str,
+    ) -> None:
+        """The drift guard: each input refuses identically through both."""
+        import cw.dev_queue
+        import cw.exceptions
+
+        self._seed(tmp_config_dir, tmp_path, status, stage)
+        fn = getattr(cw.dev_queue, entry)
+
+        with pytest.raises(getattr(cw.exceptions, expected)) as excinfo:
+            fn("GEN-500", "genhealth", native_daemon=_fake_daemon_with_live(), **kwargs)
+
+        assert type(excinfo.value).__name__ == expected
+
+    @pytest.mark.parametrize("entry", ["precheck_requeue", "requeue_ticket"])
+    def test_live_session_refuses_unless_ignored(
+        self, tmp_config_dir: Path, tmp_path: Path, entry: str
+    ) -> None:
+        import cw.dev_queue
+        from cw.exceptions import RequeueLiveSessionError
+
+        self._seed(
+            tmp_config_dir, tmp_path, QueueItemStatus.BLOCKED_ON_USER, Stage.IMPL
+        )
+        live = _seed_live_ticket_session()
+        fn = getattr(cw.dev_queue, entry)
+
+        with pytest.raises(RequeueLiveSessionError):
+            fn(
+                "GEN-500",
+                "genhealth",
+                native_daemon=_fake_daemon_with_live(_LIVE_SURFACE_REF),
+            )
+        fn(
+            "GEN-500",
+            "genhealth",
+            native_daemon=_fake_daemon_with_live(_LIVE_SURFACE_REF),
+            ignore_session_ids=frozenset({live.id}),
+        )
+
+    @pytest.mark.parametrize(
+        ("status", "flag"),
+        [
+            (QueueItemStatus.CANCELLED, "from_cancelled"),
+            (QueueItemStatus.FAILED, "from_failed"),
+            (QueueItemStatus.COMPLETED, "from_completed"),
+            (QueueItemStatus.AWAITING_OPERATOR_SIGNOFF, None),
+        ],
+    )
+    def test_accepts_opted_in_terminal_rows_and_writes_nothing(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        status: QueueItemStatus,
+        flag: str | None,
+    ) -> None:
+        from cw.dev_queue import precheck_requeue
+
+        def _no_event(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("precheck_requeue must not record an event")
+
+        monkeypatch.setattr("cw.dev_queue.requeue.record_event", _no_event)
+        self._seed(tmp_config_dir, tmp_path, status, Stage.REVIEW)
+        before = load_dev_queue().model_dump()
+        flags = {flag: True} if flag is not None else {}
+
+        precheck_requeue(
+            "GEN-500",
+            "genhealth",
+            "finalize",
+            native_daemon=_fake_daemon_with_live(),
+            **flags,
+        )
+        if status is QueueItemStatus.AWAITING_OPERATOR_SIGNOFF:
+            # A parked row also passes the regress gate.
+            precheck_requeue(
+                "GEN-500",
+                "genhealth",
+                "impl",
+                allow_regress=True,
+                native_daemon=_fake_daemon_with_live(),
+            )
+
+        assert load_dev_queue().model_dump() == before
 
 
 # ---------------------------------------------------------------------------
@@ -12155,16 +12335,18 @@ class TestCLIRequeue:
     ) -> None:
         """A live session for the ticket refuses the CLI requeue (#2275).
 
-        Exercises requeue_ticket's production default-resolution branch
-        (native_daemon=None -> get_native_daemon_client()).
+        The CLI resolves its one daemon client (#2517) and passes it to
+        ``requeue_ticket``; the ``native_daemon=None`` default branch is
+        exercised by the ``drain`` tests.
         """
         _write_client_yaml(tmp_config_dir, tmp_path)
         task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-dead-cli")
         save_dev_queue(DevQueueStore(tasks=[task]))
         stray = _seed_live_ticket_session()
         fake = _fake_daemon_with_live(_LIVE_SURFACE_REF)
+        # #2517: the CLI resolves the one client and hands it to requeue_ticket.
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.get_native_daemon_client", lambda: fake
+            "cw.cli.dev_queue.crud.get_native_daemon_client", lambda: fake
         )
 
         runner = CliRunner()
@@ -12192,7 +12374,7 @@ class TestCLIRequeue:
         fake = _fake_daemon_with_live()
         fake.roster_unreadable = True
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.get_native_daemon_client", lambda: fake
+            "cw.cli.dev_queue.crud.get_native_daemon_client", lambda: fake
         )
 
         result = CliRunner().invoke(
@@ -12804,6 +12986,523 @@ class TestCLIRequeue:
         assert len(captured) == 1
         payload = captured[0]
         assert payload["reason"] == "cli_requeue"
+
+
+# ---------------------------------------------------------------------------
+# #2517 — approve / requeue close an orphaned routed-result session
+# ---------------------------------------------------------------------------
+
+_ORPHAN_ID = "sess-orphan"
+
+
+class _OrphanWorld(NamedTuple):
+    fake: FakeNativeDaemonClient
+    surface: str
+    worktree: Path
+    client_cfg: ClientConfig
+    task: TicketTask
+
+
+def _seed_cli_orphan(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stage: Stage = Stage.PLAN,
+    last_status: str | None = "plan_pending_approval",
+    row_status: QueueItemStatus = QueueItemStatus.BLOCKED_ON_USER,
+    blocked_reason: str | None = None,
+    row_session_id: str = _ORPHAN_ID,
+) -> _OrphanWorld:
+    """A parked GEN-500 row bound to a live marker orphan homed on its worktree.
+
+    The worker is seeded with ``seed_live_worker(worktree)`` (R7), so the
+    occupancy screen reads a genuinely live home, not an unreadable roster.
+    Both CLI daemon seams are patched to the same fake, and the stop
+    confirmation reads the roster exactly once.
+    """
+    from cw.config import get_client
+    from cw.native_daemon import FakeNativeDaemonClient
+
+    _write_client_yaml(tmp_config_dir, tmp_path)
+    client_cfg = get_client("genhealth")
+    worktree = worktree_path_for(
+        client_cfg, f"{client_cfg.feature_branch_prefix}/GEN-500"
+    )
+    worktree.mkdir(parents=True, exist_ok=True)
+    fake = FakeNativeDaemonClient()
+    surface = fake.seed_live_worker(worktree)
+    extra = {"status": last_status} if last_status is not None else {}
+    _seed_live_ticket_session(
+        session_id=_ORPHAN_ID,
+        surface_ref=surface,
+        last_result=_routed_last_result(**extra),
+        worktree_path=worktree,
+    )
+    task = _make_blocked_task(
+        stage=stage,
+        status=row_status,
+        session_id=row_session_id,
+        blocked_reason=blocked_reason,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    orphan_close = "cw.cli.routed_orphan_close"
+    monkeypatch.setattr(f"{orphan_close}.get_native_daemon_client", lambda: fake)
+    monkeypatch.setattr("cw.cli.dev_queue.crud.get_native_daemon_client", lambda: fake)
+    monkeypatch.setattr(f"{orphan_close}._ROUTED_STOP_CONFIRM_TIMEOUT_SECS", 0.0)
+    monkeypatch.setattr(f"{orphan_close}._ROUTED_STOP_CONFIRM_INTERVAL_SECS", 0.0)
+    return _OrphanWorld(fake, surface, worktree, client_cfg, task)
+
+
+def _orphan_status() -> SessionStatus:
+    from cw.config import load_state
+
+    return next(s for s in load_state().sessions if s.id == _ORPHAN_ID).status
+
+
+def _gen500() -> TicketTask:
+    return next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+
+
+def _invoke(*args: str) -> Result:
+    return CliRunner().invoke(
+        main, ["dev-queue", *args, "GEN-500", "--client", "genhealth"]
+    )
+
+
+def _stop_never_takes(
+    monkeypatch: pytest.MonkeyPatch, fake: FakeNativeDaemonClient, shape: str
+) -> None:
+    if shape == "worker_still_listed":
+        _stop_leaves_worker_listed(monkeypatch, fake)
+    else:
+        _stop_makes_roster_unreadable(monkeypatch, fake)
+
+
+_STOP_FAILURE_SHAPES = pytest.mark.parametrize(
+    "shape", ["worker_still_listed", "roster_unreadable_after_stop"]
+)
+
+
+class TestCLIApproveRoutedOrphan:
+    """`cw dev-queue approve` closes the orphan AFTER the transition (#2517)."""
+
+    def test_acceptance_approve_frees_the_worktree_for_the_next_tick(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        world = _seed_cli_orphan(tmp_config_dir, tmp_path, monkeypatch)
+        stub_fetch_plan(
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        pending_copy = world.task.model_copy(update={"status": QueueItemStatus.PENDING})
+        reason = resolve_occupied_ticket_ids(
+            world.client_cfg, DevQueueStore(tasks=[pending_copy]), daemon=world.fake
+        )["GEN-500"]
+        assert is_genuinely_live_home_reason(reason)
+        assert "unreadable" not in reason
+
+        result = _invoke("approve")
+
+        assert result.exit_code == 0, result.output
+        assert _gen500().status == QueueItemStatus.PENDING
+        assert _orphan_status() == SessionStatus.COMPLETED
+        assert world.fake.stop_calls == [world.surface]
+        approved_at = result.output.index("Approved GEN-500 (genhealth)")
+        closed_at = result.output.index(
+            f"Closed orphaned routed-result session {_ORPHAN_ID} for GEN-500"
+        )
+        assert approved_at < closed_at
+        assert "GEN-500" not in resolve_occupied_ticket_ids(
+            world.client_cfg, load_dev_queue(), daemon=world.fake
+        )
+
+    @_STOP_FAILURE_SHAPES
+    def test_unconfirmed_stop_exits_nonzero_after_the_approval(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+        shape: str,
+    ) -> None:
+        world = _seed_cli_orphan(tmp_config_dir, tmp_path, monkeypatch)
+        stub_fetch_plan(
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        approved = capture_events(
+            "cw.cli.dev_queue.approve", OrchestratorEventType.TICKET_APPROVED
+        )
+        _stop_never_takes(monkeypatch, world.fake, shape)
+
+        result = _invoke("approve")
+
+        assert result.exit_code != 0
+        output = " ".join(result.output.split())
+        assert _ORPHAN_ID in output
+        assert f"claude stop {world.surface}" in output
+        assert str(world.fake.roster_path) in output
+        assert "Approved GEN-500 (genhealth), but routed-result session" in output
+        assert "row is released" in output
+        assert "Do NOT re-run approve" in output
+        assert close_command(_ORPHAN_ID) in output
+        assert _gen500().status == QueueItemStatus.PENDING
+        assert _orphan_status() == SessionStatus.ACTIVE
+        assert len(approved) == 1
+
+        retry = _invoke("approve")
+
+        assert retry.exit_code != 0
+        assert world.fake.stop_calls == [world.surface]
+
+    def test_draining_orphan_is_left_running(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        world = _seed_cli_orphan(tmp_config_dir, tmp_path, monkeypatch)
+        stub_fetch_plan(
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        _write_agent_spawn_stamp(
+            world.worktree,
+            unresolved_count=1,
+            stamped_at=datetime.now(UTC) - timedelta(minutes=5),
+        )
+
+        result = _invoke("approve")
+
+        assert result.exit_code == 0, result.output
+        assert "Left running" in result.output
+        assert "background work is still draining" in " ".join(result.output.split())
+        assert world.fake.stop_calls == []
+        assert _gen500().status == QueueItemStatus.PENDING
+        assert _orphan_status() == SessionStatus.ACTIVE
+
+    def test_review_signoff_park_pins_then_second_approve_closes(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        world = _seed_cli_orphan(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            stage=Stage.REVIEW,
+            last_status="review_pending_approval",
+        )
+        task = _gen500()
+        task.signoff = "operator"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        parked = _invoke("approve")
+
+        assert parked.exit_code == 0, parked.output
+        assert _gen500().status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert _gen500().session_id == _ORPHAN_ID
+        assert _orphan_status() == SessionStatus.ACTIVE
+        assert world.fake.stop_calls == []
+        assert "pinned by GEN-500 (genhealth, AWAITING_OPERATOR_SIGNOFF)" in (
+            parked.output
+        )
+        assert close_command(_ORPHAN_ID) in parked.output
+
+        cleared = _invoke("approve")
+
+        assert cleared.exit_code == 0, cleared.output
+        assert _gen500().status != QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert _orphan_status() == SessionStatus.COMPLETED
+        assert world.fake.stop_calls == [world.surface]
+
+    def test_orphan_pinned_by_another_tickets_row_is_left_alone(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.config import load_state, save_state
+
+        world = _seed_cli_orphan(
+            tmp_config_dir, tmp_path, monkeypatch, row_session_id="sess-gate"
+        )
+        state = load_state()
+        state.sessions.append(
+            _make_session(
+                session_id="sess-gate",
+                last_result={"status": "plan_pending_approval"},
+            )
+        )
+        save_state(state)
+        other = _make_blocked_task(
+            ticket_id="GEN-501",
+            status=QueueItemStatus.RUNNING,
+            session_id=_ORPHAN_ID,
+        )
+        save_dev_queue(DevQueueStore(tasks=[world.task, other]))
+        stub_fetch_plan(
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+
+        result = _invoke("approve")
+
+        assert result.exit_code == 0, result.output
+        assert "pinned by GEN-501 (genhealth, RUNNING)" in result.output
+        assert world.fake.stop_calls == []
+        assert _orphan_status() == SessionStatus.ACTIVE
+
+    def test_refused_approve_stops_nothing(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing irreversible precedes the transition (R2)."""
+        world = _seed_cli_orphan(
+            tmp_config_dir, tmp_path, monkeypatch, last_status=None
+        )
+
+        result = _invoke("approve")
+
+        assert result.exit_code != 0
+        assert _gen500().status == QueueItemStatus.BLOCKED_ON_USER
+        assert world.fake.stop_calls == []
+        assert _orphan_status() == SessionStatus.ACTIVE
+
+    def _stub_scope_drift_head(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        head: tuple[str | None, bool] = (_APPROVED_HEAD, True),
+    ) -> None:
+        def _fake_head(
+            branch: str, *, timeout: int = 10, cwd: Path | None = None
+        ) -> tuple[str | None, bool]:
+            del branch, timeout, cwd
+            return head
+
+        monkeypatch.setattr(
+            "cw.dev_queue.approval.branch_head_sha_on_origin", _fake_head
+        )
+        monkeypatch.setattr(
+            "cw.operator_identity.cached_gh_login", lambda: "test-operator"
+        )
+
+    def _seed_scope_drift(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> _OrphanWorld:
+        world = _seed_cli_orphan(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            stage=Stage.IMPL,
+            last_status=None,
+            blocked_reason="plan_scope_drift",
+        )
+        task = _gen500()
+        task.stage_base_ref = "base0000"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return world
+
+    def test_scope_drift_approve_closes_after_the_grant(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        world = self._seed_scope_drift(tmp_config_dir, tmp_path, monkeypatch)
+        self._stub_scope_drift_head(monkeypatch)
+
+        result = _invoke("approve", "--scope-drift", "src/a.py")
+
+        assert result.exit_code == 0, result.output
+        assert _gen500().status == QueueItemStatus.PENDING
+        assert _gen500().stage == Stage.IMPL
+        assert _orphan_status() == SessionStatus.COMPLETED
+        assert world.fake.stop_calls == [world.surface]
+        assert result.output.index("Approved scope drift") < result.output.index(
+            f"Closed orphaned routed-result session {_ORPHAN_ID}"
+        )
+
+    def test_scope_drift_unconfirmed_stop_keeps_the_grant(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        world = self._seed_scope_drift(tmp_config_dir, tmp_path, monkeypatch)
+        self._stub_scope_drift_head(monkeypatch)
+        _stop_leaves_worker_listed(monkeypatch, world.fake)
+
+        result = _invoke("approve", "--scope-drift", "src/a.py")
+
+        assert result.exit_code != 0
+        assert _gen500().status == QueueItemStatus.PENDING
+        assert _gen500().scope_drift_approved_extra_files == ["src/a.py"]
+        assert _orphan_status() == SessionStatus.ACTIVE
+
+    def test_refused_scope_drift_stops_nothing(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        world = self._seed_scope_drift(tmp_config_dir, tmp_path, monkeypatch)
+        self._stub_scope_drift_head(monkeypatch, head=(None, False))
+
+        result = _invoke("approve", "--scope-drift", "src/a.py")
+
+        assert result.exit_code != 0
+        assert world.fake.stop_calls == []
+        assert _orphan_status() == SessionStatus.ACTIVE
+
+
+class TestCLIRequeueRoutedOrphan:
+    """`cw dev-queue requeue` closes the orphan BEFORE requeue_ticket (#2517)."""
+
+    def _seed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        row_status: QueueItemStatus = QueueItemStatus.BLOCKED_ON_USER,
+    ) -> _OrphanWorld:
+        return _seed_cli_orphan(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            stage=Stage.IMPL,
+            last_status=None,
+            row_status=row_status,
+        )
+
+    def test_requeue_closes_the_orphan_then_requeues(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        world = self._seed(tmp_config_dir, tmp_path, monkeypatch)
+
+        result = _invoke("requeue")
+
+        assert result.exit_code == 0, result.output
+        assert _orphan_status() == SessionStatus.COMPLETED
+        assert world.fake.stop_calls == [world.surface]
+        assert _gen500().status == QueueItemStatus.PENDING
+        closed_at = result.output.index(
+            f"Closed orphaned routed-result session {_ORPHAN_ID}"
+        )
+        assert closed_at < result.output.index("Requeued GEN-500")
+
+    @_STOP_FAILURE_SHAPES
+    def test_unconfirmed_stop_refuses_and_leaves_the_row(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        shape: str,
+    ) -> None:
+        world = self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        _stop_never_takes(monkeypatch, world.fake, shape)
+        before = load_dev_queue().model_dump()
+
+        result = _invoke("requeue")
+
+        assert result.exit_code != 0
+        output = " ".join(result.output.split())
+        assert "The row was not requeued." in output
+        assert "status flip alone" in output
+        assert load_dev_queue().model_dump() == before
+        assert _orphan_status() == SessionStatus.ACTIVE
+
+    def test_draining_orphan_refuses_without_a_stop(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        world = self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        _write_agent_spawn_stamp(
+            world.worktree,
+            unresolved_count=1,
+            stamped_at=datetime.now(UTC) - timedelta(minutes=5),
+        )
+        before = load_dev_queue().model_dump()
+
+        result = _invoke("requeue")
+
+        assert result.exit_code != 0
+        assert "background work is still draining" in " ".join(result.output.split())
+        assert world.fake.stop_calls == []
+        assert load_dev_queue().model_dump() == before
+
+    def test_second_live_session_is_predicted_and_nothing_is_stopped(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        world = self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        second = world.fake.seed_live_worker(tmp_path / "wt-second")
+        _seed_live_ticket_session(session_id="sess-second", surface_ref=second)
+
+        result = _invoke("requeue")
+
+        assert result.exit_code != 0
+        assert "sess-second" in result.output
+        assert world.fake.stop_calls == []
+        assert _orphan_status() == SessionStatus.ACTIVE
+        assert _gen500().status == QueueItemStatus.BLOCKED_ON_USER
+
+    @pytest.mark.parametrize(
+        ("row_status", "args"),
+        [
+            (QueueItemStatus.PENDING, ()),
+            (QueueItemStatus.BLOCKED_ON_USER, ("--regress",)),
+            (QueueItemStatus.BLOCKED_ON_USER, ("--stage", "plan")),
+        ],
+        ids=["pending_row", "regress_without_stage", "backward_without_regress"],
+    )
+    def test_predicted_refusals_stop_nothing(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        row_status: QueueItemStatus,
+        args: tuple[str, ...],
+    ) -> None:
+        world = self._seed(tmp_config_dir, tmp_path, monkeypatch, row_status=row_status)
+
+        result = _invoke("requeue", *args)
+
+        assert result.exit_code != 0
+        assert world.fake.stop_calls == []
+        assert _orphan_status() == SessionStatus.ACTIVE
+
+    def test_lock_timeout_after_the_close_is_the_accepted_residual(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.exceptions import LockTimeoutError
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+
+        def _timeout(*_args: object, **_kwargs: object) -> dict[str, object]:
+            msg = "dev-queue lock timed out"
+            raise LockTimeoutError(
+                msg, lock_name="dev_queue", lock_path=tmp_path / "x.lock", waited_s=1.0
+            )
+
+        monkeypatch.setattr("cw.cli.dev_queue.crud.requeue_ticket", _timeout)
+
+        result = _invoke("requeue")
+
+        assert result.exit_code != 0
+        assert f"Closed orphaned routed-result session {_ORPHAN_ID}" in result.output
+        assert _orphan_status() == SessionStatus.COMPLETED
+        assert _gen500().status == QueueItemStatus.BLOCKED_ON_USER
+
+    @pytest.mark.parametrize(
+        ("row_status", "args"),
+        [
+            (QueueItemStatus.CANCELLED, ("--from-cancelled",)),
+            (QueueItemStatus.BLOCKED_ON_USER, ("--stage", "plan", "--regress")),
+        ],
+        ids=["from_cancelled", "regress"],
+    )
+    def test_requeue_variants_also_close(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        row_status: QueueItemStatus,
+        args: tuple[str, ...],
+    ) -> None:
+        world = self._seed(tmp_config_dir, tmp_path, monkeypatch, row_status=row_status)
+
+        result = _invoke("requeue", *args)
+
+        assert result.exit_code == 0, result.output
+        assert f"Closed orphaned routed-result session {_ORPHAN_ID}" in result.output
+        assert world.fake.stop_calls == [world.surface]
+        assert _orphan_status() == SessionStatus.COMPLETED
 
 
 # ---------------------------------------------------------------------------

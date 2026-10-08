@@ -16,10 +16,14 @@ with its daemon worker still live in the roster.
 This module finds that shape (:func:`find_stranded_routed_sessions`) and pages
 it exactly once (:func:`sweep_routed_result_sessions`). ADR-0014 governs it:
 the transcript-age bucket only debounces a signal (invariant 1), the new
-heuristic lands as a signal first (invariant 3), and the only actor that ever
-closes such a session is the operator -- ``cw doctor --reap``
-(``cw.doctor.routed_result_wedge``) or ``cw spawn close --confirmed-dead``
-(invariant 2). Accordingly, nothing here ever mutates a session's status or a
+heuristic lands as a signal first (invariant 3), and the only actors that ever
+close such a session are explicit operator commands -- ``cw doctor --reap``
+(``cw.doctor.routed_result_wedge``), ``cw spawn close --confirmed-dead``, and
+the operator-run ``cw dev-queue approve`` / ``cw dev-queue requeue`` (#2517;
+they stop the worker, confirm it left the roster, then close the session;
+invariant 2). The finders below (:func:`routed_marker_candidates`,
+:func:`split_resolvable_routed_sessions`) are called only from those commands.
+Accordingly, nothing here ever mutates a session's status or a
 queue row, emits ``session.completed``, stops a daemon worker, runs a
 subprocess, or calls ``gh``; the only state written is the existing
 ``Session.reap_proposed_at`` page-once latch, through the shared proposal
@@ -47,6 +51,7 @@ from cw.models import (
     OCCUPIED_LANE_STATUSES,
     LivenessBucket,
     OrchestratorEventType,
+    QueueItemStatus,
     ReapReason,
     SessionOrigin,
     SessionPurpose,
@@ -56,6 +61,7 @@ from cw.reconcile._shared import (
     ProposedAction,
     ReapCandidate,
     _emit_reap_proposed,
+    _looks_like_daemon_outage,
     _sentinel_partial_route_consumed,
     _transcript_age_seconds,
     stage_refusal_latched,
@@ -72,7 +78,6 @@ if TYPE_CHECKING:
     from cw.models import (
         CwState,
         OrchestratorConfig,
-        QueueItemStatus,
         Session,
         Stage,
         TicketTask,
@@ -90,6 +95,12 @@ ROUTED_RESULT_GRACE_BUCKETS: frozenset[LivenessBucket] = frozenset(
     {LivenessBucket.STALE_30M, LivenessBucket.STALE_45M}
 )
 _SECONDS_PER_MINUTE = 60
+# The ticket's own rows a requeue is about to release (#2517): every
+# lane-occupying status except RUNNING. Derived from the public constant so it
+# tracks any future occupied status.
+_PARKED_ROW_STATUSES: frozenset[QueueItemStatus] = OCCUPIED_LANE_STATUSES - {
+    QueueItemStatus.RUNNING
+}
 
 
 class StrandedRoutedSession(NamedTuple):
@@ -119,34 +130,193 @@ def session_pins_occupied_row(tasks: Iterable[TicketTask], session_id: str) -> b
     ``occupies_lane_slot``, so a terminal_sibling BLOCKED row still pins --
     erring toward protecting the session.
     """
-    return any(
-        task.session_id == session_id and task.status in OCCUPIED_LANE_STATUSES
-        for task in tasks
+    return _first_pinning_row(tasks, session_id) is not None
+
+
+def _first_pinning_row(
+    tasks: Iterable[TicketTask], session_id: str
+) -> TicketTask | None:
+    """The first lane-occupying row bound to *session_id*, else None.
+
+    :func:`session_pins_occupied_row` with the row itself, so a caller that
+    skips a pinned session can name what pins it (#2517).
+    """
+    return next(
+        (
+            task
+            for task in tasks
+            if task.session_id == session_id and task.status in OCCUPIED_LANE_STATUSES
+        ),
+        None,
+    )
+
+
+def _is_routed_marker_candidate(session: Session) -> bool:
+    """The roster-independent half of the routed-marker filter.
+
+    A live (ACTIVE/IDLE) non-orchestrator DAEMON session whose
+    ``last_result`` carries the #2458 consumed marker (exactly ``True``),
+    with no latched stage refusal (that shape belongs to the refusal pages)
+    and a non-null surface (a null one belongs to doctor class 9).
+    """
+    return not (
+        session.origin is not SessionOrigin.DAEMON
+        or session.status not in _LIVE_STATUSES
+        or session.purpose is SessionPurpose.ORCHESTRATE
+        or not _sentinel_partial_route_consumed(session)
+        or stage_refusal_latched(session)
+        or session.surface_ref is None
     )
 
 
 def _live_routed_surface_ref(session: Session, native_live: set[str]) -> str | None:
     """Return the roster short id of a routed-marker candidate, else None.
 
-    The cheap first-pass filter: a live (ACTIVE/IDLE) non-orchestrator DAEMON
-    session whose ``last_result`` carries the #2458 consumed marker (exactly
-    ``True``), with no latched stage refusal (that shape belongs to the
-    refusal pages), and whose surface is still in the daemon roster (an
-    absent one belongs to the phantom sweep and doctor class 6, a null one to
-    class 9).
+    The cheap first-pass filter: :func:`_is_routed_marker_candidate`, plus a
+    surface still in the daemon roster (an absent one belongs to the phantom
+    sweep and doctor class 6).
     """
     surface_ref = session.surface_ref
     if (
-        session.origin is not SessionOrigin.DAEMON
-        or session.status not in _LIVE_STATUSES
-        or session.purpose is SessionPurpose.ORCHESTRATE
-        or not _sentinel_partial_route_consumed(session)
-        or stage_refusal_latched(session)
+        not _is_routed_marker_candidate(session)
         or surface_ref is None
         or surface_ref not in native_live
     ):
         return None
     return surface_ref
+
+
+def routed_marker_candidates(
+    state: CwState, *, client: str, ticket_id: str
+) -> list[Session]:
+    """Every routed-marker session for (*client*, *ticket_id*) (#2517).
+
+    Matched by session name (``ticket_id_for_session``), never by a row's
+    ``session_id``: after approve/requeue no row points at the orphan any
+    more. Needs no roster and no queue, so an operator command with nothing
+    to close can return before it resolves a daemon client.
+    """
+    return [
+        session
+        for session in state.sessions
+        if session.client == client
+        and ticket_id_for_session(session.name) == ticket_id
+        and _is_routed_marker_candidate(session)
+    ]
+
+
+class PinnedOrphan(NamedTuple):
+    """A marker candidate an occupied row still binds, with that row."""
+
+    session: Session
+    pinned_by: TicketTask
+
+
+class RoutedOrphanSplit(NamedTuple):
+    """:func:`split_resolvable_routed_sessions`'s five disjoint outcomes.
+
+    ``stop``: live in the roster, unpinned, not draining -- stop, confirm
+    gone, then close. ``flip_only``: absent from a readable, trustworthy
+    roster -- no worker to stop, close by the status flip alone.
+    ``roster_untrusted``: absent from an empty roster while state records
+    another live session (the daemon-restart signature) -- never closed.
+    ``draining``: background work still draining. ``pinned``: an occupied
+    row binds it.
+    """
+
+    stop: list[Session]
+    flip_only: list[Session]
+    roster_untrusted: list[Session]
+    draining: list[Session]
+    pinned: list[PinnedOrphan]
+
+
+def _roster_outage_shaped(
+    state: CwState, native_live: set[str], *, exclude_ids: Iterable[str]
+) -> bool:
+    """True when *native_live* looks like a daemon outage, not proof of death.
+
+    :func:`_looks_like_daemon_outage` (an empty roster while state records a
+    live session with a surface) over the sessions NOT in *exclude_ids*. The
+    caller excludes its own candidates: each of them always counts as "live
+    with a surface", so without the exclusion every empty-roster close would
+    be refused and a lone orphan whose worker is gone could never be closed.
+    """
+    excluded = set(exclude_ids)
+    others = [s for s in state.sessions if s.id not in excluded]
+    return _looks_like_daemon_outage(
+        state.model_copy(update={"sessions": others}), False, native_live
+    )
+
+
+def _pin_rows(
+    tasks: Iterable[TicketTask], releasing: tuple[str, str] | None
+) -> list[TicketTask]:
+    """*tasks* minus the parked rows of the ticket a requeue is releasing."""
+    if releasing is None:
+        return list(tasks)
+    return [
+        task
+        for task in tasks
+        if (task.client, task.ticket_id) != releasing
+        or task.status not in _PARKED_ROW_STATUSES
+    ]
+
+
+def split_resolvable_routed_sessions(
+    candidates: list[Session],
+    tasks: Iterable[TicketTask],
+    *,
+    state: CwState,
+    native_live: set[str],
+    now: datetime,
+    config: OrchestratorConfig,
+    releasing: tuple[str, str] | None = None,
+) -> RoutedOrphanSplit:
+    """Classify each marker candidate an operator command resolved (#2517).
+
+    Pure: no writes, no events, no daemon call. Per candidate, in order:
+    pinned (an occupied row binds it); absent from *native_live* --
+    ``roster_untrusted`` when the roster is outage-shaped (excluding the whole
+    candidate set), else ``flip_only``; ``draining``; otherwise ``stop``.
+
+    *releasing* is ``(client, ticket_id)`` for a requeue only: that ticket's
+    own parked rows do not pin, because ``requeue_ticket`` is about to release
+    exactly those rows and a parked row always binds its own orphan
+    (ADR-0001). An approve passes None: its transition already released the
+    row, so whatever still binds the session (the REVIEW signoff park) pins.
+
+    No transcript-staleness gate: an explicit operator command resolved the
+    ticket (ADR-0014 invariant 2); the draining veto still applies.
+    """
+    pin_rows = _pin_rows(tasks, releasing)
+    outage = _roster_outage_shaped(
+        state, native_live, exclude_ids=[c.id for c in candidates]
+    )
+    # Local lists, built by keyword at the end: this module never spells a
+    # ``.stop`` attribute (the #2524 no-daemon-stop AST guard).
+    to_stop: list[Session] = []
+    flip_only: list[Session] = []
+    untrusted: list[Session] = []
+    draining: list[Session] = []
+    pinned: list[PinnedOrphan] = []
+    for session in candidates:
+        row = _first_pinning_row(pin_rows, session.id)
+        if row is not None:
+            pinned.append(PinnedOrphan(session, row))
+        elif session.surface_ref not in native_live:
+            (untrusted if outage else flip_only).append(session)
+        elif _background_work_still_draining(session, now=now, config=config):
+            draining.append(session)
+        else:
+            to_stop.append(session)
+    return RoutedOrphanSplit(
+        stop=to_stop,
+        flip_only=flip_only,
+        roster_untrusted=untrusted,
+        draining=draining,
+        pinned=pinned,
+    )
 
 
 def _stranded_hit(

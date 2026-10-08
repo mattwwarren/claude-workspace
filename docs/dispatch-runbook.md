@@ -519,10 +519,24 @@ row is claimed (the pre-claim occupancy screen) or, if that screen's check
 raced with a `HookContextConflictError` during spawn, released again with no
 attempt charged. Recognizable by a `dispatch.tick` event carrying
 `skip_reason=worktree_occupied` and, in the second case, by the operator
-`emit` line's `OCCUPIED` prefix. No operator action: the condition resolves
-itself once the occupying session finishes. Do not close that session — see
-`cw-queue-peek`'s row/session-mismatch guidance for how to tell this apart
-from a genuine wedge.
+`emit` line's `OCCUPIED` prefix. Two causes need different handling. If the
+occupying session is genuinely working, the condition resolves itself once it
+finishes and the session must not be closed (see `cw-queue-peek`'s
+row/session-mismatch guidance for how to tell this apart from a genuine
+wedge). If the session already routed its result but was never completed (a
+Stop with background work still running, #2458; doctor class
+`wedge/active-routed-result-stranded`), it never finishes on its own:
+`cw dev-queue approve` (plain or `--scope-drift`; it closes after the
+approval) and `cw dev-queue requeue` (it closes before the requeue, after
+pre-checking it) stop its worker, confirm the worker left the daemon roster,
+and close the session (#2517). Any caller of those commands, including an
+agent or orchestrator session, does this. If the stop does not take they exit
+non-zero and name `claude stop <id>`; an `approve` that fails there has
+already approved the ticket, so close the session with
+`cw spawn close --confirmed-dead <id>` once the worker is gone instead of
+re-running `approve`. A session whose background work is still draining is
+left running. Approvals made by unattended paths (the auto-adopt gate recipe,
+`drain`, `auto_fix_ci`) do not close it; the doctor class reports the fix.
 
 Also not a sentinel status:
 `validation_failed` — the sentinel was emitted but malformed. The queue
@@ -630,7 +644,9 @@ common wedge conditions:
   `cw doctor` reports it; `cw doctor --reap` closes **every** session of this
   class (marks it `COMPLETED` with `reap_reason=routed_result_stranded` and
   stops its worker) and never touches a queue row. To close just one, run
-  `cw spawn close --confirmed-dead <id>`.
+  `cw spawn close --confirmed-dead <id>`. `cw dev-queue approve` and
+  `requeue` also close this session when run for the ticket (see the
+  `worktree_occupied` paragraph).
 
 Run `cw doctor --reap --json` for machine-readable output.
 

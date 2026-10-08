@@ -114,6 +114,7 @@ def _spawn_close_impl(
     *,
     session_id: str,
     native_daemon: NativeDaemonClient | None = None,
+    surface_already_stopped: bool = False,
 ) -> None:
     """Close a daemon-spawned session.
 
@@ -121,6 +122,11 @@ def _spawn_close_impl(
     USER-origin sessions with a legacy ``surface_ref`` are logged and
     skipped — the multiplexer adapter has been removed. Separated from
     the Click command so tests can inject the daemon client directly.
+
+    ``surface_already_stopped`` (#2517): the caller already stopped the
+    worker and confirmed it left the roster (or proved there is none), so the
+    post-lock stop is skipped -- no second stop, no client resolved. The
+    cancel/route step and the COMPLETED stamp are unchanged.
     """
     surface_to_stop: str | None = None
     # Why not mutate_state: cancel_task_for_session / _route_staged_emit_result
@@ -176,7 +182,7 @@ def _spawn_close_impl(
     # daemon.stop is best-effort and slow (up to 10s), so it runs after the lock
     # releases (#2547, mirrors signal_stop / done_session). A raise leaves the
     # state already stamped; a repeat close retries just the stop (#2480).
-    if surface_to_stop is not None:
+    if surface_to_stop is not None and not surface_already_stopped:
         (native_daemon or get_native_daemon_client()).stop(surface_to_stop)
 
 

@@ -2085,6 +2085,13 @@ _CHILD_READY_TIMEOUT_S = 10.0
 # is a conscious call: verify nothing irreversible happens before the lock, that
 # no unattended loop reaches the site, and that, if it is reachable inside
 # ``dispatch_tick``, SessionsLockTimeoutError is handled.
+# One accepted exception (#2517): ``dev_queue_requeue`` is the one operator
+# site where a confirmed, marker-scoped routed-orphan stop precedes the
+# bounded lock. It is accepted because it is an operator CLI with no broad
+# ``except`` that reverts the row to PENDING, the stop runs only after the
+# lock-free ``precheck_requeue``, and a timeout after it leaves the row parked
+# and the session COMPLETED -- the state a normal park leaves. ``approve``
+# closes after its lock, so nothing irreversible precedes that one.
 _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/cli/maintenance.py", "doctor"): 1,  # `cw doctor --reap <SESSION>`
     ("cw/cli/maintenance.py", "init"): 1,  # `cw init` -> init_client (#2501)

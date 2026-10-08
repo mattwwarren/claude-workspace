@@ -59,7 +59,7 @@ from tests._reconcile_helpers import (
     _ul_record,
     _write_transcript_records,
 )
-from tests.conftest import _make_ticket_task
+from tests.conftest import _make_ticket_task, _stop_leaves_worker_listed
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -751,7 +751,7 @@ def test_act_auto_retries_stop_while_surface_still_in_roster(
     )
     real_stop = daemon.stop
     # A stop that returns but never takes effect.
-    monkeypatch.setattr(daemon, "stop", daemon.stop_calls.append)
+    _stop_leaves_worker_listed(monkeypatch, daemon)
 
     with caplog.at_level("WARNING", logger="cw.reconcile.usage_limit_mid_turn"):
         assert _tick(state, _auto_config(), daemon, at=_NOW) == []
