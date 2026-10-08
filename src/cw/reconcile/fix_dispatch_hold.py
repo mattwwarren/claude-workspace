@@ -27,6 +27,7 @@ event inbox lock is a leaf), and it never stops a worker. It must not import
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import timedelta
 from typing import TYPE_CHECKING, NamedTuple
@@ -34,6 +35,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
+from cw.native_daemon import RealNativeDaemonClient
 from cw.reconcile import _deps
 
 if TYPE_CHECKING:
@@ -98,6 +100,8 @@ def read_live_worker_roster() -> set[str] | None:
     """
     try:
         daemon = _deps.get_native_daemon_client()
+        if isinstance(daemon, RealNativeDaemonClient):
+            return _read_real_worker_roster(daemon)
         return daemon.list_live_session_short_ids_fail_closed()
     except (OSError, ValueError):
         _log.warning(
@@ -105,6 +109,25 @@ def read_live_worker_roster() -> set[str] | None:
             exc_info=True,
         )
         return None
+
+
+def _read_real_worker_roster(daemon: RealNativeDaemonClient) -> set[str] | None:
+    """Read a real roster once, preserving missing versus empty."""
+    try:
+        with daemon.roster_path.open(encoding="utf-8") as roster_file:
+            data: object = json.load(roster_file)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        _log.warning(
+            "fix_dispatch_hold: daemon roster read failed, treating it as unreadable",
+            exc_info=True,
+        )
+        return None
+    if not isinstance(data, dict):
+        return None
+    workers = data.get("workers")
+    if not isinstance(workers, dict):
+        return None
+    return {key for key in workers if isinstance(key, str)}
 
 
 def apply_launched_worker_hold(
