@@ -31,6 +31,7 @@ from cw.models import (
     CwState,
     DevQueueStore,
     LastResultSource,
+    LaunchedFixWorker,
     LocalLivenessHandle,
     OrchestratorConfig,
     OrchestratorEventType,
@@ -399,6 +400,21 @@ def _make_pending_fix_dispatch(**overrides: Any) -> PendingFixDispatch:
     }
     kwargs.update(overrides)
     return PendingFixDispatch(**kwargs)
+
+
+def _make_launched_fix_worker(**overrides: Any) -> LaunchedFixWorker:
+    """Minimal-but-valid ``LaunchedFixWorker`` tombstone (#2590) with overrides.
+
+    Same dict-merge idiom as ``_make_pending_fix_dispatch``. The default
+    ``surface_ref`` is never seeded into a ``FakeNativeDaemonClient``, so a
+    readable fake roster reports it absent unless a test seeds it.
+    """
+    kwargs: dict[str, Any] = {
+        "surface_ref": "abc12345",
+        "launched_at": datetime(2026, 1, 1, tzinfo=UTC),
+    }
+    kwargs.update(overrides)
+    return LaunchedFixWorker(**kwargs)
 
 
 # Default (ticket, client) key of the fix-loop row the fix-dispatch tests seed

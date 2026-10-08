@@ -212,7 +212,13 @@ from cw.review_finding_dispositions import FindingDisposition
 #      a session's started_at against. ``| None`` with a ``None`` default, so
 #      no migration filler is needed (same as v13/v38/v40/v42); a pre-v44 row
 #      is a claim of unknown age.
-DEV_QUEUE_SCHEMA_VERSION = 44
+# v45: added TicketTask.fix_dispatch_launched_worker (GitHub #2590) — the
+#      tombstone of a fix-loop worker that launched but was never recorded,
+#      which holds the row until a readable daemon roster no longer lists the
+#      worker's surface. ``| None`` with a ``None`` default, so no migration
+#      filler is needed (same as v13/v38/v40/v42/v44); a pre-v45 row recorded
+#      no unconfirmed worker.
+DEV_QUEUE_SCHEMA_VERSION = 45
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -335,6 +341,28 @@ class PendingFixDispatch(BaseModel):
     cycle: int
     requested_by_session_id: str
     requested_at: datetime
+
+
+class LaunchedFixWorker(BaseModel):
+    """Tombstone of a fix-loop worker that launched but was never recorded.
+
+    (GitHub #2590, refs #2502.) Stamped by ``cw.reconcile.fix_dispatch`` when
+    ``dispatch_fix_agent`` raises ``WorkerLaunchedError``: the worker is live in
+    the daemon roster, but a later spawn step (usually the ``sessions.json``
+    write) failed, so no session row may exist to say when it finishes. While
+    this is set, the completions phase holds the row RUNNING until a readable
+    roster no longer lists *surface_ref*, so a fresh REVIEW worker is never
+    started over the fix worker. ``cw.reconcile.fix_dispatch_hold`` is its
+    only reader and clears it once the roster confirms the worker stopped.
+    """
+
+    # NOT extra=forbid — persisted/runtime state, see #1200
+    # The worker's daemon roster short id (``claude stop <surface_ref>``).
+    surface_ref: str
+    # When the tombstone was stamped; the page grace counts from here.
+    launched_at: datetime
+    # When the unconfirmed-worker page last succeeded; None until the first.
+    attention_paged_at: datetime | None = None
 
 
 class UsageLimitAct(BaseModel):
@@ -944,6 +972,12 @@ class TicketTask(BaseModel):
     # is consumed and cleared by exactly one seam in fix_dispatch.py.
     pending_fix_dispatch: PendingFixDispatch | None = None
     fix_dispatch_session_id: str | None = None
+    # GitHub #2590 — see LaunchedFixWorker. Stamped only on the
+    # WorkerLaunchedError path of the fix dispatch, and cleared only by
+    # cw.reconcile.fix_dispatch_hold once a readable roster confirms the
+    # worker stopped. Deliberately NOT cleared by transition_task_status: a
+    # cancel or requeue must not release a row whose worker may still run.
+    fix_dispatch_launched_worker: LaunchedFixWorker | None = None
     # GitHub #2324 — the mid-turn usage-limit act's write-ahead intent; see
     # UsageLimitAct. Only ever set on a RUNNING row.
     usage_limit_act: UsageLimitAct | None = None

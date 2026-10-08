@@ -24,6 +24,7 @@ from cw.models import (
     DevQueueStore,
     LaneConfig,
     LastResultSource,
+    LaunchedFixWorker,
     MustFixOverride,
     OrchestratorConfig,
     OrchestratorEvent,
@@ -1261,7 +1262,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 44
+        assert DEV_QUEUE_SCHEMA_VERSION == 45
 
     def test_ticket_task_old_row_without_codex_orphan_fields_defaults_none(
         self,
@@ -2295,7 +2296,8 @@ class TestPackageExportCompleteness:
     plus #2369's ``LocalLivenessBackend`` = 66, plus #2470's
     ``WORKER_TMPDIR_RELATIVE_PATH`` and two ``DEFAULT_DISK_PRESSURE_MIN_FREE_
     INODE*`` defaults = 69, plus #2389's ``CodexHarvestOutcome`` and the six
-    ``codex_legacy_recovery`` marker names = 76) — hardcoded here, NOT
+    ``codex_legacy_recovery`` marker names = 76, later additions = 93, plus
+    #2590's ``LaunchedFixWorker`` = 94) — hardcoded here, NOT
     re-derived from the package, so a dropped or renamed export is a
     falsifiable failure rather than a tautology. A deliberate addition updates
     this set in the same commit.
@@ -2345,6 +2347,7 @@ class TestPackageExportCompleteness:
             "LaneConcurrencyOverride",
             "LaneConfig",
             "LastResultSource",
+            "LaunchedFixWorker",
             "LegacyRecoveryStatus",
             "LivenessBucket",
             "LocalLivenessBackend",
@@ -2744,6 +2747,65 @@ class TestClaimedAtField:
         restored = TicketTask.model_validate_json(task.model_dump_json())
 
         assert restored.claimed_at == claimed
+
+
+class TestLaunchedFixWorkerField:
+    """v45 (#2590): the fix-loop row's launched-but-unconfirmed worker tombstone."""
+
+    _LAUNCHED = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
+    _PAGED = datetime(2026, 10, 7, 9, 6, tzinfo=UTC)
+
+    def test_field_defaults_none(self) -> None:
+        task = TicketTask(ticket_id="GEN-1", client="acme")
+        assert task.fix_dispatch_launched_worker is None
+
+    @pytest.mark.parametrize("paged_at", [None, _PAGED])
+    def test_field_round_trips_through_json(self, paged_at: datetime | None) -> None:
+        worker = LaunchedFixWorker(
+            surface_ref="abc12345",
+            launched_at=self._LAUNCHED,
+            attention_paged_at=paged_at,
+        )
+        task = TicketTask(
+            ticket_id="GEN-1",
+            client="acme",
+            fix_dispatch_session_id="fix-sess",
+            fix_dispatch_launched_worker=worker,
+        )
+
+        restored = TicketTask.model_validate_json(task.model_dump_json())
+
+        assert restored.fix_dispatch_launched_worker == worker
+        restored_worker = restored.fix_dispatch_launched_worker
+        assert restored_worker is not None
+        assert restored_worker.surface_ref == "abc12345"
+        assert restored_worker.launched_at == self._LAUNCHED
+        assert restored_worker.attention_paged_at == paged_at
+
+    def test_previous_schema_version_row_loads_with_field_defaulted(self) -> None:
+        """A pre-v45 fix-loop row carries no key and loads with the field None
+        -- no migration filler exists for it (the v13/v38/v40/v42/v44
+        precedent)."""
+        from cw.dev_queue.migrate import migrate_dev_queue
+
+        raw: dict[str, object] = {
+            "schema_version": DEV_QUEUE_SCHEMA_VERSION - 1,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-2590",
+                    "client": "acme",
+                    "priority": 0,
+                    "status": "running",
+                    "stage": "review",
+                    "fix_dispatch_session_id": "fix-sess",
+                }
+            ],
+        }
+        store = DevQueueStore.model_validate(migrate_dev_queue(raw))
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION
+        task = store.tasks[0]
+        assert task.fix_dispatch_session_id == "fix-sess"
+        assert task.fix_dispatch_launched_worker is None
 
 
 class TestScopeDriftApprovalFields:
