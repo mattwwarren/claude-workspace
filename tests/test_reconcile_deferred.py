@@ -20,14 +20,7 @@ from cw.reconcile.deferred import (
     is_surface_stop_queued,
     run_post_lock_jobs,
 )
-
-_DEPS_DAEMON = "cw.reconcile._deps.get_native_daemon_client"
-
-
-def _install_daemon(
-    monkeypatch: pytest.MonkeyPatch, daemon: FakeNativeDaemonClient
-) -> None:
-    monkeypatch.setattr(_DEPS_DAEMON, lambda: daemon)
+from tests._reconcile_helpers import use_reconcile_daemon
 
 
 def _recording_job(label: str, calls: list[str]) -> PostLockJob:
@@ -48,7 +41,7 @@ class TestDeferSurfaceStop:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         daemon = FakeNativeDaemonClient()
-        _install_daemon(monkeypatch, daemon)
+        use_reconcile_daemon(monkeypatch, daemon)
         sink = DeferredReconcileJobs()
 
         defer_surface_stop(sink, "abcd1234")
@@ -65,11 +58,11 @@ class TestDeferSurfaceStop:
     ) -> None:
         defer_time = FakeNativeDaemonClient()
         drain_time = FakeNativeDaemonClient()
-        _install_daemon(monkeypatch, defer_time)
+        use_reconcile_daemon(monkeypatch, defer_time)
         sink = DeferredReconcileJobs()
         defer_surface_stop(sink, "abcd1234")
 
-        _install_daemon(monkeypatch, drain_time)
+        use_reconcile_daemon(monkeypatch, drain_time)
         run_post_lock_jobs(sink)
 
         assert defer_time.stop_calls == []
@@ -79,7 +72,7 @@ class TestDeferSurfaceStop:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         daemon = FakeNativeDaemonClient()
-        _install_daemon(monkeypatch, daemon)
+        use_reconcile_daemon(monkeypatch, daemon)
         sink = DeferredReconcileJobs()
 
         defer_surface_stop(sink, "abcd1234")
@@ -93,7 +86,7 @@ class TestDeferSurfaceStop:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         daemon = FakeNativeDaemonClient()
-        _install_daemon(monkeypatch, daemon)
+        use_reconcile_daemon(monkeypatch, daemon)
         sink = DeferredReconcileJobs()
 
         defer_surface_stop(sink, "aaaa1111")

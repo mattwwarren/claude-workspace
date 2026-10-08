@@ -38,7 +38,15 @@ from cw.models import (
 from cw.models.enums import StageIdentifier
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import fix_dispatch, reconcile
-from tests._reconcile_helpers import _make_pending_fix_dispatch
+from tests._reconcile_helpers import _FIX_LOOP_CLIENT as _CLIENT
+from tests._reconcile_helpers import _FIX_LOOP_TICKET as _TICKET
+from tests._reconcile_helpers import (
+    _make_pending_fix_dispatch,
+    _only_task,
+    _save_fix_session,
+    _seed_task,
+    use_reconcile_daemon,
+)
 from tests.conftest import (
     _make_daemon_session,
     _make_ticket_task,
@@ -57,8 +65,6 @@ if TYPE_CHECKING:
 
     from tests.conftest import CapturedEvent
 
-_TICKET = "2017"
-_CLIENT = "acme"
 _FIX_LOOP_PHASE = "fix_loop"
 
 
@@ -69,23 +75,6 @@ def _pending(**overrides: Any) -> PendingFixDispatch:
     }
     kwargs.update(overrides)
     return _make_pending_fix_dispatch(**kwargs)
-
-
-def _seed_task(**overrides: Any) -> None:
-    """Persist a single dev-queue row built from the canonical task builder."""
-    kwargs: dict[str, Any] = {
-        "ticket_id": _TICKET,
-        "client": _CLIENT,
-        "status": QueueItemStatus.RUNNING,
-    }
-    kwargs.update(overrides)
-    save_dev_queue(DevQueueStore(tasks=[_make_ticket_task(**kwargs)]))
-
-
-def _only_task() -> Any:
-    tasks = load_dev_queue().tasks
-    assert len(tasks) == 1
-    return tasks[0]
 
 
 @pytest.fixture
@@ -894,23 +883,6 @@ def test_stamp_helpers_tolerate_a_row_removed_after_dispatch(
 # --- completion act phase ---------------------------------------------------
 
 
-def _save_fix_session(status: SessionStatus) -> None:
-    from cw.config import save_state
-
-    save_state(
-        CwState(
-            sessions=[
-                _make_daemon_session(
-                    id="fix-sess",
-                    name=f"{_CLIENT}/fix/{_TICKET}",
-                    client=_CLIENT,
-                    status=status,
-                )
-            ]
-        )
-    )
-
-
 def test_act_on_fix_dispatch_completions_unparks_task(tmp_config_dir: Path) -> None:
     _seed_task(fix_dispatch_session_id="fix-sess")
     _save_fix_session(SessionStatus.COMPLETED)
@@ -1080,9 +1052,7 @@ def test_unrecorded_fix_worker_is_stopped_before_its_row_unparks(
     _seed_fix_handoff_after_failed_session_write(
         make_git_repo, tmp_path, mock_native_daemon, monkeypatch
     )
-    monkeypatch.setattr(
-        "cw.reconcile._deps.get_native_daemon_client", lambda: mock_native_daemon
-    )
+    use_reconcile_daemon(monkeypatch, mock_native_daemon)
     order: list[str] = []
     real_stop = mock_native_daemon.stop
     real_unpark = fix_dispatch._act_on_fix_dispatch_completions
