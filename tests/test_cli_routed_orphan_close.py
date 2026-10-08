@@ -17,6 +17,7 @@ import pytest
 from cw.config import load_state, save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.exceptions import CwError
+from cw.history import EventType, load_history
 from cw.models import (
     CompletionReason,
     CwState,
@@ -201,6 +202,50 @@ def test_closes_matching_orphan_once_outside_the_lock(
         f"Closed orphaned routed-result session {orphan.id} for 2517 (client-a)."
         in capsys.readouterr().out
     )
+
+
+def test_close_persists_durable_audit_payload(
+    tmp_path: Path,
+) -> None:
+    daemon = FakeNativeDaemonClient()
+    (orphan,) = _seed_orphans(tmp_path, daemon)
+
+    assert _close(daemon, after_transition=True) == [orphan.id]
+
+    (event,) = load_history(_CLIENT)
+    assert event.event_type is EventType.SESSION_COMPLETED
+    assert event.timestamp is not None
+    assert event.metadata == {
+        "actor": "operator",
+        "command": "approve",
+        "ticket_id": _TICKET,
+        "client": _CLIENT,
+        "session_id": orphan.id,
+        "surface_ref": orphan.surface_ref,
+        "prior_status": SessionStatus.ACTIVE.value,
+        "resulting_status": SessionStatus.COMPLETED.value,
+        "confirmation_result": "worker_gone_from_roster",
+        "reason": "routed_result_orphan_resolved",
+    }
+
+
+def test_close_surfaces_audit_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daemon = FakeNativeDaemonClient()
+    (orphan,) = _seed_orphans(tmp_path, daemon)
+
+    def _fail(*_args: object, **_kwargs: object) -> None:
+        msg = "history unavailable"
+        raise OSError(msg)
+
+    monkeypatch.setattr(f"{_MODULE}.record_event", _fail)
+
+    with pytest.raises(CwError, match="durable audit record could not be written"):
+        _close(daemon, after_transition=True)
+
+    assert _status_of(orphan.id) == SessionStatus.COMPLETED
 
 
 def test_leaves_unrelated_sessions_and_other_tickets_alone(tmp_path: Path) -> None:

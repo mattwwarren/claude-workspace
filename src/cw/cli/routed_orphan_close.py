@@ -37,6 +37,8 @@ from cw.cli.spawn import _spawn_close_impl
 from cw.config import load_state
 from cw.dev_queue import load_dev_queue
 from cw.exceptions import CwError
+from cw.history import EventType, HistoryEvent, record_event
+from cw.models import SessionStatus
 from cw.native_daemon import get_native_daemon_client, wait_for_roster_presence
 from cw.reconcile.liveness_page import close_command
 from cw.reconcile.routed_result_sessions import (
@@ -456,7 +458,59 @@ def _stop_until_gone(
     )
 
 
-def _flip_closed(session: Session, call: _OrphanCloseCall) -> None:
+def _record_close_audit(
+    session: Session,
+    call: _OrphanCloseCall,
+    *,
+    confirmation_result: str,
+) -> None:
+    """Persist the routed-orphan close audit, or surface its failure."""
+    surface_ref = cast("str", session.surface_ref)
+    metadata = {
+        "actor": "operator",
+        "command": call.command,
+        "ticket_id": call.ticket_id,
+        "client": call.client,
+        "session_id": session.id,
+        "surface_ref": surface_ref,
+        "prior_status": session.status.value,
+        "resulting_status": SessionStatus.COMPLETED.value,
+        "confirmation_result": confirmation_result,
+        "reason": "routed_result_orphan_resolved",
+    }
+    try:
+        record_event(
+            session.client,
+            HistoryEvent(
+                event_type=EventType.SESSION_COMPLETED,
+                client=session.client,
+                session_id=session.id,
+                session_name=session.name,
+                purpose=session.purpose,
+                detail="routed_result_orphan_resolved",
+                metadata=metadata,
+            ),
+        )
+    except Exception as exc:
+        logger.exception(
+            "routed_orphan_close_audit_failed: ticket_id=%s client=%s"
+            " session_id=%s command=%s",
+            call.ticket_id,
+            call.client,
+            session.id,
+            call.command,
+        )
+        msg = (
+            f"Routed-result session {session.id} was closed, but its durable"
+            " audit record could not be written: "
+            f"{exc}"
+        )
+        raise CwError(msg) from exc
+
+
+def _flip_closed(
+    session: Session, call: _OrphanCloseCall, *, confirmation_result: str
+) -> None:
     """Flip the confirmed-gone (or proven-absent) session COMPLETED."""
     try:
         _spawn_close_impl(
@@ -481,6 +535,11 @@ def _flip_closed(session: Session, call: _OrphanCloseCall) -> None:
         raise _orphan_refusal(
             session, call, problem=problem, remedy=_flip_failed_remedy(session, call)
         ) from exc
+    _record_close_audit(
+        session,
+        call,
+        confirmation_result=confirmation_result,
+    )
     # WARNING, not INFO (N2; the reasoning native_daemon.py gives for its
     # spawn-time usage-limit line): cw.cli._base._configure_logging uses
     # basicConfig at WARNING unless -v is passed, and this line is the only
@@ -506,9 +565,16 @@ def _close_one(session: Session, call: _OrphanCloseCall) -> bool:
         return False
     if checked.outcome == "stop":
         _stop_until_gone(checked.session, call, pre_stop_live=checked.live)
+        confirmation_result = "worker_gone_from_roster"
     elif not _absence_corroborated(checked.session, call, checked.live):
         return False
-    _flip_closed(checked.session, call)
+    else:
+        confirmation_result = "absent_from_readable_roster"
+    _flip_closed(
+        checked.session,
+        call,
+        confirmation_result=confirmation_result,
+    )
     return True
 
 
