@@ -86,6 +86,7 @@ from cw.codex_review._context import (
     _AgentSpecResolution,
     _build_reviewer_prompt,
     _categorize_changed_files,
+    _fetch_ticket_comments,
     _FileCategories,
     _hit_from_entry,
     _load_agent_spec_fallback_gate,
@@ -107,6 +108,7 @@ from cw.codex_review._context import (
     _select_output_instructions,
     _select_reviewer_roles,
     _SensitiveHit,
+    is_test_path,
 )
 from cw.codex_review._diff import (
     _DIFF_GIT_HEADER_RE,
@@ -199,6 +201,7 @@ __all__ = [
     "_classify_codex_output_failure",
     "_codex_scratch_dir",
     "_extract_terminal_error_message",
+    "_fetch_ticket_comments",
     "_format_failures_detail",
     "_hit_from_entry",
     "_is_audit_flag_rejection",
@@ -229,6 +232,7 @@ __all__ = [
     "_select_output_instructions",
     "_select_reviewer_roles",
     "_slug",
+    "is_test_path",
     "make_codex_blocked",
     "render_verdict_comment",
     "run_codex_roles",
