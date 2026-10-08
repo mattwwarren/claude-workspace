@@ -27,20 +27,21 @@ event inbox lock is a leaf), and it never stops a worker. It must not import
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
-from cw.native_daemon import RealNativeDaemonClient, _read_roster_workers
+from cw.native_daemon import RealNativeDaemonClient
 from cw.reconcile import _deps
 
 if TYPE_CHECKING:
     from datetime import datetime
+    from pathlib import Path
 
     from cw.models import LaunchedFixWorker, TicketTask
 
@@ -132,9 +133,7 @@ def _read_strict_roster_snapshot(path: Path) -> set[str] | None:
     try:
         with path.open("rb") as roster:
             before = os.fstat(roster.fileno())
-            workers = _read_roster_workers(
-                Path(f"/proc/self/fd/{roster.fileno()}")
-            )
+            workers = _parse_roster_workers(roster.read(), path)
             after = os.fstat(roster.fileno())
         current = path.stat()
     except FileNotFoundError:
@@ -146,6 +145,20 @@ def _read_strict_roster_snapshot(path: Path) -> set[str] | None:
     if workers is None:
         return None
     return {key for key in workers if isinstance(key, str)}
+
+
+def _parse_roster_workers(raw: bytes, path: Path) -> dict[str, object] | None:
+    """Parse a roster snapshot, preserving the native reader's shape checks."""
+    try:
+        data: object = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        _log.warning("native daemon roster at %s is unreadable: %s", path, exc)
+        return None
+    workers = data.get("workers") if isinstance(data, dict) else None
+    if not isinstance(workers, dict):
+        _log.warning("native daemon roster at %s has no 'workers' object", path)
+        return None
+    return workers
 
 
 def _same_roster_file(first: os.stat_result, second: os.stat_result) -> bool:
