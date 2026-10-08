@@ -27,21 +27,20 @@ event inbox lock is a leaf), and it never stops a worker. It must not import
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from datetime import timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
-from cw.native_daemon import RealNativeDaemonClient
+from cw.native_daemon import RealNativeDaemonClient, _read_roster_workers
 from cw.reconcile import _deps
 
 if TYPE_CHECKING:
     from datetime import datetime
-    from pathlib import Path
 
     from cw.models import LaunchedFixWorker, TicketTask
 
@@ -133,7 +132,9 @@ def _read_strict_roster_snapshot(path: Path) -> set[str] | None:
     try:
         with path.open("rb") as roster:
             before = os.fstat(roster.fileno())
-            raw = roster.read()
+            workers = _read_roster_workers(
+                Path(f"/proc/self/fd/{roster.fileno()}")
+            )
             after = os.fstat(roster.fileno())
         current = path.stat()
     except FileNotFoundError:
@@ -142,9 +143,7 @@ def _read_strict_roster_snapshot(path: Path) -> set[str] | None:
     if not _same_roster_file(before, after) or not _same_roster_file(after, current):
         return None
 
-    data: object = json.loads(raw)
-    workers = data.get("workers") if isinstance(data, dict) else None
-    if not isinstance(workers, dict):
+    if workers is None:
         return None
     return {key for key in workers if isinstance(key, str)}
 
