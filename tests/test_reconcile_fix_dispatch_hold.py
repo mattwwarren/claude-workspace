@@ -30,6 +30,7 @@ from cw.models import (
     QueueItemStatus,
     SessionStatus,
 )
+from cw.native_daemon import RealNativeDaemonClient
 from cw.queue_rows import _is_fix_dispatch_held
 from cw.reconcile import fix_dispatch, fix_dispatch_hold
 from cw.reconcile.fix_dispatch_hold import (
@@ -175,6 +176,16 @@ def test_roster_read_oserror_fails_closed(
     assert _run_completions() == []
 
     _assert_held(worker)
+
+
+def test_missing_real_roster_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing production roster cannot confirm a launched worker stopped."""
+    daemon = RealNativeDaemonClient(roster_path=tmp_path / "missing-roster.json")
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
+
+    assert fix_dispatch_hold.read_live_worker_roster() is None
 
 
 # --- 4-8: paging -------------------------------------------------------------
