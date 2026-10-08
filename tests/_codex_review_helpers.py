@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.codex_fix_loop.baseline import CycleBaseline, cycle_touched_paths
 from cw.codex_runner import CodexRunResult
 from cw.models import Stage, TicketTask
 from tests.conftest import _make_ticket_task, git_in
@@ -204,6 +205,23 @@ def _stage_merge_from_other_branch(
         git_in(repo, "merge", "--squash", "other-staged")
     else:
         git_in(repo, "merge", "--no-commit", "--no-ff", "other-staged")
+
+
+def _head_baseline(repo: Path) -> CycleBaseline:
+    """A ``CycleBaseline`` built straight from *repo*'s ``HEAD`` (#2633).
+
+    Deliberately not :func:`capture_cycle_baseline`, which refuses a tree a
+    test has already edited or pre-staged.
+    """
+    return CycleBaseline(
+        head_sha=git_in(repo, "rev-parse", "HEAD"),
+        tree_sha=git_in(repo, "rev-parse", "HEAD^{tree}"),
+    )
+
+
+def _measured_from_head(repo: Path) -> frozenset[str]:
+    """The paths a cycle touched since *repo*'s ``HEAD`` (stages them, #2633)."""
+    return frozenset(cycle_touched_paths(repo, _head_baseline(repo)))
 
 
 def _seed_conflicting_cherry_pick(repo: Path) -> None:
