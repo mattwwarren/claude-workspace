@@ -199,6 +199,73 @@ def _impl_bypass_plan_available(
     return _ImplBypassPlanCheck(available, tracker_checked=True, tracker=tracker)
 
 
+def _classify_requeue_move(
+    task: TicketTask,
+    stages: list[Stage],
+    target_stage: Stage,
+    *,
+    allow_regress: bool,
+) -> Literal["regress", "forward"]:
+    """The pure, lock-free stage gate of a requeue: regress or forward move.
+
+    Validates both stages against the resolved pipeline and refuses the two
+    backward moves that are never allowed: a regress without
+    ``allow_regress``, and a regress of a row that is not parked. Shared by
+    :func:`_apply_requeue_stage` and :func:`precheck_requeue` so the
+    prediction and the real call cannot drift (#2517). "forward" includes
+    the same-stage move.
+    """
+    _validate_stage_in_pipeline(task.stage, stages, client=task.client, lane=task.lane)
+    _validate_stage_in_pipeline(
+        target_stage, stages, client=task.client, lane=task.lane
+    )
+    if stages.index(target_stage) >= stages.index(task.stage):
+        return "forward"
+    if not allow_regress:
+        msg = (
+            f"Cannot requeue ticket '{task.ticket_id}'"
+            f" to stage '{target_stage.value}':"
+            f" that would regress from '{task.stage.value}'."
+            " Only same-stage or forward advancement is allowed."
+            " Use --regress to move backward."
+        )
+        raise RequeueStageError(msg)
+    if task.status not in _APPROVABLE_STATUSES:
+        msg = (
+            f"Cannot regress ticket '{task.ticket_id}'"
+            f" to stage '{target_stage.value}': status is"
+            f" {task.status.value!r}, expected BLOCKED_ON_USER or"
+            " AWAITING_OPERATOR_SIGNOFF."
+        )
+        raise RequeueStageError(msg)
+    return "regress"
+
+
+def _forward_gate_applied(
+    task: TicketTask,
+    ticket_id: str,
+    *,
+    from_cancelled: bool,
+    from_failed: bool,
+    from_completed: bool,
+) -> tuple[bool, bool, bool]:
+    """The forward/same-stage status gate; returns the three applied flags.
+
+    The row must be at a BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF gate,
+    OR (opt-in) CANCELLED/FAILED/COMPLETED; otherwise raises
+    :class:`RequeueStateError`. Returns ``(from_cancelled_applied,
+    from_failed_applied, from_completed_applied)``. Pure and shared with
+    :func:`precheck_requeue` (#2517).
+    """
+    approvable = task.status in _APPROVABLE_STATUSES
+    cancelled_ok = from_cancelled and task.status in _REQUEUE_FROM_CANCELLED_STATUSES
+    failed_ok = from_failed and task.status in _REQUEUE_FROM_FAILED_STATUSES
+    completed_ok = from_completed and task.status in _REQUEUE_FROM_COMPLETED_STATUSES
+    if not (approvable or cancelled_ok or failed_ok or completed_ok):
+        raise RequeueStateError(_requeue_state_error_message(ticket_id, task.status))
+    return cancelled_ok, failed_ok, completed_ok
+
+
 def _apply_requeue_stage(
     task: TicketTask,
     stages: list[Stage],
@@ -233,32 +300,11 @@ def _apply_requeue_stage(
         return False
 
     target_stage = Stage(stage_override)
-    _validate_stage_in_pipeline(task.stage, stages, client=task.client, lane=task.lane)
-    _validate_stage_in_pipeline(
-        target_stage, stages, client=task.client, lane=task.lane
+    move = _classify_requeue_move(
+        task, stages, target_stage, allow_regress=allow_regress
     )
 
-    current_idx = stages.index(task.stage)
-    target_idx = stages.index(target_stage)
-
-    if target_idx < current_idx:
-        if not allow_regress:
-            msg = (
-                f"Cannot requeue ticket '{task.ticket_id}'"
-                f" to stage '{stage_override}':"
-                f" that would regress from '{task.stage.value}'."
-                " Only same-stage or forward advancement is allowed."
-                " Use --regress to move backward."
-            )
-            raise RequeueStageError(msg)
-        if task.status not in _APPROVABLE_STATUSES:
-            msg = (
-                f"Cannot regress ticket '{task.ticket_id}'"
-                f" to stage '{stage_override}': status is"
-                f" {task.status.value!r}, expected BLOCKED_ON_USER or"
-                " AWAITING_OPERATOR_SIGNOFF."
-            )
-            raise RequeueStageError(msg)
+    if move == "regress":
         # #2421: this path carries no blocker at all, so the merge-caused flag
         # can only come from a live measurement. Probed only where
         # _stage_regress would stamp it (FINALIZE origin).
@@ -273,7 +319,9 @@ def _apply_requeue_stage(
 
     # Guarded because impl hard-exits plan_missing; review and finalize
     # degrade and are deliberately not guarded (see #1681 Decisions).
-    if target_stage == Stage.IMPL and target_idx > current_idx:
+    if target_stage == Stage.IMPL and stages.index(target_stage) > stages.index(
+        task.stage
+    ):
         plan_check = _impl_bypass_plan_available(task, client_cfg)
         if not plan_check.available:
             wt_path = _impl_bypass_worktree_path(task, client_cfg)
@@ -509,6 +557,63 @@ def classify_requeue_live_session_error(
     return _REASON_SKIPPED_LIVE_SESSION, str(exc)
 
 
+def precheck_requeue(
+    ticket_id: str,
+    client_name: str,
+    stage_override: str | None = None,
+    *,
+    allow_regress: bool = False,
+    from_cancelled: bool = False,
+    from_failed: bool = False,
+    from_completed: bool = False,
+    native_daemon: NativeDaemonClient,
+    ignore_session_ids: frozenset[str] = frozenset(),
+) -> None:
+    """Raise what :func:`requeue_ticket` would refuse with, writing nothing.
+
+    Lock-free and read-only (no write, no event, no network, no git I/O),
+    in ``requeue_ticket``'s order: the live-session guard (with
+    *ignore_session_ids*), the row and client lookup, the
+    ``allow_regress``-needs-a-stage refusal, the stage gate
+    (:func:`_classify_requeue_move`) and, for a forward move, the status gate
+    (:func:`_forward_gate_applied`) -- the very functions the real call runs,
+    so the prediction cannot drift. It exists so ``cw dev-queue requeue`` stops
+    nothing the requeue is going to refuse (#2517).
+
+    Deliberately NOT predicted: the impl-bypass plan availability (a
+    filesystem and tracker read), the FINALIZE ``merge_in_progress`` probe
+    (git I/O), the bounded-lock timeout, and any concurrent change between
+    this check and the call.
+    """
+    _refuse_if_live_session(
+        ticket_id,
+        client_name,
+        native_daemon=native_daemon,
+        ignore_session_ids=ignore_session_ids,
+    )
+    # Deferred for the same dev_queue -> executor cycle as requeue_ticket.
+    from cw.executor import resolve_pipeline_stages
+
+    task = _find_ticket(load_dev_queue(), ticket_id, client_name)
+    stages = resolve_pipeline_stages(task, get_client(client_name))
+    if allow_regress and stage_override is None:
+        raise RequeueStageError(_REGRESS_NEEDS_BACKWARD_STAGE_MSG)
+    if stage_override is not None and (
+        _classify_requeue_move(
+            task, stages, Stage(stage_override), allow_regress=allow_regress
+        )
+        == "regress"
+    ):
+        return
+    _forward_gate_applied(
+        task,
+        ticket_id,
+        from_cancelled=from_cancelled,
+        from_failed=from_failed,
+        from_completed=from_completed,
+    )
+
+
 def requeue_ticket(
     ticket_id: str,
     client_name: str,
@@ -629,21 +734,15 @@ def requeue_ticket(
             # targets) requires the ticket to be at a BLOCKED_ON_USER or
             # AWAITING_OPERATOR_SIGNOFF gate, OR (opt-in)
             # CANCELLED/FAILED/COMPLETED.
-            approvable = task.status in _APPROVABLE_STATUSES
-            cancelled_ok = (
-                from_cancelled and task.status in _REQUEUE_FROM_CANCELLED_STATUSES
-            )
-            failed_ok = from_failed and task.status in _REQUEUE_FROM_FAILED_STATUSES
-            completed_ok = (
-                from_completed and task.status in _REQUEUE_FROM_COMPLETED_STATUSES
-            )
-            if not (approvable or cancelled_ok or failed_ok or completed_ok):
-                raise RequeueStateError(
-                    _requeue_state_error_message(ticket_id, task.status)
+            from_cancelled_applied, from_failed_applied, from_completed_applied = (
+                _forward_gate_applied(
+                    task,
+                    ticket_id,
+                    from_cancelled=from_cancelled,
+                    from_failed=from_failed,
+                    from_completed=from_completed,
                 )
-            from_cancelled_applied = cancelled_ok
-            from_failed_applied = failed_ok
-            from_completed_applied = completed_ok
+            )
             _reset_for_same_stage_requeue(task)
             task.regress_attempts = 0
             # #1794: a forward/same-stage bypass resolves any pending regress
