@@ -131,6 +131,8 @@ def apply_launched_worker_hold(
     if worker.surface_ref != expected_surface_ref:
         return HoldDecision(release=False, dirty=False)
     if live is not None and worker.surface_ref not in live:
+        if not _record_worker_confirmation(task, worker, now=now):
+            return HoldDecision(release=False, dirty=False)
         task.fix_dispatch_launched_worker = None
         _log.info(
             "fix_dispatch_worker_confirmed_stopped ticket=%s client=%s surface=%s",
@@ -145,6 +147,38 @@ def apply_launched_worker_hold(
     if paged:
         worker.attention_paged_at = now
     return HoldDecision(release=False, dirty=paged)
+
+
+def _record_worker_confirmation(
+    task: TicketTask, worker: LaunchedFixWorker, *, now: datetime
+) -> bool:
+    """Append the durable audit record before clearing a confirmed tombstone."""
+    payload: dict[str, object] = {
+        "ticket_id": task.ticket_id,
+        "client": task.client,
+        "surface_ref": worker.surface_ref,
+        "prior_tombstone": worker.model_dump(mode="json"),
+        "prior_session_id": task.fix_dispatch_session_id,
+        "roster_readable": True,
+        "surface_absent": True,
+        "confirmed_at": now.isoformat(),
+        "initiating_service": "cw.reconcile.fix_dispatch_hold",
+        "initiating_job": "fix_dispatch_completions",
+    }
+    try:
+        record_event(
+            OrchestratorEventType.DAEMON_LEAKED_WORKER_STOPPED,
+            payload,
+            correlation_id=task.ticket_id,
+        )
+    except (CwError, OSError):
+        _log.warning(
+            "fix_dispatch_worker_confirmation_audit_failed ticket=%s",
+            task.ticket_id,
+            exc_info=True,
+        )
+        return False
+    return True
 
 
 def _attention_due(worker: LaunchedFixWorker, now: datetime) -> bool:
