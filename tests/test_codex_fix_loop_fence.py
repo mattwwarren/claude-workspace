@@ -4,10 +4,36 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cw.codex_fix_loop.fence import check_fix_fence, fix_scope_allowlist
-from cw.codex_review import CODEX_FIX_REVERTED_BRANCH, CODEX_FIX_SCOPE_DRIFT
-from tests._codex_review_helpers import _write
+from cw.codex_fix_loop.baseline import (
+    CycleBaseline,
+    DirtyStart,
+    capture_cycle_baseline,
+    cycle_touched_paths,
+)
+from cw.codex_fix_loop.fence import (
+    LEFT_STAGED_HINT,
+    StagedSetMismatchError,
+    check_fix_fence,
+    cycle_start_breach,
+    fix_scope_allowlist,
+    scope_violation_breach,
+    staged_set_breach,
+)
+from cw.codex_review import (
+    CODEX_FIX_DIRTY_START,
+    CODEX_FIX_REVERTED_BRANCH,
+    CODEX_FIX_SCOPE_DRIFT,
+    CODEX_FIX_SCOPE_VIOLATION,
+    _SensitiveHit,
+)
+from tests._codex_review_helpers import (
+    _measured_from_head,
+    _seed_conflicting_cherry_pick,
+    _stage_merge_from_other_branch,
+    _write,
+)
 from tests.conftest import git_in
+from tests.test_branch_ahead import _seed_conflicting_merge
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -67,6 +93,7 @@ def _check(
         allowed_files=allowed,
         finding_files=finding_files,
         cycle=2,
+        touched=set(_measured_from_head(repo)),
     )
 
 
@@ -102,6 +129,7 @@ class TestRevertGuard:
             # Even when every restored file is named, emptying the branch parks.
             finding_files=frozenset(_BASE3),
             cycle=2,
+            touched=set(_measured_from_head(repo)),
         )
 
         assert breach is not None
@@ -138,6 +166,7 @@ class TestRevertGuard:
             allowed_files=None,
             finding_files=frozenset({"c.py"}),
             cycle=2,
+            touched=set(_measured_from_head(repo)),
         )
 
         assert breach is not None
@@ -212,3 +241,218 @@ class TestScopeFence:
         _write(repo / "a.py", "a = 3\n")
 
         assert _check(repo, allowed=frozenset(_BASE3)) is None
+
+
+class TestCheckFixFence:
+    def test_cycle_edit_off_fence_parks_naming_only_that_path(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#2633: the fence blames exactly the measured cycle paths."""
+        repo = _branch_repo(make_git_repo, "f-measured", base=_BASE3, feature=_FEATURE3)
+        start = capture_cycle_baseline(repo)
+        assert isinstance(start, CycleBaseline)
+        _write(repo / "server/route.py", "route = 1\n")
+        touched = cycle_touched_paths(repo, start)
+
+        breach = check_fix_fence(
+            repo,
+            default_branch="main",
+            allowed_files=frozenset(_BASE3),
+            finding_files=frozenset(),
+            cycle=2,
+            touched=touched,
+        )
+
+        assert breach is not None
+        assert breach.reason == CODEX_FIX_SCOPE_DRIFT
+        assert breach.paths == ("server/route.py",)
+
+
+def _start(repo: Path) -> DirtyStart:
+    """The real ``capture_cycle_baseline`` result for a dirty *repo*."""
+    start = capture_cycle_baseline(repo)
+    assert isinstance(start, DirtyStart)
+    return start
+
+
+def _feature_repo(make_git_repo: Callable[..., Path], name: str) -> Path:
+    return _branch_repo(make_git_repo, name, base=_BASE3, feature=_FEATURE3)
+
+
+class TestCycleStartBreach:
+    """#2633: a dirty worktree refuses the cycle; the hint never hard-resets."""
+
+    @staticmethod
+    def _assert_refusal(breach: FenceBreach) -> None:
+        assert breach.reason == CODEX_FIX_DIRTY_START
+        assert "git reset --hard" not in breach.recovery_hint
+
+    def test_merge_head_details_and_hint(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _feature_repo(make_git_repo, "f-start-merge")
+        _stage_merge_from_other_branch(repo, {"pyproject.toml": "[project]\n"})
+
+        breach = cycle_start_breach(_start(repo), 3)
+
+        self._assert_refusal(breach)
+        assert "MERGE_HEAD" in breach.details
+        assert "pyproject.toml" in breach.details
+        assert "git merge --abort" in breach.recovery_hint
+        assert breach.paths == ("pyproject.toml",)
+
+    def test_conflicting_merge_lists_unmerged_paths(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _seed_conflicting_merge(make_git_repo, "f-start-conflict")
+
+        breach = cycle_start_breach(_start(repo), 1)
+
+        self._assert_refusal(breach)
+        assert "Unresolved (unmerged) path(s):\n- work.txt" in breach.details
+        assert "work.txt" in breach.paths
+
+    def test_cherry_pick_conflict_names_cherry_pick_head(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _feature_repo(make_git_repo, "f-start-pick")
+        _seed_conflicting_cherry_pick(repo)
+
+        breach = cycle_start_breach(_start(repo), 1)
+
+        self._assert_refusal(breach)
+        assert "CHERRY_PICK_HEAD" in breach.details
+        assert "git cherry-pick --abort" in breach.recovery_hint
+        assert "git merge --abort" not in breach.recovery_hint
+
+    def test_revert_names_revert_head(self, make_git_repo: Callable[..., Path]) -> None:
+        repo = _feature_repo(make_git_repo, "f-start-revert")
+        git_in(repo, "revert", "--no-commit", "HEAD")
+
+        breach = cycle_start_breach(_start(repo), 1)
+
+        self._assert_refusal(breach)
+        assert "REVERT_HEAD" in breach.details
+        assert "git revert --abort" in breach.recovery_hint
+
+    def test_squash_has_no_marker_and_no_abort_command(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _feature_repo(make_git_repo, "f-start-squash")
+        _stage_merge_from_other_branch(
+            repo, {"pyproject.toml": "[project]\n"}, squash=True
+        )
+
+        breach = cycle_start_breach(_start(repo), 1)
+
+        self._assert_refusal(breach)
+        assert (
+            "Uncommitted changes (git status --porcelain):\n- A  pyproject.toml"
+            in breach.details
+        )
+        assert "git status" in breach.recovery_hint
+        assert "git diff --cached" in breach.recovery_hint
+        assert "--abort" not in breach.recovery_hint
+
+    def test_listing_is_capped_at_20(self, make_git_repo: Callable[..., Path]) -> None:
+        repo = _feature_repo(make_git_repo, "f-start-cap")
+        for i in range(30):
+            _write(repo / f"stray{i:02d}.py", "x = 1\n")
+
+        breach = cycle_start_breach(_start(repo), 1)
+
+        assert "- ?? stray19.py" in breach.details
+        assert "stray20.py" not in breach.details
+        assert "- ... and 10 more" in breach.details
+        assert len(breach.paths) == 30
+
+    def test_hint_states_cw_staged_nothing(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _feature_repo(make_git_repo, "f-start-nothing")
+        _write(repo / "stray.py", "x = 1\n")
+
+        breach = cycle_start_breach(_start(repo), 4)
+
+        assert "codex fix cycle 4 was not started" in breach.details
+        assert "No fix invocation ran" in breach.details
+        assert "cw staged, committed and pushed nothing" in breach.details
+
+
+class TestScopeViolationBreach:
+    def test_details_keep_the_and_gate_text_and_hint_states_staged_state(
+        self,
+    ) -> None:
+        hits = [_SensitiveHit("pyproject.toml", "build", "packaging metadata")]
+
+        breach = scope_violation_breach(hits, 2)
+
+        assert breach.reason == CODEX_FIX_SCOPE_VIOLATION
+        assert "out of" in breach.details.lower()
+        assert "sensitive" in breach.details.lower()
+        assert "- pyproject.toml (build): packaging metadata" in breach.details
+        assert breach.paths == ("pyproject.toml",)
+        # Advisory soundness RISK 1: the measurement stages the cycle's
+        # changes, so the hint says where they are.
+        assert LEFT_STAGED_HINT in breach.recovery_hint
+
+
+class TestLeftStagedHint:
+    def test_hint_is_public_and_states_the_clean_start_premise(self) -> None:
+        assert "git reset --hard HEAD" in LEFT_STAGED_HINT
+        assert "This cycle began from a clean tree" in LEFT_STAGED_HINT
+        assert "discards only that" in LEFT_STAGED_HINT
+
+
+class TestStagedSetBreach:
+    def test_unmeasured_staged_path_hint(self) -> None:
+        breach = staged_set_breach(
+            frozenset({"a.py"}), frozenset({"a.py", "x.py"}), 2, start_head="abc123"
+        )
+
+        assert breach.reason == CODEX_FIX_SCOPE_DRIFT
+        assert "Staged but not measured:\n- x.py" in breach.details
+        assert breach.paths == ("x.py",)
+        assert "git restore --staged" in breach.recovery_hint
+        assert "git reset --hard" not in breach.recovery_hint
+        assert LEFT_STAGED_HINT not in breach.recovery_hint
+
+    def test_fix_invocation_committed_itself_hint(self) -> None:
+        breach = staged_set_breach(
+            frozenset({"a.py"}), frozenset(), 2, start_head="abc123"
+        )
+
+        assert "Measured but not staged:\n- a.py" in breach.details
+        assert "git log abc123..HEAD" in breach.recovery_hint
+        assert "would not undo" in breach.recovery_hint
+        assert "git reset --hard" not in breach.recovery_hint
+
+    def test_partial_staged_subset_hint(self) -> None:
+        breach = staged_set_breach(
+            frozenset({"a.py", "b.py"}), frozenset({"a.py"}), 2, start_head="abc123"
+        )
+
+        assert "Measured but not staged:\n- b.py" in breach.details
+        assert "git log abc123..HEAD" in breach.recovery_hint
+        assert "partial" in breach.recovery_hint
+        assert "git reset --hard" not in breach.recovery_hint
+
+    def test_mixed_extra_and_missing_reads_as_unmeasured_case(self) -> None:
+        breach = staged_set_breach(
+            frozenset({"a.py", "b.py"}),
+            frozenset({"a.py", "x.py"}),
+            2,
+            start_head="abc123",
+        )
+
+        assert "Staged but not measured:\n- x.py" in breach.details
+        assert "Measured but not staged:\n- b.py" in breach.details
+        assert breach.paths == ("b.py", "x.py")
+        assert "git restore --staged" in breach.recovery_hint
+
+    def test_mismatch_exception_carries_both_sets(self) -> None:
+        exc = StagedSetMismatchError(frozenset({"a.py"}), frozenset({"b.py"}))
+
+        assert exc.measured == frozenset({"a.py"})
+        assert exc.staged == frozenset({"b.py"})
+        assert "a.py" in str(exc)

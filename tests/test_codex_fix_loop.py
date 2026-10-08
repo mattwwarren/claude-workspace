@@ -60,6 +60,7 @@ from cw.review_findings import (
 from tests._codex_review_helpers import (
     _Clock,
     _install_pre_commit_hook,
+    _measured_from_head,
     _SequencedRunner,
     _write,
 )
@@ -293,9 +294,9 @@ def _renamer(old: str, new: str) -> Callable[[Path, list[str]], CodexRunResult]:
     """Fix-behavior callable that ``git mv``s *old* to *new* in the worktree.
 
     Mirrors ``_editor``'s shape (a ``(worktree, argv) -> CodexRunResult``
-    callable for ``_FixLoopRunner``'s ``fix_behaviors`` list) but exercises the
-    rename-aware branch of ``_porcelain_changed_paths`` instead of a plain
-    add/modify.
+    callable for ``_FixLoopRunner``'s ``fix_behaviors`` list) but exercises a
+    rename (``cycle_touched_paths`` reports both sides, ``--no-renames``)
+    instead of a plain add/modify.
     """
 
     def _rename(worktree: Path, _argv: list[str]) -> CodexRunResult:
@@ -660,7 +661,12 @@ class TestFixInvocation:
         git_in(worktree, "add", "fix.py")
 
         with caplog.at_level(logging.WARNING, logger="cw.codex_fix_loop.commit"):
-            sha = _commit_fix_cycle(worktree, cycle=1, findings=[_make_finding()])
+            sha = _commit_fix_cycle(
+                worktree,
+                cycle=1,
+                findings=[_make_finding()],
+                measured_paths=_measured_from_head(worktree),
+            )
 
         assert sha is not None
         assert sha == git_in(worktree, "rev-parse", "HEAD")
@@ -698,8 +704,11 @@ class TestFixInvocation:
         _write(worktree / "fix.py", "patched = 1\n")
         git_in(worktree, "add", "fix.py")
 
+        measured = _measured_from_head(worktree)
         with pytest.raises(subprocess.CalledProcessError):
-            _commit_fix_cycle(worktree, cycle=1, findings=[_make_finding()])
+            _commit_fix_cycle(
+                worktree, cycle=1, findings=[_make_finding()], measured_paths=measured
+            )
 
         counter_path = worktree / ".git" / "pre-commit-calls"
         assert counter_path.read_text().strip() == "2"
@@ -711,7 +720,12 @@ class TestFixInvocation:
         worktree, origin = make_git_repo_with_origin("wt-fix-commit-push")
         _write(worktree / "fix.py", "patched = 1\n")
 
-        sha = _commit_fix_cycle(worktree, cycle=1, findings=[_make_finding()])
+        sha = _commit_fix_cycle(
+            worktree,
+            cycle=1,
+            findings=[_make_finding()],
+            measured_paths=_measured_from_head(worktree),
+        )
 
         assert sha is not None
         assert git_in(origin, "rev-parse", "refs/heads/feature") == sha
@@ -734,10 +748,13 @@ class TestFixInvocation:
         commit_tracked_file(decoy, "decoy.py", "decoy = True\n")
         decoy_head = git_in(decoy, "rev-parse", "HEAD")
         _write(worktree / "fix.py", "patched = 1\n")
+        measured = _measured_from_head(worktree)
         monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
         monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
 
-        sha = _commit_fix_cycle(worktree, cycle=1, findings=[_make_finding()])
+        sha = _commit_fix_cycle(
+            worktree, cycle=1, findings=[_make_finding()], measured_paths=measured
+        )
 
         assert sha is not None
         assert sha == git_in(worktree, "rev-parse", "HEAD")
@@ -1856,11 +1873,15 @@ class TestScopeViolationGate:
         assert out.review.must_fix_initial == 1
         assert out.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
         assert out.blocker.retry_eligible is None
+        # #2633: measuring the cycle stages its changes, so the hint says so.
+        assert out.blocker.recovery_hint is not None
+        assert "left staged and uncommitted" in out.blocker.recovery_hint
 
     def test_out_of_scope_sensitive_modification_parks_verdict_stamped(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
-        # #1705 Decisions #2 regression pin: _park_scope_violation must stamp
+        # #1705 Decisions #2 regression pin: the scope-violation park (now a
+        # FenceBreach through _park_fence_breach, #2633) must stamp
         # the finalized Review onto the returned *verdict* too, not just the
         # returned AutoDevResult — mirrors _clean_exit's bug #2 fix, applied
         # to the scope-violation park path.
@@ -2274,7 +2295,8 @@ class TestTerminalSnapshotMarker:
     def test_park_scope_violation_finalizes_before_review_rebind(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
-        """``_park_scope_violation`` finalizes the persisted snapshot BEFORE it
+        """The scope-violation park (``_park_fence_breach`` →
+        ``_park_uncommitted_cycle``) finalizes the persisted snapshot BEFORE it
         rebinds ``verdict.review`` to the reconstructed cross-cycle ``Review``.
 
         Mutation-proof by construction: the pre-rebind cycle-1 verdict carries
