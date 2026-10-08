@@ -151,10 +151,16 @@ A dev-queue row reading `pending`/`blocked` while its resolved session shows
 - **A healthy self-resolving race**: the dispatcher already released its own
   claim on this ticket (the pre-claim occupancy screen, or a genuinely-live
   `HookContextConflictError` deferral) because the SAME ticket's own live
-  session still holds the per-ticket worktree — not the mismatch's fault, and
-  it clears on its own once that session finishes. A `dispatch.tick` event
-  with `skip_reason=worktree_occupied` for the ticket is the dispatcher's own
-  record of this.
+  session is genuinely working and still holds the per-ticket worktree — not
+  the mismatch's fault, and it clears on its own once that session finishes.
+  A `dispatch.tick` event with `skip_reason=worktree_occupied` for the ticket
+  is the dispatcher's own record of this.
+- **A routed-but-never-completed orphan**: the session already routed its
+  result (doctor class `wedge/active-routed-result-stranded`,
+  `sentinel_partial_route_consumed`) but a Stop with background work still
+  running left it ACTIVE, so it never finishes and does NOT clear on its own.
+  `cw dev-queue approve` / `requeue` close it once its worker is confirmed
+  gone, or `cw spawn close --confirmed-dead <id>`.
 
 Do not default to "wedge" on the mismatch alone. Corroborate with the SAME
 liveness signals `cw queue peek` and `cw doctor`'s wedge detector already

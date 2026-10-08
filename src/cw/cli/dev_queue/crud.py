@@ -10,6 +10,7 @@ import click
 from pydantic import ValidationError
 
 from cw.cli._base import handle_errors
+from cw.cli.routed_orphan_close import close_routed_result_sessions_for_ticket
 from cw.config import load_orchestrator_config, load_state
 from cw.dev_queue import (
     DEFAULT_PRUNE_OLDER_THAN_DAYS,
@@ -20,6 +21,7 @@ from cw.dev_queue import (
     clear_tickets,
     drain_held_tickets,
     move_ticket,
+    precheck_requeue,
     prune_tickets,
     remove_ticket,
     requeue_ticket,
@@ -348,10 +350,46 @@ def dev_queue_requeue(
     to recover a CANCELLED ticket, --from-failed to recover a FAILED
     ticket, or --from-completed to recover a COMPLETED ticket
     (forward/same-stage only).
+
+    Before requeueing, a leftover routed-result session for the ticket (its
+    result already routed, never completed) is closed once its worker is
+    confirmed gone from the daemon roster, because the live-session guard
+    would otherwise refuse. If its background work is still draining, or the
+    stop cannot be confirmed, the requeue is refused and the row is left
+    untouched; re-run it once the worker is gone and the retry closes the
+    session by a status flip alone. A session that an occupied row of another
+    ticket still binds is left running. Any caller of this command, including
+    an agent session, closes such a session.
     """
     config = load_orchestrator_config()
     resolved = resolve_client(ticket_id, config, client)
+    # One client for the orphan close, the pre-check and the requeue guard, so
+    # all three read the same roster (#2517).
+    daemon = get_native_daemon_client()
+
+    def _precheck(will_close: frozenset[str]) -> None:
+        precheck_requeue(
+            ticket_id,
+            resolved,
+            stage_override,
+            allow_regress=regress,
+            from_cancelled=from_cancelled,
+            from_failed=from_failed,
+            from_completed=from_completed,
+            native_daemon=daemon,
+            ignore_session_ids=will_close,
+        )
+
     try:
+        closed = close_routed_result_sessions_for_ticket(
+            ticket_id,
+            resolved,
+            command="requeue",
+            config=config,
+            after_transition=False,
+            native_daemon=daemon,
+            precheck=_precheck,
+        )
         result = requeue_ticket(
             ticket_id,
             resolved,
@@ -360,8 +398,12 @@ def dev_queue_requeue(
             from_cancelled=from_cancelled,
             from_failed=from_failed,
             from_completed=from_completed,
-            # bounded=True (#2501): operator command; only the read-only
-            # live-session check precedes the dev-queue lock.
+            native_daemon=daemon,
+            ignore_session_ids=frozenset(closed),
+            # bounded=True (#2501): operator command. The lock-free pre-checks
+            # and a confirmed routed-orphan close (#2517) precede the dev-queue
+            # lock; a timeout there leaves the row parked and the session
+            # closed, the state a normal park leaves.
             bounded=True,
         )
     except RequeueLiveSessionError as exc:

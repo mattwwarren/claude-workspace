@@ -30,6 +30,7 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     ReapPolicy,
+    Session,
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
@@ -39,10 +40,13 @@ from cw.models import (
 from cw.reconcile import routed_result_sessions
 from cw.reconcile.routed_result_sessions import (
     ROUTED_RESULT_STRANDED_REASON,
+    RoutedOrphanSplit,
     StrandedRoutedSession,
     find_stranded_routed_sessions,
     rollback_routed_result_latches,
+    routed_marker_candidates,
     session_pins_occupied_row,
+    split_resolvable_routed_sessions,
     sweep_routed_result_sessions,
 )
 from tests._reconcile_helpers import (
@@ -472,6 +476,283 @@ class TestSessionPinsOccupiedRow:
 
     def test_empty_task_list_does_not_pin(self) -> None:
         assert session_pins_occupied_row([], "s1") is False
+
+    def test_first_pinning_row_returns_the_row(self) -> None:
+        pinning = _row(status=QueueItemStatus.BLOCKED_ON_USER, session_id="s1")
+        tasks = [_row(status=QueueItemStatus.PENDING, session_id="s1"), pinning]
+
+        assert routed_result_sessions._first_pinning_row(tasks, "s1") is pinning
+        assert routed_result_sessions._first_pinning_row(tasks, "s2") is None
+
+
+# ---------------------------------------------------------------------------
+# #2517: the operator-resolution finders (approve/requeue close the orphan)
+# ---------------------------------------------------------------------------
+
+_ORPHAN_LIVE = "fake-short-id"
+
+
+def _orphan(
+    tmp_path: Path,
+    sid: str = _SID,
+    *,
+    ticket_id: str | None = None,
+    surface_ref: str | None = _ORPHAN_LIVE,
+    status: SessionStatus = SessionStatus.ACTIVE,
+    last_result: dict[str, object] | None = None,
+) -> Session:
+    """A marker session for *ticket_id* (default *sid*) with a tmp worktree."""
+    worktree = tmp_path / f"wt-{sid}"
+    sess = _mk_routed_session(
+        sid,
+        worktree,
+        surface_ref=surface_ref,
+        status=status,
+        last_result=last_result,
+    )
+    if ticket_id is not None:
+        sess.name = f"client-a/auto-dev/{ticket_id}"
+    return sess
+
+
+def _split(
+    candidates: list[Session],
+    tasks: list[TicketTask],
+    *,
+    native_live: set[str],
+    state: CwState | None = None,
+    releasing: tuple[str, str] | None = None,
+    now: datetime | None = None,
+) -> RoutedOrphanSplit:
+    return split_resolvable_routed_sessions(
+        candidates,
+        tasks,
+        state=state if state is not None else CwState(sessions=list(candidates)),
+        native_live=native_live,
+        now=now or datetime.now(UTC),
+        config=OrchestratorConfig(),
+        releasing=releasing,
+    )
+
+
+def _ids(sessions: list[Session]) -> list[str]:
+    return [s.id for s in sessions]
+
+
+class TestRoutedMarkerCandidates:
+    def test_hit_needs_no_transcript_and_no_roster(self, tmp_path: Path) -> None:
+        sess = _orphan(tmp_path, surface_ref="absent-from-any-roster")
+        state = CwState(sessions=[sess])
+
+        found = routed_marker_candidates(state, client="client-a", ticket_id=_SID)
+
+        assert _ids(found) == [_SID]
+
+    @pytest.mark.parametrize(
+        ("mutate", "client", "ticket_id"),
+        [
+            (None, "client-a", "other-ticket"),
+            (None, "client-b", _SID),
+            ({"status": SessionStatus.COMPLETED}, "client-a", _SID),
+            ({"last_result": {"status": "stage_complete"}}, "client-a", _SID),
+            (
+                {"last_result": _routed_last_result(sentinel_advance_refused=True)},
+                "client-a",
+                _SID,
+            ),
+            ({"purpose": SessionPurpose.ORCHESTRATE}, "client-a", _SID),
+            ({"origin": SessionOrigin.USER}, "client-a", _SID),
+            ({"surface_ref": None}, "client-a", _SID),
+        ],
+    )
+    def test_exclusions(
+        self,
+        tmp_path: Path,
+        mutate: dict[str, object] | None,
+        client: str,
+        ticket_id: str,
+    ) -> None:
+        sess = _orphan(tmp_path)
+        for field, value in (mutate or {}).items():
+            setattr(sess, field, value)
+
+        found = routed_marker_candidates(
+            CwState(sessions=[sess]), client=client, ticket_id=ticket_id
+        )
+
+        assert found == []
+
+
+class TestSplitResolvableRoutedSessions:
+    def test_live_unpinned_session_is_stop(self, tmp_path: Path) -> None:
+        sess = _orphan(tmp_path)
+
+        split = _split([sess], [], native_live={_ORPHAN_LIVE})
+
+        assert _ids(split.stop) == [_SID]
+        assert split.flip_only == split.draining == split.roster_untrusted == []
+        assert split.pinned == []
+
+    def test_stale_spawn_stamp_past_deadline_is_stop(self, tmp_path: Path) -> None:
+        sess = _orphan(tmp_path)
+        now = datetime.now(UTC)
+        assert sess.worktree_path is not None
+        _write_agent_spawn_stamp(
+            sess.worktree_path,
+            unresolved_count=1,
+            stamped_at=now - timedelta(minutes=90),
+        )
+
+        split = _split([sess], [], native_live={_ORPHAN_LIVE}, now=now)
+
+        assert _ids(split.stop) == [_SID]
+
+    def test_fresh_spawn_stamp_is_draining(self, tmp_path: Path) -> None:
+        sess = _orphan(tmp_path)
+        now = datetime.now(UTC)
+        assert sess.worktree_path is not None
+        _write_agent_spawn_stamp(
+            sess.worktree_path,
+            unresolved_count=1,
+            stamped_at=now - timedelta(minutes=5),
+        )
+
+        split = _split([sess], [], native_live={_ORPHAN_LIVE}, now=now)
+
+        assert _ids(split.draining) == [_SID]
+        assert split.stop == []
+
+    def test_absent_from_readable_roster_is_flip_only(self, tmp_path: Path) -> None:
+        sess = _orphan(tmp_path)
+
+        split = _split([sess], [], native_live={"someone-else"})
+
+        assert _ids(split.flip_only) == [_SID]
+        assert split.stop == split.roster_untrusted == []
+
+    def test_absent_and_pinned_is_pinned(self, tmp_path: Path) -> None:
+        sess = _orphan(tmp_path)
+        row = _row(status=QueueItemStatus.RUNNING, session_id=_SID)
+
+        split = _split([sess], [row], native_live=set())
+
+        assert [p.session.id for p in split.pinned] == [_SID]
+        assert split.pinned[0].pinned_by is row
+        assert split.flip_only == split.roster_untrusted == []
+
+    def test_empty_roster_with_other_live_session_is_roster_untrusted(
+        self, tmp_path: Path
+    ) -> None:
+        sess = _orphan(tmp_path)
+        other = _mk_routed_session("other", tmp_path / "wt-other")
+        other.last_result = None
+
+        split = _split(
+            [sess], [], native_live=set(), state=CwState(sessions=[sess, other])
+        )
+
+        assert _ids(split.roster_untrusted) == [_SID]
+        assert split.flip_only == []
+
+    def test_empty_roster_with_no_other_live_session_is_flip_only(
+        self, tmp_path: Path
+    ) -> None:
+        first = _orphan(tmp_path)
+        second = _orphan(tmp_path, "second", ticket_id=_SID)
+
+        split = _split([first, second], [], native_live=set())
+
+        assert _ids(split.flip_only) == [_SID, "second"]
+        assert split.roster_untrusted == []
+
+    def test_non_empty_roster_missing_candidate_is_flip_only_despite_others(
+        self, tmp_path: Path
+    ) -> None:
+        sess = _orphan(tmp_path)
+        other = _mk_routed_session("other", tmp_path / "wt-other")
+
+        split = _split(
+            [sess],
+            [],
+            native_live={"unrelated-worker"},
+            state=CwState(sessions=[sess, other]),
+        )
+
+        assert _ids(split.flip_only) == [_SID]
+
+    def test_pinned_beats_roster_untrusted(self, tmp_path: Path) -> None:
+        sess = _orphan(tmp_path)
+        other = _mk_routed_session("other", tmp_path / "wt-other")
+        row = _row(status=QueueItemStatus.RUNNING, session_id=_SID)
+
+        split = _split(
+            [sess], [row], native_live=set(), state=CwState(sessions=[sess, other])
+        )
+
+        assert [p.session.id for p in split.pinned] == [_SID]
+        assert split.roster_untrusted == []
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            QueueItemStatus.RUNNING,
+            QueueItemStatus.BLOCKED_ON_USER,
+            QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        ],
+    )
+    def test_other_tickets_occupied_row_pins(
+        self, tmp_path: Path, status: QueueItemStatus
+    ) -> None:
+        sess = _orphan(tmp_path)
+        row = _row(status=status, session_id=_SID, ticket_id="another")
+
+        for releasing in (None, ("client-a", _SID)):
+            split = _split(
+                [sess], [row], native_live={_ORPHAN_LIVE}, releasing=releasing
+            )
+
+            assert [p.pinned_by for p in split.pinned] == [row]
+            assert split.stop == []
+
+    @pytest.mark.parametrize(
+        "status",
+        [QueueItemStatus.BLOCKED_ON_USER, QueueItemStatus.AWAITING_OPERATOR_SIGNOFF],
+    )
+    def test_own_parked_row_pins_on_approve_but_not_on_requeue(
+        self, tmp_path: Path, status: QueueItemStatus
+    ) -> None:
+        sess = _orphan(tmp_path)
+        row = _row(status=status, session_id=_SID)
+
+        approve = _split([sess], [row], native_live={_ORPHAN_LIVE})
+        requeue = _split(
+            [sess], [row], native_live={_ORPHAN_LIVE}, releasing=("client-a", _SID)
+        )
+
+        assert [p.pinned_by for p in approve.pinned] == [row]
+        assert approve.stop == []
+        assert requeue.pinned == []
+        assert _ids(requeue.stop) == [_SID]
+
+    def test_own_running_row_still_pins_on_requeue(self, tmp_path: Path) -> None:
+        sess = _orphan(tmp_path)
+        row = _row(status=QueueItemStatus.RUNNING, session_id=_SID)
+
+        split = _split(
+            [sess], [row], native_live={_ORPHAN_LIVE}, releasing=("client-a", _SID)
+        )
+
+        assert [p.pinned_by for p in split.pinned] == [row]
+
+    def test_split_is_pure(self, tmp_path: Path) -> None:
+        sess = _orphan(tmp_path)
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(DevQueueStore(tasks=[]))
+        before = _state_queue_snapshot()
+
+        _split([sess], [], native_live={_ORPHAN_LIVE})
+
+        assert _state_queue_snapshot() == before
 
 
 def _sweep(

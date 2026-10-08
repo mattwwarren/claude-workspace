@@ -8,9 +8,12 @@ tracker-comment machinery -- lives apart from the plain queue mutations.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import click
 
 from cw.cli._base import handle_errors
+from cw.cli.routed_orphan_close import close_routed_result_sessions_for_ticket
 from cw.config import get_client, load_orchestrator_config
 from cw.dev_queue import (
     BODY_DRIFT_WARNING_KEY,
@@ -36,6 +39,9 @@ from ._plan_marker import (
     _marker_present,
     _plan_approved_marker,
 )
+
+if TYPE_CHECKING:
+    from cw.models import OrchestratorConfig
 
 
 @dev_queue.command(name="revoke-plan-approval")
@@ -184,10 +190,27 @@ def _tracker_is_github_or_unknown(client_name: str) -> bool:
     return tracker is None or tracker == TRACKER_GITHUB_ISSUES
 
 
-def _approve_scope_drift(ticket_id: str, resolved: str, scope_drift: str) -> None:
+def _close_orphans_after_approve(
+    ticket_id: str, resolved: str, config: OrchestratorConfig, *, command: str
+) -> None:
+    """Close the ticket's orphaned routed-result sessions after the approval.
+
+    Runs after the transition succeeded (#2517), so nothing irreversible
+    precedes it; a close that cannot be confirmed raises a ``CwError`` that
+    says the ticket is already approved.
+    """
+    close_routed_result_sessions_for_ticket(
+        ticket_id, resolved, command=command, config=config, after_transition=True
+    )
+
+
+def _approve_scope_drift(
+    ticket_id: str, resolved: str, scope_drift: str, config: OrchestratorConfig
+) -> None:
     """The ``--scope-drift`` branch of ``dev_queue_approve`` (#2337)."""
     extra_files = [path.strip() for path in scope_drift.split(",") if path.strip()]
-    # bounded=True (#2501): operator command; nothing precedes the lock.
+    # bounded=True (#2501): operator command; nothing precedes the lock; the
+    # routed-orphan close (#2517) runs after the transition.
     result = approve_scope_drift_ticket(
         ticket_id,
         resolved,
@@ -200,6 +223,9 @@ def _approve_scope_drift(ticket_id: str, resolved: str, scope_drift: str) -> Non
         f" {', '.join(result['extra_files'])}. Bound to branch head"
         f" {result['approved_head'][:_HEAD_SHA_DISPLAY_LEN]}; the next dispatch"
         " re-runs the scope-conformance gate with them allowed."
+    )
+    _close_orphans_after_approve(
+        ticket_id, resolved, config, command="approve --scope-drift"
     )
 
 
@@ -300,6 +326,20 @@ def dev_queue_approve(
     AWAITING_OPERATOR_SIGNOFF instead of advancing -- run `approve` again
     to clear it.
 
+    On success, a leftover routed-result session for the ticket -- one that
+    already routed its result but was never completed because background
+    work was still running -- is closed once its worker is confirmed gone
+    from the daemon roster. A session that an occupied row still binds, or
+    whose background work is still draining, is left running and named on
+    stderr. If the stop cannot be confirmed the command exits non-zero AFTER
+    the approval took effect: the ticket is approved and its row released,
+    so do not re-run `approve` (the row is already PENDING and a retry never
+    reaches the close); close the session with the `cw spawn close
+    --confirmed-dead <id>` line the message prints once the worker is gone.
+    Any caller of this command, including an agent session, closes such a
+    session; the unattended approvals (auto-adopt gate recipe, `drain`,
+    `auto_fix_ci`) do not.
+
     Pass --post-marker to also post the plan-approved audit marker on a
     PLAN-stage ticket (unrelated to the operator-signoff gate above or to
     `add --signoff`). The marker embeds the approved draft's fingerprint
@@ -348,9 +388,10 @@ def dev_queue_approve(
     config = load_orchestrator_config()
     resolved = resolve_client(ticket_id, config, client)
     if scope_drift is not None:
-        _approve_scope_drift(ticket_id, resolved, scope_drift)
+        _approve_scope_drift(ticket_id, resolved, scope_drift, config)
         return
-    # bounded=True (#2501): operator command; nothing precedes the lock.
+    # bounded=True (#2501): operator command; nothing precedes the lock; the
+    # routed-orphan close (#2517) runs after the transition.
     result = approve_ticket(ticket_id, resolved, bounded=True)
     # #2311: advisory only -- the approval already landed. approve_ticket
     # recorded the audit event itself; the CLI just surfaces the warning.
@@ -407,3 +448,4 @@ def dev_queue_approve(
             f"Approved {ticket_id} ({resolved}):"
             f" {result['from_stage']} -> {result['to_stage']}{promoted_note}"
         )
+    _close_orphans_after_approve(ticket_id, resolved, config, command="approve")

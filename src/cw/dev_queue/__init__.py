@@ -104,6 +104,7 @@ from cw.dev_queue.requeue import (
     _apply_requeue_stage,
     _impl_bypass_plan_available,
     classify_requeue_live_session_error,
+    precheck_requeue,
     requeue_ticket,
     unblock_ticket,
 )
@@ -177,6 +178,7 @@ __all__ = [
     "migrate_dev_queue",
     "move_ticket",
     "plan_path",
+    "precheck_requeue",
     "promote_plan_draft",
     "prune_tickets",
     "register_watched_pr",
