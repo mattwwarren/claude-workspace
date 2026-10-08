@@ -27,6 +27,7 @@ from cw.config import (
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.models import (
+    DEFAULT_LANE,
     ClientConfig,
     CompletionReason,
     CwState,
@@ -58,6 +59,12 @@ from cw.reconcile._shared import (
     SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON,
 )
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
+from cw.reconcile.phantom import _detect_phantom_candidates
+from cw.reconcile.phantom._detect import (
+    _classify_before_dirty_check,
+    _needs_dirty_check,
+    _PreDirtyOutcome,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -65,6 +72,7 @@ if TYPE_CHECKING:
     from cw.reconcile import ProposedAction
 
 from tests._clients_yaml import staged_client, write_clients_yaml
+from tests._dirty_check_helpers import checks_with, detect_phantom_prefetched
 from tests._reconcile_helpers import (
     PROVIDER_OVERLOAD_TEXT,
     SCOPE_GUARD_FILES,
@@ -1144,7 +1152,6 @@ def test_detect_phantom_candidates_worktree_dirty_on_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Phantom with dirty worktree → candidate.worktree_dirty True; bytes unchanged."""
-    from cw.reconcile import _detect_phantom_candidates
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     wt = tmp_path / "wt-dirty"
@@ -1160,7 +1167,7 @@ def test_detect_phantom_candidates_worktree_dirty_on_candidate(
         lambda _c, _p: "2 uncommitted path(s)",
     )
 
-    candidates = _detect_phantom_candidates(
+    candidates = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         now=started_at,
@@ -1178,7 +1185,6 @@ def test_detect_phantom_candidates_worktree_clean_reason_none_on_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Phantom with clean worktree → worktree_dirty False, reason None (#2118)."""
-    from cw.reconcile import _detect_phantom_candidates
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     wt = tmp_path / "wt-clean"
@@ -1193,7 +1199,7 @@ def test_detect_phantom_candidates_worktree_clean_reason_none_on_candidate(
         "cw.reconcile._shared.worktree_dirty_reason_by_path", lambda _c, _p: None
     )
 
-    candidates = _detect_phantom_candidates(
+    candidates = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         now=started_at,
@@ -1210,7 +1216,7 @@ def test_detect_phantom_candidates_usage_limit_detected_true(
     tmp_path: Path,
 ) -> None:
     """DAEMON phantom with usage-limit transcript → usage_limit_detected=True (#804)."""
-    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile import ProposedAction
 
     home = Path.home()
 
@@ -1236,9 +1242,7 @@ def test_detect_phantom_candidates_usage_limit_detected_true(
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
 
-    candidates = _detect_phantom_candidates(
-        state, phantom_set={sess.id}, now=started_at
-    )
+    candidates = detect_phantom_prefetched(state, phantom_set={sess.id}, now=started_at)
 
     assert len(candidates) == 1
     c = candidates[0]
@@ -1273,7 +1277,7 @@ def test_detect_phantom_candidates_usage_limit_recent_at_tail_true(
     tmp_path: Path,
 ) -> None:
     """#1345: a limit message at the transcript tail is recent → detected True."""
-    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile import ProposedAction
 
     home = Path.home()
 
@@ -1303,9 +1307,7 @@ def test_detect_phantom_candidates_usage_limit_recent_at_tail_true(
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
 
-    candidates = _detect_phantom_candidates(
-        state, phantom_set={sess.id}, now=started_at
-    )
+    candidates = detect_phantom_prefetched(state, phantom_set={sess.id}, now=started_at)
 
     assert len(candidates) == 1
     c = candidates[0]
@@ -1318,7 +1320,7 @@ def test_detect_phantom_candidates_usage_limit_stale_false(
     tmp_path: Path,
 ) -> None:
     """#1345: an early limit message with later unrelated work is stale → False."""
-    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile import ProposedAction
 
     home = Path.home()
 
@@ -1349,9 +1351,7 @@ def test_detect_phantom_candidates_usage_limit_stale_false(
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
 
-    candidates = _detect_phantom_candidates(
-        state, phantom_set={sess.id}, now=started_at
-    )
+    candidates = detect_phantom_prefetched(state, phantom_set={sess.id}, now=started_at)
 
     assert len(candidates) == 1
     c = candidates[0]
@@ -1364,7 +1364,7 @@ def test_detect_phantom_candidates_provider_overload_detected_true(
     tmp_path: Path,
 ) -> None:
     """DAEMON phantom with a provider-overload transcript → True (#1923)."""
-    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile import ProposedAction
 
     home = Path.home()
 
@@ -1388,9 +1388,7 @@ def test_detect_phantom_candidates_provider_overload_detected_true(
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
 
-    candidates = _detect_phantom_candidates(
-        state, phantom_set={sess.id}, now=started_at
-    )
+    candidates = detect_phantom_prefetched(state, phantom_set={sess.id}, now=started_at)
 
     assert len(candidates) == 1
     c = candidates[0]
@@ -1577,7 +1575,7 @@ def test_phantom_sentinel_mismatch_veto_disabled_keeps_age_fallback(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A client outside #2405 rollout keeps the old fallback with shadow telemetry."""
-    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile import ProposedAction
 
     home = Path.home()
     worktree = tmp_path / "wt-sentinel-veto-disabled"
@@ -1607,7 +1605,7 @@ def test_phantom_sentinel_mismatch_veto_disabled_keeps_age_fallback(
     save_dev_queue(DevQueueStore(tasks=[]))
 
     with caplog.at_level(logging.WARNING, logger="cw.reconcile.phantom._detect"):
-        candidates = _detect_phantom_candidates(state, phantom_set={sess.id}, now=now)
+        candidates = detect_phantom_prefetched(state, phantom_set={sess.id}, now=now)
 
     assert candidates[0].proposed_action == ProposedAction.CRASH_COMPLETE
     assert any(
@@ -1733,7 +1731,7 @@ def test_phantom_dirty_worktree_past_veto_cap_blocks_on_user_regardless_of_age(
         "cw.reconcile._shared.worktree_dirty_reason_by_path",
         lambda _c, _p: "2 uncommitted path(s)",
     )
-    from cw.reconcile import _act_on_phantom_candidates, _detect_phantom_candidates
+    from cw.reconcile import _act_on_phantom_candidates
 
     home = Path.home()
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -1770,7 +1768,7 @@ def test_phantom_dirty_worktree_past_veto_cap_blocks_on_user_regardless_of_age(
     )
     config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
 
-    cands = _detect_phantom_candidates(
+    cands = detect_phantom_prefetched(
         state, phantom_set={sess.id}, now=now, config=config
     )
     call_and_drain(_act_on_phantom_candidates, state, cands, now=now, config=config)
@@ -1795,7 +1793,7 @@ def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
     is not re-proposed on a subsequent detect pass -- it falls through to the
     ordinary CRASH_COMPLETE construction instead.
     """
-    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile import ProposedAction
     from cw.reconcile.phantom import _apply_phantom_routed_mutations
 
     home = Path.home()
@@ -1825,7 +1823,7 @@ def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    candidates = _detect_phantom_candidates(
+    candidates = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         task_by_ticket={"phantom-refusal-1": task},
@@ -1862,7 +1860,7 @@ def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
     # Second detect pass over the now-marked session: the already_refused
     # skip check stops offering the same doomed advance candidate -- it
     # falls through to CRASH_COMPLETE instead.
-    candidates_2 = _detect_phantom_candidates(
+    candidates_2 = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         task_by_ticket={"phantom-refusal-1": task_after},
@@ -2091,7 +2089,7 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     second, independent flag (_SENTINEL_ADVANCE_REFUSED_KEY) into the existing
     dict instead of choosing between the two.
     """
-    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile import ProposedAction
     from cw.reconcile.phantom import _apply_phantom_routed_mutations
 
     home = Path.home()
@@ -2123,7 +2121,7 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    candidates = _detect_phantom_candidates(
+    candidates = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         task_by_ticket={"phantom-preserve-1": task},
@@ -2169,7 +2167,7 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     # still stop offering the same doomed advance candidate even though the
     # marker's paused_status value is idle.py's, not the #1149 refusal
     # reason -- it falls through to CRASH_COMPLETE instead.
-    candidates_2 = _detect_phantom_candidates(
+    candidates_2 = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         task_by_ticket={"phantom-preserve-1": task},
@@ -3073,7 +3071,7 @@ def test_phantom_veto_bounded_falls_through_to_crash_complete(
     """A LIVE, already_refused phantom at the veto cap falls through to a single
     CRASH_COMPLETE candidate stamped veto_cap_exhausted=True — no
     SENTINEL_STAGE_MISMATCH_VETOED candidate (#1449)."""
-    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile import ProposedAction
 
     home = Path.home()
     worktree = tmp_path / "wt-bound-crash"
@@ -3089,7 +3087,7 @@ def test_phantom_veto_bounded_falls_through_to_crash_complete(
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
 
-    candidates = _detect_phantom_candidates(
+    candidates = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         now=now,
@@ -3123,7 +3121,6 @@ def test_sentinel_mismatch_veto_cap_end_to_end_via_detect_and_act(
         ProposedAction,
         ReapCandidate,
         _act_on_phantom_candidates,
-        _detect_phantom_candidates,
     )
 
     home = Path.home()
@@ -3147,7 +3144,7 @@ def test_sentinel_mismatch_veto_cap_end_to_end_via_detect_and_act(
     config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
 
     def _tick() -> list[ReapCandidate]:
-        cands = _detect_phantom_candidates(
+        cands = detect_phantom_prefetched(
             state, phantom_set={sess.id}, now=now, config=config
         )
         call_and_drain(_act_on_phantom_candidates, state, cands, now=now, config=config)
@@ -3190,7 +3187,6 @@ def test_sentinel_mismatch_veto_cap_exhaustion_emits_immediate_needs_attention(
     from cw.reconcile import (
         ProposedAction,
         _act_on_phantom_candidates,
-        _detect_phantom_candidates,
     )
 
     daemon = FakeNativeDaemonClient()
@@ -3221,7 +3217,7 @@ def test_sentinel_mismatch_veto_cap_exhaustion_emits_immediate_needs_attention(
     save_dev_queue(DevQueueStore(tasks=[task]))
     config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
 
-    candidates = _detect_phantom_candidates(
+    candidates = detect_phantom_prefetched(
         state, phantom_set={sess.id}, now=now, config=config
     )
     assert not any(
@@ -3270,7 +3266,7 @@ def test_sentinel_mismatch_veto_escalation_fires_once_not_every_tick(
         "cw.reconcile._deps.fire_push_notification",
         lambda *a, **kw: push_calls.append((a, kw)),
     )
-    from cw.reconcile import _act_on_phantom_candidates, _detect_phantom_candidates
+    from cw.reconcile import _act_on_phantom_candidates
 
     home = Path.home()
     worktree = tmp_path / "wt-veto-once"
@@ -3294,7 +3290,7 @@ def test_sentinel_mismatch_veto_escalation_fires_once_not_every_tick(
     config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
 
     for _ in range(3):
-        cands = _detect_phantom_candidates(
+        cands = detect_phantom_prefetched(
             state, phantom_set={sess.id}, now=now, config=config
         )
         call_and_drain(_act_on_phantom_candidates, state, cands, now=now, config=config)
@@ -4157,7 +4153,6 @@ def test_detect_phantom_candidates_reads_unresolved_spawn_from_worktree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1646: a real stamped cw-context.json flows into the candidate flag."""
-    from cw.reconcile import _detect_phantom_candidates
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     wt = tmp_path / "wt-unresolved-spawn"
@@ -4172,7 +4167,7 @@ def test_detect_phantom_candidates_reads_unresolved_spawn_from_worktree(
     save_dev_queue(DevQueueStore(tasks=[]))
     snap = _state_queue_snapshot()
 
-    candidates = _detect_phantom_candidates(
+    candidates = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         now=started_at,
@@ -4194,7 +4189,6 @@ def test_detect_phantom_candidates_unresolved_spawn_false_without_stamp(
     The fail-open acceptance criterion at the detect layer: an inaccessible
     worktree must classify as an ordinary phantom, never block the sweep.
     """
-    from cw.reconcile import _detect_phantom_candidates
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     sess = _mk_phantom_daemon_session(
@@ -4204,7 +4198,7 @@ def test_detect_phantom_candidates_unresolved_spawn_false_without_stamp(
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
 
-    candidates = _detect_phantom_candidates(
+    candidates = detect_phantom_prefetched(
         state,
         phantom_set={sess.id},
         now=started_at,
@@ -5449,3 +5443,170 @@ def test_merged_phantom_act_queues_stop_after_save_and_emit(
     run_post_lock_jobs(sink)
 
     assert daemon.stop_calls == ["gone-ref"]
+
+
+# ---------------------------------------------------------------------------
+# #2548: classification before the dirty check, shared by detect and capture
+# ---------------------------------------------------------------------------
+
+
+def _classify(
+    session: Session, *, now: datetime, config: OrchestratorConfig | None = None
+) -> _PreDirtyOutcome:
+    return _classify_before_dirty_check(
+        session, {}, now=now, config=config or OrchestratorConfig()
+    )
+
+
+def test_classify_before_dirty_check_route_salvage_and_advance_are_terminal(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    from cw.reconcile import ProposedAction
+
+    home = Path.home()
+    started_at = datetime(2026, 1, 1, tzinfo=UTC)
+    routed = _mk_phantom_daemon_session(
+        "cls-routed", started_at, worktree_path=tmp_path / "wt-routed"
+    )
+    routed.last_result = _shipped_salvage_payload("cls-routed")
+    salvage = _mk_phantom_daemon_session(
+        "cls-salvage",
+        started_at,
+        surface_ref="fake-short-id",
+        worktree_path=tmp_path / "wt-salvage",
+    )
+    _write_salvage_transcript(
+        home,
+        tmp_path / "wt-salvage",
+        "csid-cls",
+        _shipped_salvage_payload("cls-salvage"),
+    )
+    advance = _mk_phantom_daemon_session(
+        "salv-stage",
+        started_at,
+        surface_ref="fake-short-id",
+        worktree_path=tmp_path / "wt-advance",
+    )
+    _write_salvage_transcript(
+        home, tmp_path / "wt-advance", "csid-adv", _stage_complete_payload()
+    )
+
+    actions = {s.id: _classify(s, now=started_at) for s in (routed, salvage, advance)}
+
+    assert {sid: o.candidate is not None for sid, o in actions.items()} == {
+        "cls-routed": True,
+        "cls-salvage": True,
+        "salv-stage": True,
+    }
+    assert actions["cls-routed"].candidate is not None
+    assert (
+        actions["cls-routed"].candidate.proposed_action
+        is ProposedAction.ROUTE_EMITTED_SENTINEL
+    )
+    assert actions["cls-salvage"].candidate is not None
+    assert (
+        actions["cls-salvage"].candidate.proposed_action
+        is ProposedAction.SALVAGE_COMPLETION
+    )
+    assert actions["salv-stage"].candidate is not None
+    assert (
+        actions["salv-stage"].candidate.proposed_action
+        is ProposedAction.ROUTE_EMITTED_SENTINEL
+    )
+    for session in (routed, salvage, advance):
+        assert not _needs_dirty_check(session, actions[session.id])
+
+
+def test_classify_before_dirty_check_veto_is_terminal(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    from cw.reconcile import ProposedAction
+
+    started_at = datetime(2026, 1, 1, tzinfo=UTC)
+    now = started_at + timedelta(minutes=5)
+    worktree = tmp_path / "wt-cls-veto"
+    sess = _mk_phantom_daemon_session(
+        "cls-veto", started_at, surface_ref="fake-short-id", worktree_path=worktree
+    )
+    sess.last_result = {"paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON}
+    _write_fresh_refused_transcript(Path.home(), worktree, "csid-cls-veto", now)
+
+    outcome = _classify(sess, now=now)
+
+    assert outcome.candidate is not None
+    assert (
+        outcome.candidate.proposed_action
+        is ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED
+    )
+    assert not _needs_dirty_check(sess, outcome)
+
+
+def test_classify_before_dirty_check_plain_crash_carries_veto_fields(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """No candidate yet: the session falls through to the dirty check, with
+    the ticket, lane and #1449 cap-exhaustion fields carried for the tail."""
+    started_at = datetime(2026, 1, 1, tzinfo=UTC)
+    now = started_at + timedelta(minutes=5)
+    worktree = tmp_path / "wt-cls-crash"
+    plain = _mk_phantom_daemon_session("cls-crash", started_at, worktree_path=worktree)
+    capped = _mk_phantom_daemon_session(
+        "cls-capped", started_at, surface_ref="fake-short-id", worktree_path=worktree
+    )
+    capped.last_result = {"paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON}
+    capped.consecutive_sentinel_mismatch_vetoes = 2
+    _write_fresh_refused_transcript(Path.home(), worktree, "csid-cls-capped", now)
+    config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
+
+    plain_outcome = _classify(plain, now=now, config=config)
+    capped_outcome = _classify(capped, now=now, config=config)
+
+    assert plain_outcome == _PreDirtyOutcome(None, "cls-crash", DEFAULT_LANE)
+    assert _needs_dirty_check(plain, plain_outcome)
+    assert capped_outcome.candidate is None
+    assert capped_outcome.ticket_id == "cls-capped"
+    assert capped_outcome.veto_cap_exhausted is True
+    assert capped_outcome.veto_stale_seconds is not None
+    assert _needs_dirty_check(capped, capped_outcome)
+
+
+def test_needs_dirty_check_is_false_for_user_sessions(tmp_config_dir: Path) -> None:
+    started_at = datetime(2026, 1, 1, tzinfo=UTC)
+    user = _mk_session("cls-user", "dead-ref", started_at=started_at)
+    assert user.origin is SessionOrigin.USER
+
+    outcome = _classify(user, now=started_at)
+
+    assert outcome.candidate is None
+    assert not _needs_dirty_check(user, outcome)
+
+
+def test_detect_reads_the_captured_store_hit(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dirty and clean hits come straight from the store; detect never runs
+    the live check."""
+    started_at = datetime(2026, 1, 1, tzinfo=UTC)
+    dirty = _mk_phantom_daemon_session(
+        "hit-dirty", started_at, worktree_path=tmp_path / "wt-hit-dirty"
+    )
+    clean = _mk_phantom_daemon_session(
+        "hit-clean", started_at, worktree_path=tmp_path / "wt-hit-clean"
+    )
+    checks = checks_with([dirty, clean], {"hit-dirty": "1 unpushed", "hit-clean": None})
+
+    def _no_git(_client: str, _path: object) -> str | None:
+        msg = "detect must not run the live dirty check"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("cw.reconcile._shared.worktree_dirty_reason_by_path", _no_git)
+
+    candidates = _detect_phantom_candidates(
+        CwState(sessions=[dirty, clean]),
+        {dirty.id, clean.id},
+        now=started_at,
+        dirty_checks=checks,
+    )
+
+    reasons = {c.session_id: c.worktree_dirty_reason for c in candidates}
+    assert reasons == {"hit-dirty": "1 unpushed", "hit-clean": None}

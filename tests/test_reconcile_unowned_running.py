@@ -16,6 +16,7 @@ import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
@@ -37,7 +38,8 @@ from cw.models import (
     UsageLimitAct,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from cw.reconcile import reconcile
+from cw.reconcile import _deps, reconcile
+from cw.reconcile.dirty_checks import DirtyChecks
 from cw.reconcile.unowned_running import (
     UnownedCandidate,
     detect_unowned_running,
@@ -45,7 +47,9 @@ from cw.reconcile.unowned_running import (
 )
 from cw.worktree import worktree_path_for
 from tests._clients_yaml import write_clients_yaml
+from tests._dirty_check_helpers import DIRTY_CHECKS_LOGGER, unavailable_records
 from tests._reconcile_helpers import (
+    _attention_events,
     _failing_record_event,
     _state_queue_snapshot,
     _write_agent_spawn_stamp,
@@ -823,9 +827,9 @@ class TestNoOpAndInvariants:
         real_revert = core.revert_timed_out_tasks
         ran: list[str] = []
 
-        def _record() -> list[str]:
+        def _record(dirty_checks: DirtyChecks | None = None) -> list[str]:
             ran.append("revert_timed_out_tasks")
-            return real_revert()
+            return real_revert(dirty_checks)
 
         monkeypatch.setattr(core, "revert_timed_out_tasks", _record)
 
@@ -833,6 +837,52 @@ class TestNoOpAndInvariants:
 
         assert ran == ["revert_timed_out_tasks"]
         assert _row().session_id is None
+
+    def test_session_bound_in_lock_by_unowned_recovery_defers(
+        self,
+        client_cfg: ClientConfig,
+        adopted: list[CapturedEvent],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """M9 (#2548): the row is bound to its COMPLETED session in-lock, after
+        the dirty-check pre-pass ran, so the session was never captured. Its
+        backstop defers a tick (row stays RUNNING and bound, nothing paged);
+        the next tick captures the now-bound row and reverts it."""
+        write_clients_yaml(client_cfg)
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+        _arrange(client_cfg)
+        checked: list[str] = []
+
+        def _clean(_client: str, path: object) -> str | None:
+            checked.append(str(path))
+            return None
+
+        monkeypatch.setattr(
+            "cw.reconcile._shared.worktree_dirty_reason_by_path", _clean
+        )
+
+        with caplog.at_level(logging.WARNING, logger=DIRTY_CHECKS_LOGGER):
+            reconcile()
+
+        assert len(adopted) == 1
+        row = _row()
+        assert row.status is QueueItemStatus.RUNNING
+        assert row.session_id == _SID
+        session = next(s for s in load_state().sessions if s.id == _SID)
+        assert session.status is SessionStatus.COMPLETED
+        assert session.reap_reason is None
+        assert _attention_events("m9", _TICKET) == []
+        push = _deps.fire_push_notification
+        assert isinstance(push, MagicMock)
+        push.assert_not_called()
+        assert len(unavailable_records(caplog, _SID)) == 1
+        assert checked == []
+
+        assert reconcile().reverted_ticket_ids == [_TICKET]
+
+        assert _row().status is QueueItemStatus.PENDING
+        assert len(checked) == 1
 
 
 def _events_section(heading: str) -> str:

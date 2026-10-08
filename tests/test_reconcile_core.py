@@ -57,6 +57,11 @@ from cw.reconcile import core as reconcile_core
 from cw.reconcile._shared import ProposedAction, ReapCandidate
 from cw.reconcile.codex_boot import CAPTURE_BUDGET_SECONDS, CleanProbe, CleanProbes
 from cw.reconcile.deferred import DeferredReconcileJobs
+from cw.reconcile.dirty_checks import (
+    DIRTY_CHECK_BUDGET_SECONDS,
+    DIRTY_CHECK_MAX_PER_TICK,
+    DirtyChecks,
+)
 from cw.reconcile.gate_plan_probes import (
     PLAN_PREFETCH_BUDGET_SECONDS,
     PLAN_PREFETCH_MAX_PER_TICK,
@@ -73,8 +78,10 @@ from cw.reconcile.review_recipes import (
 from cw.reconcile.review_recipes._shared import RepoSlugs
 from cw.review_strategy import ReviewStrategy
 from tests._clients_yaml import ClientSpec, staged_client, write_clients_yaml
+from tests._dirty_check_helpers import DIRTY_CHECKS_LOGGER, unavailable_records
 from tests._reconcile_helpers import (
     LockProbeDaemon,
+    _attention_events,
     _auto_config,
     _mk_headless_daemon_session,
     _mk_phantom_daemon_session,
@@ -1108,11 +1115,13 @@ class TestConciergeAndEscalationWiring:
 # reconcile()'s dev-queue loads: its gh pre-pass first, then the codex
 # clean-probe pre-pass (#2563), then the gate recipes' plan prefetch
 # pre-pass third (#2545). The review recipes' repo-slug pre-pass (#2564) loads
-# through its own module's binding, so it is not counted here; the local
-# harvest-facts pre-pass (#2565) is the fourth, last before the lock.
+# through its own module's binding, so it is not counted here; the dirty-check
+# pre-pass (#2548) is the fourth, and the local harvest-facts pre-pass (#2565)
+# the fifth, last before the lock.
 _CODEX_PRE_PASS_LOAD = 2
 _PLAN_PRE_PASS_LOAD = 3
-_HARVEST_PRE_PASS_LOAD = 4
+_DIRTY_PRE_PASS_LOAD = 4
+_HARVEST_PRE_PASS_LOAD = 5
 
 
 class TestCodexLiveWriterRepark:
@@ -1555,6 +1564,9 @@ class TestHarvestFactsPrePass:
             reconcile_core, "capture_review_repo_slugs", _step("slugs", None)
         )
         monkeypatch.setattr(
+            reconcile_core, "_capture_dirty_checks", _step("dirty", None)
+        )
+        monkeypatch.setattr(
             reconcile_core, "_capture_harvest_facts", _step("harvest", None)
         )
         monkeypatch.setattr(
@@ -1563,7 +1575,7 @@ class TestHarvestFactsPrePass:
 
         reconcile()
 
-        assert order == ["codex", "slugs", "harvest", "locked"]
+        assert order == ["codex", "slugs", "dirty", "harvest", "locked"]
 
     def test_unreadable_state_in_harvest_pre_pass_defers_without_failing_reconcile(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -3429,9 +3441,9 @@ class TestUnownedRunningSweepWiring:
             order.append("unowned_running")
             return real_adopt(clients=clients)
 
-        def _revert() -> list[str]:
+        def _revert(dirty_checks: DirtyChecks | None = None) -> list[str]:
             order.append("revert_timed_out")
-            return real_revert()
+            return real_revert(dirty_checks)
 
         monkeypatch.setattr(reconcile_core, "run_unowned_running_recovery", _adopt)
         monkeypatch.setattr(reconcile_core, "revert_timed_out_tasks", _revert)
@@ -3539,3 +3551,222 @@ class TestUnownedRunningSweepWiring:
         assert row.status == QueueItemStatus.PENDING
         assert row.session_id is None
         assert adopted == []
+
+
+class TestDirtyChecksPrePass:
+    """#2548: the worktree dirty checks are captured in a lockless pre-pass and
+    the in-lock phantom detect and terminal backstops only look them up."""
+
+    @staticmethod
+    def _record_consumers(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+        seen: dict[str, object] = {}
+        real_detect = reconcile_core._detect_phantom_candidates
+
+        def _detect(*args: Any, **kwargs: Any) -> list[ReapCandidate]:
+            seen["detect"] = kwargs["dirty_checks"]
+            return real_detect(*args, **kwargs)
+
+        def _recorder(name: str) -> Callable[[DirtyChecks | None], list[str]]:
+            def _revert(dirty_checks: DirtyChecks | None = None) -> list[str]:
+                seen[name] = dirty_checks
+                return []
+
+            return _revert
+
+        monkeypatch.setattr(reconcile_core, "_detect_phantom_candidates", _detect)
+        monkeypatch.setattr(
+            reconcile_core, "revert_timed_out_tasks", _recorder("timed_out")
+        )
+        monkeypatch.setattr(
+            reconcile_core, "revert_completed_silent_tasks", _recorder("completed")
+        )
+        return seen
+
+    @pytest.mark.parametrize("with_phantom", [True, False])
+    def test_captured_unlocked_and_threaded_by_identity(
+        self, monkeypatch: pytest.MonkeyPatch, with_phantom: bool
+    ) -> None:
+        sessions = [_mk_session("s1", "missing-ref")] if with_phantom else []
+        save_state(CwState(sessions=sessions))
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "decoy000"}],
+        )
+        sentinel = DirtyChecks()
+        lock_free_at_capture: list[bool] = []
+
+        def _fake_capture(*, config: OrchestratorConfig) -> DirtyChecks:
+            lock_free_at_capture.append(probe_sessions_lock_free())
+            return sentinel
+
+        monkeypatch.setattr(reconcile_core, "_capture_dirty_checks", _fake_capture)
+        seen = self._record_consumers(monkeypatch)
+
+        reconcile()
+
+        assert lock_free_at_capture == [True]
+        assert seen.pop("timed_out") is sentinel
+        assert seen.pop("completed") is sentinel
+        if with_phantom:
+            assert seen.pop("detect") is sentinel
+        assert seen == {}
+
+    def test_store_is_built_with_the_per_tick_bounds(self) -> None:
+        save_state(CwState(sessions=[]))
+
+        checks = reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+
+        assert checks.budget_seconds == DIRTY_CHECK_BUDGET_SECONDS
+        assert checks.max_captures == DIRTY_CHECK_MAX_PER_TICK
+        assert checks.captures == 0
+
+    def test_idle_tick_makes_no_roster_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No live DAEMON session with a worktree: no extra `claude agents`."""
+        save_state(CwState(sessions=[_mk_session("s1", "live-ref")]))
+        calls: list[int] = []
+
+        def _roster() -> list[dict[str, object]]:
+            calls.append(1)
+            return []
+
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", _roster)
+
+        reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+
+        assert calls == []
+
+    def test_unreadable_state_defers_without_failing_reconcile(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        save_state(CwState(sessions=[]))
+        real_load = reconcile_core.load_dev_queue
+        loads: list[int] = []
+
+        def _dirty_load_fails() -> DevQueueStore:
+            loads.append(1)
+            if len(loads) == _DIRTY_PRE_PASS_LOAD:
+                msg = "dev queue unreadable"
+                raise OSError(msg)
+            return real_load()
+
+        monkeypatch.setattr(reconcile_core, "load_dev_queue", _dirty_load_fails)
+        seen = self._record_consumers(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger=reconcile_core.__name__):
+            report = reconcile()
+
+        assert isinstance(report, ReconcileReport)
+        checks = seen["timed_out"]
+        assert isinstance(checks, DirtyChecks)
+        assert checks.budget_seconds is None
+        assert checks.max_captures is None
+        assert "dirty-check pre-pass could not read state" in caplog.text
+
+    def test_capture_does_not_swallow_unexpected_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only state/dev-queue read errors are contained: a reader bug
+        propagates out of the pre-pass, as it did from the old in-lock check."""
+        session = _make_daemon_session(
+            id="to-1",
+            name="client-a/auto-dev/GEN-1",
+            status=SessionStatus.TIMED_OUT,
+            worktree_path=tmp_path / "wt",
+            surface_ref=None,
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="GEN-1",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="to-1",
+                    )
+                ]
+            )
+        )
+
+        def _boom(_client: str, _path: object) -> str | None:
+            msg = "a dirty-check bug"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("cw.reconcile._shared.worktree_dirty_reason_by_path", _boom)
+
+        with pytest.raises(RuntimeError, match="a dirty-check bug"):
+            reconcile_core._capture_dirty_checks(config=OrchestratorConfig())
+
+    def test_reconcile_locked_without_dirty_checks_passes_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(CwState(sessions=[]))
+        seen = self._record_consumers(monkeypatch)
+
+        with sessions_lock():
+            reconcile_core._reconcile_locked(deferred=DeferredReconcileJobs())
+
+        assert seen == {"timed_out": None, "completed": None}
+
+    def test_roster_race_session_defers(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """M8: live in the pre-pass roster, absent from the in-lock one, so it
+        is a phantom with no capture: it defers a tick and is never parked."""
+        surface_ref = "racesess"
+        session = _make_daemon_session(
+            id="race-1",
+            name="client-a/auto-dev/GEN-8",
+            surface_ref=surface_ref,
+            worktree_path=tmp_path / "wt-race",
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="GEN-8",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="race-1",
+                    )
+                ]
+            )
+        )
+        rosters = iter(
+            [[{"sessionId": f"{surface_ref}-full-uuid"}], [{"sessionId": "decoy000"}]]
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json", lambda: next(rosters)
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (False, True),
+        )
+
+        def _no_live_check(_client: str, _path: object) -> str | None:
+            msg = "the roster-race session must not be dirty-checked"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.reconcile._shared.worktree_dirty_reason_by_path", _no_live_check
+        )
+
+        with caplog.at_level(logging.WARNING, logger=DIRTY_CHECKS_LOGGER):
+            report = reconcile()
+
+        assert report.phantom_session_ids == ["race-1"]
+        row = load_dev_queue().tasks[0]
+        assert row.status is QueueItemStatus.RUNNING
+        assert row.session_id == "race-1"
+        assert load_state().sessions[0].status is SessionStatus.ACTIVE
+        assert _attention_events("m8", "GEN-8") == []
+        push = reconcile_core._deps.fire_push_notification
+        assert isinstance(push, MagicMock)
+        push.assert_not_called()
+        assert len(unavailable_records(caplog, "race-1")) == 1

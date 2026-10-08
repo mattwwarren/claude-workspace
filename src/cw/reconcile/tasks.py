@@ -45,7 +45,7 @@ from cw.queue_rows import (
     _PRIOR_PIPELINE_PR_OPEN_REASON,
     _is_backstop_exempt,
 )
-from cw.reconcile import _deps, _shared
+from cw.reconcile import _deps
 from cw.reconcile._shared import (
     _DIRTY_WORKTREE_REASON,
     _NEVER_CLAIMED_COMPLETION_REASON,
@@ -53,12 +53,14 @@ from cw.reconcile._shared import (
     feature_branch_key,
     ticket_id_for_session,
 )
+from cw.reconcile.dirty_checks import DIRTY_CHECK_LOOKAHEAD_SECONDS, partition_dirty
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.models import ClientConfig, Session
+    from cw.models import ClientConfig, CwState, Session
+    from cw.reconcile.dirty_checks import DirtyChecks
 
 # Grace window after Session.completed_at during which revert_timed_out_tasks/
 # revert_completed_silent_tasks leave a RUNNING task untouched, giving
@@ -74,13 +76,17 @@ if TYPE_CHECKING:
 _COMPLETION_ROUTING_GRACE_SECONDS = 60
 
 
-def _sessions_past_completion_grace(sessions: list[Session]) -> list[Session]:
+def _sessions_past_completion_grace(
+    sessions: list[Session], now: datetime | None = None
+) -> list[Session]:
     """Filter out sessions still inside their post-completion routing grace.
 
     A None completed_at gets no grace (fail-safe: never suppress
     indefinitely, mirrors _collect_timed_out_merged_candidates's guard).
+    *now* defaults to the current time (the dirty-check pre-pass passes a
+    lookahead, #2548).
     """
-    now = datetime.now(UTC)
+    now = now or datetime.now(UTC)
     return [
         s
         for s in sessions
@@ -117,11 +123,11 @@ def _revert_running_tasks_for_sessions(
     # releases, by choice: ADR-0019 permits emitting under it or after it.
     # Sessions to notify are collected inside the lock, emitted after it releases.
 
-    # Why: dirtiness is checked before dev_queue_lock is acquired (in the
-    # callers revert_timed_out_tasks / revert_completed_silent_tasks), but the
-    # orphaned claude --bg process may still be alive and could write to the
-    # worktree between that check and the BLOCKED_ON_USER write below (TOCTOU).
-    # The accepted tradeoff is block > clobber — narrow the window, accept the race.
+    # Why: dirtiness is captured before sessions_lock, in reconcile()'s
+    # lockless pre-pass (#2548), at most DIRTY_CHECK_MAX_AGE_SECONDS before this
+    # write; the orphaned claude --bg process may still be alive and could write
+    # to the worktree in between (TOCTOU). A stale capture only defers. The
+    # accepted tradeoff is block > clobber — narrow the window, accept the race.
     """
     if not session_ids:
         return []
@@ -498,161 +504,129 @@ def complete_timed_out_merged_tasks() -> list[str]:
     return completed_ids
 
 
-def _build_dirty_session_ids_and_notify(
-    sessions: list[Session],
-) -> dict[str, str]:
-    """Identify sessions with dirty worktrees, emit SESSION_NEEDS_ATTENTION.
+def backstop_targets(
+    state: CwState,
+    tasks: list[TicketTask],
+    status: SessionStatus,
+    *,
+    now: datetime | None = None,
+) -> tuple[list[Session], set[str]]:
+    """The DAEMON sessions in *status* past the completion grace, and which of
+    them own a RUNNING, non-backstop-exempt row (the ones the backstop acts on).
 
-    Called before acquiring dev_queue_lock so that dirtiness is assessed
-    outside the lock window (see TOCTOU note in _revert_running_tasks_for_sessions).
-
-    Returns a mapping of session id to dirty reason for every session whose
-    worktree has unsaved work (GitHub #2118); clean sessions are omitted.
-    Does NOT write session.last_result — this is a queue-level guard, not a
-    park-marker update (to avoid interfering with the existing park-marker logic).
-
-    Note: neither ``record_event(SESSION_NEEDS_ATTENTION)`` nor
-    ``fire_push_notification`` is called here. Both fire inside
-    ``_revert_running_tasks_for_sessions`` only when a RUNNING task is actually
-    routed to BLOCKED_ON_USER, providing the edge-trigger: each fires at most
-    once per dirty episode rather than once per tick (#763).
+    Shared by the in-lock revert and the lockless dirty-check capture (#2548),
+    so the two select the same sessions.
     """
-    dirty_session_reasons: dict[str, str] = {}
-    for session in sessions:
-        reason = _shared.worktree_dirty_reason_by_path(
-            session.client, session.worktree_path
-        )
-        if reason is None:
-            continue
-        dirty_session_reasons[session.id] = reason
-    return dirty_session_reasons
+    targets = _sessions_past_completion_grace(
+        [
+            s
+            for s in state.sessions
+            if s.status == status and s.origin is SessionOrigin.DAEMON
+        ],
+        now,
+    )
+    target_ids = {s.id for s in targets}
+    running_ids = {
+        sid
+        for t in tasks
+        if (sid := t.session_id) is not None
+        and sid in target_ids
+        and t.status == QueueItemStatus.RUNNING
+        and not _is_backstop_exempt(t)
+    }
+    return targets, running_ids
 
 
-def revert_timed_out_tasks() -> list[str]:
+def capture_backstop_dirty_checks(
+    state: CwState,
+    tasks: list[TicketTask],
+    *,
+    now: datetime,
+    checks: DirtyChecks,
+) -> None:
+    """Lockless pre-pass: capture the dirty checks the backstops will read.
+
+    Runs before ``sessions_lock`` (#2548). Captures the TIMED_OUT and DAEMON
+    COMPLETED sessions with a RUNNING row, with the completion grace shifted
+    by ``DIRTY_CHECK_LOOKAHEAD_SECONDS`` so a session crossing it before the
+    lock is captured rather than deferred.
+    """
+    lookahead = now + timedelta(seconds=DIRTY_CHECK_LOOKAHEAD_SECONDS)
+    sessions: list[Session] = []
+    for status in (SessionStatus.TIMED_OUT, SessionStatus.COMPLETED):
+        targets, running_ids = backstop_targets(state, tasks, status, now=lookahead)
+        sessions += [s for s in targets if s.id in running_ids]
+    checks.capture_all(sessions)
+
+
+def _revert_terminal_backstop(
+    status: SessionStatus, dirty_checks: DirtyChecks | None
+) -> list[str]:
+    """Revert or park the RUNNING rows of DAEMON sessions in *status*.
+
+    Caller must hold ``sessions_lock`` (all call sites are inside
+    ``_reconcile_locked``); the reap_reason stamp below relies on it.
+
+    Sessions with dirty worktrees are routed to BLOCKED_ON_USER instead of
+    PENDING, and a SESSION_NEEDS_ATTENTION event is emitted for operator
+    inspection (GitHub issue #421). Dirtiness is read from *dirty_checks*,
+    captured before the lock (#2548); a session with no usable capture is
+    deferred: its row stays RUNNING and bound, its session unstamped, and the
+    next tick retries.
+
+    Sets reap_reason=COMPLETED_BACKSTOP only on sessions whose RUNNING
+    dev-queue task is actually being reverted, so the queue-events server
+    can emit queue.session_reaped (#380) without false events on the happy
+    path (sessions whose task already completed normally are not stamped).
+    """
+    state = load_state()
+    # Pre-read the dev queue (no lock) to identify which sessions have a
+    # RUNNING task that will actually be reverted. Only those are dirty-checked
+    # and stamped. Why: this read is outside dev_queue_lock, so a task could
+    # flip from RUNNING between here and the locked revert below -- TOCTOU
+    # accepted; worst case is a missed or early event, no data loss. A row that
+    # turned RUNNING after this read is not in the set, so it waits a tick.
+    targets, running_ids = backstop_targets(state, load_dev_queue().tasks, status)
+    sessions_by_id = {s.id: s for s in targets}
+    dirty, deferred = partition_dirty(
+        dirty_checks, [s for s in targets if s.id in running_ids]
+    )
+    ready = running_ids - deferred
+    # Why: stamp in place + save_state, NOT mutate_state — the caller
+    # already holds sessions_lock, and the lock is a per-open-fd flock,
+    # so re-acquiring it here self-deadlocks (#387 gate hang).
+    state_changed = False
+    for s in targets:
+        if s.reap_reason is None and s.id in ready:
+            s.reap_reason = ReapReason.COMPLETED_BACKSTOP
+            state_changed = True
+    if state_changed:
+        save_state(state)
+    return _revert_running_tasks_for_sessions(ready, dirty, sessions_by_id)
+
+
+def revert_timed_out_tasks(dirty_checks: DirtyChecks | None = None) -> list[str]:
     """Revert RUNNING TicketTasks whose owning session is TIMED_OUT.
 
     Called during :func:`reconcile` as a backstop for the case where
     ``signal_stop`` crashed after writing TIMED_OUT status but before
     reverting the dev-queue task. Returns the list of ticket IDs reverted.
-
-    Caller must hold ``sessions_lock`` (all call sites are inside
-    ``_reconcile_locked``); the reap_reason stamp below relies on it.
-
-    Sessions with dirty worktrees are routed to BLOCKED_ON_USER instead of
-    PENDING, and a SESSION_NEEDS_ATTENTION event is emitted for operator
-    inspection (GitHub issue #421).
-
-    Sets reap_reason=COMPLETED_BACKSTOP only on sessions whose RUNNING
-    dev-queue task is actually being reverted, so the queue-events server
-    can emit queue.session_reaped (#380) without false events on the happy
-    path (sessions whose task already completed normally are not stamped).
+    See :func:`_revert_terminal_backstop`.
     """
-    state = load_state()
-    target_sessions = [
-        s
-        for s in state.sessions
-        if s.status == SessionStatus.TIMED_OUT and s.origin is SessionOrigin.DAEMON
-    ]
-    target_sessions = _sessions_past_completion_grace(target_sessions)
-    session_ids = {s.id for s in target_sessions}
-    # Pre-read the dev queue (no lock) to identify which sessions have a
-    # RUNNING task that will actually be reverted.  Only those sessions get
-    # the COMPLETED_BACKSTOP stamp so we avoid emitting false reap events for
-    # sessions whose task already completed normally via the happy path.
-    # Why: this read is outside dev_queue_lock, so a task could flip from
-    # RUNNING to another status between here and the locked revert below —
-    # TOCTOU accepted (same pattern as the dirty-check in
-    # _revert_running_tasks_for_sessions); worst case is a missed or early
-    # event, no data loss.
-    store = load_dev_queue()
-    backstop_session_ids = {
-        t.session_id
-        for t in store.tasks
-        if t.status == QueueItemStatus.RUNNING
-        and t.session_id in session_ids
-        and not _is_backstop_exempt(t)
-    }
-    # Why: stamp in place + save_state, NOT mutate_state — the caller
-    # already holds sessions_lock, and the lock is a per-open-fd flock,
-    # so re-acquiring it here self-deadlocks (#387 gate hang).
-    state_changed = False
-    for s in target_sessions:
-        if s.reap_reason is None and s.id in backstop_session_ids:
-            s.reap_reason = ReapReason.COMPLETED_BACKSTOP
-            state_changed = True
-    if state_changed:
-        save_state(state)
-    # Compute dirtiness BEFORE acquiring dev_queue_lock (see TOCTOU note in
-    # _revert_running_tasks_for_sessions docstring).
-    sessions_by_id = {s.id: s for s in target_sessions}
-    dirty_session_reasons = _build_dirty_session_ids_and_notify(target_sessions)
-    return _revert_running_tasks_for_sessions(
-        session_ids, dirty_session_reasons, sessions_by_id
-    )
+    return _revert_terminal_backstop(SessionStatus.TIMED_OUT, dirty_checks)
 
 
-def revert_completed_silent_tasks() -> list[str]:
+def revert_completed_silent_tasks(
+    dirty_checks: DirtyChecks | None = None,
+) -> list[str]:
     """Revert RUNNING TicketTasks whose owning session is DAEMON COMPLETED.
 
     Called during :func:`reconcile` as a backstop for sessions that completed
     without reverting their dev-queue task (e.g. the session wrote COMPLETED
     status but the dispatch consumer had not yet processed it). Returns the
-    list of ticket IDs reverted.
-
-    Caller must hold ``sessions_lock`` (all call sites are inside
-    ``_reconcile_locked``); the reap_reason stamp below relies on it.
-
-    Sessions with dirty worktrees are routed to BLOCKED_ON_USER instead of
-    PENDING, and a SESSION_NEEDS_ATTENTION event is emitted for operator
-    inspection (GitHub issue #421).
-
-    Sets reap_reason=COMPLETED_BACKSTOP only on sessions whose RUNNING
-    dev-queue task is actually being reverted, so the queue-events server
-    can emit queue.session_reaped (#380) without false events on the happy
-    path (sessions whose task already completed normally are not stamped).
+    list of ticket IDs reverted. See :func:`_revert_terminal_backstop`.
     """
-    state = load_state()
-    target_sessions = [
-        s
-        for s in state.sessions
-        if s.status == SessionStatus.COMPLETED and s.origin is SessionOrigin.DAEMON
-    ]
-    target_sessions = _sessions_past_completion_grace(target_sessions)
-    session_ids = {s.id for s in target_sessions}
-    # Pre-read the dev queue (no lock) to identify which sessions have a
-    # RUNNING task that will actually be reverted.  Only those sessions get
-    # the COMPLETED_BACKSTOP stamp so we avoid emitting false reap events for
-    # sessions whose task already completed normally via the happy path.
-    # Why: this read is outside dev_queue_lock, so a task could flip from
-    # RUNNING to another status between here and the locked revert below —
-    # TOCTOU accepted (same pattern as the dirty-check in
-    # _revert_running_tasks_for_sessions); worst case is a missed or early
-    # event, no data loss.
-    store = load_dev_queue()
-    backstop_session_ids = {
-        t.session_id
-        for t in store.tasks
-        if t.status == QueueItemStatus.RUNNING
-        and t.session_id in session_ids
-        and not _is_backstop_exempt(t)
-    }
-    # Why: stamp in place + save_state, NOT mutate_state — the caller
-    # already holds sessions_lock, and the lock is a per-open-fd flock,
-    # so re-acquiring it here self-deadlocks (#387 gate hang).
-    state_changed = False
-    for s in target_sessions:
-        if s.reap_reason is None and s.id in backstop_session_ids:
-            s.reap_reason = ReapReason.COMPLETED_BACKSTOP
-            state_changed = True
-    if state_changed:
-        save_state(state)
-    # Compute dirtiness BEFORE acquiring dev_queue_lock (see TOCTOU note in
-    # _revert_running_tasks_for_sessions docstring).
-    sessions_by_id = {s.id: s for s in target_sessions}
-    dirty_session_reasons = _build_dirty_session_ids_and_notify(target_sessions)
-    return _revert_running_tasks_for_sessions(
-        session_ids, dirty_session_reasons, sessions_by_id
-    )
+    return _revert_terminal_backstop(SessionStatus.COMPLETED, dirty_checks)
 
 
 def _resolve_task_policy(

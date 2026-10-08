@@ -31,6 +31,7 @@ from cw.reconcile.phantom._detect import (
     _phantom_advance_sentinel_candidate,
     _sentinel_mismatch_veto_candidate,
     _split_crash_candidates,
+    capture_phantom_dirty_checks,
 )
 from cw.reconcile.phantom._events import (
     _SENTINEL_MISMATCH_VETO_CAP_EXHAUSTED_REASON,
@@ -64,4 +65,5 @@ __all__ = [
     "_sentinel_mismatch_veto_candidate",
     "_shared",
     "_split_crash_candidates",
+    "capture_phantom_dirty_checks",
 ]
