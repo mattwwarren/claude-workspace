@@ -16,12 +16,15 @@ from cw.codex_fix_loop.baseline import CycleBaseline, DirtyStart
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, StagedSetMismatchError
 from cw.codex_review import (
     CODEX_FIX_DIRTY_START,
+    CODEX_FIX_HOOK_FAILED,
     CODEX_FIX_SCOPE_DRIFT,
     CODEX_FIX_SCOPE_VIOLATION,
     CODEX_TIMEOUT,
 )
 from cw.codex_runner import CodexRunResult
+from cw.executor_diagnostics import diagnostics_bundle_dir
 from tests._codex_review_helpers import (
+    _install_pre_commit_hook,
     _measured_from_head,
     _seed_conflicting_cherry_pick,
     _stage_merge_from_other_branch,
@@ -393,3 +396,95 @@ class TestCommitFixCycleGuard:
         )
 
         assert sha == git_in(worktree, "rev-parse", "HEAD")
+
+
+_ONCE_FAILING_HOOK = (
+    "#!/bin/sh\n"
+    'counter="$(git rev-parse --git-dir)/pre-commit-calls"\n'
+    'if [ -f "$counter" ]; then exit 0; fi\n'
+    'echo 1 > "$counter"\n'
+    "exit 1\n"
+)
+
+
+class TestHookFailure:
+    def _run(
+        self, make_git_repo: Callable[..., Path], name: str, hook: str
+    ) -> tuple[AutoDevResult, Path, str, _FixLoopRunner]:
+        worktree = _worktree(make_git_repo, name)
+        _install_pre_commit_hook(worktree, hook)
+        head = git_in(worktree, "rev-parse", "HEAD")
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()])
+        out, _ = _run_loop(runner, worktree, session_id=f"s-{name}")
+        return out, worktree, head, runner
+
+    def test_persistent_hook_failure_parks_as_hook_failed(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        out, worktree, head, runner = self._run(
+            make_git_repo, "wt-hook-lint", "#!/bin/sh\necho LINT-ERROR-XYZ\nexit 1\n"
+        )
+
+        assert _blocker_reason(out) == CODEX_FIX_HOOK_FAILED
+        assert out.blocker is not None
+        assert "LINT-ERROR-XYZ" in out.blocker.details
+        assert out.blocker.recovery_hint is not None
+        assert LEFT_STAGED_HINT in out.blocker.recovery_hint
+        assert runner.fix_calls == 1
+        assert git_in(worktree, "rev-parse", "HEAD") == head
+        assert "fix.py" in git_in(worktree, "diff", "--cached", "--name-only")
+
+    def test_secret_scanner_hook_failure_does_not_post_output(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        out, *_ = self._run(
+            make_git_repo,
+            "wt-hook-scanner",
+            "#!/bin/sh\necho '- hook id: gitleaks'\necho '- exit code: 1'\n"
+            "echo 'leaked SECRET-ABC123'\nexit 1\n",
+        )
+
+        assert out.blocker is not None
+        assert out.blocker.recovery_hint is not None
+        assert "SECRET-ABC123" not in out.blocker.details
+        assert "SECRET-ABC123" not in out.blocker.recovery_hint
+        assert "gitleaks" in out.blocker.details
+        assert "exit code 1" in out.blocker.details
+
+    def test_hook_rewrite_retry_still_succeeds(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        out, worktree, head, _ = self._run(
+            make_git_repo, "wt-hook-once", _ONCE_FAILING_HOOK
+        )
+
+        assert out.status != "blocked"
+        assert git_in(worktree, "rev-parse", "HEAD~1") == head
+
+    def test_non_hook_commit_failure_stays_codex_error(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-hook-noident")
+        # An empty committer name makes `git commit` itself fail, no hook.
+        git_in(worktree, "config", "user.name", "")
+        runner = _FixLoopRunner([_MF_DOC], fix_behaviors=[_editor()])
+
+        out, _ = _run_loop(runner, worktree, session_id="s-hook-noident")
+
+        assert _blocker_reason(out) == "codex_error"
+        bundle = diagnostics_bundle_dir("s-hook-noident")
+        [failure] = bundle.glob("fix-cycle-1-runtime_error-*.json")
+        # The commit's stderr is captured now, not lost to the driver log.
+        assert "empty ident name" in failure.read_text(encoding="utf-8")
+
+    def test_push_failure_stays_codex_error(
+        self, make_git_repo: Callable[..., Path], tmp_path: Path
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-hook-push")
+        _install_pre_commit_hook(worktree, "#!/bin/sh\nexit 0\n")
+        git_in(worktree, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+        runner = _FixLoopRunner([_MF_DOC], fix_behaviors=[_editor()])
+
+        out, _ = _run_loop(runner, worktree, session_id="s-hook-push")
+
+        assert _blocker_reason(out) == "codex_error"

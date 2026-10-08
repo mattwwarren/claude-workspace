@@ -31,6 +31,11 @@ from cw.codex_fix_loop.fence import (
     scope_violation_breach,
     staged_set_breach,
 )
+from cw.codex_fix_loop.hook_failure import (
+    CommitHookFailedError,
+    as_hook_failure,
+    hook_failure_breach,
+)
 from cw.codex_fix_loop.park import _park_fence_breach, _park_fix_failure
 from cw.codex_fix_loop.push import push_and_verify_head
 from cw.codex_review import (
@@ -202,7 +207,8 @@ def _commit_fix_cycle(
     counts toward the cap. ``git commit`` is retried exactly once, re-staging
     first, before giving up — any git failure surviving the retry raises
     ``CalledProcessError``, which the caller treats identically to a
-    fix-invocation failure.
+    fix-invocation failure, or :class:`CommitHookFailedError` when a commit
+    hook is installed (#2633; the caller parks ``codex_fix_hook_failed``).
 
     Commits only measured paths (#2633): after staging, the staged set must
     equal *measured_paths* (the set the cycle was measured to touch against
@@ -249,7 +255,13 @@ def _commit_fix_cycle(
             cycle,
         )
         git_output(["add", "-A"], cwd=worktree)
-        _git_commit(worktree, message)
+        try:
+            _git_commit(worktree, message)
+        except subprocess.CalledProcessError as exc:
+            failure = as_hook_failure(worktree, exc, cycle)
+            if failure is exc:
+                raise
+            raise failure from exc
     sha = git_output(["rev-parse", "HEAD"], cwd=worktree).strip()
     push_and_verify_head(worktree, sha)
     return sha
@@ -418,12 +430,14 @@ def _park_commit_failure(
     exc: subprocess.CalledProcessError | StagedSetMismatchError,
     baseline: CycleBaseline,
 ) -> _Park:
-    """Park a failed commit step: a staged-set mismatch or a git failure."""
+    """Park a failed commit step: staged-set mismatch, hook failure or git error."""
     if isinstance(exc, StagedSetMismatchError):
         breach = staged_set_breach(
             exc.measured, exc.staged, ctx.cycle, start_head=baseline.head_sha
         )
         return ctx.park_breach(breach)
+    if isinstance(exc, CommitHookFailedError):
+        return ctx.park_breach(hook_failure_breach(exc, ctx.cycle))
     return ctx.park_git_error(exc)
 
 
