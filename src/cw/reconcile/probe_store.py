@@ -76,21 +76,17 @@ class BoundedProbeStore[KeyT, PayloadT]:
         *,
         read: Callable[[datetime], PayloadT],
     ) -> PayloadT:
-        self.ensure_capture_available()
-        self._captures += 1
-        captured_at = datetime.now(UTC)
-        payload = read(captured_at)
-        self._probes[key] = StoredProbe(payload=payload, captured_at=captured_at)
-        return payload
-
-    def ensure_capture_available(self) -> None:
-        """Raise if the next capture would exceed its budget or cap."""
         if self._deadline is not None and monotonic() >= self._deadline:
             reason = "budget"
             raise ProbeStoreUnavailableError(reason)
         if self.max_captures is not None and self._captures >= self.max_captures:
             reason = "cap"
             raise ProbeStoreUnavailableError(reason)
+        self._captures += 1
+        captured_at = datetime.now(UTC)
+        payload = read(captured_at)
+        self._probes[key] = StoredProbe(payload=payload, captured_at=captured_at)
+        return payload
 
     def lookup(self, key: KeyT) -> PayloadT:
         probe = self._probes.get(key)
