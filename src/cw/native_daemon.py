@@ -67,16 +67,18 @@ _DEFAULT_PERMISSION_MODE = "auto"
 # Conservative allowlist of model-id prefixes confirmed to support
 # ``--permission-mode auto`` per the Claude Code docs
 # (code.claude.com/docs/en/permission-modes): Opus 4.6+, Sonnet 4.6+/
-# Sonnet 5, Opus 4.7/4.8 (gateway). worker_model is a forwarded opaque
-# string that in practice carries dated/suffixed ids (e.g.
-# "claude-sonnet-4-6-20251015"), so this is matched as a prefix, not an
-# exact set — see #1111.
+# Sonnet 5, Haiku 5.5, Opus 4.7/4.8 (gateway). Haiku 4.5 is NOT auto-capable;
+# the "claude-haiku-5-5" prefix deliberately does not match it. worker_model
+# is a forwarded opaque string that in practice carries dated/suffixed ids
+# (e.g. "claude-sonnet-4-6-20251015"), so this is matched as a prefix, not an
+# exact set — see #1111, #2624.
 _AUTO_CAPABLE_MODEL_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-6",
     "claude-opus-4-7",
     "claude-opus-4-8",
     "claude-sonnet-4-6",
     "claude-sonnet-5",
+    "claude-haiku-5-5",
 )
 
 # Permission mode for workers whose pinned model does not support

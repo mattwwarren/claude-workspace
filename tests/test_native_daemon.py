@@ -1344,6 +1344,10 @@ class TestModelSupportsAuto:
     def test_known_haiku_is_not_auto_capable(self) -> None:
         assert model_supports_auto("claude-haiku-4-5-20251001") is False
 
+    def test_haiku_5_5_is_auto_capable(self) -> None:
+        assert model_supports_auto("claude-haiku-5-5") is True
+        assert model_supports_auto("claude-haiku-5-5-20260101") is True
+
     def test_unknown_ids_are_not_auto_capable(self) -> None:
         """An unrecognized non-None id is conservatively NOT auto-capable."""
         assert model_supports_auto("claude-fable-5") is False
