@@ -27,7 +27,9 @@ event inbox lock is a leaf), and it never stops a worker. It must not import
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from datetime import timedelta
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -39,6 +41,7 @@ from cw.reconcile import _deps
 
 if TYPE_CHECKING:
     from datetime import datetime
+    from pathlib import Path
 
     from cw.models import LaunchedFixWorker, TicketTask
 
@@ -104,17 +107,9 @@ def read_live_worker_roster() -> set[str] | None:
         # worker stopped, so it must fail closed.  The fake daemon keeps an
         # in-memory roster and intentionally has no backing file; its returned
         # set is the test double's roster evidence.
-        if (
-            isinstance(daemon, RealNativeDaemonClient)
-            and not daemon.roster_path.is_file()
-        ):
-            return None
+        if isinstance(daemon, RealNativeDaemonClient):
+            return _read_strict_roster_snapshot(daemon.roster_path)
         live = daemon.list_live_session_short_ids_fail_closed()
-        if (
-            isinstance(daemon, RealNativeDaemonClient)
-            and not daemon.roster_path.is_file()
-        ):
-            return None
     except (OSError, ValueError):
         _log.warning(
             "fix_dispatch_hold: daemon roster read failed, treating it as unreadable",
@@ -123,6 +118,50 @@ def read_live_worker_roster() -> set[str] | None:
         return None
     else:
         return live
+
+
+def _read_strict_roster_snapshot(path: Path) -> set[str] | None:
+    """Read one stable, present roster snapshot; fail closed otherwise.
+
+    The regular native-daemon reader intentionally maps a missing roster to an
+    empty set.  That is unsafe for this hold: only a present, consistently
+    read empty roster can confirm that the launched surface is gone.  Reading
+    through one descriptor binds the content to one inode; the stat checks
+    reject replacement, deletion, or in-place changes before the snapshot is
+    handed to the release decision.
+    """
+    try:
+        with path.open("rb") as roster:
+            before = os.fstat(roster.fileno())
+            raw = roster.read()
+            after = os.fstat(roster.fileno())
+        current = path.stat()
+    except FileNotFoundError:
+        return None
+
+    if not _same_roster_file(before, after) or not _same_roster_file(after, current):
+        return None
+
+    data: object = json.loads(raw)
+    workers = data.get("workers") if isinstance(data, dict) else None
+    if not isinstance(workers, dict):
+        return None
+    return {key for key in workers if isinstance(key, str)}
+
+
+def _same_roster_file(first: os.stat_result, second: os.stat_result) -> bool:
+    """Return whether two observations identify the same unchanged file."""
+    return (
+        first.st_dev,
+        first.st_ino,
+        first.st_size,
+        first.st_mtime_ns,
+    ) == (
+        second.st_dev,
+        second.st_ino,
+        second.st_size,
+        second.st_mtime_ns,
+    )
 
 
 def apply_launched_worker_hold(
