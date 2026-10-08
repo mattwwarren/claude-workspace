@@ -36,12 +36,18 @@ import click
 from cw.cli.spawn import _spawn_close_impl
 from cw.config import load_state
 from cw.dev_queue import load_dev_queue
+from cw.doctor.routed_result_wedge import (
+    _emit_audit_record,
+    _finalize_audit_intent,
+    _queue_audit_intents,
+)
 from cw.exceptions import CwError
 from cw.history import EventType, HistoryEvent, record_event
-from cw.models import SessionStatus
+from cw.models import DEFAULT_LANE, DEFAULT_STAGE, SessionStatus
 from cw.native_daemon import get_native_daemon_client, wait_for_roster_presence
 from cw.reconcile.liveness_page import close_command
 from cw.reconcile.routed_result_sessions import (
+    StrandedRoutedSession,
     _roster_outage_shaped,
     routed_marker_candidates,
     split_resolvable_routed_sessions,
@@ -52,7 +58,10 @@ if TYPE_CHECKING:
 
     from cw.models import OrchestratorConfig, Session
     from cw.native_daemon import NativeDaemonClient
-    from cw.reconcile.routed_result_sessions import PinnedOrphan, RoutedOrphanSplit
+    from cw.reconcile.routed_result_sessions import (
+        PinnedOrphan,
+        RoutedOrphanSplit,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -478,20 +487,18 @@ def _record_close_audit(
         "confirmation_result": confirmation_result,
         "reason": "routed_result_orphan_resolved",
     }
+    event = HistoryEvent(
+        event_type=EventType.SESSION_COMPLETED,
+        client=session.client,
+        session_id=session.id,
+        session_name=session.name,
+        purpose=session.purpose,
+        detail="routed_result_orphan_resolved",
+        metadata=metadata,
+    )
     try:
-        record_event(
-            session.client,
-            HistoryEvent(
-                event_type=EventType.SESSION_COMPLETED,
-                client=session.client,
-                session_id=session.id,
-                session_name=session.name,
-                purpose=session.purpose,
-                detail="routed_result_orphan_resolved",
-                metadata=metadata,
-            ),
-        )
-    except Exception as exc:
+        record_event(session.client, event)
+    except (OSError, ValueError) as exc:
         logger.exception(
             "routed_orphan_close_audit_failed: ticket_id=%s client=%s"
             " session_id=%s command=%s",
@@ -508,10 +515,42 @@ def _record_close_audit(
         raise CwError(msg) from exc
 
 
+def _queue_close_audit_intent(session: Session, call: _OrphanCloseCall) -> None:
+    """Write the shared durable close intent before mutating session state."""
+    surface_ref = cast("str", session.surface_ref)
+    hit = StrandedRoutedSession(
+        session=session,
+        ticket_id=call.ticket_id,
+        lane=DEFAULT_LANE,
+        stage=DEFAULT_STAGE,
+        row_status=None,
+        stale_minutes=0.0,
+        surface_ref=surface_ref,
+    )
+    _queue_audit_intents([hit])
+
+
+def _finalize_close_audit_intent(session: Session, *, stop_succeeded: bool) -> None:
+    """Finalize and deliver the shared audit after the status mutation."""
+    record = _finalize_audit_intent(
+        session.id,
+        mutations=(
+            ["session_status_completed", "daemon_stopped"]
+            if stop_succeeded
+            else ["session_status_completed"]
+        ),
+        stop_succeeded=stop_succeeded,
+        stop_error=None,
+    )
+    if record is not None:
+        _emit_audit_record(record)
+
+
 def _flip_closed(
     session: Session, call: _OrphanCloseCall, *, confirmation_result: str
 ) -> None:
     """Flip the confirmed-gone (or proven-absent) session COMPLETED."""
+    _queue_close_audit_intent(session, call)
     try:
         _spawn_close_impl(
             session_id=session.id,
@@ -535,11 +574,17 @@ def _flip_closed(
         raise _orphan_refusal(
             session, call, problem=problem, remedy=_flip_failed_remedy(session, call)
         ) from exc
-    _record_close_audit(
-        session,
-        call,
-        confirmation_result=confirmation_result,
-    )
+    try:
+        _record_close_audit(
+            session,
+            call,
+            confirmation_result=confirmation_result,
+        )
+    finally:
+        _finalize_close_audit_intent(
+            session,
+            stop_succeeded=confirmation_result == "worker_gone_from_roster",
+        )
     # WARNING, not INFO (N2; the reasoning native_daemon.py gives for its
     # spawn-time usage-limit line): cw.cli._base._configure_logging uses
     # basicConfig at WARNING unless -v is passed, and this line is the only
