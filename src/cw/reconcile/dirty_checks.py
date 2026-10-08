@@ -109,6 +109,16 @@ def _who(session: Session) -> str:
     return f"{session.name} ({session.id})"
 
 
+def normalize_roster(
+    agents: list[dict[str, object]],
+) -> tuple[set[str], dict[str, str]]:
+    """Return the short live ids and full ids from a native roster."""
+    surface_to_full = {
+        sid[:8]: sid for a in agents if isinstance(sid := a.get("sessionId"), str)
+    }
+    return set(surface_to_full), surface_to_full
+
+
 class DirtyChecks:
     """Worktree dirty checks captured lockless, keyed by session and worktree.
 
@@ -297,9 +307,7 @@ def prepass_phantom_ids(
         subprocess.TimeoutExpired,
     ):
         return set()
-    native_live = {
-        sid[:8] for a in agents if isinstance(sid := a.get("sessionId"), str)
-    }
+    native_live, _surface_to_full = normalize_roster(agents)
     if _looks_like_daemon_outage(state, False, native_live):
         return set()
     lookahead = now + timedelta(seconds=DIRTY_CHECK_LOOKAHEAD_SECONDS)
