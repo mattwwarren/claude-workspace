@@ -43,4 +43,4 @@ clients:
   #       plan:     { backend: claude-native, model: claude-sonnet-5-5 }
   #       impl:     { backend: claude-native, model: claude-sonnet-5-5 }
   #       review:   { backend: claude-native, model: claude-sonnet-5-5 }
-  #       finalize: { backend: claude-native, model: claude-haiku-4-5-20251001 }
+  #       finalize: { backend: claude-native, model: claude-haiku-5-5 }
