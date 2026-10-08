@@ -265,6 +265,26 @@ class TestCycleTouchedPaths:
 
         assert cycle_touched_paths(repo, _head_baseline(repo)) == set()
 
+    def test_tracked_review_artifact_edit_is_measured_and_staged(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        artifact = repo / ".claude" / "review-verdict-unparseable.md"
+        _write(artifact, "original\n")
+        git_in(repo, "add", str(artifact.relative_to(repo)))
+        git_in(repo, "commit", "-m", "track review artifact")
+
+        baseline = capture_cycle_baseline(repo)
+        assert isinstance(baseline, CycleBaseline)
+        _write(artifact, "edited\n")
+
+        assert cycle_touched_paths(repo, baseline) == {
+            ".claude/review-verdict-unparseable.md"
+        }
+        assert ".claude/review-verdict-unparseable.md" in git_in(
+            repo, "diff", "--cached", "--name-only"
+        )
+
     def test_paths_are_relative_to_the_baseline_tree_not_head(
         self, make_git_repo: Callable[..., Path]
     ) -> None:

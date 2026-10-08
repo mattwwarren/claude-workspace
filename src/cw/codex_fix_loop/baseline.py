@@ -60,6 +60,7 @@ class CycleBaseline(NamedTuple):
 
     head_sha: str
     tree_sha: str
+    untracked_review_artifacts: frozenset[str] = frozenset()
 
 
 class DirtyStart(NamedTuple):
@@ -110,13 +111,15 @@ def _dirty_lines(worktree: Path) -> tuple[str, ...]:
     )
 
 
-def unstage_review_artifacts(worktree: Path) -> None:
-    """Keep cw's untracked review artifacts out of cycle staging."""
+def unstage_review_artifacts(
+    worktree: Path, untracked_artifacts: frozenset[str]
+) -> None:
+    """Keep review artifacts untracked at cycle start out of cycle staging."""
     staged = git_output(
         ["diff", "--cached", "--name-only", "--no-renames"], cwd=worktree
     )
     artifacts = sorted(
-        path for path in staged.splitlines() if path in _CW_REVIEW_ARTIFACTS
+        path for path in staged.splitlines() if path in untracked_artifacts
     )
     if artifacts:
         git_output(["restore", "--staged", "--", *artifacts], cwd=worktree)
@@ -133,12 +136,22 @@ def capture_cycle_baseline(worktree: Path) -> CycleBaseline | DirtyStart:
     """
     markers = tuple(m for m in _OPERATION_MARKERS if _marker_is_set(worktree, m))
     unmerged = _unmerged_paths(worktree)
-    dirty = _dirty_lines(worktree)
+    status = git_output(
+        ["status", "--porcelain", "--untracked-files=all"], cwd=worktree
+    )
+    status_lines = tuple(line for line in status.splitlines() if line)
+    dirty = tuple(line for line in status_lines if not _is_review_artifact(line))
+    untracked_artifacts = frozenset(
+        line[_PORCELAIN_PATH_OFFSET:]
+        for line in status_lines
+        if _is_review_artifact(line)
+    )
     if markers or unmerged or dirty:
         return DirtyStart(markers=markers, unmerged=unmerged, dirty=dirty)
     return CycleBaseline(
         head_sha=git_output(["rev-parse", "HEAD"], cwd=worktree).strip(),
         tree_sha=git_output(["rev-parse", "HEAD^{tree}"], cwd=worktree).strip(),
+        untracked_review_artifacts=untracked_artifacts,
     )
 
 
@@ -150,7 +163,7 @@ def cycle_touched_paths(worktree: Path, baseline: CycleBaseline) -> set[str]:
     :func:`cw.codex_fix_loop.fence._name_only`.
     """
     git_output(["add", "-A"], cwd=worktree)
-    unstage_review_artifacts(worktree)
+    unstage_review_artifacts(worktree, baseline.untracked_review_artifacts)
     new_tree = git_output(["write-tree"], cwd=worktree).strip()
     out = git_output(
         ["diff-tree", "-r", "--name-only", "--no-renames", baseline.tree_sha, new_tree],
