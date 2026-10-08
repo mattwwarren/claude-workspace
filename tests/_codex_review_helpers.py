@@ -13,9 +13,11 @@ import json
 import subprocess
 from typing import TYPE_CHECKING
 
+import pytest
+
 from cw.codex_runner import CodexRunResult
 from cw.models import Stage, TicketTask
-from tests.conftest import _make_ticket_task
+from tests.conftest import _make_ticket_task, git_in
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -165,3 +167,62 @@ def _populate_global_agents_dir(path: Path, **role_to_content: str) -> None:
 
 def _task() -> TicketTask:
     return _make_ticket_task(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+
+
+def _install_pre_commit_hook(repo: Path, script: str) -> None:
+    """Install *script* as *repo*'s ``pre-commit`` hook, made executable.
+
+    Used to simulate a repo-local hook (e.g. ruff-format) that rewrites files
+    and exits non-zero on the run where it changes something — the scenario
+    ``_commit_fix_cycle``'s retry-once exists to survive — or a lint hook that
+    keeps failing (#2633's ``codex_fix_hook_failed``).
+    """
+    hook_path = repo / ".git" / "hooks" / "pre-commit"
+    hook_path.write_text(script, encoding="utf-8")
+    hook_path.chmod(0o755)
+
+
+def _stage_merge_from_other_branch(
+    repo: Path, files: dict[str, str], *, squash: bool = False
+) -> None:
+    """Leave *repo* with an uncommitted merge of a branch carrying *files* (#2633).
+
+    Creates ``other-staged`` from ``main`` with *files* committed, returns to
+    the original branch, then runs ``git merge --no-commit --no-ff`` (default:
+    ``MERGE_HEAD`` set, merge result staged) or ``git merge --squash``
+    (``squash=True``: the same content staged, no ``MERGE_HEAD``). Callers
+    pass files that do not conflict with the current branch.
+    """
+    branch = git_in(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    git_in(repo, "checkout", "-b", "other-staged", "main")
+    for rel_path, text in files.items():
+        _write(repo / rel_path, text)
+    git_in(repo, "add", *files)
+    git_in(repo, "commit", "-m", "other branch work")
+    git_in(repo, "checkout", branch)
+    if squash:
+        git_in(repo, "merge", "--squash", "other-staged")
+    else:
+        git_in(repo, "merge", "--no-commit", "--no-ff", "other-staged")
+
+
+def _seed_conflicting_cherry_pick(repo: Path) -> None:
+    """Leave *repo* mid-cherry-pick on a ``pyproject.toml`` conflict (#2633).
+
+    Commits a base ``pyproject.toml`` on the current branch, edits it on a
+    side branch, edits the same line differently on the current branch, then
+    cherry-picks the side commit: three unmerged stages, ``CHERRY_PICK_HEAD``
+    set and no ``MERGE_HEAD``.
+    """
+    branch = git_in(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    _write(repo / "pyproject.toml", "version = 'base'\n")
+    git_in(repo, "add", "pyproject.toml")
+    git_in(repo, "commit", "-m", "base pyproject")
+    git_in(repo, "checkout", "-b", "pick-side")
+    _write(repo / "pyproject.toml", "version = 'side'\n")
+    git_in(repo, "commit", "-am", "side pyproject")
+    git_in(repo, "checkout", branch)
+    _write(repo / "pyproject.toml", "version = 'branch'\n")
+    git_in(repo, "commit", "-am", "branch pyproject")
+    with pytest.raises(subprocess.CalledProcessError):
+        git_in(repo, "cherry-pick", "pick-side")

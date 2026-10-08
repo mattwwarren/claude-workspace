@@ -57,7 +57,12 @@ from cw.review_findings import (
     consolidate_verdict,
     write_review_verdict,
 )
-from tests._codex_review_helpers import _Clock, _SequencedRunner, _write
+from tests._codex_review_helpers import (
+    _Clock,
+    _install_pre_commit_hook,
+    _SequencedRunner,
+    _write,
+)
 from tests.conftest import (
     _make_diff,
     _make_finding,
@@ -109,18 +114,6 @@ def _worktree(
     # a real origin to push to.
     add_bare_origin(repo)
     return repo
-
-
-def _install_pre_commit_hook(repo: Path, script: str) -> None:
-    """Install *script* as *repo*'s ``pre-commit`` hook, made executable.
-
-    Used to simulate a repo-local hook (e.g. ruff-format) that rewrites files
-    and exits non-zero on the run where it changes something — the scenario
-    ``_commit_fix_cycle``'s retry-once exists to survive.
-    """
-    hook_path = repo / ".git" / "hooks" / "pre-commit"
-    hook_path.write_text(script, encoding="utf-8")
-    hook_path.chmod(0o755)
 
 
 def _task(*, scope_hint: str | None = None) -> TicketTask:
