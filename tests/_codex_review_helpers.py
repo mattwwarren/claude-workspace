@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
@@ -20,8 +20,10 @@ from cw.codex_runner import CodexRunResult
 from cw.models import Stage, TicketTask
 from tests.conftest import _make_ticket_task, git_in
 
-if TYPE_CHECKING:
-    from pathlib import Path
+# The redacted observed `gh issue view 2633 --json comments` payload (#2633).
+_OBSERVED_COMMENTS_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "gh_issue_comments_2633.json"
+)
 
 
 def _mk_codex_proc(
@@ -244,3 +246,15 @@ def _seed_conflicting_cherry_pick(repo: Path) -> None:
     git_in(repo, "commit", "-am", "branch pyproject")
     with pytest.raises(subprocess.CalledProcessError):
         git_in(repo, "cherry-pick", "pick-side")
+
+
+def _observed_comments() -> list[dict[str, object]]:
+    """The observed #2633 comment list, unwrapped as ``gh.fetch_issue_comments`` does.
+
+    A capture of ``gh issue view 2633 --json comments`` with only values
+    redacted (login, ids, urls) and the two agent-authored scan comments cut
+    to their opening lines plus the marker-quoting and agent-marker lines.
+    """
+    payload = json.loads(_OBSERVED_COMMENTS_FIXTURE.read_text(encoding="utf-8"))
+    comments: list[dict[str, object]] = payload["comments"]
+    return comments
