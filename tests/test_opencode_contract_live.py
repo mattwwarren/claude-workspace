@@ -76,9 +76,6 @@ def _run_opencode(worktree: Path, prompt: str) -> str:
         "run",
         "--format",
         "json",
-        "--pure",
-        "--dir",
-        str(worktree),
         prompt,
     ]
     log_path = worktree / OPENCODE_LOG_RELATIVE_PATH
@@ -86,6 +83,7 @@ def _run_opencode(worktree: Path, prompt: str) -> str:
     with log_path.open("w") as log_file:
         proc = subprocess.run(
             argv,
+            cwd=worktree,
             stdout=log_file,
             stderr=subprocess.PIPE,
             timeout=120,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
@@ -26,6 +27,7 @@ from cw.opencode_runner import (
     STAGE4A_MERGE_GATE,
     SUPPORTED_STAGES,
     RealOpencodeRunner,
+    _supports_v1_flags,
     build_argv,
     build_env,
     build_stage_prompt,
@@ -77,16 +79,16 @@ def test_opencode_available_returns_bool() -> None:
 
 
 def test_build_argv_with_model(tmp_path: Path) -> None:
-    """build_argv includes --model when provided."""
-    argv = build_argv("genhealth/glm-5.2", tmp_path, "do the thing")
+    """build_argv includes --model when provided; v2 omits --pure/--dir (#2654)."""
+    argv = build_argv("genhealth/glm-5.2", tmp_path, "do the thing", v1_flags=False)
     assert argv[0] == "opencode"
     assert argv[1] == "run"
     assert "--format" in argv
     assert "json" in argv
-    assert "--pure" in argv
     assert "--auto" in argv
-    assert "--dir" in argv
-    assert str(tmp_path) in argv
+    assert "--pure" not in argv
+    assert "--dir" not in argv
+    assert str(tmp_path) not in argv
     assert "--model" in argv
     assert "genhealth/glm-5.2" in argv
     assert argv[-1] == "do the thing"
@@ -94,9 +96,46 @@ def test_build_argv_with_model(tmp_path: Path) -> None:
 
 def test_build_argv_without_model(tmp_path: Path) -> None:
     """build_argv omits --model when None."""
-    argv = build_argv(None, tmp_path, "do the thing")
+    argv = build_argv(None, tmp_path, "do the thing", v1_flags=False)
     assert "--model" not in argv
     assert argv[-1] == "do the thing"
+
+
+def test_build_argv_v1_flags(tmp_path: Path) -> None:
+    """opencode 1.x keeps --pure and --dir <worktree>."""
+    argv = build_argv(None, tmp_path, "p", v1_flags=True)
+    assert "--pure" in argv
+    assert argv[argv.index("--dir") + 1] == str(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("help_text", "expected"),
+    [
+        ("--format --pure --auto --dir", True),
+        ("--standalone --format --auto --model", False),
+    ],
+)
+def test_supports_v1_flags_probe(help_text: str, expected: bool) -> None:
+    """The help probe detects flags from stdout/stderr and is cached."""
+    _supports_v1_flags.cache_clear()
+    done = subprocess.CompletedProcess([], 0, stdout="", stderr=help_text)
+    with patch("cw.opencode_runner.subprocess.run", return_value=done):
+        assert _supports_v1_flags() is expected
+    _supports_v1_flags.cache_clear()
+
+
+def test_supports_v1_flags_probe_failure_assumes_v2() -> None:
+    """Missing binary / timeout falls back to the v2 (flag-free) argv."""
+    _supports_v1_flags.cache_clear()
+    with patch("cw.opencode_runner.subprocess.run", side_effect=OSError):
+        assert _supports_v1_flags() is False
+    _supports_v1_flags.cache_clear()
+
+
+def test_build_argv_default_probes(tmp_path: Path) -> None:
+    """v1_flags=None defers to the probe."""
+    with patch("cw.opencode_runner._supports_v1_flags", return_value=False):
+        assert "--pure" not in build_argv(None, tmp_path, "p")
 
 
 # ---------------------------------------------------------------------------
