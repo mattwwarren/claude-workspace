@@ -1252,7 +1252,9 @@ the newest `*.jsonl` under `~/.claude/projects/<slug>-dev-<T>/`:
   class). Wait for its sentinel — the #918 rescue recovers a false park.
 - **flat ≥ 45 min** → dead regardless of a `running` row. Adopt-check the
   worktree, confirm the session is gone (absent from the roster, no live
-  process), `cw spawn close --confirmed-dead <sid>`, requeue.
+  process), `cw spawn close --confirmed-dead <sid>`, requeue. Still in the
+  roster with a live process → stalled-but-live: use `/cw-queue-peek`'s
+  bare-close path or surface the STOP recommendation.
 - In between → bounded deadline check; review/plan stages go parent-silent
   for ~20 min during subagent cycles, so a single 20-min gap is not death.
 

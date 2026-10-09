@@ -61,13 +61,25 @@ two things:
      and `git cherry -v HEAD origin/<branch>` showing no `+` line (every
      remote commit has an equivalent patch in the rebased branch; a plain
      `git log origin/<branch> ^HEAD` always lists the pre-rebase commits).
-     History rewrites on shared branches stay escalated to the human.
-   - `cw spawn close --confirmed-dead <id>` / `cw doctor --reap`: the
-     session is absent from the daemon roster, its transcript is flat, and no
-     live process remains. "The work is done" is not evidence of death.
+     History rewrites on shared branches stay escalated to the human. (This
+     is recovery after a park. A worker's own `--force-with-lease` push of
+     the branch it is working on, after its own rebase — `/auto-dev-finalize`'s
+     rebase retry, `/review-monitor` — is part of the pipeline, not recovery,
+     and is unchanged.)
+   - `cw spawn close --confirmed-dead <id>`: the session is absent from the
+     daemon roster, its transcript is flat, and no live process remains.
+     "The work is done" is not evidence of death. A session still in the
+     roster with a live process is stalled-but-live, not dead: use
+     `/cw-queue-peek`'s bare-close path (which needs the human's allowlist)
+     or surface the STOP recommendation.
+   - `cw doctor --reap` (non-TTY: `--yes --routed-session-id <id>`) on a
+     routed-result session, which stays in the roster by definition: its
+     routed result is on record, its transcript is flat, and no live process
+     is working in its worktree.
    - Discarding uncommitted or unpushed worktree changes: `git log
-     origin/<branch>..HEAD` and `git diff` show them to be duplicates of
-     landed work or junk; otherwise commit and push them.
+     origin/<branch>..HEAD`, `git status --porcelain --untracked-files=all`
+     and `git diff HEAD` (staged, unstaged and untracked) show them to be
+     duplicates of landed work or junk; otherwise commit and push them.
    - Closing a ticket: its acceptance criteria are verified satisfied (cite
      the merged PR or commit) or it is verified duplicate or obsolete (cite
      the superseding ticket).

@@ -331,7 +331,8 @@ never fires.
   `~/.claude/daemon/roster.json`, transcript flat, no live process — "work is
   done" is not death evidence), then
   `cw spawn close --confirmed-dead <sid>` (flag before the id) and
-  requeue/re-add.
+  requeue/re-add. Still in the roster with a live process → stalled-but-live:
+  use `/cw-queue-peek`'s bare-close path or surface the STOP recommendation.
 - In between → arm a bounded one-shot deadline check (resume-or-dead),
   don't guess.
 

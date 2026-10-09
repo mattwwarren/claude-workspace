@@ -898,8 +898,9 @@ open enum; consumers MUST tolerate unknown values. Known values:
   (`dispatch/claim.py`, #2114) and the reconcile phantom-reaped / TIMED_OUT /
   COMPLETED-silent revert paths (#2118).
   The orchestrator reads the reason, then commits and pushes the changes, or
-  discards them only after `git -C <worktree> log origin/<branch>..HEAD` and
-  `git -C <worktree> diff` show they are duplicates of landed work or junk,
+  discards them only after `git -C <worktree> log origin/<branch>..HEAD`,
+  `git -C <worktree> status --porcelain --untracked-files=all` and
+  `git -C <worktree> diff HEAD` show they are duplicates of landed work or junk,
   then runs `cw dev-queue requeue` on the task. `cw doctor --reap` deliberately leaves
   this park alone (reverting it re-derives the identical park). The
   pre-spawn park does not charge `unproductive_attempts` (no session ran).

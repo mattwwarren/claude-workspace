@@ -123,13 +123,18 @@ table it points at — the line between what you simply do and what you ask.
 - Recovery commands, each only after the evidence named next to it:
   `cw spawn close --confirmed-dead <id>` (flag before the id) only once the
   session is verified dead — absent from `~/.claude/daemon/roster.json`,
-  transcript flat, no live process ("work is done" is not death evidence);
-  `cw doctor --reap` after the same liveness evidence (for a routed-result
-  session in a non-TTY session, `--yes --routed-session-id <id>`);
+  transcript flat, no live process ("work is done" is not death evidence;
+  still in the roster with a live process is stalled-but-live — use
+  `/cw-queue-peek`'s bare-close path or surface the STOP);
+  `cw doctor --reap --yes --routed-session-id <id>` on a routed-result
+  session (which stays in the roster by definition) once its routed result
+  is on record, its transcript is flat and no live process works in its
+  worktree;
   `cw dev-queue cancel` only after verifying the ticket is satisfied by a
   merged PR/commit or is a verified duplicate/obsolete (cite it); discarding
   uncommitted/unpushed worktree changes only after `git -C <worktree> log
-  origin/<branch>..HEAD` and `git -C <worktree> diff` show duplicates of
+  origin/<branch>..HEAD`, `git -C <worktree> status --porcelain
+  --untracked-files=all` and `git -C <worktree> diff HEAD` show duplicates of
   landed work or junk (otherwise commit and push); and
   `cw dev-queue requeue/approve/unblock`, `cw lane resume` once the blocker
   is read and resolved.

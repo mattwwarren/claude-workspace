@@ -519,7 +519,8 @@ lanes:
   hint never advises `git reset --hard`, because cw cannot say what that would
   lose from work that predates the cycle. The orchestrator cleans the tree,
   then requeues REVIEW. It discards only after `git -C <worktree> log
-  origin/<branch>..HEAD` and `git -C <worktree> diff` show the changes are
+  origin/<branch>..HEAD`, `git -C <worktree> status --porcelain
+  --untracked-files=all` and `git -C <worktree> diff HEAD` show the changes are
   duplicates of landed work or junk; otherwise it commits and pushes them.
 - **Staged-set guard** (`codex_fix_scope_drift`, always on). A cycle commits and
   pushes only the paths it was measured to touch, measured against the tree the
@@ -1184,8 +1185,8 @@ concierge_recoveries: {}
 # scope_hint: large, or the review's health is not PROCEED. A forbidden-area or
 # degraded-health park is adjudicated by the orchestrator session; a
 # scope_hint: large park is the operator's own opted-in human gate, so the
-# orchestrator notifies the human instead. Set false to
-# restore orchestrator approval of every Large gate -- a hard top-level
+# orchestrator notifies the human instead. Set false to restore orchestrator
+# approval of every Large gate (scope_hint: large still pages the human) -- a hard top-level
 # short-circuit, the whole gate-recipes module becomes a no-op regardless of
 # any per-lane or per-ticket enablement. When true, each recipe is still
 # resolved per-lane / per-ticket via the 3-tier resolution below (both recipes
@@ -1491,7 +1492,8 @@ highest first:
 Independently, the module-wide master switch `gate_recipes_enabled` (in
 `orchestrator.yaml`, default `true`) is a hard top-level short-circuit: when
 `false`, **no** recipe fires regardless of any per-lane or per-ticket setting,
-and every Large gate pages the orchestrator for a `cw dev-queue approve`.
+and every Large gate pages the orchestrator for a `cw dev-queue approve`
+(except a `scope_hint: large` gate, which pages the human).
 
 ```yaml
 # clients.yaml — keep orchestrator-adjudicated Large-gate approval on one lane only
