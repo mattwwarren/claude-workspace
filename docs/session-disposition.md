@@ -129,20 +129,20 @@ trusting `is_terminal_snapshot=true` on an old file at face value.
 ## 3. Sentinel status → operator action
 
 "Operator" here is the orchestrator session by default (ADR-0020); a human is
-escalated to only for a genuine product/scope fork or a gate they opted into.
+escalated to only for a genuine product/scope fork or a gate they opted into (`signoff: operator`, a finalize force-hold, `scope_hint: large`).
 
 | Status | Action |
 |---|---|
 | `shipped` | Done. PR live with auto-merge enabled. |
 | `stage_complete` | No action — one pipeline stage (HARDEN/PLAN/IMPL/REVIEW) finished cleanly; dispatch auto-advances to the next stage. Not a terminal outcome. |
-| `no_op` | Done. Ticket already satisfied; the orchestrator closes it as completed with a citation. |
+| `no_op` | Done. Ticket already satisfied; the orchestrator closes it as completed, citing the merged PR/commit that satisfies it. |
 | `ambiguities_pending_resolution` | The orchestrator resolves the ambiguities posted on the issue from the ticket's sources of truth (a genuine product/scope fork goes to the human), then re-dispatches. |
 | `premises_pending_verification` | The orchestrator verifies the flagged premises, records the results on the issue, and re-dispatches. |
-| `plan_pending_approval` | Usually released automatically by the `auto_adopt_clean_plan` gate recipe (on by default) unless it touches a forbidden area or carries `scope_hint: large`. If it stays parked: parks only for **large** (or unresolved) scope tier — small-tier plans advance unattended. The orchestrator reads the plan comment, then runs `cw dev-queue approve` (records `plan_approved_at` and the approved draft's fingerprint on the row — tracker-neutral; `--post-marker` additionally posts an audit-only `<!-- auto-dev-plan-approved: <sha> -->` comment on GitHub — a changed draft gets a fresh marker, the same draft does not duplicate, and nothing reads it back as approval evidence). Advances to impl only once quality-reviewed, else re-queues at plan stage (#968). |
-| `review_pending_approval` | Usually released automatically by the `auto_approve_clean_review` gate recipe (on by default) unless health is degraded, a forbidden area is touched, or it carries `scope_hint: large`. If it stays parked: parks only for large (or unresolved) tier. The orchestrator reviews the pushed branch diff, runs gates, then runs `cw dev-queue approve` (advances to FINALIZE, which ships) — or ships directly (PR + auto-merge). With signoff configured (a gate the human opted into), `approve` re-routes to `AWAITING_OPERATOR_SIGNOFF`; approve again to clear. |
+| `plan_pending_approval` | Usually released automatically by the `auto_adopt_clean_plan` gate recipe (on by default) unless it touches a forbidden area or carries `scope_hint: large`. If it stays parked: parks only for **large** (or unresolved) scope tier — small-tier plans advance unattended. For a forbidden-area or recipes-disabled park, the orchestrator reads the plan comment, then runs `cw dev-queue approve` (records `plan_approved_at` and the approved draft's fingerprint on the row — tracker-neutral; `--post-marker` additionally posts an audit-only `<!-- auto-dev-plan-approved: <sha> -->` comment on GitHub — a changed draft gets a fresh marker, the same draft does not duplicate, and nothing reads it back as approval evidence). Advances to impl only once quality-reviewed, else re-queues at plan stage (#968). A `scope_hint: large` park is the operator's own opted-in human gate: the orchestrator notifies the human and does not approve it. |
+| `review_pending_approval` | Usually released automatically by the `auto_approve_clean_review` gate recipe (on by default) unless health is degraded, a forbidden area is touched, or it carries `scope_hint: large`. If it stays parked: parks only for large (or unresolved) tier. For a degraded-health or forbidden-area park, the orchestrator reviews the pushed branch diff, runs gates, then runs `cw dev-queue approve` (advances to FINALIZE, which ships) — or ships directly (PR + auto-merge). A `scope_hint: large` park is the operator's own opted-in human gate: the orchestrator notifies the human and neither approves nor ships it. With signoff configured (a gate the human opted into), `approve` re-routes to `AWAITING_OPERATOR_SIGNOFF`; approve again to clear. |
 | `merge_pending` | PR created, CI/merge gate not yet cleared (#899). Not a failure — monitor/merge the PR (`pr_url` is preserved on the task); do not re-dispatch. |
 | `merge_gate_blocked` | Prior pipeline PR still open; the orchestrator merges or closes it, then re-dispatches. |
-| `scope_exceeded` | Scope rejection; the orchestrator closes the ticket or relaxes the constraint. |
+| `scope_exceeded` | Scope rejection; the orchestrator relaxes the constraint, or closes the ticket only when its acceptance criteria are verified satisfied (cite the merged PR/commit in the close comment) or it is verified duplicate/obsolete (cite the superseding ticket). |
 | `forbidden_area` | Forbidden-area rejection; the orchestrator updates constraints or reroutes. |
 | `blocked` | Triage `blocker.reason`, `blocker.retry_eligible`, `blocker.recovery_hint`. At FINALIZE, `blocker.reason: "agent_block"` auto-regresses the ticket to IMPL for self-heal (up to 2 times, #770). |
 | `stale_dispatch` | This ticket already has an open, unmerged PR from an earlier dispatch — the session found it and refused rather than duplicating work already in review (#1862). `blocker.details` names the PR. The orchestrator lands or closes that PR, then runs `cw dev-queue requeue <T> -c <client>`. Do **not** re-dispatch first: it will just get the same refusal. |
@@ -268,7 +268,7 @@ an unlocatable/unparseable transcript.
 2. Check the PR or issue for completion evidence.
 3. If the work is already done, the orchestrator cleans up:
    ```bash
-   cw spawn close <session-id> --confirmed-dead   # skip if the session is already COMPLETED
+   cw done <session-name>
    cw dev-queue remove <TICKET-ID> --client <client> --all
    ```
 
@@ -589,7 +589,9 @@ dev-queue approve` **refuses** it (`_not_at_approval_gate`,
 nor an approval-gate disposition) — including when the parked comment was
 asking for plan approval, which is the common plan-stage case. The parked
 session stays ACTIVE, so a requeue may hit `HookContextConflictError` while it
-is still live; close it first with `cw spawn close --confirmed-dead`.
+is still live; close it first with `cw spawn close --confirmed-dead <id>`, but
+only once the session is verified dead (absent from `~/.claude/daemon/roster.json`,
+transcript flat, no live process).
 
 ---
 
@@ -644,8 +646,11 @@ the event inbox is unwritable the append is skipped and only the logged
   closes it automatically, under any `reap_policy`. `cw doctor` reports it as
   `wedge/active-routed-result-stranded`; close it with
   `cw spawn close --confirmed-dead <id>` (this one session) or
-  `cw doctor --reap` (every session of the class). Either way the already
-  advanced row is left alone.
+  `cw doctor --reap` (every session of the class; in a non-TTY session use
+  `cw doctor --reap --yes --routed-session-id <id>` for one). Close only after
+  liveness evidence for that session: the routed result is on record, its
+  transcript is flat, and no live process is working in its worktree. Either way
+  the already advanced row is left alone.
 - **`cw spawn close`.** Closing a DAEMON session routes a staged result first.
   The #317 cancel runs only when nothing is staged, the staged dict does not
   reconstruct, or the route is refused.

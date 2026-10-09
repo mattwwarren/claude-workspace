@@ -897,8 +897,10 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `…: 3 commit(s) not on origin/dev/2114` — from both the dispatch path
   (`dispatch/claim.py`, #2114) and the reconcile phantom-reaped / TIMED_OUT /
   COMPLETED-silent revert paths (#2118).
-  The orchestrator reads the reason, commits/pushes or discards the changes
-  (after checking what they are), then runs `cw dev-queue requeue` on the task. `cw doctor --reap` deliberately leaves
+  The orchestrator reads the reason, then commits and pushes the changes, or
+  discards them only after `git -C <worktree> log origin/<branch>..HEAD` and
+  `git -C <worktree> diff` show they are duplicates of landed work or junk,
+  then runs `cw dev-queue requeue` on the task. `cw doctor --reap` deliberately leaves
   this park alone (reverting it re-derives the identical park). The
   pre-spawn park does not charge `unproductive_attempts` (no session ran).
 - `"attempt_cap_blocked"` — the dispatch claim path refused to claim a
@@ -981,7 +983,9 @@ open enum; consumers MUST tolerate unknown values. Known values:
   The orchestrator inspects the session result (`cw session result <id>`) and
   either resolves the ambiguities against the ticket's sources of truth and
   re-dispatches, or closes the ticket (escalating only a product/scope fork to
-  a human). See #923.
+  a human). It closes the ticket only when its acceptance criteria are
+  verified satisfied (citing the merged PR/commit in the close comment) or it
+  is verified duplicate/obsolete (citing the superseding ticket). See #923.
 - `"stopped_without_sentinel"` — the Stop hook observed an **abandoned exit**
   (#2135): the worker recorded a `park_comment_marker` in its worktree's
   `.claude/cw-context.json` (via `cw signal-park`, after its park comment
@@ -1177,7 +1181,9 @@ open enum; consumers MUST tolerate unknown values. Known values:
   BLOCKED_ON_USER. Deliberately distinct from `"plan_parked"`, which covers
   the unrelated v4 ambiguities/premises park. `breadcrumbs` empty. The
   orchestrator reviews the session's scope/plan and approves or redirects
-  (see the gate recipes in `config/CONFIG_REFERENCE.md`). See #1302.
+  (see the gate recipes in `config/CONFIG_REFERENCE.md`), except for a
+  `scope_hint: large` park, which is the operator's own opted-in human gate:
+  the orchestrator notifies the human instead of approving it. See #1302.
 - `"review_health_gate"` — a REVIEW-stage sentinel reported
   `health.recommendation == "EXIT_FOR_HUMAN_REVIEW"`: the review that just ran
   did not vouch for its own coverage (e.g. a reviewer document with
@@ -1416,7 +1422,9 @@ sweep's park-marker skip path); documented for reading old logs.
 **Semantics:** Emitted when a stalled headless session is skipped during the
 salvage pass because it carries a park marker (`last_result.paused_status ==
 "silently_idle"`). The session is intentionally parked BLOCKED_ON_USER and
-must not be auto-retried; the orchestrator clears or closes it.
+must not be auto-retried; the orchestrator clears or closes it once the
+session is verified dead (absent from the daemon roster, transcript flat, no
+live process).
 `reason` is an open enum — consumers MUST tolerate unknown values.
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 
@@ -1453,8 +1461,11 @@ this event.
 reconcile's stranded routed-result sweep alongside its once-only
 `session.needs_attention` page. It is proposal-only: nothing in reconcile acts
 on it under any `reap_policy`, and `cw orchestrate run`'s reap drain logs it
-and never authorizes it; the orchestrator session closes the session by
-running `cw doctor --reap` or `cw spawn close --confirmed-dead <id>`. Because it
+and never authorizes it; the orchestrator session closes the session once it
+has liveness evidence (the routed result is on record, the transcript is
+flat, no live process is working in the worktree), by running
+`cw doctor --reap --yes --routed-session-id <id>` (the non-TTY form) or
+`cw spawn close --confirmed-dead <id>`. Because it
 stamps the shared `reap_proposed_at` latch, it is the preceding proposal for
 ADR-0006 purposes if that session later becomes a phantom: the phantom
 sweep's own `crash_complete` proposal for it is deduped, not re-emitted.
@@ -2795,11 +2806,14 @@ opposite ordering to #1617's save-then-emit rule, which governs a *state
 mutation* whose event must not claim something that did not land; here the
 event **is** the safety mechanism.
 
-`cw review settle` refuses to run inside a dispatch worker, or anywhere a
-worker cannot be ruled out — an unreadable `.claude/cw-context.json`, or a
-linked git worktree with none (see ADR-0016 invariant 8) — so no event of this
-type can originate from one. A refused run — blank `--reason`, unresolvable gh
-identity, an entry with no reviewed sha, the session refusal, or a failed
+`cw review settle` refuses to run inside a dispatch worker — only on positive
+evidence of one: the nearest `.claude/cw-context.json` reports
+`headless: true`, or `$TMPDIR` lies inside such a worktree (see ADR-0016
+invariant 8 and ADR-0020 invariant 4) — so no event of this type can
+originate from a worker. Every other context (the orchestrator's main
+checkout, a directory outside a repo, a worktree with no or an unreadable
+context file) proceeds. A refused run — blank `--reason`, unresolvable gh
+identity, an entry with no reviewed sha, the worker refusal, or a failed
 audit emit — emits no marker and writes nothing.
 
 A record that never went through this command is not applied by the reader at

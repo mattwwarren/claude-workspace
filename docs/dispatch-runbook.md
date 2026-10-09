@@ -58,7 +58,10 @@ cw dev-queue add <TICKET-ID> [<TICKET-ID> ...] --client <client> \
     `review_pending_approval` sentinel, a `large` hint forces the operator
     approval gate, and a `small` hint is used only when the sentinel omits
     its own tier — a hint can ADD the gate, never remove it (`large` from
-    the sentinel always wins).
+    the sentinel always wins). `--scope large` is the operator's own "gate
+    this ticket" flag: an opted-in human gate (like `--signoff operator` and
+    `--hold-finalize`) that the gate recipes never release and the
+    orchestrator never approves — it notifies the human (ADR-0020).
 - `-p/--priority` — higher dispatches sooner. An already-queued row's
   priority can be edited in place with `cw dev-queue move <T> -c <client>
   --priority <n>` — no cancel+requeue needed; it takes effect on the next
@@ -495,10 +498,10 @@ directly (see §6 in [`session-disposition.md`](session-disposition.md)).
 | `no_op` | Done. Ticket already satisfied; the orchestrator closes it as completed with a citation (`/cw-followup`). |
 | `ambiguities_pending_resolution` | The orchestrator resolves the ambiguities against the ticket's sources of truth (post a `Pre-flight Resolutions` comment on the issue; a genuine product/scope fork is batched into one question for the human), then re-dispatches (`cw dev-queue requeue`). |
 | `premises_pending_verification` | The orchestrator verifies the flagged premises, records results on the issue, and re-dispatches. |
-| `plan_pending_approval` | Usually released automatically by the `auto_adopt_clean_plan` gate recipe (on by default) unless it touches a forbidden area or carries `scope_hint: large`. If it stays parked: only parks for **large** (or unresolved) scope tier — a small-tier plan advances unattended. The orchestrator reads the plan comment, verifies it is faithful to the ticket, then runs `cw dev-queue approve <T> -c <client>`. The approval is recorded on the dev-queue row (`plan_approved_at`) and reaches the re-dispatched plan stage via `queue_metadata` on every tracker; on GitHub you may additionally pass `--post-marker` to post an audit-only `<!-- auto-dev-plan-approved: <sha> -->` comment binding the approval to the approved draft's fingerprint (the unbound `<!-- auto-dev-plan-approved -->` when no valid fingerprint is recorded). Approving a changed draft posts a fresh marker; re-approving the same draft does not duplicate it. Nothing reads the marker back as approval evidence — the evidence is the row's `plan_approved_at` and `plan_approved_fingerprint`. The flag is a no-op on Linear, where `gh` cannot reach the ticket. Advances to impl only once the plan is quality-reviewed (both signoff markers present); otherwise `approve` re-queues at plan stage to run Plan Quality Review first (#968). |
-| `review_pending_approval` | Usually released automatically by the `auto_approve_clean_review` gate recipe (on by default) unless health is degraded, a forbidden area is touched, or it carries `scope_hint: large`. If it stays parked: only parks for large (or unresolved) tier. The orchestrator verifies the pushed branch diff and gates, then runs `cw dev-queue approve` to advance to FINALIZE (which creates the PR) — or ships it directly (PR + auto-merge, §9.4) and cancels the task. With signoff configured, `approve` re-routes to `AWAITING_OPERATOR_SIGNOFF`; approve again (§2). |
+| `plan_pending_approval` | Usually released automatically by the `auto_adopt_clean_plan` gate recipe (on by default) unless it touches a forbidden area or carries `scope_hint: large`. If it stays parked: only parks for **large** (or unresolved) scope tier — a small-tier plan advances unattended. For a forbidden-area or recipes-disabled park, the orchestrator reads the plan comment, verifies it is faithful to the ticket, then runs `cw dev-queue approve <T> -c <client>`. A `scope_hint: large` park is the operator's own opted-in human gate: the orchestrator notifies the human and does not approve it. The approval is recorded on the dev-queue row (`plan_approved_at`) and reaches the re-dispatched plan stage via `queue_metadata` on every tracker; on GitHub you may additionally pass `--post-marker` to post an audit-only `<!-- auto-dev-plan-approved: <sha> -->` comment binding the approval to the approved draft's fingerprint (the unbound `<!-- auto-dev-plan-approved -->` when no valid fingerprint is recorded). Approving a changed draft posts a fresh marker; re-approving the same draft does not duplicate it. Nothing reads the marker back as approval evidence — the evidence is the row's `plan_approved_at` and `plan_approved_fingerprint`. The flag is a no-op on Linear, where `gh` cannot reach the ticket. Advances to impl only once the plan is quality-reviewed (both signoff markers present); otherwise `approve` re-queues at plan stage to run Plan Quality Review first (#968). |
+| `review_pending_approval` | Usually released automatically by the `auto_approve_clean_review` gate recipe (on by default) unless health is degraded, a forbidden area is touched, or it carries `scope_hint: large`. If it stays parked: only parks for large (or unresolved) tier. For a degraded-health, forbidden-area or recipes-disabled park, the orchestrator verifies the pushed branch diff and gates, then runs `cw dev-queue approve` to advance to FINALIZE (which creates the PR) — or ships it directly (PR + auto-merge, §9.4) and cancels the task. A `scope_hint: large` park is the operator's own opted-in human gate: the orchestrator notifies the human and neither approves nor ships it. With signoff configured, `approve` re-routes to `AWAITING_OPERATOR_SIGNOFF`; approve again (§2). |
 | `merge_pending` | PR created but CI/merge gate not yet cleared (#899). Not a failure — the task parks with `pr_url` preserved; monitor/merge the PR. Do **not** re-dispatch. |
-| `scope_exceeded` | Scope rejection; the orchestrator closes the ticket or relaxes the constraint, then re-dispatches. |
+| `scope_exceeded` | Scope rejection; the orchestrator relaxes the constraint and re-dispatches, or closes the ticket only when its acceptance criteria are verified satisfied (cite the merged PR/commit in the close comment) or it is verified duplicate/obsolete (cite the superseding ticket). |
 | `forbidden_area` | Forbidden-area rejection; the orchestrator updates constraints or reroutes. |
 | `blocked` | Triage `blocker.reason`. Check `blocker.retry_eligible` and `blocker.recovery_hint`. `blocker.reason: "plan_unreviewable"` / `"plan_unsound"` mean plan review needs orchestrator judgment — if the pipeline bounces repeatedly on an intricate ticket, use the **spec-driven subagent escape hatch** (§7) rather than retrying. A `blocked` at FINALIZE with `blocker.reason: "agent_block"` self-heals: dispatch auto-regresses the ticket to IMPL (up to 2 regressions, #770) — no operator action. |
 | `merge_gate_blocked` | A prior pipeline PR is still open. The orchestrator merges or closes it, then re-dispatches. |
@@ -535,7 +538,8 @@ and close the session (#2517). Any caller of those commands, including an
 agent or orchestrator session, does this. If the stop does not take they exit
 non-zero and name `claude stop <id>`; an `approve` that fails there has
 already approved the ticket, so close the session with
-`cw spawn close --confirmed-dead <id>` once the worker is gone instead of
+`cw spawn close --confirmed-dead <id>` once the worker is verifiably gone
+(absent from `~/.claude/daemon/roster.json`, transcript flat, no live process) instead of
 re-running `approve`. A session whose background work is still draining is
 left running. Approvals made by unattended paths (the auto-adopt gate recipe,
 `drain`, `auto_fix_ci`) do not close it; the doctor class reports the fix.
@@ -599,9 +603,11 @@ cw spawn close <session-id>
 cw dev-queue remove <TICKET-ID> --client <client> --all
 ```
 
-`cw spawn close` **refuses a session that is already COMPLETED**. If the
-session is already completed (e.g. the worker exited cleanly), skip straight to
-`cw dev-queue remove`.
+`cw spawn close` **refuses a session that is already COMPLETED** — do not
+`cw done` it first. If the session is already completed (e.g. the worker
+exited cleanly), skip straight to `cw dev-queue remove`; use `cw done
+<session-name>` only for a session that never had a live daemon surface to
+close.
 
 If the task is already in a terminal queue status but wedged (e.g.,
 `RUNNING` with no live session), `cw doctor --reap` detects and repairs
@@ -644,7 +650,10 @@ common wedge conditions:
   `cw doctor` reports it; `cw doctor --reap` closes **every** session of this
   class (marks it `COMPLETED` with `reap_reason=routed_result_stranded` and
   stops its worker) and never touches a queue row. To close just one, run
-  `cw spawn close --confirmed-dead <id>`. `cw dev-queue approve` and
+  `cw spawn close --confirmed-dead <id>`; in a non-TTY session, close one
+  with `cw doctor --reap --yes --routed-session-id <id>`. Either close only
+  after liveness evidence for that session: the routed result is on record, its
+  transcript is flat, and no live process is working in its worktree. `cw dev-queue approve` and
   `requeue` also close this session when run for the ticket (see the
   `worktree_occupied` paragraph).
 
@@ -1242,7 +1251,8 @@ the newest `*.jsonl` under `~/.claude/projects/<slug>-dev-<T>/`:
 - **< 2 min old** → session ALIVE; do NOT requeue (double-spawn risk, #919
   class). Wait for its sentinel — the #918 rescue recovers a false park.
 - **flat ≥ 45 min** → dead regardless of a `running` row. Adopt-check the
-  worktree, `cw spawn close <sid> --confirmed-dead`, requeue.
+  worktree, confirm the session is gone (absent from the roster, no live
+  process), `cw spawn close --confirmed-dead <sid>`, requeue.
 - In between → bounded deadline check; review/plan stages go parent-silent
   for ~20 min during subagent cycles, so a single 20-min gap is not death.
 
@@ -1267,13 +1277,13 @@ necessary only for work the daemon roster does not know about
 
 ### CANCELLED row recovery (`--from-cancelled`)
 
-`cw spawn close <sid> --confirmed-dead` on a **RUNNING** row transitions that
+`cw spawn close --confirmed-dead <sid>` on a **RUNNING** row transitions that
 row to `CANCELLED` — not `BLOCKED_ON_USER`. `cw dev-queue requeue` normally
 rejects anything but `BLOCKED_ON_USER`/`AWAITING_OPERATOR_SIGNOFF`, so a
 CANCELLED row is otherwise a requeue dead-end (#1018).
 
 **One-command path (#1889):** `cw spawn close --confirmed-dead --requeue
-<sid>` folds the close and the requeue into a single invocation — it closes
+<sid>` (only after the liveness evidence above: absent from `~/.claude/daemon/roster.json`, transcript flat, no live process) folds the close and the requeue into a single invocation — it closes
 the session, then (if a `ticket_id` resolves from the session name) requeues
 the ticket to PENDING at its current stage, same as the two-step recipe
 below. This is the recommended path for the common case: a stranded RUNNING
@@ -1569,8 +1579,8 @@ reason. Wait for the annotation to clear; only a tick line still reading
   starve its lane. Requeue or remove to free the slot.
 - A session wedged in `needs_salvage` with a park marker poisons every
   respawn of its ticket (claim → revert → attempts+1, plus per-tick
-  `session.salvage_skipped` noise): `cw spawn close <sid> --confirmed-dead`
-  clears it. **Now partially mechanized** — see §11.1's
+  `session.salvage_skipped` noise): `cw spawn close --confirmed-dead <sid>`
+  clears it, once the session is verified dead (absent from `~/.claude/daemon/roster.json`, transcript flat, no live process). **Now partially mechanized** — see §11.1's
   `park_marker_poison_clear` recipe (requires `concierge_enabled: true` and
   `consecutive_salvage_skips >= 1` on a confirmed-dead session).
 - `disposition: unresolved_subagent_spawn` (#1646) is **not** an ordinary
@@ -1579,8 +1589,7 @@ reason. Wait for the annotation to clear; only a tick line still reading
   behind a verification tail that never ran. **Check the worktree and branch
   before requeueing:** look for commits ahead of the base branch, and for a
   half-finished stage the transcript never reported. Once you know what
-  landed, requeue at the right stage (or close the ticket if the work is
-  already good). The evidence is durable — `agent_spawn_stamp.unresolved_count`
+  landed, requeue at the right stage (or close the ticket, but only when its acceptance criteria are verified satisfied, citing the merged PR/commit in the close comment, or it is verified duplicate/obsolete, citing the superseding ticket). The evidence is durable — `agent_spawn_stamp.unresolved_count`
   in the worktree's `.claude/cw-context.json`, with `last_stamped_at` giving
   the time the spawn began.
 - **This one class parks even on a `reap_policy: auto` lane.** That is a
@@ -2073,7 +2082,7 @@ Three recipes, each individually toggleable via `concierge_recoveries`:
    (per-stage-floor 45-minute staleness) is closed and requeued. This is the
    automated version of §7's "a session wedged in `needs_salvage`... poisons
    every respawn" note — the orchestrator no longer needs to run `cw spawn
-   close <sid> --confirmed-dead` for this case.
+   close --confirmed-dead <sid>` for this case.
 3. **`cancelled_row_restore`** — a CANCELLED row whose worktree still has
    committed work ahead of its base branch is restored to PENDING, so work
    is never silently lost to a stray cancel.
@@ -2109,7 +2118,8 @@ row's currently-resolved session **is** that session and its status is still
 non-terminal, recipe 1 leaves the row parked and emits
 `concierge.hook_context_conflict_refused` instead of requeuing — otherwise
 every cycle burns another `attempts` increment for a spawn that cannot
-succeed. Clear it with `cw spawn close --confirmed-dead <id>`: that flips the
+succeed. Clear it with `cw spawn close --confirmed-dead <id>` once the session is
+verified dead (absent from `~/.claude/daemon/roster.json`, transcript flat, no live process): that flips the
 session's status (it never changes its id), which is exactly what makes the
 refusal predicate go False on the next concierge cycle — the ticket then
 requeues normally with no separate unblock step. A fresh session superseding

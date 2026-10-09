@@ -44,7 +44,8 @@ Dispositions survive only when driven by **evidence**, not clocks:
   a terminal result or sentinel exists, or the local PID has exited:
   constructive completion of finished work.
 - **Operator commands** (`cw spawn close`, `cw doctor --reap`, ticket
-  delete) — a human is the authority.
+  delete) — an explicit operator command is the authority (the orchestrator
+  session counts, ADR-0020).
 
 ## The signal that replaces the timers
 
@@ -60,7 +61,7 @@ signal is preserved and made multi-dimensional instead of one-dimensional
   (`paused_status=session_unresponsive`) plus a push notification —
   and mutates nothing;
 - `cw queue-peek` remains the rich advisory surface (age, idle gap,
-  sentinel, PR state) recommending WAIT/PEEK/STOP to the human;
+  sentinel, PR state) recommending WAIT/PEEK/STOP to the orchestrator;
 - the escalation latch, dispatch-loop dead-man's switch, and
   `cw dev-queue wait`'s ATTENTION exit codes are unchanged.
 

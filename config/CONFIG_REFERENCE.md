@@ -517,8 +517,10 @@ lanes:
   the park lists what was found and the command that ends that operation
   (`git merge --abort`, `git cherry-pick --abort`, `git revert --abort`). The
   hint never advises `git reset --hard`, because cw cannot say what that would
-  lose from work that predates the cycle. The orchestrator cleans the tree
-  (after checking what is in it), then requeues REVIEW.
+  lose from work that predates the cycle. The orchestrator cleans the tree,
+  then requeues REVIEW. It discards only after `git -C <worktree> log
+  origin/<branch>..HEAD` and `git -C <worktree> diff` show the changes are
+  duplicates of landed work or junk; otherwise it commits and pushes them.
 - **Staged-set guard** (`codex_fix_scope_drift`, always on). A cycle commits and
   pushes only the paths it was measured to touch, measured against the tree the
   cycle started from. If the staged set differs (an extra staged path, or the fix
@@ -1179,7 +1181,10 @@ concierge_recoveries: {}
 # true: a ticket's size alone (the Large tier, >10 files or >500 lines) never
 # pages the operator, so a Large plan/review approval park is released
 # automatically unless it touches a forbidden area, the operator set
-# scope_hint: large, or the review's health is not PROCEED. Set false to
+# scope_hint: large, or the review's health is not PROCEED. A forbidden-area or
+# degraded-health park is adjudicated by the orchestrator session; a
+# scope_hint: large park is the operator's own opted-in human gate, so the
+# orchestrator notifies the human instead. Set false to
 # restore orchestrator approval of every Large gate -- a hard top-level
 # short-circuit, the whole gate-recipes module becomes a no-op regardless of
 # any per-lane or per-ticket enablement. When true, each recipe is still
@@ -1446,7 +1451,9 @@ cw dev-queue requeue GEN-123 --client my-project --stage impl --regress
 ## Gate Recipe Enablement (RFC 0009 Phase 4)
 
 Gate recipes (`cw.reconcile.gate_recipes`) clear a Large-tier approval gate
-with **no review** unless a predicate names a reason the orchestrator must adjudicate.
+with **no review** unless a predicate names a reason it must stop: a forbidden
+area or degraded review health (the orchestrator session adjudicates), or the
+operator's own `scope_hint: large` (a human gate; see below).
 A ticket's size alone (more than 10 files or more than 500 lines) is not one:
 the ticket the operator wrote is what authorizes the work.
 
@@ -1462,7 +1469,9 @@ the ticket the operator wrote is what authorizes the work.
   scan already ran in the round that parked).
 
 Neither recipe releases a row whose operator `scope_hint` is `large` ("gate
-this ticket"), or a row that is not at the gate's own stage, and the review
+this ticket"). That is an opted-in human gate, like `signoff: operator` and a
+finalize force-hold: the orchestrator notifies the human and never approves it
+itself (ADR-0020). Nor do they release a row that is not at the gate's own stage, and the review
 recipe never releases a row with an armed finalize hold. Dispatch does not
 page (`session.needs_attention`) for a Large park a recipe will release on the
 next reconcile tick. Each release emits `gate.auto_approved` and posts an

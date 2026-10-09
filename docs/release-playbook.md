@@ -46,8 +46,11 @@ The flag convention (mirror it for every new auto-actor):
   ticket's size alone must never page the operator, who sets the plan before a
   ticket enters the pipeline. Its predicates
   (`cw.reconcile.gate_predicates`) still keep every forbidden-area touch,
-  operator `scope_hint: large` and degraded review in front of the
-  orchestrator for adjudication.
+  operator `scope_hint: large` and degraded review parked. A forbidden-area
+  or degraded-review park goes to the orchestrator for adjudication; an
+  operator `scope_hint: large` is the operator's own opted-in human gate (like
+  `signoff: operator` and a finalize force-hold), so the orchestrator notifies
+  the human instead of approving it.
   Changing any other auto-actor's *shipped default* to armed needs the same
   explicit, recorded decision — that is a product decision, not a recovery
   step (arming a flag in a config file is the orchestrator's call; see below).
