@@ -9,7 +9,7 @@ on:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
-    # Observed green legs: macOS 9.8-12.4 min (unit-test step ~9.6), ubuntu ~5-7 min; cap per leg, default is 360 (#1937)
+    # Pre-xdist green legs: macOS 9.8-12.4 min (unit-test step ~9.6), ubuntu ~5-7 min; cap per leg, default is 360 (#1937)
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -71,13 +71,25 @@ jobs:
       # Measures both worker-loaded source trees so the diff-cover step below
       # sees `.claude/scripts` diffs too (#2249). No --cov-fail-under here: one
       # blended figure would let src/cw regress behind the scripts tree.
+      # Coverage is only consumed on ubuntu (floors, diff-cover, artifact), so
+      # macOS runs the suite without it. `-n auto` parallelises across the
+      # runner's cores; COVERAGE_CORE=sysmon (3.12+) removes the default
+      # tracer's ~33% overhead.
+      - name: Test (unit)
+        if: matrix.os != 'ubuntu-latest'
+        run: uv run pytest tests/ -n auto --tb=short -m 'not integration'
+
       - name: Test (unit) with coverage
-        run: uv run pytest tests/ -v --tb=short -m 'not integration' --cov=cw --cov=.claude/scripts --cov-report=term --cov-report=xml
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          COVERAGE_CORE: sysmon
+        run: uv run pytest tests/ -n auto --tb=short -m 'not integration' --cov=cw --cov=.claude/scripts --cov-report=term --cov-report=xml
 
       # One floor per source tree, read from the `.coverage` file the unit step
       # just wrote (#2249). Ratchet: when a PR lifts `.claude/scripts` coverage,
       # raise its floor in the same PR to floor(measured) - 2; never lower it.
       - name: Coverage floors (per source tree)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           uv run coverage report --include='src/cw/*' --fail-under=88
           uv run coverage report --include='.claude/scripts/*' --fail-under=50

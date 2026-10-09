@@ -55,6 +55,7 @@ DIFF_COVER_HOOK_ID = "diff-cover"
 MCP_PYTEST_PREFIX = ["--extra", "mcp", "pytest"]
 UNIT_STEP_NAME = "Test (unit) with coverage"
 FLOORS_STEP_NAME = "Coverage floors (per source tree)"
+UBUNTU_ONLY_IF = "matrix.os == 'ubuntu-latest'"
 PATCH_STEP_NAME = "Patch coverage (diff-cover vs origin/main)"
 CLAUDE_MD = ROOT / "CLAUDE.md"
 # `--cov=` targets every coverage-measuring pytest run must carry (#2249).
@@ -288,8 +289,10 @@ def test_ci_has_per_tree_coverage_floors_step() -> None:
         "the floors step must read `.coverage` right after the unit step"
     )
     assert floors_at < names.index(PATCH_STEP_NAME), names
-    # No `if:`: the floors run on both OS legs, as --cov-fail-under=88 did.
-    assert "if" not in _step(FLOORS_STEP_NAME)
+    # Coverage is measured (and consumed) on ubuntu only; macOS runs the unit
+    # tests without it, so the floors must be gated to the leg that has data.
+    assert _step(FLOORS_STEP_NAME).get("if") == UBUNTU_ONLY_IF
+    assert _step(UNIT_STEP_NAME).get("if") == UBUNTU_ONLY_IF
     assert _ci_floors() == EXPECTED_FLOORS
 
 

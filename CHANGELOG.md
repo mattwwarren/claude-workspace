@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **CI unit tests run in parallel and drop coverage on macOS.** The unit step uses `pytest -n auto` (new dev dependency `pytest-xdist`), ubuntu measures coverage with `COVERAGE_CORE=sysmon`, and the macOS leg runs without coverage (its output was never consumed). Locally on 4 cores: 8m04s serial → 2m22s.
 ## [1.70.0] - 2026-10-09
 
 ### Changed
