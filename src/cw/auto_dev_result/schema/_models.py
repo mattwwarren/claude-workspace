@@ -224,7 +224,7 @@ class Blocker(BaseModel):
     # Phase E — queue-aware retry semantics. ``retry_eligible=True`` paired
     # with a non-null ``retry_delay_seconds`` means the orchestrator can
     # safely re-dispatch after the given backoff. ``retry_eligible=False``
-    # means human intervention is required.
+    # means the orchestrator must triage it.
     retry_eligible: bool | None = None
     retry_delay_seconds: int | None = None
 

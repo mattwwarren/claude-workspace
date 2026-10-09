@@ -192,7 +192,7 @@ def _check_wedge_repo_ahead(
         if not prs:
             recipe = (
                 f"Branch {branch} is ahead of main with no open PR. "
-                f"Suggested: cw spawn-complete {task.ticket_id} or open PR manually."
+                f"Suggested: cw spawn-complete {task.ticket_id} or open the PR."
             )
         else:
             pr_state = prs[0].get("state", "OPEN")

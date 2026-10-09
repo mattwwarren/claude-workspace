@@ -21,7 +21,8 @@ re-exports. Submodules:
 - ``wedge`` — wedge-condition detection and reap; a package with one
   submodule per detector family plus ``reap`` (#2164).
 - ``routed_result_wedge`` — the stranded routed-result session class (#2524)
-  and its operator-only ``--reap`` close.
+  and its explicit-command ``--reap`` close (the orchestrator session counts,
+  ADR-0020).
 - ``loop_health`` — dispatch loop health/liveness, TIMED_OUT-merged detection,
   and targeted single-session reap.
 - ``versions`` — claude/cw version + dependency checks, bypass disclaimer,

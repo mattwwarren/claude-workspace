@@ -162,7 +162,7 @@ DESTRUCTIVE_DIRECTIVE_BLOCKER_REASON: Literal[
 # IMPL session has nothing on the branch to fix. Distinct from
 # OPERATOR_UNAVAILABLE_BLOCKER_REASONS (RFC 0011 A1): that axis means "we
 # can't reach the operator/a dependency right now", self-healing nothing but
-# the reachability; this means the block is real and needs an operator to
+# the reachability; this means the block is real and needs the orchestrator to
 # actually act (fix main, land the dependency), not just become reachable.
 # Deliberately absent from FINALIZE_REGRESS_BLOCKER_REASONS -- see that
 # constant's docstring. See GitHub #2320.
@@ -338,8 +338,8 @@ def is_known_blocker_reason(reason: str) -> bool:
 def queue_status_for_terminal_sentinel(status: Status) -> QueueItemStatus:
     """Classify a terminal sentinel status as a hold or a completion.
 
-    Single source of truth for "does this status need a human before the
-    ticket can move again," consumed by the reconcile salvage path
+    Single source of truth for "does this status need the orchestrator's
+    triage before the ticket can move again," consumed by the reconcile salvage path
     (``cw.reconcile._shared._queue_status_for_salvaged``) so a worker that
     dies mid-sentinel is dispositioned the same way a live observer would
     have routed it (#1566). Live dispatch's Rule 1/2/5/3b

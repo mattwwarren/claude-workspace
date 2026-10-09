@@ -870,7 +870,7 @@ def init_client(
         if not isinstance(doc, dict) or "clients" not in doc:
             msg = (
                 f"{clients_path} exists but has no 'clients:' key."
-                " Add 'clients:' manually or delete the file to recreate."
+                " Add a 'clients:' key or delete the file to recreate."
             )
             raise CwError(msg)
 

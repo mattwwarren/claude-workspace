@@ -120,7 +120,7 @@ class TestRegisterMcpServers:
         # File left untouched.
         assert mcp_path.read_text() == corrupt
         captured = capsys.readouterr()
-        assert "manually" in captured.out
+        assert "to mcpServers" in captured.out
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +179,7 @@ class TestInstallCwAllowlist:
         # File must be unchanged (no write on parse failure).
         assert settings.read_text() == "not-valid-json{{{"
         captured = capsys.readouterr()
-        assert "manually" in captured.out
+        assert "permissions.allow" in captured.out
 
     def test_merges_into_existing_allow_list(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -431,7 +431,7 @@ def _record_needs_attention(act: _Act) -> None:
     disposition = (
         "parked without charge, will re-enter the queue automatically"
         if act.row.auto
-        else "parked BLOCKED_ON_USER without charge; needs an operator to clear"
+        else "parked BLOCKED_ON_USER without charge, for the orchestrator to triage"
     )
     record_event(
         OrchestratorEventType.SESSION_NEEDS_ATTENTION,

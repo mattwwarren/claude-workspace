@@ -180,7 +180,7 @@ def _report_skipped(
             line = (
                 f"Warning: routed-result session {session.id} for"
                 f" {call.ticket_id} ({call.client}) was NOT closed: {detail}."
-                " Close it yourself once its worker is gone:"
+                " Once its worker is gone, close it with:"
                 f" {close_command(session.id)}"
             )
         click.echo(line, err=True)
@@ -203,8 +203,8 @@ def _report_pinned(pinned: list[PinnedOrphan], call: _OrphanCloseCall) -> None:
         click.echo(
             f"Left running: routed-result session {item.session.id} for"
             f" {call.ticket_id} ({call.client}) is pinned by {row.ticket_id}"
-            f" ({row.client}, {row.status.name}) and was not closed. Close it"
-            f" yourself if you are sure it is dead: {close_command(item.session.id)}",
+            f" ({row.client}, {row.status.name}) and was not closed. If it is"
+            f" dead, close it with: {close_command(item.session.id)}",
             err=True,
         )
     logger.warning(
@@ -239,7 +239,7 @@ def _orphan_refusal(
 def _stop_remedy(session: Session, call: _OrphanCloseCall, surface_ref: str) -> str:
     """What to do after a stop the roster never confirmed."""
     base = (
-        f"Run `claude stop {surface_ref}` yourself; if the stop keeps failing,"
+        f"Run `claude stop {surface_ref}`; if the stop keeps failing,"
         " the roster entry is stale and the roster file"
         f" ({call.daemon.roster_path}) must be repaired."
     )
@@ -290,8 +290,8 @@ def _handle_draining(draining: list[Session], call: _OrphanCloseCall) -> None:
     first = draining[0]
     remedy = (
         "Wait for that work to finish (the session then completes on its own)"
-        " and re-run the requeue, or close the session yourself once you are"
-        f" sure it is dead: {close_command(first.id)}."
+        " and re-run the requeue, or, once it is confirmed dead, close the"
+        f" session with: {close_command(first.id)}."
     )
     raise _orphan_refusal(
         first, call, problem=_PROBLEMS[_REASON_DRAINING], remedy=remedy

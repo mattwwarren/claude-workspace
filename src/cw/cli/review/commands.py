@@ -236,8 +236,8 @@ def _read_prior_deferred(path: Path) -> list[Adjudication]:
     except ValueError as exc:
         msg = (
             f"Could not parse the existing --deferred-findings-out file at "
-            f"{path}: {exc}. Refusing to overwrite it — inspect or remove it "
-            "by hand, then re-run."
+            f"{path}: {exc}. Refusing to overwrite it — inspect or remove "
+            "it, then re-run."
         )
         raise CwError(msg) from exc
 

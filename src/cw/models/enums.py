@@ -721,7 +721,8 @@ class ReapPolicy(StrEnum):
     """Policy controlling whether the reconciler destroys a stalled session.
 
     Under ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,
-    leave session/worktree/daemon surface intact.  Requires operator action to clear.
+    leave session/worktree/daemon surface intact.  Cleared by an explicit
+    operator command (the orchestrator session counts, ADR-0020).
     Under ``AUTO``: self-healing — stop daemon, revert task to PENDING, clean worktree.
     """
 

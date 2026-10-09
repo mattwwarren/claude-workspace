@@ -377,7 +377,7 @@
   "LaneConfig": {
    "$defs": {
     "ReapPolicy": {
-     "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Requires operator action to clear.\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING, clean worktree.",
+     "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Cleared by an explicit\noperator command (the orchestrator session counts, ADR-0020).\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING, clean worktree.",
      "enum": [
       "signal_only",
       "auto"
@@ -1034,7 +1034,7 @@
      "type": "string"
     },
     "ReapPolicy": {
-     "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Requires operator action to clear.\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING, clean worktree.",
+     "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Cleared by an explicit\noperator command (the orchestrator session counts, ADR-0020).\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING, clean worktree.",
      "enum": [
       "signal_only",
       "auto"
@@ -1769,7 +1769,7 @@
      "type": "object"
     },
     "ReapPolicy": {
-     "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Requires operator action to clear.\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING, clean worktree.",
+     "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Cleared by an explicit\noperator command (the orchestrator session counts, ADR-0020).\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING, clean worktree.",
      "enum": [
       "signal_only",
       "auto"
@@ -2241,7 +2241,7 @@
      "type": "string"
     },
     "ReapPolicy": {
-     "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Requires operator action to clear.\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING, clean worktree.",
+     "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Cleared by an explicit\noperator command (the orchestrator session counts, ADR-0020).\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING, clean worktree.",
      "enum": [
       "signal_only",
       "auto"
@@ -2642,7 +2642,7 @@
   "LaneConfig": {
    "$defs": {
     "ReapPolicy": {
-     "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Requires operator action to clear.\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING, clean worktree.",
+     "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Cleared by an explicit\noperator command (the orchestrator session counts, ADR-0020).\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING, clean worktree.",
      "enum": [
       "signal_only",
       "auto"

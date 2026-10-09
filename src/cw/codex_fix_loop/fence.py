@@ -81,7 +81,7 @@ _MARKER_HINTS = {
     "REVERT_HEAD": "Finish the revert or abandon it with `git revert --abort`.",
 }
 _NO_MARKER_HINT = (
-    "Commit the changes you want to keep, or set them aside yourself (for "
+    "Commit the changes you want to keep, or set them aside (for "
     "example on a scratch branch) after checking `git diff HEAD`; cw does not "
     "know which of them are wanted, and it names no discard command because it "
     "cannot say what one would lose."
@@ -290,7 +290,7 @@ def _staged_set_hint(
             "Some staged paths were not measured as this cycle's work, so cw "
             "cannot say whether discarding them is safe. Compare "
             "`git diff --cached --name-only` with the paths above, then unstage "
-            "the unmeasured paths yourself (`git restore --staged <path>`) or "
+            "the unmeasured paths (`git restore --staged <path>`) or "
             "commit them deliberately, and requeue REVIEW."
         )
     if not staged:
@@ -298,7 +298,7 @@ def _staged_set_hint(
             "The fix invocation committed its change itself, so nothing is staged "
             "and a hard reset to HEAD would not undo that local commit. Inspect it "
             f"with `git log {start_head}..HEAD` and `git show`; if it is unwanted, "
-            f"move the branch back to `{start_head}` yourself after checking "
+            f"move the branch back to `{start_head}` after checking "
             "nothing else sits on top, then requeue REVIEW."
         )
     return (
@@ -306,8 +306,8 @@ def _staged_set_hint(
         "commit would be partial and cw does not know where the rest went. "
         "Compare `git diff --cached --name-only` with the paths above and run "
         f"`git log {start_head}..HEAD` to see whether the fix invocation "
-        "committed the remainder itself; resolve it by hand (commit, unstage or "
-        "move the branch yourself) and requeue REVIEW."
+        "committed the remainder itself; resolve it (commit, unstage or "
+        "move the branch) and requeue REVIEW."
     )
 
 

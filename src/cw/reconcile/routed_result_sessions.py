@@ -17,7 +17,8 @@ This module finds that shape (:func:`find_stranded_routed_sessions`) and pages
 it exactly once (:func:`sweep_routed_result_sessions`). ADR-0014 governs it:
 the transcript-age bucket only debounces a signal (invariant 1), the new
 heuristic lands as a signal first (invariant 3), and the only actors that ever
-close such a session are explicit operator commands -- ``cw doctor --reap``
+close such a session are explicit operator commands (the orchestrator session
+counts, ADR-0020) -- ``cw doctor --reap``
 (``cw.doctor.routed_result_wedge``), ``cw spawn close --confirmed-dead``, and
 the operator-run ``cw dev-queue approve`` / ``cw dev-queue requeue`` (#2517;
 they stop the worker, confirm it left the roster, then close the session;
