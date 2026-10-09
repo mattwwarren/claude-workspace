@@ -1,6 +1,7 @@
 # Ledger claim matching ships gated and measured, never on by default
 
 **Status:** Accepted
+**Amended by:** [ADR-0020](0020-the-operator-is-the-orchestrator-session.md) — "operator" means the orchestrator session; a human is escalated to only for product/scope forks.
 **Driven by:** #2210 (building on #1838, #1814; see ADR-0015)
 
 ## Decision

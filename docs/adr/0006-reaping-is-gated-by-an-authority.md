@@ -1,6 +1,7 @@
 # Reaping is gated by an authority, not automatic
 
 **Status:** Accepted — implemented (1.1: #552/#554/#555/#556; RFC 0004 Phase 4: #594/#595/#596 — the lane's ORCHESTRATE session is the authority, consumed via `cw orchestrate run`)
+**Amended by:** [ADR-0020](0020-the-operator-is-the-orchestrator-session.md) — "operator" means the orchestrator session; a human is escalated to only for product/scope forks.
 **Driven by:** #542 (session reaped mid-wait → task PENDING, wait rides to
 124 instead of ATTENTION), #402 (isolation breach), #438 (`doctor --reap`
 unguarded write); operator distrust of automatic reaping (milestone 1.1).

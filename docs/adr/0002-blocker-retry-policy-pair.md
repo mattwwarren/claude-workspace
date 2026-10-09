@@ -1,6 +1,7 @@
 # Blocker carries an explicit retry policy
 
 **Status:** Accepted
+**Amended by:** [ADR-0020](0020-the-operator-is-the-orchestrator-session.md) — "operator" means the orchestrator session; a human is escalated to only for product/scope forks.
 **Driven by:** #174 (Phase B + Phase E)
 **Builds on:** [`docs/headless-contract.md`](../headless-contract.md) §4.2.
 

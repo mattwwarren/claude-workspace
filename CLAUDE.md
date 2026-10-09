@@ -157,7 +157,7 @@ CI's "Coverage floors" step together; never lower a floor to land a change.
 - `mypy --strict` - **ZERO type errors allowed**
 - Test suite - **100% pass rate required**
 - `src/cw` coverage **≥88%** and `.claude/scripts` coverage **≥50%** (separate floors, never blended); new/changed lines (patch coverage) **≥90%** — cover every new branch, including `except`/error paths
-- No suppressions (`# noqa`, `# type: ignore`) without explicit user approval
+- No suppressions (`# noqa`, `# type: ignore`) without explicit approval (escalate: worker → orchestrator → user)
 
 Report format: Only actionable problems. Zero praise, zero summaries.
 
@@ -270,7 +270,7 @@ cw list
 - **Keystroke injection**: `cw bg` injects `/session-done` into active Claude sessions. Fragile but zero-coupling to Claude Code internals.
 - **Flat JSON state**: Simple, human-readable. Single-user tool.
 - **Native daemon backend**: Workers are spawned via `claude --bg` and tracked by short hex session id in `~/.claude/daemon/roster.json`. No multiplexer required.
-- **On-demand reconciliation**: `cw status`, `cw list`, `cw start`, and each `dispatch_tick` call `reconcile()` to detect phantoms (sessions in state but absent from the daemon roster). By default (`reap_policy: signal_only`, per ADR-0006) detection emits `SESSION_REAP_PROPOSED` and routes the task to `BLOCKED_ON_USER` — no destructive mutation. Destructive act (RUNNING→PENDING revert, daemon stop, worktree removal) requires `reap_policy: auto` for the lane, or an explicit `cw doctor --reap`. No background daemon needed.
+- **On-demand reconciliation**: `cw status`, `cw list`, `cw start`, and each `dispatch_tick` call `reconcile()` to detect phantoms (sessions in state but absent from the daemon roster). By default (`reap_policy: signal_only`, per ADR-0006) detection emits `SESSION_REAP_PROPOSED` and routes the task to `BLOCKED_ON_USER` — no destructive mutation. Destructive act (RUNNING→PENDING revert, daemon stop, worktree removal) requires `reap_policy: auto` for the lane, or an explicit `cw doctor --reap` (the orchestrator session runs it, per [ADR-0020](docs/adr/0020-the-operator-is-the-orchestrator-session.md)). No background daemon needed.
 - **File-based locking**: Prevents concurrent state corruption from parallel session operations. Locks are ranked and re-entry raises instead of hanging; no subprocess runs under `sessions_lock` outside a ticketed allowlist ([ADR-0019](docs/adr/0019-lock-hierarchy-and-no-subprocess-under-sessions-lock.md)).
 - **Event history**: Audit trail for session lifecycle transitions.
 
@@ -504,7 +504,9 @@ When spawning agents to write code, this same process applies. Agents will:
 
 ## Stop-and-Ask Triggers
 
-**STOP and ask the user when:**
+**STOP and escalate when** (these are escalation points: a dispatched worker
+escalates to the orchestrator session; the orchestrator brings it to the user
+only when it cannot resolve it itself — ADR-0020):
 
 1. **Debugging Depth 2+**: If you've tried 2+ different approaches without success
 2. **Architectural Changes**: Before modifying shared infrastructure, patterns, or interfaces
@@ -524,7 +526,7 @@ When spawning agents to write code, this same process applies. Agents will:
 
 **Problem**: Going deeper into debugging without surfacing progress
 **Why it hurts**: Wasted time, context exhaustion, frustration
-**Solution**: After 2 attempts, stop and report findings. Ask for guidance.
+**Solution**: After 2 attempts, stop and report findings. Escalate for guidance (worker → orchestrator → user).
 
 ### Late Escalation
 

@@ -1,6 +1,7 @@
 # Timers never destroy work
 
 **Status:** Accepted — implemented (process-kill-timeout removal)
+**Amended by:** [ADR-0020](0020-the-operator-is-the-orchestrator-session.md) — "operator" means the orchestrator session; a human is escalated to only for product/scope forks.
 **Driven by:** operator-reported work and telemetry loss from timer-driven
 kills; the long tail of patches trying to make time-based reaping safe
 (#215, #265, #314, #326, #340, #384, #543, #544, #545, #756, #918, #976,

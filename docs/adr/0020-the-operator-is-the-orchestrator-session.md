@@ -18,7 +18,11 @@ cw is built to drive software through AI. Nothing in the pipeline may require
 a human to *run* a command, edit a file, open a PR, merge, requeue, reap,
 close a session, reset a branch, or arm a flag that an AI session can run.
 
-A human is escalated to for exactly two things:
+Escalation runs worker → orchestrator → human. The CLAUDE.md stop-and-ask
+triggers are escalation points on that chain: a worker escalates to the
+orchestrator, and the orchestrator brings a trigger to the human only when it
+cannot resolve it itself. Beyond those, a human is escalated to for exactly
+two things:
 
 1. **Genuine product or scope forks** — a question the ticket's sources of
    truth cannot answer (intent, public-contract shape, what the product

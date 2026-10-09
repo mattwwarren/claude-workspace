@@ -6,8 +6,10 @@ an auto-actor by surprise.
 
 The one property that makes the whole thing safe: **merged ≠ armed.** Every
 behavioural change lands behind a default-off flag, so phases can merge and a
-release can ship "dark." Turning it on is a separate, permission-gated operator
-action decoupled from the merge.
+release can ship "dark." Turning it on is a separate, evidence-gated operator
+action decoupled from the merge. Per ADR-0020 the operator is the orchestrator
+session: it arms the flag itself, after collecting the evidence below, and does
+not hand a command to a human.
 
 This is the pattern RFC 0009 (gate recipes) shipped under as v1.18.0, and the
 pattern RFC 0010 (native review-monitor) follows. The RFC 0010 sprint is the
@@ -44,9 +46,11 @@ The flag convention (mirror it for every new auto-actor):
   ticket's size alone must never page the operator, who sets the plan before a
   ticket enters the pipeline. Its predicates
   (`cw.reconcile.gate_predicates`) still keep every forbidden-area touch,
-  operator `scope_hint: large` and degraded review in front of a person.
-  Arming any other auto-actor by default needs the same explicit operator
-  decision.
+  operator `scope_hint: large` and degraded review in front of the
+  orchestrator for adjudication.
+  Changing any other auto-actor's *shipped default* to armed needs the same
+  explicit, recorded decision — that is a product decision, not a recovery
+  step (arming a flag in a config file is the orchestrator's call; see below).
 - A **per-lane** `dict[str,bool] | None` map on `LaneConfig` (+ a `TicketTask`
   override) resolved most-specific-wins (ticket → lane → hardcoded-off floor),
   so risk is armed per lane, never globally by accident. See
@@ -70,14 +74,15 @@ RFC 0010 example:
   parallel once P1 is in.
 - **Wave 3 — P4 (#1099):** needs P1+P2+P3. This is where an unresolved RFC
   **Open Question** is confirmed with the operator *before merge* (RFC 0010's
-  OQ2, `auto_fix_ci` semantics).
+  OQ2, `auto_fix_ci` semantics) — a product decision, so it goes to the human
+  as a batched question (ADR-0020).
 - **Wave 4 — P5 (#1100):** docs/tests-only tail (e.g. porting operational
   lessons). Lands last, lowest risk.
 
 Then cut the release (next minor — RFC 0009 was v1.18.0, RFC 0010 targets
 v1.19.0) bundling P1..Pn.
 
-### 4. Activation — a separate, classifier-gated operator action
+### 4. Activation — a separate, evidence-gated operator action
 
 The release ships **dark**. Activation is a deliberate later step, never part
 of the release:
@@ -86,13 +91,15 @@ of the release:
    `review_recipes: {…}`).
 2. Flip the master switch on in `~/.claude-workspace/orchestrator.yaml`.
 
-The master-switch flip **arms a production auto-actor**, so it is
-classifier-gated to the operator — handed over as a `! <command>`, never
-written by an agent. This is the same posture RFC 0009 used: shipped v1.18.0
-dark, then dogfooded on the `dogfood` lane by opting the lane in and flipping
-`gate_recipes_enabled` via an operator `!` command; disarmed back to the
-shipped default afterwards. (Gate recipes have since been armed by default;
-see the exception above.)
+The master-switch flip **arms a production auto-actor**, so the orchestrator
+session arms it only with evidence in hand: the flag's measured shadow/dry-run
+events (or the dogfood lane's clean run), and a rollback it has confirmed is
+one flag flip. There is no human `! <command>` handoff (ADR-0020 amends the
+earlier rule that arming was a human-only command, never written by an agent).
+This is the same posture RFC 0009 used: shipped v1.18.0 dark, then dogfooded on
+the `dogfood` lane by opting the lane in and flipping `gate_recipes_enabled`;
+disarmed back to the shipped default afterwards. (Gate recipes have since been
+armed by default; see the exception above.)
 
 Rollback is symmetric and instant: flip the lane map or the master switch back
 to `False` — it takes effect on the next reconcile tick, no redeploy.
@@ -108,9 +115,9 @@ default, the other is the exception.
   primary mechanism.** It fires automatically on every push to `main`, reads
   the HEAD commit's subject, and — if the subject matches the commit-subject
   contract below — tags the release and cuts the matching GitHub Release with
-  CHANGELOG-derived notes. No manual step is needed for the common case.
-- **`scripts/release.sh <version>` is the manual exception path.** Use it
-  when the automated job needs a human-driven or out-of-band cut, or as a
+  CHANGELOG-derived notes. No extra step is needed for the common case.
+- **`scripts/release.sh <version>` is the exception path.** The orchestrator
+  runs it when the automated job needs an out-of-band cut, or as a
   stopgap while `release-tag.yml` itself is being diagnosed. The version bump
   in `pyproject.toml` precedes it (`cw.__version__` is resolved dynamically
   from the installed distribution — there is no separate version literal to
@@ -181,12 +188,12 @@ own cadence or bundles opportunistically into whatever release is open:
    incremental merges are inert — merged ≠ armed.
 3. Merge waves ordered by dependency, parallel where independent.
 4. One bundled release at phase-set completion, shipped dark.
-5. **Activation decoupled from the merge** and gated to a human as the sole
-   arming authority.
+5. **Activation decoupled from the merge** and gated on evidence, with the
+   operating session (the orchestrator) as the arming authority (ADR-0020).
 
 Stages 2 and 5 are the load-bearing ones: they are what let an autonomous
-pipeline merge and release without a human in the loop, while keeping the human
-as the only one who can turn a behaviour *on*.
+pipeline merge and release without a human in the loop, while keeping arming a
+deliberate, evidence-backed act separate from merging.
 
 ## Related
 
