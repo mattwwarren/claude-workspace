@@ -93,8 +93,9 @@ what plays when; the agents and pipelines do the playing.
 
 7. **Act, then report.** When an agent result, a watch event, or a queue check
    tells you something new, decide and execute — including side-effectful
-   actions (closing a ticket, stopping a session, dispatching a wave) — once
-   the evidence the relevant skill names holds. Report what you did and why
+   actions (closing a ticket, stopping a session, dispatching a wave) —
+   after the evidence the runbook names for that action (see *Decision
+   ownership* below). Act, then report: say what you did and why
    afterwards; there is no pre-action approval gate. Only the escalations
    under *The human decides* below pause for a person.
 
@@ -114,18 +115,33 @@ table it points at — the line between what you simply do and what you ask.
 - Filing a new ticket for scope discovered during hardening.
 - Arming, stopping, and de-duplicating the attention watch (Phase 4).
 - Parking a gated ticket and pulling it from the queue (rule 6).
-- Force-pushing a cw-owned branch or other history rewrites after collecting
-  the evidence (verified rebase, `git diff origin/main..HEAD` as the runbook
-  names), and every recovery command (`cw doctor --reap`, `cw spawn close
-  --confirmed-dead`, `cw dev-queue requeue/approve/unblock/cancel`, `cw lane
-  resume`).
+- Force-pushing a cw-owned branch (one the pipeline created for the ticket;
+  never a shared branch, never from a headless worker) with
+  `--force-with-lease`, only after a clean rebase onto `origin/main` and
+  `git cherry -v HEAD origin/<branch>` showing no `+` line (no remote-only
+  work missing from the rebased branch).
+- Recovery commands, each only after the evidence named next to it:
+  `cw spawn close --confirmed-dead <id>` (flag before the id) only once the
+  session is verified dead — absent from `~/.claude/daemon/roster.json`,
+  transcript flat, no live process ("work is done" is not death evidence);
+  `cw doctor --reap` after the same liveness evidence (for a routed-result
+  session in a non-TTY session, `--yes --routed-session-id <id>`);
+  `cw dev-queue cancel` only after verifying the ticket is satisfied by a
+  merged PR/commit or is a verified duplicate/obsolete (cite it); discarding
+  uncommitted/unpushed worktree changes only after `git -C <worktree> log
+  origin/<branch>..HEAD` and `git -C <worktree> diff` show duplicates of
+  landed work or junk (otherwise commit and push); and
+  `cw dev-queue requeue/approve/unblock`, `cw lane resume` once the blocker
+  is read and resolved.
 - Resolving missing-data items an AI session can resolve (fetch the artifact,
   read the log, file the follow-up ticket).
 - Stopping a wedged session per the peek-stop ladder (`/cw-queue-peek`'s
   explicit STOP rows).
 - Approving a plan or review gate whose plan stays within the ticket's agreed
   scope (`cw dev-queue approve`). A ticket's size is not a scope question:
-  the gate recipes already release most such parks without a page.
+  the gate recipes already release most such parks without a page. This does
+  not cover the human-kept gates listed below (`AWAITING_OPERATOR_SIGNOFF`,
+  `finalize_gate_held`, `scope_hint: large`) — notify the human instead.
 - Adjudicating codex MUST_FIX findings against the ticket's sources of truth
   (`/cw-followup`): settle an out-of-scope, already-decided or
   non-reproducible finding with `cw review settle`, citing the source, and
@@ -143,8 +159,14 @@ table it points at — the line between what you simply do and what you ask.
 - Acceptance criteria that ask for data the system does not have and no
   session can obtain, where the answer changes product intent.
 - Changes to sprint direction or composition.
-- Gates the human opted into: `signoff: operator` lanes/tickets and finalize
-  force-holds (`hold_finalize`, `finalize_gate: manual`).
+- Gates the human opted into: `signoff: operator` lanes/tickets
+  (`AWAITING_OPERATOR_SIGNOFF`), finalize force-holds (`hold_finalize`,
+  `finalize_gate: manual`, `finalize_gate_held`), and `scope_hint: large`
+  (the operator's own "gate this ticket" flag). You never approve or release
+  these; notify the human. A large-by-size gate *without* `scope_hint: large`
+  is not one of these — you adjudicate it.
+- Force-push or history-rewriting actions on a shared branch (a cw-owned
+  branch is yours, above).
 
 A useful tell: if you catch yourself ending an orchestrator turn with "want
 me to dispatch?", that IS the signal — dispatch.
@@ -364,9 +386,12 @@ be read in light of that arithmetic — it is not evidence of "N real failures."
   genuinely cannot be resolved, park it, write the gate down, and escalate
   only if it is a product/scope fork (rule 6).
 - **Stalled / retry-cap / reap_proposed** → a wedge. Stop the session
-  (`cw spawn close`), then decide remove-vs-requeue. (`cw doctor --reap` clears
-  dead sessions but will *not* auto-revert a BLOCKED_ON_USER task — for those,
-  run the close+remove yourself.)
+  (`cw spawn close --confirmed-dead <id>` only after the death checks: absent
+  from the roster, flat transcript, no live process; see `/cw-queue-peek` for a
+  stalled-but-live session), then decide remove-vs-requeue. (`cw doctor --reap`
+  clears dead sessions, after the same liveness evidence, but will *not*
+  auto-revert a BLOCKED_ON_USER task — for those, run the close+remove
+  yourself.)
 - **Shipped / merge-gate** → `/cw-followup`.
 
 Use `/cw-followup`, `/cw-validate-result`, and `/cw-queue-peek` as the actual

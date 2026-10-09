@@ -16,11 +16,13 @@ A headless `/auto-dev` run ends in one of several sentinel shapes. Each shape ne
 | `merge_gate_blocked` | Rebase the feature branch onto current `origin/main`, force-push, open PR. |
 | `ambiguities_pending_resolution` / `premises_pending_verification` | Answer from the ticket's sources of truth, render a Decisions section, append to the ticket body, re-dispatch. |
 | `blocked` (real) | Read `blocker.reason` + `details`; triage per `recovery_hint` (re-dispatch, fix, close), escalating only a product/scope fork. |
-| `plan_pending_approval` / `review_pending_approval` | Usually released by a gate recipe. If still parked, approve when within the ticket's agreed scope; escalate only scope growth that is a genuine product/scope fork. |
+| `plan_pending_approval` / `review_pending_approval` | Usually released by a gate recipe. If still parked, approve when within the ticket's agreed scope (never a human-kept gate: `AWAITING_OPERATOR_SIGNOFF`, `finalize_gate_held`, `scope_hint: large` — notify the human); escalate only scope growth that is a genuine product/scope fork. |
 | `scope_exceeded` / `forbidden_area` | Adjudicate against the ticket's sources of truth; escalate only a genuine product/scope fork. |
 | `BlockedResult` (parser couldn't validate) | Diagnose — show the validation error, transcript tail, and the raw payload. |
 
 This skill collapses the seven branches into one prompt; the orchestrator runs each action, and only genuine product/scope forks go to the human (ADR-0020).
+
+**Human-kept gates are the exception to every "approve it yourself" step below.** A row with status `AWAITING_OPERATOR_SIGNOFF` (`signoff: operator`), `finalize_gate_held` (a finalize force-hold: `hold_finalize` / `finalize_gate: manual`), or `scope_hint: large` is a gate the human opted into. Do not approve, release, or requeue it; notify the human instead. A large-by-size gate *without* `scope_hint: large` is not one of these; adjudicate it.
 
 ## Inputs
 
@@ -32,7 +34,7 @@ Accepts a single argument identifying the session:
 
 Optional flags from the user:
 - `--dry-run` — describe the action; do not execute side effects.
-- `--auto-accept-defaults` — for ambiguities / premises, take every plan default and append a Decisions section without confirmation.
+- `--auto-accept-defaults` — for ambiguities / premises, take every plan default and append a Decisions section without confirmation. Use it only when every ambiguity's default is backed by the ticket's sources of truth (ticket body, approved plan-of-record, pre-flight resolutions, recorded decisions, linked RFCs and dependency tickets), and cite the source for each; otherwise answer each one yourself or batch the genuine forks to the human.
 
 ## How it works
 
@@ -92,7 +94,7 @@ Draft a close comment in the form:
 Closed as no_op by /auto-dev (session <ID>) — already satisfied by <PR URL>.
 ```
 
-Close it with that citation (no confirmation needed once the satisfying PR is verified merged):
+Close it with that citation (no confirmation needed once the satisfying PR is verified merged and the ticket's acceptance criteria are verified satisfied by it; a ticket closed as duplicate/obsolete instead cites the superseding ticket):
 
 ```bash
 gh issue close <TICKET> --repo mattwwarren/claude-workspace \
@@ -103,7 +105,7 @@ gh issue close <TICKET> --repo mattwwarren/claude-workspace \
 
 The branch was correctly built but `local main` diverged from `origin/main` before merge gate ran. Read `prior_pr_warnings` to see which PRs need to land first.
 
-Default action (when prior PRs have since merged): rebase + force-push + open PR. The branch is cw-owned, so force-push after the evidence holds (prior PRs merged, rebase onto `origin/main` clean, `fork_point_sha` verified); no confirmation step.
+Default action (when prior PRs have since merged): rebase + force-push + open PR. Force-push applies only to a cw-owned branch (one the pipeline created for the ticket), only run by the orchestrator (never a headless worker), always with `--force-with-lease`, and only after the evidence holds: prior PRs merged, rebase onto `origin/main` clean, `fork_point_sha` verified, and `git -C "$WORKTREE" log "origin/$BRANCH" ^HEAD` showing no remote-only commits (run it after the rebase and before the push; the only entries allowed are the pre-rebase copies of your own commits, so confirm with `git -C "$WORKTREE" cherry -v HEAD "origin/$BRANCH"` that no `+` line carries work absent from the rebased branch). No confirmation step once that holds. A shared branch's history rewrite stays with the human.
 
 ```bash
 WORKTREE=$(jq -r '.session.worktree_path' <<<"$RESULT")
@@ -150,7 +152,7 @@ Render a Decisions section and append it to the ticket body. Pipe the parser out
 ```bash
 echo "$RESULT" | uv run --project "$(git rev-parse --show-toplevel)" \
   python .claude/skills/cw-followup/scripts/render_decisions.py \
-  --auto-accept-defaults  # only when the plan defaults are to be taken as-is
+  --auto-accept-defaults  # only when every ambiguity's default is backed by the ticket's sources of truth (cite them)
 ```
 
 Without `--auto-accept-defaults`, the script leaves each decision as a fill-in stub. Answer each ambiguity / premise yourself from the ticket's sources of truth (ticket body, approved plan-of-record, pre-flight resolutions, recorded decisions, linked RFCs and dependency tickets; verify premises against the code), then substitute the answers into the stub before appending. Only a genuine product/scope fork (a question those sources cannot answer) goes to the human, batched into one `AskUserQuestion` with a recommendation for each.
@@ -202,11 +204,11 @@ To settle: save the payload with the **Write tool** to a scratch file, run `cw r
 
 When every finding is settled or fixed and the branch should ship as-is (issue #2205), the path is `cw dev-queue approve "$TICKET" -c <CLIENT> --override-must-fix --reason "<the same citations>"` followed by `cw dev-queue requeue "$TICKET" -c <CLIENT> --stage finalize`. A bare `requeue --stage finalize` is not enough: FINALIZE's MUST_FIX Override Verification step re-reads `.claude/review-verdict.json` and parks the row again. The override is bound to the verdict's reviewed SHA and exact MUST_FIX finding set, so a new review round or a new commit voids it. Use it only when every remaining MUST_FIX finding is in one of the two settle buckets above. The reason is recorded on the row and in the audit event, and it is rendered into the PR body's `## Operator override` section.
 
-When `blocker.reason` is anything else: read the Phase E retry fields the Blocker now carries (issue #174) — `retry_eligible`, `retry_delay_seconds`, and `recovery_hint`. When `retry_eligible` is true, re-dispatch after `retry_delay_seconds` (honouring `recovery_hint`); when it is false or absent, triage per `recovery_hint` yourself (requeue, regress, fix, file the follow-up, or close). Escalate to the human only a genuine product/scope fork, surfacing the blocker verbatim.
+When `blocker.reason` is anything else: read the Phase E retry fields the Blocker now carries (issue #174) — `retry_eligible`, `retry_delay_seconds`, and `recovery_hint`. When `retry_eligible` is true, re-dispatch after `retry_delay_seconds` (honouring `recovery_hint`); when it is false or absent, triage per `recovery_hint` yourself (requeue, regress, fix, file the follow-up, or close — a close only when the ticket's acceptance criteria are verified satisfied, citing the merged PR/commit, or it is verified duplicate/obsolete, citing the superseding ticket). Escalate to the human only a genuine product/scope fork, surfacing the blocker verbatim.
 
 #### `plan_pending_approval`
 
-A Large plan (more than 10 files or 500 lines) parks here. Size alone is not a reason to involve a human. The `auto_adopt_clean_plan` gate recipe (on by default) releases the park on the next reconcile tick unless the plan touches a forbidden area, `scope_hint: large` is set, or the draft is unbound or was already approved once. If it is still parked and the row carries `scope_hint: large`, that is an opted-in gate (`signoff: operator` style): surface the plan to the human. Otherwise decide it yourself against the ticket's sources of truth:
+A Large plan (more than 10 files or 500 lines) parks here. Size alone is not a reason to involve a human. The `auto_adopt_clean_plan` gate recipe (on by default) releases the park on the next reconcile tick unless the plan touches a forbidden area, `scope_hint: large` is set, or the draft is unbound or was already approved once. If it is still parked and the row carries `scope_hint: large` (or is `AWAITING_OPERATOR_SIGNOFF` / `finalize_gate_held`), that is an opted-in gate (`signoff: operator` style): do not approve it; notify the human with the plan. Otherwise decide it yourself against the ticket's sources of truth:
 
 - **Plan stays within the ticket's agreed scope** (every file and behavior traces to the ticket, its pre-flight resolutions, or a recorded decision): approve it with `cw dev-queue approve "$TICKET" -c <CLIENT>`. Approval is the row path: it binds the draft's fingerprint, and the plan stage accepts it on re-dispatch. A prose comment such as "approved" is not evidence and the ticket would only re-park.
 - **Plan grows scope or touches a forbidden area**: adjudicate against the sources of truth first (trim, split into a follow-up ticket, or approve). Only if the growth is a genuine product/scope fork, put it to the human in one batched `AskUserQuestion` with your recommendation.
@@ -214,7 +216,7 @@ A Large plan (more than 10 files or 500 lines) parks here. Size alone is not a r
 
 #### `review_pending_approval`
 
-A Large review parks here after its fix loop. The `auto_approve_clean_review` gate recipe (on by default) releases it when health is PROCEED, no forbidden area was touched, and a reviewer ran, unless the row carries `scope_hint: large`. If it is still parked, read `health` and `review.*`. A row carrying `scope_hint: large` is an opted-in gate: surface it to the human with a recommendation. A degraded health or a forbidden-area touch you adjudicate yourself against the ticket's sources of truth, escalating only a genuine product/scope fork. Otherwise approve with `cw dev-queue approve "$TICKET" -c <CLIENT>`, or requeue the fix loop for an in-scope defect.
+A Large review parks here after its fix loop. The `auto_approve_clean_review` gate recipe (on by default) releases it when health is PROCEED, no forbidden area was touched, and a reviewer ran, unless the row carries `scope_hint: large`. If it is still parked, read `health` and `review.*`. A row carrying `scope_hint: large` (or `AWAITING_OPERATOR_SIGNOFF` / `finalize_gate_held`) is an opted-in gate: do not approve it; notify the human with a recommendation. A degraded health or a forbidden-area touch you adjudicate yourself against the ticket's sources of truth, escalating only a genuine product/scope fork. Otherwise approve with `cw dev-queue approve "$TICKET" -c <CLIENT>`, or requeue the fix loop for an in-scope defect.
 
 #### `scope_exceeded` / `forbidden_area`
 
@@ -252,7 +254,7 @@ Recipe (validated 4× in the 1.1 waves — #387, #552, #554, #558):
    for the pushed branch; `git log origin/main..origin/<branch> --oneline` for the
    commit stack; read the sentinel from the transcript for the review verdict +
    open SHOULD_FIX list.
-2. **Close the session** (`cw spawn close <short-id>`) and **sweep the queue**
+2. **Close the session**: if it is verified dead (absent from `~/.claude/daemon/roster.json`, transcript flat, no live process — "work is done" is not death evidence), `cw spawn close --confirmed-dead <short-id>` (flag before the id). A wedged session still `working` in the roster is live: the bare `cw spawn close <short-id>` is classifier-gated and needs the human to have allowlisted it (permission settings are the human's); if it is not allowlisted, surface the recommendation instead. Then **sweep the queue**
    (`cw dev-queue remove <ticket> -c <client> --all` — the task is stale however
    it was routed; the PR record becomes the source of truth).
 3. **Disposition the sentinel** as if it had routed normally:

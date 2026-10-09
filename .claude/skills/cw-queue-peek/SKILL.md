@@ -45,8 +45,9 @@ locates each RUNNING task's claude transcript jsonl, parses last-emitted sentine
 + last activity timestamps, and calls `gh pr view` to resolve PR state.
 
 The `cw queue peek` command never stops sessions itself — it only reports. The
-orchestrator runs `cw spawn close <session_id>` itself once the report's STOP
-evidence holds (see "Acting on recommendations").
+orchestrator closes the session itself once the report's STOP evidence holds
+and the death checks pass (see "Acting on recommendations" for which
+`cw spawn close` form).
 
 ## Execution
 
@@ -189,8 +190,8 @@ whose evidence holds (the ladder verdict survived the rule 10 liveness gate, or
 the PEEK follow-up confirmed the stall), run:
 
 ```bash
-# Stop the session
-cw spawn close <session_id>
+# Stop the session — ONLY after the death checks below (flag BEFORE the id)
+cw spawn close --confirmed-dead <session_id>
 
 # Remove the queue task if no retry is wanted
 cw dev-queue remove <ticket_id> -c <client>
@@ -198,11 +199,28 @@ cw dev-queue remove <ticket_id> -c <client>
 # OR leave the queue task so a future tick can re-dispatch
 ```
 
+The footer's bare `cw spawn close <session_id>` is deliberately
+classifier-gated (`src/cw/cli/spawn.py`); `--confirmed-dead` is the form an
+allowlist rule like `Bash(cw spawn close --confirmed-dead*)` matches, and it
+asserts the session is already terminal. Use it only after verifying death:
+
+- the session is absent from `~/.claude/daemon/roster.json`,
+- its transcript is flat (no new records), and
+- no live process remains.
+
+"The work is done" (a merged PR, a clean sentinel) is **not** death evidence.
+
+For a **stalled-but-live** STOP row (still in the roster, a process alive, e.g.
+the stuck post-PR-merge pattern), run the bare `cw spawn close <session_id>`
+yourself. That requires the human to have allowlisted it (permission settings
+are the human's, not yours to change); if it is not allowlisted, surface the
+STOP recommendation with the evidence instead of working around the gate.
+
 Decide remove-vs-leave from the ticket's state: leave the task when the stall
 looks transient (a future tick re-dispatches it); remove it when the ticket is
 obsolete or a duplicate. Report what was closed afterwards.
 
-Always `cw spawn close` **before** `cw dev-queue remove` — see #317 for why
+Always close the session **before** `cw dev-queue remove` — see #317 for why
 (removing first races against the dispatcher loop, which can spawn att+1
 between the remove and the close).
 

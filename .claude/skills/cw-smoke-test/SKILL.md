@@ -82,7 +82,7 @@ Until that returns a row, or a reasonable timeout (default 30 minutes — match 
 
 While waiting, surface progress sparingly. Print one line on `session.spawned` (with the worker id + worktree path), then go silent until completion. The user can `cw event tail` themselves if they want intermediate noise.
 
-If completion never arrives within the timeout, surface the worker id + `cw status` snapshot and stop. The orchestrator (the session running the smoke test) decides whether to retry: triage per the blocker/timeout evidence (`cw dev-queue requeue`, or `cw spawn close` first if the worker is dead) rather than blindly re-running.
+If completion never arrives within the timeout, surface the worker id + `cw status` snapshot and stop. The orchestrator (the session running the smoke test) decides whether to retry: triage per the blocker/timeout evidence (`cw dev-queue requeue`, or `cw spawn close --confirmed-dead <id>` first, only once the worker is verified dead: absent from the daemon roster, transcript flat, no live process) rather than blindly re-running.
 
 ### Step 4 — validate
 

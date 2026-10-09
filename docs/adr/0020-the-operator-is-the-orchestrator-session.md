@@ -58,7 +58,9 @@ two things:
      origin/main..HEAD` shows only release churn.
    - Force-push of a **cw-owned** branch (one the pipeline created for the
      ticket): `--force-with-lease`, after a clean rebase onto `origin/main`
-     and `git log origin/<branch> ^HEAD` showing no remote-only commits.
+     and `git cherry -v HEAD origin/<branch>` showing no `+` line (every
+     remote commit has an equivalent patch in the rebased branch; a plain
+     `git log origin/<branch> ^HEAD` always lists the pre-rebase commits).
      History rewrites on shared branches stay escalated to the human.
    - `cw spawn close --confirmed-dead <id>` / `cw doctor --reap`: the
      session is absent from the daemon roster, its transcript is flat, and no

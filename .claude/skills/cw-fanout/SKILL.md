@@ -233,8 +233,20 @@ If `GATE` is non-gate / unknown, or `session.timed_out` fires without a
 recognized gate disposition: triage it yourself right away. Read the blocker
 and the session's transcript tail / `branch_state`, then act per
 `/cw-followup` (requeue, approve, regress, `cw spawn close`, file the
-follow-up, or close the ticket). Escalate to the human only a genuine
-product/scope fork. Never re-dispatch without first reading the blocker.
+follow-up, or close the ticket), each destructive act only after the evidence
+`/cw-followup` and `/cw-queue-peek` name for it (`cw spawn close
+--confirmed-dead <id>` only for a verified-dead session; a ticket close only
+with the satisfying merged PR/commit or the superseding ticket cited).
+Escalate to the human only a genuine product/scope fork. Never re-dispatch
+without first reading the blocker.
+
+**Human-kept gates are never closed inline.** A row with status
+`AWAITING_OPERATOR_SIGNOFF`, `finalize_gate_held` (a finalize force-hold:
+`hold_finalize` / `finalize_gate: manual`), or `scope_hint: large` is a gate
+the human opted into. Do not approve, release, or requeue it, in the recognized
+gate loop above or in this fallback — notify the human and keep the wave
+going. (A large-by-size gate *without* `scope_hint: large` is not one of
+these; adjudicate it.)
 
 When the event is `session.timed_out`, check the `branch_state` field:
 `"absent_no_merged_pr"` means the worker died before push (an anomaly worth
@@ -272,8 +284,10 @@ cw queue peek --client <CLIENT>
 ```
 
 Follow `/cw-queue-peek`: act on STOP / STOP-OR-PEEK rows (stuck post-PR-merge,
-retry loop, approaching the 60-min ceiling) per its ladder. Always
-`cw spawn close <session_id>` **before** `cw dev-queue remove`.
+retry loop, approaching the 60-min ceiling) per its ladder, using the close
+form and death checks it names (`cw spawn close --confirmed-dead <session_id>`
+only for a verified-dead session). Always close the session **before**
+`cw dev-queue remove`.
 
 Surface progress sparingly — one line when the wave shrinks or a ticket flips
 to needs-attention; otherwise stay quiet. `cw watch` shows the live board.
@@ -313,7 +327,10 @@ never fires.
   recovers a falsely-parked row.
 - **Idle time ≥ 45 min flat** (or two consecutive 20-min stale checks with
   no new records and no queue movement) → dead regardless of a `running`
-  row. Adopt-check, then `cw spawn close <sid> --confirmed-dead` and
+  row. Adopt-check, then verify death (absent from
+  `~/.claude/daemon/roster.json`, transcript flat, no live process — "work is
+  done" is not death evidence), then
+  `cw spawn close --confirmed-dead <sid>` (flag before the id) and
   requeue/re-add.
 - In between → arm a bounded one-shot deadline check (resume-or-dead),
   don't guess.
@@ -356,7 +373,12 @@ fanout: client=claude-workspace wave=[204,205,206] → all shipped; 0 need atten
 ## Failure modes
 
 - **Pre-flight drops the whole wave** — print the failing rows; do not enqueue.
-  Re-run with `--skip-preflight` when the failing checks are advisory-only.
+  Re-run with `--skip-preflight` only when every failing check is one whose
+  `detail` names a condition `cw doctor` reports as a known-benign warning
+  (e.g. stale linkage drift on `cw_backend_healthy`); never when a failing
+  check is `ticket_open`, `no_open_pr_for_ticket`, `not_already_queued`,
+  `agents_present`, `client_repo_resolved`, or `repo_resolved`. State the
+  checks and the benign evidence in the warning banner.
 - **Dispatch loop not running** — the watchdog only ticks while `cw dev-queue
   run` is alive; if it was killed, the wave stalls silently. Re-launch
   it (Step 3) and note the gap.
