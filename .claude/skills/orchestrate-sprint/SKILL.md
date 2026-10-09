@@ -9,7 +9,7 @@ The conductor. You are running a sprint as an **orchestrator session**: a body
 of work comes in (a backlog, a queue, a "mountain"), more arrives as you
 validate what's going out, and your job is to keep it all flowing — hardening
 tickets so they plan first-try, dispatching them to headless `/auto-dev` via
-cw, watching the queue, triaging what needs a human, and handing off cleanly
+cw, watching the queue, triaging what the pipeline parks (escalating to a human only genuine product/scope forks), and handing off cleanly
 before you run out of room.
 
 This skill adds no new parsing or validation logic. It composes pieces that
@@ -72,31 +72,35 @@ what plays when; the agents and pipelines do the playing.
    wall-clock timeout — a completely different fix. The code-reasoning was
    plausible and wrong.) Logs are evidence; fluent prose is not.
 
-5. **Batch decisions; don't dribble them.** When a ticket needs the operator,
+5. **Batch decisions; don't dribble them.** When a ticket needs a human decision,
    resolve every technical/convention question yourself (you're ≥70% sure and
    the alternative is just wrong) and surface only the genuine product/scope
    forks — all of them at once, each with a recommendation and a one-line
    trade-off. One good `AskUserQuestion` beats five round-trips. This is what
    `/harden-ticket` does per ticket; do it for the sprint too.
 
-6. **Park the un-unblockable; don't re-dispatch it.** Some tickets cannot be
-   moved by an agent — they're gated on an external HAR capture, a credential,
-   a product decision, a dependency PR. The autonomous loop will faithfully
-   re-attempt such a ticket *forever*, dying the same way each time and holding
-   a lane slot while it does (this is the classic queue wedge). When you spot
-   one, harden what *is* resolvable, write the gate down explicitly on the
-   ticket, pull it out of the queue, and tell the operator what's needed to
-   un-gate it. Re-dispatch is not a strategy for a human-gated ticket.
+6. **Park the un-unblockable; don't blindly re-dispatch it.** Some tickets
+   cannot be moved by a worker — they're gated on an external HAR capture, a
+   credential, a product decision, a dependency PR. The autonomous loop will
+   faithfully re-attempt such a ticket *forever*, dying the same way each time
+   and holding a lane slot while it does (this is the classic queue wedge).
+   When you spot one, harden what *is* resolvable, write the gate down
+   explicitly on the ticket, pull it out of the queue, and un-gate it
+   yourself where an AI session can (merge the dependency PR, capture the
+   artifact, supply the credential from the environment). Only a genuine
+   product/scope fork goes to the human. Blind re-dispatch is not a strategy
+   for a gated ticket.
 
-7. **Surface observations before acting on them.** When an agent result, a
-   watch event, or a queue check tells you something new, say what you learned
-   and what you propose *before* you execute — especially for anything
-   side-effectful (closing a ticket, stopping a session, dispatching a wave).
-   The operator needs to see the decision point, not just the aftermath.
+7. **Act, then report.** When an agent result, a watch event, or a queue check
+   tells you something new, decide and execute — including side-effectful
+   actions (closing a ticket, stopping a session, dispatching a wave) — once
+   the evidence the relevant skill names holds. Report what you did and why
+   afterwards; there is no pre-action approval gate. Only the escalations
+   under *The human decides* below pause for a person.
 
 ## Decision ownership
 
-Rule 5 says batch decisions to the operator; this section is the reference
+Rule 5 says batch decisions to the human; this section is the reference
 table it points at — the line between what you simply do and what you ask.
 
 **The orchestrator decides and acts, without asking:**
@@ -109,7 +113,14 @@ table it points at — the line between what you simply do and what you ask.
   cross-links, and adding filed tickets to the sprint page.
 - Filing a new ticket for scope discovered during hardening.
 - Arming, stopping, and de-duplicating the attention watch (Phase 4).
-- Parking a human-gated ticket and pulling it from the queue (rule 6).
+- Parking a gated ticket and pulling it from the queue (rule 6).
+- Force-pushing a cw-owned branch or other history rewrites after collecting
+  the evidence (verified rebase, `git diff origin/main..HEAD` as the runbook
+  names), and every recovery command (`cw doctor --reap`, `cw spawn close
+  --confirmed-dead`, `cw dev-queue requeue/approve/unblock/cancel`, `cw lane
+  resume`).
+- Resolving missing-data items an AI session can resolve (fetch the artifact,
+  read the log, file the follow-up ticket).
 - Stopping a wedged session per the peek-stop ladder (`/cw-queue-peek`'s
   explicit STOP rows).
 - Approving a plan or review gate whose plan stays within the ticket's agreed
@@ -120,21 +131,20 @@ table it points at — the line between what you simply do and what you ask.
   non-reproducible finding with `cw review settle`, citing the source, and
   requeue a real in-scope defect into the fix loop.
 
-**The operator decides:**
+**The human decides (product/scope forks and opted-in gates only):**
 
 - Genuine product/scope forks where either answer is defensible
   (`/harden-ticket`'s escalation criteria), including a plan or review
   finding that would grow scope beyond the ticket or needs behavior the
   sources of truth do not decide.
-- Anything touching a forbidden area (migrations, auth/security core,
-  CI/CD pipeline logic, shared base classes).
-- Acceptance criteria that ask for data the system does not have.
-- Force-push or history-rewriting actions on shared branches (`cw-followup:106`
-  — "Confirm with the user before force-push" — the existing precedent for
-  this bucket).
-- Whether to fold a bug discovered during hardening into an in-flight ticket
-  or spin a new one.
+- A forbidden-area touch (migrations, auth/security core, CI/CD pipeline
+  logic, shared base classes) only when it is itself such a fork; otherwise
+  adjudicate it against the ticket's sources of truth.
+- Acceptance criteria that ask for data the system does not have and no
+  session can obtain, where the answer changes product intent.
 - Changes to sprint direction or composition.
+- Gates the human opted into: `signoff: operator` lanes/tickets and finalize
+  force-holds (`hold_finalize`, `finalize_gate: manual`).
 
 A useful tell: if you catch yourself ending an orchestrator turn with "want
 me to dispatch?", that IS the signal — dispatch.
@@ -147,7 +157,7 @@ hardening the next batch while a wave runs. But this is the spine.
 
 ### Phase 0 — Set the frame (once, at kickoff)
 
-State the discipline you're operating under so the operator knows what to
+State the discipline you're operating under so the human knows what to
 expect: you'll delegate to sonnet, keep implementation in auto-dev, surface
 decisions in batches, and hand off before you fill. Confirm the client and the
 source of the work-list (a Linear project, a label, an explicit ticket list).
@@ -170,8 +180,8 @@ Answer the one comment; ship on round 2.
 Reserve `/harden-ticket` for the targeted cases its skill names: multi-task
 plan docs whose literal code the worker transcribes verbatim, tickets
 defining public contracts (new event types, schemas, `--json` output),
-tickets already bouncing, and waves the operator explicitly wants to run with
-zero mid-wave interrupts. Crucially: **if the ticket already has fresh
+tickets already bouncing, and waves that must run with zero mid-wave
+interrupts. Crucially: **if the ticket already has fresh
 auto-dev plan comments, read them instead of re-sweeping** (rule 3). Harden
 by reconciling what's already known + resolving the forks, not by re-running
 the whole sweep.
@@ -224,7 +234,7 @@ turns an hour.
 
 If the harness kills the backgrounded process outright instead of the
 backstop firing on its own, the completion notification still fires (per
-direct operator observation), so the orchestrator still re-arms and the
+direct observation), so the orchestrator still re-arms and the
 resume stamp keeps it lossless either way. This is documented behavior, not
 a tested one — this ticket's suite doesn't exercise an actual harness kill.
 
@@ -259,11 +269,11 @@ lanes use their own stamp files and are left alone. (A single `pgrep`
 pattern cannot tell "no lane" apart from "any lane", so read the argument
 list instead.)
 
-**Triage the event, then re-arm — and re-arm *before* asking the operator any
+**Triage the event, then re-arm — and re-arm *before* asking the human any
 blocking question.** The order is: event fires → watch exits → triage →
 re-arm → *then*, if still needed, ask. Re-arming closes the window; asking
 first does not. If you ask a blocking question before re-arming, any event
-that lands while you wait for the operator queues up behind the question —
+that lands while you wait for the human queues up behind the question —
 not lost (the resume stamp already advances past it, so the next arm still
 picks it up) but arriving late, which reads exactly like a missed page if
 you're mid-conversation and not polling. (Observed directly on this ticket's
@@ -279,7 +289,7 @@ It watches the `session.needs_attention` / `operator.escalation` /
 (`stale_30m`/`stale_45m` only) event bus for your client, deduped by a
 per-client resume stamp so a parked session doesn't spam and a re-arm after
 triage doesn't replay what you already saw. Events arrive to *you*; you
-triage; you push the operator only what changes what they'd do next. Use
+triage; you push the human only what a product/scope fork or opted-in gate requires of them. Use
 `/cw-queue-peek` for the WAIT/PEEK/STOP verdict on any session running long.
 **Silence means healthy only within the `--max-idle-seconds` backstop
 window — and only once you've confirmed exactly one watch is armed for
@@ -301,7 +311,7 @@ first liveness-sweep tick runs at all), during which the session is
 indistinguishable from a healthy one that is simply busy.
 
 So still run `cw queue peek --client <client>` at each natural checkpoint —
-after a gate, after a merge, before you tell the operator things are fine —
+after a gate, after a merge, before you report things are fine —
 as a **confirmation** step rather than the only line of defense. It computes
 `idle_m` (minutes since the session's last transcript *record*) alongside
 `age_m`, and `idle_m ≈ age_m` is the signature of a worker that never did
@@ -327,7 +337,7 @@ plus any true retries. A `failed`/`abandoned` result sitting at the cap should
 be read in light of that arithmetic — it is not evidence of "N real failures."
 
 - **Blocked on user / ambiguities / plan-approval** → resolve the technical
-  parts, batch the real forks to the operator (rule 5). Often `/harden-ticket`
+  parts, batch the real forks to the human (rule 5). Often `/harden-ticket`
   reactively, then re-dispatch. A plan or review approval park whose plan
   stays within the ticket's scope is yours to `cw dev-queue approve` (and
   usually a gate recipe already released it); codex MUST_FIX findings are
@@ -349,12 +359,14 @@ be read in light of that arithmetic — it is not evidence of "N real failures."
   `plan_pending_approval` / `review_pending_approval` park, `cw dev-queue
   approve` is itself the delta: it records the approval on the queue row,
   which is the evidence the plan stage reads. A prose approval comment is not.
-- **Premise-pending-verification on an external unknown** → it's human-gated.
-  Park it, write the gate down, tell the operator what un-gates it (rule 6).
+- **Premise-pending-verification on an external unknown** → verify the
+  premise yourself (pull the log / artifact / dependency state). If it
+  genuinely cannot be resolved, park it, write the gate down, and escalate
+  only if it is a product/scope fork (rule 6).
 - **Stalled / retry-cap / reap_proposed** → a wedge. Stop the session
   (`cw spawn close`), then decide remove-vs-requeue. (`cw doctor --reap` clears
-  dead sessions but will *not* auto-revert a BLOCKED_ON_USER task — those need
-  the manual close+remove.)
+  dead sessions but will *not* auto-revert a BLOCKED_ON_USER task — for those,
+  run the close+remove yourself.)
 - **Shipped / merge-gate** → `/cw-followup`.
 
 Use `/cw-followup`, `/cw-validate-result`, and `/cw-queue-peek` as the actual
@@ -380,7 +392,7 @@ high prior, not absolutes. Name the exception out loud when you take it:
   it loses the fidelity that's the whole point. Author these yourself.
 - **A genuinely trivial, in-context edit** where dispatching a whole auto-dev
   run costs more than the fix — and you already have the file open for a reason
-  the operator authorized. Still prefer a ticket if it touches anything shared.
+  the work already warranted. Still prefer a ticket if it touches anything shared.
 - **An emergency** (prod is down, the queue itself is wedged) where the pipeline
   is too slow and you need to act directly. Surface it, then act.
 
@@ -415,7 +427,7 @@ delegation.
 
 - **Re-sweeping a ticket that already has plan comments.** The sweep is in the
   thread; read it.
-- **Re-dispatching a human-gated ticket.** It will wedge again. Park it.
+- **Re-dispatching a gated ticket without a tracker-state delta.** It will wedge again. Park it, supply the delta, then release it.
 - **Arming the watch with the Monitor tool, or opening a second Monitor on
   top of it.** The Monitor tool has no persistent mode — every Monitor
   expires within 30 minutes and there is no `persistent` parameter — so it
@@ -423,7 +435,7 @@ delegation.
   `Bash` instead, with no `Monitor` call alongside it, and re-arm it every
   time it exits (Phase 4).
 - **Asking a blocking question before re-arming the watch.** Events that land
-  while you wait for the operator arrive late, not lost — but late reads
+  while you wait for the human arrive late, not lost — but late reads
   exactly like a missed page. Triage, re-arm, *then* ask (Phase 4).
 - **Leaving the watch armed once the queue is empty.** Arm it only while
   tickets are in flight; there's nothing to wake you for otherwise, and a

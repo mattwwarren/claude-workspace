@@ -76,11 +76,11 @@ accounting for same-file carryover) catches missing imports — which are **not*
   both append tests to the same file (`test_sprint.py`), the second to reach
   finalize hits a merge conflict and blocks with no PR. The work is fine — it
   just needs a rebase (keep both test blocks). Either sequence such tasks, or
-  expect the hand-rebase.
-- **A hand-finished ticket needs its issue closed explicitly.** When you open a
-  PR by hand (recovering a crashed/blocked finalize), it won't auto-close the
-  issue unless the body carries `Closes #N`. Add it, or `gh issue close` after
-  merge.
+  expect the orchestrator to rebase it.
+- **A recovery-finished ticket needs its issue closed explicitly.** When the
+  orchestrator opens a PR itself (recovering a crashed/blocked finalize), it
+  won't auto-close the issue unless the body carries `Closes #N`. Add it, or
+  run `gh issue close` after merge.
 
 ## Premise gate: real vs. spurious parks
 
@@ -89,7 +89,8 @@ external fact. Distinguish:
 
 - **Genuinely un-verifiable in the sandbox** (e.g. a live Notion/OAuth read —
   headless workers lack those connectors by design): the park is *correct*.
-  Verify it out-of-band and answer as a comment.
+  The orchestrator session has the connectors: it verifies the fact itself and
+  answers as a comment.
 - **Self-verifiable from authoritative sources** (`--help`, official docs, the
   merged dependency's source): the worker should proceed and log it as friction,
   not park. When it parks anyway, that's the gate defect tracked in #1192 — a

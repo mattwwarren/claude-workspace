@@ -7,20 +7,20 @@ description: React to a completed /auto-dev session's sentinel result by perform
 
 Performs the post-run action that matches a finished `/auto-dev` session's sentinel.
 
-A headless `/auto-dev` run ends in one of several sentinel shapes. Each shape needs a different next move from a human:
+A headless `/auto-dev` run ends in one of several sentinel shapes. Each shape needs a different next move, which the orchestrator (the session running this skill) performs itself:
 
 | Sentinel shape | What this skill does |
 |---|---|
 | `shipped` | Print PR URL, confirm auto-merge state. |
 | `no_op` | Close the ticket with a comment citing the satisfying PR. |
 | `merge_gate_blocked` | Rebase the feature branch onto current `origin/main`, force-push, open PR. |
-| `ambiguities_pending_resolution` / `premises_pending_verification` | Render a Decisions section, append to the ticket body, suggest re-dispatch. |
-| `blocked` (real) | Surface `blocker.reason` + `details`; suggest re-dispatch or escalate. |
-| `plan_pending_approval` / `review_pending_approval` | Usually released by a gate recipe. If still parked, approve when within the ticket's agreed scope; escalate only scope growth or forbidden-area touches. |
-| `scope_exceeded` / `forbidden_area` | Surface and stop; ticket needs a human design decision. |
+| `ambiguities_pending_resolution` / `premises_pending_verification` | Answer from the ticket's sources of truth, render a Decisions section, append to the ticket body, re-dispatch. |
+| `blocked` (real) | Read `blocker.reason` + `details`; triage per `recovery_hint` (re-dispatch, fix, close), escalating only a product/scope fork. |
+| `plan_pending_approval` / `review_pending_approval` | Usually released by a gate recipe. If still parked, approve when within the ticket's agreed scope; escalate only scope growth that is a genuine product/scope fork. |
+| `scope_exceeded` / `forbidden_area` | Adjudicate against the ticket's sources of truth; escalate only a genuine product/scope fork. |
 | `BlockedResult` (parser couldn't validate) | Diagnose — show the validation error, transcript tail, and the raw payload. |
 
-Today the human does each of these by hand. This skill collapses the seven branches into one prompt.
+This skill collapses the seven branches into one prompt; the orchestrator runs each action, and only genuine product/scope forks go to the human (ADR-0020).
 
 ## Inputs
 
@@ -92,7 +92,7 @@ Draft a close comment in the form:
 Closed as no_op by /auto-dev (session <ID>) — already satisfied by <PR URL>.
 ```
 
-Confirm with the user unless `--auto-accept-defaults` is set, then:
+Close it with that citation (no confirmation needed once the satisfying PR is verified merged):
 
 ```bash
 gh issue close <TICKET> --repo mattwwarren/claude-workspace \
@@ -103,7 +103,7 @@ gh issue close <TICKET> --repo mattwwarren/claude-workspace \
 
 The branch was correctly built but `local main` diverged from `origin/main` before merge gate ran. Read `prior_pr_warnings` to see which PRs need to land first.
 
-Default action (when prior PRs have since merged): rebase + force-push + open PR. Confirm with the user before force-push.
+Default action (when prior PRs have since merged): rebase + force-push + open PR. The branch is cw-owned, so force-push after the evidence holds (prior PRs merged, rebase onto `origin/main` clean, `fork_point_sha` verified); no confirmation step.
 
 ```bash
 WORKTREE=$(jq -r '.session.worktree_path' <<<"$RESULT")
@@ -150,10 +150,10 @@ Render a Decisions section and append it to the ticket body. Pipe the parser out
 ```bash
 echo "$RESULT" | uv run --project "$(git rev-parse --show-toplevel)" \
   python .claude/skills/cw-followup/scripts/render_decisions.py \
-  --auto-accept-defaults  # only when the user opted in
+  --auto-accept-defaults  # only when the plan defaults are to be taken as-is
 ```
 
-Without `--auto-accept-defaults`, the script leaves each decision as a fill-in stub. Read each ambiguity / premise to the user, capture their answers inline, then substitute them into the stub before appending.
+Without `--auto-accept-defaults`, the script leaves each decision as a fill-in stub. Answer each ambiguity / premise yourself from the ticket's sources of truth (ticket body, approved plan-of-record, pre-flight resolutions, recorded decisions, linked RFCs and dependency tickets; verify premises against the code), then substitute the answers into the stub before appending. Only a genuine product/scope fork (a question those sources cannot answer) goes to the human, batched into one `AskUserQuestion` with a recommendation for each.
 
 To append to the ticket body without losing the existing content:
 
@@ -168,7 +168,7 @@ Use the **Write tool** to author the concatenated result (the existing body abov
 gh issue edit "$TICKET" --repo mattwwarren/claude-workspace --body-file /tmp/body.md
 ```
 
-After append, suggest re-dispatch: `cw dev-queue add <TICKET>` (add `-c <CLIENT>` only for a multi-client setup); if the dispatch loop is idle, also run `cw dev-queue run --once` to kick it. Do not auto-dispatch on a bare interactive invocation — re-dispatch belongs to the user. Inside an `orchestrate-sprint` or `cw-fanout` loop, the orchestrator is the caller and dispatches itself.
+After append, re-dispatch: `cw dev-queue add <TICKET>` (add `-c <CLIENT>` only for a multi-client setup); if the dispatch loop is idle, also run `cw dev-queue run --once` to kick it. The orchestrator re-dispatches itself (skip only under `--dry-run`).
 
 #### `blocked` (validated, real `AutoDevResult` with `status=blocked`)
 
@@ -179,18 +179,18 @@ jq '.result.blocker' <<<"$RESULT"
 # stage, reason, details
 ```
 
-When `blocker.reason == "tool_denied"` (issue #182): re-dispatch is the typical recovery, but the classifier non-determinism flagged in #183 means a delay before retry is sensible. Recommend `cw dev-queue add <TICKET>` (optionally with `-c <CLIENT>`) with a 2-3 minute pause for the auto-mode classifier to settle; if the dispatch loop is idle, run `cw dev-queue run --once` after adding.
+When `blocker.reason == "tool_denied"` (issue #182): re-dispatch is the typical recovery, but the classifier non-determinism flagged in #183 means a delay before retry is sensible. Run `cw dev-queue add <TICKET>` (optionally with `-c <CLIENT>`) after a 2-3 minute pause for the auto-mode classifier to settle; if the dispatch loop is idle, run `cw dev-queue run --once` after adding.
 
 When `blocker.reason == "codex_must_fix_findings"` (issue #2210): `blocker.details` is the rendered review comment, and it ends in a `### Settle a finding` section carrying one fenced `json` payload per blocking finding (capped at 10; any remainder is listed compactly below them). Those payloads exist so a decision can be recorded permanently instead of the same finding re-parking the next round.
 
-**Adjudicate each finding yourself against the ticket's sources of truth; do not hand the list to the operator.** The operator set the plan before the ticket entered the pipeline. The ticket body, the approved plan-of-record, any `<!-- auto-dev-preflight-resolutions -->` comment, recorded operator decisions on the ticket, and linked RFCs and dependency tickets are the record of what was agreed. Read them, then put every finding in exactly one bucket:
+**Adjudicate each finding yourself against the ticket's sources of truth; do not hand the list to a human.** The plan was set before the ticket entered the pipeline. The ticket body, the approved plan-of-record, any `<!-- auto-dev-preflight-resolutions -->` comment, recorded operator decisions on the ticket, and linked RFCs and dependency tickets are the record of what was agreed. Read them, then put every finding in exactly one bucket:
 
 | Bucket | When | Action |
 |---|---|---|
 | **Out of scope / already decided** | The finding asks for work the plan or ticket explicitly excludes, or contradicts a recorded operator decision (cite which). | Settle it `REJECTED`, with `--reason` quoting the source: "Plan §Scope excludes X (issue comment <url>)". |
 | **Not reproducible** | The finding is wrong against the code. Verify it yourself, citing `file:line`. | Settle it `REJECTED`, with the evidence as the reason. |
 | **Real, in-scope defect** | The finding is correct and fixing it stays inside the agreed scope. | Do **not** settle it. Requeue the ticket into the fix loop (`cw dev-queue requeue "$TICKET" -c <CLIENT> --stage impl --regress`; the park sits at REVIEW, and a backward move needs `--regress`). Nothing to ask anyone. |
-| **Product or scope question** | Fixing it needs behavior the sources of truth do not decide, or grows scope beyond the plan (new files, features or contracts the ticket never asked for). | Escalate to the operator: batch every such finding into one `AskUserQuestion`, each with a recommendation. This is the only bucket that reaches them. |
+| **Product or scope question** | Fixing it needs behavior the sources of truth do not decide, or grows scope beyond the plan (new files, features or contracts the ticket never asked for). | Escalate to the human: batch every such finding into one `AskUserQuestion`, each with a recommendation. This is the only bucket that reaches them. |
 
 Never settle a finding you cannot tie to a specific source or to code evidence. That one is a product or scope question, not a rejection.
 
@@ -198,27 +198,27 @@ To settle: save the payload with the **Write tool** to a scratch file, run `cw r
 
 `--reason` is mandatory and must be non-blank: the citation, never a placeholder. The command records your resolved `gh` login as the settling actor and emits a `review.finding_settled` audit event per finding, so the record says who silenced the finding, when, why, and against which reviewed sha. A settle can be withdrawn with `outcome: "REVERSED"` (see `cw review settle --help`).
 
-**Where it runs.** Run it from the operator's main checkout or an interactive cw session worktree, which is where you, the orchestrator, already are. It refuses inside a dispatch worker (`headless: true`), on an unreadable `.claude/cw-context.json`, and in a linked git worktree with no context file, because a worker settling its own reviewer's findings is the pipeline adjudicating itself. If it refuses, you are in the wrong directory: run it from the main checkout. Do not write a context file, and do not hand-author the `REVIEW-FINDING-DISPOSITIONS` marker. A worker never runs this command.
+**Where it runs.** The orchestrator runs it, from wherever it already is (main checkout, interactive cw session worktree, or any directory outside a headless worker). It refuses only inside a headless dispatch worker (`.claude/cw-context.json` with `headless: true`, or `$TMPDIR` inside such a worktree), because a worker settling its own reviewer's findings is the pipeline adjudicating itself. A worker hands the payload to the orchestrator, which runs it. Do not write a context file, and do not hand-author the `REVIEW-FINDING-DISPOSITIONS` marker. A worker never runs this command.
 
 When every finding is settled or fixed and the branch should ship as-is (issue #2205), the path is `cw dev-queue approve "$TICKET" -c <CLIENT> --override-must-fix --reason "<the same citations>"` followed by `cw dev-queue requeue "$TICKET" -c <CLIENT> --stage finalize`. A bare `requeue --stage finalize` is not enough: FINALIZE's MUST_FIX Override Verification step re-reads `.claude/review-verdict.json` and parks the row again. The override is bound to the verdict's reviewed SHA and exact MUST_FIX finding set, so a new review round or a new commit voids it. Use it only when every remaining MUST_FIX finding is in one of the two settle buckets above. The reason is recorded on the row and in the audit event, and it is rendered into the PR body's `## Operator override` section.
 
-When `blocker.reason` is anything else: read the Phase E retry fields the Blocker now carries (issue #174) — `retry_eligible`, `retry_delay_seconds`, and `recovery_hint`. When `retry_eligible` is true, recommend re-dispatch after `retry_delay_seconds` (surfacing `recovery_hint`); when it is false or absent, treat as human-escalation and surface verbatim.
+When `blocker.reason` is anything else: read the Phase E retry fields the Blocker now carries (issue #174) — `retry_eligible`, `retry_delay_seconds`, and `recovery_hint`. When `retry_eligible` is true, re-dispatch after `retry_delay_seconds` (honouring `recovery_hint`); when it is false or absent, triage per `recovery_hint` yourself (requeue, regress, fix, file the follow-up, or close). Escalate to the human only a genuine product/scope fork, surfacing the blocker verbatim.
 
 #### `plan_pending_approval`
 
-A Large plan (more than 10 files or 500 lines) parks here. Size alone is not a reason to involve the operator. The `auto_adopt_clean_plan` gate recipe (on by default) releases the park on the next reconcile tick unless the plan touches a forbidden area, the operator set `scope_hint: large`, or the draft is unbound or was already approved once. If it is still parked and the row carries `scope_hint: large`, the operator asked to gate this ticket: surface the plan to them. Otherwise decide it yourself against the ticket's sources of truth:
+A Large plan (more than 10 files or 500 lines) parks here. Size alone is not a reason to involve a human. The `auto_adopt_clean_plan` gate recipe (on by default) releases the park on the next reconcile tick unless the plan touches a forbidden area, `scope_hint: large` is set, or the draft is unbound or was already approved once. If it is still parked and the row carries `scope_hint: large`, that is an opted-in gate (`signoff: operator` style): surface the plan to the human. Otherwise decide it yourself against the ticket's sources of truth:
 
-- **Plan stays within the ticket's agreed scope** (every file and behavior traces to the ticket, its pre-flight resolutions, or a recorded operator decision): approve it with `cw dev-queue approve "$TICKET" -c <CLIENT>`. Approval is the row path: it binds the draft's fingerprint, and the plan stage accepts it on re-dispatch. A prose comment such as "approved" is not evidence and the ticket would only re-park.
-- **Plan grows scope or touches a forbidden area**: that is a scope question. Put it to the operator in one batched `AskUserQuestion` with your recommendation (trim, split into a follow-up ticket, or approve the growth).
-- **Abandon**: only on the operator's word.
+- **Plan stays within the ticket's agreed scope** (every file and behavior traces to the ticket, its pre-flight resolutions, or a recorded decision): approve it with `cw dev-queue approve "$TICKET" -c <CLIENT>`. Approval is the row path: it binds the draft's fingerprint, and the plan stage accepts it on re-dispatch. A prose comment such as "approved" is not evidence and the ticket would only re-park.
+- **Plan grows scope or touches a forbidden area**: adjudicate against the sources of truth first (trim, split into a follow-up ticket, or approve). Only if the growth is a genuine product/scope fork, put it to the human in one batched `AskUserQuestion` with your recommendation.
+- **Abandon**: when the evidence shows the ticket is a duplicate or obsolete (cite it), abandon it yourself; otherwise abandoning is a product fork for the human.
 
 #### `review_pending_approval`
 
-A Large review parks here after its fix loop. The `auto_approve_clean_review` gate recipe (on by default) releases it when health is PROCEED, no forbidden area was touched, and a reviewer ran, unless the row carries the operator's `scope_hint: large`. If it is still parked, read `health` and `review.*`. A degraded health, a forbidden-area touch, or the operator's `scope_hint: large` is the operator's call: surface it with a recommendation. Otherwise approve with `cw dev-queue approve "$TICKET" -c <CLIENT>`, or requeue the fix loop for an in-scope defect.
+A Large review parks here after its fix loop. The `auto_approve_clean_review` gate recipe (on by default) releases it when health is PROCEED, no forbidden area was touched, and a reviewer ran, unless the row carries `scope_hint: large`. If it is still parked, read `health` and `review.*`. A row carrying `scope_hint: large` is an opted-in gate: surface it to the human with a recommendation. A degraded health or a forbidden-area touch you adjudicate yourself against the ticket's sources of truth, escalating only a genuine product/scope fork. Otherwise approve with `cw dev-queue approve "$TICKET" -c <CLIENT>`, or requeue the fix loop for an in-scope defect.
 
 #### `scope_exceeded` / `forbidden_area`
 
-Plan exceeded scope or touched a forbidden area. Surface the scope numbers and the forbidden-touched flag. The ticket needs a human design decision — do not act.
+Plan exceeded scope or touched a forbidden area. Surface the scope numbers and the forbidden-touched flag, then adjudicate against the ticket's sources of truth: trim, split into a follow-up ticket, or approve the growth with the citation. Escalate to the human only a genuine product/scope fork (batched, with a recommendation).
 
 #### `BlockedResult` with `reason != status_unknown`
 
@@ -266,14 +266,14 @@ Recipe (validated 4× in the 1.1 waves — #387, #552, #554, #558):
 
 ## Failure modes
 
-- **Cannot resolve session** — print the session ref + sessions.json hint; do not guess. The user may have the wrong session id.
-- **Transcript file missing** — likely the session record is stale (`reconcile` ran but the JSONL was rotated). Show the expected path so the user can confirm.
-- **Sentinel parses but `effective_status` is not recognized** — surface verbatim; ask the user to confirm whether to treat it as a real blocker or as a new producer status that should be added to the parser.
+- **Cannot resolve session** — print the session ref + sessions.json hint; do not guess. The session id may be wrong.
+- **Transcript file missing** — likely the session record is stale (`reconcile` ran but the JSONL was rotated). Show the expected path.
+- **Sentinel parses but `effective_status` is not recognized** — surface verbatim; decide whether it is a real blocker or a new producer status that should be added to the parser (file the parser ticket if so).
 - **Side effects fail** (gh issue close, force-push, rebase conflicts) — stop, surface the error, do not retry silently.
 
 ## Out of scope
 
-- Re-dispatching to `/auto-dev` on a bare interactive invocation. The skill prepares the ground (decisions appended, branch rebased) but the user owns the dispatch trigger in that mode. Inside an `orchestrate-sprint` or `cw-fanout` loop, the orchestrator is the caller and dispatches itself — see `/cw-fanout` (#187) for re-dispatching at N>1.
+- Re-dispatch at N>1. For a single ticket the skill prepares the ground (decisions appended, branch rebased) and the orchestrator re-dispatches it; see `/cw-fanout` (#187) for re-dispatching at N>1.
 - Creating new tickets. `/cw-followup` acts on the existing one only.
 - Mutating the sentinel schema. Schema drift surfaces as `validation_failed`; fixing it is a separate ticket.
 
@@ -283,6 +283,6 @@ Recipe (validated 4× in the 1.1 waves — #387, #552, #554, #558):
 - #171 — `/cw-smoke-test` (consumes followup as the post-dispatch step).
 - #182 — `/auto-dev` no-recovery-on-deny (defines `tool_denied`).
 - #183 — auto-mode classifier non-determinism (informs the retry-with-delay default).
-- #184 — PushNotification on `tool_denied` (cw-side path; this skill is the human-side companion).
+- #184 — PushNotification on `tool_denied` (cw-side path; this skill is the orchestrator-side companion).
 - #174 — Blocker field expansion (Phase E adds `retry_eligible` / `recovery_hint` — this skill will key off them when they land).
 - #187 — `/cw-fanout` (re-dispatch at N>1 after followup prepares the ground).

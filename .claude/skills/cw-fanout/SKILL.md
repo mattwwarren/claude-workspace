@@ -1,6 +1,6 @@
 ---
 name: cw-fanout
-description: Multi-ticket parallel dispatch with a monitoring handoff — takes a list of tickets, runs pre-flight per ticket, enqueues the batch, starts the cw dispatch loop, then watches the wave via the queue-peek ladder and the session.needs_attention / session.timed_out event bus, closes gate tickets inline via /cw-followup without operator hand-rolling, and drives the wave to terminal in one orchestrated motion. Use when the user wants to enqueue several tickets and then monitor the queue in one motion. Triggers on "fan out these tickets", "dispatch a wave", "enqueue these and watch them", "run /auto-dev on N tickets and monitor", "dispatch and babysit the queue".
+description: Multi-ticket parallel dispatch with a monitoring handoff — takes a list of tickets, runs pre-flight per ticket, enqueues the batch, starts the cw dispatch loop, then watches the wave via the queue-peek ladder and the session.needs_attention / session.timed_out event bus, closes gate tickets inline via /cw-followup without hand-rolling, and drives the wave to terminal in one orchestrated motion. Use when the user wants to enqueue several tickets and then monitor the queue in one motion. Triggers on "fan out these tickets", "dispatch a wave", "enqueue these and watch them", "run /auto-dev on N tickets and monitor", "dispatch and babysit the queue".
 ---
 
 # cw-fanout
@@ -24,10 +24,11 @@ validation logic:
 
 ## When to use
 
-- The operator has several ready tickets and wants them dispatched in parallel,
+- There are several ready tickets and wants them dispatched in parallel,
   then watched as a single wave.
 - A meta-test spray across N tech-debt tickets where each should run `/auto-dev`
-  headless and surface only when it needs a human.
+  headless and surface to the orchestrator when they need attention (the human
+  only for a genuine product/scope fork).
 - Re-dispatching at N>1 after `/cw-followup` has prepared the ground (decisions
   appended, branches rebased).
 
@@ -75,7 +76,7 @@ table: one row per ticket, `ok` plus any failing hard checks. Then:
 - **Default:** drop tickets whose `ok` is false from the wave. Print the dropped
   rows with their failing checks. Continue with the survivors.
 - **`--skip-preflight`:** keep every ticket; print a warning banner listing the
-  failed checks so the operator sees the wave launched in degraded mode.
+  failed checks so the wave's degraded launch is on record.
 - **No survivors:** stop. Nothing to dispatch.
 
 On `--dry-run`, print the table and stop here.
@@ -190,7 +191,7 @@ If `GATE` is one of `plan_pending_approval`, `review_pending_approval`,
 1. Run `/cw-followup --ticket-id <T>` inline. It resolves the gate against
    the ticket's sources of truth and reaches the operator only for a genuine
    product or scope question.
-2. Check if the operator removed the ticket from the queue (do this before any
+2. Check if the ticket was removed from the queue (do this before any
    approve/requeue attempt to avoid spurious errors):
    ```bash
    cw dev-queue tasks --ticket <T> -c <CLIENT> --json | jq length
@@ -213,7 +214,9 @@ If `GATE` is one of `plan_pending_approval`, `review_pending_approval`,
      Before approving a Large plan, grep its text for the literal strings the
      resolutions mandated — a `[SATISFIED]` conformance row is a claim, not
      evidence (#929 round 1 shipped one with the mandated field list absent).
-     A plan that grows scope beyond the ticket goes to the operator instead.
+     A plan that grows scope beyond the ticket: adjudicate against the
+     ticket's sources of truth (trim, split, or approve with the citation);
+     only a genuine product/scope fork goes to the human.
    - `review_pending_approval` →
      `cw dev-queue approve <T> -c <CLIENT>` (this arm is sound: review →
      finalize; if session not found, fall back to
@@ -227,8 +230,11 @@ If `GATE` is one of `plan_pending_approval`, `review_pending_approval`,
    `gate closed: #<T> (<GATE>) → re-dispatched, watching` — resume the loop.
 
 If `GATE` is non-gate / unknown, or `session.timed_out` fires without a
-recognized gate disposition: surface the ticket + session immediately and
-pause for the operator. Do not silently re-dispatch.
+recognized gate disposition: triage it yourself right away. Read the blocker
+and the session's transcript tail / `branch_state`, then act per
+`/cw-followup` (requeue, approve, regress, `cw spawn close`, file the
+follow-up, or close the ticket). Escalate to the human only a genuine
+product/scope fork. Never re-dispatch without first reading the blocker.
 
 When the event is `session.timed_out`, check the `branch_state` field:
 `"absent_no_merged_pr"` means the worker died before push (an anomaly worth
@@ -270,8 +276,7 @@ retry loop, approaching the 60-min ceiling) per its ladder. Always
 `cw spawn close <session_id>` **before** `cw dev-queue remove`.
 
 Surface progress sparingly — one line when the wave shrinks or a ticket flips
-to needs-attention; otherwise stay quiet. The operator can `cw watch` for the
-live board.
+to needs-attention; otherwise stay quiet. `cw watch` shows the live board.
 
 ### Fallback: Poll Ladder
 
@@ -282,8 +287,8 @@ it's also the `cw event tail` command referenced in 4b above.
 **Monitor LIVENESS, not just queue state.** Queue rows, the roster, and
 `wave_status` output can all lag or lie (false parks on live sessions — #976;
 rows deleted mid-run with no event — #978; silent worker deaths produce NO
-queue transition, ever). The 2026-07-03/05 sprint's operator had to manually
-bump a queue-transition-only monitor twice. The wave monitor MUST watch three
+queue transition, ever). The 2026-07-03/05 sprint's queue-transition-only
+monitor had to be bumped twice. The wave monitor MUST watch three
 signals per ticket:
 
 1. **Queue transitions** — the `wave_status.py` diff (4a above).
@@ -320,12 +325,15 @@ other wave is queued behind it), then print a per-ticket disposition table.
 Suggest the right follow-up per ticket:
 
 - `completed` → `/cw-validate-result --ticket-id <N>` to confirm what shipped.
-- `blocked_on_user` (gate-type — gate was open at wave end and operator chose
-  not to resolve it) → `/cw-followup --ticket-id <N>` to disposition it manually.
+- `blocked_on_user` (gate-type — gate still open at wave end) → run
+  `/cw-followup --ticket-id <N>` yourself to disposition it.
 - `blocked_on_user` (non-gate — paused-for-input, user-directed blocked, or
-  exited without sentinel) → surface the ticket to the operator; do not
-  auto-dispatch.
-- `failed` / dropped → surface the reason; let the operator decide.
+  exited without sentinel) → triage it: read the blocker and transcript tail,
+  then requeue / approve / regress / close per the evidence. The dispatch loop
+  never blindly retries it; you read the blocker first. Escalate only a
+  genuine product/scope fork.
+- `failed` / dropped → read the reason and act (requeue, file the follow-up,
+  or close); escalate only a genuine product/scope fork.
 
 ## Output shape
 
@@ -348,15 +356,15 @@ fanout: client=claude-workspace wave=[204,205,206] → all shipped; 0 need atten
 ## Failure modes
 
 - **Pre-flight drops the whole wave** — print the failing rows; do not enqueue.
-  Offer `--skip-preflight` if the operator wants to override.
+  Re-run with `--skip-preflight` when the failing checks are advisory-only.
 - **Dispatch loop not running** — the watchdog only ticks while `cw dev-queue
-  run` is alive; if the operator killed it, the wave stalls silently. Re-launch
+  run` is alive; if it was killed, the wave stalls silently. Re-launch
   it (Step 3) and note the gap.
 - **A ticket sits `pending` forever** — concurrency cap is saturated by other
   clients, or the freshness gate keeps rejecting it (stale `main`). Surface
-  `cw dev-queue status` + `cw doctor`; suggest `cw dev-queue refresh-all`.
-- **Gate-abandon** — the operator removes a ticket mid-gate (e.g. closes the
-  issue or manually drops it from the queue). The skill prints
+  `cw dev-queue status` + `cw doctor`; run `cw dev-queue refresh-all`.
+- **Gate-abandon** — the ticket is removed mid-gate (e.g. the issue is closed
+  or it is dropped from the queue). The skill prints
   `gate abandoned: #<T> (<GATE>) → operator removed ticket; wave continues` and
   resumes the loop. No re-dispatch is attempted.
 - **Approve-session-not-found** — `cw dev-queue approve <T>` raises
@@ -366,11 +374,11 @@ fanout: client=claude-workspace wave=[204,205,206] → all shipped; 0 need atten
   `plan_pending_approval` gate that requeue records no approval, so the plan
   stage re-parks once; the `auto_adopt_clean_plan` gate recipe then releases
   that fresh park on the next reconcile tick (unless it touches a forbidden
-  area or carries `scope_hint: large`, which is the operator's call anyway).
+  area or carries `scope_hint: large`, which is an opted-in gate).
 - **`needs_attention` storm** — many tickets pause at once (often the same
   ambiguity across a batch). For known gate types, the inline loop calls
   `/cw-followup` per gate ticket in sequence — if multiple tickets share the
-  same ambiguity, the operator provides the same answer on each invocation.
+  same ambiguity, the orchestrator provides the same answer on each invocation.
   For non-gate blocked tickets, disposition one via `/cw-followup`, then
   `cw dev-queue requeue <T>` each remaining ticket with the same decision rather
   than answering each separately.
