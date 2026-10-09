@@ -17,9 +17,11 @@ free-form text in ``text`` event payloads, harvested via the sentinel pattern
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
@@ -42,7 +44,6 @@ from cw.executor_launch import _launch_logged_subprocess
 from cw.worktree import apply_worker_tmpdir
 
 if TYPE_CHECKING:
-    import subprocess
     from collections.abc import Iterator
 
     from cw.models import TicketTask
@@ -148,26 +149,59 @@ class RealOpencodeRunner:
         )
 
 
-def build_argv(model: str | None, worktree: Path, prompt: str) -> list[str]:
+_HELP_PROBE_TIMEOUT_S = 10
+
+
+@functools.lru_cache(maxsize=1)
+def _supports_v1_flags() -> bool:
+    """Return True if ``opencode run`` still advertises ``--pure`` and ``--dir``.
+
+    opencode 2.x removed both flags (#2654); 1.x has them. Probed once per
+    process from ``opencode run --help``. Any probe failure means "assume 2.x"
+    (omit the flags), the form that is safe on both versions' argv parsers
+    since the worker already runs with ``cwd=worktree``.
+    """
+    try:
+        result = subprocess.run(
+            ["opencode", "run", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=_HELP_PROBE_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    help_text = result.stdout + result.stderr
+    return "--pure" in help_text and "--dir" in help_text
+
+
+def build_argv(
+    model: str | None,
+    worktree: Path,
+    prompt: str,
+    *,
+    v1_flags: bool | None = None,
+) -> list[str]:
     """Return the opencode argv for the given model, worktree, and prompt.
 
-    Pins ``--format json`` (event stream for harvest), ``--pure`` (no external
-    plugins — mechanical permission profile per #1669 R4), ``--auto`` (auto-
+    Pins ``--format json`` (event stream for harvest) and ``--auto`` (auto-
     approve permissions not explicitly denied — essential for headless fire-
-    and-forget operation where no TTY is available to answer prompts), and
-    ``--dir`` (run in the worktree). The prompt is the trailing positional,
-    redacted in diagnostics by ``redact_argv``.
+    and-forget operation where no TTY is available to answer prompts). The
+    worktree is the process cwd (see ``_launch_logged_subprocess``). On
+    opencode 1.x, ``--pure`` (no external plugins, #1669 R4) and ``--dir`` are
+    also passed; opencode 2.x rejects both (#2654), so they are only emitted
+    when ``v1_flags`` is true (default: probed via ``opencode run --help``).
+    The prompt is the trailing positional, redacted in diagnostics by
+    ``redact_argv``.
     """
-    argv: list[str] = [
-        "opencode",
-        "run",
-        "--format",
-        "json",
-        "--pure",
-        "--auto",
-        "--dir",
-        str(worktree),
-    ]
+    if v1_flags is None:
+        v1_flags = _supports_v1_flags()
+    argv: list[str] = ["opencode", "run", "--format", "json"]
+    if v1_flags:
+        argv.append("--pure")
+    argv.append("--auto")
+    if v1_flags:
+        argv.extend(["--dir", str(worktree)])
     if model is not None:
         argv.extend(["--model", model])
     argv.append(prompt)
@@ -442,14 +476,14 @@ def _plan_prompt(ticket_id: str, session_id: str | None = None) -> str:
         "base classes with 3+ consumers; large otherwise;\n"
         "   - a `## Ambiguities` section: exactly `NO_AMBIGUITIES`, or each "
         "interpretive choice with the assumption adopted and why it is safe. "
-        "An ambiguity only a human can settle → emit blocked with "
+        "An ambiguity the ticket's sources of truth cannot settle → emit blocked with "
         'blocker.reason "plan_ambiguous" and the open question in '
         "blocker.details, rather than guessing.\n"
         "5. Write the full plan verbatim to .cw/plan.md in the worktree "
         "(the IMPL stage hard-requires this file), then post the same text "
         "as a ticket comment (the audit copy) when the tracker is writable.\n"
         "6. Exit status: scope small → stage_complete; scope large → "
-        "plan_pending_approval (a human approves before implementation); "
+        "plan_pending_approval (the orchestrator approves before implementation); "
         "already satisfied → no_op as above; anything unresolvable → blocked "
         "with a specific blocker.reason and details.\n"
         + _sentinel_rules(session_id)
@@ -532,7 +566,7 @@ def _review_prompt(ticket_id: str, session_id: str | None = None) -> str:
         "most 500 lines AND no forbidden-area touches; large otherwise).\n"
         "6. Exit status: tier small with no unresolved MUST_FIX → "
         "stage_complete; tier large with no unresolved MUST_FIX → "
-        "review_pending_approval (a human approves the ship). Set "
+        "review_pending_approval (the orchestrator approves the ship). Set "
         "review.agents_run to 1 — you are the single reviewer; never report "
         "a review pass that did not happen. Set review.reviewed_sha to "
         "REVIEWED_SHA (step 4) — the post-fix-loop branch tip, or the "

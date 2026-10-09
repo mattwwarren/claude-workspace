@@ -62,7 +62,7 @@ i.e. `ADJUDICATIONS` carries at least one `outcome: "operator_action"` entry.
 - [ ] <summary> — <suggested_fix> *(<reviewer_role>)*
 ```
 
-Source the body from the structured finding data, as the blocking-findings comment rule does. The entry's `rationale` is REQUIRED and must name the concrete action the operator has to take — file ticket X, link the ticket discharging criterion Y — so a checklist reader never has to open the transcript. No PR exists yet, so the comment posts to the ticket. Sentinel: append `operator actionable findings posted: review_operator_actionable` to `friction_highlights`, mirroring the `blocking findings posted: <reason>` idiom. **Provenance marker (#2097):** end the comment body with the line `<!-- cw-agent-authored -->` on its own line after a blank line, per the *Comment provenance rule* in `.claude/commands/auto-dev.md`. **Park marker (#2228):** once this checklist comment has posted successfully, run `cw signal-park` once. Never run it for a `tool_denied` exit; otherwise ignore failures and continue. See the *Park-comment stamp rule* in `.claude/commands/auto-dev.md`. **Timing note:** the exit itself does not fire until Step 3c. Stamp now, exit later is safe here.
+Source the body from the structured finding data, as the blocking-findings comment rule does. The entry's `rationale` is REQUIRED and must name the concrete action the orchestrator must take — file ticket X, link the ticket discharging criterion Y — so a checklist reader never has to open the transcript. No PR exists yet, so the comment posts to the ticket. Sentinel: append `operator actionable findings posted: review_operator_actionable` to `friction_highlights`, mirroring the `blocking findings posted: <reason>` idiom. **Provenance marker (#2097):** end the comment body with the line `<!-- cw-agent-authored -->` on its own line after a blank line, per the *Comment provenance rule* in `.claude/commands/auto-dev.md`. **Park marker (#2228):** once this checklist comment has posted successfully, run `cw signal-park` once. Never run it for a `tool_denied` exit; otherwise ignore failures and continue. See the *Park-comment stamp rule* in `.claude/commands/auto-dev.md`. **Timing note:** the exit itself does not fire until Step 3c. Stamp now, exit later is safe here.
 
 **Its trigger is `ADJUDICATIONS`, not `blocker.reason`.** The rule fires purely on the presence of an `operator_action` entry, whatever `blocker.reason` the stage exits with. That decouples the racing-exits case: a pass carrying both an operator-actionable finding and a separate NON_DEFERRABLE finding records `plan_deviation` as the exit reason and still posts this comment. Two comments, one exit reason, no precedence ladder.
 
@@ -87,8 +87,8 @@ The fix-loop agent's friction report MUST flag scope growth explicitly so the ma
 **Headless — on each escalation event:** append a string to `friction_highlights` (e.g. `"fix_loop_cycle_3_entered"`, `"fix_loop_scope_growth: <files>"`) AND set `health.fix_loop_escalated: true` in the structured output. Continue the loop without any AskUserQuestion. (`health.fix_loop_escalated` is distinct from `health.downgrade_applied`, which only the Headless Mode health aggregation rule sets for confidence-driven status downgrades.)
 
 **Hard exit (cycle 5 failed to clear MUST_FIX) — applies in both modes:**
-- **Interactive:** AskUserQuestion: "MUST_FIX issues persist after 5 fix cycles: [details]. Continue manually from worktree, skip ticket, or abort pipeline?"
-- **Headless:** EXIT `blocked` with `blocker.reason: "review_blocked"`. The `friction_highlights` field will contain the per-cycle escalation notes from cycles 3–5; the human reviewer sees them in the structured output. Also post the still-unresolved MUST_FIX findings — verbatim — as a tracker comment per the blocking-findings comment rule above (Checkpoint 3a).
+- **Interactive:** AskUserQuestion: "MUST_FIX issues persist after 5 fix cycles: [details]. Continue fixing from worktree (the AI does it), skip ticket, or abort pipeline?"
+- **Headless:** EXIT `blocked` with `blocker.reason: "review_blocked"`. The `friction_highlights` field will contain the per-cycle escalation notes from cycles 3–5; the orchestrator sees them in the structured output. Also post the still-unresolved MUST_FIX findings — verbatim — as a tracker comment per the blocking-findings comment rule above (Checkpoint 3a).
 
 > **Maintenance note:** the cap values (`expected 2`, `hard-cap at 5`) appear in 6 locations: Step 3b.5 in the core doc, this section (multiple), the Checkpoint 3a Headless callout, the gate-collapse table rows for `S3 action list non-empty`, `S3 action list non-empty after 5 fix cycles`, and `S3 fix-loop cycle 3+`, and the `blocker.reason` table description for `review_blocked`. If you tune either value, update all locations atomically.
 
@@ -141,7 +141,7 @@ never back-filled with a synthetic round. The command hard-errors (exit 1, plain
 message) only on content matching *neither* the current nor the pre-#1840 shape —
 foreign text, a truncated block, a half-written round/date pair. That is a
 refusal to overwrite records it cannot read, not a transient failure: inspect or
-remove the file by hand, then re-run.
+the orchestrator inspects or removes the file, then re-runs.
 
 ---
 
@@ -215,7 +215,7 @@ whose tip matches the worktree's HEAD, the row is parked `BLOCKED_ON_USER` with
 `disposition: fix_dispatch_ref_unresolved` and a single `session.needs_attention`
 (no `stage.errored`, and no repeat per tick). `pending_fix_dispatch` is
 **retained**, so recovery is `cw dev-queue requeue`, which clears the handoff and
-re-runs review — there is nothing to execute by hand here, because the branch the
+re-runs review — there is nothing further to execute here, because the branch the
 fix would land on is exactly what could not be located (#2209).
 
 ```bash

@@ -1,14 +1,15 @@
 ---
 name: cw-queue-peek
-description: In-flight inspection of RUNNING cw dev-queue sessions — for each, computes age, idle gap, last sentinel status, and PR state, and recommends WAIT / PEEK / STOP via a peek-stop ladder so the operator can decide whether to keep a session alive or close it via `cw spawn close`. Use when watching a parallel dispatch wave, when a session is running long, or when you suspect a session is stuck (post-PR-merge wait, tool denial, retry loop). Triggers on "peek the queue", "what's running", "check long-running sessions", "is anything stuck", "should I stop session X".
+description: In-flight inspection of RUNNING cw dev-queue sessions — for each, computes age, idle gap, last sentinel status, and PR state, and recommends WAIT / PEEK / STOP via a peek-stop ladder, then the orchestrator keeps a session alive or closes it via `cw spawn close` once the STOP evidence holds. Use when watching a parallel dispatch wave, when a session is running long, or when you suspect a session is stuck (post-PR-merge wait, tool denial, retry loop). Triggers on "peek the queue", "what's running", "check long-running sessions", "is anything stuck", "should I stop session X".
 model: haiku
 ---
 
 # cw Queue Peek
 
-Reports-only inspection of in-flight dev-queue sessions. Surfaces stalls and
-stuck sessions before they hit the 60-min hard timeout, so the operator can
-stop wasteful work early and re-dispatch productively.
+Inspection of in-flight dev-queue sessions. Surfaces stalls and stuck
+sessions before they hit the 60-min hard timeout, so the orchestrator can
+stop wasteful work early (running `cw spawn close` itself once the STOP
+evidence holds) and re-dispatch productively.
 
 This skill is the **in-flight** counterpart to the orchestrator event bus
 (`cw event tail --type session.needs_attention --type session.timed_out`,
@@ -22,7 +23,7 @@ sessions.
 - Watching a parallel dispatch wave where one or more tickets are running long
 - A session is past its expected wall-clock and you want to know if it's still progressing
 - A PR was merged but the worker session is still alive (the canonical "stuck post-create" pattern)
-- Periodic check during operator orchestration of a queue ("anything need attention?")
+- Periodic check during orchestration of a queue ("anything need attention?")
 - Right before considering a `cw spawn close` — verify the peek confirms it's stuck
 
 Do **not** use this skill for:
@@ -43,8 +44,10 @@ The skill calls `cw queue peek`, which reads `~/.local/share/cw/dev_queue.json`,
 locates each RUNNING task's claude transcript jsonl, parses last-emitted sentinel
 + last activity timestamps, and calls `gh pr view` to resolve PR state.
 
-The command never stops sessions itself — it only reports. The operator runs
-`cw spawn close <session_id>` after reviewing the report.
+The `cw queue peek` command never stops sessions itself — it only reports. The
+orchestrator closes the session itself once the report's STOP evidence holds
+and the death checks pass (see "Acting on recommendations" for which
+`cw spawn close` form).
 
 ## Execution
 
@@ -107,8 +110,8 @@ The command's recommendation is computed from this ladder. Higher rules win:
    the dispatch admission gate's #1750 signal, since raw claim count no
    longer implies failure (#1727/#1768).
 5. **Long stall without PR**: `idle_min > 15` and no PR → **STOP-OR-PEEK**
-   (manually inspect before stopping — could be tool denial or model-side
-   hang).
+   (inspect the transcript tail before stopping — could be tool denial or
+   model-side hang).
 6. **Moderate stall without PR**: `idle_min > 7` and no PR → **PEEK** (check
    for tool denial or rate-limit).
 7. **Mature session**: `age_min > 45` → **PEEK** (verify still progressing).
@@ -130,7 +133,7 @@ rule, wording reflects how far past the trigger the session actually is.
 
 ## Cost framing
 
-- Peek is free (~30s operator time, no API calls beyond `gh pr view`).
+- Peek is free (~30s, no API calls beyond `gh pr view`).
 - Per-session worker burn: roughly $0.05-0.15/min when actively producing.
 - 30-min wasted ≈ $2-5; 60-min wasted ≈ $4-10.
 - False-positive STOP cost: lose WIP, re-dispatch ≈ $2-5 + 30 min. The
@@ -182,19 +185,42 @@ ladder's rule 10 liveness gate already requires before any STOP.
 
 ## Acting on recommendations
 
-The command never executes stops. After reading the report:
+`cw queue peek` never executes stops; the orchestrator does. For each STOP row
+whose evidence holds (the ladder verdict survived the rule 10 liveness gate, or
+the PEEK follow-up confirmed the stall), run:
 
 ```bash
-# Stop the session
-cw spawn close <session_id>
+# Stop the session — ONLY after the death checks below (flag BEFORE the id)
+cw spawn close --confirmed-dead <session_id>
 
-# Remove the queue task if you don't want a retry
+# Remove the queue task if no retry is wanted
 cw dev-queue remove <ticket_id> -c <client>
 
 # OR leave the queue task so a future tick can re-dispatch
 ```
 
-Always `cw spawn close` **before** `cw dev-queue remove` — see #317 for why
+The footer's bare `cw spawn close <session_id>` is deliberately
+classifier-gated (`src/cw/cli/spawn.py`); `--confirmed-dead` is the form an
+allowlist rule like `Bash(cw spawn close --confirmed-dead*)` matches, and it
+asserts the session is already terminal. Use it only after verifying death:
+
+- the session is absent from `~/.claude/daemon/roster.json`,
+- its transcript is flat (no new records), and
+- no live process remains.
+
+"The work is done" (a merged PR, a clean sentinel) is **not** death evidence.
+
+For a **stalled-but-live** STOP row (still in the roster, a process alive, e.g.
+the stuck post-PR-merge pattern), run the bare `cw spawn close <session_id>`
+yourself. That requires the human to have allowlisted it (permission settings
+are the human's, not yours to change); if it is not allowlisted, surface the
+STOP recommendation with the evidence instead of working around the gate.
+
+Decide remove-vs-leave from the ticket's state: leave the task when the stall
+looks transient (a future tick re-dispatches it); remove it when the ticket is
+obsolete or a duplicate. Report what was closed afterwards.
+
+Always close the session **before** `cw dev-queue remove` — see #317 for why
 (removing first races against the dispatcher loop, which can spawn att+1
 between the remove and the close).
 

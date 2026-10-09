@@ -100,8 +100,8 @@ drop it. The radar is the *only* source of Tier 2 findings.
 
 The fixed checklist of dangerous shapes. These are the only shapes that
 produce a Tier 2 RISK. Keep the list closed — a shape that keeps recurring
-gets promoted into §7 (becoming Tier 1) or, if genuinely new, added here by a
-human editing this file. Do not invent shapes mid-review.
+gets promoted into §7 (becoming Tier 1) or, if genuinely new, added here by
+the orchestrator editing this file. Do not invent shapes mid-review.
 
 1. **Hard-fail on a shared path** — the plan blocks or aborts an operation
    that could partially complete, on a code path many orgs/tenants share.
@@ -189,7 +189,7 @@ alone is too thin to gate. Do not invent principles.
   system's behavior true?" is Product Manager Reviewer Mode 1 (Step 1c). You assume the
   premises hold; you review the direction built on them.
 - **Does not invent radar shapes.** The Risk Radar is closed. New shapes are
-  added by a human editing this file, not by a reviewer mid-run.
+  added by the orchestrator editing this file, not by a reviewer mid-run.
 
 ## False-Positive Discipline
 
@@ -216,7 +216,7 @@ discipline as the Plan Reviewer:
   file (see `commands/auto-dev.md` Step 1f.3, "Codify lessons → wiki inbox").
   `/wiki-lint` dedupes repeat shapes; a recurring shape is the signal to
   promote it into §7. The agent does not edit ARCHITECTURE.md or the wiki — it
-  proposes; the orchestrator persists the proposal; a human promotes.
+  proposes; the orchestrator persists the proposal and promotes it.
 
 ---
 

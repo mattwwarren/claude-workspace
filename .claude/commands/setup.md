@@ -182,7 +182,7 @@ plan_exit:
    ```
 
 2. **If no layout matched**, ask the user:
-   > "This repo has no ship-it — probed `.claude/commands/ship-it.md`, `.claude/skills/ship-it/SKILL.md`, and `.agents/skills/ship-it/SKILL.md`. `/prep-pr` and `/auto-dev` need one to create PRs. Copy the command template from the installed Claude home or from the checked-out `global-claude/templates/ship-it-template.md`? (yes / no / show-me)"
+   > "This repo has no ship-it — probed `.claude/commands/ship-it.md`, `.claude/skills/ship-it/SKILL.md`, and `.agents/skills/ship-it/SKILL.md`. `/prep-pr` and `/auto-dev` need one to create PRs. Copy the command template from the installed Claude home or from the checked-out `global-claude/templates/ship-it-template.md`? (yes / no / show-me)" (When run by the orchestrator or headless — e.g. because `/prep-pr` BLOCKED on "no project /ship-it" — answer **yes** and copy without asking.)
 
    - **yes** → copy (not symlink — symlinks = de facto global fallback, which we explicitly reject):
      ```bash

@@ -848,9 +848,11 @@ def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
                 )
             raise UnblockStateError(msg)
 
-        # bounded=True (#2501): operator-only; the inner dev-queue lock is
-        # taken before any write, so a timeout is a clean retry. It holds
-        # sessions_lock while it waits (up to the timeout again).
+        # bounded=True (#2501): explicit operator command (the orchestrator
+        # session counts, ADR-0020), never an unattended loop; the inner
+        # dev-queue lock is taken before any write, so a timeout is a clean
+        # retry. It holds sessions_lock while it waits (up to the timeout
+        # again).
         with _lock(bounded=True):
             store = load_dev_queue()
             task = _find_ticket(store, ticket_id, client_name)

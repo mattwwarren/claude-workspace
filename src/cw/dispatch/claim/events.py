@@ -138,8 +138,9 @@ def _emit_worktree_occupied_skip_event(client_name: str, ticket_id: str) -> None
     Sibling of _emit_stale_dispatch_blocked_event: per-task, outside the
     precedence chain, no SESSION_NEEDS_ATTENTION sibling -- a genuinely
     working session resolves itself; a routed-but-never-completed orphan
-    (#2517) does not and is closed by the operator-run ``cw dev-queue
-    approve`` / ``requeue`` or ``cw spawn close --confirmed-dead``. Shared by the
+    (#2517) does not and is closed by the explicit ``cw dev-queue
+    approve`` / ``requeue`` or ``cw spawn close --confirmed-dead`` command
+    (the orchestrator session counts, ADR-0020). Shared by the
     pre-claim occupancy screen, the genuinely-live HookContextConflictError
     release, and the pre-existing WorktreeOccupiedError release.
     """
@@ -217,7 +218,7 @@ def _emit_tracker_mcp_gate_attention_event(
     hardcoded empty because no session ran), plus four additive fields on the
     ``attempt_ceiling`` precedent in :func:`_emit_attempt_cap_attention_event`:
     ``branch``, ``file_inspected``, and ``expected_plugin`` name exactly what
-    the operator must fix, and ``details`` composes them into one
+    the orchestrator must fix, and ``details`` composes them into one
     human-readable string. This detail is transient and event-only by design
     -- ``TicketTask.advisory_note`` is cleared by the very
     ``transition_task_status`` call that performs the park.

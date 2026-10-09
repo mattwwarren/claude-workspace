@@ -622,7 +622,7 @@ WORKTREE SETUP (always — required for parallel safety):
 WORK:
 - Rebase against origin/main: `git fetch origin && git rebase origin/main`
 - Resolve conflicts. If domain knowledge is required, STOP and report — do NOT guess.
-- **If you discover the branch's commits are already in main (squash-merged):** STOP and report — do NOT skip commits or force a no-op rebase. The user will close the PR. Signs: every conflicted file's HEAD-side already contains your branch's intended change; commits in your branch reference work the user has already shipped.
+- **If you discover the branch's commits are already in main (squash-merged):** STOP and report — do NOT skip commits or force a no-op rebase. The orchestrator closes the PR (it verifies the signs, then runs `gh pr close` with a citation). Signs: every conflicted file's HEAD-side already contains your branch's intended change; commits in your branch reference work already shipped.
 - For ci_failing: read failure log via `gh run view <run_id> --log-failed`, fix root cause. Do NOT skip tests, do NOT add # noqa or # type: ignore without reason.
 - For changes_requested human threads: apply suggested fixes when correct. If a suggestion is unclear or wrong, post a substantive technical reply explaining why via `gh review reply <thread_id>` (this is NOT a nudge — it's clarifying disagreement on a real finding).
 - Push: `git push --force-with-lease origin <branch>` (rebase rewrites history; --force-with-lease is required and safe — refuses to overwrite if remote moved unexpectedly)
@@ -693,7 +693,7 @@ This is self-healing: next cycle `reviewer_count > 0`, the state clears, no DM i
 
 **Step 4d: Enqueue a DM escalation when `dm_escalation_reason` is set.**
 
-The DM is the only signal the user gets when they need to jump in — it must carry enough context to act without first reverse-engineering the PR. Build a **structured** message, not a one-liner and not a log dump. Required fields:
+The DM is the only signal the user gets when they need to jump in — and it fires only for what the orchestrator cannot resolve (a genuine product/scope fork, an opted-in gate); it must carry enough context to act without first reverse-engineering the PR. Build a **structured** message, not a one-liner and not a log dump. Required fields:
 
 - PR number, title, URL
 - Why it's stuck: `dm_escalation_reason` (`loop` = auto-fix cap hit; `week_old` = open ≥ 7 days) and `attention_state`

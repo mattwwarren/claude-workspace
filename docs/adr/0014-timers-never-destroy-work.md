@@ -1,6 +1,7 @@
 # Timers never destroy work
 
 **Status:** Accepted — implemented (process-kill-timeout removal)
+**Amended by:** [ADR-0020](0020-the-operator-is-the-orchestrator-session.md) — "operator" means the orchestrator session; a human is escalated to only for product/scope forks.
 **Driven by:** operator-reported work and telemetry loss from timer-driven
 kills; the long tail of patches trying to make time-based reaping safe
 (#215, #265, #314, #326, #340, #384, #543, #544, #545, #756, #918, #976,
@@ -43,7 +44,8 @@ Dispositions survive only when driven by **evidence**, not clocks:
   a terminal result or sentinel exists, or the local PID has exited:
   constructive completion of finished work.
 - **Operator commands** (`cw spawn close`, `cw doctor --reap`, ticket
-  delete) — a human is the authority.
+  delete) — an explicit operator command is the authority (the orchestrator
+  session counts, ADR-0020).
 
 ## The signal that replaces the timers
 
@@ -59,7 +61,7 @@ signal is preserved and made multi-dimensional instead of one-dimensional
   (`paused_status=session_unresponsive`) plus a push notification —
   and mutates nothing;
 - `cw queue-peek` remains the rich advisory surface (age, idle gap,
-  sentinel, PR state) recommending WAIT/PEEK/STOP to the human;
+  sentinel, PR state) recommending WAIT/PEEK/STOP to the orchestrator;
 - the escalation latch, dispatch-loop dead-man's switch, and
   `cw dev-queue wait`'s ATTENTION exit codes are unchanged.
 

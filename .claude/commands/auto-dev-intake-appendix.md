@@ -20,7 +20,7 @@ Step P1 found `LOCAL_MAIN != ORIGIN_MAIN`.
 
 | Option | Action |
 |---|---|
-| Sync now | If ahead-only: `git -C "$REPO" push origin main`. If behind-only: `git -C "$REPO" pull --ff-only`. If both: fall through to "proceed anyway" — the human decides. |
+| Sync now | If ahead-only: `git -C "$REPO" push origin main`. If behind-only: `git -C "$REPO" pull --ff-only`. If both: fall through to "proceed anyway" — diverged history is not auto-reconciled here; the orchestrator reconciles it. |
 | Proceed anyway | Continue to Stage 0 with local main as the fork point; the Stage 4 merge gate still catches the divergence. |
 | Abandon ticket | Exit without spawning any agents. No sentinel emit. |
 
@@ -71,7 +71,7 @@ EXIT with the structured `blocked` sentinel before any agent is spawned:
     "reason": "local_main_diverged_from_origin",
     "details": "local_main=<sha>, origin_main=<sha>, ahead=<n>, behind=<n>",
     "message": "Local main is not in sync with origin/main; pipeline aborted before impl",
-    "recovery_hint": "Push or rebase local main, then re-dispatch",
+    "recovery_hint": "Orchestrator: push or rebase local main (git push origin main / git pull --ff-only), then re-dispatch",
     "retry_eligible": true,
     "retry_delay_seconds": null
   },
@@ -79,7 +79,7 @@ EXIT with the structured `blocked` sentinel before any agent is spawned:
 }
 ```
 
-`retry_eligible: true` per ADR-0002 — the orchestrator MAY re-dispatch once the divergence is resolved (typically one `git push origin main` or `git pull --ff-only`). `retry_delay_seconds: null` because no time-based backoff helps; the gate clears when the human acts. `local_main_diverged_from_origin` is an open-enum addition to `blocker.reason` (headless-contract.md §4.2 — `reason` is open by design); consumers surface it verbatim, no parser change needed.
+`retry_eligible: true` per ADR-0002 — the orchestrator MAY re-dispatch once the divergence is resolved (typically one `git push origin main` or `git pull --ff-only`, which the orchestrator runs itself). `retry_delay_seconds: null` because no time-based backoff helps; the gate clears when the orchestrator syncs main. `local_main_diverged_from_origin` is an open-enum addition to `blocker.reason` (headless-contract.md §4.2 — `reason` is open by design); consumers surface it verbatim, no parser change needed.
 
 ---
 
@@ -119,7 +119,7 @@ On a family match, EXIT before spawning any agent and **before** the
     "reason": "operator_unavailable",
     "details": "<matched signature + fetch op, e.g. 'gh issue view: Could not resolve host'>",
     "message": "Ticket fetch failed: operator/dependency currently unreachable",
-    "recovery_hint": "Resolve the underlying network/auth/GitHub-availability issue, then re-dispatch",
+    "recovery_hint": "Orchestrator: resolve the underlying network/auth/GitHub-availability issue, then re-dispatch (cw dev-queue unblock)",
     "retry_eligible": true,
     "retry_delay_seconds": null
   },
@@ -138,7 +138,7 @@ The EXIT must happen before spawning any agent and **before** the
 `stage.entered` (`s0_intake`) emission: a fetch that never succeeded has no
 stage-entry to correlate against.
 
-`next_actions` must be `["manual_intervention"]`. The only other legal member of
+`next_actions` must be `["manual_intervention"]` (the action name is a schema-stable label; the intervention is the orchestrator's). The only other legal member of
 `_PRE_FLIGHT_BLOCKED_NEXT_ACTIONS` (`auto_dev_result/schema.py`) is
 `sync_local_main`, which is the Origin Sync surface and wrong here.
 `reason: "operator_unavailable"` is already in
@@ -179,7 +179,7 @@ structured `stale_dispatch` sentinel:
     "reason": "pr_already_open",
     "details": "<PR number, URL, and review state, e.g. 'PR #1899 (https://github.com/o/r/pull/1899) is open, reviewDecision=REVIEW_REQUIRED'>",
     "message": "Ticket already has an open, unmerged PR from an earlier dispatch",
-    "recovery_hint": "Land or close the PR, then unblock the ticket (cw dev-queue unblock)",
+    "recovery_hint": "Orchestrator: land or close the PR, then run cw dev-queue unblock for the ticket",
     "retry_eligible": false,
     "retry_delay_seconds": null
   },

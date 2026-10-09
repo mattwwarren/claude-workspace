@@ -1,8 +1,8 @@
 # claude-workspace (`cw`)
 
-Multi-session workspace orchestrator for Claude Code. `cw` lets you drive parallel autonomous Claude workers across your repos — enqueue tickets, dispatch workers, monitor progress, and handle gates — while staying the coordinator rather than the implementer.
+Multi-session workspace orchestrator for Claude Code. `cw` lets you drive parallel autonomous Claude workers across your repos — enqueue tickets, dispatch workers, monitor progress, and handle gates — while staying the coordinator rather than the implementer. The coordinator is the long-lived orchestrator Claude session by default; a human is escalated to only for genuine product/scope forks and gates they explicitly opted into ([ADR-0020](docs/adr/0020-the-operator-is-the-orchestrator-session.md)).
 
-The core loop: **harden a ticket → dispatch it → workers implement, review, and ship → you triage gates and clean up.**
+The core loop: **harden a ticket → dispatch it → workers implement, review, and ship → the orchestrator triages gates and cleans up.**
 
 ## Prerequisites
 
@@ -62,19 +62,25 @@ place: the **Vocabulary** section of `cw guide`.
 
 ### Sprint recipe (operator perspective)
 
+The "operator" is whoever is operating cw — by default the long-lived
+orchestrator Claude session (`/orchestrate-sprint`, `/cw-fanout`,
+`/cw-followup`), not a human at a keyboard (ADR-0020). Every step below is run
+by that session; a human is escalated to only for genuine product/scope forks
+and for gates they explicitly opted into (`signoff: operator`, finalize hold, `scope_hint: large`).
+
 1. **Orient** — `cw dev-queue status` (expect empty/known), `cw doctor` (expect healthy)
 2. **Scope** — take the epic; split into sub-tickets if large; note sequential deps
 3. **Harden** — run `/harden-ticket` on each ticket to resolve technical ambiguities upfront
 4. **Dispatch** — `cw dev-queue add <id> -c <client> -s large` → `cw dev-queue run --once`
 5. **Watch** — `cw watch` or `cw dev-queue wait`; monitor for transcript silence >25 min
-6. **Triage gates** — respond to `plan_pending_approval`, `ambiguities_pending_resolution`, `review_pending_approval`, `blocked` as they surface
+6. **Triage gates** — adjudicate `plan_pending_approval`, `ambiguities_pending_resolution`, `review_pending_approval`, `blocked` as they surface
 7. **Verify** — read the worker's sentinel (`cw session result`), run the gate, check the PR
 8. **Clean up** — `cw done` → `cw spawn close` → `cw dev-queue remove`
 
 ### Information flow
 
 ```
-You (coordinator)
+Orchestrator session (coordinator)
     │
     ├─ /harden-ticket <id>          ← pre-flight: resolve ambiguities before dispatch
     │
@@ -104,19 +110,19 @@ You (coordinator)
 | Status | Action |
 |---|---|
 | `shipped` | Done. PR is live with auto-merge. |
-| `no_op` | Ticket already satisfied. Close as completed. |
+| `no_op` | Ticket already satisfied. The orchestrator closes it as completed with a citation. |
 | `stage_complete` | Staged pipeline: one stage (HARDEN/PLAN/IMPL/REVIEW) finished cleanly — not terminal. `cw` auto-advances the ticket to the next stage. |
 | `merge_pending` | PR created but CI/merge gate hasn't cleared yet. Not a failure — don't re-dispatch, just monitor the PR. |
-| `ambiguities_pending_resolution` | Answer questions on the issue, re-dispatch. |
-| `premises_pending_verification` | Verify flagged premises on the issue, re-dispatch. |
-| `plan_pending_approval` | Usually released automatically by the `auto_adopt_clean_plan` gate recipe (on by default) unless it touches a forbidden area or carries `scope_hint: large`. If it stays parked: read the plan comment, then `cw dev-queue approve` (records the approval on the row for any tracker; `--post-marker` also posts an audit-only `<!-- auto-dev-plan-approved: <sha> -->` on GitHub, binding it to the approved draft's fingerprint — nothing reads it back as approval evidence). |
-| `review_pending_approval` | Usually released automatically by the `auto_approve_clean_review` gate recipe (on by default) unless health is degraded, a forbidden area is touched, or it carries `scope_hint: large`. If it stays parked: review the diff yourself, ship (`gh pr create` + `gh pr merge --squash --auto`). |
-| `merge_gate_blocked` | A prior pipeline PR is still open. Merge or close it, re-dispatch. |
-| `scope_exceeded` | Diff grew past the declared scope tier. Re-scope the ticket or approve manually. |
-| `forbidden_area` | Change touches a forbidden path (see client config). Route to a human. |
-| `empty_diff_blocked` | The branch has no commits ahead of the default branch at IMPL/REVIEW exit. Check what the worker did; requeue or close. |
-| `stale_dispatch` | The ticket already has an open, unmerged PR from an earlier dispatch. Merge or close that PR, then requeue. |
-| `blocked` | Triage `blocker.reason` and `blocker.retry_eligible`. Re-dispatch if eligible. The row copies `blocker.reason` into its `blocked_reason` (the `cw dev-queue tasks` REASON column). |
+| `ambiguities_pending_resolution` | The orchestrator answers the questions on the issue from the ticket's sources of truth (a genuine product/scope fork goes to the human, batched into one question), then re-dispatches. |
+| `premises_pending_verification` | The orchestrator verifies the flagged premises on the issue, then re-dispatches. |
+| `plan_pending_approval` | Usually released automatically by the `auto_adopt_clean_plan` gate recipe (on by default) unless it touches a forbidden area or carries `scope_hint: large`. If it stays parked on a forbidden area, the orchestrator reads the plan comment, then runs `cw dev-queue approve` (records the approval on the row for any tracker; `--post-marker` also posts an audit-only `<!-- auto-dev-plan-approved: <sha> -->` on GitHub, binding it to the approved draft's fingerprint — nothing reads it back as approval evidence). A `scope_hint: large` park is the operator's own "gate this ticket" flag: the orchestrator notifies the human instead of approving it. |
+| `review_pending_approval` | Usually released automatically by the `auto_approve_clean_review` gate recipe (on by default) unless health is degraded, a forbidden area is touched, or it carries `scope_hint: large`. If it stays parked on degraded health or a forbidden area, the orchestrator reviews the diff against the ticket's sources of truth, then either approves (`cw dev-queue approve`) or ships directly (`gh pr create` + `gh pr merge --squash --auto`). A `scope_hint: large` park is the operator's own "gate this ticket" flag: the orchestrator notifies the human instead of approving or shipping it. |
+| `merge_gate_blocked` | A prior pipeline PR is still open. The orchestrator merges or closes it, then re-dispatches. |
+| `scope_exceeded` | Diff grew past the declared scope tier. The orchestrator re-scopes the ticket or approves it. |
+| `forbidden_area` | Change touches a forbidden path (see client config). The orchestrator triages it; only a genuine product/scope fork goes to a human. |
+| `empty_diff_blocked` | The branch has no commits ahead of the default branch at IMPL/REVIEW exit. The orchestrator checks what the worker did, then requeues, or closes the ticket only once its acceptance criteria are verified satisfied (cite the merged PR/commit) or it is verified duplicate/obsolete (cite the superseding ticket). |
+| `stale_dispatch` | The ticket already has an open, unmerged PR from an earlier dispatch. The orchestrator merges or closes that PR, then requeues. |
+| `blocked` | The orchestrator triages `blocker.reason` and `blocker.retry_eligible`, and re-dispatches if eligible. The row copies `blocker.reason` into its `blocked_reason` (the `cw dev-queue tasks` REASON column). |
 
 Use the `/cw-session-watch` skill to read a session's exit status without hand-grepping events and transcripts, and `/cw-followup` to act on the sentinel automatically (close `no_op`, rebase+PR for `merge_gate_blocked`, draft a Decisions section for ambiguities/premises, escalate real blockers).
 
@@ -157,13 +163,13 @@ Use the `/cw-session-watch` skill to read a session's exit status without hand-g
 | `cw dev-queue refresh-all` | Fast-forward all client repos to origin/main |
 | `cw queue peek` | In-flight inspection of RUNNING dev-queue sessions (age, idle gap, sentinel, PR state) |
 
-`cw dev-queue wait` exit codes: `0`=shipped/no_op · `1`=failed/cancelled · `2`=blocked/pending-human · `3`=attention (stale transcript, or a mid-wait reap confirmed by `reap_proposed_at`) · `4`=parked awaiting operator signoff · `124`=timeout
+`cw dev-queue wait` exit codes: `0`=shipped/no_op · `1`=failed/cancelled · `2`=blocked/pending-triage · `3`=attention (stale transcript, or a mid-wait reap confirmed by `reap_proposed_at`) · `4`=parked awaiting operator signoff · `124`=timeout
 
 For a wave of tickets, the `/cw-fanout` skill wraps this whole table — pre-flight, enqueue, dispatch, and monitor — into one orchestrated motion, using the `/cw-queue-peek` skill's WAIT/PEEK/STOP ladder to decide whether to keep a long-running session alive.
 
-**Operator signoff gate** (RFC 0007 Phase 3): configure `--signoff operator` on `cw dev-queue add`, a lane, or the global default to force a ship checkpoint a ticket can't clear on its own. A gated ticket parks as `AWAITING_OPERATOR_SIGNOFF` at the REVIEW→FINALIZE boundary; `cw dev-queue approve` clears it forward (large-tier tickets need it twice — once for the ordinary review gate, once for signoff), and `cw dev-queue requeue --stage <earlier> --regress` sends it backward instead.
+**Operator signoff gate** (RFC 0007 Phase 3): configure `--signoff operator` on `cw dev-queue add`, a lane, or the global default to force a ship checkpoint a ticket can't clear on its own — a gate the human explicitly opts into, so clearing it stays theirs (ADR-0020). A gated ticket parks as `AWAITING_OPERATOR_SIGNOFF` at the REVIEW→FINALIZE boundary; `cw dev-queue approve` clears it forward (large-tier tickets need it twice — once for the ordinary review gate, once for signoff), and `cw dev-queue requeue --stage <earlier> --regress` sends it backward instead.
 
-**Proactive finalize hold** (RFC 0011 A3): configure `--hold-finalize` on `cw dev-queue add`, `finalize_gate: manual` on a lane, or `default_finalize_gate: manual` globally to stop a ticket before an *unattended* finalize. A held ticket parks as `BLOCKED_ON_USER` with disposition `finalize_gate_held` at the REVIEW→FINALIZE boundary, wins outright over the signoff gate when both are armed, and is released only by a human `cw dev-queue approve` — an automatic gate-recipe approve declines and emits `gate.auto_approve_held` instead. `cw dev-queue drain` deliberately does not batch-release it.
+**Proactive finalize hold** (RFC 0011 A3): configure `--hold-finalize` on `cw dev-queue add`, `finalize_gate: manual` on a lane, or `default_finalize_gate: manual` globally to stop a ticket before an *unattended* finalize. A held ticket parks as `BLOCKED_ON_USER` with disposition `finalize_gate_held` at the REVIEW→FINALIZE boundary, wins outright over the signoff gate when both are armed, and is released only by an operator-initiated `cw dev-queue approve` (a gate the human opted into, so releasing it stays theirs) — an automatic gate-recipe approve declines and emits `gate.auto_approve_held` instead. `cw dev-queue drain` deliberately does not batch-release it.
 
 ### Orchestrator
 
@@ -314,7 +320,7 @@ Stage 5: CI Wait         ← skipped headless (orchestrator concern)
 
 **Scope tiers** control approval automation:
 - **Small** (≤10 files, ≤500 lines, no forbidden areas): most gates auto-skip
-- **Large** (>10 files or >500 lines or forbidden areas): plan and review require human approval
+- **Large** (>10 files or >500 lines or forbidden areas): plan and review park at an approval gate. By default the `auto_adopt_clean_plan` / `auto_approve_clean_review` gate recipes clear a clean Large gate with no review (size alone is not a reason to stop); a gate they decline for a forbidden area touched or degraded health is adjudicated by the orchestrator session, which escalates to a human only for a genuine product/scope fork; an explicit `scope_hint: large` is the operator's own opted-in human gate, so the orchestrator notifies the human rather than clearing it
 
 **Sentinel output** (headless only):
 

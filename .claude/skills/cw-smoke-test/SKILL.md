@@ -22,7 +22,7 @@ One required argument:
 
 Optional flags:
 - `--client <NAME>` — cw client name; resolves the repo root/tracker (via `clients.yaml`) as well as the dev-queue lookup (default `claude-workspace`).
-- `--skip-preflight` — run pre-flight in advisory mode (still report; do not abort). Useful when the operator already knows about an issue (e.g. cw doctor reports stale linkage drift).
+- `--skip-preflight` — run pre-flight in advisory mode (still report; do not abort). Useful when the issue is already known (e.g. cw doctor reports stale linkage drift).
 
 ## How it works
 
@@ -82,7 +82,7 @@ Until that returns a row, or a reasonable timeout (default 30 minutes — match 
 
 While waiting, surface progress sparingly. Print one line on `session.spawned` (with the worker id + worktree path), then go silent until completion. The user can `cw event tail` themselves if they want intermediate noise.
 
-If completion never arrives within the timeout, surface the worker id + `cw status` snapshot and stop. Do not auto-retry on a bare interactive invocation — that's the user's call. Inside an `orchestrate-sprint` or `cw-fanout` loop, the orchestrator is the caller and decides.
+If completion never arrives within the timeout, surface the worker id + `cw status` snapshot and stop. The orchestrator (the session running the smoke test) decides whether to retry: triage per the blocker/timeout evidence (`cw dev-queue requeue`, or `cw spawn close --confirmed-dead <id>` first, only once the worker is verified dead: absent from the daemon roster, transcript flat, no live process) rather than blindly re-running.
 
 ### Step 4 — validate
 
@@ -99,7 +99,7 @@ That skill resolves the transcript, parses the sentinel via `cw-followup/scripts
 | `valid` | PASS — the pipeline produced a usable result. Print the `effective_status` and the PR / branch / worktree as applicable. |
 | `producer_status_unknown` | PASS-WITH-WARNING — the run finished and emitted a structured payload, but the producer used a status the parser has never heard of. (Note: `premises_pending_verification` / `ambiguities_pending_resolution` became canonical in v4 (#191) and now report `valid` — this outcome is reserved for genuinely new statuses.) File a parser ticket if it is new. |
 | `invalid_sentinel` | FAIL — schema validation failed. This is producer/consumer drift; surface the validation error verbatim and recommend filing a parser bug. |
-| `no_sentinel` | FAIL — the run exited without emitting a sentinel at all. Walk the user through `references/no-sentinel-patterns.md` (in the validator skill's references). |
+| `no_sentinel` | FAIL — the run exited without emitting a sentinel at all. Work through `references/no-sentinel-patterns.md` (in the validator skill's references). |
 
 ### Step 5 — suggest follow-up
 
@@ -110,7 +110,7 @@ smoke-test: #<TICKET> → <effective_status>; ready to <suggested action>
   /cw-followup --session-id <WORKER_SHORT_ID>
 ```
 
-On FAIL, do NOT suggest `/cw-followup` — surface the failure and let the user decide whether to file a producer or parser ticket. The historical drift cases (`#190` plan_source, `#191` v4 statuses) are resolved in the current parser; if a *new* unknown status or plan_source surfaces, file a fresh parser ticket rather than re-opening those.
+On FAIL, do NOT suggest `/cw-followup` — surface the failure and file the producer or parser ticket yourself. The historical drift cases (`#190` plan_source, `#191` v4 statuses) are resolved in the current parser; if a *new* unknown status or plan_source surfaces, file a fresh parser ticket rather than re-opening those.
 
 ## Output shape
 
@@ -134,7 +134,7 @@ smoke-test: #999 → no_sentinel — worker session 4f44d145 exited without emit
 - Continuous-loop dispatching (use `cw dev-queue run` without `--once`).
 - Multi-ticket batch dispatch — use `/cw-fanout` for parallel N-way (pre-flight + enqueue + dispatch loop + monitoring handoff).
 - Phase A stage-transition events. This skill works without them; with them, monitoring becomes more informative.
-- Re-dispatching after a failure on a bare interactive invocation. The user owns the dispatch trigger in that mode; the smoke test is one-shot. Inside an `orchestrate-sprint` or `cw-fanout` loop, the orchestrator is the caller and dispatches itself.
+- Automatic re-dispatch after a failure. The smoke test itself is one-shot; the orchestrator re-dispatches afterwards (single ticket) or via `/cw-fanout` (N-way) once it has triaged the failure.
 
 ## Related
 

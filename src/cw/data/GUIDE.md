@@ -5,6 +5,13 @@ coordinator: you harden tickets, dispatch workers, watch, and verify. Workers im
 This guide is the operator-facing how-to; it ships with the tool, so it always matches the
 version you have (`cw guide`). For internals, see the repo's `docs/`.
 
+"You" and "the operator" mean whoever is operating cw — by default the long-lived
+orchestrator Claude session, not a human at a keyboard (ADR-0020). Run every recovery
+command in this guide yourself (`cw doctor --reap`, `cw dev-queue requeue|approve|drain`,
+`cw spawn close --confirmed-dead`, ...), after checking the evidence the docs name. Escalate
+to a human only for a genuine product/scope fork (batched into one question) and for gates
+the human explicitly opted into (`signoff: operator`, a finalize hold, `scope_hint: large`).
+
 ## Vocabulary
 
 One name per thing. The canonical term comes first; the names you will still
@@ -55,11 +62,12 @@ a sentinel carries one — and they never share values, so always say which.
 
 - `pending` — eligible for the next dispatch tick.
 - `running` — claimed; a session is, or should be, live. Holds a lane slot.
-- `blocked_on_user` — **parked**: waiting on an operator. Holds a lane slot.
+- `blocked_on_user` — **parked**: waiting for the orchestrator to triage it. Holds a lane slot.
   "Park" is the verb, `blocked_on_user` is the status, and `disposition`
   says why.
 - `awaiting_operator_signoff` — parked for a `--signoff operator` gate before
-  it ships. Holds a lane slot; cleared by a second `approve`.
+  it ships (a gate the human opted into, so the human clears it). Holds a lane
+  slot; cleared by a second `approve`.
 - `completed` / `failed` / `cancelled` — terminal. The row frees its slot.
 
 **Why a row stopped** — three fields, read in this order:
@@ -309,7 +317,8 @@ cw `session_id` → `sessions.json` `surface_ref` / `claude_session_id` →
    (or `serve` for a self-healing loop). The `cw-fanout` skill does steps 4–6 for a whole
    batch in one motion.
 5. **Watch**: `cw dev-queue wait <id>` / `cw watch` / `cw queue peek` (status + >25-min
-   transcript silence). Gates park as BLOCKED_ON_USER — clear with `cw dev-queue approve`.
+   transcript silence). Gates park as BLOCKED_ON_USER — adjudicate them and clear with
+   `cw dev-queue approve` (opted-in human gates — `signoff: operator`, a finalize hold, `scope_hint: large` — you notify the human about instead).
 6. **Verify on terminal**: read the worker's OWN sentinel (assistant/`tool_result`, never the
    prompt's illustrative example) — `cw session result <session>` or the `cw-validate-result`
    skill — run the gate, check the PR. Sequential deps: harden N+1 against post-N main and
@@ -321,7 +330,7 @@ cw `session_id` → `sessions.json` `surface_ref` / `claude_session_id` →
    `cw dev-queue unblock` (salvage-parked) and `requeue --from-cancelled/--from-failed`
    put recovered tickets back in the queue.
 
-   > **Salvaging by hand? Check what branch you are standing on first.** `/ship-it` and
+   > **Salvaging directly? Check what branch you are standing on first.** `/ship-it` and
    > `/prep-pr` push `git branch --show-current` — correct in a normal dev session, wrong in
    > an orchestrator session, where you are on the *session* branch and not the feature
    > branch you mean to ship. Delegating from there pushes the session branch. `/ship-it`

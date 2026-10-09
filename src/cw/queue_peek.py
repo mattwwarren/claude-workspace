@@ -2,8 +2,8 @@
 
 A BLOCKED_ON_USER row short-circuits to the ``AWAITING_OPERATOR``
 recommendation (#2212) before any of the below is computed -- it is waiting
-on a human, not wedged, and scoring an intentionally-idle row would report
-false precision. For each RUNNING task (one client or all), look up:
+on the orchestrator's triage, not wedged, and scoring an intentionally-idle
+row would report false precision. For each RUNNING task (one client or all), look up:
 
 - session age (primarily the session's claim time — ``Session.started_at``
   in CW_STATE — falling back to the first user message in the worker's
@@ -644,7 +644,7 @@ def _stall_check(
     if idle_min is not None and idle_min > IDLE_STALL_MIN and not pr_state:
         return (
             "STOP-OR-PEEK",
-            f"idle {idle_min:.0f}min, no PR — likely stuck; manual peek before stop",
+            f"idle {idle_min:.0f}min, no PR — likely stuck; peek before stop",
         )
     if idle_min is not None and idle_min > IDLE_PEEK_MIN and not pr_state:
         return ("PEEK", f"idle {idle_min:.0f}min, no PR — check for tool denial")

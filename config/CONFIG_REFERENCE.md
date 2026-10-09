@@ -190,7 +190,9 @@ indefinitely (#1111). When a DAEMON-origin worker is pinned to a
 non-auto-capable model, cw spawns it with `--permission-mode bypassPermissions`
 instead — the same non-interactive posture already-supported Sonnet/Opus
 workers run under. This requires the bypass-permissions disclaimer to have
-been accepted once (`claude --dangerously-skip-permissions` interactively);
+been accepted once (`claude --dangerously-skip-permissions` interactively —
+a physical-human step that needs a TTY, one of the only two exceptions in
+ADR-0020);
 an unaccepted disclaimer surfaces as a clear `DisclaimerNotAcceptedError`
 rather than a silent hang. Auto-capable pins (Sonnet 4.6+, Sonnet 5, Opus
 4.6+) and unpinned clients are unaffected and continue to use `auto`.
@@ -515,8 +517,11 @@ lanes:
   the park lists what was found and the command that ends that operation
   (`git merge --abort`, `git cherry-pick --abort`, `git revert --abort`). The
   hint never advises `git reset --hard`, because cw cannot say what that would
-  lose from work that predates the cycle. Clean the tree yourself, then requeue
-  REVIEW.
+  lose from work that predates the cycle. The orchestrator cleans the tree,
+  then requeues REVIEW. It discards only after `git -C <worktree> log
+  origin/<branch>..HEAD`, `git -C <worktree> status --porcelain
+  --untracked-files=all` and `git -C <worktree> diff HEAD` show the changes are
+  duplicates of landed work or junk; otherwise it commits and pushes them.
 - **Staged-set guard** (`codex_fix_scope_drift`, always on). A cycle commits and
   pushes only the paths it was measured to touch, measured against the tree the
   cycle started from. If the staged set differs (an extra staged path, or the fix
@@ -532,7 +537,11 @@ lanes:
   carrying `<!-- auto-dev-preflight-resolutions -->` written by the operator
   login (agent-authored comments and pipeline-header comments never count; an
   unresolved login means no constraints) is rendered into the fix prompt as
-  `## Binding Operator Constraints`. Sentences such as "do not add `foo_bar`" or
+  `## Binding Operator Constraints`. The orchestrator session posts as that
+  login, so a resolutions comment it writes (without the
+  `<!-- cw-agent-authored -->` marker) counts as operator-written; the
+  mechanism is unchanged (ADR-0020), and for plan approvals the orchestrator
+  uses `cw dev-queue approve --post-marker`. Sentences such as "do not add `foo_bar`" or
   "no new lock" become forbidden tokens or detector kinds, and a cycle that
   **introduces** one in non-test source (a new file at that path, a new
   identifier, or a net-new lock or state file) parks. Mentioning a token in
@@ -729,8 +738,9 @@ clients:
   my-project:
     workspace_path: /home/user/projects/my-project
     lanes:
-      # A supervised lane: the operator answers every park, so the operator IS
-      # the rate limiter an automated ceiling exists to be. Disable the cap.
+      # A human-supervised lane (`signoff: operator` is the human's opt-in): the
+      # human answers every park, so the human IS the rate limiter an
+      # automated ceiling exists to be. Disable the cap.
       - name: codex-trial
         signoff: operator
         attempt_ceiling: false
@@ -1001,7 +1011,7 @@ operator_github_login_by_repo: {}
 # transcript-staleness crossings, and a crossing into the top bucket by a
 # roster-present session with no sentinel and no pending subagent emits a
 # signal-only session.needs_attention (paused_status=session_unresponsive)
-# plus a push notification — the operator decides what happens next.
+# plus a push notification — the orchestrator decides what happens next.
 
 # Ceiling on a row's unproductive_attempts (claims that left RUNNING with no
 # evidence of progress; #786, re-pointed at that counter by #1750) — a
@@ -1116,11 +1126,12 @@ review_recipe_repeat_fire_threshold: 5
 review_recipe_repeat_fire_window_minutes: 20
 
 # Reap policy: controls whether the reconciler destroys a stalled session
-# or only signals for human intervention (ADR-0006 invariant 4).
+# or only signals for the orchestrator (ADR-0006 invariant 4; the orchestrator
+# session is the authority that acts on the signal, ADR-0020).
 #
 # signal_only (default): when a session is detected as stalled/phantom,
 #   the owning queue task is routed to BLOCKED_ON_USER. Session status,
-#   worktree, and daemon surface are left intact for operator review.
+#   worktree, and daemon surface are left intact for orchestrator review.
 #   Re-detection on subsequent ticks is an idempotent no-op.
 #
 # auto: pre-#554 self-healing — stop the daemon surface, revert the queue
@@ -1133,7 +1144,7 @@ reap_policy: signal_only
 # Daemon-side mechanical recovery reactor (RFC 0008 capstone, GitHub #1015).
 # Opt-in, default false: the 3 recipes below requeue/restore TicketTasks in
 # ways adjacent to reap_policy's own destructive-action gate above (ADR-0006
-# invariant 4) -- nothing fires without an explicit operator opt-in, same
+# invariant 4) -- nothing fires without an explicit opt-in in config, same
 # fail-safe posture as reap_policy's signal_only default.
 #
 # When enabled, 3 recipes run every reconcile tick, each individually
@@ -1171,8 +1182,11 @@ concierge_recoveries: {}
 # true: a ticket's size alone (the Large tier, >10 files or >500 lines) never
 # pages the operator, so a Large plan/review approval park is released
 # automatically unless it touches a forbidden area, the operator set
-# scope_hint: large, or the review's health is not PROCEED. Set false to
-# restore manual approval of every Large gate -- a hard top-level
+# scope_hint: large, or the review's health is not PROCEED. A forbidden-area or
+# degraded-health park is adjudicated by the orchestrator session; a
+# scope_hint: large park is the operator's own opted-in human gate, so the
+# orchestrator notifies the human instead. Set false to restore orchestrator
+# approval of every Large gate (scope_hint: large still pages the human) -- a hard top-level
 # short-circuit, the whole gate-recipes module becomes a no-op regardless of
 # any per-lane or per-ticket enablement. When true, each recipe is still
 # resolved per-lane / per-ticket via the 3-tier resolution below (both recipes
@@ -1403,9 +1417,11 @@ cw dev-queue add GEN-456 --client my-project --scope large
 
 ## Operator Signoff Gates (RFC 0007 Phase 3)
 
-Lets an operator require an explicit signoff before a ticket ships, gating the
+Lets the human require an explicit signoff before a ticket ships, gating the
 REVIEW→FINALIZE transition (the point at which a ticket would otherwise
-auto-advance or complete unattended). Resolved with 3-tier precedence,
+auto-advance or complete unattended). This is a gate the human explicitly opts
+into, so per ADR-0020 clearing it stays theirs rather than the orchestrator
+session's. Resolved with 3-tier precedence,
 highest first:
 
 1. **Per-ticket** — `cw dev-queue add GEN-123 --client my-project --signoff operator`
@@ -1436,7 +1452,9 @@ cw dev-queue requeue GEN-123 --client my-project --stage impl --regress
 ## Gate Recipe Enablement (RFC 0009 Phase 4)
 
 Gate recipes (`cw.reconcile.gate_recipes`) clear a Large-tier approval gate
-with **no human review** unless a predicate names a reason a person is needed.
+with **no review** unless a predicate names a reason it must stop: a forbidden
+area or degraded review health (the orchestrator session adjudicates), or the
+operator's own `scope_hint: large` (a human gate; see below).
 A ticket's size alone (more than 10 files or more than 500 lines) is not one:
 the ticket the operator wrote is what authorizes the work.
 
@@ -1452,7 +1470,9 @@ the ticket the operator wrote is what authorizes the work.
   scan already ran in the round that parked).
 
 Neither recipe releases a row whose operator `scope_hint` is `large` ("gate
-this ticket"), or a row that is not at the gate's own stage, and the review
+this ticket"). That is an opted-in human gate, like `signoff: operator` and a
+finalize force-hold: the orchestrator notifies the human and never approves it
+itself (ADR-0020). Nor do they release a row that is not at the gate's own stage, and the review
 recipe never releases a row with an armed finalize hold. Dispatch does not
 page (`session.needs_attention`) for a Large park a recipe will release on the
 next reconcile tick. Each release emits `gate.auto_approved` and posts an
@@ -1472,10 +1492,11 @@ highest first:
 Independently, the module-wide master switch `gate_recipes_enabled` (in
 `orchestrator.yaml`, default `true`) is a hard top-level short-circuit: when
 `false`, **no** recipe fires regardless of any per-lane or per-ticket setting,
-and every Large gate pages for a manual `cw dev-queue approve`.
+and every Large gate pages the orchestrator for a `cw dev-queue approve`
+(except a `scope_hint: large` gate, which pages the human).
 
 ```yaml
-# clients.yaml — keep manual Large-gate approval on one lane only
+# clients.yaml — keep orchestrator-adjudicated Large-gate approval on one lane only
 clients:
   my-project:
     workspace_path: /path/to/repo
@@ -1561,7 +1582,7 @@ has recorded a `park_comment_marker` for the ticket — its own claim, written
 with `cw signal-park` after its park comment posted, that it is taking that
 exit (full contract: [`docs/session-disposition.md`](../docs/session-disposition.md)
 §6c). It is a state-mutating auto-actor driven by the worker's recorded
-marker, so it **ships dark** and is armed per-lane by an operator.
+marker, so it **ships dark** and is armed per-lane by the orchestrator session.
 
 Whether it fires for a given ticket is resolved with 3-tier precedence,
 highest first — the same shape as the gate and review recipes above:
@@ -1881,13 +1902,14 @@ are `null` when not applicable.
 
 `cw init` automatically writes `cw-queue-events` and `cw-pr-events` entries into
 `<workspace>/.mcp.json`. The files `config/cw-queue-events.mcp.json.example` and
-`config/cw-pr-events.mcp.json.example` are for manual wiring only and are not
-required when using `cw init`.
+`config/cw-pr-events.mcp.json.example` are templates for wiring outside `cw init`
+and are not required when using `cw init`.
 
 `cw-operator` (see [`docs/operator-channel.md`](../docs/operator-channel.md))
-is **manual wiring only** — `cw init` does not auto-wire it into `.mcp.json`.
-Copy `config/cw-operator-events.mcp.json.example` in by hand. It shares the
-same host/port as `cw-queue-events` (no separate `serve` process).
+is not auto-wired — `cw init` does not write it into `.mcp.json`. The
+orchestrator session wires it by copying
+`config/cw-operator-events.mcp.json.example` in. It shares the same host/port as
+`cw-queue-events` (no separate `serve` process).
 
 ## Managing Configuration
 

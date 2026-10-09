@@ -1,6 +1,7 @@
 # Parked tasks pin their Session
 
 **Status:** Accepted
+**Amended by:** [ADR-0020](0020-the-operator-is-the-orchestrator-session.md) — "operator" means the orchestrator session; a human is escalated to only for product/scope forks.
 **Driven by:** #58
 **Builds on:** [ADR-0000](0000-native-supervisor-migration.md) — assumes
 `claude --bg <id>` is the resume primitive.

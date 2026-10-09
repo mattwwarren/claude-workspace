@@ -42,7 +42,7 @@ The script reports one of four `outcome` values. Treat each differently:
 | `outcome` | Meaning | Exit |
 |---|---|---|
 | `valid` | Sentinel parsed cleanly as a canonical `AutoDevResult` | 0 |
-| `producer_status_unknown` | Sentinel present, but the producer emitted a status the parser has never heard of. (`premises_pending_verification` / `ambiguities_pending_resolution` are *no longer* this case — they became canonical in v4, issue #191, and now report `valid`.) Treat as a real outcome the human should act on. | 0 |
+| `producer_status_unknown` | Sentinel present, but the producer emitted a status the parser has never heard of. (`premises_pending_verification` / `ambiguities_pending_resolution` are *no longer* this case — they became canonical in v4, issue #191, and now report `valid`.) Treat as a real outcome the orchestrator should act on (file the parser ticket). | 0 |
 | `invalid_sentinel` | Sentinel present but schema validation failed. Producer/consumer drift — report it. | 1 |
 | `no_sentinel` | No sentinel block in the transcript — the run exited before emitting. Diagnose via `references/no-sentinel-patterns.md`. | 1 |
 

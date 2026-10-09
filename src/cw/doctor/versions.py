@@ -199,7 +199,7 @@ def _check_codex_capability() -> CheckResult:
             "codex-capability",
             ok=True,
             warn=True,
-            detail=f"{probe.detail} — re-run `codex --version` manually to diagnose"
+            detail=f"{probe.detail} — re-run `codex --version` to diagnose"
             " (PATH, permissions, network)",
         )
     return CheckResult("codex-capability", ok=True, warn=False, detail=probe.detail)

@@ -982,7 +982,8 @@ def release_stale_gated_tasks() -> list[str]:
     Variant B is cross-reference-only -- a blocking PR that merged or closed
     and then left the queue entirely (its task row removed/never tracked) has
     no ``pr_state`` for this scan to match against, so that row stays parked
-    until an operator intervenes. No ``gh pr view`` fallback is attempted.
+    until the orchestrator requeues or closes it. No ``gh pr view`` fallback is
+    attempted.
 
     Does NOT require ``sessions_lock`` -- operates on the dev queue and the
     events inbox only. Returns the list of ticket_ids released or stamped.

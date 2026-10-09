@@ -61,7 +61,7 @@ Create PR via /prep-pr + /ship-it?
 ```
 
 - **Yes** → proceed to Step 4c
-- **No / Abort** → Stop, report worktree path for manual pickup
+- **No / Abort** → Stop, report worktree path so the orchestrator can pick it up
 
 ---
 
@@ -115,8 +115,8 @@ Options:
 ```
 
 - **Fix** → spawn the CI-fix agent named in the core doc's Step 5a bullet, then
-  loop back to Step 5a. Max 2 fix attempts, then escalate.
-- **Ignore** → proceed (user handles CI manually).
+  loop back to Step 5a. Max 2 fix attempts, then park for the orchestrator.
+- **Ignore** → proceed (the orchestrator picks up the CI failure from the open PR).
 - **Abort** → stop pipeline.
 
 ### Step 5b — initial review feedback check
@@ -143,7 +143,7 @@ Inline comments:
 
 Options:
 1. Address — I'll fix the requested changes and push updates (triggers 10m CI wait)
-2. Skip — proceed to next ticket (you'll address feedback manually)
+2. Skip — proceed to next ticket (the orchestrator addresses the feedback later)
 3. Discuss — I'll draft reply comments for your review before posting
 ```
 
@@ -202,7 +202,7 @@ Reached from Step 4c.5 of the core doc, and only when the single auto-rebase att
     "details": "PR #<N> opened with conflicts after sibling merges to origin/main between /prep-pr's sync-with-main and PR open. One auto-rebase attempted and failed; conflicted files: <list>",
     "exception_type": null,
     "message": "PR is open but conflicts with main; auto-rebase failed",
-    "recovery_hint": "Manual rebase in the impl worktree, OR close PR #<N> and re-dispatch the ticket",
+    "recovery_hint": "Orchestrator: rebase in the impl worktree (resolve conflicts, push), OR close PR #<N> and re-dispatch the ticket",
     "retry_eligible": true,
     "retry_delay_seconds": null
   },
@@ -214,7 +214,7 @@ Reached from Step 4c.5 of the core doc, and only when the single auto-rebase att
 
 **Producer note:** `merge_conflict_post_push` is an open-enum addition to `blocker.reason` (headless-contract.md §4.2 — `reason` is open by design). Consumers surface it verbatim; no parser change needed.
 
-**Defense-in-depth handoff:** the blocker is `retry_eligible: true` because `/review-monitor` auto-engages on orphaned CONFLICTING PRs authored by `@me`. If it rebases successfully the orchestrator can re-dispatch this ticket; if it also fails, `recovery_hint` hands over to a human.
+**Defense-in-depth handoff:** the blocker is `retry_eligible: true` because `/review-monitor` auto-engages on orphaned CONFLICTING PRs authored by `@me`. If it rebases successfully the orchestrator can re-dispatch this ticket; if it also fails, `recovery_hint` hands over to the orchestrator, which rebases the impl worktree itself or closes the PR and re-dispatches.
 
 ---
 
@@ -278,7 +278,7 @@ If any signature is present, emit the structured `blocked` sentinel below and st
     "details": "<matched signature + which push site, e.g. 'ship-it.md initial push: Permission denied (publickey)', 'Step 4c.2 post-merge push: Could not resolve host', or 'prep-pr.md Step 1 sync-with-base push: Authentication failed'>",
     "exception_type": null,
     "message": "git push failed authentication (SSH key locked or credentials expired)",
-    "recovery_hint": "Unlock the SSH key (or refresh credentials) and requeue the ticket",
+    "recovery_hint": "Orchestrator: refresh credentials and requeue the ticket (cw dev-queue requeue). Unlocking an SSH key passphrase (ssh-add) is the one physically-human step",
     "retry_eligible": true,
     "retry_delay_seconds": null
   },
@@ -286,7 +286,7 @@ If any signature is present, emit the structured `blocked` sentinel below and st
 }
 ```
 
-**Do not add `push_auth_failed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`auto_dev_result/schema.py`, currently `{"agent_block"}`). A locked SSH key is not fixed by re-running implementation; regressing FINALIZE→IMPL would burn `FINALIZE_REGRESS_CAP` attempts against a still-locked key. Park for the operator via the sentinel above.
+**Do not add `push_auth_failed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`auto_dev_result/schema.py`, currently `{"agent_block"}`). A locked SSH key is not fixed by re-running implementation; regressing FINALIZE→IMPL would burn `FINALIZE_REGRESS_CAP` attempts against a still-locked key. Park for the orchestrator via the sentinel above; the SSH-key passphrase unlock (`ssh-add`) is a physical-human exception — everything else in the recovery is the orchestrator's.
 
 **cw-side classification (RFC 0011 A1, #1155):** `push_auth_failed` is retro-classified under `OPERATOR_UNAVAILABLE_BLOCKER_REASONS`, so cw tags its park `paused_status: "awaiting_operator_availability"` rather than generic `"blocked"` — a cw-side (`dispatch/routing.py`) routing change only, no producer change required.
 
@@ -356,7 +356,7 @@ when `prep_pr_finalize.py verify --require-automerge` reported the
     "details": "Step 4c re-verification: prep_pr_finalize.py verify --require-automerge reported automerge-enabled check failed (autoMergeRequest read back null) for PR #<N>; arm-automerge: attempts=<k>/<max>, gh exit <code>, gh stderr: <verbatim gh_stderr, or 'none -- gh exited 0 but autoMergeRequest read back null'>",
     "exception_type": null,
     "message": "auto-merge was never armed after bounded retries (see details for gh's error)",
-    "recovery_hint": "Run `prep_pr_finalize.py arm-automerge <pr-number> --repo-path <worktree> --head-sha <head-sha>` and re-verify, or merge the PR directly",
+    "recovery_hint": "Orchestrator: run `prep_pr_finalize.py arm-automerge <pr-number> --repo-path <worktree> --head-sha <head-sha>` and re-verify, or merge the PR directly",
     "retry_eligible": true,
     "retry_delay_seconds": null
   },
@@ -369,10 +369,10 @@ when `prep_pr_finalize.py verify --require-automerge` reported the
 - (a) Retries exhausted (`arm-automerge` exit 1): the template above as written.
 - (b) No arm attempted (arm genuinely not attempted: `automerge-enabled` plus another failed check, or null `pr_number`; a denied arm is (d), not (b)): `details` are the original verify-only text — `Step 4c re-verification: prep_pr_finalize.py verify --require-automerge reported automerge-enabled check failed (autoMergeRequest read back null) for PR #<N>` with no `arm-automerge:` tail — and `message` is `auto-merge is not armed (no arm attempted: see details)`.
 - (c) Invocation error (exit 2, or any code other than 0/1/3): `details` begin `arm-automerge invocation error (exit <code>, not a gh failure): <stderr>` and `message` is `arm-automerge could not run (invocation error, not a gh failure)`, which also covers an existing `.claude/project-config.yaml` whose `pr.auto_merge` cannot be determined (fail closed, #2581): the stderr names the reason.
-- (d) Classifier-denied arm (#2625): the `arm-automerge` Bash call was denied by the auto-mode permission classifier, so `prep_pr_finalize.py` never started and the call has no exit status. Use it only when `pr_number` is non-null AND the denied call is the arm command (see Step 4c in the core doc for the detection gate). It applies even when other checks failed. `details` are `arm-automerge blocked by the auto-mode permission classifier before it ran (not a gh failure, not an invocation error); the classifier message, quoted verbatim, is: "Permission for this action was denied by the Claude Code auto mode classifier. Reason: <verbatim reason>". PR #<N> is open with autoMergeRequest null at head <head_sha> (checks may still be running; that does not block arming). The arm was not retried and not worked around (no direct gh pr merge). <if other checks failed: also failed: <names>>`, where `<verbatim reason>` is replaced at emit time by the actual text after `Reason:`. `message` is `auto-merge was not armed: the arm command was denied by the auto-mode permission classifier (a human-opened gate, not a gh failure)`. `recovery_hint` is exactly: ``Run `prep_pr_finalize.py arm-automerge <pr-number> --repo-path <worktree> --head-sha <head-sha>` from an operator shell (idempotent, head-pinned; <head-sha> is the 40-hex head SHA), then `cw dev-queue requeue <ticket> -c <client>` or let the PR merge (cw releases the row). To stop recurrence the operator can add an allow rule for that exact command in their own settings.`` Nothing more: never suggest that the worker change its own permissions, try another tool, interpreter or encoding, or merge directly. `retry_eligible: true` (the classifier is non-deterministic, claude-workspace#183; cw does not route on it).
+- (d) Classifier-denied arm (#2625): the `arm-automerge` Bash call was denied by the auto-mode permission classifier, so `prep_pr_finalize.py` never started and the call has no exit status. Use it only when `pr_number` is non-null AND the denied call is the arm command (see Step 4c in the core doc for the detection gate). It applies even when other checks failed. `details` are `arm-automerge blocked by the auto-mode permission classifier before it ran (not a gh failure, not an invocation error); the classifier message, quoted verbatim, is: "Permission for this action was denied by the Claude Code auto mode classifier. Reason: <verbatim reason>". PR #<N> is open with autoMergeRequest null at head <head_sha> (checks may still be running; that does not block arming). The arm was not retried and not worked around (no direct gh pr merge). <if other checks failed: also failed: <names>>`, where `<verbatim reason>` is replaced at emit time by the actual text after `Reason:`. `message` is `auto-merge was not armed: the arm command was denied by the auto-mode permission classifier (an auto-mode classifier gate, not a gh failure)`. `recovery_hint` is exactly: ``Run `prep_pr_finalize.py arm-automerge <pr-number> --repo-path <worktree> --head-sha <head-sha>` from an operator shell (the orchestrator's own shell; idempotent, head-pinned; <head-sha> is the 40-hex head SHA), then `cw dev-queue requeue <ticket> -c <client>` or let the PR merge (cw releases the row). To stop recurrence the human can add an allow rule for that exact command in their own settings (permission settings are the human's, never an agent's).`` Nothing more: never suggest that the worker change its own permissions, try another tool, interpreter or encoding, or merge directly. `retry_eligible: true` (the classifier is non-deterministic, claude-workspace#183; cw does not route on it).
   Here the reason stays `automerge_not_armed`: the sentinel's `pr_info` carries the PR, so cw stamps `pr_url` and releases the row on merge (Rule 5 `pr_info` stamp, `src/cw/dispatch/routing/__init__.py:959`; Variant A release, `src/cw/reconcile/tasks.py:832`; both keyed on this reason). This deliberately narrows the generic Tool-Use Denial Exit for this one call; see Step 4c.2 (#636).
 
-**Do not add `automerge_not_armed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`src/cw/auto_dev_result/schema.py:83`, currently `{"agent_block"}`). A failed auto-merge arm is not fixed by re-running implementation; regressing FINALIZE→IMPL would burn `FINALIZE_REGRESS_CAP` attempts against a PR that already exists and just needs re-arming. Park for the operator via the sentinel above.
+**Do not add `automerge_not_armed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`src/cw/auto_dev_result/schema.py:83`, currently `{"agent_block"}`). A failed auto-merge arm is not fixed by re-running implementation; regressing FINALIZE→IMPL would burn `FINALIZE_REGRESS_CAP` attempts against a PR that already exists and just needs re-arming. Park for the orchestrator via the sentinel above; the orchestrator runs `arm-automerge` itself.
 
 **Producer note:** `automerge_not_armed` is an open-enum addition to `blocker.reason` (headless-contract.md §4.2 — `reason` is open by design). Consumers surface it verbatim; no parser change needed.
 
@@ -380,6 +380,6 @@ when `prep_pr_finalize.py verify --require-automerge` reported the
 
 ## Step 4c.2: the `auto` permission-mode limitation, and the no-`/ship-it` block
 
-**Permission mode (known limitation, #636 — deferred):** headless workers run under `claude --bg --permission-mode auto` (`native_daemon.py` `_DEFAULT_PERMISSION_MODE`), so the `auto` classifier fires on `gh pr create` inside a worktree-isolated subagent and, with no TTY to approve, blocks `/prep-pr`. The allowlist `Bash(gh pr:*)` does NOT suppress it, and setting `bypassPermissions` on *this subagent spawn alone* is ineffective — the worker's own `auto` mode is the source. The effective fix (spawning the worker with a non-`auto` `permission_mode`) is **deferred** to RFC 0005's FINALIZE/REVIEW stages (#622/#621); until then a classifier block surfaces as a BLOCK for manual ship.
+**Permission mode (known limitation, #636 — deferred):** headless workers run under `claude --bg --permission-mode auto` (`native_daemon.py` `_DEFAULT_PERMISSION_MODE`), so the `auto` classifier fires on `gh pr create` inside a worktree-isolated subagent and, with no TTY to approve, blocks `/prep-pr`. The allowlist `Bash(gh pr:*)` does NOT suppress it, and setting `bypassPermissions` on *this subagent spawn alone* is ineffective — the worker's own `auto` mode is the source. The effective fix (spawning the worker with a non-`auto` `permission_mode`) is **deferred** to RFC 0005's FINALIZE/REVIEW stages (#622/#621); until then a classifier block surfaces as a BLOCK for the orchestrator to ship.
 
-**If the agent returns BLOCK due to "no project `/ship-it`":** The project hasn't been set up for automated PR creation. AskUserQuestion: "Project has no ship-it in any layout `/prep-pr` probes (`.claude/commands/ship-it.md`, `.claude/skills/ship-it/SKILL.md`, `.agents/skills/ship-it/SKILL.md`). Create one manually and resume, skip this ticket (leave branch pushed), or abort pipeline?"
+**If the agent returns BLOCK due to "no project `/ship-it`":** The project hasn't been set up for automated PR creation. AskUserQuestion: "Project has no ship-it in any layout `/prep-pr` probes (`.claude/commands/ship-it.md`, `.claude/skills/ship-it/SKILL.md`, `.agents/skills/ship-it/SKILL.md`). Set one up now via `/setup` and resume, skip this ticket (leave branch pushed), or abort pipeline?" (Headless: BLOCK for the orchestrator to set up ship-it via `/setup`.)

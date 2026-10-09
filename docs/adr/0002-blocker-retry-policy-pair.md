@@ -1,6 +1,7 @@
 # Blocker carries an explicit retry policy
 
 **Status:** Accepted
+**Amended by:** [ADR-0020](0020-the-operator-is-the-orchestrator-session.md) — "operator" means the orchestrator session; a human is escalated to only for product/scope forks.
 **Driven by:** #174 (Phase B + Phase E)
 **Builds on:** [`docs/headless-contract.md`](../headless-contract.md) §4.2.
 
@@ -9,7 +10,7 @@
 A `blocker` payload encodes the orchestrator's retry policy in two fields:
 `retry_eligible: bool | None` and `retry_delay_seconds: int | None`. Consumers
 read the pair to choose between retry-now, retry-after-delay, and
-human-required without hard-coding per-`reason` rules.
+orchestrator-triage (no retry policy committed) without hard-coding per-`reason` rules.
 
 ## Invariant
 
@@ -20,13 +21,13 @@ For any `Blocker` instance produced by `cw.auto_dev_result.parse_stdout`:
 3. `retry_eligible=True` with `retry_delay_seconds=None` is legal — it means
    "safe to retry, no specific backoff needed".
 4. Both fields default to `None`. A producer that does not commit a retry
-   policy leaves them null; consumers MUST treat null as "human required".
+   policy leaves them null; consumers MUST treat null as "escalate to orchestrator triage" (ADR-0020).
 
 ## What this means for callers
 
 - **Queue orchestrator** (today: `cw dispatch`; future: SDK orchestrator
   per #117 / #140) reads `blocker.retry_eligible` first, then `retry_delay_seconds`.
-  Routes `retry_eligible=False` and `retry_eligible=None` to human escalation;
+  Routes `retry_eligible=False` and `retry_eligible=None` to escalation (orchestrator triage, ADR-0020);
   routes `retry_eligible=True` to a re-dispatch path that respects the delay.
 - **`signal_stop`** (issue #184) inspects `blocker.retry_eligible` inline to
   decide whether to fire a PushNotification to the user (eligible=False) or
@@ -52,7 +53,7 @@ For any `Blocker` instance produced by `cw.auto_dev_result.parse_stdout`:
   | `plan_unreviewable`   | `false`          | `null`                |
 
 - Producer MAY leave both fields null during a rollout window. Consumers
-  treat null as "human required" (the safe default), which never
+  treat null as "escalate to orchestrator triage" (the safe default), which never
   regresses behavior.
 
 ## Consequences

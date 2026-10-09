@@ -19,7 +19,10 @@ stays "Anti-patterns".
 Code. It lets an operator drive parallel autonomous Claude workers across
 their repos — enqueue tickets, dispatch background workers, monitor progress
 to terminal, triage gates, and ship with auto-merge — while the operator stays
-the coordinator rather than the implementer. The core loop is: harden a
+the coordinator rather than the implementer. Per ADR-0020 the "operator" is
+whoever is operating cw — by default the long-lived orchestrator Claude
+session, not a human at a keyboard; a human is escalated to only for genuine
+product/scope forks and for gates they explicitly opted into. The core loop is: harden a
 ticket, dispatch it, let workers implement/review/ship it, then triage gates
 and clean up. Workers are spawned via `claude --bg` and tracked by a short hex
 session id in `~/.claude/daemon/roster.json`; no multiplexer is required.
@@ -77,8 +80,8 @@ the daemon surface, force-remove the worktree). The act phase is gated by a
 `reap_policy` that defaults to `signal_only`: detection emits a distress event
 and routes the owning task to `BLOCKED_ON_USER`, but performs no destructive
 mutation until an authority — the lane's long-lived `ORCHESTRATE` session, or
-an explicit operator command (`cw doctor --reap`, `cw reconcile --apply`) —
-authorizes it. Automatic reaping (`reap_policy: auto`) is opt-in per lane, not
+an explicit operator command (`cw doctor --reap`, `cw reconcile --apply`; per
+ADR-0020 the orchestrator session counts as the operator) — authorizes it. Automatic reaping (`reap_policy: auto`) is opt-in per lane, not
 the default. Callers must count `BLOCKED_ON_USER`/`REAP_PROPOSED` sessions as
 occupying capacity — a stalled, signal-only session does not free its slot
 just because it stopped making progress.
@@ -98,8 +101,8 @@ time or transcript age against a threshold and, on exceedance, mutate
 session status, the dev queue, the daemon roster, or a worktree. Thresholds
 may only debounce or delay *signals* and *re-checks*. A destructive act
 requires evidence (roster absence, a recorded terminal result, a dead PID) or
-an explicit operator command, and remains subject to ADR-0006's `reap_policy`
-gate. New health heuristics land as signals (events, notifications,
+an explicit operator command (per ADR-0020, run by the orchestrator session),
+and remains subject to ADR-0006's `reap_policy` gate. New health heuristics land as signals (events, notifications,
 advisories) first; promoting one to an automatic disposition requires a new
 ADR superseding this one. This is the constraint a plan reaches for when
 asked to fix a hang — "if it has been quiet for N minutes, do X to the
@@ -243,7 +246,8 @@ cites one of these.
 
 1. Reap-policy authority: reaping is gated by an authority; the default
    `reap_policy` is `signal_only` (no destructive mutation without
-   authorization); automatic reaping is opt-in. — Source:
+   authorization, where the orchestrator session counts as the authority per
+   ADR-0020); automatic reaping is opt-in. — Source:
    `docs/adr/0006-reaping-is-gated-by-an-authority.md`
 2. Harvest authority / one-door result publishing: each backend has one
    designated harvest authority pushing through one validated door;
@@ -296,7 +300,8 @@ cites one of these.
 13. Timers never destroy work: no elapsed-time or transcript-age comparison
     may mutate session status, dev-queue state, the daemon roster, or a
     worktree; time-based heuristics land as signals only, and a destructive
-    act needs evidence or an operator command. — Source:
+    act needs evidence or an operator command (the orchestrator session
+    counts, per ADR-0020). — Source:
     `docs/adr/0014-timers-never-destroy-work.md`
 14. Lock discipline: state-file locks are acquired in non-decreasing rank
     (`sessions_lock`, then STATE locks, then a leaf inbox/history lock, with
@@ -313,7 +318,8 @@ principle, grounded in the same source document.
 1. Destructive reap under `signal_only` with no authority sign-off —
    force-removing a worktree, stopping a daemon, or reverting
    RUNNING→PENDING without a `reap_policy: auto` lane or an explicit
-   operator command (`cw doctor --reap`, `cw reconcile --apply`) behind it.
+   operator command (`cw doctor --reap`, `cw reconcile --apply`; the
+   orchestrator session counts, per ADR-0020) behind it.
    — Source: `docs/adr/0006-reaping-is-gated-by-an-authority.md`
 2. A second `session.last_result =` write path outside the RFC 0012 door —
    any new or existing writer that assigns `last_result` directly instead
@@ -397,3 +403,4 @@ new one.
 | [0013](docs/adr/0013-agent-delegated-ticket-work.md) | Provider-portable ticket work is agent work; cw keeps one GitHub-only programmatic client | Accepted |
 | [0015](docs/adr/0015-voided-finding-suppression-is-content-anchored.md) | Voided-finding suppression is content-anchored, never positional | Accepted |
 | [0016](docs/adr/0016-ledger-claim-matching-is-gated-and-measured.md) | Ledger claim matching ships gated and measured, never on by default | Accepted |
+| [0020](docs/adr/0020-the-operator-is-the-orchestrator-session.md) | The operator is the orchestrator session; a human is escalated to only for product or scope forks | Accepted |
