@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.69.1] - 2026-10-09
+
 ### Fixed
 
 - **The opencode executor works with opencode 2.x (#2654).** opencode v2 rejects `--pure` and `--dir` on `opencode run`, so every opencode-executor session blocked as `opencode_no_output`. `build_argv` now omits both (the worker already runs with `cwd=<worktree>`) and passes them only when `opencode run --help` still lists them (opencode 1.x); a failed probe assumes 2.x.
