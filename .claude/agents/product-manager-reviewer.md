@@ -125,12 +125,12 @@ AMBIGUITIES — N items
    - Alternative(s) the ticket also supports: a lettered list — `(a) <alternative>`, `(b) <alternative>`, … — always lettered, even when there is only one alternative, so a later round can settle this item by naming a discrete label (`ALT-b`)
    - Why it matters: <how the answer changes the code>
    - Ticket evidence: <verbatim quote from ticket description or comment that is the source of the ambiguity>
-   - Recommendation: ADOPT — <why the plan's stated assumption is safe to auto-adopt without a human answer> | PARK — <why this is a genuine product/scope fork the sources of truth cannot answer: product intent or public-contract shape; routed to the orchestrator, which escalates to a human only if it cannot resolve it>
+   - Recommendation: ADOPT — <why the plan's stated assumption is safe to auto-adopt without a human answer> | PARK — <why the orchestrator must decide: product/scope intent, public-contract shape, destructive-action semantics, or "cannot confidently recommend a side"; the orchestrator escalates to a human only if it cannot resolve it>
 
 2. ...
 ```
 
-**Recommendation is mandatory on every item — never omit it.** PARK only for a genuine product/scope fork (product intent or public-contract shape that the ticket's sources of truth cannot answer). Otherwise ADOPT, stating the assumption you are adopting and why it is safe; an uncertain technical, convention, or destructive-action-semantics question is answered from the sources of truth, not parked. Consumer-side default: a missing or malformed `Recommendation` line (wrong token, absent sub-bullet, anything other than a leading `ADOPT`/`PARK` token) is treated as PARK downstream — a deliberate fail-closed default, not a bug, and never a shortcut for writing ADOPT.
+**Recommendation is mandatory on every item — never omit it.** PARK (to the orchestrator, which adjudicates and escalates to a human only a genuine product/scope fork it cannot resolve) when getting it wrong is not cheap to unwind: product/scope intent, a public contract, or destructive-action semantics the ticket's sources of truth do not settle. Otherwise ADOPT, stating the assumption you are adopting and why it is safe; an uncertain technical or convention question is answered from the sources of truth, not parked. Consumer-side default: a missing or malformed `Recommendation` line (wrong token, absent sub-bullet, anything other than a leading `ADOPT`/`PARK` token) is treated as PARK downstream — a deliberate fail-closed default, not a bug, and never a shortcut for writing ADOPT.
 
 If no ambiguities are found, return exactly:
 

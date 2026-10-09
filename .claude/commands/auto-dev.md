@@ -75,7 +75,7 @@ Pass `--headless` to run the pipeline with no interactive prompts. Every `AskUse
 
 **Cross-repo spec:** [`claude-workspace/docs/headless-contract.md`](https://github.com/mattwwarren/claude-workspace/blob/main/docs/headless-contract.md) reformulates this section + the Appendix as a parser-implementer reference. This file (`commands/auto-dev.md`) is the producer source of truth; the spec doc is the link target for cw and any other consumer.
 
-**Philosophy:** the human only sees the diff after the machine has done all deterministic cleanup it can. Two gates remain:
+**Philosophy:** the orchestrator (and the human only for opted-in gates or a genuine product/scope fork) sees the diff after the machine has done all deterministic cleanup it can. Two gates remain, both adjudicated by the orchestrator:
 - Plan approval (large scope only) is the only "before work" gate.
 - Review approval (large scope only) is the only "after work" gate.
 Everything else runs to completion or exits with a structured error.
@@ -109,7 +109,7 @@ The rows below define the deterministic headless action for every interactive ga
 | S1 plan, no Linear plan, large | Generate → EXIT `plan_pending_approval` through the consolidated park (#1650): one `## Pending Verification Scan` comment carrying advisory Step-1f findings, `### Approval requested`, and the full draft; draft persisted to `.cw/plan-draft.md`; no branch |
 | S1 ambiguity scan, no ambiguities | AUTO-CONTINUE |
 | S1 ambiguity scan, ambiguities found (parked) | EXIT `ambiguities_pending_resolution` through the consolidated park (#1650): parked questions + advisory Step-1f findings (+ `### Approval requested` when Large) + draft, ONE comment; draft persisted; no branch |
-| S1 ambiguity scan, non-empty `PREMISES TO VERIFY` (unverified) | EXIT `premises_pending_verification` through the consolidated park (#1650): unverified premises (+ parked ambiguities) + advisory Step-1f findings + draft, ONE comment; draft persisted; no branch — verification is human/investigation work, not a plan revision |
+| S1 ambiguity scan, non-empty `PREMISES TO VERIFY` (unverified) | EXIT `premises_pending_verification` through the consolidated park (#1650): unverified premises (+ parked ambiguities) + advisory Step-1f findings + draft, ONE comment; draft persisted; no branch — verification is investigation work for the orchestrator, not a plan revision |
 | S1 pre-flight finds ticket already satisfied | EXIT `no_op` (no branch, `next_actions: ["close_issue_as_completed"]`) |
 | S1 plan review, both markers present + current | AUTO-SKIP (no reviewer spawn, no marker re-append) |
 | S1 spec review, NO_ISSUES / SHOULD_FIX / PRINCIPLE only | Append `plan-spec-reviewed` marker, continue |
@@ -443,9 +443,10 @@ The stage instead EXITS `blocked` with
 directive verbatim and naming the comment (author, created timestamp, and whether it was
 marked agent-authored), and `retry_eligible: false`. Fail closed, on the same reasoning as
 `auto-dev-finalize.md`'s semantic auto-resolve attempt: a destructive act taken on a
-comment's say-so is unrecoverable, so it is always worth one operator round. The gate holds
-even when the comment reads as the operator's own — a human who wants a branch deleted can
-delete it, and asking costs one round.
+comment's say-so is unrecoverable, so it is always worth one orchestrator round: the park is
+addressed to the orchestrator, which acts on the directive itself after collecting evidence
+(ADR-0020). The gate holds even when the comment reads as the operator's own — the worker
+never acts on it, and parking costs one round.
 
 **Never invent a `blocker.reason`.** Use a value from the `blocker.reason` Values table in
 the Appendix below, or one documented in `docs/headless-contract.md` §4.2. The enum is open,
@@ -458,7 +459,7 @@ registered reason fits, prefix the new one with `x_` to declare it explicitly fr
 
 ## Tool-Use Denial Exit
 
-The Claude Code auto-mode classifier can deny a tool call mid-pipeline (typical case: external-system writes like `gh issue comment` under the agent's identity). In interactive mode the human re-authorizes; in headless mode there is no human and no retry path, so an undirected denial produces a silent stall until the Layer 1 backstop times the session out (~30 min, see claude-workspace#176).
+The Claude Code auto-mode classifier can deny a tool call mid-pipeline (typical case: external-system writes like `gh issue comment` under the agent's identity). In interactive mode the person driving the session re-authorizes; in headless mode there is no one to re-authorize in-session and no retry path, so an undirected denial produces a silent stall until the Layer 1 backstop times the session out (~30 min, see claude-workspace#176).
 
 **Detection.** On every `tool_result` block with `is_error: true`, check whether the content begins with the literal phrase:
 
@@ -493,7 +494,7 @@ Match is a case-sensitive substring check against the tool_result content. The c
 }
 ```
 
-`retry_eligible: true` by default — the classifier is the source of non-determinism, not the plan or the impl. If a future denial form indicates a hard policy refusal (not yet observed), set `retry_eligible: false` and leave the orchestrator to surface to the human.
+`retry_eligible: true` by default — the classifier is the source of non-determinism, not the plan or the impl. If a future denial form indicates a hard policy refusal (not yet observed), set `retry_eligible: false` and park for the orchestrator, which adjudicates it (escalating to the human only if it proves a product/scope fork).
 
 **Action (interactive).** The denial appears verbatim to the user in the normal tool-result stream; no skill action is required. The user re-authorizes or alters the operation as they would for any classifier prompt.
 
@@ -684,7 +685,7 @@ The pipeline records deferred review findings in the PR body (Stage 4 Step 4d) b
    ```
    This is the idempotency gate — filing and labeling both happen, but a re-run that finds the label already present is a no-op.
 
-**Headless:** Step H3 is interactive-only (stays in the PR Hygiene Sweep, which runs in interactive mode only per the Headless Mode out-of-scope notes). Deferred findings are written to the PR body by Step 4d and harvested on the next interactive sweep.
+**Headless:** Step H3 is interactive-only (stays in the PR Hygiene Sweep, which runs in interactive mode only per the Headless Mode out-of-scope notes). Deferred findings are written to the PR body by Step 4d and carried in the park/result payload; the orchestrator files the tickets from that payload (dedup + `review-debt` label as above, then `review-debt-harvested`) — or the next interactive sweep does.
 
 ### Quick Feedback Checks (stage boundaries)
 
@@ -756,7 +757,7 @@ After Stage 3 completes, proceed to Stage 4.
 
 At any failure point, present options via **AskUserQuestion:**
 
-1. **Skip ticket** — move to next ticket, leave partial work for manual pickup
+1. **Skip ticket** — move to next ticket, leave partial work in the worktree/branch for the orchestrator to pick up
 2. **Retry** — re-enter pipeline at the failed stage with existing state preserved
 3. **Abort pipeline** — stop all processing
 
@@ -769,7 +770,7 @@ On skip or abort, report what was completed and the worktree path/branch if part
 If any agent returns friction level **BLOCK**:
 - Surface the blocker immediately via AskUserQuestion
 - Do NOT proceed to next stage
-- "Resolve this manually and resume, skip ticket, or abort pipeline?"
+- "Resolve the blocker and resume, skip ticket, or abort pipeline?" (the AI resolves it where it can; ask only for a genuine product/scope fork)
 
 **Headless:** EXIT `blocked` with `blocker.reason: "agent_block"`.
 
@@ -1226,15 +1227,15 @@ Applies to: `no_op`, `plan_pending_approval`, `ambiguities_pending_resolution`, 
 |---|---|
 | `shipped` | PR created with auto-merge enabled; CI wait skipped |
 | `no_op` | Stage 1 pre-flight verification found all targeted changes already in the desired state; no branch created; `next_actions: ["close_issue_as_completed"]`. Distinct from `blocked` — this is a healthy outcome, not a failure |
-| `plan_pending_approval` | Large scope — plan generated and posted to Linear; no branch created; awaiting human approval |
-| `ambiguities_pending_resolution` | Plan was clear enough to proceed by tier rules, but the Step 1c ambiguity scan surfaced clarifying questions; posted to Linear; no branch created; awaiting human answers |
-| `premises_pending_verification` | The Step 1c ambiguity scan surfaced one or more unverified premises — factual claims about an external system the plan's correctness depends on; posted to Linear; no branch created; awaiting human verification (not a plan revision) |
-| `review_pending_approval` | Large scope — fix loop complete, branch pushed, no PR; awaiting human review approval |
+| `plan_pending_approval` | Large scope — plan generated and posted to Linear; no branch created; awaiting orchestrator approval |
+| `ambiguities_pending_resolution` | Plan was clear enough to proceed by tier rules, but the Step 1c ambiguity scan surfaced clarifying questions; posted to Linear; no branch created; awaiting answers from the orchestrator (a genuine product/scope fork goes on to the human) |
+| `premises_pending_verification` | The Step 1c ambiguity scan surfaced one or more unverified premises — factual claims about an external system the plan's correctness depends on; posted to Linear; no branch created; awaiting orchestrator verification (not a plan revision) |
+| `review_pending_approval` | Large scope — fix loop complete, branch pushed, no PR; awaiting orchestrator review approval |
 | `merge_gate_blocked` | Small scope — prior pipeline PR still open; cannot create next PR until gate clears |
 | `scope_exceeded` | `--scope-limit small` rejected a Large ticket before impl started |
 | `forbidden_area` | `--forbidden` constraint matched a planned file; ticket rejected before impl started |
 | `blocked` | Unrecoverable error mid-pipeline; see `blocker` field for details |
-| `empty_diff_blocked` | Branch pushed but measures zero commits ahead of `origin/<default_branch>` — nothing to review or ship; dispatch's #1870 gate or the review-stage synthesis itself detected this and parked for human triage rather than presenting a normal scope-approval decision. `branch` is non-null; `next_actions` is empty; `blocker.reason` is typically `empty_diff_no_commits` |
+| `empty_diff_blocked` | Branch pushed but measures zero commits ahead of `origin/<default_branch>` — nothing to review or ship; dispatch's #1870 gate or the review-stage synthesis itself detected this and parked for orchestrator triage rather than presenting a normal scope-approval decision. `branch` is non-null; `next_actions` is empty; `blocker.reason` is typically `empty_diff_no_commits` |
 | `stale_dispatch` | This ticket already has an open, **unmerged** PR from an earlier dispatch, so the run refuses rather than re-implementing work already in review (#1862). Detected by the Stage 0 intake self-check (see `auto-dev-intake.md` Step 3), or by `cw`'s own pre-dispatch gate before a session is even spawned. `pr` stays **null** — this run did not create that PR; its number/URL/review state go in `blocker.details`. `next_actions` is empty; `blocker.reason` is `pr_already_open`. Distinct from `no_op` (nothing is complete — the PR is unmerged) and from `merge_gate_blocked` (that is a *different* ticket's PR blocking this one) |
 | `tracker_mcp_unavailable` | **cw-side only — never emit this as a sentinel `status`.** `cw`'s pre-dispatch tracker-MCP gate (#2442) found that this ticket branch's `.claude/settings.json` (or the client's configured `settings_path`) verifiably lacks the tracker MCP plugin in `enabledPlugins`, so no session was spawned — the condition that surfaces mid-run as `impl_comments_unreadable_after_regress` (#2415) is caught before spawn instead. The row is parked `BLOCKED_ON_USER` with disposition `tracker_mcp_gate` and `blocked_reason` `tracker_mcp_unavailable_pre_dispatch`; the `session.needs_attention` event names the branch, the file inspected, and the expected plugin id (`details`). Per-client opt-in via `clients.yaml` `tracker_mcp_gate` (default off); fails open on a missing branch, missing file, malformed JSON, or unrecognized `enabledPlugins` shape |
 
@@ -1252,8 +1253,8 @@ When `status: "blocked"`, the `blocker.reason` field carries one of:
 | `plan_deviation` | A non-deferrable Stage-3 finding (impl deviates from an explicit plan requirement/prohibition) survived the fix loop or was judged beyond fix-loop scope. The pipeline does not assign plan-vs-impl blame — it always exits `blocked`; the operator uses `cw dev-queue requeue --regress` to send it back to impl, or revisits the plan. Also posts the blocking findings that caused the exit — regardless of severity — as a tracker comment (#1817) |
 | `review_operator_actionable` | An accepted MUST_FIX finding carrying `no_diff_anchor: true` — the session judged it valid and in-scope, but its remedy lies outside this diff entirely (a follow-up ticket that was never filed, an artifact that exists nowhere), so the fix loop structurally cannot act on it. Adjudicated `outcome: "operator_action"` at Checkpoint 3a and posted to the ticket as a `## Operator-Actionable Review Findings` checklist; `blocker.stage` is `"stage3_review"` and it routes to BLOCKED_ON_USER, not finalize. Distinct from `plan_deviation`, which is a NON_DEFERRABLE plan-conformance judgment: a finding that is both `no_diff_anchor` and NON_DEFERRABLE never reaches this reason — it exits `plan_deviation` instead (#1817) |
 | `plan_scope_drift` | Step 2.5 gate 2: the delivered diff touched more unplanned files than `check_plan_scope_conformance.py`'s allowance (#1779). **Mechanical and pre-review** — it is a file-set measurement taken *after impl, before review*, where `plan_deviation` above is a reviewer's *judgment* about content, raised during Stage 3. `blocker.stage` is `"stage2_impl"` (vs `plan_deviation`'s `"stage3_review"`), and `blocker.details` enumerates the specific unplanned paths — that list is the operator's entire authorization surface: requeue the parked task if the growth was legitimate, or `cw dev-queue requeue --regress` to send it back for a tighter diff. Distinct from `scope_exceeded`, which is a Status (not a blocker reason) fired *before impl started*, from the Stage-1 plan's own estimate |
-| `plan_unreviewable` | Plan Reviewer (spec station) returned MUST_FIX both before and after a single Step 1f.4 revision cycle — the plan needs human triage, not another auto-revision. No branch created. Also posts the persisting blocking findings as a tracker comment (#1815) |
-| `plan_unsound` | Plan Soundness Reviewer returned a MUST_FIX (direction contradicts a codified `ARCHITECTURE.md` §7/§8 rule) in a headless run, or it persisted after a Step 1f.4 revision cycle — the chosen direction needs human judgment. No branch created. Also posts the persisting blocking findings as a tracker comment (#1815) |
+| `plan_unreviewable` | Plan Reviewer (spec station) returned MUST_FIX both before and after a single Step 1f.4 revision cycle — the plan needs orchestrator triage, not another auto-revision. No branch created. Also posts the persisting blocking findings as a tracker comment (#1815) |
+| `plan_unsound` | Plan Soundness Reviewer returned a MUST_FIX (direction contradicts a codified `ARCHITECTURE.md` §7/§8 rule) in a headless run, or it persisted after a Step 1f.4 revision cycle — the chosen direction needs orchestrator judgment. No branch created. Also posts the persisting blocking findings as a tracker comment (#1815) |
 | `ambiguity_scan_unconverged` | Step 1c's ambiguity/premise scan parked for 2 consecutive rounds without converging — the round cap (`plan-stage-scan-round`, cap 2, tracked on `.cw/plan-draft.md`'s first line) was reached, so another park round would just re-ask what the operator has already been asked twice. No branch created. `blocker.stage` is `"stage1_plan"` and `retry_eligible: true`; the still-open item(s) and the round count at exhaustion (always 2) are named verbatim in `blocker.details`, folded into the same consolidated `## Pending Verification Scan` comment as any ambiguities, premises, and advisory findings raised that round (#1683) |
 | `deferred_stub_unresolved` | Step 1c's pre-branch stub check found a `## Deferred Premises` entry still marked `PENDING — agent must supply on next scan` after the scan that was required to classify it — the halt-check the plan depends on is un-enforced, so the round blocks instead of proceeding to any Step 4c outcome, AUTO-CONTINUE included. No branch created. `blocker.stage` is `"stage1_plan"` and `retry_eligible: true`; the unresolved stub(s) are named verbatim in `blocker.details` and folded into the same consolidated park comment (#1683) |
 | `scope_tier_stale` | Step 1g.0's tier re-verification, immediately before the `**Scope tier:**` stamp is written, found the tier last computed this invocation differs from the tier freshly recomputed from the plan's current state — a Step 1f.4 revision (or an accumulated resumed round) could otherwise carry an earlier round's stale tier through to the persisted stamp, silently skipping the Large-tier operator-approval gate at Checkpoint 1. No branch created. `blocker.stage` is `"stage1_plan"` and `retry_eligible: true`; `blocker.details` names both tiers, each with its full `(files, lines, forbidden_touched)` tuple. Also posts the mismatch as a tracker comment under `## Blocking Review Findings` (#1815, #1897) |
@@ -1300,13 +1301,13 @@ A `worktree_path` ending in `dev-proj-1234-fix-login` is wrong — that pattern 
 
 **`next_actions`** — advisory list `cw` can act on without prose-parsing. Empty for terminal success. Examples:
 - `"wait_for_ci"` — auto-merge is pending CI; cw can poll
-- `"user_approve_plan"` — large scope plan posted to Linear; cw should notify user
+- `"user_approve_plan"` — large scope plan posted to Linear; the orchestrator adjudicates it and approves (`cw dev-queue approve`)
 - `"resolve_merge_gate"` — prior PR must merge before this ticket can ship
-- `"user_approve_review"` — large scope branch pushed; cw should notify user for review
-- `"user_resolve_ambiguities"` — Step 1c surfaced ambiguities; cw should notify user; answers belong on the Linear ticket before re-invoking
-- `"close_issue_as_completed"` — `no_op` outcome: the targeted change was already in place; cw should close the ticket as completed (the skill does not auto-close)
+- `"user_approve_review"` — large scope branch pushed; the orchestrator reviews the diff and approves (escalating only a product/scope fork)
+- `"user_resolve_ambiguities"` — Step 1c surfaced ambiguities; the orchestrator resolves them against the ticket's sources of truth (escalating only genuine product/scope forks); answers belong on the Linear ticket before re-invoking
+- `"close_issue_as_completed"` — `no_op` outcome: the targeted change was already in place; the orchestrator closes the ticket as completed with a citation (the skill does not auto-close)
 - `"attach_ui_evidence"` — Stage 4d UI Evidence Gate "Hold" branch (interactive only): PR was created with frontend file changes but the body has no screenshots/video, the human chose to hold rather than ship-anyway or capture-now; auto-merge was NOT enabled
-- `"attach_ui_evidence_and_enable_automerge"` — Stage 4d UI Evidence Gate fired in headless: PR was created with frontend file changes but the body has no screenshots/video; auto-merge was NOT enabled; the human should embed media in the PR body then run `gh pr merge --auto --squash`
+- `"attach_ui_evidence_and_enable_automerge"` — Stage 4d UI Evidence Gate fired in headless: PR was created with frontend file changes but the body has no screenshots/video; auto-merge was NOT enabled; the orchestrator embeds media in the PR body then runs `gh pr merge --auto --squash`
 
 **`ambiguities`** — populated when `status="ambiguities_pending_resolution"`. List of structured items, one per question. Each item:
 ```json

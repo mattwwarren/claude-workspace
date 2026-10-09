@@ -32,7 +32,7 @@ BRANCH=$(git branch --show-current)
 git push -u origin "$BRANCH" 2>&1
 ```
 
-If push fails (e.g., diverged), BLOCK — do not force-push without explicit user approval.
+If push fails (e.g., diverged), BLOCK — do not force-push unless you have evidence it is a cw-owned branch (a `dev/<ticket>`-style branch this pipeline created); otherwise park for the orchestrator.
 
 ## Step 3: Create the PR
 
@@ -221,7 +221,7 @@ if "$FINALIZE" check-automerge-allowed --repo-path "$REPO_ROOT"; then
   # 0 armed/merged | 1 failed after bounded retries | 2 invocation error | 3 seam refused
   case "$arm_status" in
     0) ;;
-    3) echo "Auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR #$PR_NUMBER open for manual merge." ;;
+    3) echo "Auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR #$PR_NUMBER open for the orchestrator to merge." ;;
     1) echo "BLOCK: gh pr merge --auto failed after bounded retries for PR #$PR_NUMBER (arm-automerge exit 1): see gh_stderr in the JSON above (empty means gh exited 0 but autoMergeRequest read back null)" >&2; exit 1 ;;
     *) echo "BLOCK: arm-automerge invocation error (exit $arm_status, not a gh failure): not retried" >&2; exit 1 ;;
   esac
@@ -231,7 +231,7 @@ else
     echo "Auto-merge gate failed unexpectedly (exit $GATE_STATUS) — BLOCK." >&2
     exit 1
   fi
-  echo "Auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR #$PR_NUMBER open for manual merge."
+  echo "Auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR #$PR_NUMBER open for the orchestrator to merge."
 fi
 ```
 
@@ -283,7 +283,7 @@ If the script exits non-zero, BLOCK with the JSON. Do not paper over failures.
 
 ## Failure modes
 
-- **Push fails (diverged):** BLOCK. User must rebase or merge main first.
+- **Push fails (diverged):** BLOCK for the orchestrator to rebase or merge main first.
 - **PR creation fails:** BLOCK with the `gh` error verbatim.
 - **Auto-merge enable fails:** BLOCK — the PR exists but auto-merge isn't on; don't silently leave it unset.
 - **Finalize verification fails:** BLOCK with the JSON; do not paper over.

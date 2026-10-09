@@ -357,7 +357,7 @@ result per the two cases below:
   "worktree"`** and have the agent re-checkout the feature branch from origin (the same
   push-then-recheckout pattern as the Stage 3b fix loop) before invoking `/prep-pr`.
 
-**A `/prep-pr` invocation blocked by the harness's own permission classifier** is rare — the known limitation (#636, deferred) and why neither the `Bash(gh pr:*)` allowlist nor a per-spawn `bypassPermissions` suppresses it live in `.claude/commands/auto-dev-finalize-appendix.md`, section "Step 4c.2: the `auto` permission-mode limitation, and the no-`/ship-it` block". Read it now if `/prep-pr` blocked on a permission prompt; the block surfaces as a BLOCK for manual ship either way.
+**A `/prep-pr` invocation blocked by the harness's own permission classifier** is rare — the known limitation (#636, deferred) and why neither the `Bash(gh pr:*)` allowlist nor a per-spawn `bypassPermissions` suppresses it live in `.claude/commands/auto-dev-finalize-appendix.md`, section "Step 4c.2: the `auto` permission-mode limitation, and the no-`/ship-it` block". Read it now if `/prep-pr` blocked on a permission prompt; the block surfaces as a BLOCK for the orchestrator to ship either way.
 
 **Compose the PR title in the parent finalize worktree before spawning (#2362):** with no `--title`, `ship-it.md`'s Step 3 Tier 3 titles the whole branch after its first substantive commit — usually a building block, not the change being shipped (#2358, #2361). Finalize decides the real title instead and passes it through `/prep-pr --title`, which `ship-it.md`'s Tier 1 already honors unconditionally ahead of every other tier. The parent must perform the reads and composition below before spawning; do not defer them to the child, because an interactive `isolation: "worktree"` child cannot see the parent's `.cw` artifacts.
 
@@ -576,7 +576,7 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
 
    The script resolves only three enumerated safe shapes (`one_sided_insert`, `import_union`, and a path-gated `doc_append`), atomically across every conflicted file, and writes nothing at all if any block is unsafe.
 
-   - **Absent from both locations** → do NOT invoke `uv run python` against a nonexistent path. Log `"classify_merge_conflict: script absent, skipped"` in `friction_highlights`, `git merge --abort`, and fall through to the unchanged `merge_conflict_post_push` sentinel below — the same terminal outcome as a refusal, honestly labelled instead of surfacing a raw `FileNotFoundError` as `$RESOLVE_OUTPUT`. Unlike this pipeline's other guard sites, absence here is not "continue non-blocking": a conflict nothing classified was always going to escalate to human review.
+   - **Absent from both locations** → do NOT invoke `uv run python` against a nonexistent path. Log `"classify_merge_conflict: script absent, skipped"` in `friction_highlights`, `git merge --abort`, and fall through to the unchanged `merge_conflict_post_push` sentinel below — the same terminal outcome as a refusal, honestly labelled instead of surfacing a raw `FileNotFoundError` as `$RESOLVE_OUTPUT`. Unlike this pipeline's other guard sites, absence here is not "continue non-blocking": a conflict nothing classified was always going to park for the orchestrator.
    - **Candidate found but its marker is missing or below minimum** → EXIT `blocked` with `blocker.reason: "agent_block"` (this doc's fixed catch-all convention — do not invent a new reason), `blocker.details: "Step 4c.5: HEADLESS BLOCK — classify_merge_conflict.py at <resolved-path> — missing/stale cw-script-version marker (need >= 1)"`, and STOP. A resolver that cannot be trusted to have classified the conflict at all is a tooling-integrity failure, not a classification outcome; do not fold it in with genuine refusals.
    - **Exit 1 or 2 (refused)** → `git merge --abort`, then fall through to the **existing, unchanged** `merge_conflict_post_push` sentinel below, appending to `blocker.details`: `"; semantic auto-resolve attempted — refused: $RESOLVE_OUTPUT"`.
    - **Exit 0 (resolved)** → stage the reported `resolved_files`, confirm nothing is still unmerged, and commit with a message that records what was auto-synthesized (never `--no-edit` — the default merge message is the only artifact of this event that outlives the pipeline run, since `friction_highlights` does not persist):
@@ -684,9 +684,9 @@ After `/prep-pr` returns with a PR number:
    ```
    - **Capture now** → apply the same Dispatch Detection test as Step 4c (`.claude/cw-context.json` present). **In a dispatch worktree:** spawn a `general-purpose` agent (`subagent_type: "general-purpose"`, `model: "haiku"`, no `isolation` key) scoped to the session cwd — same #766/#1047 rationale as Step 4c. **Otherwise:** spawn a `general-purpose` agent (`subagent_type: "general-purpose"`, `isolation: "worktree"`, `model: "haiku"`). Agent spawns are async unconditionally (`run_in_background` is not one of their parameters) — end the turn and resume on the completion notification rather than polling. This async-dispatch exemption is scoped to the Agent tool's subagent spawn only — it does not extend to a raw Bash call; see `auto-dev.md`'s Worker Execution Discipline section for the no-backgrounding rule that applies there. **Non-Claude executor (opencode FINALIZE, #1670):** this file is also consumed by `opencode run`, which has no Agent tool, no Stop hook, and no completion notifications — there, do NOT attempt a spawn or a turn-end wait; run the capture inline in the current session and keep going. Either way, pass the playwright-cli capture + `gh pr edit --body` instructions from the project's `/ship-it` Step 6b. Re-run this gate after the agent returns; max 2 capture attempts before falling through to "Hold".
    - **Ship anyway** → continue to step 2 (auto-merge enable). Append `"ui_evidence_missing_user_override"` to `friction_highlights`.
-   - **Hold** → skip step 2 entirely (do NOT enable auto-merge). The PR waits on the human to attach evidence and run `gh pr merge --auto --squash`. Set `pr.auto_merge: false` and `next_actions: ["attach_ui_evidence"]`.
+   - **Hold** → skip step 2 entirely (do NOT enable auto-merge). The PR waits for the orchestrator to attach evidence and run `gh pr merge --auto --squash`. Set `pr.auto_merge: false` and `next_actions: ["attach_ui_evidence"]`.
 
-   *Headless:* never block — append `"ui_evidence_missing"` to `friction_highlights`, set `pr.auto_merge: false` and `next_actions: ["attach_ui_evidence_and_enable_automerge"]`, skip step 2, continue to step 3. Status stays `shipped` because the PR exists; the human decides from the structured output.
+   *Headless:* never block — append `"ui_evidence_missing"` to `friction_highlights`, set `pr.auto_merge: false` and `next_actions: ["attach_ui_evidence_and_enable_automerge"]`, skip step 2, continue to step 3. Status stays `shipped` because the PR exists; the orchestrator embeds the evidence and runs `gh pr merge --auto --squash` from the structured output.
 
    **If the gate is clean** (no UI files in diff, OR UI files plus media markers in body): proceed to step 2.
 
@@ -728,7 +728,7 @@ After `/prep-pr` returns with a PR number:
 
    Omit the section for `"clean"`. The section is idempotent across restarts: replace an existing `## Operator override` section rather than appending a second one.
 
-3. **Enable auto-merge:** Precondition: if the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless, skip this entire item — do not run the seam check or `arm-automerge`, set the sentinel's `pr.auto_merge` to `false`, and continue to step 4. Otherwise, first check the shared seam — `~/.claude/scripts/prep_pr_finalize.py check-automerge-allowed` — and record its exit status. Exit `0` permits the arm; exit `1` means `.claude/project-config.yaml` sets `pr.auto_merge: false`, so skip this step, set the sentinel's `pr.auto_merge` to `false`, leave the PR open for manual merge, and skip the verification below. Any other exit status is an unexpected gate failure: BLOCK. Exit `2` can also mean `.claude/project-config.yaml` exists but `pr.auto_merge` cannot be determined (fail closed, #2581); the stderr names the reason, so carry it in the BLOCK. When the seam permits it, arm with the bounded-retry `arm-automerge` (#2576), run from the impl worktree and resolving the script in the same Bash call (the reuse path skips Step 4c, so this item cannot rely on a `FINALIZE` defined there):
+3. **Enable auto-merge:** Precondition: if the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless, skip this entire item — do not run the seam check or `arm-automerge`, set the sentinel's `pr.auto_merge` to `false`, and continue to step 4. Otherwise, first check the shared seam — `~/.claude/scripts/prep_pr_finalize.py check-automerge-allowed` — and record its exit status. Exit `0` permits the arm; exit `1` means `.claude/project-config.yaml` sets `pr.auto_merge: false`, so skip this step, set the sentinel's `pr.auto_merge` to `false`, leave the PR open for the orchestrator to merge, and skip the verification below. Any other exit status is an unexpected gate failure: BLOCK. Exit `2` can also mean `.claude/project-config.yaml` exists but `pr.auto_merge` cannot be determined (fail closed, #2581); the stderr names the reason, so carry it in the BLOCK. When the seam permits it, arm with the bounded-retry `arm-automerge` (#2576), run from the impl worktree and resolving the script in the same Bash call (the reuse path skips Step 4c, so this item cannot rely on a `FINALIZE` defined there):
 
    ```bash
    cd <worktree>
@@ -762,7 +762,7 @@ After `/prep-pr` returns with a PR number:
 
    Options:
    1. Retry — re-check `check-automerge-allowed`, then run `"$FINALIZE" arm-automerge <pr-number> --repo-path <worktree> --head-sha "$HEAD_SHA"` again (re-run the resolver and `git rev-parse HEAD` in the same Bash call) and re-verify
-   2. Leave open — do not enable auto-merge; human merges manually
+   2. Leave open — do not enable auto-merge here; the orchestrator arms or merges it
    3. Abort — stop pipeline
    ```
    - **Retry** → run `check-automerge-allowed` again first. Only when it exits `0`, re-run the arm command once and then re-run this verify. Exit `1` means leave the PR open without retrying; any other exit status is an unexpected gate failure and BLOCK. If the allowed retry still fails, fall through to **Leave open**.
@@ -807,7 +807,7 @@ The two agent spawns it refers back to are pinned here:
 
 ### Step 5a: Wait for CI (10 minutes max)
 
-- **Fix** → Spawn agent (`model: "sonnet"`) in the worktree to investigate CI failure, apply fix, push to branch. Pass `subagent_type: "general-purpose"` (#2211). Loop back to Step 5a. Max 2 fix attempts, then escalate.
+- **Fix** → Spawn agent (`model: "sonnet"`) in the worktree to investigate CI failure, apply fix, push to branch. Pass `subagent_type: "general-purpose"` (#2211). Loop back to Step 5a. Max 2 fix attempts, then park for the orchestrator (EXIT `blocked`).
 
 ### Step 5b: Initial Review Feedback Check
 

@@ -184,7 +184,7 @@ git diff "$FORK_POINT" -- "$MYPY_BASELINE_FILE" | grep -E '^\+[^+]'
 
 Any output (an added or rewritten entry line) means the diff baselined an
 error — that is a suppression, same class as `# type: ignore`: STOP and report
-a BLOCK needing explicit user approval. Pure deletions (debt you fixed) are
+a BLOCK needing explicit approval (escalate: worker → orchestrator → user). Pure deletions (debt you fixed) are
 fine. Do not run the tool's re-sync/regenerate command; if it would rewrite
 unrelated lines, leave the file untouched.
 
@@ -275,8 +275,8 @@ REVIEW. The unmeasurable cases (unresolvable worktree, unreadable git state)
 park too. A finalize regress for a non-merge cause (e.g. a diff-cover
 `agent_block`) with an unchanged head is deliberately NOT gated here — it is
 left to existing routing (the #1717 `_consume_finalize_regress_repeat`
-signal-only detector at REVIEW re-entry). Recovery: conclude and push the merge
-in the ticket's worktree, then `cw dev-queue requeue`.
+signal-only detector at REVIEW re-entry). Recovery (the orchestrator runs it):
+conclude and push the merge in the ticket's worktree, then `cw dev-queue requeue`.
 
 **Known limitation:** runs only at the single-hop `_route_stage_success` site,
 not the multi-hop stage-pointer walk (mirrors #1801's accepted-limitation
@@ -303,7 +303,9 @@ via AskUserQuestion and do NOT proceed to the next stage.
 
 If the implementation agent fails tests/lint/mypy after 2 attempts: surface the
 failure details via AskUserQuestion — "Continue manually from worktree, skip
-ticket, or abort pipeline?" — and do NOT loop indefinitely.
+ticket, or abort pipeline?" — and do NOT loop indefinitely. (Choosing
+"Continue manually" means the AI continues the work in the worktree itself; no
+one is asked to run anything.)
 
 In headless mode neither branch applies: escalate exclusively through the
 sentinel's `blocker` field, per "Stage 2 Completion" in the core doc.
