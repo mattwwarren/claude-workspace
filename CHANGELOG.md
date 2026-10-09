@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.70.1] - 2026-10-09
+
+### Fixed
+
+- **The opencode executor refreshes `.claude/cw-context.json` on every spawn (#2653).** A reused worktree kept the previous session's context file, so a finalize worker's bare `cw result emit` resolved a stale session id (refused as "already recorded", exit 0) and `check_must_fix_override.py` never saw the operator's `queue_metadata.must_fix_override`; the worker's block was lost and cw synthesized `merge_pending`. `_opencode_preflight` now calls `_write_hook_context` (no Stop hook) with the new session's id and the task's override before any other check. Not addressed here: `cw result emit` still exits 0 on a refusal, git synthesis still produces `merge_pending` with an empty PR url, and there is still no operator command to repair a lost `blocked_reason`.
+
 ## [1.70.0] - 2026-10-09
 
 ### Changed

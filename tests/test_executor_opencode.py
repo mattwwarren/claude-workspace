@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
@@ -18,6 +20,10 @@ from cw.models import (
     OPENCODE_BACKEND,
     ClientConfig,
     LastResultSource,
+    MustFixOverride,
+    Session,
+    SessionOrigin,
+    SessionPurpose,
     SessionStatus,
     Stage,
     StageExecutorConfig,
@@ -353,11 +359,57 @@ def test_opencode_preflight_env_tmpdir_resolves_against_worktree(
 
     with patch("cw.executor.opencode.opencode_available", return_value=True):
         result = _opencode_preflight(
-            config, task, tmp_path, client, Stage.IMPL, "sid-1"
+            config, task, tmp_path, client, Stage.IMPL, _sess()
         )
 
     assert isinstance(result, _PreflightOK)
     assert result.env["TMPDIR"] == str(resolve_worker_tmpdir(tmp_path))
+
+
+def _sess() -> Session:
+    return Session(
+        name="test/finalize",
+        client="test",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        workspace_path=Path("/tmp"),
+    )
+
+
+def test_opencode_preflight_refreshes_stale_cw_context(tmp_path: Path) -> None:
+    """#2653: a reused worktree's stale cw-context.json is rewritten per spawn.
+
+    The new session id lands (so a bare ``cw result emit`` targets it) and the
+    operator's must_fix_override is delivered to check_must_fix_override.py.
+    """
+    context_path = tmp_path / ".claude" / "cw-context.json"
+    context_path.parent.mkdir(parents=True)
+    context_path.write_text(
+        json.dumps({"session_id": "stale-id", "must_fix_override": None}),
+        encoding="utf-8",
+    )
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    client = ClientConfig(name="test", workspace_path=tmp_path)
+    override = MustFixOverride(
+        actor="operator",
+        reason="operator says ok",
+        reviewed_sha="a" * 40,
+        finding_ids=[("a.py", "fp")],
+        recorded_at=datetime(2026, 10, 9, tzinfo=UTC),
+    )
+    task = TicketTask(
+        ticket_id="T-1", client="test", stage=Stage.FINALIZE, must_fix_override=override
+    )
+    sess = _sess()
+
+    with patch("cw.executor.opencode.opencode_available", return_value=True):
+        _opencode_preflight(config, task, tmp_path, client, Stage.FINALIZE, sess)
+
+    ctx = json.loads(context_path.read_text(encoding="utf-8"))
+    assert ctx["session_id"] == sess.id
+    assert ctx["queue_metadata"]["must_fix_override"] == override.model_dump(
+        mode="json"
+    )
 
 
 def test_opencode_executor_stage_sentinel_schema(tmp_path: Path) -> None:
