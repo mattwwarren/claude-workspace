@@ -7,7 +7,7 @@ produces no bytes for it. Nothing here reads or influences the disposition
 table — the sections report what the verdict already decided.
 
 The one section that is not purely a report is :func:`_render_settle_payloads`
-(#2210): it hands the operator a ready-to-paste ``cw review settle`` payload
+(#2210): it hands the orchestrator a ready-to-paste ``cw review settle`` payload
 per blocking finding, which is the producer half of the cross-round
 adjudication ledger's first real write path.
 
@@ -131,16 +131,14 @@ _BACKTICK_RUN_RE = re.compile(r"`+")
 _SETTLE_INTRO = (
     "Each payload below records one blocking finding as settled. Save one to "
     "a file, run `cw review settle <file> --reason '<why>' --out settle.md` "
-    "from your main checkout (or an interactive `cw` session worktree), and "
-    "post `settle.md` as a ticket comment. "
+    "from the orchestrator session (anywhere outside a headless dispatch "
+    "worker), and post `settle.md` as a ticket comment. "
     "`file`, `summary` and `reviewed_sha` are the finding's identity and "
     "provenance, copied verbatim, so nothing needs editing; put your "
     "reasoning in `--reason` (or a per-entry `rationale`), or set `outcome` "
     "to `ACCEPTED` if you uphold the finding. The command refuses to run "
     "inside a dispatch worker — a settled finding is never re-raised, so the "
-    "pipeline must not be able to settle its own reviewer's findings — and "
-    "wherever it cannot rule a worker out: an unreadable "
-    "`.claude/cw-context.json`, or a linked git worktree with none. Post "
+    "pipeline must not be able to settle its own reviewer's findings. Post "
     "`settle.md` as its own comment, unedited: the marker is read only when "
     "it opens the comment body. This works only on GitHub-tracked tickets: a "
     "marker posted on any other tracker is not read by the codex lane."
@@ -162,8 +160,8 @@ _SETTLE_MAX_COMPACT_ROWS = 40
 _SETTLE_COMPACT_SUMMARY_MAX = 120
 _SETTLE_OVERFLOW_NOTE = (
     "Not enough room for the remaining findings' payloads. Settle any of "
-    "these by hand with `cw review settle` — the identity is the file and the "
-    "verbatim summary from its MUST_FIX line above:"
+    "these with a hand-written `cw review settle` payload — the identity is "
+    "the file and the verbatim summary from its MUST_FIX line above:"
 )
 
 # #2210 round 2: disposition records the reader refused to apply. A refusal's

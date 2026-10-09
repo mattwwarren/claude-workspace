@@ -32,15 +32,12 @@ SUPPRESSION rather than recording one pass's outcome, so it carries an audit
 contract the others do not: a mandatory ``--reason``, provenance
 (actor / CLI-stamped UTC timestamp / verbatim summary / reviewed sha) on every
 record, one ``review.finding_settled`` event per settled finding, and a flat
-refusal to run inside a dispatch worker — or anywhere a worker cannot be ruled
-out: an unreadable dispatch context, or a linked worktree with none. See
-ADR-0016.
+refusal to run inside a headless dispatch worker. See ADR-0016 and ADR-0020.
 """
 
 from __future__ import annotations
 
 import os
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -402,80 +399,10 @@ class _SettleInput(BaseModel):
 _SETTLE_IN_WORKER_MSG = (
     "Refusing to settle a review finding from inside a dispatch worker "
     "(.claude/cw-context.json reports headless). A ledger entry silently "
-    "suppresses every future re-raise of that finding, so the pipeline "
-    "must not mint one for its own reviewer. Save the payload, and run "
-    "`cw review settle` from the main checkout."
+    "suppresses every future re-raise of that finding, so a worker must not "
+    "mint one for its own reviewer. Hand the payload to the orchestrator "
+    "session, which runs `cw review settle` outside the worker."
 )
-
-_SETTLE_CONTEXT_UNRESOLVED_MSG = (
-    "Refusing to settle a review finding: the `.claude/cw-context.json` above "
-    "this directory could not be resolved — it is unreadable, is not a JSON "
-    "object, or carries no boolean `headless` field — so there is nothing "
-    "that says you are NOT inside a worker. Run `cw review settle` from your "
-    "main checkout, or from an interactive cw session worktree whose context "
-    "reports `headless: false`. Nothing was written: no marker, no --out "
-    "file, no event."
-)
-
-_SETTLE_WORKTREE_WITHOUT_CONTEXT_MSG = (
-    "Refusing to settle a review finding: this directory is inside a linked "
-    "git worktree with no `.claude/cw-context.json` above it. Dispatch "
-    "workers run in linked worktrees, so a worktree whose context file is "
-    "missing cannot be told apart from a worker whose context was lost. Run "
-    "`cw review settle` from your main checkout, or from an interactive cw "
-    "session worktree whose context reports `headless: false`. Nothing was "
-    "written: no marker, no --out file, no event."
-)
-
-
-def _nearest_context_root(start: Path) -> Path | None:
-    """The nearest directory at or above *start* holding a cw context file.
-
-    Distinct from :func:`~cw.cli._hook_io.find_cw_context`, which returns None
-    both when no file exists and when the file it found is unreadable. The
-    settle guard must tell those apart: an absent file is an operator's plain
-    checkout, an unreadable one is a dispatch context it cannot vouch for.
-    """
-    from cw.models import HOOK_CONTEXT_RELATIVE_PATH
-
-    resolved = start.resolve()
-    for candidate in [resolved, *resolved.parents]:
-        if (candidate / HOOK_CONTEXT_RELATIVE_PATH).is_file():
-            return candidate
-    return None
-
-
-# `git rev-parse --git-dir --git-common-dir` prints exactly one path per flag.
-_GIT_DIR_PAIR_LINES = 2
-
-
-def _in_linked_worktree(cwd: Path) -> bool:
-    """True iff *cwd* is inside a linked git worktree (not a main checkout).
-
-    A linked worktree's ``--git-dir`` is ``<common>/worktrees/<name>`` while
-    its ``--git-common-dir`` is the shared ``.git``; in a main checkout the
-    two are the same directory. Both are printed relative to *cwd* (or
-    absolute), so each is resolved against it; this avoids
-    ``--path-format=absolute``, which git older than 2.31 echoes back as an
-    extra output line instead of honouring. Any failure (git missing, not a
-    repository, timeout) is "not a linked worktree": every dispatch worker
-    runs in a working git worktree, so a directory git cannot read is not one.
-    """
-    from cw._git import run_git
-
-    try:
-        result = run_git(
-            ["rev-parse", "--git-dir", "--git-common-dir"],
-            cwd=cwd,
-            capture_output=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    lines = result.stdout.splitlines()
-    if result.returncode != 0 or len(lines) != _GIT_DIR_PAIR_LINES:
-        return False
-    return (cwd / lines[0]).resolve() != (cwd / lines[1]).resolve()
 
 
 def _worker_tmpdir_is_headless() -> bool:
@@ -483,69 +410,37 @@ def _worker_tmpdir_is_headless() -> bool:
 
     Every cw executor points a worker's ``TMPDIR`` at its own worktree
     (``apply_worker_tmpdir``, #2470). That survives a ``cd``, so it catches a
-    worker that changed directory to get past the cwd-keyed checks below,
-    which would otherwise see the operator's main checkout or ``/tmp``.
-    Interactive sessions carry ``headless: false`` and are not matched.
+    worker that changed directory to get past the cwd check below.
     """
     from cw.cli._hook_io import find_cw_context
 
     tmpdir = os.environ.get("TMPDIR")
     if not tmpdir:
         return False
-    root = _nearest_context_root(Path(tmpdir))
-    if root is None:
-        return False
-    context = find_cw_context(root)
+    context = find_cw_context(Path(tmpdir))
     return context is not None and context.get("headless") is True
 
 
-def _refuse_settle_outside_an_interactive_session() -> None:
-    """Refuse to mint a suppression from inside a dispatch worker (#2210).
+def _refuse_settle_inside_a_dispatch_worker() -> None:
+    """Refuse to mint a suppression from inside a headless worker (#2210).
 
-    A settle is the one act that can silence a real defect permanently. A
-    worker settling findings raised by its own reviewer is the pipeline
-    adjudicating itself, so it is refused outright. There is no bypass flag,
-    env var or option: a control an agent can switch off is not a control.
-
-    Keyed on the nearest ``.claude/cw-context.json`` (searched upward from
-    cwd, the way ``check_not_main_checkout.py`` does), which ``cw`` stamps for
-    every session it spawns — ``headless: true`` for a DAEMON-origin
-    ``/auto-dev`` worker, an explicit ``false`` for an interactive one:
-
-    - context reports ``headless: false`` → proceed (interactive session);
-    - context reports ``headless: true`` → refuse (dispatch worker);
-    - context exists but is unreadable, not an object, or has no boolean
-      ``headless`` → refuse: a dispatch context this guard cannot vouch for;
-    - no context file at all, inside a linked git worktree → refuse. Workers
-      run in linked worktrees, so a missing context there cannot be told
-      apart from a worker whose context was lost (#2210 round 4's concern);
-    - no context file at all, anywhere else → proceed. That is the
-      operator's own main checkout, or a directory outside any repository —
-      where an orchestrator session acting for the operator runs. Round 4
-      refused this case too, which bounced every orchestrator-run settle back
-      to the operator by hand even though no worker can be standing there.
-
-    Ahead of all of these, a ``$TMPDIR`` inside a headless worker's worktree
-    refuses (:func:`_worker_tmpdir_is_headless`): it is the worker signal a
-    ``cd`` does not change.
+    A worker settling findings raised by its own reviewer is the pipeline
+    adjudicating itself, so it is refused outright. The refusal fires only on
+    positive evidence of a worker (ADR-0020): the nearest
+    ``.claude/cw-context.json`` (searched upward from cwd) reports
+    ``headless: true``, or ``$TMPDIR`` lies inside a worktree whose context
+    does. Every other context proceeds — the main checkout, a directory
+    outside any repository, a worktree with no context file, a context file
+    that cannot be read. Failing to prove a session is not a worker is not a
+    reason to hand the settle to a human; the orchestrator session runs it.
     """
     from cw.cli._hook_io import find_cw_context
 
     if _worker_tmpdir_is_headless():
         raise CwError(_SETTLE_IN_WORKER_MSG)
-    cwd = Path.cwd()
-    root = _nearest_context_root(cwd)
-    if root is None:
-        if _in_linked_worktree(cwd):
-            raise CwError(_SETTLE_WORKTREE_WITHOUT_CONTEXT_MSG)
-        return
-    context = find_cw_context(root)
-    headless = None if context is None else context.get("headless")
-    if headless is False:
-        return
-    raise CwError(
-        _SETTLE_IN_WORKER_MSG if headless is True else _SETTLE_CONTEXT_UNRESOLVED_MSG
-    )
+    context = find_cw_context(Path.cwd())
+    if context is not None and context.get("headless") is True:
+        raise CwError(_SETTLE_IN_WORKER_MSG)
 
 
 def _resolve_settle_actor() -> str:
@@ -677,14 +572,12 @@ def review_settle(
 ) -> None:
     """Record operator-settled findings as a postable marker (#2210).
 
-    Run this from your main checkout, or from an interactive cw session
-    worktree (or any directory beneath either). It refuses inside a dispatch
-    worker — a ledger entry silently suppresses every future re-raise of that
-    finding, so the pipeline must not be able to settle its own reviewer's
-    findings — and it refuses just as flatly when it cannot rule a worker
-    out: a `.claude/cw-context.json` that is unreadable or has no boolean
-    `headless`, or a linked git worktree with no context file at all. There
-    is no bypass flag.
+    The orchestrator session runs this from anywhere outside a headless
+    dispatch worker. It refuses only inside such a worker (a
+    `.claude/cw-context.json` reporting `headless: true`, or a `$TMPDIR`
+    inside one) — a ledger entry silently suppresses every future re-raise of
+    that finding, so a worker must not settle its own reviewer's findings.
+    There is no bypass flag.
 
     PATH is a file path or '-' for stdin. Payload: {"entries": [{"file":
     "<path>", "summary": "<verbatim finding summary>", "outcome":
@@ -734,7 +627,7 @@ def review_settle(
     On success: exits 0, prints the marker to stdout.
     On failure: exits 1, prints 'field.path: message' lines to stderr.
     """
-    _refuse_settle_outside_an_interactive_session()
+    _refuse_settle_inside_a_dispatch_worker()
     settle_reason = reason.strip()
     if not settle_reason:
         msg = (
