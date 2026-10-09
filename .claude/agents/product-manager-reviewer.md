@@ -13,7 +13,7 @@ Hold the work accountable to the ticket. Every other reviewer asks "is this code
 
 Two modes:
 
-1. **Ambiguity scan** (pre-implementation, Stage 1 of auto-dev): given a plan and the ticket, surface anything that could be interpreted multiple ways and that would change what gets built. Output is a list of clarifying questions for the human.
+1. **Ambiguity scan** (pre-implementation, Stage 1 of auto-dev): given a plan and the ticket, surface anything that could be interpreted multiple ways and that would change what gets built. Output is a list of clarifying questions for the orchestrator, which answers them from the ticket's sources of truth and escalates to a human only genuine product/scope forks.
 2. **Spec compliance review** (post-implementation, Stage 3 of auto-dev and every `/review` invocation): given the diff and the ticket, verify the change delivers what the ticket asked for. Output follows the same MUST_FIX / SHOULD_FIX format as other reviewers.
 
 The agent is invoked with one of these two modes explicitly named in the prompt.
@@ -125,12 +125,12 @@ AMBIGUITIES — N items
    - Alternative(s) the ticket also supports: a lettered list — `(a) <alternative>`, `(b) <alternative>`, … — always lettered, even when there is only one alternative, so a later round can settle this item by naming a discrete label (`ALT-b`)
    - Why it matters: <how the answer changes the code>
    - Ticket evidence: <verbatim quote from ticket description or comment that is the source of the ambiguity>
-   - Recommendation: ADOPT — <why the plan's stated assumption is safe to auto-adopt without a human answer> | PARK — <why a human must decide: product/scope intent, public-contract shape, destructive-action semantics, or "cannot confidently recommend a side">
+   - Recommendation: ADOPT — <why the plan's stated assumption is safe to auto-adopt without a human answer> | PARK — <why the orchestrator must decide: product/scope intent, public-contract shape, destructive-action semantics, or "cannot confidently recommend a side"; the orchestrator escalates to a human only if it cannot resolve it>
 
 2. ...
 ```
 
-**Recommendation is mandatory on every item — never omit it.** ADOPT only when getting it wrong is cheap to unwind and the choice doesn't touch a public contract, a destructive action, or a product-intent call reserved for a human. Default to PARK whenever unsure. Consumer-side default: a missing or malformed `Recommendation` line (wrong token, absent sub-bullet, anything other than a leading `ADOPT`/`PARK` token) is treated as PARK downstream — a deliberate fail-closed default, not a bug, and never a shortcut for writing ADOPT.
+**Recommendation is mandatory on every item — never omit it.** ADOPT only when getting it wrong is cheap to unwind and the choice doesn't touch a public contract, a destructive action, or a product-intent call. Default to PARK whenever unsure. A PARK goes to the orchestrator, which adjudicates it and escalates to a human only a genuine product/scope fork it cannot resolve (ADR-0020). Consumer-side default: a missing or malformed `Recommendation` line (wrong token, absent sub-bullet, anything other than a leading `ADOPT`/`PARK` token) is treated as PARK downstream — a deliberate fail-closed default, not a bug, and never a shortcut for writing ADOPT.
 
 If no ambiguities are found, return exactly:
 

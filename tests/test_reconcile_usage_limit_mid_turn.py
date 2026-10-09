@@ -994,7 +994,7 @@ def test_act_signal_only_parks_blocked_on_user_without_touching_session(
     assert attention[0]["crashed"] is False
     assert attention[0][ACT_STARTED_AT_KEY] == _NOW.isoformat()
     assert _RESET_AT.isoformat() in attention[0]["breadcrumbs"]
-    assert "needs an operator" in attention[0]["breadcrumbs"]
+    assert "for the orchestrator to triage" in attention[0]["breadcrumbs"]
     push = cast("MagicMock", _deps.fire_push_notification)
     push.assert_called_once_with(load_state().sessions[0].name, _CLIENT)
 

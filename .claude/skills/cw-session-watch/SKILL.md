@@ -195,13 +195,13 @@ flips to `completed`), but `last_result` will be absent. Always inspect
 
 ### Reporting the result
 
-After a successful lookup, surface to the user in a structured form. Read the
+After a successful lookup, report the outcome in a structured form. Read the
 sentinel from `last_result` (via `cw session show --json` or `cw session
 result`):
 
 - **If `status == "shipped"`**: PR url + fix cycles + ticket cleared.
 - **If `status == "blocked"`**: blocker.reason + recovery_hint + next_actions
-  (so the user knows what unblocks it).
+  (what unblocks it, which the orchestrator then does).
 - **If `status == "no_op"`**: explain why no work was needed (often "already
   done in upstream PR" or similar).
 - **If the queue transition is `cancelled`**: this is an operator-initiated
@@ -213,8 +213,8 @@ result`):
   **Before recommending re-dispatch, check the impl branch for un-PR'd
   commits** — sessions routinely complete impl + push + run gates, then time
   out at the Stage 3/4 boundary (between reviewers finishing and `gh pr
-  create`). Salvage path in that case is manual PR finalization, not
-  redispatch. See "Salvaging timed-out impl" below.
+  create`). Salvage path in that case is for the orchestrator to finalize the
+  PR itself, not redispatch. See "Salvaging timed-out impl" below.
   Additionally, inspect the `branch_state` field on the `session.timed_out`
   event (via `cw event tail --type session.timed_out --json`):
   - `"absent_no_merged_pr"` — **anomaly**: worker died before push or branch
@@ -234,7 +234,7 @@ result`):
 |---|---|---|---|
 | `shipped` | `completed` | `completed` | PR merged or auto-merge armed; ticket done |
 | `blocked` (retry_eligible: true) | `completed` | `pending` | Recovery needed (e.g. sync main); will redispatch on next tick |
-| `blocked` (retry_eligible: false) | `completed` | `failed` | Human needs to intervene; check blocker.recovery_hint |
+| `blocked` (retry_eligible: false) | `completed` | `failed` | Orchestrator triages per blocker.recovery_hint (requeue / regress / fix / close; escalate only a product/scope fork) |
 | `no_op` | `completed` | `completed` | Nothing to do (e.g. already shipped upstream) |
 | `validation_failed` | `completed` | `pending`/`failed` | Producer-side sentinel bug; check attempts vs 3-cap |
 | `premises_pending_verification` | `completed` | `pending` | Session surfaced premises; verify and re-dispatch |
@@ -244,7 +244,7 @@ result`):
 | (none — always `disposition: null`) | any | `cancelled` | Operator-initiated task cancel, not a sentinel outcome. Report "cancelled, nothing to report"; don't wait on a sentinel. |
 
 If you see a combination not in this table, surface the full sentinel + the
-queue routing to the user — that's likely a bug worth filing.
+queue routing in your report and file the bug yourself — that's likely a defect worth a ticket.
 
 ## Salvaging crashed-but-actually-ran
 
@@ -277,7 +277,7 @@ authoritative: act on `shipped` / `blocked` / `premises_pending_*` etc.
 exactly as the routing table prescribes.
 
 If the worktree has commits ahead of main on `dev/<ticket>-<slug>`,
-run the timed-out-impl salvage steps below to finalize the PR manually.
+run the timed-out-impl salvage steps below to finalize the PR yourself.
 
 **Filing the regression:** if this fires, link the report to the reconcile
 race tracking ticket (search open issues for "reconcile race phantom
@@ -289,7 +289,7 @@ window before reconcile reaps a session, or (b) check `claude agents --json`
 
 Before recommending a redispatch after a `timed_out`-with-no-sentinel session,
 run this triage — it routinely turns a "lost session" into a 5-minute
-manual PR-open:
+PR-open that the orchestrator performs itself:
 
 ```bash
 # 1. Are there commits on the dev branch beyond main?

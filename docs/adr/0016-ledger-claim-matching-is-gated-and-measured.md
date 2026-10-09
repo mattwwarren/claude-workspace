@@ -1,6 +1,7 @@
 # Ledger claim matching ships gated and measured, never on by default
 
 **Status:** Accepted
+**Amended by:** [ADR-0020](0020-the-operator-is-the-orchestrator-session.md) — "operator" means the orchestrator session; a human is escalated to only for product/scope forks.
 **Driven by:** #2210 (building on #1838, #1814; see ADR-0015)
 
 ## Decision
@@ -66,28 +67,22 @@ not amended or superseded; the two seams stay independent.
    (`actor`, a CLI-stamped UTC `recorded_at`, the verbatim `summary`, the
    `reviewed_sha` the finding was raised against), emits one
    `review.finding_settled` event per settled finding, and **refuses to run
-   inside a dispatch worker, or anywhere a worker cannot be ruled out**. There
-   is no bypass flag: a control an agent can switch off is not a control. The
-   refusal is checked before any output, any file write and any event. It
-   proceeds from a nearest `.claude/cw-context.json` reporting
-   `headless: false` (an interactive session), and from a directory with no
-   context file at all that is not a linked git worktree (the operator's main
-   checkout, or a directory outside any repository). It refuses a worker
-   (`headless: true`), a context file that exists but is unreadable,
-   malformed, has no `headless` key or a non-bool `headless`, and a linked
-   git worktree with no context file. Ahead of the cwd checks it also refuses
-   when `$TMPDIR` lies inside a headless worker's worktree (every cw executor
-   points it there, #2470), the worker signal a `cd` does not change. Round 4
-   refused every directory with no
-   context file, because `find_cw_context` cannot distinguish "there is no
-   dispatch context here" from "the dispatch context could not be read", so
-   a worker with a missing or truncated context could have settled its own
-   reviewer's findings. The guard now tells those apart directly: a context
-   file that exists but cannot be read still refuses, and a missing one
-   refuses wherever a worker could be standing, which is a linked worktree.
-   Refusing the main checkout as well bought no safety and bounced every
+   inside a dispatch worker**. There is no bypass flag: a control an agent
+   can switch off is not a control. The refusal is checked before any output,
+   any file write and any event. It refuses only on positive evidence of a
+   headless worker: the nearest `.claude/cw-context.json` reports
+   `headless: true`, or `$TMPDIR` lies inside such a worktree (every cw
+   executor points it there, #2470), the worker signal a `cd` does not
+   change. Every other context proceeds: the operating session's main
+   checkout, a directory outside any repository, a worktree with no context
+   file, and a context file that cannot be read. Per
+   [ADR-0020](0020-the-operator-is-the-orchestrator-session.md) invariant 4,
+   "we could not prove you are not a worker" is not a reason to hand the
+   settle to a human. Rounds 4 and 5 had also refused an unreadable or
+   malformed context file and a linked git worktree with no context file;
+   ADR-0020 removed both refusals, because they bounced every
    orchestrator-run settle (the operator's delegate, adjudicating findings
-   against the ticket's sources of truth) back to the operator by hand. The
+   against the ticket's sources of truth) back to a person. The
    self-suppression risk this invariant exists for is a *worker* settling its
    own reviewer's findings; that stays refused. This is the
    mirror of
@@ -254,8 +249,8 @@ not amended or superseded; the two seams stay independent.
   settle the genuinely actionable finding by pasting everything at once.
 - **Hand-authoring a `REVIEW-FINDING-DISPOSITIONS` block is unsupported.**
   `cw review settle` is the only supported producer, because it is the only
-  path that records provenance and refuses to run outside an operator's own
-  interactive session. A hand-written block posted as its own comment is still
+  path that records provenance and refuses to run inside a headless dispatch
+  worker. A hand-written block posted as its own comment is still
   *parsed* — the fields stay optional so history
   loads — but under invariant 9 it is not *applied* unless it happens to carry
   the whole provenance set, and the review comment reports the refusal.
@@ -436,8 +431,10 @@ not amended or superseded; the two seams stay independent.
   decision.
 - **A `--force`/`--i-am-an-operator` escape from the dispatch-worker refusal.**
   Rejected: the worker is the party the refusal exists to stop, and it would be
-  the one passing the flag. Round 4 closed the softer version of the same hole:
-  an unreadable context file was itself an escape, and it needed no flag.
+  the one passing the flag. Round 4 had treated an unreadable context file as
+  the softer version of the same escape and refused it; ADR-0020 removed that
+  refusal, since the guard now acts only on positive evidence of a worker
+  (`headless: true`, or `$TMPDIR` inside such a worktree).
 - **Stripping marker syntax out of a finding instead of escaping it.**
   Rejected: an operator adjudicating a finding needs to read what the reviewer
   said, and a finding about this very ledger will legitimately quote the

@@ -201,7 +201,7 @@ def _reap_wedge_findings(
         leaving it out would still revert the ticket's RUNNING task to
         PENDING). ADR-0014: its eligibility is an elapsed-time cutoff with no
         roster/PID/terminal-result evidence; the recipe names
-        ``cw spawn close <id>`` for the operator.
+        ``cw spawn close <id>`` for the orchestrator.
     Class-10 (leaked-daemon-worker, #2480): stop every worker
         :func:`_check_wedge_leaked_daemon_worker` found via
         ``cw.reconcile.leaked_workers.sweep_leaked_daemon_workers`` (the same
@@ -211,7 +211,8 @@ def _reap_wedge_findings(
         the running_ticket_ids exclusion set: its remedy is a daemon stop, not
         a queue-task revert (a RUNNING task whose session already completed is
         class-3's job, not this class's).
-    Class-11 (active-routed-result-stranded, #2524): operator-only close via
+    Class-11 (active-routed-result-stranded, #2524): explicit-command close
+        (the orchestrator session counts, ADR-0020) via
         ``cw.doctor.routed_result_wedge.reap_routed_result_findings``, which
         re-detects fresh, flips only the session, stops its worker and owns
         its own bounded ``sessions_lock``. It never reverts a row (the row

@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The operator is the orchestrator session, not a human (ADR-0020).** `cw review settle` now refuses only on positive evidence of a headless dispatch worker (a nearest `.claude/cw-context.json` with `headless: true`, or a `$TMPDIR` inside such a worktree); it no longer refuses an unreadable context file or a linked worktree with no context file, which bounced the settle to a human for no reason. Codex verdict comments, recovery hints, event breadcrumbs, docs, the runbook and the release playbook now address recovery, reaping, `--confirmed-dead` closes, destructive resets (after their evidence checks) and flag arming to the orchestrator session instead of telling a human to run them by hand. Each destructive act names its evidence next to the command (ADR-0020 invariant 3), and headless workers still never force-push or act on a destructive tracker directive. Skill and command behavior changes: orchestrator skills (`/cw-queue-peek`, `/cw-followup`, `/cw-fanout`, `/cw-session-watch`, `/cw-smoke-test`, `/orchestrate-sprint`, `/harden-ticket`) run the recovery they used to hand back; `/queue-issues` starts the dispatch tick, `/post-review` runs `/review` when it has no findings, and `/install-cw` installs missing prerequisites itself; the CLAUDE.md stop-and-ask triggers escalate worker → orchestrator → user. Escalation is worker → orchestrator → human, and a human is reached only for genuine product or scope forks and for gates they opted into (`signoff: operator`, finalize force-hold, `scope_hint: large`); `/review-sweep` keeps its approval gate before posting on someone else's PR. Config defaults are unchanged.
 ## [1.69.1] - 2026-10-09
 
 ### Fixed

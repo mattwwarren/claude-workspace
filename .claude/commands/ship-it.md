@@ -32,7 +32,7 @@ BRANCH=$(git branch --show-current)
 git push -u origin "$BRANCH" 2>&1
 ```
 
-If push fails (e.g., diverged), BLOCK — do not force-push without explicit user approval.
+If push fails (e.g., diverged), BLOCK and park for the orchestrator — never force-push from here. A force-push of a cw-owned branch is the orchestrator's, after its evidence checks (ADR-0020).
 
 ## Step 3: Create the PR
 
@@ -283,7 +283,7 @@ If the script exits non-zero, BLOCK with the JSON. Do not paper over failures.
 
 ## Failure modes
 
-- **Push fails (diverged):** BLOCK. User must rebase or merge main first.
+- **Push fails (diverged):** BLOCK for the orchestrator to rebase or merge main first.
 - **PR creation fails:** BLOCK with the `gh` error verbatim.
 - **Auto-merge enable fails:** BLOCK — the PR exists but auto-merge isn't on; don't silently leave it unset.
 - **Finalize verification fails:** BLOCK with the JSON; do not paper over.

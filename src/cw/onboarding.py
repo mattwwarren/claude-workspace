@@ -49,7 +49,8 @@ def register_mcp_servers(workspace_path: Path, client_name: str) -> bool:
         except json.JSONDecodeError:
             click.echo(
                 f"cw init: could not parse {mcp_path} — "
-                'add "cw-queue-events" and "cw-pr-events" to mcpServers manually.'
+                'cw left it unchanged; add "cw-queue-events" and "cw-pr-events" '
+                "to mcpServers."
             )
             return False
         except OSError:
@@ -105,7 +106,8 @@ def install_cw_allowlist() -> bool:
         except json.JSONDecodeError:
             click.echo(
                 "cw init: could not parse ~/.claude/settings.json — "
-                f'add "{CW_ALLOWLIST_ENTRY}" to permissions.allow manually.'
+                f'cw left it unchanged; add "{CW_ALLOWLIST_ENTRY}" to '
+                "permissions.allow."
             )
             return False
 

@@ -95,7 +95,8 @@ only reason was the ticket's size, and forwarding each release would page the
 operator for the noise the recipes exist to remove. It stays in the event log
 and in the ticket's audit comment; add it to `event_types` to be notified
 anyway. `gate.auto_approve_failed` and `gate.auto_approve_held` still forward:
-each marks a row a person must look at.
+each marks a row the orchestrator must look at (a held-finalize row is the
+opted-in human's gate, ADR-0020).
 
 **Fail-loud validation:** unlike `reap_policy` (which silently coerces an
 invalid value to its safe default per ADR-0006), an invalid
@@ -213,10 +214,11 @@ Add the `cw-operator` MCP server to your `.mcp.json` (see
 }
 ```
 
-This is **manual wiring only** — `cw init` does not auto-wire `cw-operator`
-into `.mcp.json` the way it does for `cw-queue-events`/`cw-pr-events` today.
-Skill/runbook adoption of this channel is deferred to a follow-up ticket
-(#1003).
+The orchestrator session does this wiring itself (copy
+`config/cw-operator-events.mcp.json.example` into the `.mcp.json`) — `cw init`
+does not auto-wire `cw-operator` into `.mcp.json` the way it does for
+`cw-queue-events`/`cw-pr-events` today. Skill/runbook adoption of this channel
+is deferred to a follow-up ticket (#1003).
 
 There is no `operator-channel serve` subcommand — the channel rides the
 existing `cw queue-channel serve` process (`cw_queue_events_server.make_app()`

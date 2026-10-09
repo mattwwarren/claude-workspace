@@ -20,7 +20,7 @@ but the ``Session`` row itself is left untouched -- daemon not stopped,
 and ``cw.reconcile._shared._apply_queue_mutations``'s ``clear_session_id``
 handling). Left uncorrected, that "ghost" session would count toward
 ``host_running`` forever, permanently consuming one unit of host budget until
-an operator manually intervenes -- silently strangling throughput on every
+the orchestrator intervenes -- silently strangling throughput on every
 future tick until someone notices. The join below excludes a session only
 when its owning task is CONFIRMED parked (BLOCKED_ON_USER or
 AWAITING_OPERATOR_SIGNOFF, joined via ``TicketTask.session_id ==

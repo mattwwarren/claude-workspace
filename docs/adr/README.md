@@ -62,6 +62,7 @@ When an ADR is superseded, edit the old one's status line — don't delete it.
 | [0017](0017-session-inbox-and-resume-trigger.md) | A session's inbound channel is a durable mailbox plus a paused-only resume trigger | Accepted |
 | [0018](0018-codex-runs-as-a-detached-local-liveness-job.md) | Codex runs as a detached, local-liveness-tracked job, not an in-process thread | Accepted |
 | [0019](0019-lock-hierarchy-and-no-subprocess-under-sessions-lock.md) | Locks form a ranked hierarchy, re-entry is an error, and nothing runs a subprocess under `sessions_lock` | Accepted |
+| [0020](0020-the-operator-is-the-orchestrator-session.md) | The operator is the orchestrator session; a human is escalated to only for product or scope forks | Accepted |
 
 ADR-0000 is the foundational record — the trajectory it captures is
 assumed as ground truth by every subsequent ADR.

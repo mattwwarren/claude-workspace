@@ -53,8 +53,10 @@ themselves.
 
    If this refuses — e.g. `missing section: ## Tickets`, or a malformed
    `sprint_buildout:` config block — do **not** work around it. Report the
-   defect verbatim and offer to fix the RFC against `docs/rfcs/TEMPLATE.md`
-   (or point at `config/CONFIG_REFERENCE.md` for a config defect). Silently
+   defect verbatim and fix the RFC against `docs/rfcs/TEMPLATE.md` yourself
+   (or fix the config per `config/CONFIG_REFERENCE.md` for a config defect);
+   escalate only when the missing content is a product/scope fork the RFC
+   must decide. Silently
    inferring what the RFC failed to say is the exact failure this design
    exists to prevent.
 
@@ -165,8 +167,8 @@ Restated here because they are the two ways this pipeline can go wrong
 irreversibly:
 
 1. **If `cw sprint plan` refuses, do not work around it.** Report the defect
-   verbatim and offer to fix the RFC against `docs/rfcs/TEMPLATE.md`.
-   Silently inferring what the RFC failed to say is the exact failure this
+   verbatim and fix the RFC against `docs/rfcs/TEMPLATE.md` yourself
+   (escalating only a product/scope fork). Silently inferring what the RFC failed to say is the exact failure this
    design exists to prevent.
 2. **Create nothing before the step-3 gate is approved.** `gh issue create`
    has no draft mode — a typo ships instantly, and 15 issues is a lot to

@@ -74,7 +74,7 @@ def _promotion_write_error(
     msg = (
         f"{head} RESTORE FAILED: {plan_path} could not be restored"
         f" ({restore_error.__class__.__name__}: {restore_error}) and may hold"
-        f" partial content. Manual recovery: the approved draft is still intact"
+        f" partial content. Recovery: the approved draft is still intact"
         f" at {draft_path}; fix the I/O error, then re-run `cw dev-queue approve"
         f" {task.ticket_id} --client {task.client}`, which promotes that draft"
         f" over {plan_path} again."

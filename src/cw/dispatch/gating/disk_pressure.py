@@ -262,8 +262,8 @@ def _record_host_tmp_exhausted_block(
     :func:`~cw.dispatch.lanes._record_client_freshness_block` threads it --
     because the disk-pressure gate probes each client's own mount. Only the
     inode dimension latches: a tmpfs out of inodes is the 2026-09-27 ENOSPC
-    incident this signal exists for, and it needs an operator (clearing
-    stale scratch trees) rather than time.
+    incident this signal exists for, and it needs the orchestrator to act
+    (clearing stale scratch trees) rather than time.
     """
     save_host_tmp_probe_cache(
         client_name, HostTmpProbeCache(probed_at=now, exhausted=True, latched=True)

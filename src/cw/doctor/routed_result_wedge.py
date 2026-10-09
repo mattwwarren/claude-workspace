@@ -9,7 +9,8 @@ worker still live in the daemon roster. The reconcile pass pages it once
 - :func:`_check_wedge_routed_result_session` reports it on every ``cw doctor``
   run, through the same shared detector the reconcile page uses.
 - :func:`reap_routed_result_findings` closes it on ``cw doctor --reap`` only
-  -- an explicit operator command (ADR-0014 invariant 2), so it closes
+  -- an explicit operator command (the orchestrator session counts, ADR-0020;
+  ADR-0014 invariant 2), so it closes
   regardless of ``reap_policy``, as classes 6 and 8 do.
 
 The close flips the session alone (COMPLETED, ``completed_reason=USER``,
@@ -392,7 +393,8 @@ def _stop_and_audit(hit: StrandedRoutedSession, daemon: NativeDaemonClient) -> N
 def reap_routed_result_findings(findings: list[WedgeFinding]) -> list[str]:
     """Close every still-stranded session named by *findings*; return their ids.
 
-    Operator-only (``cw doctor --reap``). Re-detects on fresh state under the
+    An explicit operator command (``cw doctor --reap``; the orchestrator session
+    counts, ADR-0020). Re-detects on fresh state under the
     lock, so a session that gained a bound row or fresh transcript activity
     since the finding was collected is skipped. Lock ordering: roster and
     config reads outside every lock; a queue snapshot under

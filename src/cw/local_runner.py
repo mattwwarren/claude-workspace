@@ -731,7 +731,7 @@ def synthesize_git_result(
         if file_request:
             # Parked, not retried: once the plan-driven --file manifest ships,
             # this fires mainly when the file the model needs is genuinely
-            # absent from the plan's enumeration — a plan gap a human must
+            # absent from the plan's enumeration — a plan gap the orchestrator must
             # close, not something a blind re-dispatch fixes. retry_delay_
             # seconds must stay None here (Blocker._check_retry_invariants
             # rejects a delay paired with retry_eligible=False).

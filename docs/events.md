@@ -49,7 +49,7 @@ A new ticket has been added to the work queue for an orchestrator client.
 **Payload:** `{"ticket_id": "<str>", "client": "<str>", "lane": "<str>"}`
 **Semantics:** Emitted once per PENDING task when the client's local
 `<default_branch>` is behind `origin/<default_branch>`. The task stays
-PENDING; the slot is skipped for this tick. Operator should run
+PENDING; the slot is skipped for this tick. The orchestrator runs
 `cw dev-queue refresh-all` to fast-forward and unblock dispatch.
 
 ```json
@@ -469,9 +469,9 @@ attention-worthy.
 `exception_type` set otherwise. When the loop exits because the installed
 cw package version drifted from the loaded one, the payload also carries
 `reason: "version_drift"` plus `loaded_version`/`installed_version`.
-Operator-relevant: if you see this without having stopped the loop yourself,
-dispatch is down and pending tickets will not be claimed until it is
-restarted.
+Operator-relevant: if you see this without the orchestrator having stopped the
+loop, dispatch is down and pending tickets will not be claimed until the
+orchestrator restarts it.
 
 ### `dispatch.usage_limit_armed`
 
@@ -803,8 +803,9 @@ requested lane names. It is **absent** from the liveness sweep's distress
 payload and from the client-scoped `dispatch_loop_stale` payload, both of
 which carry their own extra fields instead.
 
-**Semantics:** Emitted when a session requires human intervention — the
-orchestrator cannot automatically retry or complete it. `paused_status` is an
+**Semantics:** Emitted when a session requires operator intervention (the
+orchestrator session, per ADR-0020 — a human only for a product/scope fork) —
+the dispatch loop cannot automatically retry or complete it. `paused_status` is an
 open enum; consumers MUST tolerate unknown values. Known values:
 
 - `"session_unresponsive"` — signal-only distress from the liveness sweep
@@ -812,7 +813,7 @@ open enum; consumers MUST tolerate unknown values. Known values:
   bucket with no sentinel emitted and no pending subagent at the transcript
   tail. Fires once per evidence key (see **Liveness dead-session page**
   below), one push notification per page, and mutates nothing — the session
-  keeps running; the operator decides.
+  keeps running; the orchestrator decides.
   `breadcrumbs` carries stale minutes, stage, and elapsed seconds. For a
   session with no surface, Claude session id, transcript, or local liveness
   handle (#2417), the page carries `staleness_source: "session_age"` and the
@@ -896,8 +897,11 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `…: 3 commit(s) not on origin/dev/2114` — from both the dispatch path
   (`dispatch/claim.py`, #2114) and the reconcile phantom-reaped / TIMED_OUT /
   COMPLETED-silent revert paths (#2118).
-  Operator should read the reason, commit/push or discard the changes, then
-  `cw dev-queue requeue` the task. `cw doctor --reap` deliberately leaves
+  The orchestrator reads the reason, then commits and pushes the changes, or
+  discards them only after `git -C <worktree> log origin/<branch>..HEAD`,
+  `git -C <worktree> status --porcelain --untracked-files=all` and
+  `git -C <worktree> diff HEAD` show they are duplicates of landed work or junk,
+  then runs `cw dev-queue requeue` on the task. `cw doctor --reap` deliberately leaves
   this park alone (reverting it re-derives the identical park). The
   pre-spawn park does not charge `unproductive_attempts` (no session ran).
 - `"attempt_cap_blocked"` — the dispatch claim path refused to claim a
@@ -909,7 +913,7 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `attempt_ceiling` (int), the *resolved* ceiling that fired (#1751). Read
   that, not `global_attempt_ceiling`: the row's lane may have overridden it,
   and a lane with `attempt_ceiling: false` never produces this park at all.
-  Operator recovery is §7's "Attempt-cap reset" in
+  Orchestrator recovery is §7's "Attempt-cap reset" in
   `docs/dispatch-runbook.md`.
 - `"spawn_post_launch_failed"` — a worker is live but its record is not
   (#2502): a spawn step failed after the worker launched. Two emitters share
@@ -947,11 +951,11 @@ open enum; consumers MUST tolerate unknown values. Known values:
   and the row stays RUNNING with no `session_id`; reconcile then adopts the
   row (`task.session_adopted`) once the recorded session's `cw-context.json`
   ties it to this claim and the session did not predate the claim, and until
-  it does the operator inspects the worker and, if none is running, releases
+  it does the orchestrator inspects the worker and, if none is running, releases
   the row with `cw dev-queue cancel <ticket> -c <client>` followed by
   `cw dev-queue requeue <ticket> -c <client> --from-cancelled` (plain
   `cw dev-queue requeue` refuses a RUNNING row). When the `sessions.json`
-  write failed on a dispatch claim, the same operator release applies;
+  write failed on a dispatch claim, the same orchestrator release applies;
   nothing yet recovers that case automatically (#2591 follow-up). No push
   notification is fired (`fire_push_notification` is not called).
 - `"fix_dispatch_worker_unconfirmed"` — a fix-loop worker that launched but
@@ -977,8 +981,12 @@ open enum; consumers MUST tolerate unknown values. Known values:
 - `"plan_parked"` — A headless worker completed its plan stage with open
   ambiguities or unverified premises (`ambiguities_pending_resolution` or
   `premises_pending_verification` sentinel status). The task is BLOCKED_ON_USER.
-  Operator should inspect the session result (`cw session result <id>`) and
-  either resolve the ambiguities and re-dispatch, or close the ticket. See #923.
+  The orchestrator inspects the session result (`cw session result <id>`) and
+  either resolves the ambiguities against the ticket's sources of truth and
+  re-dispatches, or closes the ticket (escalating only a product/scope fork to
+  a human). It closes the ticket only when its acceptance criteria are
+  verified satisfied (citing the merged PR/commit in the close comment) or it
+  is verified duplicate/obsolete (citing the superseding ticket). See #923.
 - `"stopped_without_sentinel"` — the Stop hook observed an **abandoned exit**
   (#2135): the worker recorded a `park_comment_marker` in its worktree's
   `.claude/cw-context.json` (via `cw signal-park`, after its park comment
@@ -1049,7 +1057,7 @@ open enum; consumers MUST tolerate unknown values. Known values:
   releases it at the reset; `park` (any policy other than `auto`, including
   the `signal_only` default) goes `RUNNING → BLOCKED_ON_USER` with
   `disposition="usage_limited_mid_turn"` and `session_id` left set, and the
-  session and its surface are untouched for an operator to clear. A step that
+  session and its surface are untouched for the orchestrator to clear. A step that
   fails is logged and retried next tick. Any other transition of the row
   clears the intent and ends the act. While the intent is set the phantom
   sweep, the COMPLETED/TIMED_OUT-session backstops and the liveness sweep's
@@ -1088,7 +1096,7 @@ open enum; consumers MUST tolerate unknown values. Known values:
   no `board.py` badge at all, no `cw dev-queue status` badge, no
   `cw orchestrate status` row. This is a narrower surface than
   `"freshness_gate_blocked"` above, which at least gets a `board.py`
-  client-header badge. Operator recovery is §7's "Dispatch-loop staleness
+  client-header badge. Orchestrator recovery is §7's "Dispatch-loop staleness
   page" in `docs/dispatch-runbook.md`.
 - `"salvage_skip_escalated"` — *historical (ADR-0014)*: the salvage-skip
   latch escalation. No longer produced; may exist in old logs.
@@ -1136,7 +1144,7 @@ open enum; consumers MUST tolerate unknown values. Known values:
   the queue lock when the guard refused), and the recovery command
   `cw spawn close --confirmed-dead --requeue <session-id>` (the close cancels the
   `RUNNING` row, `--requeue` puts it back to `PENDING` at its current stage).
-  The operator can inspect the worktree log (`.cw/opencode.log`) first.
+  The orchestrator inspects the worktree log (`.cw/opencode.log`) first.
   Also emitted by the phantom sweep (`cw.reconcile.phantom`, #2513) for an
   exited worker (absent from the daemon roster) whose routed sentinel the
   guard refused: the same 9 fields and recovery command, with "exited worker"
@@ -1172,8 +1180,11 @@ open enum; consumers MUST tolerate unknown values. Known values:
 - `"approval_gate"` — Rule 1: a non-small-tier scope-gated approval status
   (`plan_pending_approval` or `review_pending_approval`) parked the task to
   BLOCKED_ON_USER. Deliberately distinct from `"plan_parked"`, which covers
-  the unrelated v4 ambiguities/premises park. `breadcrumbs` empty. Operator
-  should review the session's scope/plan and approve or redirect. See #1302.
+  the unrelated v4 ambiguities/premises park. `breadcrumbs` empty. The
+  orchestrator reviews the session's scope/plan and approves or redirects
+  (see the gate recipes in `config/CONFIG_REFERENCE.md`), except for a
+  `scope_hint: large` park, which is the operator's own opted-in human gate:
+  the orchestrator notifies the human instead of approving it. See #1302.
 - `"review_health_gate"` — a REVIEW-stage sentinel reported
   `health.recommendation == "EXIT_FOR_HUMAN_REVIEW"`: the review that just ran
   did not vouch for its own coverage (e.g. a reviewer document with
@@ -1183,10 +1194,10 @@ open enum; consumers MUST tolerate unknown values. Known values:
   the same recommendation on its IMPL success path as an honest "I am not a
   reviewer" default (#1580), which is not a degraded-review signal and must
   keep auto-advancing. `breadcrumbs` empty — the per-reviewer rationale
-  instead reaches the operator via the sentinel's `friction_highlights` and
+  instead reaches the orchestrator via the sentinel's `friction_highlights` and
   `health.agent_health_summary` (#2094), plus the on-disk diagnostics bundle
   each reviewer document is persisted to on every run
-  (`src/cw/codex_review/_roles.py`). Operator recovery is to re-run review —
+  (`src/cw/codex_review/_roles.py`). Orchestrator recovery is to re-run review —
   `cw dev-queue requeue` (or `cw dev-queue drain`, which selects this
   disposition); `cw dev-queue approve` deliberately fails closed here, because
   there is nothing shippable to authorize until review is re-run. See #1702.
@@ -1210,7 +1221,7 @@ open enum; consumers MUST tolerate unknown values. Known values:
   generic `_hold_aware_disposition` stamp. Deliberately **not** a
   `HOLD_DISPOSITIONS` member and deliberately **not** fix-loop-eligible: a
   finding rejected because its anchor could not be trusted must never be handed
-  to a fix agent. Operator recovery is to read the rejected finding on the
+  to a fix agent. Orchestrator recovery is to read the rejected finding on the
   posted review comment (rendered under "MUST_FIX — mechanically rejected") and
   re-run review — `cw dev-queue requeue`, or `cw dev-queue drain`, which selects
   this disposition. See #1714.
@@ -1412,7 +1423,9 @@ sweep's park-marker skip path); documented for reading old logs.
 **Semantics:** Emitted when a stalled headless session is skipped during the
 salvage pass because it carries a park marker (`last_result.paused_status ==
 "silently_idle"`). The session is intentionally parked BLOCKED_ON_USER and
-must not be auto-retried; the operator must manually clear or close it.
+must not be auto-retried; the orchestrator clears or closes it once the
+session is verified dead (absent from the daemon roster, transcript flat, no
+live process).
 `reason` is an open enum — consumers MUST tolerate unknown values.
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 
@@ -1449,8 +1462,11 @@ this event.
 reconcile's stranded routed-result sweep alongside its once-only
 `session.needs_attention` page. It is proposal-only: nothing in reconcile acts
 on it under any `reap_policy`, and `cw orchestrate run`'s reap drain logs it
-and never authorizes it; the operator closes the session with
-`cw doctor --reap` or `cw spawn close --confirmed-dead <id>`. Because it
+and never authorizes it; the orchestrator session closes the session once it
+has liveness evidence (the routed result is on record, the transcript is
+flat, no live process is working in the worktree), by running
+`cw doctor --reap --yes --routed-session-id <id>` (the non-TTY form) or
+`cw spawn close --confirmed-dead <id>`. Because it
 stamps the shared `reap_proposed_at` latch, it is the preceding proposal for
 ADR-0006 purposes if that session later becomes a phantom: the phantom
 sweep's own `crash_complete` proposal for it is deduped, not re-emitted.
@@ -1781,7 +1797,7 @@ refusal.
 
 This event is #2303's production-observability commitment standing in
 for a live-subagent integration test (see the round-3 operator note):
-the operator watches for this event, and for any recurrence of the
+the orchestrator watches for this event, and for any recurrence of the
 #2250/#2280/#2275 wedge signature with **no** matching refusal event,
 after release. A recurrence with no refusal event means the premise —
 that injected PreToolUse hooks intercept a subagent's own tool calls —
@@ -2393,7 +2409,7 @@ mutation raises `CwError` after `gate.auto_approved` was already recorded —
 so the durable event stream carries a correction, not a standing
 false-positive "approved" record. Forwarded to the operator-attention
 channel by default: the row stays parked with its page suppressed, so this
-is how the operator learns a person is needed. Stamps
+is how the orchestrator learns the row needs triage. Stamps
 `TicketTask.gate_recipe_failed_at` as a one-shot latch so a persisting
 failure doesn't re-detect and re-emit both events every reconcile tick; the
 latch clears itself once the condition resolves.
@@ -2424,7 +2440,8 @@ raised and nothing is broken, the gate deliberately held, and no
 as parked (`BLOCKED_ON_USER` / `finalize_gate_held`), is not reported as
 approved, and gets no audit comment. Forwarded to the operator-attention
 channel by default, for the same reason as `gate.auto_approve_failed`: the
-row needs a person.
+row needs the operator who armed the hold (a gate the human opted into,
+ADR-0020).
 
 Note: a *persistently* armed hold (as opposed to one armed inside the
 detect→act race window) re-emits this pair on every reconcile tick — there is
@@ -2790,11 +2807,14 @@ opposite ordering to #1617's save-then-emit rule, which governs a *state
 mutation* whose event must not claim something that did not land; here the
 event **is** the safety mechanism.
 
-`cw review settle` refuses to run inside a dispatch worker, or anywhere a
-worker cannot be ruled out — an unreadable `.claude/cw-context.json`, or a
-linked git worktree with none (see ADR-0016 invariant 8) — so no event of this
-type can originate from one. A refused run — blank `--reason`, unresolvable gh
-identity, an entry with no reviewed sha, the session refusal, or a failed
+`cw review settle` refuses to run inside a dispatch worker — only on positive
+evidence of one: the nearest `.claude/cw-context.json` reports
+`headless: true`, or `$TMPDIR` lies inside such a worktree (see ADR-0016
+invariant 8 and ADR-0020 invariant 4) — so no event of this type can
+originate from a worker. Every other context (the orchestrator's main
+checkout, a directory outside a repo, a worktree with no or an unreadable
+context file) proceeds. A refused run — blank `--reason`, unresolvable gh
+identity, an entry with no reviewed sha, the worker refusal, or a failed
 audit emit — emits no marker and writes nothing.
 
 A record that never went through this command is not applied by the reader at
@@ -2916,7 +2936,7 @@ for. This event is how that cost stops being silent.
 
 **Surfacing, not expiry.** The record is not deleted, not rewritten, and not
 marked spent: it still applies on any later pass where that file has not moved.
-The operator decides whether to re-settle it against the current code or
+The orchestrator decides whether to re-settle it against the current code or
 withdraw it with `review.finding_disposition_reverted` above. Silent expiry is
 precisely the invisible mechanical act ADR-0016 exists to refuse.
 

@@ -82,7 +82,7 @@ _WARNED_FAIL_OPEN: dict[tuple[str, str], str] = {}
 
 @dataclass(frozen=True)
 class TrackerMcpGateHit:
-    """What the operator must fix for one gated ticket (#2442).
+    """What the orchestrator must fix for one gated ticket (#2442).
 
     Threaded from the resolver into the park's SESSION_NEEDS_ATTENTION event
     as additive payload fields.

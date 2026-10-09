@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -929,7 +928,7 @@ class TestReviewSettle:
     def _operator_machine(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Run every settle test from an interactive cw session worktree.
+        """Run every settle test from a non-worker cw session worktree.
 
         The repo checkout this suite runs in carries a real context of its own
         (``headless: true`` under dispatch), so every case writes its own
@@ -952,9 +951,10 @@ class TestReviewSettle:
         inside the worker's worktree, whose headless context the upward search
         then finds — correctly refusing, and so not testing the case at all.
         """
-        from cw.cli.review.commands import _nearest_context_root
-
-        if _nearest_context_root(tmp_path.parent) is not None:
+        above = tmp_path.parent.resolve()
+        if any(
+            (d / HOOK_CONTEXT_RELATIVE_PATH).is_file() for d in [above, *above.parents]
+        ):
             pytest.skip("a cw context sits above tmp_path (suite runs in a worker)")
 
     def _invoke(self, runner: CliRunner, payload: dict[str, Any], *args: str) -> Result:
@@ -1387,42 +1387,36 @@ class TestReviewSettle:
             ("malformed json", "{not json"),
             ("empty file", ""),
             ("non-object payload", '["headless"]'),
-            ("headless is a string", '{"headless": "false"}'),
-            ("headless is a number", '{"headless": 0}'),
+            ("headless is a string", '{"headless": "true"}'),
+            ("headless is a number", '{"headless": 1}'),
             ("headless is null", '{"headless": null}'),
         ],
     )
-    def test_an_indeterminate_context_refuses_and_writes_nothing(
+    def test_an_indeterminate_context_proceeds(
         self, runner: CliRunner, tmp_path: Path, label: str, body: str | None
     ) -> None:
-        """Fail CLOSED (#2210 round 4) on a context file it cannot vouch for.
+        """Only positive evidence of a worker refuses (ADR-0020).
 
-        A context file that exists is a dispatch context. If it is unreadable,
-        or its ``headless`` is not a bool, nothing says this is not a worker,
-        and this guard decides whether a durable suppression may be minted —
-        the same fail-closed posture as #2213.
+        A context file that cannot be read, or whose ``headless`` is not the
+        boolean ``true``, is not evidence of a worker. Refusing here bounced
+        the settle to a human for no reason the orchestrator could fix.
         """
         assert label
         context_path = tmp_path / HOOK_CONTEXT_RELATIVE_PATH
         context_path.write_text(body or "", encoding="utf-8")
-        out_path = tmp_path / "settle.md"
 
-        result = self._invoke(runner, _settle_payload(), "--out", str(out_path))
+        result = self._invoke(runner, _settle_payload())
 
-        assert result.exit_code != 0
-        assert "could not be resolved" in result.output
-        assert "REVIEW-FINDING-DISPOSITIONS" not in result.output
-        assert not out_path.exists()
-        assert read_events() == []
+        assert result.exit_code == 0, result.output
+        assert "REVIEW-FINDING-DISPOSITIONS" in result.output
+        assert len(read_events()) == 1
 
     def test_no_context_outside_any_repository_proceeds(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
         """No context file and no linked worktree: the operator's own machine.
 
-        An orchestrator session acting for the operator runs here. Refusing it
-        (round 4's behavior) bounced every orchestrator-run settle back to the
-        operator by hand, though no worker can be standing in this directory.
+        The orchestrator session runs here (ADR-0020).
         """
         self._require_no_ancestor_context(tmp_path)
         (tmp_path / HOOK_CONTEXT_RELATIVE_PATH).unlink()
@@ -1453,18 +1447,17 @@ class TestReviewSettle:
         assert result.exit_code == 0, result.output
         assert "REVIEW-FINDING-DISPOSITIONS" in result.output
 
-    def test_no_context_in_a_linked_worktree_refuses_and_writes_nothing(
+    def test_no_context_in_a_linked_worktree_proceeds(
         self,
         runner: CliRunner,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
     ) -> None:
-        """Workers run in linked worktrees: a missing context there refuses.
+        """A linked worktree with no context file is not evidence of a worker.
 
-        A worker whose context file was lost is indistinguishable from any
-        other linked worktree with no context, so the guard keeps round 4's
-        fail-closed posture for exactly that shape.
+        Workers are identified by their ``headless: true`` context and their
+        ``TMPDIR``; a bare linked worktree carries neither (ADR-0020).
         """
         self._require_no_ancestor_context(tmp_path)
         (tmp_path / HOOK_CONTEXT_RELATIVE_PATH).unlink()
@@ -1472,15 +1465,11 @@ class TestReviewSettle:
         worktree = tmp_path / "linked"
         git_in(repo, "worktree", "add", "-b", "feature", str(worktree))
         monkeypatch.chdir(worktree)
-        out_path = tmp_path / "settle.md"
 
-        result = self._invoke(runner, _settle_payload(), "--out", str(out_path))
+        result = self._invoke(runner, _settle_payload())
 
-        assert result.exit_code != 0
-        assert "linked git worktree" in result.output
-        assert "REVIEW-FINDING-DISPOSITIONS" not in result.output
-        assert not out_path.exists()
-        assert read_events() == []
+        assert result.exit_code == 0, result.output
+        assert "REVIEW-FINDING-DISPOSITIONS" in result.output
 
     def test_a_worker_tmpdir_refuses_even_after_changing_directory(
         self,
@@ -1522,30 +1511,6 @@ class TestReviewSettle:
             _write_session_context(scratch, headless=False)
         scratch.mkdir(exist_ok=True)
         monkeypatch.setenv("TMPDIR", "/" if shape == "root" else str(scratch))
-
-        result = self._invoke(runner, _settle_payload())
-
-        assert result.exit_code == 0, result.output
-
-    @pytest.mark.parametrize(
-        "error",
-        [OSError("git missing"), subprocess.TimeoutExpired(["git"], 10)],
-    )
-    def test_a_git_failure_reads_as_not_a_linked_worktree(
-        self,
-        runner: CliRunner,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-        error: Exception,
-    ) -> None:
-        """Every worker runs in a readable git worktree; one git cannot read is not."""
-        self._require_no_ancestor_context(tmp_path)
-        (tmp_path / HOOK_CONTEXT_RELATIVE_PATH).unlink()
-
-        def _raise(*_args: object, **_kwargs: object) -> None:
-            raise error
-
-        monkeypatch.setattr("cw._git.run_git", _raise)
 
         result = self._invoke(runner, _settle_payload())
 

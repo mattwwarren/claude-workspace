@@ -23,7 +23,7 @@ it in place of the interactive prompt.
 **The universal rule:** a gate collapses to one of
 
 - a **deterministic auto-action** (auto-commit, continue-with-known-state), or
-- a **`HEADLESS BLOCK`** when the gate cannot be resolved without a human.
+- a **`HEADLESS BLOCK`** when the gate cannot be resolved by the worker itself (the park is addressed to the orchestrator).
 
 Never silently skip a step. A silently-skipped ship step is the exact defect
 this mode exists to prevent (feed post / review-monitor registration dropped
@@ -46,7 +46,7 @@ PREP_PR_BLOCK>>>
 
 Do NOT fall back to shipping-anyway, reverting work, or inventing a PR yourself
 to route around a block. Emitting the block and halting IS the correct headless
-behavior — the orchestrator routes it to a human.
+behavior — the orchestrator reads the block and resolves it (escalating to the human only for a genuine product/scope fork).
 
 ---
 
@@ -107,7 +107,7 @@ git merge origin/<base>
     - **Retry** → re-attempt the push once.
     - **Abort** → stop /prep-pr.
 
-    **Headless:** emit `HEADLESS BLOCK` (`gate: "Step 1 sync-with-base push"`, `reason: agent_block` per this file's fixed convention, `details:` the verbatim push failure output). Do NOT retry automatically in headless mode and do NOT proceed to Step 2 — an unavailability condition (auth/network) needs the operator, not a blind retry.
+    **Headless:** emit `HEADLESS BLOCK` (`gate: "Step 1 sync-with-base push"`, `reason: agent_block` per this file's fixed convention, `details:` the verbatim push failure output). Do NOT retry automatically in headless mode and do NOT proceed to Step 2 — an unavailability condition (auth/network) needs the orchestrator to resolve and requeue, not a blind retry.
 - **If merge conflicts** → surface the conflicting files to the user:
   > "Merge conflicts with `<base>`. Conflicting files: [list]. Resolve before continuing?"
   - **Yes** → help resolve conflicts, commit the merge. When resolving a CHANGELOG conflict, never edit or remove a released `## [X.Y.Z]` section; your entry goes under `[Unreleased]`.
@@ -149,9 +149,9 @@ This scans for `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod` and chec
 How the `## Quality Gates` section is read:
 
 - **A bash code block is authoritative.** When the block yields at least one gate, the ecosystem defaults are dropped entirely (`detected_from` is then just `["CLAUDE.md"]`); the block is the complete gate set. A block with no commands, or an unclosed fence, is ignored and the defaults stay.
-- **Bullet gates** use `- name: command [| autofix]`, where `name` is a single token (no spaces). A command may be wrapped in one backtick pair. Other bullets, such as `- No suppressions (...) without explicit user approval`, are prose and are not gates. With no bash block, a bullet gate replaces the same-named ecosystem default; alongside a bash block, a block gate replaces a same-named bullet gate.
+- **Bullet gates** use `- name: command [| autofix]`, where `name` is a single token (no spaces). A command may be wrapped in one backtick pair. Other bullets, such as `- No suppressions (...) without explicit approval`, are prose and are not gates. With no bash block, a bullet gate replaces the same-named ecosystem default; alongside a bash block, a block gate replaces a same-named bullet gate.
 - **Gate names** are the executable (`mypy`, `pre-commit`, `diff-cover`). Gates that share an executable are named `<tool>-<qualifier>` from the subcommand or `-m` marker, e.g. `ruff-check`, `ruff-format`, `pytest-not-integration`, `pytest-integration`.
-- **No automatic autofix for bash-block gates.** The bash block has no autofix syntax, so `/prep-pr` no longer auto-fixes format failures (previously the ecosystem `ruff-format` default supplied `ruff format .`) for repos whose gates come from a `CLAUDE.md` bash block. Autofix is available only for bullet-declared gates whose name is not also a bash-block gate. A failing block gate such as `ruff-format` is fixed manually, or by the Step 7 fix loop for gates without an autofix.
+- **No automatic autofix for bash-block gates.** The bash block has no autofix syntax, so `/prep-pr` no longer auto-fixes format failures (previously the ecosystem `ruff-format` default supplied `ruff format .`) for repos whose gates come from a `CLAUDE.md` bash block. Autofix is available only for bullet-declared gates whose name is not also a bash-block gate. A failing block gate such as `ruff-format` is fixed directly by the AI, or by the Step 7 fix loop for gates without an autofix.
 
 Store the result — you'll run these gates in Step 7.
 
@@ -300,11 +300,11 @@ After all gates pass:
 - If fixes were applied in this cycle → loop back to **Step 4** for re-review
 - Track cycle count. At `--max-cycles` (default 3):
 
-  > "Reached maximum review cycles (N). Remaining issues: [summary]. Ship anyway, fix manually, or abort?"
+  > "Reached maximum review cycles (N). Remaining issues: [summary]. Ship anyway, fix remaining issues, or abort?"
 
   Options:
   - **Ship anyway** — proceed to Step 8 with known issues
-  - **Fix manually** — exit /prep-pr so user can fix by hand
+  - **Fix remaining issues** — exit /prep-pr so the AI fixes them directly, then re-run
   - **Abort** — stop entirely
 
   **Headless:** emit a `HEADLESS BLOCK` (`gate: "Step 7 max review cycles"`,
@@ -346,10 +346,10 @@ After all gates pass:
      (no symlink between them): prefer `.claude/skills/ship-it/SKILL.md` — the
      path the runtime itself loads — and name the shadowed `.agents/` copy in
      the Ship Summary. Never merge or run both.
-   - **If none of the layouts matched**: **STOP.** Tell the user:
+   - **If none of the layouts matched**: **STOP.** Report (interactive: run `/setup` to create the project ship-it; headless: BLOCK for the orchestrator to do so):
      > "This project has no ship-it — probed `.claude/commands/ship-it.md`, `.claude/skills/ship-it/SKILL.md`, and `.agents/skills/ship-it/SKILL.md`. Create a project-level ship-it that knows your repo's PR conventions, branch naming, and CI setup. The generic global one was removed because it caused more problems than it solved."
      >
-     > Do NOT fall back to any global ship-it. Do NOT try to create a PR yourself. The user must set up a project-specific ship-it first.
+     > Do NOT fall back to any global ship-it. Do NOT try to create a PR yourself. A project-specific ship-it must be set up first (via `/setup`, run by the orchestrator).
 
 **Headless:** propagate headless-ness into the delegated ship-it execution
 — this is the delegation hop where the original defect surfaced.

@@ -126,7 +126,7 @@ Parse selection into a list of IDs.
    - Tickets: `<count>` — list the IDs
    - Priority: `<N>` if set, else "(default)"
    - Concurrency cap: `yq -r '.per_client_max_parallel.<client> // .per_client_max_parallel.default' ~/.claude-workspace/orchestrator.yaml`
-   - Daemon running? `pgrep -f "cw daemon" >/dev/null && echo "yes" || echo "NO — start with \`cw daemon\` or \`systemctl --user start cw-daemon\` so items actually dispatch"`
+   - Daemon running? `pgrep -f "cw daemon" >/dev/null && echo "yes" || echo "NO — start it (\`cw daemon\` or \`systemctl --user start cw-daemon\`) so items actually dispatch"`
 
 2. **If `--dry-run`**: stop here, print the `cw dev-queue add` command that would run.
 
@@ -145,10 +145,10 @@ subject to the concurrency cap and spawns `/auto-dev <id>` sessions.
 Report:
 - N tickets enqueued for `<client>`
 - Current dev-queue status: `cw dev-queue status`
-- Remind:
+- Dispatch:
   - If the daemon is running, dispatch is automatic.
-  - Otherwise, run `cw dev-queue run --once` to dispatch a single tick, or
-    `cw dev-queue run` for a continuous loop in the foreground.
+  - Otherwise, run `cw dev-queue run --once` now to dispatch a single tick (or
+    `cw dev-queue run` for a continuous loop) — do not leave it as a to-do.
   - Use `cw dev-queue plan` first if you want an orchestrator-agent-produced
     ordering (then `cw dev-queue run --use-plan`).
 

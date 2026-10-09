@@ -27,7 +27,7 @@ peon status           # optional
 
 ### Accept the bypass-permissions disclaimer
 
-Before `cw` can spawn background Claude sessions, the `claude` binary requires you to accept its bypass-permissions disclaimer. Run this once interactively:
+Before `cw` can spawn background Claude sessions, the `claude` binary requires its bypass-permissions disclaimer to be accepted. **This is one of the only two physically-human steps** (ADR-0020): acceptance needs a TTY, so an orchestrator session cannot do it. The other is unlocking an SSH key with its passphrase (`ssh-add`). A human runs this once, interactively:
 
 ```bash
 claude --dangerously-skip-permissions
@@ -52,7 +52,7 @@ Expected output for a healthy setup:
 ```
 
 - `[OK] bypass-disclaimer — accepted` — disclaimer accepted; `cw` can spawn sessions.
-- `[WARN] bypass-disclaimer — ...` — disclaimer not yet accepted; run `claude --dangerously-skip-permissions` interactively.
+- `[WARN] bypass-disclaimer — ...` — disclaimer not yet accepted; a human must run `claude --dangerously-skip-permissions` interactively (physical-human exception: needs a TTY).
 - `[OK] claude-version` — `claude` binary found and responsive.
 - `[WARN] daemon-reachable` — the Claude native daemon has not been started yet; this resolves automatically when `cw` first spawns a worker session.
 - `[OK/WARN] skills-commands-drift` — repo-tracked `.claude/skills`/`.claude/commands`/`.claude/scripts` files compared against `~/.claude`; `[WARN]` means at least one tracked file is missing, content differs, or its `~/.claude` counterpart is a symlink pointing somewhere other than this checkout. A `differ` on `.claude/scripts/prep_pr_state.py` is the #2090 shape: a stale copy of a cw-owned script at `~/.claude/scripts/` — re-run `scripts/install-skills.sh`.
@@ -157,8 +157,9 @@ workspace:
 - **MCP servers** (`.mcp.json`) — merges `cw-queue-events` and `cw-pr-events`
   entries so background agents receive queue and PR events via MCP.
   The files `config/cw-queue-events.mcp.json.example` and
-  `config/cw-pr-events.mcp.json.example` are for manual wiring only; `cw init`
-  generates these entries automatically.
+  `config/cw-pr-events.mcp.json.example` are templates for wiring outside
+  `cw init` (the orchestrator copies them); `cw init` generates these entries
+  automatically.
 - **Bash allowlist** (`~/.claude/settings.json`) — adds `"Bash(cw:*)"` to
   `permissions.allow` so agents can call `cw` commands without prompting.
 - **SessionStart hook** (`<workspace>/.claude/settings.json`) — adds

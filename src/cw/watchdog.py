@@ -157,7 +157,7 @@ def run_tick(
     for ticket_id in escalated:
         message = (
             f"{ticket_id} has been parked past {ESCALATION_PARK_MINUTES} minutes"
-            " without operator action."
+            " without the orchestrator acting on it."
         )
         send_desktop_notification("cw watchdog: gate escalated", message)
         log_lines.append(_log_line(resolved_now, "escalation", ticket_id, message))
@@ -291,7 +291,7 @@ def install() -> list[Path]:
     """Write the platform-appropriate unit file(s); return the paths written.
 
     Does not invoke ``systemctl``/``launchctl`` — the CLI layer prints the
-    activation command for the operator to run themselves.
+    activation command to run.
     """
     cw_path = _resolve_cw_executable_path()
     if _is_macos():

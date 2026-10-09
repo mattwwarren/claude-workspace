@@ -17,7 +17,7 @@ python3 --version 2>/dev/null || echo "MISSING: python3"
 claude --version 2>/dev/null || echo "MISSING: claude"
 ```
 
-If any required tools are missing, stop and tell the user what needs to be installed:
+If any required tools are missing, install them yourself with these commands, then re-run the checks (report only if an install fails):
 
 - **uv**: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - **Python 3.13+**: `uv python install 3.13`
@@ -71,7 +71,7 @@ Install the cw slash commands to `~/.claude/commands/` so they're available glob
 ./scripts/install-skills.sh
 ```
 
-Or if working from a non-local install, find the project source and run the script. The skills include:
+Or if working from a non-local install, find the project source and run the script yourself. The skills include:
 - `/session-done` - Wrap up work session with handoff generation
 - `/handoff` - Generate session handoff for abnormal endings
 - `/orchestrate-phase` - Automated phase implementation with GitHub Issue integration

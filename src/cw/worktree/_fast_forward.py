@@ -124,8 +124,8 @@ def _sync_reused_submodules(
     no submodule actually checked out -- so a failed sync here can make the
     NEXT reuse refresh's occupancy check (:func:`unsaved_work_reason`) read
     this worktree as having unsaved work and decline to fast-forward it
-    again until a human re-runs ``git submodule update`` or otherwise
-    cleans it up by hand. Init and update only: never ``deinit``, reset or
+    again until the orchestrator re-runs ``git submodule update`` or otherwise
+    cleans it up. Init and update only: never ``deinit``, reset or
     delete a submodule to recover from this.
     """
     if not (wt_path / ".gitmodules").exists():
@@ -158,7 +158,8 @@ def _sync_reused_submodules(
             f"submodule sync of {branch} in reused worktree {wt_path} failed "
             f"({reason}); the sync may be partial (some submodules "
             "registered but none checked out), which can leave the "
-            "worktree uncommitted-dirty until a human re-syncs it by hand"
+            "worktree uncommitted-dirty until `git submodule update --init "
+            "--recursive` is re-run there"
         )
     return None
 

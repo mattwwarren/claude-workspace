@@ -49,7 +49,7 @@ Scan backward through the conversation for the most recent review output. Findin
    - file.py:42 — description of issue
    ```
 
-3. **If no findings are in context**, ask the user: "No review findings in the current conversation. Provide them, or run /review first?"
+3. **If no findings are in context**, run `/review` yourself to produce them (ask the user only if the findings must come from them): "No review findings in the current conversation; running /review first."
 
 ### Convert to Comment JSON
 

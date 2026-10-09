@@ -72,13 +72,13 @@ MEANING_ROW_REVIEW_BLOCKED_ANCHOR = (
 MEANING_ROW_PLAN_UNREVIEWABLE_ANCHOR = (
     "| `plan_unreviewable` | Plan Reviewer (spec station) returned MUST_FIX "
     "both before and after a single Step 1f.4 revision cycle — the plan "
-    "needs human triage, not another auto-revision. No branch created"
+    "needs orchestrator triage, not another auto-revision. No branch created"
 )
 MEANING_ROW_PLAN_UNSOUND_ANCHOR = (
     "| `plan_unsound` | Plan Soundness Reviewer returned a MUST_FIX "
     "(direction contradicts a codified `ARCHITECTURE.md` §7/§8 rule) in a "
     "headless run, or it persisted after a Step 1f.4 revision cycle — the "
-    "chosen direction needs human judgment. No branch created"
+    "chosen direction needs orchestrator judgment. No branch created"
 )
 
 HEADLESS_CONTRACT_REVIEW_BLOCKED_ANCHOR = (

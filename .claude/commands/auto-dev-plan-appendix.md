@@ -83,9 +83,9 @@ Reached from `### Step 1c: Ambiguity Verification` in the core doc, and only whe
 
 ## Consolidated park (single-exit rule, #1650)
 
-Reached from Step 1c's headless mode in the core doc, and only when a gate has decided to exit for a human with a draft plan in hand. A round that converges to AUTO-CONTINUE never reaches here.
+Reached from Step 1c's headless mode in the core doc, and only when a gate has decided to exit for the orchestrator with a draft plan in hand. A round that converges to AUTO-CONTINUE never reaches here.
 
-**Consolidated park (single-exit rule, #1650).** When Step 4c below (or Checkpoint 1's headless large-scope clause, or the Pre-branch integrity checks' stub/cap hard-EXITs below, #1683) decides to exit for a human AND a draft plan exists in hand, do NOT exit carrying only that gate's findings — each serial gate costs one operator round (mean park latency 9–13h). Finish ALL remaining plan-phase analysis first:
+**Consolidated park (single-exit rule, #1650).** When Step 4c below (or Checkpoint 1's headless large-scope clause, or the Pre-branch integrity checks' stub/cap hard-EXITs below, #1683) decides to exit for the orchestrator AND a draft plan exists in hand, do NOT exit carrying only that gate's findings — each serial gate costs one operator round (mean park latency 9–13h). Finish ALL remaining plan-phase analysis first:
 
    1. Run Step 1d scope classification on the draft (if not already run this invocation).
    2. Run the Step 1f stations (Plan Reviewer + Plan Soundness Reviewer, serially per the existing headless dispatch rules, honoring the Step 1f.1 marker skip) in **advisory mode**: findings are collected only — no signoff marker is appended, no revision cycle (Step 1f.4) runs, and a station MUST_FIX must NOT convert the park into `blocked`; the fixes land next round together with the operator's answers. A station that friction-BLOCKs is skipped with a note in the comment — never escalated to `agent_block` from this path.

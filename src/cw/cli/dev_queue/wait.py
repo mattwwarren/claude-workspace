@@ -87,12 +87,12 @@ _WAIT_STATUS_EXIT: dict[str, int] = {
     "merge_pending": _WAIT_EXIT_BLOCKED,
     "scope_exceeded": _WAIT_EXIT_FAILED,
     "forbidden_area": _WAIT_EXIT_FAILED,
-    # #1870: an empty branch needs a human to push commits or close the ticket,
-    # so it maps to BLOCKED (matching the dispatch gate's BLOCKED_ON_USER park)
+    # #1870: an empty branch needs the orchestrator to push commits or close the
+    # ticket, so it maps to BLOCKED (matching the dispatch gate's BLOCKED_ON_USER park)
     # rather than FAILED — nothing errored, there is simply nothing there.
     "empty_diff_blocked": _WAIT_EXIT_BLOCKED,
     # #1862: this ticket already has an open, unmerged PR from an earlier
-    # dispatch. A human has to land or close it before the ticket can move,
+    # dispatch. The orchestrator lands or closes it before the ticket can move,
     # so it maps to BLOCKED (matching the dispatch gate's BLOCKED_ON_USER
     # park) rather than FAILED — nothing errored, the work is already in
     # review.
@@ -314,7 +314,7 @@ def _handle_reaped_mid_wait(
     together confirming reconcile reaped the owning session and reverted the
     task to PENDING.  A bare non-None→None transition alone is not sufficient
     evidence: a normal inter-stage handoff clears session_id the same way.
-    The operator must decide whether to re-dispatch (#542).
+    The orchestrator session decides whether to re-dispatch (#542).
     """
     if output_json:
         click.echo(
