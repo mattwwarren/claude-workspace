@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Any
 
 from cw.auto_dev_result import AutoDevResult
 from cw.executor.core import FireAndForgetRunner, _PreflightOK, _spawn_fire_and_forget
+from cw.models import SessionOrigin, SessionPurpose
+from cw.native_daemon import get_native_daemon_client
 from cw.opencode_runner import (
     OPENCODE_NOT_FOUND,
     STAGE4A_MERGE_GATE,
@@ -24,16 +26,19 @@ from cw.opencode_runner import (
 from cw.opencode_runner import (
     make_blocked as make_opencode_blocked,
 )
+from cw.spawn import _write_hook_context
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import (
         ClientConfig,
+        Session,
         Stage,
         StageExecutorConfig,
         TicketTask,
     )
+    from cw.native_daemon import NativeDaemonClient
 
 
 def _opencode_preflight(
@@ -42,9 +47,18 @@ def _opencode_preflight(
     worktree: Path,
     client: ClientConfig,
     stage: Stage,
-    session_id: str,
+    sess: Session,
+    daemon: NativeDaemonClient | None = None,
 ) -> AutoDevResult | _PreflightOK:
     """Run OpencodeExecutor pre-flight checks for any supported stage.
+
+    #2653: refreshes ``<worktree>/.claude/cw-context.json`` first, on every
+    spawn. Without it a reused worktree keeps the previous session's file, so
+    a worker's bare ``cw result emit`` resolves the stale session id (refused
+    as "already recorded") and ``check_must_fix_override.py`` never sees the
+    operator's ``queue_metadata.must_fix_override``. ``write_stop_hook=False``:
+    opencode has no Claude turn loop to signal-stop. Written before the
+    binary / stage checks so even a blocked park carries a fresh context.
 
     Returns a blocked ``AutoDevResult`` on binary-missing or unsupported
     stage; returns ``_PreflightOK`` with the resolved argv + env
@@ -57,7 +71,23 @@ def _opencode_preflight(
     stage's own entry marker so dispatch never walks ``task.stage`` forward
     on a failure sentinel.
     """
-    del client  # unused: opencode builds its prompt from ticket_id + stage
+    _write_hook_context(
+        worktree,
+        session_id=sess.id,
+        session_name=sess.name,
+        client=client.name,
+        purpose=SessionPurpose.IMPL.value,
+        ticket_id=task.ticket_id,
+        origin=SessionOrigin.DAEMON,
+        headless=True,
+        task=task,
+        default_branch=client.default_branch,
+        workspace_path=client.workspace_path,
+        lane=task.lane,
+        merge_gate_ignore_paths=client.merge_gate_ignore_paths,
+        write_stop_hook=False,
+        daemon=daemon,
+    )
     if stage.value not in SUPPORTED_STAGES:
         return make_opencode_blocked(
             ticket_id=task.ticket_id,
@@ -75,7 +105,7 @@ def _opencode_preflight(
             stage_reached=stage_entry_marker(stage.value),
         )
     prompt = build_stage_prompt(
-        stage.value, task.ticket_id, worktree, session_id=session_id
+        stage.value, task.ticket_id, worktree, session_id=sess.id
     )
     return _PreflightOK(
         argv=build_opencode_argv(config.model, worktree, prompt),
@@ -136,6 +166,7 @@ class OpencodeExecutor:
         parent: str | None = None,
     ) -> str:
         del parent, wall_clock_budget_seconds
+        daemon = get_native_daemon_client()
 
         def _blocked(*, reason: str, details: str) -> AutoDevResult:
             return make_opencode_blocked(
@@ -153,7 +184,7 @@ class OpencodeExecutor:
             stage=stage,
             executor_name="opencode",
             preflight_fn=lambda sess: _opencode_preflight(
-                self._config, task, worktree, client, stage, sess.id
+                self._config, task, worktree, client, stage, sess, daemon
             ),
             blocked_ctor=_blocked,
             runner=self._runner,
