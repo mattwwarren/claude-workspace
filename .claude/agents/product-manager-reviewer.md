@@ -130,7 +130,7 @@ AMBIGUITIES — N items
 2. ...
 ```
 
-**Recommendation is mandatory on every item — never omit it.** PARK (to the orchestrator, which adjudicates and escalates to a human only a genuine product/scope fork it cannot resolve) when getting it wrong is not cheap to unwind: product/scope intent, a public contract, or destructive-action semantics the ticket's sources of truth do not settle. Otherwise ADOPT, stating the assumption you are adopting and why it is safe; an uncertain technical or convention question is answered from the sources of truth, not parked. Consumer-side default: a missing or malformed `Recommendation` line (wrong token, absent sub-bullet, anything other than a leading `ADOPT`/`PARK` token) is treated as PARK downstream — a deliberate fail-closed default, not a bug, and never a shortcut for writing ADOPT.
+**Recommendation is mandatory on every item — never omit it.** ADOPT only when getting it wrong is cheap to unwind and the choice doesn't touch a public contract, a destructive action, or a product-intent call. Default to PARK whenever unsure. A PARK goes to the orchestrator, which adjudicates it and escalates to a human only a genuine product/scope fork it cannot resolve (ADR-0020). Consumer-side default: a missing or malformed `Recommendation` line (wrong token, absent sub-bullet, anything other than a leading `ADOPT`/`PARK` token) is treated as PARK downstream — a deliberate fail-closed default, not a bug, and never a shortcut for writing ADOPT.
 
 If no ambiguities are found, return exactly:
 

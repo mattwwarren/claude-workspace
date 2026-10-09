@@ -155,11 +155,11 @@ After all agents return, for each finding, spawn a parallel Haiku agent
 
 **Discard findings scoring below 75.**
 
-## Step 6: Present Findings
+## Step 6: Present Findings for Approval
 
-**Post without an approval gate** — the sweep runs autonomously; keep the report below as the record of what is posted (escalate to the human only for a genuine product/scope fork).
+**MANDATORY: Never act without user approval.**
 
-After confidence filtering, produce a summary:
+After confidence filtering, present a summary to the user:
 
 1. PR number, title, and link
 2. Review depth (light/deep)
@@ -170,17 +170,20 @@ After confidence filtering, produce a summary:
 
 Proposed action: "Approve (no issues)" or "Request changes (N issues)"
 
-State: **"Posting this review to PR #N."**
+Ask: **"Post this review to PR #N, or adjust?"**
 
-- **Proceed** → Step 7
-- **If a human is driving this session and asks for edits** → adjust findings per feedback, re-present
-- **If a human declines** → skip to Step 8 (mark done without posting)
+- **If approved** → proceed to Step 7
+- **If user wants edits** → adjust findings per feedback, re-present
+- **If user declines** → skip to Step 8 (mark done without posting)
 
 ### Self-Review Mode
 
 Frame findings as things to fix, not review comments to post:
 
-Default action: **Fix all** → check out the branch, apply fixes, commit, push. Then mark done in Step 8. Alternatives (only if a human driving the session asks for one):
+> "Found N issues in your PR. Want me to fix them directly, or just note them for you?"
+
+Options:
+- **Fix all** → check out the branch, apply fixes, commit, push. Then mark done in Step 8.
 - **Fix MUST_FIX only** → fix critical issues, skip SHOULD_FIX
 - **Just note them** → print the table, skip to Step 8 (no review posted, no fixes)
 - **Post as self-review anyway** → fall through to peer-review Step 7

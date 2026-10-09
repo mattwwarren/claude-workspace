@@ -405,19 +405,11 @@ _SETTLE_IN_WORKER_MSG = (
 )
 
 
-def _worker_tmpdir_is_headless() -> bool:
-    """True iff ``$TMPDIR`` points inside a headless dispatch worker's worktree.
-
-    Every cw executor points a worker's ``TMPDIR`` at its own worktree
-    (``apply_worker_tmpdir``, #2470). That survives a ``cd``, so it catches a
-    worker that changed directory to get past the cwd check below.
-    """
+def _path_is_in_headless_worker(path: Path) -> bool:
+    """True iff the nearest cw context at or above *path* reports ``headless: true``."""
     from cw.cli._hook_io import find_cw_context
 
-    tmpdir = os.environ.get("TMPDIR")
-    if not tmpdir:
-        return False
-    context = find_cw_context(Path(tmpdir))
+    context = find_cw_context(path)
     return context is not None and context.get("headless") is True
 
 
@@ -433,13 +425,15 @@ def _refuse_settle_inside_a_dispatch_worker() -> None:
     outside any repository, a worktree with no context file, a context file
     that cannot be read. Failing to prove a session is not a worker is not a
     reason to hand the settle to a human; the orchestrator session runs it.
-    """
-    from cw.cli._hook_io import find_cw_context
 
-    if _worker_tmpdir_is_headless():
-        raise CwError(_SETTLE_IN_WORKER_MSG)
-    context = find_cw_context(Path.cwd())
-    if context is not None and context.get("headless") is True:
+    ``$TMPDIR`` is checked first: every cw executor points a worker's
+    ``TMPDIR`` at its own worktree (``apply_worker_tmpdir``, #2470), and that
+    survives a ``cd`` that would get a worker past the cwd check.
+    """
+    tmpdir = os.environ.get("TMPDIR")
+    if (tmpdir and _path_is_in_headless_worker(Path(tmpdir))) or (
+        _path_is_in_headless_worker(Path.cwd())
+    ):
         raise CwError(_SETTLE_IN_WORKER_MSG)
 
 

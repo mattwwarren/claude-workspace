@@ -2064,7 +2064,7 @@ class TestRenderSettlePayloads:
     ) -> None:
         comment = self._comment(_make_finding(severity="MUST_FIX"))
         assert "orchestrator session" in comment
-        assert "refuses to run inside a dispatch worker" in comment
+        assert "refuses to run inside a headless dispatch worker" in comment
         assert "--reason" in comment
 
 

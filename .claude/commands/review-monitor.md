@@ -651,7 +651,7 @@ WORK:
         echo "$ARM_JSON"
         case "$arm_status" in
           0) ;;
-          3) echo "auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR open for the orchestrator to merge" ;;
+          3) echo "auto-merge disabled via .claude/project-config.yaml (pr.auto_merge: false) — leaving PR open for manual merge" ;;
           1) echo "auto-merge arm failed after bounded retries (see gh_stderr in the JSON above) — PR left unarmed; report in Step 5" ;;
           *) echo "arm-automerge refused (exit $arm_status): the reason is on stderr above; NOT arming auto-merge (this is not a pr.auto_merge: false opt-out)" ;;
         esac

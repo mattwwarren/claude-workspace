@@ -10,7 +10,7 @@ orchestrator Claude session, not a human at a keyboard (ADR-0020). Run every rec
 command in this guide yourself (`cw doctor --reap`, `cw dev-queue requeue|approve|drain`,
 `cw spawn close --confirmed-dead`, ...), after checking the evidence the docs name. Escalate
 to a human only for a genuine product/scope fork (batched into one question) and for gates
-the human explicitly opted into (`signoff: operator`, a finalize hold).
+the human explicitly opted into (`signoff: operator`, a finalize hold, `scope_hint: large`).
 
 ## Vocabulary
 
@@ -318,7 +318,7 @@ cw `session_id` → `sessions.json` `surface_ref` / `claude_session_id` →
    batch in one motion.
 5. **Watch**: `cw dev-queue wait <id>` / `cw watch` / `cw queue peek` (status + >25-min
    transcript silence). Gates park as BLOCKED_ON_USER — adjudicate them and clear with
-   `cw dev-queue approve` (a Large gate the gate recipes decline, not one they auto-clear).
+   `cw dev-queue approve` (opted-in human gates — `signoff: operator`, a finalize hold, `scope_hint: large` — you notify the human about instead).
 6. **Verify on terminal**: read the worker's OWN sentinel (assistant/`tool_result`, never the
    prompt's illustrative example) — `cw session result <session>` or the `cw-validate-result`
    skill — run the gate, check the PR. Sequential deps: harden N+1 against post-N main and

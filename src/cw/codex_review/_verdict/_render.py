@@ -137,7 +137,7 @@ _SETTLE_INTRO = (
     "provenance, copied verbatim, so nothing needs editing; put your "
     "reasoning in `--reason` (or a per-entry `rationale`), or set `outcome` "
     "to `ACCEPTED` if you uphold the finding. The command refuses to run "
-    "inside a dispatch worker — a settled finding is never re-raised, so the "
+    "inside a headless dispatch worker — a settled finding is never re-raised, so the "
     "pipeline must not be able to settle its own reviewer's findings. Post "
     "`settle.md` as its own comment, unedited: the marker is read only when "
     "it opens the comment body. This works only on GitHub-tracked tickets: a "

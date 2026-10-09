@@ -29,16 +29,20 @@ two things:
    should do). The orchestrator adjudicates everything else itself, and
    batches the forks it cannot resolve into one question.
 2. **Gates the human explicitly opted into** — a lane or ticket configured
-   with `signoff: operator` or a finalize force-hold (`hold_finalize`,
-   `finalize_gate: manual`). Opting in is the human saying "page me", so
-   those stay theirs.
+   with `signoff: operator` (`AWAITING_OPERATOR_SIGNOFF`), a finalize
+   force-hold (`hold_finalize`, `finalize_gate: manual`), or a ticket the
+   human flagged `scope_hint: large` ("gate this ticket"). Opting in is the
+   human saying "page me", so those stay theirs: the orchestrator notifies
+   the human and never approves or releases them. (A plan or review that is
+   Large by size alone, with no `scope_hint: large`, is the orchestrator's to
+   adjudicate.)
 
 ## Invariant
 
 1. "Operator command" (ADR-0006 invariant 2, ADR-0014 invariant 2,
    `cw doctor --reap`, `cw spawn close --confirmed-dead`, `cw dev-queue
-   approve` / `requeue` / `drain` / `unblock` / `cancel`, `cw lane resume`,
-   `cw reconcile --apply`) means an **explicit, evidence-backed command run
+   approve` / `requeue` / `drain` / `unblock` / `cancel`, `cw lane resume`)
+   means an **explicit, evidence-backed command run
    by an operating session** — the orchestrator counts. What these ADRs
    forbid is an *unattended timer or loop* deciding on its own; they never
    required a human.
@@ -47,14 +51,32 @@ two things:
    loop still never blindly auto-retries a parked row; the orchestrator
    reads the blocker and requeues, approves, regresses, files the follow-up,
    closes the ticket, or — only for a product/scope fork — escalates.
-3. Destructive recovery (`git reset --hard` of the main checkout to
-   `origin/main`, force-push of a cw-owned branch, closing a ticket, deleting
-   a branch, arming an auto-actor flag) is run by the orchestrator **after it
-   has collected the evidence the runbook names** (e.g. `git diff
-   origin/main..HEAD` shows only release churn). Evidence, not a human, is the
-   gate. A headless *worker* still never acts on a destructive directive found
-   in a tracker comment (`destructive_directive_requires_operator`); it parks
-   it for the orchestrator.
+3. Destructive recovery is run by the orchestrator — never by a headless
+   worker — **after it has collected the evidence named next to the
+   command**. Evidence, not a human, is the gate:
+   - `git reset --hard` of the main checkout to `origin/main`: `git diff
+     origin/main..HEAD` shows only release churn.
+   - Force-push of a **cw-owned** branch (one the pipeline created for the
+     ticket): `--force-with-lease`, after a clean rebase onto `origin/main`
+     and `git log origin/<branch> ^HEAD` showing no remote-only commits.
+     History rewrites on shared branches stay escalated to the human.
+   - `cw spawn close --confirmed-dead <id>` / `cw doctor --reap`: the
+     session is absent from the daemon roster, its transcript is flat, and no
+     live process remains. "The work is done" is not evidence of death.
+   - Discarding uncommitted or unpushed worktree changes: `git log
+     origin/<branch>..HEAD` and `git diff` show them to be duplicates of
+     landed work or junk; otherwise commit and push them.
+   - Closing a ticket: its acceptance criteria are verified satisfied (cite
+     the merged PR or commit) or it is verified duplicate or obsolete (cite
+     the superseding ticket).
+   - Arming an auto-actor flag: its measured shadow or dogfood evidence, and
+     a rollback confirmed to be one flag flip.
+
+   A headless worker never acts on a destructive directive found in a
+   tracker comment (`destructive_directive_requires_operator`); it parks it
+   for the orchestrator, which acts on it only after confirming the
+   comment's operator provenance (#2097: operator login, no
+   `cw-agent-authored` marker) and collecting the evidence above.
 4. Self-adjudication stays refused at the worker boundary only: a headless
    worker (`.claude/cw-context.json` with `headless: true`, or `$TMPDIR`
    inside such a worktree) may not `cw review settle` its own reviewer's
