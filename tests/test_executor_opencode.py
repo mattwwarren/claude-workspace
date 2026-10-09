@@ -167,7 +167,8 @@ def test_opencode_executor_spawn_runner_path(
         call = fake_runner.calls[0]
         assert call["argv"][0] == "opencode"
         assert "--format" in call["argv"]
-        assert "--pure" in call["argv"]
+        assert "--pure" not in call["argv"]
+        assert "--dir" not in call["argv"]
         assert "--auto" in call["argv"]
         assert "--model" in call["argv"]
         prompt = call["argv"][-1]
