@@ -241,8 +241,11 @@ class TestRealNativeDaemonClientSpawnGitEnv:
 
         env = captured.get("env")
         assert isinstance(env, dict)
-        neutral = Path.home() / ".cw" / "tmp"
+        neutral = Path(env["TMPDIR"])
         assert env["TMPDIR"] == env["TMP"] == env["TEMP"] == str(neutral)
+        assert neutral.parent == Path.home() / ".cw" / "tmp"
+        assert neutral.name.startswith("supervisor-")
+        assert neutral.stat().st_mode & 0o777 == 0o700
         for var in ("TMPDIR", "TMP", "TEMP"):
             assert not Path(env[var]).is_relative_to(worktree)
         assert neutral.is_dir()
