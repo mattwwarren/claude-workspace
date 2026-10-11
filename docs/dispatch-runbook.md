@@ -1658,6 +1658,90 @@ signal deliberately re-firing while the condition persists, exactly like the
 `lane_circuit_paused` page above. The debounce stamp clears itself the moment
 the client ticks again, so the next genuine episode pages immediately.
 
+### Reading lock-hold numbers (#2637)
+
+cw records how long the **sessions** lock (`.sessions.lock`) and the
+**dev-queue** lock (`.dev_queue.lock`) are held, so a slow or wedged holder
+shows up as a number instead of a guess.
+
+**What is measured.** Both locks go through one seam,
+`cw.config._guarded_state_lock`. The *hold* runs from the `flock` acquisition
+returning to just before the unlock. The *wait* (from just before the
+acquisition to it returning) is recorded separately. The *caller* is the
+first frame outside the lock plumbing, as `module:qualname` (for example
+`cw.dispatch.tick:dispatch_tick`; a `mutate_state` call is labelled with the
+function that called `mutate_state`). Each sessions-lock record also carries
+`state_io_s`, the time spent inside `load_state`/`save_state` during that
+hold, and `state_bytes`, the `sessions.json` size when the record was written.
+A hold is recorded when it was **held or waited for at least 0.25 s**.
+
+**Where to read it.**
+
+- `cw doctor`, check `lock-holds` (also in `cw doctor --json`): each lock's
+  longest completed hold in the last hour with caller and age, "at least N
+  recorded", the longest wait when it reached 10 s, the aggregate state
+  load/save share, and the `sessions.json` size at the longest hold.
+- `cw dev-queue status` (text mode only): one footer line,
+  `Longest completed lock hold, last hour: …`. `--json` is unchanged.
+- The raw records: `~/.local/share/cw/lock_holds.<YYYY-MM-DD>.jsonl` (one
+  file per UTC day; today's and yesterday's are kept). Every recorded hold is
+  also logged at DEBUG on logger `cw._lock_hold`, before the cap below
+  applies.
+
+**Thresholds.** Recorded at or above 0.25 s held or waited; doctor warns
+(advisory, `ok` stays true) at or above 10 s held or waited.
+
+**Limits.**
+
+- *Completed holds only.* A hold still in progress, or a process killed
+  mid-hold, leaves no record. For a lock that is held right now, find the
+  holder with `lsof ~/.local/share/cw/.sessions.lock` (or `.dev_queue.lock`).
+  A bounded acquisition that timed out was never held and leaves no record
+  either.
+- *Counts are lower bounds.* Records are capped at 1 MiB per UTC day. Past
+  the cap only records with a hold or wait of at least 10 s are appended, up
+  to a hard ceiling of 2 MiB, and one marker line is written when the cap
+  trips (another when the ceiling does). Doctor then prints "record cap
+  reached; counts are lower bounds", and after the ceiling also "nothing more
+  is recorded today". The DEBUG log is not capped.
+- *The share is survivor-biased once the cap trips.* Past the cap only the
+  10 s+ holds are kept, and past the ceiling nothing is, so the aggregate
+  state load/save share is computed over the holds that survived, not over
+  every hold that day.
+- *Notes can be stranded.* A hold is written only once its thread holds no
+  guarded lock. A dev-queue hold taken while the thread holds a guarded lock
+  that does not go through this seam (the dispatch-plan lock,
+  `dispatch_state_lock`, the focus lock) stays in memory until that thread's
+  next sessions or dev-queue release, and is lost if the process exits first.
+
+**Kill switch.** `CW_LOCK_HOLD_RECORD=0` (read once at process start; default
+on) turns off recording and the state load/save timer in that process.
+Existing sidecar files are still read by doctor and status.
+
+**The pruning decision rule.** Use the *aggregate* state load/save share over
+the window's sessions-lock holds: `state_io_fraction = sum(state_io_s) /
+sum(held_s)` over the recorded sessions holds that carry a `state_io_s`
+figure. It is not the longest hold's own ratio, and it covers recorded holds
+only. `dev_queue` holds have no such figure ("n/a").
+
+- **Aggregate `state_io_fraction >= 0.5`:** load/save of `sessions.json`
+  dominates, so a smaller file shortens holds. Run `cw session prune`
+  manually. Doctor adds the `cw session prune` pointer in exactly this case.
+- **Below 0.5:** pruning will not fix long holds. Look at what the named
+  callers do while they hold the lock: the in-lock work the #1232 family
+  moved out, the ADR-0019 allowlist of in-lock subprocesses, and the
+  bounded-wait history in #2491, #2500 and #2501.
+
+Automatic pruning is deliberately not shipped. #2637 stays open as the
+tracker for that half, and this section is its measurement input.
+
+**Tie-in to the watchdog.** A `cw dev-queue serve` wedged on `.sessions.lock`
+stops emitting `dispatch.tick`. The mainstream watchdog's dead-man's switch
+pages on exactly that (see §11.3), and so does `dispatch_loop_stale` above,
+but the watchdog only runs if the orchestrator ran `cw watchdog install` and
+activated the timer. The lock-hold numbers then tell you who held the lock and
+for how long once it was released.
+
 ### Quota walls: probe before pausing
 
 Worker transcripts ending in "You've hit your session limit" are evidence of
@@ -2170,3 +2254,7 @@ launchd `.plist` under `~/Library/LaunchAgents/` — it does not itself run
 `systemctl`/`launchctl`; the orchestrator runs the printed activation command
 (`systemctl --user daemon-reload && systemctl --user enable --now
 cw-watchdog.timer`, or `launchctl load <plist>`).
+
+A `dispatch.tick` gap is often a `serve` stuck behind `.sessions.lock`. Once
+the lock is released, "Reading lock-hold numbers (#2637)" earlier in this
+runbook shows which caller held it and for how long.

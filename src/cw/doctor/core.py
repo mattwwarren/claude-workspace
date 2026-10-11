@@ -41,6 +41,7 @@ from cw.doctor.linkage import (
     _check_workspace_paths,
     _check_worktree_paths_sessions,
 )
+from cw.doctor.lock_holds import _check_lock_holds
 from cw.doctor.loop_health import (
     _check_loop_health,
     _check_loop_liveness,
@@ -159,7 +160,7 @@ def run_doctor(
     report.checks.extend(_check_loop_health())
     report.checks.extend(_check_loop_liveness())
     report.checks.append(_check_inbox_size())
-    report.checks.append(_check_sessions_size())
+    report.checks.extend([_check_sessions_size(), _check_lock_holds()])
     report.checks.extend(_check_worker_tmp_pressure(_clients))
     report.checks.extend(_check_workspace_paths())
     report.checks.extend(_check_dispatch_repo_head(_clients))
