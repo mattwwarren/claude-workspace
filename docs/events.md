@@ -982,8 +982,9 @@ open enum; consumers MUST tolerate unknown values. Known values:
   stopped starts a second worker on the same worktree.
   **Known limitation:** aider and opencode runs without a handle are not
   auto-harvested. They hold their lane slot until the operator acts, and
-  doctor wedge class 9 lists them as advisory only. Its recipe is
-  `cw spawn close` alone, which has the same close-does-not-stop gap (#2663).
+  doctor wedge class 9 lists them as advisory only. Its recipe for an aider or
+  opencode session names the same two steps: stop the process, then run
+  `cw spawn close <session-id>` (#2663).
   **codex is different.** The detached `cw codex run` job completes its own
   session when it finishes, and a handle is only needed for crash harvest. Do
   nothing while the pid is alive and making progress. If the pid is gone or

@@ -201,7 +201,9 @@ def _reap_wedge_findings(
         leaving it out would still revert the ticket's RUNNING task to
         PENDING). ADR-0014: its eligibility is an elapsed-time cutoff with no
         roster/PID/terminal-result evidence; the recipe names
-        ``cw spawn close <id>`` for the orchestrator.
+        ``cw spawn close <id>`` for the orchestrator. For an aider or
+        opencode session the recipe first says to stop the worker process,
+        since ``cw spawn close`` alone does not stop it (#2663).
     Class-10 (leaked-daemon-worker, #2480): stop every worker
         :func:`_check_wedge_leaked_daemon_worker` found via
         ``cw.reconcile.leaked_workers.sweep_leaked_daemon_workers`` (the same
