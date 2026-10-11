@@ -243,12 +243,33 @@ class TestRealNativeDaemonClientSpawnGitEnv:
         assert isinstance(env, dict)
         neutral = Path(env["TMPDIR"])
         assert env["TMPDIR"] == env["TMP"] == env["TEMP"] == str(neutral)
-        assert neutral.parent == Path.home() / ".cw" / "tmp"
-        assert neutral.name.startswith("supervisor-")
-        assert neutral.stat().st_mode & 0o777 == 0o700
+        assert neutral == Path.home() / ".cw" / "tmp"
         for var in ("TMPDIR", "TMP", "TEMP"):
             assert not Path(env[var]).is_relative_to(worktree)
         assert neutral.is_dir()
+
+    def test_live_roster_without_supervisor_pid_preserves_fallback_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A roster without supervisor identity cannot remove the fallback."""
+        fallback = Path.home() / ".cw" / "tmp"
+        fallback.mkdir(parents=True)
+        marker = fallback / "active-worker-scratch"
+        marker.write_text("keep", encoding="utf-8")
+        roster = tmp_path / "roster.json"
+        roster.write_text(
+            json.dumps({"workers": {"worker": {"cwd": str(tmp_path / "wt")}}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("cw.native_daemon._ROSTER_PATH", roster)
+
+        def fake_run(args: object, **kwargs: object) -> _FakeCompleted:
+            return _FakeCompleted(stdout="backgrounded · a1b2c3d4\n")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        RealNativeDaemonClient().spawn_bg(cwd=tmp_path / "wt", prompt="x")
+
+        assert marker.read_text(encoding="utf-8") == "keep"
 
     def test_worker_scratch_dir_is_still_created_at_spawn(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

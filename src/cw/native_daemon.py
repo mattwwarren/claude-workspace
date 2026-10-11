@@ -20,7 +20,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -265,34 +264,6 @@ def _usage_limit_error(message: str, raw_text: str) -> UsageLimitError:
     return UsageLimitError(message, reset_at=reset_at)
 
 
-def _cleanup_stale_supervisor_tmpdirs(root: Path, current: Path) -> None:
-    """Remove at most eight fallback dirs after the daemon supervisor exits."""
-    try:
-        roster = json.loads(_ROSTER_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        supervisor_alive = False
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return
-    else:
-        pid = roster.get("supervisorPid") if isinstance(roster, dict) else None
-        if not isinstance(pid, int) or pid <= 0:
-            supervisor_alive = False
-        else:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                supervisor_alive = False
-            except OSError:
-                return
-            else:
-                supervisor_alive = True
-    if supervisor_alive:
-        return
-    for path in sorted(root.glob("supervisor-*"))[:8]:
-        if path != current and path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path, ignore_errors=True)
-
-
 def _spawn_clean_env(cwd: Path) -> dict[str, str]:
     """Return os.environ with GIT_* vars stripped and PWD set to cwd.
 
@@ -325,12 +296,10 @@ def _spawn_clean_env(cwd: Path) -> dict[str, str]:
     — it silently reshapes the behavior of other tools (pytest plugins, etc.)
     beyond just prompt suppression.
 
-    Finally points TMPDIR/TMP/TEMP at a private, supervisor-scoped fallback
-    under ``~/.cw/tmp`` (#2470, #2672), so scratch files never land on the
-    host's shared ``/tmp`` tmpfs and separate supervisors do not share a
-    scratch directory. The fallback is mode ``0700`` and stale directories are
-    removed in a bounded pass after the daemon supervisor exits. This env does
-    NOT reach the worker it spawns: ``claude --bg``
+    Finally points TMPDIR/TMP/TEMP at the neutral, worktree-independent
+    ``~/.cw/tmp`` via the shared :func:`cw.worktree.apply_worker_tmpdir`
+    (#2470, #2672), so scratch files never land on the host's shared ``/tmp``
+    tmpfs. This env does NOT reach the worker it spawns: ``claude --bg``
     forwards none of it, and the first spawn's env seeds the supervisor whose
     frozen value every later worker inherits. A worktree-scoped value here
     became every worker's TMPDIR, and removing that worktree pulled it out
@@ -343,7 +312,7 @@ def _spawn_clean_env(cwd: Path) -> dict[str, str]:
     ``get_native_daemon_client`` from this module at module scope, so a
     module-level import here would be circular.
     """
-    from cw.worktree import resolve_worker_tmpdir
+    from cw.worktree import apply_worker_tmpdir, resolve_worker_tmpdir
 
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["PWD"] = str(cwd)
@@ -354,17 +323,7 @@ def _spawn_clean_env(cwd: Path) -> dict[str, str]:
     env["GH_NO_UPDATE_NOTIFIER"] = "1"
     env["GIT_TERMINAL_PROMPT"] = "0"
     resolve_worker_tmpdir(cwd).mkdir(parents=True, exist_ok=True)
-    supervisor_root = resolve_worker_tmpdir(Path.home())
-    supervisor_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    supervisor_root.chmod(0o700)
-    supervisor_tmpdir = supervisor_root / f"supervisor-{os.getpid()}"
-    _cleanup_stale_supervisor_tmpdirs(supervisor_root, supervisor_tmpdir)
-    supervisor_tmpdir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    supervisor_tmpdir.chmod(0o700)
-    value = str(supervisor_tmpdir)
-    env["TMPDIR"] = value
-    env["TMP"] = value
-    env["TEMP"] = value
+    apply_worker_tmpdir(env, Path.home())
     return env
 
 
