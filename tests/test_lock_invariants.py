@@ -52,7 +52,8 @@ _TICKET_RE = re.compile(r"^#\d+$")
 # it never had an entry (the probe never recorded the stubbed in-lock plan
 # read), and its read now runs in a lockless pre-pass. #2547's ADR row is
 # deleted too; it never had an allowlist entry either (the fake daemon stop
-# launches no real subprocess).
+# launches no real subprocess). #2548's ADR row is deleted as stale too: its
+# two allowlist entries left with the lockless pre-pass (CHANGELOG 1.69.0).
 _DOCUMENTED_TICKETS = frozenset(
     {
         "#2545",
