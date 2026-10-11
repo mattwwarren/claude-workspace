@@ -291,13 +291,13 @@ class TestCallerLabel:
 
 
 # ---------------------------------------------------------------------------
-# Dated files and cleanup
+# Dated files
 # ---------------------------------------------------------------------------
 
 
 class TestDatedFiles:
     @freeze_time("2026-10-11 12:00:00")
-    def test_day_file_named_by_utc_date_and_old_files_unlinked(self) -> None:
+    def test_day_file_named_by_utc_date_without_deleting_old_files(self) -> None:
         sink = state_dir()
         for day in ("2026-10-10", "2026-10-09", "2026-10-08"):
             (sink / f"lock_holds.{day}.jsonl").write_text("")
@@ -306,6 +306,8 @@ class TestDatedFiles:
         write_batch(sink, [_record()], datetime.now(UTC))
 
         assert sorted(p.name for p in sink.glob("lock_holds.*.jsonl")) == [
+            "lock_holds.2026-10-08.jsonl",
+            "lock_holds.2026-10-09.jsonl",
             "lock_holds.2026-10-10.jsonl",
             "lock_holds.2026-10-11.jsonl",
             "lock_holds.not-a-date.jsonl",
