@@ -514,13 +514,16 @@ class SpawnUnregisteredError(CwError):
 
 
 class WorkerLaunchedError(CwError):
-    """A spawn step failed AFTER the daemon worker was launched (#2502).
+    """A spawn step failed AFTER the worker was launched (#2502, #2592).
 
     Raised by :func:`cw.spawn.spawn_create_impl` when anything after
     ``daemon.spawn_bg`` returned fails: the cw session-id lookup from the
     transcript, the parent lookup, or the ``sessions.json`` write.
     :class:`SpawnUnregisteredError` is the one exception: it stays a backend
-    failure. The worker is live when this is raised, so it is the opposite of
+    failure. Also raised by the fire-and-forget spawn skeleton
+    (``cw.executor.core``, codex, opencode and aider) when reading the
+    launched process's start time or storing its liveness handle fails
+    (#2592). The worker is live when this is raised, so it is the opposite of
     that error and of :class:`DisclaimerNotAcceptedError`, which both mean no
     usable worker exists.
 
@@ -528,18 +531,23 @@ class WorkerLaunchedError(CwError):
     ``session_id`` wherever a successful spawn would have been recorded), never
     spawn it again, and never count this as a backend failure (no spawn-error
     backoff, no lane circuit-breaker increment). The raise site has already
-    paged ``session.needs_attention``; an unrecorded worker is stopped by the
-    leaked-worker sweep, not by the caller.
+    paged ``session.needs_attention``. An unrecorded daemon worker is stopped
+    by the leaked-worker sweep, not by the caller. A fire-and-forget local
+    process is NOT swept: the operator acts as the page directs.
 
     ``session_id`` is the cw session id the worker was launched under; it may
     be absent from ``sessions.json`` when the state write was what failed.
-    ``surface_ref`` is the daemon short id. The message embeds the original
-    error's text so a caller that only logs ``str(exc)`` still shows the cause.
+    ``surface_ref`` is the daemon short id, or ``None`` for a fire-and-forget
+    local process, whose liveness handle is ``Session.local_liveness``. The
+    message embeds the original error's text so a caller that only logs
+    ``str(exc)`` still shows the cause.
     """
 
     __slots__ = ("session_id", "surface_ref")
 
-    def __init__(self, message: str, *, session_id: str, surface_ref: str) -> None:
+    def __init__(
+        self, message: str, *, session_id: str, surface_ref: str | None
+    ) -> None:
         super().__init__(message)
         self.session_id = session_id
         self.surface_ref = surface_ref

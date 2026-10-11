@@ -102,6 +102,7 @@ from tests.conftest import (
     _make_ticket_task,
     _symlink_loop,
     _vouch_for_roster_worker,
+    fire_and_forget_breadcrumb,
     git_in,
     occupy_worktree,
     post_launch_attention_payload,
@@ -8930,29 +8931,33 @@ def fake_codex_job_runner(
             proc.wait()
 
 
+@pytest.fixture
+def codex_capable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the pre-spawn codex capability gate pass without shelling out.
+
+    CodexExecutor.spawn() (src/cw/executor.py) runs its OWN
+    shutil.which("codex") pre-flight, separate from the capability gate mocked
+    here. The class-level @pytest.mark.binary_on_path marker
+    (tests/conftest.py's _hide_optional_binaries guard, #1753) makes that
+    pre-flight see codex as present without shelling out — CI runners have no
+    real codex binary on PATH, and without this, spawn() takes the synchronous
+    CODEX_NOT_FOUND branch and never launches the review job, and these tests
+    only passed on a dev machine that happens to have codex installed. Every
+    class using this fixture carries that marker too.
+    """
+    from cw.executor import CodexCapabilityDiagnosis
+
+    _reset_codex_capability_cache()
+    monkeypatch.setattr(
+        "cw.dispatch.claim.codex_capability.codex_capability_diagnosis",
+        lambda **_kwargs: CodexCapabilityDiagnosis(None, "codex-cli 1.0.0"),
+    )
+
+
 @pytest.mark.binary_on_path("codex")
+@pytest.mark.usefixtures("codex_capable")
 class TestCodexSpawnDoesNotBlockDispatch:
     """#1727: a codex REVIEW in flight must not stall the shared dispatch tick."""
-
-    @pytest.fixture(autouse=True)
-    def _codex_capable(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Make the pre-spawn codex capability gate pass without shelling out."""
-        from cw.executor import CodexCapabilityDiagnosis
-
-        _reset_codex_capability_cache()
-        monkeypatch.setattr(
-            "cw.dispatch.claim.codex_capability.codex_capability_diagnosis",
-            lambda **_kwargs: CodexCapabilityDiagnosis(None, "codex-cli 1.0.0"),
-        )
-        # CodexExecutor.spawn() (src/cw/executor.py) runs its OWN
-        # shutil.which("codex") pre-flight, separate from the capability
-        # gate mocked above. The class-level @pytest.mark.binary_on_path
-        # marker (tests/conftest.py's _hide_optional_binaries guard, #1753)
-        # makes that pre-flight see codex as present without shelling out —
-        # CI runners have no real codex binary on PATH, and without this,
-        # spawn() takes the synchronous CODEX_NOT_FOUND branch and never
-        # launches the review job, and these tests only passed on a dev
-        # machine that happens to have codex installed.
 
     def test_other_client_spawns_while_codex_review_still_running(
         self,
@@ -17419,6 +17424,64 @@ class TestSpawnFailureClassification:
         assert daemon.stop_calls == []
 
 
+def _arrange_post_launch_spawn(
+    client: ClientConfig | ClientSpec,
+    task: TicketTask,
+    monkeypatch: pytest.MonkeyPatch,
+    capture_events: Callable[..., list[CapturedEvent]],
+) -> tuple[list[_SpawnOutcome], list[CapturedEvent]]:
+    """Seed one queued *task* on a lane at 1 of a 2-error breaker (#2502).
+
+    Returns the spied spawn outcomes and the captured ``cw.spawn`` pages.
+    """
+    write_clients_yaml(client)
+    _seed_lane_override(1)
+    add_ticket(task)
+    pages = capture_events("cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+    return _spy_spawn_outcomes(monkeypatch), pages
+
+
+def _assert_post_launch_row_kept(outcomes: list[_SpawnOutcome]) -> TicketTask:
+    """Assert one launched spawn kept its row RUNNING with no backoff or breaker
+    count (#2502), whatever backend launched it; return the row."""
+    assert len(outcomes) == 1
+    assert outcomes[0].spawned is True
+    assert outcomes[0].spawn_error is False
+    row = load_dev_queue().tasks[0]
+    assert row.status == QueueItemStatus.RUNNING
+    assert row.spawn_error_count == 0
+    assert row.next_eligible_at is None
+    override = _lane_override()
+    assert override.consecutive_spawn_errors == 0
+    assert override.paused is not True
+    return row
+
+
+def _wire_later_tick_reconcile(
+    monkeypatch: pytest.MonkeyPatch, daemon: FakeNativeDaemonClient
+) -> None:
+    """Wire each later tick's reconcile to *daemon*'s roster, ``reap_policy:
+    auto`` (the destructive setting), and an unmerged PR (#2502)."""
+    from cw.models import ReapPolicy
+
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [
+            {"sessionId": sid}
+            for sid in {"decoy000", *daemon.list_live_session_short_ids()}
+        ],
+    )
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda *_a, **_k: (False, True),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.core.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+    )
+
+
 class TestPostLaunchSpawnFailure:
     """#2502: once a worker exists, dispatch keeps the row and never re-spawns.
 
@@ -17435,28 +17498,14 @@ class TestPostLaunchSpawnFailure:
         monkeypatch: pytest.MonkeyPatch,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> tuple[list[_SpawnOutcome], list[CapturedEvent]]:
-        write_clients_yaml(client)
-        _seed_lane_override(1)
-        add_ticket(TicketTask(ticket_id=self._TICKET, client="test-client"))
-        pages = capture_events(
-            "cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION
-        )
-        return _spy_spawn_outcomes(monkeypatch), pages
+        task = TicketTask(ticket_id=self._TICKET, client="test-client")
+        return _arrange_post_launch_spawn(client, task, monkeypatch, capture_events)
 
     @staticmethod
     def _assert_kept(
         outcomes: list[_SpawnOutcome], daemon: FakeNativeDaemonClient
     ) -> TicketTask:
-        assert len(outcomes) == 1
-        assert outcomes[0].spawned is True
-        assert outcomes[0].spawn_error is False
-        row = load_dev_queue().tasks[0]
-        assert row.status == QueueItemStatus.RUNNING
-        assert row.spawn_error_count == 0
-        assert row.next_eligible_at is None
-        override = _lane_override()
-        assert override.consecutive_spawn_errors == 0
-        assert override.paused is not True
+        row = _assert_post_launch_row_kept(outcomes)
         assert len(daemon.spawn_calls) == 1
         assert daemon.stop_calls == []
         return row
@@ -17679,8 +17728,6 @@ class TestPostLaunchSpawnFailure:
         """
         from freezegun import freeze_time
 
-        from cw.models import ReapPolicy
-
         self._arrange(sample_client_config, monkeypatch, capture_events)
         if failure == "state_write":
             request.getfixturevalue("fail_state_write_after_launch")
@@ -17689,24 +17736,7 @@ class TestPostLaunchSpawnFailure:
                 "cw.dispatch.claim.spawn._stamp_spawn_success", _raise_oserror
             )
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr(
-            "cw.reconcile.core._claude_agents_json",
-            lambda: [
-                {"sessionId": sid}
-                for sid in {"decoy000", *daemon.list_live_session_short_ids()}
-            ],
-        )
-        monkeypatch.setattr(
-            "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
-        )
-        monkeypatch.setattr(
-            "cw.reconcile._deps.pr_is_merged_for_ticket",
-            lambda *_a, **_k: (False, True),
-        )
-        monkeypatch.setattr(
-            "cw.reconcile.core.load_orchestrator_config",
-            lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
-        )
+        _wire_later_tick_reconcile(monkeypatch, daemon)
 
         statuses: list[QueueItemStatus] = []
         with freeze_time(datetime.now(UTC)) as frozen:
@@ -17780,6 +17810,124 @@ class TestPostLaunchSpawnFailure:
             )
 
         assert post_launch_attention_payload(pages)["session_id"] == "sess-9"
+
+
+@pytest.mark.binary_on_path("codex")
+@pytest.mark.usefixtures("codex_capable")
+class TestFireAndForgetPostLaunchSpawnFailure:
+    """#2592: a fire-and-forget worker whose liveness handle could not be
+    stored after launch keeps its row bound and is never spawned again.
+
+    Driven through codex, the one fire-and-forget backend dispatch reaches by
+    stage config. The lane starts at 1 of a 2-error breaker, so a failure
+    wrongly counted as a backend error would trip it.
+    """
+
+    _TICKET = "GEN-2592"
+
+    def _arrange(
+        self,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> tuple[list[_SpawnOutcome], list[CapturedEvent]]:
+        spec = ClientSpec.from_config(
+            client, extra=executor_backend_extra("review", "codex")
+        )
+        task = TicketTask(
+            ticket_id=self._TICKET, client="test-client", stage=Stage.REVIEW
+        )
+        return _arrange_post_launch_spawn(spec, task, monkeypatch, capture_events)
+
+    @staticmethod
+    def _assert_kept(
+        outcomes: list[_SpawnOutcome],
+        daemon: FakeNativeDaemonClient,
+        job_runner: FakeFireAndForgetRunner,
+    ) -> TicketTask:
+        row = _assert_post_launch_row_kept(outcomes)
+        assert daemon.spawn_calls == []
+        assert daemon.stop_calls == []
+        assert len(job_runner.calls) == 1
+        assert job_runner.procs[0].poll() is None
+        return row
+
+    def test_handle_store_failure_keeps_codex_row_bound_and_pages_once(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+        fake_codex_job_runner: FakeFireAndForgetRunner,
+    ) -> None:
+        """(e1) Both handle stores fail: bound, ACTIVE, one exact page."""
+        outcomes, pages = self._arrange(
+            sample_client_config, monkeypatch, capture_events
+        )
+
+        def _disk_full(*_args: object, **_kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.executor.core._store_liveness_handle", _disk_full)
+        daemon = FakeNativeDaemonClient()
+
+        result = dispatch_tick(breaker_config, native_daemon=daemon)
+
+        assert result.spawned == 1
+        row = self._assert_kept(outcomes, daemon, fake_codex_job_runner)
+        assert "Do not spawn it again" in (outcomes[0].error or "")
+        (session,) = load_state().sessions
+        assert row.session_id == session.id
+        assert session.status == SessionStatus.ACTIVE
+        assert session.local_liveness is None
+        payload = post_launch_attention_payload(pages)
+        assert payload["session_name"] == f"test-client/auto-dev/{self._TICKET}"
+        assert payload["claude_session_id"] is None
+        assert payload["lane"] == "default"
+        assert payload["breadcrumbs"] == fire_and_forget_breadcrumb(
+            session.id,
+            "codex",
+            fake_codex_job_runner.procs[0].pid,
+            "OSError: disk full",
+        )
+        # R2: the real codex pre-flight wrote this worktree's context, and it
+        # is not headless, so the serve-boot orphan pass skips this session.
+        assert session.worktree_path is not None
+        context_file = session.worktree_path / ".claude" / "cw-context.json"
+        context = json.loads(context_file.read_text())
+        assert context["headless"] is False
+
+    def test_later_ticks_never_respawn_the_handleless_codex_worker(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+        fake_codex_job_runner: FakeFireAndForgetRunner,
+    ) -> None:
+        """(e2) Three ticks an hour apart, reconcile at ``reap_policy: auto``:
+        one codex job, no daemon spawn, the row RUNNING throughout."""
+        from freezegun import freeze_time
+
+        self._arrange(sample_client_config, monkeypatch, capture_events)
+        monkeypatch.setattr("cw.executor.core._store_liveness_handle", _raise_oserror)
+        daemon = FakeNativeDaemonClient()
+        _wire_later_tick_reconcile(monkeypatch, daemon)
+
+        statuses: list[QueueItemStatus] = []
+        with freeze_time(datetime.now(UTC)) as frozen:
+            for _ in range(3):
+                dispatch_tick(breaker_config, native_daemon=daemon)
+                statuses.append(load_dev_queue().tasks[0].status)
+                frozen.tick(timedelta(hours=1))
+
+        assert daemon.spawn_calls == []
+        assert len(fake_codex_job_runner.calls) == 1
+        assert statuses == [QueueItemStatus.RUNNING] * 3
+        (session,) = load_state().sessions
+        assert session.status == SessionStatus.ACTIVE
+        assert fake_codex_job_runner.procs[0].poll() is None
 
 
 class TestStampFailedThenAdopted:

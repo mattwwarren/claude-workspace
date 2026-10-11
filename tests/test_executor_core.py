@@ -15,6 +15,7 @@ import pytest
 
 from cw.auto_dev_result import AutoDevResult
 from cw.config import load_state
+from cw.exceptions import WorkerLaunchedError
 from cw.executor import (
     ClaudeNativeExecutor,
     StageExecutor,
@@ -28,6 +29,7 @@ from cw.executor.core import (
     _persist_runtime_error_diagnostics,
     _PreflightOK,
     _spawn_fire_and_forget,
+    _store_liveness_handle,
 )
 from cw.executor_diagnostics import (
     ExecutorFailure,
@@ -60,15 +62,19 @@ from tests.conftest import (
     _audit_failure_logged,
     _fail_audit_append,
     find_completed_session,
+    fire_and_forget_breadcrumb,
+    post_launch_attention_payload,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from unittest.mock import MagicMock
 
     from cw.executor.core import BlockedCtor, FireAndForgetRunner
     from cw.executor_diagnostics import ExecutorName
-    from cw.models import LocalLivenessBackend
+    from cw.models import LocalLivenessBackend, LocalLivenessHandle
     from cw.native_daemon import FakeNativeDaemonClient
+    from tests.conftest import CapturedEvent
 
 
 def _make_client(tmp_path: Path, *, worker_model: str | None = None) -> ClientConfig:
@@ -710,6 +716,52 @@ def _kill_procs(runner: FakeFireAndForgetRunner) -> None:
             proc.wait()
 
 
+def _assert_worker_owned(
+    sid: str,
+    runner: FakeFireAndForgetRunner,
+    pages: list[CapturedEvent],
+    executor_name: LocalLivenessBackend,
+    cause: str,
+    record_mock: MagicMock,
+) -> dict[str, object]:
+    """Assert a post-launch failure kept the live worker owned (#2592).
+
+    The session stays ACTIVE with no result, no handle, no completion event
+    and no diagnostics bundle; its process still runs; exactly one page
+    carries the backend's exact recovery breadcrumb. Returns that page.
+    """
+    session = next(s for s in load_state().sessions if s.id == sid)
+    assert session.status == SessionStatus.ACTIVE
+    assert session.completed_reason is None
+    assert session.last_result is None
+    assert session.local_liveness is None
+    assert runner.procs[0].poll() is None
+    record_mock.assert_not_called()
+    assert list(diagnostics_bundle_dir(sid).glob("*")) == []
+    payload = post_launch_attention_payload(pages)
+    assert payload["breadcrumbs"] == fire_and_forget_breadcrumb(
+        sid, executor_name, runner.procs[0].pid, cause
+    )
+    return payload
+
+
+def _core_log_records(
+    caplog: pytest.LogCaptureFixture, level: int
+) -> list[logging.LogRecord]:
+    return [
+        r for r in caplog.records if r.name == "cw.executor.core" and r.levelno == level
+    ]
+
+
+def _assert_names_worker(
+    record: logging.LogRecord, executor_name: str, pid: int, sid: str
+) -> None:
+    """Pin the log call's arguments: backend, pid, session id, ticket id."""
+    message = record.getMessage()
+    for part in (executor_name, str(pid), sid, f"ticket={_FAF_TICKET}"):
+        assert part in message, (part, message)
+
+
 def test_fake_fire_and_forget_runner_records_call_and_returns_live_proc(
     tmp_path: Path,
 ) -> None:
@@ -872,15 +924,21 @@ def test_spawn_fire_and_forget_liveness_unavailable(
 def test_spawn_fire_and_forget_unexpected_error_reraises_and_completes(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
+    capture_events: Callable[..., list[CapturedEvent]],
 ) -> None:
-    """launch() raises → re-raised; session COMPLETED/CRASHED; bundle persisted."""
+    """launch() raises → re-raised; session COMPLETED/CRASHED; bundle persisted.
+
+    Pre-launch (#2592): no worker exists, so the raw error propagates (not
+    ``WorkerLaunchedError``) and nothing is paged.
+    """
     worktree = make_git_repo("wt-faf-unexpected")
     runner = FakeFireAndForgetRunner()
+    pages = capture_events("cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION)
 
     with (
         patch.object(runner, "launch", side_effect=OSError("exec boom")),
         patch("cw.executor.core._record_orchestrator_event") as record_mock,
-        pytest.raises(OSError, match="exec boom"),
+        pytest.raises(OSError, match="exec boom") as excinfo,
     ):
         _faf_spawn(
             worktree,
@@ -889,6 +947,8 @@ def test_spawn_fire_and_forget_unexpected_error_reraises_and_completes(
             executor_name="opencode",
         )
 
+    assert not isinstance(excinfo.value, WorkerLaunchedError)
+    assert pages == []
     record_mock.assert_not_called()
     session = find_completed_session(load_state())
     assert session.status == SessionStatus.COMPLETED
@@ -946,15 +1006,18 @@ def test_spawn_fire_and_forget_passes_created_session_to_preflight_fn(
 def test_spawn_fire_and_forget_preflight_fn_raises_reraises_and_completes(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
+    capture_events: Callable[..., list[CapturedEvent]],
 ) -> None:
     """preflight_fn raises → re-raised; session COMPLETED/CRASHED; bundle persisted.
 
     The pre-flight call runs inside the skeleton's ``try:`` (#2388), so a
     pre-flight exception (e.g. CodexExecutor's ``_write_hook_context``) never
-    leaks the already-persisted session ACTIVE.
+    leaks the already-persisted session ACTIVE. Pre-launch (#2592): the raw
+    error propagates, not ``WorkerLaunchedError``, and nothing is paged.
     """
     worktree = make_git_repo("wt-faf-preflight-raises")
     runner = FakeFireAndForgetRunner()
+    pages = capture_events("cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION)
 
     def _boom(_sess: Session) -> AutoDevResult | _PreflightOK:
         msg = "preflight boom"
@@ -962,7 +1025,7 @@ def test_spawn_fire_and_forget_preflight_fn_raises_reraises_and_completes(
 
     with (
         patch("cw.executor.core._record_orchestrator_event") as record_mock,
-        pytest.raises(OSError, match="preflight boom"),
+        pytest.raises(OSError, match="preflight boom") as excinfo,
     ):
         _spawn_fire_and_forget(
             task=TicketTask(ticket_id=_FAF_TICKET, client="test", stage=Stage.IMPL),
@@ -975,6 +1038,8 @@ def test_spawn_fire_and_forget_preflight_fn_raises_reraises_and_completes(
             runner=runner,
         )
 
+    assert not isinstance(excinfo.value, WorkerLaunchedError)
+    assert pages == []
     assert runner.calls == []
     record_mock.assert_not_called()
     session = find_completed_session(load_state())
@@ -992,6 +1057,297 @@ def test_spawn_fire_and_forget_preflight_fn_raises_reraises_and_completes(
     failure = ExecutorFailure.model_validate_json(path.read_text())
     assert failure.executor_name == "codex"
     assert failure.argv_sanitized == []
+
+
+# ---------------------------------------------------------------------------
+# #2592 — a failure after runner.launch keeps the live worker owned
+# ---------------------------------------------------------------------------
+
+# The page emitter's cap on the error text (cw.spawn), restated as a literal
+# so a change to it shows up here.
+_PAGE_ERROR_CAP = 500
+
+
+def _launch_expecting_worker_launched(
+    worktree: Path,
+    runner: FakeFireAndForgetRunner,
+    executor_name: LocalLivenessBackend,
+) -> WorkerLaunchedError:
+    with pytest.raises(WorkerLaunchedError) as excinfo:
+        _faf_spawn(
+            worktree,
+            runner=runner,
+            preflight=_PreflightOK(argv=_FAF_ARGV, env=_FAF_ENV),
+            executor_name=executor_name,
+        )
+    return excinfo.value
+
+
+@pytest.mark.parametrize("executor_name", ["aider", "opencode", "codex"])
+def test_spawn_fire_and_forget_handle_store_failure_keeps_worker_owned(
+    executor_name: LocalLivenessBackend,
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    capture_events: Callable[..., list[CapturedEvent]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Handle store fails on both attempts → worker kept, paged, not respawned.
+
+    The parametrization drives both recovery-text variants: aider and opencode
+    get the stop-then-close text, codex the do-nothing-while-alive text.
+    """
+    worktree = make_git_repo(f"wt-faf-store-fails-{executor_name}")
+    runner = FakeFireAndForgetRunner()
+    pages = capture_events("cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+    caplog.set_level(logging.WARNING, logger="cw.executor.core")
+
+    try:
+        with (
+            patch(
+                "cw.executor.core._store_liveness_handle",
+                side_effect=OSError("disk full"),
+            ) as store_mock,
+            patch("cw.executor.core._record_orchestrator_event") as record_mock,
+        ):
+            err = _launch_expecting_worker_launched(worktree, runner, executor_name)
+
+        (session,) = load_state().sessions
+        assert err.session_id == session.id
+        assert err.surface_ref is None
+        assert isinstance(err.__cause__, OSError)
+        assert "Do not spawn it again" in str(err)
+        assert store_mock.call_count == 2
+        payload = _assert_worker_owned(
+            session.id, runner, pages, executor_name, "OSError: disk full", record_mock
+        )
+        assert payload["session_name"] == f"test/{AUTO_DEV_LABEL_PREFIX}{_FAF_TICKET}"
+        assert payload["client"] == "test"
+        assert payload["ticket_id"] == _FAF_TICKET
+        assert payload["lane"] == "default"
+        assert payload["claude_session_id"] is None
+        pid = runner.procs[0].pid
+        [warning] = _core_log_records(caplog, logging.WARNING)
+        [error] = _core_log_records(caplog, logging.ERROR)
+        _assert_names_worker(warning, executor_name, pid, session.id)
+        _assert_names_worker(error, executor_name, pid, session.id)
+    finally:
+        _kill_procs(runner)
+
+
+def test_spawn_fire_and_forget_handle_store_retry_records_handle(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    capture_events: Callable[..., list[CapturedEvent]],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The store fails once; the immediate retry records the handle, no page."""
+    worktree = make_git_repo("wt-faf-store-retry")
+    runner = FakeFireAndForgetRunner()
+    pages = capture_events("cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+    attempts: list[str] = []
+
+    def _flaky(sid: str, handle: LocalLivenessHandle) -> None:
+        attempts.append(sid)
+        if len(attempts) == 1:
+            msg = "disk full"
+            raise OSError(msg)
+        _store_liveness_handle(sid, handle)
+
+    monkeypatch.setattr("cw.executor.core._store_liveness_handle", _flaky)
+    caplog.set_level(logging.WARNING, logger="cw.executor.core")
+
+    try:
+        sid = _faf_spawn(
+            worktree,
+            runner=runner,
+            preflight=_PreflightOK(argv=_FAF_ARGV, env=_FAF_ENV),
+            executor_name="opencode",
+        )
+
+        assert attempts == [sid, sid]
+        session = next(s for s in load_state().sessions if s.id == sid)
+        assert session.status == SessionStatus.ACTIVE
+        assert session.local_liveness is not None
+        assert session.local_liveness.pid == runner.procs[0].pid
+        assert pages == []
+        [warning] = _core_log_records(caplog, logging.WARNING)
+        _assert_names_worker(warning, "opencode", runner.procs[0].pid, sid)
+        assert _core_log_records(caplog, logging.ERROR) == []
+    finally:
+        _kill_procs(runner)
+
+
+def test_spawn_fire_and_forget_start_time_read_raises_keeps_worker_owned(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    capture_events: Callable[..., list[CapturedEvent]],
+) -> None:
+    """read_process_start_time_ns raising after launch → kept, paged, no store."""
+    worktree = make_git_repo("wt-faf-start-time-raises")
+    runner = FakeFireAndForgetRunner()
+    pages = capture_events("cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+
+    try:
+        with (
+            patch(
+                "cw.executor.core.read_process_start_time_ns",
+                side_effect=OverflowError("inf"),
+            ),
+            patch("cw.executor.core._store_liveness_handle") as store_mock,
+            patch("cw.executor.core._record_orchestrator_event") as record_mock,
+        ):
+            err = _launch_expecting_worker_launched(worktree, runner, "aider")
+
+        store_mock.assert_not_called()
+        assert isinstance(err.__cause__, OverflowError)
+        assert err.surface_ref is None
+        _assert_worker_owned(
+            err.session_id, runner, pages, "aider", "OverflowError: inf", record_mock
+        )
+    finally:
+        _kill_procs(runner)
+
+
+def test_spawn_fire_and_forget_post_launch_page_failure_is_swallowed(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed page write never replaces the ``WorkerLaunchedError``."""
+    worktree = make_git_repo("wt-faf-page-fails")
+    runner = FakeFireAndForgetRunner()
+    caplog.set_level(logging.ERROR, logger="cw.spawn")
+
+    try:
+        with (
+            patch(
+                "cw.executor.core._store_liveness_handle",
+                side_effect=OSError("disk full"),
+            ),
+            patch("cw.spawn.record_event", side_effect=OSError("inbox unwritable")),
+            patch("cw.executor.core._record_orchestrator_event") as record_mock,
+        ):
+            err = _launch_expecting_worker_launched(worktree, runner, "opencode")
+
+        session = next(s for s in load_state().sessions if s.id == err.session_id)
+        assert session.status == SessionStatus.ACTIVE
+        assert runner.procs[0].poll() is None
+        record_mock.assert_not_called()
+        assert any(
+            "spawn_post_launch_failed" in r.getMessage()
+            and r.name == "cw.spawn"
+            and r.levelno == logging.ERROR
+            for r in caplog.records
+        )
+    finally:
+        _kill_procs(runner)
+
+
+def test_spawn_fire_and_forget_liveness_unavailable_event_failure_crash_completes(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    capture_events: Callable[..., list[CapturedEvent]],
+) -> None:
+    """Start time unreadable, then the completion event fails: the process was
+    already killed, so the raw error propagates and nothing is paged."""
+    worktree = make_git_repo("wt-faf-unavailable-event-fails")
+    runner = FakeFireAndForgetRunner()
+    pages = capture_events("cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+
+    try:
+        with (
+            patch("cw.executor.core.read_process_start_time_ns", return_value=None),
+            patch(
+                "cw.executor.core._record_orchestrator_event",
+                side_effect=OSError("events unwritable"),
+            ),
+            pytest.raises(OSError, match="events unwritable") as excinfo,
+        ):
+            _faf_spawn(
+                worktree,
+                runner=runner,
+                preflight=_PreflightOK(argv=_FAF_ARGV, env=_FAF_ENV),
+                executor_name="codex",
+            )
+
+        assert not isinstance(excinfo.value, WorkerLaunchedError)
+        assert runner.procs[0].poll() is not None
+        session = find_completed_session(load_state())
+        assert session.completed_reason == CompletionReason.NORMAL
+        result = AutoDevResult.model_validate(session.last_result)
+        assert result.blocker is not None
+        assert result.blocker.reason == LIVENESS_UNAVAILABLE
+        assert pages == []
+    finally:
+        _kill_procs(runner)
+
+
+def test_spawn_fire_and_forget_preflight_blocked_event_failure_reraises(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    capture_events: Callable[..., list[CapturedEvent]],
+) -> None:
+    """Pre-flight blocked, then the completion event fails: no process exists,
+    so the raw error propagates and nothing is paged."""
+    worktree = make_git_repo("wt-faf-blocked-event-fails")
+    runner = FakeFireAndForgetRunner()
+    pages = capture_events("cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+    blocked = make_blocked(
+        ticket_id=_FAF_TICKET, worktree=worktree, reason="preflight_nope"
+    )
+
+    with (
+        patch(
+            "cw.executor.core._record_orchestrator_event",
+            side_effect=OSError("events unwritable"),
+        ),
+        pytest.raises(OSError, match="events unwritable") as excinfo,
+    ):
+        _faf_spawn(worktree, runner=runner, preflight=blocked)
+
+    assert not isinstance(excinfo.value, WorkerLaunchedError)
+    assert runner.calls == []
+    session = find_completed_session(load_state())
+    assert session.completed_reason == CompletionReason.NORMAL
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.blocker is not None
+    assert result.blocker.reason == "preflight_nope"
+    assert pages == []
+
+
+@pytest.mark.parametrize("executor_name", ["aider", "codex"])
+def test_spawn_fire_and_forget_recovery_text_survives_the_error_cap(
+    executor_name: LocalLivenessBackend,
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    capture_events: Callable[..., list[CapturedEvent]],
+) -> None:
+    """The recovery text comes first, so the page's cap cuts only the cause."""
+    worktree = make_git_repo(f"wt-faf-cap-{executor_name}")
+    runner = FakeFireAndForgetRunner()
+    pages = capture_events("cw.spawn", OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+
+    try:
+        with (
+            patch(
+                "cw.executor.core._store_liveness_handle",
+                side_effect=OSError("x" * 600),
+            ),
+            patch("cw.executor.core._record_orchestrator_event"),
+        ):
+            err = _launch_expecting_worker_launched(worktree, runner, executor_name)
+
+        sid = err.session_id
+        breadcrumbs = str(post_launch_attention_payload(pages)["breadcrumbs"])
+        assert breadcrumbs.startswith(
+            fire_and_forget_breadcrumb(sid, executor_name, runner.procs[0].pid, "")
+        )
+        assert breadcrumbs.endswith("…")
+        prefix = f"worker live (session {sid}): "
+        assert len(breadcrumbs) == len(prefix) + _PAGE_ERROR_CAP + 1
+    finally:
+        _kill_procs(runner)
 
 
 @pytest.mark.parametrize("executor_name", ["aider", "opencode"])

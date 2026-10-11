@@ -92,6 +92,7 @@ from tests._codex_recovery_helpers import (
     _task_without_base_ref,
     _use_auto_reap_policy,
 )
+from tests._host_probe_guard import scoped_process_iter
 from tests._reconcile_helpers import _mk_headless_daemon_session
 from tests.conftest import commit_tracked_file, git_in
 
@@ -236,6 +237,61 @@ def test_detached_codex_job_with_liveness_handle_is_not_an_orphan(
     assert task.status is QueueItemStatus.RUNNING
     assert task.session_id == session.id
     assert _attention_events("test-codex-boot-handle") == []
+
+
+@pytest.mark.parametrize(
+    ("headless", "reaped"),
+    [(True, 1), (False, 0)],
+    ids=["headless-context", "preflight-written-context"],
+)
+def test_handleless_fire_and_forget_codex_session_never_requeued_while_a_writer_lives(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    headless: bool,
+    reaped: int,
+) -> None:
+    """#2592 R2: a kept, handle-less fire-and-forget codex session is never
+    requeued while its writer lives, so no duplicate review starts.
+
+    A post-launch handle-store failure leaves the codex session ACTIVE, with
+    no surface and no liveness handle, bound to its RUNNING row. Under a
+    headless worktree context the boot pass parks the row for the operator and
+    leaves the session ACTIVE. Under the context ``_codex_preflight`` actually
+    writes (``headless: false``) the boot pass does not own the session at
+    all: it stays ACTIVE and bound. Production codex sessions take the second
+    shape today, so this pins the invariant, not a recovery path.
+    """
+    repo, _ = _seed_clean_codex_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    state = load_state()
+    state.sessions[0].surface_ref = None
+    assert state.sessions[0].local_liveness is None
+    save_state(state)
+    if not headless:
+        (repo / ".claude" / "cw-context.json").write_text('{"headless": false}')
+    _live_writer(monkeypatch, 4242)
+    _use_auto_reap_policy(monkeypatch)
+    sent = _forbid_os_kill(monkeypatch)
+
+    assert reap_orphaned_codex_sessions_at_boot() == reaped
+
+    assert sent == []
+    consumer = f"test-codex-boot-faf-{headless}"
+    session = _assert_session_left_active()
+    assert _completed_events(f"{consumer}-completed") == []
+    if headless:
+        _assert_parked(consumer, _PARK_REASON_CODEX_PROCESS_RUNNING, linked=True)
+        assert session.reap_proposed_at is not None
+    else:
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.RUNNING
+        assert task.session_id == session.id
+        assert _attention_events(consumer) == []
+        assert _requeued_events(f"{consumer}-requeued") == []
+        assert _reap_proposed_events(f"{consumer}-reap") == []
+        assert session.reap_proposed_at is None
 
 
 def test_clean_orphan_with_fix_loop_off_is_requeued(
@@ -1100,6 +1156,7 @@ class TestCodexProcessesIn:
             worktree.rmdir()
             name = psutil.Process(proc.pid).name()
             monkeypatch.setattr(codex_boot, "_CODEX_PROCESS_NAME", name)
+            monkeypatch.setattr(psutil, "process_iter", scoped_process_iter({proc.pid}))
 
             found = _codex_processes_in(worktree)
 
@@ -1135,10 +1192,23 @@ class TestCodexProcessesIn:
 
         assert _codex_processes_in(tmp_path) is None
 
-    def test_real_process_table_has_no_codex_in_a_fresh_dir(
-        self, tmp_path: Path
+    def test_real_psutil_reader_finds_no_codex_in_a_fresh_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The real psutil reader concludes ``[]`` for a directory nobody is in.
+
+        The reader's results are scoped to this test's own pid (#2664): the
+        host table may hold a zombie or foreign-owned ``codex`` whose
+        unreadable cwd makes a whole-table scan inconclusive (``None``), which
+        is correct production behaviour but a host-dependent test. That makes
+        this deliberately weaker than the whole-table scan it replaces -- it no
+        longer proves a full real scan concludes on a CI runner; that
+        host-dependence is exactly what was removed.
+        """
+        monkeypatch.setattr(psutil, "process_iter", scoped_process_iter({os.getpid()}))
+
         assert _codex_processes_in(tmp_path) == []
+        assert _codex_processes_in(tmp_path / "x") == []
 
 
 def _auto(*, auto: bool) -> OrchestratorConfig:

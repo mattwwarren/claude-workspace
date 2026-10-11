@@ -47,6 +47,7 @@ from tests._opencode_helpers import (
     text_event,
     write_opencode_log,
 )
+from tests.conftest import _write_bin_stub
 
 if TYPE_CHECKING:
     from tests._opencode_helpers import LogLine
@@ -136,6 +137,27 @@ def test_build_argv_default_probes(tmp_path: Path) -> None:
     """v1_flags=None defers to the probe."""
     with patch("cw.opencode_runner._supports_v1_flags", return_value=False):
         assert "--pure" not in build_argv(None, tmp_path, "p")
+
+
+def test_build_argv_default_probe_ignores_a_host_opencode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unpatched probe cannot see an opencode 1.x installed on the host (#2664).
+
+    A stub that advertises ``--pure``/``--dir`` sits first on ``PATH``, so
+    without the ``Popen``-layer launch guard the real probe would answer
+    ``True`` here -- exactly what a developer machine with ``/usr/bin/opencode``
+    1.x did to ``test_opencode_executor_spawn_runner_path``. CI has no such
+    binary, so the probe fails and the flag-free argv is the one under test.
+    """
+    bin_dir = _write_bin_stub(tmp_path, "opencode", '#!/bin/sh\necho "--pure --dir"\n')
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    _supports_v1_flags.cache_clear()
+
+    assert "--pure" not in build_argv(None, tmp_path, "p")
+    assert _supports_v1_flags() is False
+
+    _supports_v1_flags.cache_clear()
 
 
 # ---------------------------------------------------------------------------

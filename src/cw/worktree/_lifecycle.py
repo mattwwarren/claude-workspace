@@ -275,12 +275,12 @@ def create_worktree(
     if wt_path.exists():
         # Idempotent reuse is only safe when the existing worktree is still on
         # the branch we were asked for. A stale worktree left by a prior failed
-        # dispatch (crash before reconcile's TIMED_OUT cleanup, see #404) can
+        # dispatch (a crash that left the tree behind, see #404) can
         # carry a different branch — and thus a prior run's commits — into the
         # new session. Silently reusing it feeds the worker the wrong context
         # and has caused cross-ticket isolation breaches (#402). Refuse on
-        # mismatch: the dispatch loop reverts the task to PENDING and reconcile
-        # removes the stale tree so the retry starts clean.
+        # mismatch: the dispatch loop reverts the task to PENDING and the claim
+        # path removes an unoccupied, clean stale tree so the retry starts clean.
         current_branch = _checked_out_branch(wt_path)
         if current_branch != branch:
             found = current_branch or "(none / detached HEAD / not a worktree)"

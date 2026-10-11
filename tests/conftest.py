@@ -46,6 +46,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.opencode_runner import _supports_v1_flags
 from cw.orchestrate import TickSummary
 from cw.review_findings import (
     CapturedDiff,
@@ -57,7 +58,7 @@ from cw.review_findings import (
     Severity,
 )
 from cw.spawn import SPAWN_POST_LAUNCH_FAILED_REASON
-from tests import _git_ceiling
+from tests import _git_ceiling, _host_probe_guard
 from tests import _lock_invariants as lock_invariants
 
 if TYPE_CHECKING:
@@ -92,6 +93,21 @@ _OPTIONAL_BINARY_DENYLIST: frozenset[str] = frozenset({"codex", "opencode"})
 def _iter_src_files() -> list[Path]:
     """Return every ``*.py`` file under ``src/``, sorted for determinism."""
     return sorted(_SRC_ROOT.rglob("*.py"))
+
+
+def _files_under(prefix: str) -> list[Path]:
+    """Return the ``src/`` ``*.py`` files whose posix relpath starts with *prefix*.
+
+    *prefix* is relative to ``src/`` and MUST end in ``/`` (for example
+    ``"cw/reconcile/"``): without the slash ``"cw/reconcile"`` would also match
+    ``cw/reconcile_x.py``. Pure discovery, no scan semantics (#2630), in line
+    with the pure, generic path/discovery helpers hoisted above.
+    """
+    return [
+        path
+        for path in _iter_src_files()
+        if path.relative_to(_SRC_ROOT).as_posix().startswith(prefix)
+    ]
 
 
 def _load_workflow(path: Path) -> dict[Any, Any]:
@@ -2071,6 +2087,13 @@ def _hide_optional_binaries(
     depend on the *real* binary being installed, reintroducing the original
     bug for any runner that opts in without one.
 
+    ``shutil.which`` masking never reaches a probe that hands the bare name
+    straight to ``subprocess`` (``opencode run --help`` in
+    ``cw.opencode_runner._supports_v1_flags``), so the same fixture also
+    refuses such a launch at the ``Popen`` layer with ``FileNotFoundError``,
+    as a CI host without the binary does (#2664). A forced-present name is
+    launched for real. Logic and limits: ``tests/_host_probe_guard.py``.
+
     ``@pytest.mark.integration``-marked tests are exempt entirely: those
     tests intentionally shell out to real external tools (``claude --bg``,
     ``codex``, ``opencode``), so this fixture no-ops for them.
@@ -2089,6 +2112,49 @@ def _hide_optional_binaries(
         return real_which(cmd, mode, path)
 
     monkeypatch.setattr("shutil.which", _guarded_which)
+    _host_probe_guard.install_binary_launch_guard(
+        monkeypatch, _OPTIONAL_BINARY_DENYLIST, forced_present
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_process_table(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default ``psutil.process_iter`` to an empty host process table (#2664).
+
+    ``cw.reconcile.codex_boot._codex_processes_in`` scans the whole table and
+    fails closed -- ``None``, "inconclusive", the boot pass parks -- whenever a
+    process is unreadable (``AccessDenied`` reports ``None``): one foreign or
+    zombie ``codex`` makes every unpatched scan on the host inconclusive, so
+    the result depended on the machine, not the test.
+
+    Sibling of ``_mock_codex_capability_probe``. Patched at ``psutil`` rather
+    than at ``_codex_processes_in`` so tests that fake the table with their
+    own ``psutil.process_iter`` patch keep working (a later patch wins). A
+    test that needs the real reader scopes its results to pids it owns with
+    ``tests/_host_probe_guard.py::scoped_process_iter``.
+
+    ``@pytest.mark.integration``-marked tests are exempt, as for
+    ``_hide_optional_binaries``.
+    """
+    if request.node.get_closest_marker("integration") is not None:
+        return
+    monkeypatch.setattr("psutil.process_iter", _host_probe_guard.empty_process_table)
+
+
+@pytest.fixture(autouse=True)
+def _reset_opencode_flag_probe() -> Iterator[None]:
+    """Clear the process-sticky ``opencode run --help`` probe cache (#2664).
+
+    ``_supports_v1_flags`` is an ``lru_cache(maxsize=1)``: whichever test
+    reaches it first fixes the answer for the rest of the process. Clearing
+    around every test keeps a stale ``True`` -- seeded by an ``integration``
+    test that ran the real binary, or by a probe test -- from leaking.
+    """
+    _supports_v1_flags.cache_clear()
+    yield
+    _supports_v1_flags.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -2357,6 +2423,36 @@ def post_launch_attention_payload(events: list[CapturedEvent]) -> dict[str, Any]
     assert payload["paused_status"] == SPAWN_POST_LAUNCH_FAILED_REASON
     assert payload["crashed"] is False
     return payload
+
+
+def fire_and_forget_breadcrumb(sid: str, backend: str, pid: int, cause: str) -> str:
+    """Return the exact breadcrumb of a fire-and-forget post-launch page (#2592).
+
+    An independent literal of the operator-facing contract: it imports nothing
+    from ``src``, so a regression there cannot move the expected text with it.
+    *cause* is the full cause text (``"OSError: disk full"``); nothing is
+    truncated, so callers pass short causes.
+    """
+    if backend in ("aider", "opencode"):
+        return (
+            f"worker live (session {sid}): {backend} pid {pid} is still running"
+            " and its liveness handle was not recorded. Recovery: stop that"
+            f" process, then run `cw spawn close {sid}`. `cw spawn close` alone"
+            " does not stop the process, and requeueing before it is stopped"
+            f" starts a second worker on the same worktree. Cause: {cause}"
+        )
+    if backend == "codex":
+        return (
+            f"worker live (session {sid}): codex pid {pid} is still running and"
+            " its liveness handle was not recorded. Recovery: a codex job"
+            " completes its own session when it finishes, so do nothing while"
+            " that pid is alive and making progress. If the pid is gone or"
+            f" hung, stop it, then run `cw spawn close {sid}`. Stopping a"
+            " healthy job kills an in-flight review, and `cw spawn close`"
+            f" cancels the row. Cause: {cause}"
+        )
+    msg = f"no fire-and-forget breadcrumb for backend {backend!r}"
+    raise ValueError(msg)
 
 
 @pytest.fixture

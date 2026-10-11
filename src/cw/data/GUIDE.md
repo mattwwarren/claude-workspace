@@ -153,8 +153,8 @@ a sentinel carries one — and they never share values, so always say which.
 - **Orphan** — a session that finished before reconcile read its sentinel,
   or a codex review whose driver crashed (`cw codex migrate-legacy`).
 - **Reap** — the destructive act on a phantom or stalled session: revert the
-  row to `pending`, stop the daemon surface, remove the worktree. Under the
-  default `reap_policy: signal_only` reconcile only *proposes*
+  row to `pending` and stop the daemon surface (no reconcile act removes the
+  worktree). Under the default `reap_policy: signal_only` reconcile only *proposes*
   (`session.reap_proposed`) and parks the row; `reap_policy: auto` on the lane
   or an explicit `cw doctor --reap` performs it.
 - **Wedge** — `cw doctor`'s word for a lane that cannot make progress

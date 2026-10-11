@@ -126,8 +126,8 @@ def _revert_running_tasks_for_sessions(
     # Why: dirtiness is captured before sessions_lock, in reconcile()'s
     # lockless pre-pass (#2548), at most DIRTY_CHECK_MAX_AGE_SECONDS before this
     # write; the orphaned claude --bg process may still be alive and could write
-    # to the worktree in between (TOCTOU). A stale capture only defers. The
-    # accepted tradeoff is block > clobber — narrow the window, accept the race.
+    # to the worktree in between (TOCTOU). An in-bound clean hit can route the
+    # row to PENDING; no act here removes the worktree. Tradeoff: block > clobber.
     """
     if not session_ids:
         return []

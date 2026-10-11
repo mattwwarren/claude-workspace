@@ -410,7 +410,8 @@ def _apply_sentinel_to_task(
                 # ever existed" -- both silently returned routed=True before
                 # this fix, with no signal a race had occurred at all. WARNING
                 # (not INFO) to match this module's convention for anomalous-
-                # but-non-fatal conditions (see worktree_cleanup_skip_dirty).
+                # but-non-fatal conditions (see dirty_check_unavailable in
+                # cw.reconcile.dirty_checks).
                 _log.warning(
                     "sentinel_race_miss_detected: ticket=%s session=%s",
                     ticket_id,

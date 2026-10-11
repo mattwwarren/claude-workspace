@@ -25,14 +25,31 @@ codex clean probes (#2563) and the plan prefetch (#2545) are:
 A captured ``None`` (clean) is a hit. The live helper is unchanged: an error
 escaping to its own fail-safe is captured as clean, and a git failure inside
 ``unsaved_work_reason`` comes back as a reason string, so it is captured as
-dirty -- both exactly as the in-lock check behaved.
+dirty -- both exactly as the in-lock check behaved. The helper's fail-open
+direction (an empty path, an unresolvable branch or any exception reads as
+clean) is pinned by three unit tests (``TestWorktreeDirtyReasonByPath``);
+whether it should fail closed is tracked in #2662.
 
 TOCTOU: the in-lock check used to run milliseconds before the act; a capture
 is now typically seconds old, at most ``DIRTY_CHECK_MAX_AGE_SECONDS``. An
-orphaned process could dirty the worktree after capture. The freshness bound
-limits that window, a phantom has already been off the roster for at least
-the 30 s spawn grace, and a stale capture only defers. The accepted tradeoff
-stays block > clobber.
+orphaned process could dirty the worktree after capture, and a capture inside
+the bound is consumed as a hit (one at least that old is stale and defers), so
+an in-bound clean capture is not deferred. The
+freshness bound limits that window and a phantom has already been off the
+roster for at least the 30 s spawn grace. What the window can cost is
+bounded: no reconcile act removes a worktree; for the phantom sweep and
+backstops the capture only selects the queue disposition (#1747, ADR-0014;
+pinned by ``tests/test_reconcile_worktree_removal_guard.py``). Post-lock
+surface stops do not read or depend on the dirt value (a merged phantom's
+candidacy still requires a usable capture; a miss defers it). The residual is
+an in-bound clean capture routing a row to PENDING, not BLOCKED_ON_USER (on
+a ``reap_policy: auto`` lane for the phantom sweep, on any lane for the
+backstops): the next claim's ``_reuse_occupancy`` refuses to move HEAD under
+unsaved work, but does not block re-dispatch into a dirty tree under
+``allow_dirty_reuse=True``. ("Destructive" here means on-disk work loss;
+the RUNNING -> PENDING revert still consumes a capture up to
+``DIRTY_CHECK_MAX_AGE_SECONDS`` old.) The accepted tradeoff stays
+block > clobber.
 
 A leaf module: it imports ``cw.reconcile._shared`` and
 ``cw.reconcile.probe_store`` and nothing from ``tasks``, ``phantom`` or

@@ -1135,7 +1135,7 @@ review_recipe_repeat_fire_window_minutes: 20
 #   Re-detection on subsequent ticks is an idempotent no-op.
 #
 # auto: pre-#554 self-healing — stop the daemon surface, revert the queue
-#   task to PENDING for retry, and remove the worktree.
+#   task to PENDING for retry. No reconcile act removes the worktree (ADR-0014).
 #
 # MIGRATION: existing deployments wanting self-healing must set:
 #   reap_policy: auto
