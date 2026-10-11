@@ -1622,6 +1622,13 @@ class TestCodexFixLoopGrowthGuard:
     def test_guard_switch_defaults_on(self) -> None:
         assert OrchestratorConfig().codex_fix_loop_growth_guard_enabled is True
 
+    def test_cumulative_budget_default_is_forty_and_zero_is_rejected(self) -> None:
+        """#2648: the loop-wide budget mirrors the per-cycle one."""
+        config = OrchestratorConfig()
+        assert config.codex_fix_loop_cumulative_growth_budget_lines == 40
+        with pytest.raises(ValidationError):
+            OrchestratorConfig(codex_fix_loop_cumulative_growth_budget_lines=0)
+
 
 class TestCodexClaimSuppressionGate:
     """Lane-scoped codex claim-match suppression tier (#2210, ADR-0016)."""

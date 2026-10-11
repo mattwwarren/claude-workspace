@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from typing import TYPE_CHECKING
 
 import pytest
@@ -11,6 +12,7 @@ from cw.codex_fix_loop.fence import LEFT_STAGED_HINT
 from cw.codex_fix_loop.growth import (
     DEFAULT_GROWTH_BUDGET_LINES,
     AdditionKind,
+    LoopGrowthBudget,
     check_growth_budget,
     detect_additions,
     effective_budget,
@@ -170,7 +172,30 @@ def _repo(make_git_repo: Callable[..., Path]) -> Path:
     return repo
 
 
-def _check(repo: Path, *, open_findings: int = 1) -> FenceBreach | None:
+def _a_py(cycles: int, lines: int = 12) -> str:
+    """``src/a.py`` after *cycles* fix cycles that each append *lines* lines."""
+    return "a = 1\n" + "".join(
+        f"c{c}_{i} = {i}\n" for c in range(1, cycles + 1) for i in range(lines)
+    )
+
+
+def _repo_with_cycles(
+    make_git_repo: Callable[..., Path], committed_cycles: int, lines: int = 12
+) -> tuple[Path, str]:
+    """A ``_repo`` plus *committed_cycles* committed fix cycles; returns the repo
+    and the sha before cycle 1 (the loop start).
+    """
+    repo = _repo(make_git_repo)
+    start = git_in(repo, "rev-parse", "HEAD")
+    for cycle in range(1, committed_cycles + 1):
+        _write(repo / "src" / "a.py", _a_py(cycle, lines))
+        git_in(repo, "commit", "-am", f"fix cycle {cycle}")
+    return repo, start
+
+
+def _check(
+    repo: Path, *, open_findings: int = 1, loop_budget: LoopGrowthBudget | None = None
+) -> FenceBreach | None:
     baseline = _head_baseline(repo)
     cycle_touched_paths(repo, baseline)  # stages the cycle, as the loop does
     return check_growth_budget(
@@ -179,6 +204,7 @@ def _check(repo: Path, *, open_findings: int = 1) -> FenceBreach | None:
         open_findings=[_make_finding()] * open_findings,
         budget_lines=DEFAULT_GROWTH_BUDGET_LINES,
         cycle=2,
+        loop_budget=loop_budget,
     )
 
 
@@ -232,6 +258,104 @@ class TestCheckGrowthBudget:
         (repo / "blob.bin").write_bytes(bytes(range(256)) * 40)
 
         assert _check(repo) is None
+
+
+def _loop_budget(start: str, n_original: int = 1) -> LoopGrowthBudget:
+    return LoopGrowthBudget(
+        start_sha=start,
+        per_finding_lines=DEFAULT_GROWTH_BUDGET_LINES,
+        allowed_lines=effective_budget(DEFAULT_GROWTH_BUDGET_LINES, n_original),
+    )
+
+
+class TestCumulativeBudget:
+    """#2648: the loop-wide net-line budget, measured from the loop start."""
+
+    def test_fourth_small_cycle_breaches_the_cumulative_budget(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo, start = _repo_with_cycles(make_git_repo, 3)
+        _write(repo / "src" / "a.py", _a_py(4))
+
+        breach = _check(repo, loop_budget=_loop_budget(start))
+
+        assert breach is not None
+        assert breach.reason == CODEX_FIX_GROWTH_BUDGET
+        assert (
+            "cumulative net non-test source lines +48 since the fix loop began"
+            in breach.details
+        )
+        assert f"(pre-loop head {start[:12]})" in breach.details
+        assert "exceeds the loop budget of 40 (40 per originally-found finding)" in (
+            breach.details
+        )
+        assert LEFT_STAGED_HINT in breach.recovery_hint
+        assert "codex_fix_loop_cumulative_growth_budget_lines" in breach.recovery_hint
+        assert "codex_fix_loop_growth_guard_enabled" in breach.recovery_hint
+
+    def test_third_small_cycle_within_budget_passes(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo, start = _repo_with_cycles(make_git_repo, 2)
+        _write(repo / "src" / "a.py", _a_py(3))
+
+        assert _check(repo, loop_budget=_loop_budget(start)) is None
+
+    def test_no_loop_budget_means_no_cumulative_check(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo, _start = _repo_with_cycles(make_git_repo, 3)
+        _write(repo / "src" / "a.py", _a_py(4))
+
+        assert _check(repo) is None
+
+    def test_shrinking_cycle_is_never_parked_for_the_loop_total(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo, start = _repo_with_cycles(make_git_repo, 4)
+        # Loop total +46 (> 40), but this cycle itself removes two lines.
+        _write(repo / "src" / "a.py", "".join(_a_py(4).splitlines(keepends=True)[:-2]))
+
+        assert _check(repo, loop_budget=_loop_budget(start)) is None
+
+    def test_test_and_doc_lines_are_excluded(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo, start = _repo_with_cycles(make_git_repo, 2)
+        _write(repo / "src" / "a.py", _a_py(3))
+        _write(repo / "tests" / "test_a.py", "".join(f"t{i} = 1\n" for i in range(50)))
+        _write(repo / "docs" / "a.md", "".join(f"line {i}\n" for i in range(50)))
+
+        assert _check(repo, loop_budget=_loop_budget(start)) is None
+
+    def test_budget_scales_with_original_finding_count(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo, start = _repo_with_cycles(make_git_repo, 3)
+        _write(repo / "src" / "a.py", _a_py(4))
+
+        assert _check(repo, loop_budget=_loop_budget(start, n_original=2)) is None
+
+    def test_per_cycle_only_breach_never_mentions_cumulative(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        _write(repo / "src" / "a.py", "".join(f"x{i} = {i}\n" for i in range(50)))
+
+        breach = _check(repo)
+
+        assert breach is not None
+        assert "cumulative" not in breach.details
+        assert "cumulative" not in breach.recovery_hint
+
+    def test_unreachable_start_sha_propagates(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo, _start = _repo_with_cycles(make_git_repo, 1)
+        _write(repo / "src" / "a.py", _a_py(2))
+
+        with pytest.raises(subprocess.CalledProcessError):
+            _check(repo, loop_budget=_loop_budget("0" * 40))
 
 
 class TestPostedGrowthText:
