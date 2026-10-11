@@ -475,12 +475,7 @@ def test_environ_contents_never_leak_into_detail_or_logs(
     cwd = _make_worker_dir(tmp_path, "wt-a")
     proc_root = tmp_path / "proc"
     sibling = str(tmp_path / "wt-b" / ".cw" / "tmp")
-    raw = (
-        b"SECRET_TOKEN=hunter2\0"
-        + b"BLOB=\xff\xfe\x80garbage\0"
-        + f"TMPDIR={sibling}".encode()
-        + b"\0"
-    )
+    raw = b"SECRET_TOKEN=hunter2\0BLOB=\xff\xfe\x80garbage\0" + _environ(TMPDIR=sibling)
     _seed_proc_worker(daemon, proc_root, cwd, 101, raw)
 
     with caplog.at_level(logging.DEBUG):
