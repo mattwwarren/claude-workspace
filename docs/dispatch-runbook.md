@@ -640,7 +640,9 @@ common wedge conditions:
   For an aider or opencode session the recovery is two steps (#2663): stop the
   process named in the `spawn_post_launch_failed` breadcrumb
   (`<backend> pid <pid>`), then run `cw spawn close <id>`; `cw spawn close`
-  alone does not stop it. Other backends keep the `cw spawn close <id>`
+  alone does not stop it. If no page names a pid (the page is best-effort),
+  find the worker process in the session's worktree; if none is running, skip
+  the stop step. Other backends keep the `cw spawn close <id>`
   command alone. Excludes `CODEX_BACKEND` sessions (owned by `codex_boot`,
   #2285/#2307).
 - `wedge/active-routed-result-stranded` (#2524) — an `ACTIVE`/`IDLE` DAEMON

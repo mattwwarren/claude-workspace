@@ -7872,6 +7872,8 @@ class TestWedgeActiveNullLivenessOrphan:
         recipe = findings[0].recipe
         assert f"{executor_name} pid <pid>" in recipe
         assert "still names the worker" in recipe
+        assert "If no page names a pid" in recipe
+        assert "skip the stop step" in recipe
         assert recipe.index("stop that process") < recipe.index(
             f"cw spawn close {_CLASS9_SID}"
         )

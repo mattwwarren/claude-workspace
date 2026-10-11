@@ -138,7 +138,9 @@ def _null_liveness_orphan_recipe(
             f"{lead}Its {executor_name} worker may still be running. If the "
             "session has a `spawn_post_launch_failed` page, it names the process "
             f"(`{executor_name} pid <pid>`); confirm that pid still names the "
-            f"worker before killing it. Recovery: {guidance}"
+            f"worker before killing it. If no page names a pid, find the "
+            f"{executor_name} process running in this session's worktree; if "
+            f"none is running, skip the stop step. Recovery: {guidance}"
         )
     return (
         f"ACTIVE session {session_id} has no daemon surface; could not resolve "
