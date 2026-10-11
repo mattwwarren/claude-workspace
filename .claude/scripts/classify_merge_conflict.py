@@ -3,8 +3,8 @@
 """Gate script: mechanically resolve only provably-safe merge conflicts (#1850).
 
 Usage (from `/auto-dev-finalize` Step 4c.5, semantic auto-resolve attempt):
-    classify_merge_conflict.py resolve \\
-        --conflicted-files /tmp/conflicted-files-$CW_SESSION --json
+    classify_merge_conflict.py resolve --json --conflicted-files \\
+        "$(git rev-parse --show-toplevel)/.cw/conflicted-files-$CW_SESSION"
 
 Context: Step 4c.5 used to make exactly one mechanical rebase attempt against
 a freshly-conflicted PR and, on failure, park unconditionally with

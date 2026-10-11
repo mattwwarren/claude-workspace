@@ -11,9 +11,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cw.config import load_state, save_state, sessions_lock
+import pytest
+
+import cw.config
+from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
+from cw._lock_hold import LockHoldRecord, read_window
+from cw.config import load_state, mutate_state, save_state, sessions_lock, state_dir
+from cw.exceptions import CwLockReentrancyError, SessionsLockTimeoutError
 from cw.models import CwState, LastResultSource, Session, SessionPurpose, SessionStatus
 from cw.result import emit_result
+from tests.conftest import _FakeClock
 from tests.test_result import _valid_payload
 
 if TYPE_CHECKING:
@@ -155,3 +162,76 @@ class TestSessionsLockEmitResult:
         assert target is not None, "target session disappeared"
         # At least one mutation must have landed — last_result or status change
         assert target.last_result is not None or target.status == SessionStatus.IDLE
+
+
+def _recorded_holds() -> list[LockHoldRecord]:
+    return read_window(state_dir(), now=datetime.now(UTC)).records
+
+
+@pytest.fixture
+def record_every_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Record every hold, however short (#2637)."""
+    monkeypatch.setattr("cw._lock_hold.RECORD_MIN_S", 0.0)
+
+
+@pytest.mark.usefixtures("record_every_hold")
+class TestSessionsLockHoldRecording:
+    """The sessions lock records its hold through the real seam (#2637)."""
+
+    def test_mutate_state_records_hold_and_state_io(
+        self, monkeypatch: pytest.MonkeyPatch, lock_hold_clock: _FakeClock
+    ) -> None:
+        real_write = cw.config.atomic_write_text
+
+        def slow_write(path: Path, text: str) -> None:
+            lock_hold_clock.now += 9.0
+            real_write(path, text)
+
+        def mutate(_state: CwState) -> None:
+            lock_hold_clock.now += 3.0
+
+        monkeypatch.setattr("cw.config.atomic_write_text", slow_write)
+        mutate_state(mutate)
+
+        (record,) = _recorded_holds()
+        assert record.lock == "sessions"
+        assert record.held_s == 12.0
+        assert record.waited_s == 0.0
+        assert record.state_io_s == 9.0
+        assert record.state_bytes is not None
+
+    def test_add_session_records_bounded_state_io(self) -> None:
+        _add_session("sess-io", "test-client/io")
+
+        (record,) = _recorded_holds()
+        assert record.caller == "tests.test_sessions_lock:_add_session"
+        assert record.state_io_s is not None
+        assert record.state_io_s <= record.held_s
+
+    @pytest.mark.usefixtures("held_sessions_lock")
+    def test_bounded_timeout_records_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.5")
+        monkeypatch.setattr("cw._flock.time", _FakeClock())
+
+        with pytest.raises(SessionsLockTimeoutError), sessions_lock(bounded=True):
+            pass
+
+        assert _recorded_holds() == []
+
+    def test_body_that_raises_still_records(self) -> None:
+        msg = "body"
+        with pytest.raises(KeyError, match=msg), sessions_lock():
+            raise KeyError(msg)
+
+        (record,) = _recorded_holds()
+        assert record.lock == "sessions"
+
+    @pytest.mark.lock_violations_expected("reentry")
+    def test_reentry_still_raises_and_records_only_the_outer_hold(self) -> None:
+        with pytest.raises(CwLockReentrancyError), sessions_lock(), sessions_lock():
+            pass
+
+        (record,) = _recorded_holds()
+        assert record.lock == "sessions"

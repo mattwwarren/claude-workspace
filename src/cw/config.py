@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import sys
+import time
 from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -20,7 +21,7 @@ from pydantic import ValidationError
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
-from cw import _config_migrate
+from cw import _config_migrate, _lock_hold
 from cw._flock import acquire_flock, acquire_sessions_flock
 from cw._git import run_git
 from cw._lock_guard import LockRank, lock_guard
@@ -66,19 +67,35 @@ def _guarded_state_lock(
     rank: LockRank,
     acquire: Callable[[Any], None],
 ) -> Iterator[None]:
-    """Guard and hold a state-lock fd using the lock-specific *acquire*."""
-    with lock_guard(lock_name, lock_path, rank):
-        fd = lock_path.open("w")
-        try:
-            acquire(fd)
-        except BaseException:
-            fd.close()
-            raise
-        try:
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            fd.close()
+    """Guard and hold a state-lock fd using the lock-specific *acquire*.
+
+    Also times the wait and the hold for :mod:`cw._lock_hold` (#2637): the
+    hold runs from *acquire* returning to just before ``LOCK_UN``. The note
+    taken after unlock is in-memory; the sidecar write runs in the outer
+    ``finally``, after ``lock_guard`` has popped, and only once this thread
+    holds no guarded lock.
+    """
+    try:
+        with lock_guard(lock_name, lock_path, rank):
+            fd = lock_path.open("w")
+            requested = time.monotonic()
+            try:
+                acquire(fd)
+            except BaseException:
+                fd.close()
+                raise
+            acquired = time.monotonic()
+            try:
+                yield
+            finally:
+                released = time.monotonic()
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                fd.close()
+                _lock_hold.note_hold(
+                    lock_name, held_s=released - acquired, waited_s=acquired - requested
+                )
+    finally:
+        _lock_hold.flush_pending(state_dir, state_file)
 
 
 _xdg_config = os.environ.get("XDG_CONFIG_HOME", "")
@@ -583,12 +600,13 @@ def get_client(name: str) -> ClientConfig:
 
 def load_state() -> CwState:
     """Load persisted session state, applying schema migrations."""
-    path = state_file()
-    if not path.exists():
-        return CwState()
-    raw = json.loads(path.read_text())
-    _backup_state_file(raw)
-    return CwState.model_validate(_config_migrate.migrate_cw_state(raw))
+    with _lock_hold.timed_state_io():
+        path = state_file()
+        if not path.exists():
+            return CwState()
+        raw = json.loads(path.read_text())
+        _backup_state_file(raw)
+        return CwState.model_validate(_config_migrate.migrate_cw_state(raw))
 
 
 def _backup_state_file(raw: dict[str, Any]) -> None:
@@ -611,9 +629,10 @@ def _backup_state_file(raw: dict[str, Any]) -> None:
 
 def save_state(state: CwState) -> None:
     """Persist session state to disk atomically."""
-    refuse_real_state_write(state_file())
-    state_dir().mkdir(parents=True, exist_ok=True)
-    atomic_write_text(state_file(), state.model_dump_json(indent=2))
+    with _lock_hold.timed_state_io():
+        refuse_real_state_write(state_file())
+        state_dir().mkdir(parents=True, exist_ok=True)
+        atomic_write_text(state_file(), state.model_dump_json(indent=2))
 
 
 def load_orchestrator_config() -> OrchestratorConfig:

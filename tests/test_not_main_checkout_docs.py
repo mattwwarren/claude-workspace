@@ -13,6 +13,7 @@ here rather than in a script-test sibling.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from tests.conftest import GUARD_MARKER_CURRENT, _cmd
@@ -104,6 +105,17 @@ def test_pre_mutation_guard_stale_marker_pins_blocker_disposition() -> None:
     )
     assert "missing/stale cw-script-version marker (need >= 1)" in disposition
     assert "STOP" in section
+
+
+def test_pre_mutation_guard_invokes_python3_not_bare_python() -> None:
+    """The stdlib-only guard runs under ``python3``, the interpreter the impl
+    environment has; a bare ``python`` is absent there (#2436). The executed
+    proof is the ``_GUARD_SCRIPTS`` matrix in
+    ``test_scope_conformance_gate_docs.py``, whose stub PATH carries
+    ``python3`` and no ``python``."""
+    section = _pre_mutation_guard_section()
+    assert 'python3 "$RESOLVED"' in section
+    assert re.search(r'^\s*python "\$RESOLVED"', section, re.MULTILINE) is None
 
 
 def test_check_not_main_checkout_declares_cw_script_version_header() -> None:

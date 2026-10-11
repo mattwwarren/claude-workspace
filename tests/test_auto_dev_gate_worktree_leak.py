@@ -2,8 +2,10 @@
 
 Covers the Step 2.5 / Mitigation 1 gate-worktree block in both
 `auto-dev-impl.md` and `auto-dev.md`:
-- path keyed on $CW_SESSION (deterministic), not $$ (PID, unreclaimable)
-- $CW_SESSION is guarded against being unset/empty
+- path keyed on the gate key `gate_key.py` prints (clone identity plus
+  branch; deterministic), not $CW_SESSION and not $$ (PID, unreclaimable)
+  (#2436)
+- the gate key is validated as 16 lowercase hex before any path is built
 - cleanup trap covers EXIT, and INT/TERM additionally force an explicit exit
   (a trap alone only runs cleanup and resumes execution — it does not stop
   the script)
@@ -15,17 +17,19 @@ Covers the Step 2.5 / Mitigation 1 gate-worktree block in both
 from tests.conftest import _cmd
 
 
-def test_impl_gate_worktree_path_keyed_on_session_not_pid() -> None:
-    """auto-dev-impl.md: TMPWT must be keyed on $CW_SESSION, never bare $$."""
+def test_impl_gate_worktree_path_keyed_on_gate_key_not_session() -> None:
+    """auto-dev-impl.md: TMPWT/TMPDIR keyed on $GATE_KEY, never bare $$."""
     content = _cmd("auto-dev-impl.md")
-    assert '"${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$CW_SESSION"' in content
+    assert '"${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$GATE_KEY"' in content
+    assert '"${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$GATE_KEY"' in content
     assert '"/tmp/gate-wt-$$"' not in content
 
 
-def test_auto_dev_gate_worktree_path_keyed_on_session_not_pid() -> None:
-    """auto-dev.md: TMPWT must be keyed on $CW_SESSION, never bare $$."""
+def test_auto_dev_gate_worktree_path_keyed_on_gate_key_not_session() -> None:
+    """auto-dev.md: TMPWT/TMPDIR keyed on $GATE_KEY, never bare $$."""
     content = _cmd("auto-dev.md")
-    assert '"${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$CW_SESSION"' in content
+    assert '"${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$GATE_KEY"' in content
+    assert '"${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$GATE_KEY"' in content
     assert '"/tmp/gate-wt-$$"' not in content
 
 
@@ -47,16 +51,18 @@ def test_auto_dev_gate_worktree_trap_covers_int_and_term() -> None:
     assert "2>/dev/null' EXIT INT TERM" not in content
 
 
-def test_impl_gate_worktree_session_var_guarded() -> None:
-    """auto-dev-impl.md: TMPWT derivation must guard against unset $CW_SESSION."""
+def test_impl_gate_worktree_gate_key_guarded() -> None:
+    """auto-dev-impl.md: the gate key is validated; no $CW_SESSION guard remains."""
     content = _cmd("auto-dev-impl.md")
-    assert ': "${CW_SESSION:?CW_SESSION must be set}"' in content
+    assert '[[ "$GATE_KEY" =~ ^[0-9a-f]{16}$ ]]' in content
+    assert ': "${CW_SESSION:?CW_SESSION must be set}"' not in content
 
 
-def test_auto_dev_gate_worktree_session_var_guarded() -> None:
-    """auto-dev.md: TMPWT derivation must guard against unset $CW_SESSION."""
+def test_auto_dev_gate_worktree_gate_key_guarded() -> None:
+    """auto-dev.md: the gate key is validated; no $CW_SESSION guard remains."""
     content = _cmd("auto-dev.md")
-    assert ': "${CW_SESSION:?CW_SESSION must be set}"' in content
+    assert '[[ "$GATE_KEY" =~ ^[0-9a-f]{16}$ ]]' in content
+    assert ': "${CW_SESSION:?CW_SESSION must be set}"' not in content
 
 
 def test_impl_gate_worktree_add_checks_exit_status() -> None:

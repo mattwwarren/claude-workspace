@@ -902,31 +902,72 @@ After each stage's spawned agent returns a "done" claim, before advancing to the
 Run these checks from the main session against the pushed branch — not from the impl isolation worktree (inaccessible) and not from bare cwd (no impl changes there):
 
 ```bash
+# Disarm first: a trap or flag left armed by an earlier fence in this shell must not
+# fire against the paths below. A leaked earlier path is the safe failure; a deleted
+# live path is not.
+trap - EXIT INT TERM
+GATE_WT_CLEANED=1
 # 0. Verify the branch was pushed; abort immediately if not
 git fetch origin main <branch-name>
 git rev-parse --verify origin/<branch-name> || { echo "IMPL_NOT_PUSHED"; exit 1; }
 
 # Set up one trap-cleaned temp worktree at origin/<branch-name>
 FORK_POINT=$(git merge-base origin/main origin/<branch-name>)
-: "${CW_SESSION:?CW_SESSION must be set}"
-TMPWT="${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$CW_SESSION"
-export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$CW_SESSION"
-# Deterministic path (keyed on $CW_SESSION, not $$) — reconstructable by an
-# external reconciler even if this invocation is SIGKILLed before any trap runs.
+# Gate key: gate_key.py is the one place the gate paths are named. It keys them on
+# the clone's identity plus the branch, so two gates on one host never share a path.
+# Resolved repo-local first, then the installed copy; a miss stops the gate.
+GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
+  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+[ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
+KEY_SCRIPT=""
+for candidate in "$GUARD_ROOT/.claude/scripts/gate_key.py" "$HOME/.claude/scripts/gate_key.py"; do
+  if [ -f "$candidate" ]; then KEY_SCRIPT="$candidate"; break; fi
+done
+[ -n "$KEY_SCRIPT" ] || { echo "GATE_KEY_HELPER_MISSING: gate_key.py not found (\$GUARD_ROOT/.claude/scripts, ~/.claude/scripts); run scripts/install-skills.sh"; exit 1; }
+GATE_KEY=$(python3 "$KEY_SCRIPT" --branch '<branch-name>') && [[ "$GATE_KEY" =~ ^[0-9a-f]{16}$ ]] || { echo "IMPL_FAILED: gate_key.py could not compute the gate key ($KEY_SCRIPT; $(python3 --version 2>&1))"; exit 1; }
+TMPWT="${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$GATE_KEY"
+export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$GATE_KEY"
+# Deterministic path (keyed on repo identity + branch, not $$) — reconstructable
+# by an external reconciler even if this invocation is SIGKILLed before any trap runs.
 # Off /tmp: a tmpfs-backed /tmp is exhausted by a few concurrent gate runs'
 # venvs + pytest/coverage/uv caches (ENOSPC across the host).
-git worktree remove --force "$TMPWT" 2>/dev/null
-rm -rf "$TMPWT" 2>/dev/null
-rm -rf "$TMPDIR" 2>/dev/null
-mkdir -p "$TMPDIR" || { echo "IMPL_FAILED: unable to create TMPDIR: $TMPDIR"; exit 1; }
-git worktree prune
-gate_wt_cleanup() { git worktree remove --force "$TMPWT" 2>/dev/null; rm -rf "$TMPWT" 2>/dev/null; rm -rf "$TMPDIR" 2>/dev/null; }
+# The path is shared by successive runs of this branch and the self-heal below is
+# destructive, so it runs only once --claim shows no live run owns the path. A
+# SIGKILLed run leaves a dead owner record, which the next claim takes over; a live
+# owner makes --claim refuse, and this fence exits before touching the path.
+python3 "$KEY_SCRIPT" --branch '<branch-name>' --claim --key "$GATE_KEY" --gate-root "${CW_GATE_ROOT:-/var/tmp}" \
+  || { echo "IMPL_FAILED: gate path $TMPWT not claimed (live owner or claim error, see above); left untouched"; exit 1; }
+gate_wt_cleanup() {
+  [ -z "${GATE_WT_CLEANED:-}" ] || return 0; GATE_WT_CLEANED=1
+  cleanup_failed=0
+  git worktree remove --force "$TMPWT" 2>/dev/null || :
+  rm -rf "$TMPWT" 2>/dev/null || :
+  rm -rf "$TMPDIR" 2>/dev/null || :
+  [ ! -e "$TMPWT" ] && [ ! -L "$TMPWT" ] || cleanup_failed=1
+  [ ! -e "$TMPDIR" ] && [ ! -L "$TMPDIR" ] || cleanup_failed=1
+  if [ "$cleanup_failed" -ne 0 ]; then
+    echo "IMPL_FAILED: gate cleanup failed; owner record retained for operator recovery (gate path $TMPWT, TMPDIR $TMPDIR)" >&2
+    return 1
+  fi
+  python3 "$KEY_SCRIPT" --release --key "$GATE_KEY" --gate-root "${CW_GATE_ROOT:-/var/tmp}" 2>/dev/null
+}
+# Cleanup is armed only now, after a successful claim: a refused or failed claim exits
+# above with no trap armed and the flag set, so it never deletes the refused owner's paths.
+GATE_WT_CLEANED=
 trap gate_wt_cleanup EXIT
 # INT/TERM must also actually stop the script — a trap alone only runs
 # cleanup and then resumes execution; without the explicit exit here the
 # gate would keep running gate checks after the harness believed it had
 # killed this invocation.
 trap 'gate_wt_cleanup; exit 143' INT TERM
+# Self-heal: a prior invocation for this branch may have been killed after
+# `git worktree add` registered the entry but before cleanup ran.
+git worktree remove --force "$TMPWT" 2>/dev/null
+rm -rf "$TMPWT" 2>/dev/null
+rm -rf "$TMPDIR" 2>/dev/null
+mkdir -p "$TMPDIR" || { echo "IMPL_FAILED: unable to create TMPDIR: $TMPDIR"; exit 1; }
+git worktree prune
 git worktree add --detach "$TMPWT" origin/<branch-name> || { echo "IMPL_FAILED: git worktree add exited $?"; exit 1; }
 
 # 1. Diff is non-empty
@@ -939,7 +980,7 @@ comm -23 "$TMPDIR/touched_files-$$" "$TMPDIR/planned_files-$$" | wc -l
 # (output must be 0 — no unexpected file touches)
 
 # 3. If the plan lists a test command, run it.
-export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$CW_SESSION"
+export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$GATE_KEY"
 cd "$TMPWT" && timeout 600 <test_command> --tb=short > "$TMPDIR/test.log-$$" 2>&1
 # Foreground, sized timeout — never accept a background continuation for
 # this call: a timeout here is IMPL_FAILED, not something to resume later
@@ -967,7 +1008,7 @@ commit_count=$(git -C "$TMPWT" log --oneline "$FORK_POINT"..HEAD | wc -l)
 # Violation: append "impl_no_incremental_commits" to friction_highlights (advisory, not blocking)
 ```
 
-**Headless behavior:** If any check fails (including `IMPL_NOT_PUSHED`, or gate setup itself — e.g. `git worktree add` erroring), set `status: "blocked"`, use the matching `blocker.reason` (`"impl_not_pushed"` or `"impl_failed"`), and do NOT spawn reviewers. Interactive: AskUserQuestion with the failed check output.
+**Headless behavior:** If any check fails (including `IMPL_NOT_PUSHED`, or gate setup itself — e.g. `git worktree add` erroring, the gate path being held by a live run, or `gate_key.py` missing (run scripts/install-skills.sh)), set `status: "blocked"`, use the matching `blocker.reason` (`"impl_not_pushed"` or `"impl_failed"`), and do NOT spawn reviewers. Interactive: AskUserQuestion with the failed check output.
 
 **Why this works:**
 - Gates run in a checkout of the pushed branch — not the inaccessible impl worktree

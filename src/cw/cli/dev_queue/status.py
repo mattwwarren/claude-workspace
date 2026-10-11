@@ -8,12 +8,14 @@ from typing import TYPE_CHECKING
 
 import click
 
+from cw._lock_hold import format_longest, read_window, summarize
 from cw.cli._base import _emit_freshness_subline, handle_errors
 from cw.config import (
     _load_concurrency_overrides,
     get_client,
     load_orchestrator_config,
     load_state,
+    state_dir,
 )
 from cw.dev_queue import list_tickets
 from cw.dispatch import TICK_STALE_SECONDS
@@ -376,3 +378,22 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
                 _emit_dev_queue_lane_breakdown(
                     by_client[client_name], client_name, config
                 )
+
+    _echo_longest_lock_holds()
+
+
+def _echo_longest_lock_holds() -> None:
+    """Print the last hour's longest completed lock holds, if any (#2637).
+
+    Text mode only: ``--json`` is a dict keyed by client, so the
+    machine-readable form lives in ``cw doctor --json`` (``lock-holds``). An
+    absent or unreadable sidecar prints nothing.
+    """
+    now = datetime.now(UTC)
+    summaries = summarize(read_window(state_dir(), now=now).records)
+    if not summaries:
+        return
+    click.echo("")
+    click.echo(
+        f"Longest completed lock hold, last hour: {format_longest(summaries, now)}"
+    )

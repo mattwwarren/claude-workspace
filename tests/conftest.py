@@ -5,10 +5,12 @@ from __future__ import annotations
 import contextlib
 import errno
 import fcntl
+import functools
 import importlib.util
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -27,7 +29,10 @@ import yaml
 # (#1756). isort keeps a plain ``import`` ahead of the ``from cw ...`` lines;
 # tests/test_conftest.py::TestHomeRedirectByConstruction pins the ordering.
 import tests._session_home
-from cw.config import load_state, save_state, sessions_lock_file
+from cw import _lock_hold as lock_hold_module
+from cw._lock_hold import LockHoldRecord
+from cw._lock_hold import day_path as lock_hold_day_path
+from cw.config import load_state, save_state, sessions_lock_file, state_dir
 from cw.disk import DiskUsage, InodeUsage
 from cw.models import (
     AGENT_SPAWN_STAMP_KEY,
@@ -318,7 +323,9 @@ GUARD_MARKER_BAD_CASES: tuple[tuple[str, str], ...] = (
 )
 
 
-def write_guard_stub_bin(tmp_path: Path) -> Path:
+def write_guard_stub_bin(
+    tmp_path: Path, names: tuple[str, ...] = ("uv", "python3")
+) -> Path:
     """Create a ``PATH`` directory of sentinel interpreters for a fence (#2141).
 
     Replaces the runner's former rewrite of the fence *text* (``uv run python``
@@ -326,13 +333,19 @@ def write_guard_stub_bin(tmp_path: Path) -> Path:
     would have kept passing had the doc's invocation changed shape. The fence
     now executes exactly as the doc spells it; only the binaries it calls are
     fixtures. Both spellings in these docs are covered — ``uv run python
-    "$RESOLVED"`` and the bare ``python "$RESOLVED"`` the stdlib-only
-    pre-mutation guard uses — and each stub echoes the sentinel followed by its
-    own argument vector, so a caller can assert on the arguments the doc passes.
+    "$RESOLVED"`` and the ``python3 "$RESOLVED"`` the stdlib-only pre-mutation
+    guard uses (#2436) — and each stub echoes the sentinel followed by its own
+    argument vector, so a caller can assert on the arguments the doc passes. A
+    bare ``python`` is deliberately not stubbed: it is absent from the impl
+    environment, so a fence that regressed to it would run the host interpreter
+    (or fail with command-not-found) and miss the INVOKED sentinel.
+
+    *names* narrows the stub set; Step 2.5 gate 2 passes ``("uv",)`` so its
+    ``python3`` stays the real interpreter that computes the gate key.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("uv", "python"):
+    for name in names:
         stub = bin_dir / name
         stub.write_text(_GUARD_STUB_BODY, encoding="utf-8")
         stub.chmod(0o755)
@@ -425,7 +438,7 @@ def run_guard_fence(
     bare relative ``.claude/scripts/...``, and a runner that always executed
     from the root could not tell the two apart. The fence text itself is left
     alone apart from *placeholders* (see ``substitute_fence_placeholders``): the
-    invocation is neutralised by putting sentinel ``uv``/``python`` stubs first
+    invocation is neutralised by putting sentinel ``uv``/``python3`` stubs first
     on ``PATH`` instead. The per-site capture variables are echoed afterwards
     because four of the five fences assign the invocation into a command
     substitution rather than letting it print.
@@ -493,28 +506,21 @@ def run_guard_fence(
         + '\necho "${VERDICT-}${RESOLVE_OUTPUT-}${SCOPE_CONFORMANCE_OUTPUT-}'
         '${MUST_FIX_OVERRIDE_OUTPUT-}"\n'
     )
-    # Scoped to this tmp_path so the gate-2 fence's hard-coded
-    # `/tmp/touched_files-$CW_SESSION` scratch write cannot collide with a
-    # concurrent run; the path is literal in the doc, so it is cleaned up here
-    # rather than redirected.
     session = tmp_path.name
-    try:
-        return subprocess.run(
-            ["bash", "-c", body],
-            cwd=nested,
-            env={
-                "HOME": str(home),
-                "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
-                "CW_SESSION": session,
-                "TMPWT": str(repo),
-                "FORK_POINT": "HEAD",
-            },
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    finally:
-        Path(f"/tmp/touched_files-{session}").unlink(missing_ok=True)
+    return subprocess.run(
+        ["bash", "-c", body],
+        cwd=nested,
+        env={
+            "HOME": str(home),
+            "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+            "CW_SESSION": session,
+            "TMPWT": str(repo),
+            "FORK_POINT": "HEAD",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def load_guard_script_module(script_path: Path, module_name: str) -> types.ModuleType:
@@ -543,6 +549,164 @@ def run_guard_script_cli(
         text=True,
         check=False,
     )
+
+
+# --- Step 2.5 gate key (#2436) ----------------------------------------------
+# Shared by tests/test_gate_key.py, tests/test_gate_key_fences.py and the gate-2
+# runner in tests/test_scope_conformance_gate_docs.py, so the fence locators,
+# the key helper and the claim doubles are spelled once.
+
+GATE_KEY_SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "gate_key.py"
+
+# The pid-namespace link text a fake /proc tree and a built claimant share by
+# default (the value observed on the Linux dispatch host).
+GATE_KEY_TEST_PIDNS = "pid:[4026531836]"
+
+# Step 2.5 gate 2's numbered bullet and gate 3's, which bound gate 2's section.
+_GATE2_START = "2. **File set is within the plan's enumeration**"
+_GATE2_END = "3. **Test command exit code is 0:**"
+_GATE3_END = "4. **Mypy/ruff clean"
+
+# The line a gate fence prints when gate_key.py resolves nowhere (R15): the one
+# place the regex is spelled, so text, executed and gate-2 checks cannot drift.
+_GATE_KEY_HELPER_MISSING = re.compile(
+    r'GATE_KEY_HELPER_MISSING:[^"\n]*run scripts/install-skills\.sh'
+)
+
+
+@functools.cache
+def _gate_key_module() -> types.ModuleType:
+    """The stdlib-only gate_key.py, loaded lazily so conftest imports without it."""
+    return load_guard_script_module(GATE_KEY_SCRIPT, "gate_key")
+
+
+def gate_key_for(repo: Path, branch: str) -> str:
+    """The gate key the fences derive for *branch* in *repo*'s clone.
+
+    Uses the script's own ``compute_key`` so every fence test shares one
+    formula; ``tests/test_gate_key.py`` pins that formula independently.
+    """
+    key: str = _gate_key_module().compute_key(str((repo / ".git").resolve()), branch)
+    return key
+
+
+def link_real_python3(bin_dir: Path) -> Path:
+    """Put ``python3 -> sys.executable`` in *bin_dir*; return *bin_dir*.
+
+    Executed fences call ``python3``; linking the test interpreter keeps them
+    off a host ``/usr/bin/python3`` the venv never vetted.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    link = bin_dir / "python3"
+    link.unlink(missing_ok=True)
+    link.symlink_to(sys.executable)
+    return bin_dir
+
+
+def install_gate_key(home: Path) -> Path:
+    """Copy the real gate_key.py to ``<home>/.claude/scripts``; return the copy."""
+    scripts = home / ".claude" / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    target = scripts / GATE_KEY_SCRIPT.name
+    target.write_text(GATE_KEY_SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
+    return target
+
+
+@pytest.fixture
+def clean_gate_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the ambient gate variables a dispatched worker exports (R12).
+
+    A worker shell carries ``CLAUDE_PID``; CI does not. Clearing it (and the
+    override and gate root) gives every gate-key test the same environment.
+    """
+    for name in ("CLAUDE_PID", "CW_GATE_OWNER_PID", "CW_GATE_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def sleeper() -> Iterator[Callable[[], subprocess.Popen[bytes]]]:
+    """Factory for live, killable child processes; teardown reaps every one."""
+    children: list[subprocess.Popen[bytes]] = []
+
+    def _start() -> subprocess.Popen[bytes]:
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        children.append(child)
+        return child
+
+    yield _start
+    for child in children:
+        if child.poll() is None:
+            child.terminate()
+        child.wait(timeout=10)
+
+
+def make_claimant(
+    gate_key_module: types.ModuleType,
+    worker: int | tuple[int, str],
+    shell: int | tuple[int, str],
+    *,
+    source: str = "CLAUDE_PID",
+    note: str = "",
+    pidns: str | None = GATE_KEY_TEST_PIDNS,
+) -> Any:
+    """Build *gate_key_module*'s ``Claimant`` from two process specs.
+
+    Each spec is a ``(pid, token)`` pair, or a bare pid whose real start token
+    is read through the module's default ``Probe`` (so a ``sleeper`` pid can be
+    passed directly).
+    """
+
+    def _proc(spec: int | tuple[int, str]) -> Any:
+        if isinstance(spec, int):
+            token = gate_key_module.process_start_token(spec, gate_key_module.Probe())
+            assert token is not None, f"no start token for live pid {spec}"
+            return gate_key_module.Proc(spec, token)
+        return gate_key_module.Proc(spec[0], spec[1])
+
+    return gate_key_module.Claimant(_proc(worker), _proc(shell), source, note, pidns)
+
+
+def assert_gate_key_helper_missing(text: str) -> None:
+    """Assert *text* carries the missing-helper line ending in the remedy."""
+    assert _GATE_KEY_HELPER_MISSING.search(text), text
+
+
+def _single_bash_fence(text: str, where: str) -> str:
+    fences = _bash_fences(text)
+    assert len(fences) == 1, f"{where}: expected one bash fence, got {len(fences)}"
+    return fences[0]
+
+
+def _fence_containing(doc: str, marker: str) -> str:
+    fences = [fence for fence in _bash_fences(_cmd(doc)) if marker in fence]
+    assert len(fences) == 1, f"{doc}: expected one fence with {marker!r}"
+    return fences[0]
+
+
+def gate2_fence() -> str:
+    """Step 2.5 gate 2's own bash fence in ``auto-dev-impl.md``."""
+    content = _cmd("auto-dev-impl.md")
+    start = content.index(_GATE2_START)
+    end = content.index(_GATE2_END, start)
+    return _single_bash_fence(content[start:end], "gate 2")
+
+
+def impl_gate3_fence() -> str:
+    """Step 2.5 gate 3's own bash fence in ``auto-dev-impl.md``."""
+    content = _cmd("auto-dev-impl.md")
+    start = content.index(_GATE2_END)
+    end = content.index(_GATE3_END, start)
+    return _single_bash_fence(content[start:end], "gate 3")
+
+
+def impl_gate_setup_fence() -> str:
+    """Step 2.5's gate-setup fence: the one that arms the cleanup trap."""
+    return _fence_containing("auto-dev-impl.md", "trap gate_wt_cleanup EXIT")
+
+
+def monolith_gate_fence() -> str:
+    """``auto-dev.md``'s Mitigation 1 fence: the one that arms the cleanup trap."""
+    return _fence_containing("auto-dev.md", "trap gate_wt_cleanup EXIT")
 
 
 def _write_bin_stub(tmp_path: Path, name: str, body: str) -> Path:
@@ -1285,6 +1449,74 @@ def held_sessions_lock() -> Iterator[Path]:
     """Fixture form of :func:`_hold_sessions_lock` for whole-test contention."""
     with _hold_sessions_lock() as lock_path:
         yield lock_path
+
+
+# Defaults for one seeded lock-hold record; ``at`` is filled in at call time.
+_LOCK_HOLD_DEFAULTS: dict[str, object] = {
+    "lock": "sessions",
+    "held_s": 1.0,
+    "waited_s": 0.0,
+    "caller": "tests.fake:caller",
+    "pid": 1,
+    "state_io_s": None,
+    "state_bytes": None,
+}
+
+
+def _seed_lock_holds(
+    *holds: Mapping[str, object], raw_lines: Sequence[str] = ()
+) -> Path:
+    """Append lock-hold records to the dated sidecar under ``state_dir()`` (#2637).
+
+    Each mapping overrides :data:`_LOCK_HOLD_DEFAULTS` (``at`` defaults to now,
+    UTC), is validated through ``LockHoldRecord`` and lands in the file for its
+    own ``at`` day, so a record from yesterday lands in yesterday's file.
+    *raw_lines* are appended verbatim to today's file (malformed lines, capped
+    markers). Returns today's path.
+    """
+    sink = state_dir()
+    sink.mkdir(parents=True, exist_ok=True)
+    for hold in holds:
+        record = LockHoldRecord.model_validate(
+            {**_LOCK_HOLD_DEFAULTS, "at": datetime.now(UTC), **hold}
+        )
+        path = lock_hold_day_path(sink, record.at.astimezone(UTC).date())
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(record.model_dump_json() + "\n")
+    today = lock_hold_day_path(sink, datetime.now(UTC).date())
+    if raw_lines:
+        with today.open("a", encoding="utf-8") as handle:
+            handle.writelines(f"{line}\n" for line in raw_lines)
+    return today
+
+
+@pytest.fixture(autouse=True)
+def _lock_hold_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each test fresh lock-hold recorder state with recording on (#2637).
+
+    The pending notes and the state-I/O accumulator are thread-local module
+    state, so a test that leaves either behind would leak into the next test's
+    first record. ``RECORD_ENABLED`` is read once at import from
+    ``CW_LOCK_HOLD_RECORD``; pinning it keeps a developer's shell setting out of
+    the suite.
+    """
+    monkeypatch.setattr("cw._lock_hold._STATE", lock_hold_module._ThreadState())
+    monkeypatch.setattr("cw._lock_hold.RECORD_ENABLED", True)
+
+
+@pytest.fixture
+def lock_hold_clock(monkeypatch: pytest.MonkeyPatch) -> _FakeClock:
+    """One :class:`_FakeClock` behind the seam's and the recorder's ``monotonic``.
+
+    The hold is timed in ``cw.config`` (``_guarded_state_lock``) and the state
+    I/O in ``cw._lock_hold`` (``timed_state_io``); both read ``time.monotonic``
+    through their own module, so both are patched to the same clock. The
+    ``cw._flock.time`` patch used for bounded waits does not reach either.
+    """
+    clock = _FakeClock()
+    monkeypatch.setattr("cw.config.time", clock)
+    monkeypatch.setattr("cw._lock_hold.time", clock)
+    return clock
 
 
 class _RecordingLockPath:

@@ -23,6 +23,9 @@ re-exports. Submodules:
 - ``routed_result_wedge`` — the stranded routed-result session class (#2524)
   and its explicit-command ``--reap`` close (the orchestrator session counts,
   ADR-0020).
+- ``lock_holds`` — the longest recent completed sessions / dev-queue lock
+  holds and waits from the ``cw._lock_hold`` sidecar, with the aggregate
+  state load/save share (#2637).
 - ``loop_health`` — dispatch loop health/liveness, TIMED_OUT-merged detection,
   and targeted single-session reap.
 - ``versions`` — claude/cw version + dependency checks, bypass disclaimer,
@@ -69,6 +72,7 @@ from cw.doctor.linkage import (
     _check_workspace_paths,
     _check_worktree_paths_sessions,
 )
+from cw.doctor.lock_holds import _check_lock_holds
 from cw.doctor.loop_health import (
     _check_loop_health,
     _check_loop_liveness,
@@ -123,6 +127,7 @@ __all__ = [
     "_check_dispatch_repo_head",
     "_check_inbox_size",
     "_check_linkage",
+    "_check_lock_holds",
     "_check_loop_health",
     "_check_loop_liveness",
     "_check_orchestrator_config",
