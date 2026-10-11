@@ -53,7 +53,6 @@ keeps that order and extends it to every other state-file lock.
    |---|---|
    | `reconcile.gate_recipes`: `fetch_approved_plan_comment` runs `gh` per candidate | #2545 |
    | `reconcile.concierge` recipe 3 git call; `reconcile.main_drift` checks | #2546 |
-   | `reconcile.phantom._detect` and `reconcile.tasks`: phantom dirty-check git | #2548 |
    | `reconcile.usage_limit_mid_turn`: in-lock surface stop | #2549 |
    | `reconcile._shared`: `claude agents --json` | #2550 |
    | `session`: `done --cleanup` removes the worktree in-lock | #2557 |
