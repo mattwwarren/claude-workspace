@@ -39,8 +39,10 @@ from cw.models import (
     TicketTask,
     UsageLimitAct,
 )
+from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import _deps, dirty_checks, probe_store, reconcile
 from cw.reconcile._shared import _DIRTY_WORKTREE_REASON, ProposedAction
+from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 from cw.reconcile.dirty_checks import (
     DIRTY_CHECK_BUDGET_SECONDS,
     DIRTY_CHECK_LOOKAHEAD_SECONDS,
@@ -53,6 +55,7 @@ from cw.reconcile.dirty_checks import (
     prepass_phantom_ids,
 )
 from cw.reconcile.phantom import (
+    _act_on_phantom_candidates,
     _detect_phantom_candidates,
     capture_phantom_dirty_checks,
 )
@@ -75,13 +78,15 @@ from tests._dirty_check_helpers import (
 )
 from tests._reconcile_helpers import (
     _attention_events,
+    _auto_config,
     _mk_phantom_daemon_session,
     _shipped_salvage_payload,
     _state_queue_snapshot,
     _write_salvage_transcript,
     probe_sessions_lock_free,
+    use_reconcile_daemon,
 )
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests.conftest import _make_daemon_session, _make_ticket_task, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -1121,3 +1126,165 @@ class TestNoSubprocessUnderTheLock:
         assert row.disposition == _DIRTY_WORKTREE_REASON
         (page,) = _attention_events("real", "real")
         assert "1 uncommitted path(s)" in str(page["breadcrumbs"])
+
+
+_WIP = "wip.py"
+_WIP_BODY = "unsaved = True\n"
+
+
+def _write_unsaved_work(repo: Path) -> tuple[str, str]:
+    """Write an untracked file into *repo*; return its (status, HEAD) snapshot."""
+    (repo / _WIP).write_text(_WIP_BODY, encoding="utf-8")
+    return git_in(repo, "status", "--porcelain"), git_in(repo, "rev-parse", "HEAD")
+
+
+def _assert_intact(repo: Path, before: tuple[str, str]) -> None:
+    assert repo.is_dir()
+    assert (repo / _WIP).read_text(encoding="utf-8") == _WIP_BODY
+    assert before[0] == f"?? {_WIP}"
+    after = git_in(repo, "status", "--porcelain"), git_in(repo, "rev-parse", "HEAD")
+    assert after == before
+
+
+class TestStaleCleanCaptureDestroysNothing:
+    """#2630: no reconcile act removes a worktree; for the phantom sweep and
+    backstops the capture only selects the queue disposition.
+
+    A real worktree dirtied after an in-bound clean capture keeps its files.
+    Removal primitives are not patched: callers bind them at import time and
+    reconcile references none of them, so such patches would be vacuous. The
+    on-disk assertions plus ``tests/test_reconcile_worktree_removal_guard.py``
+    are the protection.
+    """
+
+    def test_backstop_revert_on_stale_clean_capture_leaves_dirtied_worktree_intact(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = make_git_repo("wt-x")
+        session = _backstop_session("x", tmp_path, worktree_path=repo)
+        _seed([session], [_row("x")])
+        checks = checks_with([session], {"x": None})
+        before = _write_unsaved_work(repo)
+        _forbid_live(monkeypatch)
+
+        reverted = revert_timed_out_tasks(checks)
+
+        _assert_intact(repo, before)
+        # Known residual (#2630): an in-bound clean capture routes the dirtied
+        # tree's row to PENDING; a future fix (#2662 or a post-lock re-verify)
+        # should flip this assertion to BLOCKED_ON_USER.
+        assert reverted == ["x"]
+        assert _stored_row("x").status is QueueItemStatus.PENDING
+
+    def test_phantom_act_on_stale_clean_capture_leaves_dirtied_worktree_intact(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = make_git_repo("wt-px")
+        phantom = _phantom("px", tmp_path, worktree_path=repo)
+        _seed([phantom], [_row("px")])
+        checks = checks_with([phantom], {"px": None})
+        before = _write_unsaved_work(repo)
+        _forbid_live(monkeypatch)
+        deferred = DeferredReconcileJobs()
+
+        candidates = _detect_phantom_candidates(
+            load_state(), {phantom.id}, now=_STARTED, dirty_checks=checks
+        )
+        (candidate,) = candidates
+        assert candidate.worktree_dirty is False
+        reverted, *_ = _act_on_phantom_candidates(
+            load_state(),
+            candidates,
+            now=_STARTED,
+            config=_auto_config(),
+            deferred=deferred,
+        )
+
+        _assert_intact(repo, before)
+        # A plain crash candidate queues no surface stop: no job could touch it.
+        assert deferred.post_lock == []
+        # Known residual (#2630): an in-bound clean capture routes the dirtied
+        # tree's row to PENDING; a future fix (#2662 or a post-lock re-verify)
+        # should flip this assertion to BLOCKED_ON_USER.
+        assert reverted == ["px"]
+        assert _stored_row("px").status is QueueItemStatus.PENDING
+
+    def test_merged_phantom_stop_is_post_lock_and_does_not_depend_on_the_dirt_value(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Post-lock surface stops do not read or depend on the dirt value (a
+        merged phantom's candidacy still requires a usable capture; a miss
+        defers it). A DIRTY capture reaches the act through the real detect;
+        only the drain stops the surface, the live helper is never hit, and the
+        worktree's files stay intact."""
+        daemon = FakeNativeDaemonClient()
+        use_reconcile_daemon(monkeypatch, daemon)
+        repo = make_git_repo("wt-mp")
+        phantom = _phantom("mp", tmp_path, worktree_path=repo)
+        _seed([phantom], [_row("mp")])
+        before = _write_unsaved_work(repo)
+        checks = checks_with([phantom], {"mp": _DIRTY})
+        _forbid_live(monkeypatch)
+        sink = DeferredReconcileJobs()
+
+        (candidate,) = _detect_phantom_candidates(
+            load_state(), {phantom.id}, now=_STARTED, dirty_checks=checks
+        )
+        assert candidate.worktree_dirty is True
+        _act_on_phantom_candidates(
+            load_state(),
+            [candidate],
+            now=_STARTED,
+            config=_auto_config(),
+            merged_ticket_ids=frozenset({"mp"}),
+            deferred=sink,
+        )
+
+        assert [job.label for job in sink.post_lock] == ["surface_stop:dead-ref"]
+        assert daemon.stop_calls == []
+        assert _stored_session("mp").status is SessionStatus.COMPLETED
+
+        run_post_lock_jobs(sink)
+
+        assert daemon.stop_calls == ["dead-ref"]
+        _assert_intact(repo, before)
+
+
+class TestMergedPhantomNeedsAUsableCapture:
+    @pytest.mark.parametrize("store", ["none", "empty"])
+    def test_merged_phantom_without_a_usable_capture_is_not_a_candidate(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        store: str,
+    ) -> None:
+        """Merged-ness is a function of the ticket id and is assigned AFTER
+        detect by ``_split_crash_candidates`` (detect takes no merged input), so
+        a merged phantom with no usable capture is dropped for the tick and
+        never reaches the act. The detect assertion IS the pin (the same one
+        ``TestMissSources._phantom_deferred`` makes), kept as the named pin for
+        "a merged phantom's candidacy still requires a usable capture"."""
+        phantom = _phantom("mp", tmp_path)
+        _seed([phantom], [])
+        _forbid_live(monkeypatch)
+        state = load_state()
+        checks = None if store == "none" else DirtyChecks()
+
+        with caplog.at_level(logging.WARNING, logger=DIRTY_CHECKS_LOGGER):
+            candidates = _detect_phantom_candidates(
+                state, {phantom.id}, now=_STARTED, dirty_checks=checks
+            )
+
+        assert candidates == []
+        assert _stored_session(phantom.id).status is SessionStatus.ACTIVE
+        assert len(unavailable_records(caplog, phantom.id)) == 1

@@ -196,10 +196,11 @@ class OrchestratorConfig(BaseModel):
             )
         return self
 
-    # Gating policy for destructive reap actions (stop daemon, revert task to
-    # PENDING, remove worktree). Default ``signal_only`` routes stalled/phantom
-    # sessions to BLOCKED_ON_USER for operator review; ``auto`` restores the
-    # pre-#554 self-healing behavior. See ADR-0006 invariant 4 and GitHub #554.
+    # Gating policy for reap actions (stop daemon, revert task to PENDING). No
+    # reconcile act removes a worktree (ADR-0014). Default ``signal_only`` routes
+    # stalled/phantom sessions to BLOCKED_ON_USER for operator review; ``auto``
+    # restores the pre-#554 self-healing behavior. See ADR-0006 invariant 4 and
+    # GitHub #554.
     reap_policy: ReapPolicy = ReapPolicy.SIGNAL_ONLY
     # Global defaults for the `cw guard-busy-wait` PreToolUse guard (#1946),
     # overridable per lane (LaneConfig.busy_wait_guard_*). Default-ON, unlike

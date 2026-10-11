@@ -26,12 +26,8 @@ from __future__ import annotations
 
 import ast
 from collections import Counter
-from typing import TYPE_CHECKING
 
-from tests.conftest import _SRC_ROOT, _iter_src_files
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from tests.conftest import _SRC_ROOT, _files_under
 
 _STOP_ATTR = "stop"
 _RECONCILE_PREFIX = "cw/reconcile/"
@@ -86,24 +82,18 @@ def _count_stop_calls(source: str, relpath: str) -> dict[tuple[str, str], int]:
     return {(relpath, qualname): n for qualname, n in collector.counts.items()}
 
 
-def _reconcile_files() -> list[Path]:
-    return [
-        path
-        for path in _iter_src_files()
-        if path.relative_to(_SRC_ROOT).as_posix().startswith(_RECONCILE_PREFIX)
-    ]
-
-
 def _scan_reconcile_stop_calls() -> dict[tuple[str, str], int]:
     found: dict[tuple[str, str], int] = {}
-    for path in _reconcile_files():
+    for path in _files_under(_RECONCILE_PREFIX):
         relpath = path.relative_to(_SRC_ROOT).as_posix()
         found.update(_count_stop_calls(path.read_text(encoding="utf-8"), relpath))
     return found
 
 
 def test_scan_covers_the_reconcile_package() -> None:
-    relpaths = {p.relative_to(_SRC_ROOT).as_posix() for p in _reconcile_files()}
+    relpaths = {
+        p.relative_to(_SRC_ROOT).as_posix() for p in _files_under(_RECONCILE_PREFIX)
+    }
 
     assert "cw/reconcile/core.py" in relpaths
     assert "cw/reconcile/phantom/_events.py" in relpaths

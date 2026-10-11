@@ -723,7 +723,8 @@ class ReapPolicy(StrEnum):
     Under ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,
     leave session/worktree/daemon surface intact.  Cleared by an explicit
     operator command (the orchestrator session counts, ADR-0020).
-    Under ``AUTO``: self-healing — stop daemon, revert task to PENDING, clean worktree.
+    Under ``AUTO``: self-healing — stop daemon, revert task to PENDING for retry.
+    No reconcile act removes the worktree (ADR-0014).
     """
 
     SIGNAL_ONLY = "signal_only"

@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **No reconcile act removes a worktree; docs and comments now say so and a guard pins it (#2630).** No reconcile act removes a worktree; for the phantom sweep and backstops the capture only selects the queue disposition (RUNNING -> PENDING versus BLOCKED_ON_USER), and post-lock surface stops do not read or depend on the dirt value (a merged phantom's candidacy still requires a usable capture; a miss defers it). "Destructive" here means on-disk work loss; the RUNNING -> PENDING revert still consumes a capture up to 90 s old. `tests/test_reconcile_worktree_removal_guard.py` pins the reconcile side as a tripwire; `dirty_checks.py` documents that the live helper reads helper errors as clean (fail-open, tracked in #2662). No behavior change. The principle's remaining instance, `cw worktree gc --apply` force-removing after classification with no fresh re-check, is outside reconcile and tracked in #2669.
+
 ## [1.70.1] - 2026-10-09
 
 ### Fixed
