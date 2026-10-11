@@ -77,7 +77,12 @@ from cw.codex_fix_loop.divergence import (
     render_divergence_report,
 )
 from cw.codex_fix_loop.fence import fix_scope_allowlist
-from cw.codex_fix_loop.growth import DEFAULT_GROWTH_BUDGET_LINES
+from cw.codex_fix_loop.growth import (
+    DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES,
+    DEFAULT_GROWTH_BUDGET_LINES,
+    LoopGrowthBudget,
+    effective_budget,
+)
 from cw.codex_fix_loop.park import _clean_exit, _park_survivors
 from cw.codex_fix_loop.snapshot import _persist_cycle_snapshot, _with_snapshot_pointer
 from cw.codex_review import (
@@ -375,6 +380,7 @@ def run_review_with_fix_loop(
     growth_budget_lines: int = DEFAULT_GROWTH_BUDGET_LINES,
     growth_guard_enabled: bool = True,
     operator_login: str | None = None,
+    cumulative_growth_budget_lines: int = DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the initial review pass plus a bounded MUST_FIX fix loop.
 
@@ -395,7 +401,9 @@ def run_review_with_fix_loop(
     ``growth_budget_lines`` and ``growth_guard_enabled`` (#2633) set the
     in-file growth budget and its lane-resolved switch, and ``operator_login``
     is the identity whose marker-bearing comment carries binding constraints
-    (``None`` fails closed: no constraints).
+    (``None`` fails closed: no constraints). ``cumulative_growth_budget_lines``
+    (#2648) is the loop-wide net-line budget per originally-found finding,
+    measured from the loop's start commit under the same switch.
     """
     deadline = (
         None
@@ -455,6 +463,14 @@ def run_review_with_fix_loop(
         pre_loop_head_sha=verdict.reviewed_sha,
         stall_cycles=stall_cycles,
     )
+    # #2648: the loop-wide growth budget, fixed for the whole loop.
+    loop_growth_budget = LoopGrowthBudget(
+        divergence_state.pre_loop_head_sha,
+        cumulative_growth_budget_lines,
+        effective_budget(
+            cumulative_growth_budget_lines, len(divergence_state.original_keys)
+        ),
+    )
     # #1723: true iff at least one fix cycle so far produced a real commit
     # (OR'd across cycles) — distinguishes a genuine fix from a fix loop
     # that converged purely because every cycle's fix invocation was a no-op.
@@ -499,6 +515,7 @@ def run_review_with_fix_loop(
             growth_budget_lines=growth_budget_lines,
             growth_guard_enabled=growth_guard_enabled,
             constraints=constraints,
+            loop_growth_budget=loop_growth_budget,
         )
         if park is not None:
             return park
