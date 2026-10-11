@@ -37,6 +37,7 @@ from cw.codex_review import (
     _parse_unified_diff,
     is_test_path,
 )
+from cw.codex_review._const import CODEX_FIX_LOOP_CUMULATIVE_GROWTH_BUDGET_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -56,7 +57,7 @@ _SHA_PREFIX_CHARS = 12
 _CUMULATIVE_HINT = (
     "The loop-wide total, not this cycle alone, exceeded the cumulative budget; "
     "earlier fix cycles' commits remain on the branch. To raise it set "
-    "`codex_fix_loop_cumulative_growth_budget_lines` in orchestrator.yaml, or "
+    f"`{CODEX_FIX_LOOP_CUMULATIVE_GROWTH_BUDGET_KEY}` in orchestrator.yaml, or "
     "disable the growth guard for a lane with "
     f"`{CODEX_FIX_LOOP_GROWTH_GUARD_KEY}: false`."
 )
