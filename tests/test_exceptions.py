@@ -241,6 +241,15 @@ class TestWorkerLaunchedError:
         assert err.surface_ref == "00000001"
         assert str(err) == "msg"
 
+    def test_surface_ref_may_be_none(self) -> None:
+        """#2592: a fire-and-forget local process has no daemon surface."""
+        from cw.exceptions import WorkerLaunchedError
+
+        err = WorkerLaunchedError("m", session_id="sess-1", surface_ref=None)
+
+        assert err.surface_ref is None
+        assert err.session_id == "sess-1"
+
     def test_unrelated_to_no_worker_errors(self) -> None:
         from cw.exceptions import (
             DisclaimerNotAcceptedError,

@@ -102,6 +102,7 @@ from tests.conftest import (
     _make_ticket_task,
     _symlink_loop,
     _vouch_for_roster_worker,
+    fire_and_forget_breadcrumb,
     git_in,
     occupy_worktree,
     post_launch_attention_payload,
@@ -17809,6 +17810,124 @@ class TestPostLaunchSpawnFailure:
             )
 
         assert post_launch_attention_payload(pages)["session_id"] == "sess-9"
+
+
+@pytest.mark.binary_on_path("codex")
+@pytest.mark.usefixtures("codex_capable")
+class TestFireAndForgetPostLaunchSpawnFailure:
+    """#2592: a fire-and-forget worker whose liveness handle could not be
+    stored after launch keeps its row bound and is never spawned again.
+
+    Driven through codex, the one fire-and-forget backend dispatch reaches by
+    stage config. The lane starts at 1 of a 2-error breaker, so a failure
+    wrongly counted as a backend error would trip it.
+    """
+
+    _TICKET = "GEN-2592"
+
+    def _arrange(
+        self,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> tuple[list[_SpawnOutcome], list[CapturedEvent]]:
+        spec = ClientSpec.from_config(
+            client, extra=executor_backend_extra("review", "codex")
+        )
+        task = TicketTask(
+            ticket_id=self._TICKET, client="test-client", stage=Stage.REVIEW
+        )
+        return _arrange_post_launch_spawn(spec, task, monkeypatch, capture_events)
+
+    @staticmethod
+    def _assert_kept(
+        outcomes: list[_SpawnOutcome],
+        daemon: FakeNativeDaemonClient,
+        job_runner: FakeFireAndForgetRunner,
+    ) -> TicketTask:
+        row = _assert_post_launch_row_kept(outcomes)
+        assert daemon.spawn_calls == []
+        assert daemon.stop_calls == []
+        assert len(job_runner.calls) == 1
+        assert job_runner.procs[0].poll() is None
+        return row
+
+    def test_handle_store_failure_keeps_codex_row_bound_and_pages_once(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+        fake_codex_job_runner: FakeFireAndForgetRunner,
+    ) -> None:
+        """(e1) Both handle stores fail: bound, ACTIVE, one exact page."""
+        outcomes, pages = self._arrange(
+            sample_client_config, monkeypatch, capture_events
+        )
+
+        def _disk_full(*_args: object, **_kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.executor.core._store_liveness_handle", _disk_full)
+        daemon = FakeNativeDaemonClient()
+
+        result = dispatch_tick(breaker_config, native_daemon=daemon)
+
+        assert result.spawned == 1
+        row = self._assert_kept(outcomes, daemon, fake_codex_job_runner)
+        assert "Do not spawn it again" in (outcomes[0].error or "")
+        (session,) = load_state().sessions
+        assert row.session_id == session.id
+        assert session.status == SessionStatus.ACTIVE
+        assert session.local_liveness is None
+        payload = post_launch_attention_payload(pages)
+        assert payload["session_name"] == f"test-client/auto-dev/{self._TICKET}"
+        assert payload["claude_session_id"] is None
+        assert payload["lane"] == "default"
+        assert payload["breadcrumbs"] == fire_and_forget_breadcrumb(
+            session.id,
+            "codex",
+            fake_codex_job_runner.procs[0].pid,
+            "OSError: disk full",
+        )
+        # R2: the real codex pre-flight wrote this worktree's context, and it
+        # is not headless, so the serve-boot orphan pass skips this session.
+        assert session.worktree_path is not None
+        context_file = session.worktree_path / ".claude" / "cw-context.json"
+        context = json.loads(context_file.read_text())
+        assert context["headless"] is False
+
+    def test_later_ticks_never_respawn_the_handleless_codex_worker(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+        fake_codex_job_runner: FakeFireAndForgetRunner,
+    ) -> None:
+        """(e2) Three ticks an hour apart, reconcile at ``reap_policy: auto``:
+        one codex job, no daemon spawn, the row RUNNING throughout."""
+        from freezegun import freeze_time
+
+        self._arrange(sample_client_config, monkeypatch, capture_events)
+        monkeypatch.setattr("cw.executor.core._store_liveness_handle", _raise_oserror)
+        daemon = FakeNativeDaemonClient()
+        _wire_later_tick_reconcile(monkeypatch, daemon)
+
+        statuses: list[QueueItemStatus] = []
+        with freeze_time(datetime.now(UTC)) as frozen:
+            for _ in range(3):
+                dispatch_tick(breaker_config, native_daemon=daemon)
+                statuses.append(load_dev_queue().tasks[0].status)
+                frozen.tick(timedelta(hours=1))
+
+        assert daemon.spawn_calls == []
+        assert len(fake_codex_job_runner.calls) == 1
+        assert statuses == [QueueItemStatus.RUNNING] * 3
+        (session,) = load_state().sessions
+        assert session.status == SessionStatus.ACTIVE
+        assert fake_codex_job_runner.procs[0].poll() is None
 
 
 class TestStampFailedThenAdopted:
