@@ -7845,6 +7845,66 @@ class TestWedgeActiveNullLivenessOrphan:
 
         assert self._check(state, queue) == []
 
+    @pytest.mark.parametrize(
+        ("backend", "executor_name"),
+        [("local", "aider"), ("opencode", "opencode")],
+    )
+    def test_fire_and_forget_backend_recipe_names_stop_then_close(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        backend: str,
+        executor_name: str,
+    ) -> None:
+        """aider/opencode: ``cw spawn close`` alone leaves the process running
+        (#2663), so the recipe names stopping it BEFORE the close."""
+        state, queue = self._seed(
+            tmp_config_dir,
+            tmp_path,
+            [self._make_session(tmp_path)],
+            [self._make_task()],
+            backend=backend,
+        )
+
+        findings = self._check(state, queue)
+
+        assert len(findings) == 1
+        recipe = findings[0].recipe
+        assert f"{executor_name} pid <pid>" in recipe
+        assert "still names the worker" in recipe
+        assert "If no page names a pid" in recipe
+        assert "skip the stop step" in recipe
+        assert recipe.index("stop that process") < recipe.index(
+            f"cw spawn close {_CLASS9_SID}"
+        )
+        assert "`cw spawn close` alone does not stop the process" in recipe
+        assert "second worker on the same worktree" in recipe
+        assert "no liveness record past its spawn grace" in recipe
+        self._assert_untouched()
+
+    @pytest.mark.parametrize("backend", ["claude-native", "future-backend"])
+    def test_non_fire_and_forget_recipe_is_close_only(
+        self, tmp_config_dir: Path, tmp_path: Path, backend: str
+    ) -> None:
+        """claude-native (and a backend this map does not know) keep the
+        close-only recipe: ``cw spawn close`` does stop a surface-backed worker."""
+        state, queue = self._seed(
+            tmp_config_dir,
+            tmp_path,
+            [self._make_session(tmp_path)],
+            [self._make_task()],
+            backend=backend,
+        )
+
+        findings = self._check(state, queue)
+
+        assert len(findings) == 1
+        recipe = findings[0].recipe
+        assert f"Run: cw spawn close {_CLASS9_SID}" in recipe
+        assert "stop that process" not in recipe
+        assert "alone does not stop" not in recipe
+        self._assert_untouched()
+
     def test_local_liveness_present_not_flagged(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
@@ -7893,6 +7953,7 @@ class TestWedgeActiveNullLivenessOrphan:
         assert finding.ticket_id == ticket_id
         assert _BACKEND_UNRESOLVED_TEXT in finding.recipe
         assert f"cw spawn close {_CLASS9_SID}" in finding.recipe
+        assert "stop that process" not in finding.recipe
 
     def test_unresolvable_task_advisory_finding(
         self, tmp_config_dir: Path, tmp_path: Path

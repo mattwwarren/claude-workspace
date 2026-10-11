@@ -33,6 +33,7 @@ from cw.executor.core import (
     _persist_runtime_error_diagnostics,
     _PreflightOK,
     codex_capability_diagnosis,
+    post_launch_recovery_guidance,
 )
 from cw.executor.local import LocalExecutor, _local_preflight
 from cw.executor.opencode import OpencodeExecutor, _opencode_preflight
@@ -58,6 +59,7 @@ __all__ = [
     "_opencode_preflight",
     "_persist_runtime_error_diagnostics",
     "codex_capability_diagnosis",
+    "post_launch_recovery_guidance",
     "resolve_executor",
     "resolve_executor_config",
     "resolve_pipeline_stages",

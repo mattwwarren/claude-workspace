@@ -77,6 +77,8 @@ _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL = "wedge/active-daemon-stale-no-sentinel"
 # against the client ceiling. Advisory only (ADR-0014): the eligibility test is
 # absence plus elapsed time, with no roster, PID, or terminal-result evidence,
 # so --reap never mutates it; the recipe names `cw spawn close <id>` instead.
+# For aider/opencode sessions it names stopping the process first (#2663):
+# `cw spawn close` alone does not stop a fire-and-forget worker.
 _WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN = "wedge/active-null-liveness-orphan"
 
 # Wedge class for daemon roster workers whose surface_ref names a cw session

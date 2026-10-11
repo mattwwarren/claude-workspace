@@ -25,9 +25,11 @@ from cw.doctor.wedge._constants import (
     _WEDGE_LEAKED_DAEMON_WORKER,
 )
 from cw.exceptions import CwError
-from cw.executor import resolve_executor_config
+from cw.executor import post_launch_recovery_guidance, resolve_executor_config
 from cw.models import (
     CODEX_BACKEND,
+    LOCAL_BACKEND,
+    OPENCODE_BACKEND,
     QueueItemStatus,
     SessionOrigin,
     SessionPurpose,
@@ -35,10 +37,25 @@ from cw.models import (
 )
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import SPAWN_GRACE_SECONDS, ticket_id_for_session
+from cw.reconcile.harvest_synthesis import AIDER_BACKEND
 from cw.reconcile.leaked_workers import find_leaked_daemon_workers
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, DevQueueStore, Session
+
+# Config backend name -> executor name the ``spawn_post_launch_failed`` page
+# breadcrumb uses (``<executor> pid <pid>``): ``resolve_executor_config`` yields
+# the former (``local`` runs aider), the latter keys
+# ``post_launch_recovery_guidance``. These are the fire-and-forget backends,
+# whose ``cw spawn close`` does not stop the process (#2663). Two limits: the
+# backend is read from the CURRENT config (a session records none when
+# ``local_liveness`` is None), so a ``clients.yaml`` backend change after launch
+# yields the close-only text; and a future fire-and-forget backend missing here
+# silently falls back to close-only.
+_FIRE_AND_FORGET_EXECUTOR_NAMES: dict[str, str] = {
+    LOCAL_BACKEND: AIDER_BACKEND,
+    OPENCODE_BACKEND: OPENCODE_BACKEND,
+}
 
 
 def _resolve_backend_for_orphan_check(
@@ -99,12 +116,31 @@ def _is_null_liveness_candidate(session: Session, cutoff: datetime) -> bool:
 def _null_liveness_orphan_recipe(
     session_id: str, backend: str | None, reason: str | None
 ) -> str:
-    """Recipe text for a class-9 finding; names the session id, never its name."""
+    """Recipe text for a class-9 finding; names the session id, never its name.
+
+    An aider or opencode session gets the stop-then-close steps of
+    :func:`~cw.executor.post_launch_recovery_guidance` (#2663): ``cw spawn
+    close`` alone leaves their process running. Any other resolved backend
+    keeps the close-only command.
+    """
     if backend is not None:
-        return (
+        lead = (
             f"ACTIVE session {session_id} has no daemon surface and no liveness "
             "record past its spawn grace — it holds a ceiling slot. "
-            f"Run: cw spawn close {session_id}"
+        )
+        executor_name = _FIRE_AND_FORGET_EXECUTOR_NAMES.get(backend)
+        if executor_name is None:
+            return f"{lead}Run: cw spawn close {session_id}"
+        guidance = post_launch_recovery_guidance(
+            executor_name=executor_name, sid=session_id
+        )
+        return (
+            f"{lead}Its {executor_name} worker may still be running. If the "
+            "session has a `spawn_post_launch_failed` page, it names the process "
+            f"(`{executor_name} pid <pid>`); confirm that pid still names the "
+            f"worker before killing it. If no page names a pid, find the "
+            f"{executor_name} process running in this session's worktree; if "
+            f"none is running, skip the stop step. Recovery: {guidance}"
         )
     return (
         f"ACTIVE session {session_id} has no daemon surface; could not resolve "
@@ -128,7 +164,9 @@ def _check_wedge_active_null_liveness_orphan(
     Advisory only (ADR-0014): eligibility is absence plus elapsed time, with
     no roster, dead-PID, or terminal-result evidence, so
     :func:`_reap_wedge_findings` never mutates on it. The recipe names the
-    per-session operator command, ``cw spawn close <id>``.
+    per-session operator command, ``cw spawn close <id>``; for an aider or
+    opencode session it first says to stop the worker process, because
+    ``cw spawn close`` alone does not stop it (#2663).
 
     ``CODEX_BACKEND`` sessions are excluded silently: CodexExecutor never sets
     either liveness channel by design (``executor.py``, #1727) and its orphans

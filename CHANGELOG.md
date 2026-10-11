@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Doctor wedge class 9 now says to stop the process before `cw spawn close` for aider and opencode sessions (#2663).** The `wedge/active-null-liveness-orphan` recipe named `cw spawn close <id>` alone, which does not stop a fire-and-forget worker, so following it left the process running and requeueing then started a second worker on the same worktree. For aider and opencode sessions the recipe now names the process (`<backend> pid <pid>` from the `spawn_post_launch_failed` page), says to confirm the pid before killing it (if no page names a pid, find the process running in the session's worktree, and skip the stop step if none is running), and gives the same stop-then-close steps as that page (`post_launch_recovery_guidance`, promoted from a private helper in `cw.executor.core`). codex stays excluded from class 9, and the claude-native and backend-unresolved recipes are unchanged. The backend is read from the current `clients.yaml`, so a backend change after launch yields the close-only recipe.
+
 ## [1.71.0] - 2026-10-11
 
 ### Added
