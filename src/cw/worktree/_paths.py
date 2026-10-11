@@ -117,8 +117,10 @@ def resolve_worker_tmpdir(worktree: Path) -> Path:
 def apply_worker_tmpdir(env: dict[str, str], worktree: Path) -> Path:
     """Point *env*'s TMPDIR/TMP/TEMP at *worktree*'s scratch dir; return it.
 
-    The one shared resolve -> mkdir -> force-set step every executor env
-    builder calls (``native_daemon._spawn_clean_env``,
+    The one shared resolve -> mkdir -> force-set step every env builder calls
+    (``native_daemon.daemon_worker_tmpdir_env``, the worker's own dir written
+    into ``settings.local.json``; ``native_daemon._spawn_clean_env`` with
+    ``Path.home()``, the neutral supervisor fallback ``~/.cw/tmp``, #2672;
     ``codex_runner.build_codex_run_env``, ``local_runner.build_env``,
     ``opencode_runner.build_env``), so a worker never writes scratch files to
     the host's shared ``/tmp`` tmpfs -- the 2026-09-27 ENOSPC incident.

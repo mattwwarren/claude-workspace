@@ -330,8 +330,17 @@ class OrchestratorConfig(BaseModel):
     # Modified` manifest). No lane override. The literal is pinned to
     # codex_fix_loop.growth.DEFAULT_GROWTH_BUDGET_LINES by a lockstep test.
     codex_fix_loop_growth_budget_lines: int = Field(default=40, ge=1)
+    # #2648 — loop-wide net non-test source lines, per originally-found
+    # finding, the fix loop may add across all its cycles (measured from the
+    # loop's start commit) before a cycle that itself adds net lines is parked
+    # codex_fix_growth_budget_exceeded. Same manifest gate and switch as the
+    # per-cycle budget. No lane override. The literal is pinned to
+    # codex_fix_loop.growth.DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES by a
+    # lockstep test.
+    codex_fix_loop_cumulative_growth_budget_lines: int = Field(default=40, ge=1)
     # #2633 — kill switch for the fix loop's heuristic guards: the growth
-    # budget (net lines, top-level def count), the lock, state-file and
+    # budget (net lines per cycle and, #2648, cumulative across the loop;
+    # top-level def count), the lock, state-file and
     # path-constant detectors, and the operator-constraint violation check.
     # It does not cover the constraint prompt section, the clean-start
     # refusal, the staged-set guard, the scope fence, revert guard,

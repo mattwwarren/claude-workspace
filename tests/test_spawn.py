@@ -1443,6 +1443,101 @@ class TestWriteHookContext:
 
         assert without_param == with_param
 
+    @staticmethod
+    def _expected_tmpdir_env(worktree: Path) -> dict[str, str]:
+        value = str(worktree.resolve() / ".cw" / "tmp")
+        return {"TMPDIR": value, "TMP": value, "TEMP": value}
+
+    def test_daemon_origin_writes_worker_tmpdir_env_block(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2672: the worker's own TMPDIR rides in settings.local.json's env.
+
+        ``claude --bg`` does not forward the caller env, so the per-worker value
+        must come from the settings file the worker loads at session start.
+        """
+        worktree = tmp_path / "worktree"
+        worktree.mkdir(parents=True)
+
+        self._call(worktree, origin=SessionOrigin.DAEMON)
+
+        settings = json.loads(
+            (worktree / ".claude" / "settings.local.json").read_text()
+        )
+        assert settings["env"] == self._expected_tmpdir_env(worktree)
+        assert (worktree.resolve() / ".cw" / "tmp").is_dir()
+
+    def test_daemon_origin_overwrites_a_sibling_worktree_tmpdir(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2672 self-heal: a stale env block naming another worktree is replaced."""
+        worktree = tmp_path / "worktree"
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True)
+        sibling = str(tmp_path / "sibling-wt" / ".cw" / "tmp")
+        (claude_dir / "settings.local.json").write_text(
+            json.dumps({"env": {"TMPDIR": sibling, "TMP": sibling, "TEMP": sibling}})
+        )
+
+        self._call(worktree, origin=SessionOrigin.DAEMON)
+
+        settings = json.loads((claude_dir / "settings.local.json").read_text())
+        assert settings["env"] == self._expected_tmpdir_env(worktree)
+
+    def test_user_origin_without_prior_settings_gets_env_block(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        worktree = tmp_path / "worktree"
+        worktree.mkdir(parents=True)
+
+        self._call(worktree, origin=SessionOrigin.USER)
+
+        settings = json.loads(
+            (worktree / ".claude" / "settings.local.json").read_text()
+        )
+        assert settings["env"] == self._expected_tmpdir_env(worktree)
+
+    def test_write_stop_hook_false_writes_no_env_and_no_scratch_dir(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2672: no settings file means no env block and no ``.cw/tmp`` created."""
+        from cw.spawn import _write_hook_context
+
+        worktree = tmp_path / "worktree"
+        worktree.mkdir(parents=True)
+
+        _write_hook_context(
+            worktree,
+            session_id="sess-codex",
+            session_name="test-client/auto-dev/137",
+            client="test-client",
+            purpose="impl",
+            ticket_id="137",
+            origin=SessionOrigin.DAEMON,
+            write_stop_hook=False,
+        )
+
+        assert not (worktree / ".claude" / "settings.local.json").exists()
+        assert not (worktree / ".cw" / "tmp").exists()
+
+    def test_hooks_payload_is_unchanged_by_the_env_block(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """The ``hooks`` key is exactly ``_build_hook_settings``'s output."""
+        from cw.spawn import _build_hook_settings
+
+        worktree = tmp_path / "worktree"
+        worktree.mkdir(parents=True)
+
+        self._call(worktree, origin=SessionOrigin.DAEMON)
+
+        settings = json.loads(
+            (worktree / ".claude" / "settings.local.json").read_text()
+        )
+        context_path = (worktree / HOOK_CONTEXT_RELATIVE_PATH).resolve()
+        assert set(settings) == {"hooks", "env"}
+        assert {"hooks": settings["hooks"]} == _build_hook_settings(context_path)
+
     def test_write_hook_context_prior_attempts_summary_with_write_stop_hook_false(
         self,
         tmp_config_dir: Path,

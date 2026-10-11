@@ -1286,6 +1286,12 @@
      "title": "Codex Fix Loop Growth Budget Lines",
      "type": "integer"
     },
+    "codex_fix_loop_cumulative_growth_budget_lines": {
+     "default": 40,
+     "minimum": 1,
+     "title": "Codex Fix Loop Cumulative Growth Budget Lines",
+     "type": "integer"
+    },
     "codex_fix_loop_growth_guard_enabled": {
      "default": true,
      "title": "Codex Fix Loop Growth Guard Enabled",
@@ -2493,6 +2499,12 @@
      "title": "Codex Fix Loop Growth Budget Lines",
      "type": "integer"
     },
+    "codex_fix_loop_cumulative_growth_budget_lines": {
+     "default": 40,
+     "minimum": 1,
+     "title": "Codex Fix Loop Cumulative Growth Budget Lines",
+     "type": "integer"
+    },
     "codex_fix_loop_growth_guard_enabled": {
      "default": true,
      "title": "Codex Fix Loop Growth Guard Enabled",
@@ -3062,6 +3074,7 @@
    "default_codex_fix_loop_enabled": false,
    "codex_fix_loop_stall_cycles": 1,
    "codex_fix_loop_growth_budget_lines": 40,
+   "codex_fix_loop_cumulative_growth_budget_lines": 40,
    "codex_fix_loop_growth_guard_enabled": true,
    "codex_claim_suppression_enabled": false,
    "liveness_buckets_minutes": [

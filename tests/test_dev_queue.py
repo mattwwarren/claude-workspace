@@ -81,6 +81,7 @@ from tests._worktree_helpers import patch_worktree
 from tests.conftest import (
     _make_daemon_session,
     _make_ticket_task,
+    _seed_lock_holds,
     _stop_leaves_worker_listed,
     _stop_makes_roster_unreadable,
     _write_project_config_yaml,
@@ -866,6 +867,86 @@ class TestCLIDevQueueStatus:
         result = runner.invoke(main, ["dev-queue", "status"])
         assert result.exit_code == 0, result.output
         assert "[STALE" not in result.output
+
+    def test_status_shows_longest_completed_lock_hold(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+    ) -> None:
+        """Seeded lock-hold records render one footer line (#2637)."""
+        add_ticket(TicketTask(ticket_id="GEN-300", client="genhealth"))
+        _seed_lock_holds(
+            {
+                "at": datetime.now(UTC) - timedelta(minutes=14),
+                "held_s": 12.4,
+                "caller": "cw.dispatch.tick:dispatch_tick",
+            }
+        )
+
+        result = CliRunner().invoke(main, ["dev-queue", "status"])
+
+        assert result.exit_code == 0, result.output
+        assert "Longest completed lock hold, last hour:" in result.output
+        assert "sessions 12.4s (cw.dispatch.tick:dispatch_tick, 14m ago" in (
+            result.output
+        )
+
+    def test_status_without_lock_holds_has_no_footer(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+    ) -> None:
+        add_ticket(TicketTask(ticket_id="GEN-301", client="genhealth"))
+
+        result = CliRunner().invoke(main, ["dev-queue", "status"])
+
+        assert result.exit_code == 0, result.output
+        assert "Longest completed lock hold" not in result.output
+
+    def test_status_json_unchanged_by_lock_holds(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--json stays a dict keyed by client; lock holds live in doctor --json."""
+        from cw.orchestrate import TickSummary
+
+        add_ticket(TicketTask(ticket_id="GEN-302", client="genhealth"))
+        _seed_lock_holds({"held_s": 12.0})
+        tick = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason="none",
+            tick_at=datetime.now(UTC),
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
+            lambda: {"genhealth": tick},
+        )
+
+        result = CliRunner().invoke(main, ["dev-queue", "status", "--json"])
+
+        assert result.exit_code == 0, result.output
+        assert list(json.loads(result.output)) == ["genhealth"]
+
+    def test_status_unreadable_lock_hold_sink_prints_nothing_extra(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        add_ticket(TicketTask(ticket_id="GEN-303", client="genhealth"))
+        not_a_dir = tmp_dev_queue / "regular-file"
+        not_a_dir.write_text("")
+        monkeypatch.setattr("cw.cli.dev_queue.status.state_dir", lambda: not_a_dir)
+
+        result = CliRunner().invoke(main, ["dev-queue", "status"])
+
+        assert result.exit_code == 0, result.output
+        assert "Longest completed lock hold" not in result.output
 
 
 # ---------------------------------------------------------------------------

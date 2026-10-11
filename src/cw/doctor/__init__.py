@@ -23,6 +23,9 @@ re-exports. Submodules:
 - ``routed_result_wedge`` — the stranded routed-result session class (#2524)
   and its explicit-command ``--reap`` close (the orchestrator session counts,
   ADR-0020).
+- ``lock_holds`` — the longest recent completed sessions / dev-queue lock
+  holds and waits from the ``cw._lock_hold`` sidecar, with the aggregate
+  state load/save share (#2637).
 - ``loop_health`` — dispatch loop health/liveness, TIMED_OUT-merged detection,
   and targeted single-session reap.
 - ``versions`` — claude/cw version + dependency checks, bypass disclaimer,
@@ -36,6 +39,9 @@ re-exports. Submodules:
 - ``user_level_hooks`` — detection of a ``cw signal-stop`` Stop hook installed
   in ``~/.claude/settings{,.local}.json``, where it applies to every Claude
   session instead of just cw's worktrees (#2226).
+- ``worker_tmpdir`` — detection of live cw daemon workers whose effective
+  TMPDIR is outside their own worktree (settings ``env``, then ``/proc``
+  environ guarded by the roster ``procStart``) (#2672).
 - ``core`` — the ``run_doctor`` orchestrator that assembles the full report.
 - ``report`` — human-readable and JSON rendering.
 """
@@ -66,6 +72,7 @@ from cw.doctor.linkage import (
     _check_workspace_paths,
     _check_worktree_paths_sessions,
 )
+from cw.doctor.lock_holds import _check_lock_holds
 from cw.doctor.loop_health import (
     _check_loop_health,
     _check_loop_liveness,
@@ -95,6 +102,7 @@ from cw.doctor.wedge import (
     _check_wedge_task_running_no_session,
     _reap_wedge_findings,
 )
+from cw.doctor.worker_tmpdir import _check_worker_tmpdir_scope
 
 __all__ = [
     "_CW_DEPS_CHECK_NAME",
@@ -119,6 +127,7 @@ __all__ = [
     "_check_dispatch_repo_head",
     "_check_inbox_size",
     "_check_linkage",
+    "_check_lock_holds",
     "_check_loop_health",
     "_check_loop_liveness",
     "_check_orchestrator_config",
@@ -133,6 +142,7 @@ __all__ = [
     "_check_wedge_repo_ahead",
     "_check_wedge_task_running_completed_session",
     "_check_wedge_task_running_no_session",
+    "_check_worker_tmpdir_scope",
     "_check_workspace_paths",
     "_check_worktree_paths_sessions",
     "_dep_distribution_name",

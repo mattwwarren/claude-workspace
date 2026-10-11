@@ -18,6 +18,7 @@ from cw.native_daemon import (
     RealNativeDaemonClient,
     WorkerHome,
     _is_native_surface_ref,
+    daemon_worker_tmpdir_env,
     get_native_daemon_client,
     model_supports_auto,
     read_supervisor_resume_session_id,
@@ -212,13 +213,16 @@ class TestRealNativeDaemonClientSpawnGitEnv:
             f"PWD must be overridden to str(cwd); got {env.get('PWD')!r}"
         )
 
-    def test_tmpdir_delegates_to_shared_worker_tmpdir_helper(
+    def test_supervisor_env_carries_no_worktree_scoped_tmpdir(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """TMPDIR must point at the worktree's own scratch dir (#2470).
+        """The ``claude --bg`` env exports the neutral ``~/.cw/tmp`` (#2672).
 
-        Delegation assertion only: the override-vs-ambient behavior itself is
-        covered once, on ``apply_worker_tmpdir`` in test_worktree_paths.py.
+        ``claude --bg`` does not forward the caller's env to the worker; the
+        first spawn's env seeds the supervisor, and every later worker inherits
+        it. A worktree-scoped value there leaks into every sibling worker, so
+        the spawn env carries a worktree-independent dir instead -- and
+        overrides an ambient sibling-worktree value, not ``setdefault``.
         """
         captured: dict[str, object] = {}
 
@@ -226,14 +230,87 @@ class TestRealNativeDaemonClientSpawnGitEnv:
             captured.update(kwargs)
             return _FakeCompleted(stdout="backgrounded · a1b2c3d4\n")
 
-        monkeypatch.setenv("TMPDIR", "/tmp")
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        sibling_scratch = str(tmp_path / "other-wt" / ".cw" / "tmp")
+        for var in ("TMPDIR", "TMP", "TEMP"):
+            monkeypatch.setenv(var, sibling_scratch)
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        RealNativeDaemonClient().spawn_bg(cwd=tmp_path, prompt="x")
+        RealNativeDaemonClient().spawn_bg(cwd=worktree, prompt="x")
 
         env = captured.get("env")
         assert isinstance(env, dict)
-        assert env["TMPDIR"] == str(resolve_worker_tmpdir(tmp_path))
+        neutral = Path(env["TMPDIR"])
+        assert env["TMPDIR"] == env["TMP"] == env["TEMP"] == str(neutral)
+        assert neutral == Path.home() / ".cw" / "tmp"
+        for var in ("TMPDIR", "TMP", "TEMP"):
+            assert not Path(env[var]).is_relative_to(worktree)
+        assert neutral.is_dir()
+
+    def test_live_roster_without_supervisor_pid_preserves_fallback_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A roster without supervisor identity cannot remove the fallback."""
+        fallback = Path.home() / ".cw" / "tmp"
+        fallback.mkdir(parents=True)
+        marker = fallback / "active-worker-scratch"
+        marker.write_text("keep", encoding="utf-8")
+        roster = tmp_path / "roster.json"
+        roster.write_text(
+            json.dumps({"workers": {"worker": {"cwd": str(tmp_path / "wt")}}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("cw.native_daemon._ROSTER_PATH", roster)
+
+        def fake_run(args: object, **kwargs: object) -> _FakeCompleted:
+            return _FakeCompleted(stdout="backgrounded · a1b2c3d4\n")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        RealNativeDaemonClient().spawn_bg(cwd=tmp_path / "wt", prompt="x")
+
+        assert marker.read_text(encoding="utf-8") == "keep"
+
+    def test_worker_scratch_dir_is_still_created_at_spawn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``<cwd>/.cw/tmp`` exists after every spawn (#2672).
+
+        Resume paths do not rewrite ``settings.local.json``, so the dir its
+        ``env`` block names must be created by the spawn itself.
+        """
+
+        def fake_run(args: object, **kwargs: object) -> _FakeCompleted:
+            return _FakeCompleted(stdout="backgrounded · a1b2c3d4\n")
+
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        RealNativeDaemonClient().spawn_bg(cwd=worktree, prompt="x")
+
+        assert (worktree / ".cw" / "tmp").is_dir()
+
+
+class TestDaemonWorkerTmpdirEnv:
+    """daemon_worker_tmpdir_env: the worker's own scratch dir as a settings env."""
+
+    def test_returns_exactly_the_three_vars_at_the_worktree_scratch_dir(
+        self, tmp_path: Path
+    ) -> None:
+        env = daemon_worker_tmpdir_env(tmp_path)
+        value = str(resolve_worker_tmpdir(tmp_path))
+        assert env == {"TMPDIR": value, "TMP": value, "TEMP": value}
+
+    def test_creates_the_dir(self, tmp_path: Path) -> None:
+        daemon_worker_tmpdir_env(tmp_path)
+        assert resolve_worker_tmpdir(tmp_path).is_dir()
+
+    def test_is_idempotent(self, tmp_path: Path) -> None:
+        first = daemon_worker_tmpdir_env(tmp_path)
+        second = daemon_worker_tmpdir_env(tmp_path)
+        assert first == second
+        assert resolve_worker_tmpdir(tmp_path).is_dir()
 
 
 @pytest.fixture
@@ -1002,6 +1079,50 @@ class TestRealNativeDaemonClientWorkerCwds:
         assert client.list_live_worker_cwds() is None
 
 
+def _observed_worker() -> dict[str, object]:
+    """One roster worker entry, copied from a live ``roster.json`` and redacted.
+
+    The shape (keys, nesting, value types, ``dispatch.env == {}``) is observed
+    from claude 2.1.296's roster, not authored; ``rvAuth``/``ptyAuth`` are
+    dummy values, ids/paths/sockets are placeholders. ``procStart`` is field
+    22 (starttime) of ``/proc/<pid>/stat``, hence a string of digits (#2672).
+    """
+    return {
+        "pid": 3894201,
+        "procStart": "77143177",
+        "sessionId": "00000000-0000-4000-8000-000000000000",
+        "rendezvousSock": "/run/redacted/rv/44ab3d1b.sock",
+        "ptySock": "/run/redacted/pty/00000000.pty.sock",
+        "cliVersion": "2.1.296",
+        "startedAt": 1760000000000,
+        "attempt": 1,
+        "cwd": "/wt/dev-0000",
+        "dispatch": {
+            "proto": 1,
+            "short": "44ab3d1b",
+            "nonce": "redacted",
+            "sessionId": "00000000-0000-4000-8000-000000000000",
+            "createdAt": 1760000000000,
+            "source": "shell",
+            "cwd": "/wt/dev-0000",
+            "launch": {
+                "mode": "prompt",
+                "args": ["--session-id", "00000000-0000-4000-8000-000000000000"],
+                "restoresTranscript": False,
+            },
+            "env": {},
+            "isolation": "none",
+            "respawnFlags": ["--permission-mode", "auto"],
+            "seed": {"intent": "/auto-dev-impl 0000 --headless"},
+        },
+        "decModes": [2004, 2031, 1004, 1000, 1002, 1003, 1006],
+        "rvAuth": "dummy-rv-auth",
+        "ptyAuth": "dummy-pty-auth",
+        "replPid": 3894202,
+        "replProcStart": "77143180",
+    }
+
+
 class TestRealNativeDaemonClientWorkerHomes:
     """list_live_worker_homes: (short id, cwd) pairs for #2480's surface_ref match."""
 
@@ -1020,9 +1141,52 @@ class TestRealNativeDaemonClientWorkerHomes:
         client = RealNativeDaemonClient(roster_path=roster)
         assert client.list_live_worker_homes() == frozenset(
             {
-                WorkerHome("aaaa1111", Path("/wt/one")),
-                WorkerHome("bbbb2222", Path("/wt/two")),
+                WorkerHome("aaaa1111", Path("/wt/one"), 1, None),
+                WorkerHome("bbbb2222", Path("/wt/two"), 2, None),
             }
+        )
+
+    def test_populates_pid_and_proc_start_from_observed_entry(
+        self, tmp_path: Path
+    ) -> None:
+        """``pid``/``procStart`` ride along for the worker-tmpdir-scope check."""
+        roster = tmp_path / "roster.json"
+        roster.write_text(json.dumps({"workers": {"44ab3d1b": _observed_worker()}}))
+        client = RealNativeDaemonClient(roster_path=roster)
+        assert client.list_live_worker_homes() == frozenset(
+            {WorkerHome("44ab3d1b", Path("/wt/dev-0000"), 3894201, "77143177")}
+        )
+
+    def test_pid_and_proc_start_none_when_absent(self, tmp_path: Path) -> None:
+        entry = _observed_worker()
+        del entry["pid"]
+        del entry["procStart"]
+        roster = tmp_path / "roster.json"
+        roster.write_text(json.dumps({"workers": {"44ab3d1b": entry}}))
+        (home,) = RealNativeDaemonClient(roster_path=roster).list_live_worker_homes()
+        assert home.pid is None
+        assert home.proc_start is None
+
+    @pytest.mark.parametrize(
+        ("pid", "proc_start"),
+        [
+            pytest.param(True, 77143177, id="bool-pid-int-procstart"),
+            pytest.param("3894201", None, id="str-pid-null-procstart"),
+            pytest.param(3894201.0, ["77143177"], id="float-pid-list-procstart"),
+        ],
+    )
+    def test_invalid_pid_or_proc_start_yields_none(
+        self, tmp_path: Path, pid: object, proc_start: object
+    ) -> None:
+        """A wrong-typed value degrades to None; the cwd view does not fail."""
+        entry = _observed_worker()
+        entry["pid"] = pid
+        entry["procStart"] = proc_start
+        roster = tmp_path / "roster.json"
+        roster.write_text(json.dumps({"workers": {"44ab3d1b": entry}}))
+        client = RealNativeDaemonClient(roster_path=roster)
+        assert client.list_live_worker_homes() == frozenset(
+            {WorkerHome("44ab3d1b", Path("/wt/dev-0000"), None, None)}
         )
 
     def test_absent_roster_returns_empty_set(self, tmp_path: Path) -> None:
@@ -1189,6 +1353,17 @@ class TestFakeNativeDaemonClient:
         client.spawn_bg(cwd=tmp_path, prompt="x")
         client.roster_unreadable = True
         assert client.list_live_worker_homes() is None
+
+    def test_seed_live_worker_surfaces_pid_and_proc_start(self, tmp_path: Path) -> None:
+        client = FakeNativeDaemonClient()
+        seeded = client.seed_live_worker(tmp_path / "one", pid=42, proc_start="777")
+        bare = client.seed_live_worker(tmp_path / "two")
+        assert client.list_live_worker_homes() == frozenset(
+            {
+                WorkerHome(seeded, tmp_path / "one", 42, "777"),
+                WorkerHome(bare, tmp_path / "two", None, None),
+            }
+        )
 
     def test_short_ids_fail_closed_none_when_roster_unreadable(
         self, tmp_path: Path

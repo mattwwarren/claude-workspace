@@ -296,14 +296,23 @@ def _spawn_clean_env(cwd: Path) -> dict[str, str]:
     — it silently reshapes the behavior of other tools (pytest plugins, etc.)
     beyond just prompt suppression.
 
-    Finally points TMPDIR/TMP/TEMP at ``<cwd>/.cw/tmp`` via the shared
-    :func:`cw.worktree.apply_worker_tmpdir` (#2470), so the worker's scratch
-    files never land on the host's shared ``/tmp`` tmpfs. The import is
-    function-local on purpose: ``cw.worktree``'s package ``__init__`` imports
-    ``_lifecycle``, which imports ``get_native_daemon_client`` from this
-    module at module scope, so a module-level import here would be circular.
+    Finally points TMPDIR/TMP/TEMP at the neutral, worktree-independent
+    ``~/.cw/tmp`` via the shared :func:`cw.worktree.apply_worker_tmpdir`
+    (#2470, #2672), so scratch files never land on the host's shared ``/tmp``
+    tmpfs. This env does NOT reach the worker it spawns: ``claude --bg``
+    forwards none of it, and the first spawn's env seeds the supervisor whose
+    frozen value every later worker inherits. A worktree-scoped value here
+    became every worker's TMPDIR, and removing that worktree pulled it out
+    from under the fleet (#2672). The worker's own ``<cwd>/.cw/tmp`` reaches
+    it through ``settings.local.json`` instead (see
+    :func:`daemon_worker_tmpdir_env`); it is still created here so it exists
+    on resume paths, which do not rewrite settings. ``Path.home()`` is read
+    at call time. The import is function-local on purpose: ``cw.worktree``'s
+    package ``__init__`` imports ``_lifecycle``, which imports
+    ``get_native_daemon_client`` from this module at module scope, so a
+    module-level import here would be circular.
     """
-    from cw.worktree import apply_worker_tmpdir
+    from cw.worktree import apply_worker_tmpdir, resolve_worker_tmpdir
 
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["PWD"] = str(cwd)
@@ -313,7 +322,29 @@ def _spawn_clean_env(cwd: Path) -> dict[str, str]:
     env["GH_PAGER"] = "cat"
     env["GH_NO_UPDATE_NOTIFIER"] = "1"
     env["GIT_TERMINAL_PROMPT"] = "0"
-    apply_worker_tmpdir(env, cwd)
+    resolve_worker_tmpdir(cwd).mkdir(parents=True, exist_ok=True)
+    apply_worker_tmpdir(env, Path.home())
+    return env
+
+
+def daemon_worker_tmpdir_env(worktree: Path) -> dict[str, str]:
+    """Return TMPDIR/TMP/TEMP pointing at *worktree*'s own ``.cw/tmp`` (#2672).
+
+    The value ``spawn._write_hook_context`` writes as the top-level ``env``
+    block of ``<worktree>/.claude/settings.local.json``, which the worker loads
+    at session start. It cannot travel through the spawn env: ``claude --bg``
+    has no env-forwarding flag and does not populate the dispatch envelope's
+    env slot (RFC 0001 Row 10, ADR-0003, #133; ``dispatch.env`` is ``{}`` in
+    the live roster), and every worker is a pre-warmed process of the
+    supervisor, whose env was seeded by whichever spawn started it. Resolves,
+    creates and sets the dir through :func:`cw.worktree.apply_worker_tmpdir`,
+    so there is one resolve/mkdir implementation. Function-local import for
+    the same circularity reason as :func:`_spawn_clean_env`.
+    """
+    from cw.worktree import apply_worker_tmpdir
+
+    env: dict[str, str] = {}
+    apply_worker_tmpdir(env, worktree)
     return env
 
 
@@ -327,10 +358,17 @@ class WorkerHome(NamedTuple):
     ``Session.surface_ref`` (#2480). :meth:`NativeDaemonClient.
     list_live_worker_homes` keeps both fields for callers that need the
     latter, chiefly :func:`cw.worktree.live_home_reason`.
+
+    ``pid`` and ``proc_start`` carry the roster's ``pid`` and ``procStart``
+    (``/proc/<pid>/stat`` field 22) for the ``worker-tmpdir-scope`` doctor
+    check (#2672); ``None`` when the roster lacks them or holds a wrong type.
+    NamedTuple equality includes both fields.
     """
 
     short_id: str
     cwd: Path
+    pid: int | None = None
+    proc_start: str | None = None
 
 
 @runtime_checkable
@@ -597,14 +635,16 @@ class RealNativeDaemonClient:
         Same failure semantics as :meth:`list_live_worker_cwds`: an absent
         roster is an empty frozenset; an unreadable or malformed file, or a
         worker entry with no usable non-empty string ``cwd``, is ``None``
-        (logged at WARNING).
+        (logged at WARNING). ``pid``/``procStart`` do NOT fail closed: a
+        missing or wrong-typed value is just ``None`` (#2672).
         """
         workers = _read_roster_workers(self._roster_path)
         if workers is None:
             return None
         homes: set[WorkerHome] = set()
         for short_id, entry in workers.items():
-            cwd = entry.get("cwd") if isinstance(entry, dict) else None
+            fields: dict[str, object] = entry if isinstance(entry, dict) else {}
+            cwd = fields.get("cwd")
             if not isinstance(cwd, str) or not cwd:
                 _log.warning(
                     "native daemon roster at %s: worker %s has no usable cwd",
@@ -612,7 +652,16 @@ class RealNativeDaemonClient:
                     short_id,
                 )
                 return None
-            homes.add(WorkerHome(short_id, Path(cwd)))
+            pid = fields.get("pid")
+            proc_start = fields.get("procStart")
+            homes.add(
+                WorkerHome(
+                    short_id,
+                    Path(cwd),
+                    pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
+                    proc_start if isinstance(proc_start, str) else None,
+                )
+            )
         return frozenset(homes)
 
     def stop(self, short_id: str) -> None:
@@ -645,6 +694,9 @@ class FakeNativeDaemonClient:
         self.stop_calls: list[str] = []
         self._live: set[str] = set()
         self._cwd_by_id: dict[str, Path] = {}
+        # Roster pid/procStart per seeded worker (#2672); absent means None.
+        self._pid_by_id: dict[str, int] = {}
+        self._proc_start_by_id: dict[str, str] = {}
         self.raise_usage_limit: bool = False
         self.usage_limit_reset_at: datetime | None = None
         self.raise_unregistered: bool = False
@@ -688,7 +740,9 @@ class FakeNativeDaemonClient:
             self._cwd_by_id[short_id] = cwd
         return short_id
 
-    def seed_live_worker(self, cwd: Path) -> str:
+    def seed_live_worker(
+        self, cwd: Path, *, pid: int | None = None, proc_start: str | None = None
+    ) -> str:
         """Register a live worker homed at *cwd* without a real spawn (#2213).
 
         Test-only seeding for occupancy tests: registers the worker directly in
@@ -696,12 +750,17 @@ class FakeNativeDaemonClient:
         appending to ``spawn_calls`` the way :meth:`spawn_bg` would -- a test
         proving "occupied, so nothing was spawned" must not itself record a
         spawn to make the occupant appear. Returns the short id, for a test
-        that also wants to :meth:`stop` it.
+        that also wants to :meth:`stop` it. *pid*/*proc_start* surface on the
+        worker's :class:`WorkerHome` (#2672).
         """
         self._counter += 1
         short_id = f"{self._counter:08x}"
         self._live.add(short_id)
         self._cwd_by_id[short_id] = cwd
+        if pid is not None:
+            self._pid_by_id[short_id] = pid
+        if proc_start is not None:
+            self._proc_start_by_id[short_id] = proc_start
         return short_id
 
     def list_live_session_short_ids(self) -> set[str]:
@@ -737,7 +796,14 @@ class FakeNativeDaemonClient:
             cwd = self._cwd_by_id.get(short_id)
             if cwd is None:
                 return None
-            homes.add(WorkerHome(short_id, cwd))
+            homes.add(
+                WorkerHome(
+                    short_id,
+                    cwd,
+                    self._pid_by_id.get(short_id),
+                    self._proc_start_by_id.get(short_id),
+                )
+            )
         return frozenset(homes)
 
     def stop(self, short_id: str) -> None:

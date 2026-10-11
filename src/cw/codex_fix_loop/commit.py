@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from cw.codex_fix_loop.constraints import OperatorConstraints
     from cw.codex_fix_loop.convergence import _OpenFindingKey
     from cw.codex_fix_loop.fence import FenceBreach
+    from cw.codex_fix_loop.growth import LoopGrowthBudget
     from cw.codex_fix_loop.snapshot import _PersistedSnapshot
     from cw.codex_review import _SensitiveHit
     from cw.codex_runner import CodexRunner, CodexRunResult
@@ -419,11 +420,16 @@ def _park_invocation_failure(ctx: _CycleContext, result: CodexRunResult) -> _Par
 
 @dataclass(frozen=True)
 class _GrowthGuards:
-    """The switchable heuristic guards' settings for one run (#2633)."""
+    """The switchable heuristic guards' settings for one run (#2633).
+
+    ``loop_budget`` (#2648) is the loop-wide net-line budget, checked inside
+    the growth guard and so covered by the same switch and manifest gate.
+    """
 
     enabled: bool
     budget_lines: int
     constraints: OperatorConstraints | None
+    loop_budget: LoopGrowthBudget | None = None
 
 
 def _growth_breach(
@@ -448,6 +454,7 @@ def _growth_breach(
             open_findings=findings,
             budget_lines=guards.budget_lines,
             cycle=ctx.cycle,
+            loop_budget=guards.loop_budget,
         )
         if breach is not None:
             return breach
@@ -531,6 +538,7 @@ def _run_fix_and_commit(
     growth_budget_lines: int = DEFAULT_GROWTH_BUDGET_LINES,
     growth_guard_enabled: bool = True,
     constraints: OperatorConstraints | None = None,
+    loop_growth_budget: LoopGrowthBudget | None = None,
 ) -> tuple[_Park | None, str | None]:
     """Run one cycle's fix invocation and commit; return ``(park, commit_sha)``.
 
@@ -545,6 +553,8 @@ def _run_fix_and_commit(
     skipped when ``growth_guard_enabled`` is False), a staged-set mismatch, or
     a failed commit — ``commit_sha`` is always ``None`` alongside it.
     *constraints* also reach the fix prompt regardless of the switch.
+    *loop_growth_budget* (#2648) adds the loop-wide net-line check to the
+    growth guard; ``None`` checks this cycle alone.
     """
     ctx = _CycleContext(
         task=task,
@@ -582,7 +592,9 @@ def _run_fix_and_commit(
         scope_tier=scope_tier,
         default_branch=default_branch,
         allowed_files=allowed_files,
-        guards=_GrowthGuards(growth_guard_enabled, growth_budget_lines, constraints),
+        guards=_GrowthGuards(
+            growth_guard_enabled, growth_budget_lines, constraints, loop_growth_budget
+        ),
     )
     if breach is not None:
         return ctx.park_breach(breach), None
