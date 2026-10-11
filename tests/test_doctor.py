@@ -8590,7 +8590,7 @@ class TestCheckLockHolds:
         assert "Reading lock-hold numbers" in result.detail
 
     def test_aggregate_not_longest_ratio_decides(self, tmp_config_dir: Path) -> None:
-        """R2 seed: the longest io-carrying record's own ratio is 0.75, aggregate 9/40."""
+        """R2 seed: longest io-carrying record's own ratio 0.75, aggregate 9/40."""
         from cw.doctor import _check_lock_holds
 
         _seed_lock_holds(

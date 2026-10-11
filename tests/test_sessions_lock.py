@@ -221,8 +221,9 @@ class TestSessionsLockHoldRecording:
         assert _recorded_holds() == []
 
     def test_body_that_raises_still_records(self) -> None:
-        with pytest.raises(KeyError, match="body"), sessions_lock():
-            raise KeyError("body")
+        msg = "body"
+        with pytest.raises(KeyError, match=msg), sessions_lock():
+            raise KeyError(msg)
 
         (record,) = _recorded_holds()
         assert record.lock == "sessions"

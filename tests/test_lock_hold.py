@@ -206,9 +206,7 @@ class TestFlush:
         def spy(
             sink_dir: Callable[[], Path], state_file_fn: Callable[[], Path]
         ) -> None:
-            calls.append(
-                (tuple(h.name for h in held_locks()), _today_path().exists())
-            )
+            calls.append((tuple(h.name for h in held_locks()), _today_path().exists()))
             real_flush(sink_dir, state_file_fn)
 
         monkeypatch.setattr("cw._lock_hold.flush_pending", spy)
@@ -235,9 +233,7 @@ class TestFlush:
 
         flush_pending(lambda: not_a_dir, state_file)
 
-        assert any(
-            "flush_pending failed" in r.getMessage() for r in caplog.records
-        )
+        assert any("flush_pending failed" in r.getMessage() for r in caplog.records)
         # The batch was taken before the failed write: nothing retries.
         _flush()
         assert not _today_path().exists()
@@ -378,9 +374,7 @@ class TestCapPolicy:
     def test_nothing_written_past_ceiling(self, small_cap: int) -> None:
         assert select_lines([_record(held_s=30.0)], small_cap, _NOW) == []
 
-    def test_file_stays_bounded_with_one_marker_per_stage(
-        self, small_cap: int
-    ) -> None:
+    def test_file_stays_bounded_with_one_marker_per_stage(self, small_cap: int) -> None:
         sink = state_dir()
         small = _record()
         warn = _record(held_s=30.0)
@@ -456,9 +450,7 @@ class TestReadWindow:
         day_path(state_dir(), now.date()).mkdir(parents=True)
         assert read_window(state_dir(), now=now).records == []
 
-    @pytest.mark.parametrize(
-        ("stage", "ceiling"), [("cap", False), ("ceiling", True)]
-    )
+    @pytest.mark.parametrize(("stage", "ceiling"), [("cap", False), ("ceiling", True)])
     def test_todays_marker_sets_capped(self, stage: str, ceiling: bool) -> None:
         now = datetime.now(UTC)
         _seed_lock_holds(raw_lines=[_marker_line(stage, now)])
@@ -596,14 +588,15 @@ class TestTimedStateIo:
         assert record.state_io_s == 3.0
 
     def test_exception_passes_through(self) -> None:
-        with pytest.raises(KeyError, match="boom"), timed_state_io():
-            raise KeyError("boom")
+        msg = "boom"
+        with pytest.raises(KeyError, match=msg), timed_state_io():
+            raise KeyError(msg)
         with (
-            pytest.raises(KeyError, match="boom"),
+            pytest.raises(KeyError, match=msg),
             sessions_lock(),
             timed_state_io(),
         ):
-            raise KeyError("boom")
+            raise KeyError(msg)
 
     def test_load_state_under_lock_records_state_io(self) -> None:
         with sessions_lock():
@@ -856,9 +849,9 @@ class TestFailureIsolation:
             with pytest.raises(expected):
                 _run_body(action)
 
+        messages = [r.getMessage() for r in caplog.records]
         assert any(
-            r.getMessage().startswith("lock-hold recorder") and "failed" in r.getMessage()
-            for r in caplog.records
+            m.startswith("lock-hold recorder") and "failed" in m for m in messages
         )
         # The lock is released and usable afterwards.
         _hold_sessions()
