@@ -802,6 +802,9 @@ def _run_codex_review_and_complete(
             disposition_drift_check_enabled=disposition_drift_check_enabled,
             stall_cycles=_resolve_codex_fix_loop_stall_cycles(client, task, config),
             growth_budget_lines=config.codex_fix_loop_growth_budget_lines,
+            cumulative_growth_budget_lines=(
+                config.codex_fix_loop_cumulative_growth_budget_lines
+            ),
             growth_guard_enabled=_resolve_codex_fix_loop_growth_guard_enabled(
                 client, task, config
             ),

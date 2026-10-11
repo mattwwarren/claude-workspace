@@ -122,7 +122,8 @@ CODEX_FIX_DIRTY_START = "codex_fix_dirty_start"
 CODEX_FIX_HOOK_FAILED = "codex_fix_hook_failed"
 # A fix cycle added code inside an allowed file beyond what the open findings
 # justify: a new lock, on-disk state file or path constant, too many new
-# top-level definitions, or more net source lines than the per-cycle budget.
+# top-level definitions, or more net source lines than the per-cycle or the
+# loop-wide (#2648, cumulative since the fix loop began) budget.
 CODEX_FIX_GROWTH_BUDGET = "codex_fix_growth_budget_exceeded"
 # A fix cycle introduced something a binding operator constraint (the
 # operator's ``auto-dev-preflight-resolutions`` comment) rules out.
