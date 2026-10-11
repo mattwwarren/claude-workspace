@@ -776,7 +776,9 @@ idle, stalled and phantom sweeps' stage-mismatch refusals (via
 loop's per-tick staleness watchdog (via `_notify_stale_clients_with_pending`)
 in `cw.dispatch`; and `spawn_create_impl` in `cw.spawn` plus the dispatch
 claim path's `_handle_post_launch_failure` in `cw.dispatch.claim.spawn`, both
-through `cw.spawn.emit_spawn_post_launch_attention` (#2502). (The former
+through `cw.spawn.emit_spawn_post_launch_attention` (#2502).
+`_spawn_fire_and_forget` in `cw.executor.core` also emits it, through
+`cw.spawn.emit_spawn_post_launch_attention` (#2592). (The former
 idle-watchdog / salvage / salvage-skip emitters were removed with the
 process-kill timeouts, ADR-0014.) The liveness sweep's
 distress check is skipped entirely for a row parked with
@@ -921,7 +923,12 @@ open enum; consumers MUST tolerate unknown values. Known values:
   when its transcript lookup, parent lookup or `sessions.json` write fails
   after `daemon.spawn_bg` returned (it then raises `WorkerLaunchedError`), and
   the dispatch claim path, when its dev-queue stamp, `session.spawned` event or
-  console line fails after `executor.spawn` returned. A worker that never
+  console line fails after `executor.spawn` returned. A third emitter,
+  `_spawn_fire_and_forget` in `cw.executor.core` (codex, opencode and aider,
+  #2592), uses the same shape when reading the launched process's start time
+  or storing its liveness handle fails after launch (it then raises
+  `WorkerLaunchedError` with `surface_ref` `None`).
+  A worker that never
   appears in the roster (`SpawnUnregisteredError`) is not this case; it stays a
   spawn failure. The dispatch row is kept RUNNING, never reverted to PENDING,
   and the failure counts toward neither the spawn-error backoff nor the lane
@@ -932,7 +939,10 @@ open enum; consumers MUST tolerate unknown values. Known values:
   <error>`, with the error collapsed to one line, redacted, then truncated to
   500 characters plus `…`. Only the `spawn_create_impl` emission sets
   `session_name` and `claude_session_id`; the dispatch emission leaves them
-  `""`/`null`. When the state write failed, the session id is absent from
+  `""`/`null`. The fire-and-forget emission (#2592) is the one exception to
+  that "only": it also sets `session_name`, and leaves `claude_session_id`
+  `null`; its breadcrumb reads `worker live (session <id>): <backend> pid
+  <pid> ...`, with no surface. When the state write failed, the session id is absent from
   `sessions.json`: the leaked-worker sweep stops the unrecorded worker on the
   next reconcile tick, the row stays RUNNING bound to that id, and
   `cw dev-queue tasks` shows the `?session_mismatch` advisory. For a fix-loop
@@ -958,6 +968,32 @@ open enum; consumers MUST tolerate unknown values. Known values:
   write failed on a dispatch claim, the same orchestrator release applies;
   nothing yet recovers that case automatically (#2591 follow-up). No push
   notification is fired (`fire_push_notification` is not called).
+  A fire-and-forget launch (#2592) does NOT stop the process. The session
+  stays ACTIVE (no `surface_ref`, no liveness handle) and bound to the RUNNING
+  row, so no second worker is spawned. The handle store is retried once
+  immediately.
+  **aider and opencode recovery is two steps.** First stop the process named
+  in the breadcrumb (`<backend> pid <pid>`; it leads its own process group, so
+  `kill -- -<pid>` also stops its children; check the pid still names the
+  worker before killing). Then run `cw spawn close <session-id>`.
+  `cw spawn close` alone does not stop a fire-and-forget process: it only
+  stops a worker that has a `surface_ref`, and otherwise cancels the dev-queue
+  row and marks the session COMPLETED. Requeueing before the process is
+  stopped starts a second worker on the same worktree.
+  **Known limitation:** aider and opencode runs without a handle are not
+  auto-harvested. They hold their lane slot until the operator acts, and
+  doctor wedge class 9 lists them as advisory only. Its recipe is
+  `cw spawn close` alone, which has the same close-does-not-stop gap (#2663).
+  **codex is different.** The detached `cw codex run` job completes its own
+  session when it finishes, and a handle is only needed for crash harvest. Do
+  nothing while the pid is alive and making progress. If the pid is gone or
+  hung, stop it, then run `cw spawn close <session-id>`. Stopping a healthy
+  codex job kills an in-flight review, and `cw spawn close` would then cancel
+  the row. Nothing auto-recovers a handle-less codex job that dies without
+  completing: doctor wedge class 9 excludes codex, the #2417 age ladder only
+  signals, and the serve-boot orphan pass skips sessions whose worktree
+  `cw-context.json` says `headless: false`, which is what the codex pre-flight
+  writes.
 - `"fix_dispatch_worker_unconfirmed"` — a fix-loop worker that launched but
   was never recorded (#2590) is not yet confirmed stopped, so its row is held:
   `breadcrumbs` names the one action that releases it,
