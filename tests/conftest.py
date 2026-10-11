@@ -91,6 +91,21 @@ def _iter_src_files() -> list[Path]:
     return sorted(_SRC_ROOT.rglob("*.py"))
 
 
+def _files_under(prefix: str) -> list[Path]:
+    """Return the ``src/`` ``*.py`` files whose posix relpath starts with *prefix*.
+
+    *prefix* is relative to ``src/`` and MUST end in ``/`` (for example
+    ``"cw/reconcile/"``): without the slash ``"cw/reconcile"`` would also match
+    ``cw/reconcile_x.py``. Pure discovery, no scan semantics (#2630), in line
+    with the pure, generic path/discovery helpers hoisted above.
+    """
+    return [
+        path
+        for path in _iter_src_files()
+        if path.relative_to(_SRC_ROOT).as_posix().startswith(prefix)
+    ]
+
+
 def _load_workflow(path: Path) -> dict[Any, Any]:
     """Parse a GitHub Actions workflow YAML file at *path* (#1612).
 
