@@ -88,6 +88,8 @@ MAX_FILE_BYTES = 1_048_576
 CEILING_FACTOR = 2
 # Each append is whole lines in single ``write`` calls of at most this size.
 WRITE_CHUNK_BYTES = 4096
+# Sidecar files dated ``KEEP_DAYS`` or more before today are unlinked.
+KEEP_DAYS = 2
 CALLER_MAX_CHARS = 200
 _PENDING_CAP = 256
 _FRAME_DEPTH_CAP = 16
@@ -319,18 +321,37 @@ def day_path(sink_dir: Path, day: date) -> Path:
     return sink_dir / f"{_FILE_PREFIX}{day.isoformat()}{_FILE_SUFFIX}"
 
 
+def _file_day(path: Path) -> date | None:
+    stem = path.name.removeprefix(_FILE_PREFIX).removesuffix(_FILE_SUFFIX)
+    try:
+        return date.fromisoformat(stem)
+    except ValueError:
+        return None
+
+
+def _unlink_expired(sink_dir: Path, today: date) -> None:
+    cutoff = today - timedelta(days=KEEP_DAYS)
+    for path in sink_dir.glob(f"{_FILE_PREFIX}*{_FILE_SUFFIX}"):
+        file_day = _file_day(path)
+        if file_day is not None and file_day <= cutoff:
+            path.unlink(missing_ok=True)
+
+
 def write_batch(
     sink_dir: Path, records: Sequence[LockHoldRecord], now: datetime
 ) -> None:
     """Append *records* to the sidecar for *now*'s UTC day under the cap policy.
 
-    Lines go out in single ``O_APPEND`` writes of whole lines, each at most
-    :data:`WRITE_CHUNK_BYTES`, so concurrent writers interleave by chunk and
-    the reader skips any torn line.
+    The first write of a day unlinks files dated :data:`KEEP_DAYS` or more
+    before it. Lines go out in single ``O_APPEND`` writes of whole lines, each
+    at most :data:`WRITE_CHUNK_BYTES`, so concurrent writers interleave by
+    chunk and the reader skips any torn line.
     """
     today = now.astimezone(UTC).date()
     path = day_path(sink_dir, today)
     sink_dir.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        _unlink_expired(sink_dir, today)
     try:
         size = path.stat().st_size
     except FileNotFoundError:
