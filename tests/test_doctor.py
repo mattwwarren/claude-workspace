@@ -9238,3 +9238,22 @@ class TestCheckWorkerTmpPressure:
         report = run_doctor()
 
         assert "worker-tmp/client-a" in {c.name for c in report.checks}
+
+    def test_worker_tmpdir_scope_registered_in_run_doctor(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """run_doctor() includes the #2672 worker-tmpdir-scope check."""
+        _stub_claude_version_ok(monkeypatch)
+        monkeypatch.setattr(
+            "cw.doctor.worker_tmpdir.get_native_daemon_client",
+            lambda: mock_native_daemon,
+        )
+
+        report = run_doctor()
+
+        by_name = {c.name: c for c in report.checks}
+        assert "worker-tmpdir-scope" in by_name
+        assert by_name["worker-tmpdir-scope"].ok is True

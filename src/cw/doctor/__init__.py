@@ -39,6 +39,9 @@ re-exports. Submodules:
 - ``user_level_hooks`` — detection of a ``cw signal-stop`` Stop hook installed
   in ``~/.claude/settings{,.local}.json``, where it applies to every Claude
   session instead of just cw's worktrees (#2226).
+- ``worker_tmpdir`` — detection of live cw daemon workers whose effective
+  TMPDIR is outside their own worktree (settings ``env``, then ``/proc``
+  environ guarded by the roster ``procStart``) (#2672).
 - ``core`` — the ``run_doctor`` orchestrator that assembles the full report.
 - ``report`` — human-readable and JSON rendering.
 """
@@ -99,6 +102,7 @@ from cw.doctor.wedge import (
     _check_wedge_task_running_no_session,
     _reap_wedge_findings,
 )
+from cw.doctor.worker_tmpdir import _check_worker_tmpdir_scope
 
 __all__ = [
     "_CW_DEPS_CHECK_NAME",
@@ -138,6 +142,7 @@ __all__ = [
     "_check_wedge_repo_ahead",
     "_check_wedge_task_running_completed_session",
     "_check_wedge_task_running_no_session",
+    "_check_worker_tmpdir_scope",
     "_check_workspace_paths",
     "_check_worktree_paths_sessions",
     "_dep_distribution_name",

@@ -46,6 +46,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import (
+    daemon_worker_tmpdir_env,
     get_native_daemon_client,
     resolve_permission_mode,
     wait_for_roster_presence,
@@ -613,12 +614,12 @@ def _write_hook_context(
     True (the default, preserving every existing caller's behavior
     byte-for-byte):
 
-    - ``settings.local.json`` — configures a Stop hook that runs
-      ``cw signal-stop`` after each agent turn, behind a POSIX-sh guard that
-      tests the **absolute** path of the ``cw-context.json`` written below
-      (#2226, see :func:`_stop_hook_command`). The guard is identity-free: the
-      path it tests is written by this same function, so it cannot skip a
-      dispatch worker whatever the hook's environment or cwd.
+    - ``settings.local.json`` — a Stop hook running ``cw signal-stop`` each
+      turn behind an identity-free POSIX-sh guard on the **absolute** path of
+      the ``cw-context.json`` below (#2226, see :func:`_stop_hook_command`),
+      plus an ``env`` block pinning TMPDIR/TMP/TEMP to the worker's own
+      ``.cw/tmp`` (#2672; ``claude --bg`` forwards no caller env, see
+      :func:`cw.native_daemon.daemon_worker_tmpdir_env`).
     - ``cw-context.json`` — correlation metadata the hook reads to emit a
       ``SESSION_COMPLETED`` event keyed back to the cw session + dev_queue
       task. Bypasses the env-var injection limitation on ``claude --bg``
@@ -722,10 +723,11 @@ def _write_hook_context(
                 )
 
     if write_stop_hook:
-        atomic_write_text(
-            settings_path,
-            json.dumps(_build_hook_settings(context_path.resolve()), indent=2) + "\n",
-        )
+        settings = {
+            **_build_hook_settings(context_path.resolve()),
+            "env": daemon_worker_tmpdir_env(worktree.resolve()),
+        }
+        atomic_write_text(settings_path, json.dumps(settings, indent=2) + "\n")
     context: dict[str, object] = {
         "schema_version": CW_CONTEXT_SCHEMA_VERSION,
         "session_id": session_id,
