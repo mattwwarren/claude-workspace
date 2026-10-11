@@ -3,7 +3,7 @@
 """Guard script: abort if the current git repo is the operator's main checkout.
 
 Usage (from within an impl agent's working directory):
-    python .claude/scripts/check_not_main_checkout.py
+    python3 .claude/scripts/check_not_main_checkout.py
 
 Context: cw dispatch workers run in isolated worktrees.  The cw-context.json
 written by ``cw`` at spawn time carries ``workspace_path`` — the operator's
