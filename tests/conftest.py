@@ -2354,6 +2354,36 @@ def post_launch_attention_payload(events: list[CapturedEvent]) -> dict[str, Any]
     return payload
 
 
+def fire_and_forget_breadcrumb(sid: str, backend: str, pid: int, cause: str) -> str:
+    """Return the exact breadcrumb of a fire-and-forget post-launch page (#2592).
+
+    An independent literal of the operator-facing contract: it imports nothing
+    from ``src``, so a regression there cannot move the expected text with it.
+    *cause* is the full cause text (``"OSError: disk full"``); nothing is
+    truncated, so callers pass short causes.
+    """
+    if backend in ("aider", "opencode"):
+        return (
+            f"worker live (session {sid}): {backend} pid {pid} is still running"
+            " and its liveness handle was not recorded. Recovery: stop that"
+            f" process, then run `cw spawn close {sid}`. `cw spawn close` alone"
+            " does not stop the process, and requeueing before it is stopped"
+            f" starts a second worker on the same worktree. Cause: {cause}"
+        )
+    if backend == "codex":
+        return (
+            f"worker live (session {sid}): codex pid {pid} is still running and"
+            " its liveness handle was not recorded. Recovery: a codex job"
+            " completes its own session when it finishes, so do nothing while"
+            " that pid is alive and making progress. If the pid is gone or"
+            f" hung, stop it, then run `cw spawn close {sid}`. Stopping a"
+            " healthy job kills an in-flight review, and `cw spawn close`"
+            f" cancels the row. Cause: {cause}"
+        )
+    msg = f"no fire-and-forget breadcrumb for backend {backend!r}"
+    raise ValueError(msg)
+
+
 @pytest.fixture
 def capture_events(
     monkeypatch: pytest.MonkeyPatch,
