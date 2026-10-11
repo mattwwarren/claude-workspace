@@ -317,6 +317,30 @@ def test_empty_git_common_dir_exits_1(
     _assert_key_failure(capsys, ["--branch", BRANCH], "printed no git common dir")
 
 
+def test_git_common_dir_resolution_failure_exits_1(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        _mod.subprocess,
+        "run",
+        lambda *args, **_kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout=".git\n", stderr=""
+        ),
+    )
+
+    def _fail(_path: Path, *_args: Any, **_kwargs: Any) -> Path:
+        message = "resolution failed"
+        raise OSError(message)
+
+    monkeypatch.setattr(_mod.Path, "resolve", _fail)
+    _assert_key_failure(
+        capsys,
+        ["--branch", BRANCH],
+        "git common dir .git could not be resolved: resolution failed",
+    )
+
+
 def test_git_not_runnable_exits_1(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -762,6 +786,25 @@ def test_publish_fsync_failure_exits_1_and_keeps_the_old_record(
     assert events == ["fsync"]
     assert owner.read_text(encoding="utf-8") == before
     assert not owner.with_name(owner.name + ".tmp").exists()
+
+
+def test_publish_rejects_a_symlinked_temp_record(
+    tmp_path: Path,
+) -> None:
+    probe = _tree(tmp_path)
+    gate_root = tmp_path / "gate-root"
+    gate_root.mkdir()
+    target = tmp_path / "outside-record"
+    target.write_text("leave me", encoding="utf-8")
+    tmp_record = gate_root / f"cw-gate-owner-{KEY}.json.tmp"
+    tmp_record.symlink_to(target)
+
+    code, text = _mod.claim(gate_root, KEY, BRANCH, _claimant(probe), probe)
+
+    assert code == 1
+    assert "could not publish the owner record" in text
+    assert tmp_record.is_symlink()
+    assert target.read_text(encoding="utf-8") == "leave me"
 
 
 def test_zombie_state_reads_as_dead_on_proc(tmp_path: Path) -> None:

@@ -418,7 +418,20 @@ export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$GATE_KEY"
 # owner makes --claim refuse, and this fence exits before touching the path.
 python3 "$KEY_SCRIPT" --branch '<branch-name>' --claim --key "$GATE_KEY" --gate-root "${CW_GATE_ROOT:-/var/tmp}" \
   || { echo "IMPL_FAILED: gate path $TMPWT not claimed (live owner or claim error, see above); left untouched"; exit 1; }
-gate_wt_cleanup() { [ -z "${GATE_WT_CLEANED:-}" ] || return 0; GATE_WT_CLEANED=1; git worktree remove --force "$TMPWT" 2>/dev/null; rm -rf "$TMPWT" 2>/dev/null; rm -rf "$TMPDIR" 2>/dev/null; python3 "$KEY_SCRIPT" --release --key "$GATE_KEY" --gate-root "${CW_GATE_ROOT:-/var/tmp}" 2>/dev/null; }
+gate_wt_cleanup() {
+  [ -z "${GATE_WT_CLEANED:-}" ] || return 0; GATE_WT_CLEANED=1
+  cleanup_failed=0
+  git worktree remove --force "$TMPWT" 2>/dev/null || cleanup_failed=1
+  rm -rf "$TMPWT" 2>/dev/null || cleanup_failed=1
+  rm -rf "$TMPDIR" 2>/dev/null || cleanup_failed=1
+  [ ! -e "$TMPWT" ] && [ ! -L "$TMPWT" ] || cleanup_failed=1
+  [ ! -e "$TMPDIR" ] && [ ! -L "$TMPDIR" ] || cleanup_failed=1
+  if [ "$cleanup_failed" -ne 0 ]; then
+    echo "IMPL_FAILED: gate cleanup failed; owner record retained for operator recovery (gate path $TMPWT, TMPDIR $TMPDIR)" >&2
+    return 1
+  fi
+  python3 "$KEY_SCRIPT" --release --key "$GATE_KEY" --gate-root "${CW_GATE_ROOT:-/var/tmp}" 2>/dev/null
+}
 # Cleanup is armed only now, after a successful claim: a refused or failed claim exits
 # above with no trap armed and the flag set, so it never deletes the refused owner's paths.
 GATE_WT_CLEANED=

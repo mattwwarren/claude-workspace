@@ -47,12 +47,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import fcntl
 import hashlib
 import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -188,7 +190,13 @@ def git_common_dir() -> str:
     if not common:
         msg = "git rev-parse --git-common-dir printed no git common dir"
         raise GateKeyError(msg)
-    return str(Path(common).resolve())
+    common_path = Path(common)
+    try:
+        resolved = common_path.resolve()
+    except (OSError, RuntimeError) as exc:
+        msg = f"git common dir {common_path} could not be resolved: {exc}"
+        raise GateKeyError(msg) from exc
+    return str(resolved)
 
 
 def compute_key(common_dir: str, branch: str) -> str:
@@ -639,6 +647,23 @@ def judge(
     return EXIT_OK, note_both_dead(record.pid, record.shell_pid, owner)
 
 
+def _open_publish_temp(tmp: Path) -> object:
+    """Create the owner temp file without following a shared-root symlink."""
+    try:
+        mode = tmp.lstat().st_mode
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISREG(mode):
+            msg = f"temporary owner path is not a regular file: {tmp}"
+            raise OSError(errno.EEXIST, msg)
+        tmp.unlink()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(tmp, flags, 0o600)
+    return os.fdopen(descriptor, "w", encoding="utf-8")
+
+
 def _publish(owner: Path, record: dict[str, object]) -> str:
     """Write *record* to a temp file in the gate root, fsync, then rename it.
 
@@ -647,15 +672,18 @@ def _publish(owner: Path, record: dict[str, object]) -> str:
     """
     tmp = owner.with_name(f"{owner.name}.tmp")
     payload = json.dumps(record, sort_keys=True) + "\n"
+    created = False
     try:
-        with tmp.open("w", encoding="utf-8") as handle:
+        with _open_publish_temp(tmp) as handle:
+            created = True
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         tmp.replace(owner)
     except OSError as exc:
-        with contextlib.suppress(OSError):
-            tmp.unlink(missing_ok=True)
+        if created:
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
         return f"gate_key: could not publish the owner record {owner}: {exc}"
     return ""
 

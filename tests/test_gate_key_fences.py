@@ -140,7 +140,7 @@ def test_claim_precedes_the_destructive_commands(name: str) -> None:
     assert claim < fence.index("git worktree remove --force")
     assert claim < fence.index("rm -rf")
     assert claim < fence.index(_EXIT_TRAP)
-    cleanup = next(line for line in fence.splitlines() if "gate_wt_cleanup() {" in line)
+    cleanup = _cleanup_text(fence)
     assert _RELEASE_CALL in cleanup
 
 
@@ -167,8 +167,11 @@ def test_impl_doc_states_the_per_call_gate_contract() -> None:
     assert "gate 5" not in sentence.lower()
 
 
-def _cleanup_line(fence: str) -> str:
-    return next(line for line in fence.splitlines() if "gate_wt_cleanup() {" in line)
+def _cleanup_text(fence: str) -> str:
+    lines = fence.splitlines()
+    start = next(i for i, line in enumerate(lines) if "gate_wt_cleanup() {" in line)
+    end = next(i for i in range(start + 1, len(lines)) if lines[i] == "}")
+    return "\n".join(lines[start : end + 1])
 
 
 def _assert_armed_after_claim(fence: str) -> None:
@@ -209,7 +212,7 @@ def test_cleanup_arming_check_bites_on_a_synthetic_fence() -> None:
 @pytest.mark.parametrize("name", _CLAIMING)
 def test_gate_wt_cleanup_is_guarded_run_once(name: str) -> None:
     fence = _FENCES[name]()
-    cleanup = _cleanup_line(fence)
+    cleanup = _cleanup_text(fence)
     body = cleanup[cleanup.index("{") + 1 : cleanup.rindex("}")].strip()
     assert body.startswith(_CLEANUP_GUARD)
     assert body.index(_CLEANUP_GUARD) < body.index("git worktree remove")
@@ -597,7 +600,8 @@ def test_same_worker_overlap_with_a_live_gate_shell_refuses(
     assert "SECOND=1" in result.stdout, result.stdout + result.stderr
     assert "gate path in use by a live run" in result.stderr
     assert "SENTINEL_KEPT" in result.stdout
-    assert not owner.exists()
+    assert owner.exists()
+    assert "gate cleanup failed; owner record retained" in result.stderr
 
 
 def test_setup_fence_twice_in_one_shell_is_a_takeover_not_a_refusal(
