@@ -486,6 +486,14 @@ guard parks the cycle **uncommitted** and reports; none reverts a commit.
 - `codex_fix_loop_growth_budget_lines` (`orchestrator.yaml`, default `40`,
   `ge=1`): net non-test source lines one cycle may add **per open MUST_FIX
   finding** (at least one) before the growth guard parks it. No lane override.
+- `codex_fix_loop_cumulative_growth_budget_lines` (`orchestrator.yaml`, default
+  `40`, `ge=1`, #2648): net non-test source lines the whole fix loop may add
+  across all its cycles **per originally-found (cycle-0) finding** (at least
+  one), measured from the commit the loop started on. No lane override. It
+  defaults to the per-cycle value, so a loop that reaches +41 net lines across
+  several small cycles (one original finding) now parks where it previously did
+  not; this is intended. To allow more, raise this key; to turn it off for a
+  lane, set `codex_fix_loop_growth_guard_enabled: false` on that lane.
 - `codex_fix_loop_growth_guard_enabled` (`orchestrator.yaml`, default `true`):
   switch for the heuristic guards. A lane can override it in either direction
   with `codex_fix_loop_growth_guard_enabled: true|false` in `clients.yaml`
@@ -495,6 +503,7 @@ guard parks the cycle **uncommitted** and reports; none reverts a commit.
 # orchestrator.yaml
 codex_fix_loop_stall_cycles: 1
 codex_fix_loop_growth_budget_lines: 40
+codex_fix_loop_cumulative_growth_budget_lines: 40
 codex_fix_loop_growth_guard_enabled: true
 ```
 
@@ -532,7 +541,12 @@ lanes:
   constant, more than 3 top-level `def`/`class` definitions, or more net
   non-test source lines than the budget. An open finding whose `suggested_fix`
   explicitly asks for a lock or a state file justifies that kind. Tests and prose
-  are never counted.
+  are never counted. A loop-wide check (#2648) also parks a cycle when the net
+  non-test source lines since the fix loop began (earlier cycles' commits plus
+  this cycle) exceed `codex_fix_loop_cumulative_growth_budget_lines` per
+  originally-found finding **and** this cycle itself adds net lines, so many
+  small cycles cannot add up to what one large cycle may not. A cycle that
+  shrinks the total is never parked for it.
 - **Operator constraints** (`codex_fix_constraint_violation`). The newest comment
   carrying `<!-- auto-dev-preflight-resolutions -->` written by the operator
   login (agent-authored comments and pipeline-header comments never count; an
@@ -562,8 +576,8 @@ lanes:
   `review.fix_loop_divergence_detected` event.
 
 **What the switch covers.** `codex_fix_loop_growth_guard_enabled: false` turns off
-the growth guard (net lines, definition count, lock, state-file and path-constant
-detectors) and the forbidden-token and kind check. It does **not** turn off the
+the growth guard (per-cycle and cumulative net lines, definition count, lock,
+state-file and path-constant detectors) and the forbidden-token and kind check. It does **not** turn off the
 constraint section in the fix prompt, the clean-start refusal, the staged-set
 guard, the scope fence, the revert guard, the sensitive-path guard, the
 hook-failure park or the divergence guard. The divergence guard has its own knob,
@@ -572,7 +586,9 @@ hook-failure park or the divergence guard. The divergence guard has its own knob
 **Recovery text.** Each park's `recovery_hint` that advises `git reset --hard HEAD`
 (growth, constraint, hook, scope drift and revert-guard parks) is correct only
 because the cycle began from a clean tree: the reset discards just that cycle's
-own staged work.
+own staged work. On a cumulative growth park (#2648) only the current cycle is
+staged; earlier cycles' commits stay on the branch, and `git reset --hard HEAD`
+discards only the current cycle.
 
 **Settled findings that come back reworded.** This ticket does not add fuzzy
 suppression of paraphrased settled findings. The existing claim tier (#2210) can
