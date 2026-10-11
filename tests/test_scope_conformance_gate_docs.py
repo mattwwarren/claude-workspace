@@ -21,14 +21,13 @@ case belongs in that table, not in a local list here (#2141 round 6).
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 import pytest
 
@@ -37,6 +36,8 @@ from cw.models import (
     SCOPE_DRIFT_APPROVED_HEAD_KEY,
 )
 from tests.conftest import (
+    _GATE2_END,
+    _GATE2_START,
     GUARD_FENCE_INVOKED,
     GUARD_MARKER_BAD_CASES,
     GUARD_MARKER_CURRENT,
@@ -47,8 +48,13 @@ from tests.conftest import (
     _clean_git_env,
     _cmd,
     _placement,
+    assert_gate_key_helper_missing,
+    gate2_fence,
+    gate_key_for,
     git_in,
     guard_candidate_path,
+    install_gate_key,
+    link_real_python3,
     run_guard_fence,
     substitute_fence_placeholders,
     write_guard_stub_bin,
@@ -75,8 +81,6 @@ def _doc(relative: str) -> str:
     return (_REPO_ROOT / relative).read_text(encoding="utf-8")
 
 
-_GATE2_START = "2. **File set is within the plan's enumeration**"
-_GATE2_END = "3. **Test command exit code is 0:**"
 _RESOLVER_SUBSECTION = "### Guard-script path resolution and staleness marker (#2141)"
 _MARKER_RULE_START = "**Marker parsing is strict"
 _MARKER_RULE_END = "**Existence is not enough.**"
@@ -391,8 +395,8 @@ def test_gate2_fence_derives_the_session_worktree_in_its_own_fence() -> None:
     is the original bug. The fence therefore derives the worktree itself from
     the branch, and carries no ambient-cwd escape hatch at all.
     """
-    fence = _gate2_fence()
-    assert 'git -C "$TMPWT" worktree list' in fence
+    fence = gate2_fence()
+    assert "git worktree list --porcelain" in fence
     # Round 8: derived in-fence, but no longer from the branch name alone — the
     # ticket-keyed probe comes first and the branch lookup is its fallback.
     assert "cw-context.json" in fence
@@ -424,7 +428,7 @@ def test_gate2_fence_defines_tmpwt_and_fork_point_before_using_them() -> None:
     self-containment claim, so it is pinned textually here rather than left to
     the executable test alone.
     """
-    fence = _gate2_fence()
+    fence = gate2_fence()
     for name in ("TMPWT", "FORK_POINT"):
         assignment = f"{name}="
         use = f'"${name}"'
@@ -683,11 +687,6 @@ _GATE2_MARKER_BAD_CASES: tuple[tuple[str, str], ...] = (
     *GUARD_MARKER_BAD_CASES,
     ("previous_minimum", GUARD_MARKER_CURRENT),
 )
-
-
-def _gate2_fence() -> str:
-    """Step 2.5 gate 2's own bash fence (#2141)."""
-    return _site_fence(_GATE2_SCRIPT)
 
 
 _IMPL_GUARD_SCRIPT = "check_impl_guard_staleness.py"
@@ -1015,16 +1014,8 @@ def _gate2_candidate_path(tmp_path: Path, location: str) -> str:
     return str(root.resolve() / ".claude" / "scripts" / _GATE2_SCRIPT)
 
 
-def _gate2_session(tmp_path: Path) -> str:
-    """A ``$CW_SESSION`` unique to *tmp_path* (#2141 round 4).
-
-    Gate 2's fence hard-codes ``${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$CW_SESSION``,
-    so the session id
-    is what keeps two concurrently-running tests (or a stale run's leftovers)
-    from sharing one detached worktree. Derived from the full ``tmp_path``
-    rather than its basename, which repeats across parametrized cases.
-    """
-    return "t" + hashlib.sha256(str(tmp_path).encode()).hexdigest()[:16]
+# The stale, host-wide `$CW_SESSION` the gate paths must ignore (#2436).
+_GATE2_STALE_SESSION = "9141a90d"
 
 
 def _write_failing_git_diff_stub(bin_dir: Path) -> None:
@@ -1103,6 +1094,39 @@ def _add_gate2_session_worktree(
 _BRANCH_HEAD = "<branch-head>"
 
 
+def _init_gate2_repo(repo: Path) -> None:
+    """The gate-2 clone: ``main`` plus a one-commit feature branch, origin = itself.
+
+    A no-op when *repo* already exists, so two runner calls can share a clone.
+    """
+    if (repo / ".git").exists():
+        return
+    repo.mkdir(parents=True, exist_ok=True)
+    git_in(repo, "init", "-b", "main")
+    git_in(repo, "config", "user.email", "test@example.com")
+    git_in(repo, "config", "user.name", "cw test")
+    git_in(repo, "commit", "--allow-empty", "-m", "initial")
+    git_in(repo, "checkout", "-b", _GATE2_BRANCH)
+    (repo / _PROBE_FILE).write_text("delivered\n", encoding="utf-8")
+    git_in(repo, "add", _PROBE_FILE)
+    git_in(repo, "commit", "-m", "probe")
+    git_in(repo, "checkout", "main")
+    git_in(repo, "remote", "add", "origin", str(repo))
+    git_in(repo, "fetch", "origin")
+
+
+def _plant_gate2_key_script(
+    key_script: Literal["home", "session", "both"] | None,
+    home: Path,
+    session_wt: Path,
+) -> None:
+    """Install the real gate_key.py where gate 2's resolver probes (#2436)."""
+    if key_script in {"home", "both"}:
+        install_gate_key(home)
+    if key_script in {"session", "both"}:
+        install_gate_key(session_wt)
+
+
 def _scope_drift_metadata(
     repo: Path, approval: tuple[list[str], str] | None
 ) -> dict[str, object] | None:
@@ -1131,18 +1155,35 @@ def _run_gate2_fence(
     context_ticket: str | None = None,
     scope_drift_approval: tuple[list[str], str] | None = None,
     cw_session_override: str | None = None,
+    gate_root: Path | None = None,
+    key_script: Literal["home", "session", "both"] | None = "home",
+    cwd_outside_repo: bool = False,
+    omit_cw_session: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Execute gate 2's own fence against real worktrees (#2141 round 4/5).
 
     *scope_drift_approval* (#2337) is ``(extra_files, approved_head)``, planted
     as ``queue_metadata`` in the session worktree's context file (so it needs
     *context_ticket*); ``_BRANCH_HEAD`` as the head resolves to the branch's
-    real tip. The approved-files scratch file is echoed after the fence.
+    real tip. The approved-files scratch file is echoed after the fence, and so
+    is the fence's own ``$TMPWT`` (``GATE_TMPWT=...``).
 
     Deliberately not the shared ``run_guard_fence``: gate 2's resolver reads
-    ``git -C "$TMPWT" worktree list``, so only a fixture with an actual detached
+    ``git worktree list --porcelain``, so only a fixture with an actual detached
     gate worktree *and* an actual session worktree on the branch can tell a
     correct resolver from one that happens to land on the right directory.
+
+    The gate worktree lives at ``<gate_root>/cw-gate-wt-<key>``, where the key
+    is what ``gate_key.py`` derives for this clone and branch (#2436);
+    *gate_root* (default ``tmp_path / "gate-root"``) is exported as
+    ``CW_GATE_ROOT`` so no case writes under the real ``/var/tmp``. The real
+    script is planted at ``$HOME/.claude/scripts`` and/or the session worktree
+    per *key_script* (``None`` plants neither), and ``python3`` is the test
+    interpreter while ``uv`` stays the sentinel stub. *cwd_outside_repo* runs
+    the fence from a directory outside every worktree, with git discovery
+    capped there. ``CW_SESSION`` carries a stale shared literal unless
+    *omit_cw_session* drops it. The repo and session worktree are reused when
+    they already exist under *tmp_path*, so two calls can share one clone.
 
     The fence runs as its own ``bash -c`` invocation with **cwd = the detached
     ``$TMPWT``** — the shell a headless worker would give it if it executed each
@@ -1169,31 +1210,21 @@ def _run_gate2_fence(
     makes an in-fence ``FORK_POINT`` observable in the touched-files scratch
     output echoed after the fence.
 
-    *cw_session_override*, when given, replaces the ``tmp_path``-derived
-    ``$CW_SESSION`` value with a literal string — used only to prove AC4/AC5
-    (#2315): two calls sharing an identical ``$CW_SESSION`` but different
-    ``tmp_path`` roots must still resolve different touched-files/approved-extra
-    paths, since both are keyed on ``$SESSION_WT``, never on ``$CW_SESSION``.
+    *cw_session_override*, when given, replaces the stale ``$CW_SESSION``
+    literal — used to prove AC4/AC5 (#2315): two calls sharing an identical
+    ``$CW_SESSION`` but different ``tmp_path`` roots must still resolve
+    different touched-files/approved-extra paths, since both are keyed on
+    ``$SESSION_WT``, never on ``$CW_SESSION``.
     """
     repo = tmp_path / "repo"
-    repo.mkdir(parents=True, exist_ok=True)
-    git_in(repo, "init", "-b", "main")
-    git_in(repo, "config", "user.email", "test@example.com")
-    git_in(repo, "config", "user.name", "cw test")
-    git_in(repo, "commit", "--allow-empty", "-m", "initial")
-    git_in(repo, "checkout", "-b", _GATE2_BRANCH)
-    (repo / _PROBE_FILE).write_text("delivered\n", encoding="utf-8")
-    git_in(repo, "add", _PROBE_FILE)
-    git_in(repo, "commit", "-m", "probe")
-    git_in(repo, "checkout", "main")
-    git_in(repo, "remote", "add", "origin", str(repo))
-    git_in(repo, "fetch", "origin")
+    _init_gate2_repo(repo)
 
-    if session_worktree:
+    session_wt = tmp_path / "session-wt"
+    if session_worktree and not session_wt.exists():
         queue_metadata = _scope_drift_metadata(repo, scope_drift_approval)
         _add_gate2_session_worktree(
             repo,
-            tmp_path / "session-wt",
+            session_wt,
             session_branch=session_branch,
             session_copy=session_copy,
             context_ticket=context_ticket,
@@ -1207,17 +1238,15 @@ def _run_gate2_fence(
         global_scripts = home / ".claude" / "scripts"
         global_scripts.mkdir(parents=True, exist_ok=True)
         (global_scripts / _GATE2_SCRIPT).write_text(global_copy, encoding="utf-8")
+    _plant_gate2_key_script(key_script, home, session_wt)
 
-    session = (
-        cw_session_override
-        if cw_session_override is not None
-        else _gate2_session(tmp_path)
-    )
-    tmpwt = Path(f"/var/tmp/cw-gate-wt-{session}")
+    root = gate_root if gate_root is not None else tmp_path / "gate-root"
+    root.mkdir(parents=True, exist_ok=True)
+    tmpwt = root / f"cw-gate-wt-{gate_key_for(repo, _GATE2_BRANCH)}"
     if gate_worktree:
         git_in(repo, "worktree", "add", "--detach", str(tmpwt), _GATE2_BRANCH)
 
-    bin_dir = write_guard_stub_bin(tmp_path)
+    bin_dir = link_real_python3(write_guard_stub_bin(tmp_path, names=("uv",)))
     if break_git_diff:
         _write_failing_git_diff_stub(bin_dir)
     # Computed the same way the fence itself resolves `$SESSION_WT` (the
@@ -1227,26 +1256,35 @@ def _run_gate2_fence(
     session_wt_path = (tmp_path / "session-wt").resolve()
     body = (
         substitute_fence_placeholders(
-            _gate2_fence(),
+            gate2_fence(),
             {"branch-name": _GATE2_BRANCH, "ticket-id": _GATE2_TICKET},
         )
         + '\necho "${SCOPE_CONFORMANCE_OUTPUT-}"'
         + f'\ncat "{session_wt_path}/.cw/touched-files.txt" 2>/dev/null'
-        + f'\ncat "{session_wt_path}/.cw/approved-extra.txt" 2>/dev/null || true\n'
+        + f'\ncat "{session_wt_path}/.cw/approved-extra.txt" 2>/dev/null || true'
+        + '\necho "GATE_TMPWT=${TMPWT-}"\n'
     )
+    env = {
+        "HOME": str(home),
+        "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+        "CW_GATE_ROOT": str(root),
+        "SESSION_ROOT": str(tmpwt),
+        "GUARD_ROOT": str(tmpwt),
+    }
+    if not omit_cw_session:
+        env["CW_SESSION"] = cw_session_override or _GATE2_STALE_SESSION
+    # A missing gate worktree cannot also be the cwd; the repo root stands in,
+    # and is itself a decoy the fence must not resolve to.
+    cwd = tmpwt if gate_worktree else repo
+    if cwd_outside_repo:
+        cwd = tmp_path / "outside"
+        cwd.mkdir(exist_ok=True)
+        env["GIT_CEILING_DIRECTORIES"] = str(tmp_path)
     try:
         return subprocess.run(
             ["bash", "-c", body],
-            # A missing gate worktree cannot also be the cwd; the repo root
-            # stands in, and is itself a decoy the fence must not resolve to.
-            cwd=tmpwt if gate_worktree else repo,
-            env={
-                "HOME": str(home),
-                "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
-                "CW_SESSION": session,
-                "SESSION_ROOT": str(tmpwt),
-                "GUARD_ROOT": str(tmpwt),
-            },
+            cwd=cwd,
+            env=env,
             capture_output=True,
             text=True,
             check=False,
@@ -1505,7 +1543,7 @@ def test_gate2_fence_ignores_a_context_file_for_another_ticket(
 def test_gate2_reads_scope_drift_approval_and_checks_ancestry() -> None:
     """Gate 2 reads the operator's approval from ``queue_metadata`` and binds
     it by ancestry, not SHA equality (#2337)."""
-    fence = _gate2_fence()
+    fence = gate2_fence()
     assert SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY in fence
     assert SCOPE_DRIFT_APPROVED_HEAD_KEY in fence
     assert "merge-base --is-ancestor" in fence
@@ -1581,15 +1619,21 @@ def test_gate2_scratch_files_differ_across_worktrees_sharing_cw_session(
     resolve different touched-files/approved-extra paths, because both are
     keyed on ``$SESSION_WT`` (this worker's own session worktree) and never on
     ``$CW_SESSION``. Forces the collision via ``cw_session_override`` rather
-    than relying on a ``_gate2_session`` hash collision, which two distinct
-    ``tmp_path`` roots do not produce."""
+    than relying on two distinct ``tmp_path`` roots to produce the same value,
+    which they do not.
+
+    Both workers also share one gate root (#2436): their gate worktrees are
+    keyed on clone identity plus branch, so the shared ``$CW_SESSION`` no
+    longer puts them on one path."""
     shared_session = "shared-session-2315"
+    shared_root = tmp_path / "shared-gate-root"
     result_a = _run_gate2_fence(
         tmp_path / "worker-a",
         session_copy=_GATE2_MARKER_CURRENT,
         context_ticket=_GATE2_TICKET,
         scope_drift_approval=(["src/a.py"], _BRANCH_HEAD),
         cw_session_override=shared_session,
+        gate_root=shared_root,
     )
     result_b = _run_gate2_fence(
         tmp_path / "worker-b",
@@ -1597,9 +1641,16 @@ def test_gate2_scratch_files_differ_across_worktrees_sharing_cw_session(
         context_ticket=_GATE2_TICKET,
         scope_drift_approval=(["src/a.py"], _BRANCH_HEAD),
         cw_session_override=shared_session,
+        gate_root=shared_root,
     )
-    assert result_a.returncode == 0, result_a.stderr
-    assert result_b.returncode == 0, result_b.stderr
+    assert result_a.returncode == 0, result_a.stdout + result_a.stderr
+    assert result_b.returncode == 0, result_b.stdout + result_b.stderr
+    gate_a = _echoed_gate_tmpwt(result_a)
+    gate_b = _echoed_gate_tmpwt(result_b)
+    assert gate_a != gate_b
+    assert Path(gate_a).parent == Path(gate_b).parent == shared_root
+    assert shared_session not in gate_a
+    assert shared_session not in gate_b
 
     session_wt_a = (tmp_path / "worker-a" / "session-wt").resolve()
     session_wt_b = (tmp_path / "worker-b" / "session-wt").resolve()
@@ -1624,6 +1675,83 @@ def test_gate2_scratch_files_differ_across_worktrees_sharing_cw_session(
     assert shared_session not in touched_b
     assert shared_session not in approved_a
     assert shared_session not in approved_b
+
+
+def _echoed_gate_tmpwt(result: subprocess.CompletedProcess[str]) -> str:
+    """The ``$TMPWT`` the gate-2 fence derived, echoed by the runner."""
+    lines = [
+        line for line in result.stdout.splitlines() if line.startswith("GATE_TMPWT=")
+    ]
+    assert len(lines) == 1, result.stdout
+    return lines[0].removeprefix("GATE_TMPWT=")
+
+
+def test_gate2_runs_without_cw_session_env(tmp_path: Path) -> None:
+    """The old ``: "${CW_SESSION:?...}"`` guard is gone: no ``$CW_SESSION`` at
+    all still reaches the script (#2436)."""
+    result = _run_gate2_fence(
+        tmp_path, session_copy=_GATE2_MARKER_CURRENT, omit_cw_session=True
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _INVOKED in result.stdout
+
+
+def test_gate2_fence_hard_stops_when_gate_key_script_is_missing(
+    tmp_path: Path,
+) -> None:
+    """No gate_key.py anywhere → exit 3 with the install remedy, never a
+    fallback to a ``$CW_SESSION``-keyed path (#2436 R10)."""
+    result = _run_gate2_fence(
+        tmp_path, session_copy=_GATE2_MARKER_CURRENT, key_script=None
+    )
+    assert result.returncode == 3, result.stdout
+    assert _INVOKED not in result.stdout
+    assert_gate_key_helper_missing(result.stdout)
+
+
+def test_gate2_fence_resolves_gate_key_from_the_session_worktree_copy(
+    tmp_path: Path,
+) -> None:
+    """A session-worktree copy alone is enough: gate 2 probes it first."""
+    result = _run_gate2_fence(
+        tmp_path, session_copy=_GATE2_MARKER_CURRENT, key_script="session"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _INVOKED in result.stdout
+    key = gate_key_for(tmp_path / "repo", _GATE2_BRANCH)
+    assert _echoed_gate_tmpwt(result) == str(
+        tmp_path / "gate-root" / f"cw-gate-wt-{key}"
+    )
+
+
+def test_gate2_gate_path_ignores_cw_session(tmp_path: Path) -> None:
+    """Same clone, two different ``$CW_SESSION`` values: one gate path."""
+    first = _run_gate2_fence(
+        tmp_path, session_copy=_GATE2_MARKER_CURRENT, cw_session_override="9141a90d"
+    )
+    second = _run_gate2_fence(
+        tmp_path, session_copy=_GATE2_MARKER_CURRENT, cw_session_override="7d5c53c2"
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert _echoed_gate_tmpwt(first) == _echoed_gate_tmpwt(second)
+    assert "9141a90d" not in _echoed_gate_tmpwt(first)
+
+
+def test_gate2_fence_hard_stops_when_the_cwd_is_outside_the_repo(
+    tmp_path: Path,
+) -> None:
+    """The R11 precondition, executed: from a cwd outside every worktree the
+    key cannot be computed, and the fence stops with exit 3 naming the
+    interpreter (#2436)."""
+    result = _run_gate2_fence(
+        tmp_path, session_copy=_GATE2_MARKER_CURRENT, cwd_outside_repo=True
+    )
+    assert result.returncode == 3, result.stdout
+    assert _INVOKED not in result.stdout
+    assert re.search(
+        r"could not compute the gate key \(.*; Python 3\.\d+\.\d+.*\)", result.stdout
+    ), result.stdout
 
 
 def test_canonical_template_shows_the_hard_stop_shape() -> None:
@@ -1673,7 +1801,7 @@ def test_no_site_fence_uses_the_fail_open_or_cwd_relative_shapes() -> None:
                 # Step 2.5 gate 2's variant: the ambient cwd there may already
                 # be the detached gate worktree, so it derives its anchor from
                 # the branch rather than from `git rev-parse` (#2141 round 4).
-                assert 'git -C "$TMPWT" worktree list' in fence, (
+                assert "git worktree list --porcelain" in fence, (
                     f"{doc}: a $SESSION_WT anchor must be derived in-fence from "
                     f"`git worktree list`, keyed on the branch"
                 )
