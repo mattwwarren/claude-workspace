@@ -511,13 +511,17 @@ def _record_liveness_handle(
         _store_liveness_handle(sid, handle)
 
 
-def _post_launch_recovery_guidance(*, executor_name: str, sid: str) -> str:
+def post_launch_recovery_guidance(*, executor_name: str, sid: str) -> str:
     """Return the operator's recovery steps for a live, handle-less worker.
 
     The one place the text varies by backend (#2592). A ``cw codex run`` job
     completes its own session when it finishes, so a healthy one is left
     alone. ``cw spawn close`` stops only a worker with a ``surface_ref``, so
     an aider or opencode process must be stopped first.
+
+    Shared with the doctor's class-9 wedge recipe
+    (``cw.doctor.wedge.orphans``, #2663), which gives an aider or opencode
+    session the same stop-then-close steps.
     """
     if executor_name == CODEX_BACKEND:
         return (
@@ -557,7 +561,7 @@ def _launched_worker_error(
         task.ticket_id,
         exc_info=exc,
     )
-    guidance = _post_launch_recovery_guidance(executor_name=executor_name, sid=sess.id)
+    guidance = post_launch_recovery_guidance(executor_name=executor_name, sid=sess.id)
     error = (
         f"{executor_name} pid {proc.pid} is still running and its liveness"
         f" handle was not recorded. Recovery: {guidance}"
