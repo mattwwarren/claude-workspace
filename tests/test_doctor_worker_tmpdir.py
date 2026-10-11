@@ -249,9 +249,7 @@ class TestProcEnviron:
         result = _check(proc_root)
 
         assert result.warn is True
-        assert (
-            f"{short_id} (cwd {cwd}): TMPDIR unset (host default)" in result.detail
-        )
+        assert f"{short_id} (cwd {cwd}): TMPDIR unset (host default)" in result.detail
 
     def test_symlinked_cwd_compares_by_realpath(
         self, tmp_path: Path, daemon: FakeNativeDaemonClient
@@ -320,9 +318,7 @@ class TestUnverifiable:
         daemon.seed_live_worker(cwd, pid=101, proc_start=_START)
         self._assert_unverifiable(_check(tmp_path / "no-such-proc"))
 
-    def test_stat_missing(
-        self, tmp_path: Path, daemon: FakeNativeDaemonClient
-    ) -> None:
+    def test_stat_missing(self, tmp_path: Path, daemon: FakeNativeDaemonClient) -> None:
         cwd = _make_worker_dir(tmp_path, "wt-a")
         proc_root = tmp_path / "proc"
         _seed_proc(proc_root, 101, environ=_environ(TMPDIR="/elsewhere"), stat=None)

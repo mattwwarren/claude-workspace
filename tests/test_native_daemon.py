@@ -1330,9 +1330,7 @@ class TestFakeNativeDaemonClient:
         client.roster_unreadable = True
         assert client.list_live_worker_homes() is None
 
-    def test_seed_live_worker_surfaces_pid_and_proc_start(
-        self, tmp_path: Path
-    ) -> None:
+    def test_seed_live_worker_surfaces_pid_and_proc_start(self, tmp_path: Path) -> None:
         client = FakeNativeDaemonClient()
         seeded = client.seed_live_worker(tmp_path / "one", pid=42, proc_start="777")
         bare = client.seed_live_worker(tmp_path / "two")

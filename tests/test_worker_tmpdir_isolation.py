@@ -31,9 +31,7 @@ if TYPE_CHECKING:
     from cw.native_daemon import FakeNativeDaemonClient
 
 
-def _spawn(
-    client: ClientConfig, worktree: Path, daemon: FakeNativeDaemonClient
-) -> str:
+def _spawn(client: ClientConfig, worktree: Path, daemon: FakeNativeDaemonClient) -> str:
     """Spawn one daemon worker on *worktree* through the real spawn path."""
     return spawn_create_impl(
         client=client,
