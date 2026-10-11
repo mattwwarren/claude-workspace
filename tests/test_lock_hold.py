@@ -15,6 +15,7 @@ import logging
 import os
 import threading
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
@@ -25,6 +26,7 @@ from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
 from cw._lock_guard import LockRank, held_locks, lock_guard
 from cw._lock_hold import (
     LockHoldRecord,
+    LockHoldSummary,
     caller_label,
     chunk_lines,
     day_path,
@@ -278,6 +280,14 @@ class TestCallerLabel:
         monkeypatch.setattr("cw._lock_hold.CALLER_MAX_CHARS", 10)
         label = caller_label()
         assert label == "tests.test_lock_hold:"[:10]
+
+    def test_no_frame_falls_back_to_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw._lock_hold.inspect", SimpleNamespace(currentframe=lambda: None)
+        )
+        assert caller_label() == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -698,6 +708,17 @@ class TestFormatLongest:
 
     def test_empty(self) -> None:
         assert format_longest([], _NOW) == ""
+
+    def test_summary_without_a_longest_record(self) -> None:
+        summary = LockHoldSummary(
+            lock=SESSIONS_LOCK_NAME,
+            count=0,
+            longest=None,
+            longest_wait=None,
+            state_io_fraction=None,
+            state_io_dominates=None,
+        )
+        assert format_longest([summary], _NOW) == "sessions n/a"
 
 
 # ---------------------------------------------------------------------------
