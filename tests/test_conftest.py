@@ -12,14 +12,19 @@ Also pins the suite-wide ``HOME`` redirect (#1756) owned by
 
 from __future__ import annotations
 
+import errno
+import inspect
 import os
 import re
 import shutil
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
+import psutil
 import pytest
 from pydantic import ValidationError
 
@@ -33,6 +38,7 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
 )
+from cw.opencode_runner import _supports_v1_flags
 from tests._session_home import REAL_HOME, SESSION_HOME, wants_real_home
 from tests.conftest import (
     _OPTIONAL_BINARY_DENYLIST,
@@ -40,6 +46,7 @@ from tests.conftest import (
     _guard_no_real_claude_projects_writes,
     _make_daemon_session,
     _make_ticket_task,
+    _reset_opencode_flag_probe,
     _seed_daemon_session,
 )
 
@@ -240,6 +247,106 @@ class TestOptionalBinaryAbsenceGuard:
 
         result = shutil.which("codex")
         assert result == str(bin_dir / "codex")
+
+    @pytest.mark.parametrize("binary", sorted(_OPTIONAL_BINARY_DENYLIST))
+    def test_denylisted_launch_raises_filenotfound(
+        self, binary: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A present denylisted binary cannot be *launched* by bare name (#2664).
+
+        ``shutil.which`` masking never reaches a probe that hands the bare
+        name straight to ``subprocess`` (``opencode run --help``), so the real
+        host binary answered. The ``Popen``-layer guard makes the launch fail
+        the way it does on a CI runner without the binary.
+        """
+        bin_dir = _make_fake_binary(tmp_path, binary)
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+        with pytest.raises(FileNotFoundError) as excinfo:
+            subprocess.run([binary, "--version"], check=False)
+
+        assert excinfo.value.errno == errno.ENOENT
+        assert excinfo.value.filename == binary
+
+    @pytest.mark.parametrize("binary", sorted(_OPTIONAL_BINARY_DENYLIST))
+    def test_path_qualified_launch_is_not_blocked(
+        self, binary: str, tmp_path: Path
+    ) -> None:
+        """A test's own stub launched by absolute path still runs."""
+        bin_dir = _make_fake_binary(tmp_path, binary)
+
+        result = subprocess.run([str(bin_dir / binary)], check=False)
+
+        assert result.returncode == 0
+
+    def test_non_denylisted_launch_is_not_blocked(self) -> None:
+        """Only denylisted names are refused; ordinary launches are untouched."""
+        result = subprocess.run([sys.executable, "-c", "pass"], check=False)
+
+        assert result.returncode == 0
+
+    @pytest.mark.binary_on_path("opencode")
+    def test_binary_on_path_marker_lets_the_launch_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A forced-present binary is launched for real (the stub on PATH runs)."""
+        bin_dir = _make_fake_binary(tmp_path, "opencode")
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+        result = subprocess.run(["opencode", "--version"], check=False)
+
+        assert result.returncode == 0
+
+    @pytest.mark.integration
+    def test_integration_marker_exempts_launch_guard(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``integration``-marked tests launch the real binary by bare name."""
+        bin_dir = _make_fake_binary(tmp_path, "codex")
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+        result = subprocess.run(["codex", "--version"], check=False)
+
+        assert result.returncode == 0
+
+
+class TestHostProbeIsolation:
+    """The autouse ``_isolate_process_table`` + ``_reset_opencode_flag_probe`` (#2664).
+
+    Two host-state reads leaked into the unit suite: the ``opencode run
+    --help`` probe (process-sticky ``lru_cache``) and the codex boot pass's
+    ``psutil.process_iter`` scan, which any foreign zombie ``codex`` turns
+    inconclusive. Both now default to the state a CI runner presents.
+    """
+
+    def test_process_table_is_empty_by_default(self) -> None:
+        """No host process is visible unless a test builds its own table."""
+        assert list(psutil.process_iter(["name", "cwd"])) == []
+
+    @pytest.mark.integration
+    def test_integration_marker_exempts_process_table(self) -> None:
+        """``integration``-marked tests read the real process table."""
+        assert os.getpid() in {process.pid for process in psutil.process_iter(["name"])}
+
+    def test_flag_probe_cache_is_cleared_around_each_test(self) -> None:
+        """The reset fixture empties the ``lru_cache`` before and after a test."""
+        v1_help = subprocess.CompletedProcess([], 0, stdout="--pure --dir", stderr="")
+
+        def _seed() -> None:
+            with patch("cw.opencode_runner.subprocess.run", return_value=v1_help):
+                assert _supports_v1_flags() is True
+            assert _supports_v1_flags.cache_info().currsize == 1
+
+        _seed()
+        guard = inspect.unwrap(_reset_opencode_flag_probe)()
+
+        next(guard)
+        assert _supports_v1_flags.cache_info().currsize == 0
+
+        _seed()
+        with pytest.raises(StopIteration):
+            next(guard)
+        assert _supports_v1_flags.cache_info().currsize == 0
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
