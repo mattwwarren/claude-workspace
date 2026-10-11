@@ -8,7 +8,7 @@ allowed-tools: ["Bash", "Glob", "Grep", "Read", "Write", "Agent", "Skill"]
 
 **Orientation:** Read `.cw/plan.md` for the approved plan from Stage 1. Read `.cw/context.json` for ticket context (or prose-delegate to `auto-dev-intake.md` first if absent). **`.cw/plan.md` being absent** is rare — the tracker-aware plan-recovery fallback (#943/#1906), the per-tracker authorship checks it must satisfy before honoring a `<!-- plan-spec-reviewed` marker, and the `plan_missing` exit that fires only once every tracker branch is exhausted live in `.claude/commands/auto-dev-impl-appendix.md`, section "Orientation: tracker-aware plan recovery when `.cw/plan.md` is absent". Read it now if the plan file is missing; do not improvise a recovery path, and do not exit `plan_missing` from this summary alone.
 
-**Comments are live, not cached (#1794).** The cached `comments` array in `.cw/context.json` is a Stage-0 (or earlier Stage-2 re-materialization) snapshot only. Dispatch spawns `/auto-dev-{stage.value} <ticket> --headless` **directly per stage** (`src/cw/executor.py`, RFC 0005 A2) — Stage 0 does NOT re-run between pipeline stages, so on an IMPL-stage re-entry (queue re-dispatch, `--regress --stage impl`, or a resumed `s2_implementing` session) the cached array can be arbitrarily stale and an operator send-back comment would never reach this stage. Regardless of whether `.cw/context.json` already exists, this stage MUST live-fetch the ticket comments on every invocation via the active tracker's fetch op (`list_comments(<id>)` for `linear`; `gh issue view <n> --json comments` for `github-issues`), overwrite `.cw/context.json`'s `comments` array with the fresh result (each entry mapped to `{"author": "<login>", "created_at": "<createdAt>", "body": "<text>"}`), and bump `materialized_by_session` to the current session id. Mirrors `auto-dev-plan.md`'s "Comments and body are live, not cached" paragraph. Also write the fresh array verbatim to `$GUARD_ROOT/.cw/impl-comments.json` (creating the directory first if absent), resolving `$GUARD_ROOT` exactly as in "Guard-script path resolution and staleness marker (#2141)" below — the Pre-Stage Detector Guard below consumes it. Never write this cache to a fixed `/tmp/...` path or any `$CW_SESSION`-keyed path: `$CW_SESSION` is not guaranteed unique across two workers sharing a machine, so a fixed name there lets one worker's cache collide with another's. **On comments-fetch failure, a regressed entry hard-blocks; a fresh one WARNs (#2415).** Before deciding how to handle a failed live fetch, read `queue_metadata.regressed_into_stage` from `.claude/cw-context.json` — the same source the Pre-Stage Detector Guard's `REGRESSED_INTO_STAGE` reads (`.claude/commands/auto-dev-impl-appendix.md`). **If it is non-empty** (this IMPL entry was reached via `_stage_regress`) **and** the live fetch exits non-zero or returns malformed JSON: EXIT `blocked` with `blocker.reason: "impl_comments_unreadable_after_regress"` and `blocker.details` naming the fetch failure. A regress exists specifically to act on newer comments, and continuing on the stale cached array would defeat it, and the worker cannot tell whether the comment that triggered the regress is the very one it can no longer read. **Otherwise** (a fresh, non-regressed entry), **WARN and continue** (mirrors `auto-dev-intake.md`'s Step 0d): emit an attention signal, log `"impl_comments_fetch_failed"` in `friction_highlights`, and leave the existing `comments` array untouched rather than overwriting it with an empty/failed result — a stale-but-real array is better evidence than none. Still write whatever was fetched (possibly `[]`) to `$GUARD_ROOT/.cw/impl-comments.json`; the staleness script degrades gracefully on a bad or empty comments file without masking an independently-sourced `regressed_into_stage` signal.
+**Comments are live, not cached (#1794).** The cached `comments` array in `.cw/context.json` is a Stage-0 (or earlier Stage-2 re-materialization) snapshot only. Dispatch spawns `/auto-dev-{stage.value} <ticket> --headless` **directly per stage** (`src/cw/executor.py`, RFC 0005 A2) — Stage 0 does NOT re-run between pipeline stages, so on an IMPL-stage re-entry (queue re-dispatch, `--regress --stage impl`, or a resumed `s2_implementing` session) the cached array can be arbitrarily stale and an operator send-back comment would never reach this stage. Regardless of whether `.cw/context.json` already exists, this stage MUST live-fetch the ticket comments on every invocation via the active tracker's fetch op (`list_comments(<id>)` for `linear`; `gh issue view <n> --json comments` for `github-issues`), overwrite `.cw/context.json`'s `comments` array with the fresh result (each entry mapped to `{"author": "<login>", "created_at": "<createdAt>", "body": "<text>"}`), and bump `materialized_by_session` to the current session id. Mirrors `auto-dev-plan.md`'s "Comments and body are live, not cached" paragraph. Also write the fresh array verbatim to `$GUARD_ROOT/.cw/impl-comments.json` (creating the directory first if absent), resolving `$GUARD_ROOT` exactly as in "Guard-script path resolution and staleness marker (#2141)" below — the Pre-Stage Detector Guard below consumes it. Never write this cache to a fixed `/tmp/...` path or any `$CW_SESSION`-keyed path: `$CW_SESSION` is not guaranteed unique across two workers sharing a machine, so a fixed name there lets one worker's cache collide with another's. The Step 2.5 gate worktree and its `TMPDIR` follow the same rule: their `cw-gate-wt-`/`cw-gate-tmp-` names come from `gate_key.py` (clone identity plus branch), never from `$CW_SESSION` (#2436). **On comments-fetch failure, a regressed entry hard-blocks; a fresh one WARNs (#2415).** Before deciding how to handle a failed live fetch, read `queue_metadata.regressed_into_stage` from `.claude/cw-context.json` — the same source the Pre-Stage Detector Guard's `REGRESSED_INTO_STAGE` reads (`.claude/commands/auto-dev-impl-appendix.md`). **If it is non-empty** (this IMPL entry was reached via `_stage_regress`) **and** the live fetch exits non-zero or returns malformed JSON: EXIT `blocked` with `blocker.reason: "impl_comments_unreadable_after_regress"` and `blocker.details` naming the fetch failure. A regress exists specifically to act on newer comments, and continuing on the stale cached array would defeat it, and the worker cannot tell whether the comment that triggered the regress is the very one it can no longer read. **Otherwise** (a fresh, non-regressed entry), **WARN and continue** (mirrors `auto-dev-intake.md`'s Step 0d): emit an attention signal, log `"impl_comments_fetch_failed"` in `friction_highlights`, and leave the existing `comments` array untouched rather than overwriting it with an empty/failed result — a stale-but-real array is better evidence than none. Still write whatever was fetched (possibly `[]`) to `$GUARD_ROOT/.cw/impl-comments.json`; the staleness script degrades gracefully on a bad or empty comments file without masking an independently-sourced `regressed_into_stage` signal.
 
 In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage completes. In the interactive monolith chain: do NOT emit the sentinel here; the monolith owns it.
 
@@ -240,6 +240,8 @@ literally at each call site, because shell state does not persist between
 `Bash` tool calls (same convention as `prep-pr.md`'s `prep_pr_state.py`
 resolver).
 
+**Tool scripts outside the table (#2436).** `gate_key.py` is invoked from the Step 2.5 fences but is deliberately not a row above: it has no stale-versus-current behaviour to gate (it computes a key, and `--claim` fails closed), so it follows the tool-script convention of `prep_pr_state.py`: probe the session worktree or `$GUARD_ROOT` copy, then `$HOME/.claude/scripts`, and hard-stop when it is absent with one line ending `run scripts/install-skills.sh`. A missing helper never falls back to a `$CW_SESSION`- or `$$`-keyed path. Commands reach a client-repo worker as soon as the checkout updates, but scripts are linked per file, so until the installer is re-run `~/.claude/scripts/gate_key.py` is absent there and Step 2.5 stops with that remedy. Each fence validates the printed key against `^[0-9a-f]{16}$` instead of trusting the script's presence.
+
 ### Pre-Stage Detector Guard
 
 Before starting S2 work, run `detect_current_stage()` (see [Resume Detection](#resume-detection)).
@@ -318,7 +320,8 @@ Stage 2 agent spawn:
       # the script, and never take the absent-from-both-locations skip path.
       exit 3
     else
-      python "$RESOLVED"
+      # stdlib-only guard; python3 is the interpreter present in the impl environment (#2436)
+      python3 "$RESOLVED"
     fi
   fi
   ```
@@ -384,32 +387,60 @@ Fetching `main` alongside `<branch-name>` ensures `origin/main` is current befor
 **Gate setup: create one trap-cleaned temp worktree at `origin/<branch-name>`**
 
 ```bash
+# Disarm first: a trap or flag left armed by an earlier fence in this shell must not
+# fire against the paths below. A leaked earlier path is the safe failure; a deleted
+# live path is not.
+trap - EXIT INT TERM
+GATE_WT_CLEANED=1
 FORK_POINT=$(git merge-base origin/main origin/<branch-name>)
-: "${CW_SESSION:?CW_SESSION must be set}"
-TMPWT="${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$CW_SESSION"
-export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$CW_SESSION"
-# Deterministic path (keyed on $CW_SESSION, not $$) — reconstructable by an
-# external reconciler even if this invocation is SIGKILLed before any trap runs.
+# Gate key: gate_key.py is the one place the gate paths are named. It keys them on
+# the clone's identity plus the branch, so two gates on one host never share a path.
+# Resolved repo-local first, then the installed copy; a miss stops the gate.
+GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
+  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+[ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
+KEY_SCRIPT=""
+for candidate in "$GUARD_ROOT/.claude/scripts/gate_key.py" "$HOME/.claude/scripts/gate_key.py"; do
+  if [ -f "$candidate" ]; then KEY_SCRIPT="$candidate"; break; fi
+done
+[ -n "$KEY_SCRIPT" ] || { echo "GATE_KEY_HELPER_MISSING: gate_key.py not found (\$GUARD_ROOT/.claude/scripts, ~/.claude/scripts); run scripts/install-skills.sh"; exit 1; }
+GATE_KEY=$(python3 "$KEY_SCRIPT" --branch '<branch-name>') && [[ "$GATE_KEY" =~ ^[0-9a-f]{16}$ ]] || { echo "IMPL_FAILED: gate_key.py could not compute the gate key ($KEY_SCRIPT; $(python3 --version 2>&1))"; exit 1; }
+TMPWT="${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$GATE_KEY"
+export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$GATE_KEY"
+# Deterministic path (keyed on repo identity + branch, not $$) — reconstructable
+# by an external reconciler even if this invocation is SIGKILLed before any trap runs.
 # Off /tmp: a tmpfs-backed /tmp is exhausted by a few concurrent gate runs'
 # venvs + pytest/coverage/uv caches (ENOSPC across the host).
-# Self-heal: a prior invocation for this same session may have been killed
-# after `git worktree add` registered the entry but before cleanup ran.
-git worktree remove --force "$TMPWT" 2>/dev/null
-rm -rf "$TMPWT" 2>/dev/null
-rm -rf "$TMPDIR" 2>/dev/null
-mkdir -p "$TMPDIR" || { echo "IMPL_FAILED: unable to create TMPDIR: $TMPDIR"; exit 1; }
-git worktree prune
-gate_wt_cleanup() { git worktree remove --force "$TMPWT" 2>/dev/null; rm -rf "$TMPWT" 2>/dev/null; rm -rf "$TMPDIR" 2>/dev/null; }
+# The path is shared by successive runs of this branch and the self-heal below is
+# destructive, so it runs only once --claim shows no live run owns the path. A
+# SIGKILLed run leaves a dead owner record, which the next claim takes over; a live
+# owner makes --claim refuse, and this fence exits before touching the path.
+python3 "$KEY_SCRIPT" --branch '<branch-name>' --claim --key "$GATE_KEY" --gate-root "${CW_GATE_ROOT:-/var/tmp}" \
+  || { echo "IMPL_FAILED: gate path $TMPWT not claimed (live owner or claim error, see above); left untouched"; exit 1; }
+gate_wt_cleanup() { [ -z "${GATE_WT_CLEANED:-}" ] || return 0; GATE_WT_CLEANED=1; git worktree remove --force "$TMPWT" 2>/dev/null; rm -rf "$TMPWT" 2>/dev/null; rm -rf "$TMPDIR" 2>/dev/null; python3 "$KEY_SCRIPT" --release --key "$GATE_KEY" --gate-root "${CW_GATE_ROOT:-/var/tmp}" 2>/dev/null; }
+# Cleanup is armed only now, after a successful claim: a refused or failed claim exits
+# above with no trap armed and the flag set, so it never deletes the refused owner's paths.
+GATE_WT_CLEANED=
 trap gate_wt_cleanup EXIT
 # INT/TERM must also actually stop the script — a trap alone only runs
 # cleanup and then resumes execution; without the explicit exit here the
 # gate would keep running gate checks after the harness believed it had
 # killed this invocation.
 trap 'gate_wt_cleanup; exit 143' INT TERM
+# Self-heal: a prior invocation for this branch may have been killed after
+# `git worktree add` registered the entry but before cleanup ran.
+git worktree remove --force "$TMPWT" 2>/dev/null
+rm -rf "$TMPWT" 2>/dev/null
+rm -rf "$TMPDIR" 2>/dev/null
+mkdir -p "$TMPDIR" || { echo "IMPL_FAILED: unable to create TMPDIR: $TMPDIR"; exit 1; }
+git worktree prune
 git worktree add --detach "$TMPWT" origin/<branch-name> || { echo "IMPL_FAILED: git worktree add exited $?"; exit 1; }
 ```
 
-All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT run those against the cw session worktree with origin-qualified refs — that cwd confusion is the bug this step fixes. FORK_POINT is recomputed from `origin` refs; do not trust the impl agent's reported value. **Exception:** gate 2's guard-script resolver and its `--plan` argument target the cw session worktree, not `$TMPWT` (the detached checkout has no `.claude/cw-context.json` and no uncommitted `.cw/` state). Gate 2 derives that worktree **inside its own fence** from `git worktree list`, keyed on the branch, because shell variables do not persist between fenced Bash calls.
+All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT run those against the cw session worktree with origin-qualified refs — that cwd confusion is the bug this step fixes. The gate paths are keyed by `gate_key.py` (clone identity plus branch), never by `$CW_SESSION`. Shell state does not persist between fenced Bash calls, so the setup fence's ownership claim, its `EXIT` trap and the `$GATE_KEY`, `$TMPWT`, `$TMPDIR` and `$FORK_POINT` it computes cover the setup call only. Gate 2's fence, gate 3's fence and gate 4's re-runs re-derive the gate key and the paths themselves from `gate_key.py` (gate 2 also re-derives `$FORK_POINT`). FORK_POINT is recomputed from `origin` refs; do not trust the impl agent's reported value. **Exception:** gate 2's guard-script resolver and its `--plan` argument target the cw session worktree, not `$TMPWT` (the detached checkout has no `.claude/cw-context.json` and no uncommitted `.cw/` state). Gate 2 derives that worktree **inside its own fence** from `git worktree list`, keyed on the branch, because shell variables do not persist between fenced Bash calls.
+
+**Gate helper missing (#2436).** A fence that cannot resolve `gate_key.py` prints one line ending `run scripts/install-skills.sh` and exits non-zero before touching any gate path; it never falls back to a `$CW_SESSION`- or `$$`-keyed path. In headless mode EXIT `blocked` with `blocker.reason: "impl_failed"` and `blocker.details: "Step 2.5 gate setup: gate_key.py not found — run scripts/install-skills.sh"`, so the orchestrator can self-resolve (ADR-0020) instead of reading a generic implementation failure.
 
 **Gate checks (all run in `$TMPWT`):**
 
@@ -428,9 +459,38 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
    ```bash
    # Self-contained: shell state does not persist between fenced Bash calls, and
    # the ambient cwd may be $TMPWT. Every variable used below is derived here.
-   : "${CW_SESSION:?CW_SESSION must be set}"
-   TMPWT="${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$CW_SESSION"
-   export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$CW_SESSION"
+   # Precondition: the cwd is inside a worktree of this repository (the session
+   # worktree and the detached $TMPWT both qualify); from anywhere else the
+   # worktree list and the gate key cannot be computed and the fence exits 3.
+   # The session worktree is derived FIRST: gate_key.py is resolved from it, and the
+   # key it prints is what names $TMPWT. Primary: the worktree whose
+   # cw-context.json names this ticket — the handle that survives a session
+   # branch named anything other than <branch-name>. Gate worktrees are skipped.
+   SESSION_WT=""
+   while IFS= read -r wt; do
+     case "$wt" in */cw-gate-wt-*) continue ;; esac
+     if [ -f "$wt/.claude/cw-context.json" ] && \
+        [ "$(jq -r '.ticket_id // empty' "$wt/.claude/cw-context.json" 2>/dev/null)" = "<ticket-id>" ]; then
+       SESSION_WT="$wt"; break
+     fi
+   done < <(git worktree list --porcelain | sed -n 's/^worktree //p')
+   # Fallback: the branch-keyed lookup, for a worktree carrying no context file.
+   if [ -z "$SESSION_WT" ]; then
+     SESSION_WT=$(git worktree list --porcelain \
+       | awk -v b="branch refs/heads/<branch-name>" '/^worktree /{w=substr($0,10)} $0==b{print w; exit}')
+   fi
+   KEY_SCRIPT=""
+   for candidate in ${SESSION_WT:+"$SESSION_WT/.claude/scripts/gate_key.py"} "$HOME/.claude/scripts/gate_key.py"; do
+     if [ -f "$candidate" ]; then KEY_SCRIPT="$candidate"; break; fi
+   done
+   if [ -z "$KEY_SCRIPT" ]; then
+     echo "GATE_KEY_HELPER_MISSING: Step 2.5 gate 2: gate_key.py not found (session worktree, ~/.claude/scripts); run scripts/install-skills.sh"
+     exit 3
+   fi
+   GATE_KEY=$(python3 "$KEY_SCRIPT" --branch '<branch-name>') && [[ "$GATE_KEY" =~ ^[0-9a-f]{16}$ ]] || {
+     echo "IMPL_FAILED: Step 2.5 gate 2: gate_key.py could not compute the gate key ($KEY_SCRIPT; $(python3 --version 2>&1)); run from inside a worktree of the repo"; exit 3; }
+   TMPWT="${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$GATE_KEY"
+   export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$GATE_KEY"
    mkdir -p "$TMPDIR"
    if [ ! -d "$TMPWT" ]; then
      echo "IMPL_FAILED: Step 2.5 gate 2: gate worktree $TMPWT missing (run Gate setup first)"
@@ -441,22 +501,6 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
    MIN_VERSION=2  # per the script version table in auto-dev-impl.md
    TOUCHED=$(git -C "$TMPWT" diff --name-only "$FORK_POINT") || {
      echo "IMPL_FAILED: Step 2.5 gate 2: git diff --name-only failed"; exit 3; }
-   # The session worktree (not the detached $TMPWT). Primary: the worktree whose
-   # cw-context.json names this ticket — the handle that survives a session
-   # branch named anything other than <branch-name>.
-   SESSION_WT=""
-   while IFS= read -r wt; do
-     [ "$wt" = "$TMPWT" ] && continue
-     if [ -f "$wt/.claude/cw-context.json" ] && \
-        [ "$(jq -r '.ticket_id // empty' "$wt/.claude/cw-context.json" 2>/dev/null)" = "<ticket-id>" ]; then
-       SESSION_WT="$wt"; break
-     fi
-   done < <(git -C "$TMPWT" worktree list --porcelain | sed -n 's/^worktree //p')
-   # Fallback: the branch-keyed lookup, for a worktree carrying no context file.
-   if [ -z "$SESSION_WT" ]; then
-     SESSION_WT=$(git -C "$TMPWT" worktree list --porcelain \
-       | awk -v b="branch refs/heads/<branch-name>" '/^worktree /{w=substr($0,10)} $0==b{print w; exit}')
-   fi
    if [ -z "$SESSION_WT" ] || [ "$SESSION_WT" = "$TMPWT" ]; then
      echo "IMPL_FAILED: Step 2.5 gate 2: cannot locate cw session worktree for <branch-name>"
      exit 3  # HARD STOP: EXIT blocked with impl_failed (see bullets below).
@@ -505,7 +549,7 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
      SCOPE_CONFORMANCE_EXIT=$?
    fi
    ```
-   Resolution follows "Guard-script path resolution and staleness marker (#2141)" above for the marker gate, but this call site anchors differently: instead of `$GUARD_ROOT` (a `git rev-parse --show-toplevel` / `cw-context.json` derivation from the ambient cwd), it uses `$SESSION_WT`, derived **inside this fence** from `git -C "$TMPWT" worktree list --porcelain`. The fence carries no `$GUARD_ROOT`, no `rev-parse`, and no `$PWD` fallback, for two reasons that both have to hold at once: shell variables do not persist between fenced Bash calls, so an anchor captured in the Gate-setup fence may simply be unset here; and by this point the ambient cwd may already be `$TMPWT`, so any ambient re-derivation resolves to the detached gate worktree — the exact bug this gate had. Deriving from the worktree list is correct either way, whether or not the fences share a shell.
+   Resolution follows "Guard-script path resolution and staleness marker (#2141)" above for the marker gate, but this call site anchors differently: instead of `$GUARD_ROOT` (a `git rev-parse --show-toplevel` / `cw-context.json` derivation from the ambient cwd), it uses `$SESSION_WT`, derived **inside this fence** from `git worktree list --porcelain` before the gate key is computed, because `gate_key.py` is resolved from it and the key it prints is what names `$TMPWT`. The one precondition is that the fence runs with its cwd inside some worktree of this repository (the session worktree and the detached `$TMPWT` both qualify); from any other cwd neither the worktree list nor the key can be computed and the fence hard-stops with exit 3. The fence carries no `$GUARD_ROOT`, no `rev-parse`, and no `$PWD` fallback, for two reasons that both have to hold at once: shell variables do not persist between fenced Bash calls, so an anchor captured in the Gate-setup fence may simply be unset here; and by this point the ambient cwd may already be `$TMPWT`, so any ambient re-derivation resolves to the detached gate worktree — the exact bug this gate had. Deriving from the worktree list is correct either way, whether or not the fences share a shell.
 
    **The lookup is two-step, and the branch name is only the fallback.** The primary key is `ticket_id` in each candidate worktree's `.claude/cw-context.json` (written by `spawn_create_impl`, `src/cw/spawn.py`) — the one handle that does not depend on what the local branch is called. Keying on `branch refs/heads/<branch-name>` alone was wrong: the impl stage's own branch-discipline bullet says `isolation: "worktree"` provisions the session on an auto-generated `agent-<hash>` branch, and a detached session worktree has no `branch` line at all, so a correct implementation delivered from either shape found nothing and the gate hard-stopped on it. The branch-keyed `awk` stays as the fallback for a worktree carrying no context file (it is gitignored, so a worktree provisioned outside cw has none). `$TMPWT` is skipped explicitly in the primary loop, and the pre-existing empty-or-equals-`$TMPWT` hard stop still applies when neither step resolves — a second lookup must not soften it, and a context file naming a *different* ticket must not satisfy it.
 
@@ -519,7 +563,7 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
 
    **Session worktree not locatable** (or, once a current script has resolved, `$SESSION_WT/.cw/plan.md` is missing): EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: HEADLESS BLOCK — cannot locate cw session worktree for <branch-name>"`, and STOP.
 
-   **Gate worktree missing / merge-base failed / touched-file diff failed:** EXIT `blocked` with `blocker.reason: "impl_failed"` and STOP. The `git diff --name-only` extraction is in this class deliberately: its status is captured into `$TOUCHED` rather than piped into `sort`, because a pipeline reports only its *last* command's status — a failed diff would leave `sort` at 0, write an empty touched-file list, and let the file-set gate pass against zero delivered files. An empty list is never evidence of conformance; it is evidence the extraction did not run.
+   **Gate worktree missing / gate key not computable / merge-base failed / touched-file diff failed:** EXIT `blocked` with `blocker.reason: "impl_failed"` and STOP. A missing `gate_key.py` is the same class: `blocker.details: "Step 2.5 gate 2: gate_key.py not found — run scripts/install-skills.sh"`. The `git diff --name-only` extraction is in this class deliberately: its status is captured into `$TOUCHED` rather than piped into `sort`, because a pipeline reports only its *last* command's status — a failed diff would leave `sort` at 0, write an empty touched-file list, and let the file-set gate pass against zero delivered files. An empty list is never evidence of conformance; it is evidence the extraction did not run.
 
    The script compares the delivered file set against the plan's `## Files Modified` enumeration and allows `max(SCOPE_DRIFT_ABS_FLOOR, round(plan_files * (SCOPE_DRIFT_RATIO - 1)))` unplanned files (v1: floor 5, ratio 1.5; per-repo override via `[tool.cw.scope_conformance]` in `pyproject.toml`). It prints a JSON verdict — `triggered`, `extra_files`, `allowed_extra`, `plan_file_count`, `delivered_file_count`, `approved_extra_files` — to stdout, captured above in `$SCOPE_CONFORMANCE_OUTPUT`.
 
@@ -539,18 +583,30 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
 
 3. **Test command exit code is 0:** Re-run the agent's claimed test command in `$TMPWT`:
    ```bash
-   export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$CW_SESSION"
+   # Self-contained: re-derive the gate key; the setup fence's $TMPWT does not persist.
+   GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+   CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
+     "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+   [ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
+   KEY_SCRIPT=""
+   for candidate in "$GUARD_ROOT/.claude/scripts/gate_key.py" "$HOME/.claude/scripts/gate_key.py"; do
+     if [ -f "$candidate" ]; then KEY_SCRIPT="$candidate"; break; fi
+   done
+   [ -n "$KEY_SCRIPT" ] || { echo "GATE_KEY_HELPER_MISSING: Step 2.5 gate 3: gate_key.py not found (\$GUARD_ROOT/.claude/scripts, ~/.claude/scripts); run scripts/install-skills.sh"; exit 3; }
+   GATE_KEY=$(python3 "$KEY_SCRIPT" --branch '<branch-name>') && [[ "$GATE_KEY" =~ ^[0-9a-f]{16}$ ]] || { echo "IMPL_FAILED: Step 2.5 gate 3: gate_key.py could not compute the gate key ($KEY_SCRIPT; $(python3 --version 2>&1))"; exit 3; }
+   TMPWT="${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$GATE_KEY"
+   export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$GATE_KEY"
    cd "$TMPWT" && <test_command>
    ```
    Non-zero exit → `impl_failed`. The agent's pasted tail was either fabricated or stale.
 
-4. **Mypy/ruff clean on touched files** (if Python): Export `TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$CW_SESSION"` ahead of both re-runs below, same as gate 3, so ruff/mypy/uv caches also stay off tmpfs. Re-run ruff in `$TMPWT`; non-zero exit → `impl_failed`. Re-run mypy under the Stage 2 type-check gate rule, re-verifying (never trusting) the agent's baseline claim: no baseline, or a strict override applies → plain mypy on touched files, non-zero → `impl_failed`; a baseline applies → independently re-run the appendix's Detection steps against `$FORK_POINT` to derive your own `MYPY_BASELINE_FILE` / `MYPY_BASELINE_CMD` (never copy them from the friction report; a mismatch with the agent's reported values → `impl_failed`), then run that command and the no-growth check per `.claude/commands/auto-dev-impl-appendix.md`, section "Type check gate: mypy baseline detection and comparison" — any blocking error, or a baseline file that gained entries since `$FORK_POINT`, → `impl_failed`. Record baselined pre-existing errors in touched files to `.cw/deferred-findings.md` as that section specifies; they do not fail this gate.
+4. **Mypy/ruff clean on touched files** (if Python): Re-derive `GATE_KEY`, `TMPWT` and `TMPDIR` ahead of both re-runs below exactly as gate 3's fence does (same `gate_key.py` call; shell state does not persist between fenced Bash calls), so ruff/mypy/uv caches also stay off tmpfs. Re-run ruff in `$TMPWT`; non-zero exit → `impl_failed`. Re-run mypy under the Stage 2 type-check gate rule, re-verifying (never trusting) the agent's baseline claim: no baseline, or a strict override applies → plain mypy on touched files, non-zero → `impl_failed`; a baseline applies → independently re-run the appendix's Detection steps against `$FORK_POINT` to derive your own `MYPY_BASELINE_FILE` / `MYPY_BASELINE_CMD` (never copy them from the friction report; a mismatch with the agent's reported values → `impl_failed`), then run that command and the no-growth check per `.claude/commands/auto-dev-impl-appendix.md`, section "Type check gate: mypy baseline detection and comparison" — any blocking error, or a baseline file that gained entries since `$FORK_POINT`, → `impl_failed`. Record baselined pre-existing errors in touched files to `.cw/deferred-findings.md` as that section specifies; they do not fail this gate.
 
 5. **Incremental commit discipline** (Mitigation 3): `git -C "$TMPWT" log --oneline "$FORK_POINT"..HEAD | wc -l` MUST be > 1 for any non-trivial change (>50 lines OR >3 files touched). A single commit on a large change → flag as discipline failure in friction (does NOT block, but compromises OOM recovery for any follow-up fix loop; record `"impl_no_incremental_commits"` in `friction_highlights`).
 
-**On gate failure (gate setup itself — e.g. `git worktree add` erroring — or any of checks 1, 3, 4):**
+**On gate failure (gate setup itself — e.g. `git worktree add` erroring or the gate path being held by a live run — or any of checks 1, 3, 4):**
 - **Interactive:** AskUserQuestion with the failed-check output: "Implementation agent's completion claim failed gate <N>: <details>. Retry impl, abort ticket, or override?"
-- **Headless:** EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate <N> failed: <verbatim check output>"`. Do NOT spawn reviewers — the impl is not done.
+- **Headless:** EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate <N> failed: <verbatim check output>"`. Do NOT spawn reviewers — the impl is not done. When the failure is a refused gate claim (the gate path is held by a live run) or a missing `gate_key.py`, set `blocker.retry_eligible: null` and read `impl_failed` here as "gate path held by a live run" (or "run scripts/install-skills.sh"), not as an implementation defect: leave the live run's path untouched and let the orchestrator triage it (ADR-0020).
 
 **On all gates pass:** Proceed to Checkpoint 2 (existing logic).
 
