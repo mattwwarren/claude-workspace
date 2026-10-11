@@ -8,7 +8,10 @@ clean-start baseline, and parks the cycle uncommitted when it adds a new lock,
 on-disk state file or path constant, more than
 :data:`_MAX_NEW_TOP_LEVEL_DEFS` top-level definitions, or more net non-test
 source lines than the budget allows — unless an open finding explicitly asks
-for that kind of addition. Active only when the plan has a ``## Files
+for that kind of addition. A loop-wide budget (#2648) also parks a cycle that
+adds net lines when the net source lines since the fix loop began exceed the
+cumulative budget, so many small cycles cannot add up to what one big cycle
+may not (the #2590 shape). Active only when the plan has a ``## Files
 Modified`` manifest, like the fence. Regex detectors run on ``.py`` files;
 test files and docs are excluded everywhere. Removed-line hits cancel added
 ones per file and kind, so editing a line that already held a construct is
@@ -21,7 +24,7 @@ import re
 from enum import StrEnum
 from typing import TYPE_CHECKING, NamedTuple
 
-from cw.codex_fix_loop.baseline import cycle_diff
+from cw.codex_fix_loop.baseline import cycle_diff, diff_since
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
 from cw.codex_fix_loop.posted_text import (
     POSTED_TEXT_MAX_CHARS,
@@ -43,8 +46,34 @@ if TYPE_CHECKING:
     from cw.review_findings import Finding
 
 DEFAULT_GROWTH_BUDGET_LINES = 40
+# Loop-wide net-line budget per originally-found finding (#2648); pinned to
+# OrchestratorConfig.codex_fix_loop_cumulative_growth_budget_lines by a test.
+DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES = 40
 _MAX_NEW_TOP_LEVEL_DEFS = 3
 _DOC_SUFFIXES = (".md", ".mdx", ".rst", ".txt", ".adoc")
+# How much of the loop-start sha the park details show.
+_SHA_PREFIX_CHARS = 12
+_CUMULATIVE_HINT = (
+    "The loop-wide total, not this cycle alone, exceeded the cumulative budget; "
+    "earlier fix cycles' commits remain on the branch. To raise it set "
+    "`codex_fix_loop_cumulative_growth_budget_lines` in orchestrator.yaml, or "
+    "disable the growth guard for a lane with "
+    f"`{CODEX_FIX_LOOP_GROWTH_GUARD_KEY}: false`."
+)
+
+
+class LoopGrowthBudget(NamedTuple):
+    """The fix loop's cumulative net-line budget (#2648).
+
+    ``start_sha`` is the commit ``HEAD`` held when the loop began,
+    ``per_finding_lines`` the configured allowance per originally-found
+    finding, and ``allowed_lines`` that allowance times the number of
+    originally-found findings (at least one).
+    """
+
+    start_sha: str
+    per_finding_lines: int
+    allowed_lines: int
 
 
 class AdditionKind(StrEnum):
@@ -161,6 +190,30 @@ def effective_budget(budget: int, n_open: int) -> int:
     return budget * max(1, n_open)
 
 
+def _cumulative_breach_line(
+    worktree: Path, loop_budget: LoopGrowthBudget, cycle_net: int
+) -> str | None:
+    """The details line for a loop-wide budget breach, or ``None`` (#2648).
+
+    Only a cycle that itself adds net source lines can breach: a cycle that
+    shrinks the loop total is never parked for it, and costs no extra git call.
+    """
+    if cycle_net <= 0:
+        return None
+    file_diffs, added, _window, _changed = _parse_unified_diff(
+        diff_since(worktree, loop_budget.start_sha)
+    )
+    total = net_source_lines(file_diffs, added)
+    if total <= loop_budget.allowed_lines:
+        return None
+    return (
+        f"- cumulative net non-test source lines +{total} since the fix loop "
+        f"began (pre-loop head {loop_budget.start_sha[:_SHA_PREFIX_CHARS]}) "
+        f"exceeds the loop budget of {loop_budget.allowed_lines} "
+        f"({loop_budget.per_finding_lines} per originally-found finding)"
+    )
+
+
 def check_growth_budget(
     worktree: Path,
     baseline: CycleBaseline,
@@ -168,11 +221,14 @@ def check_growth_budget(
     open_findings: list[Finding],
     budget_lines: int,
     cycle: int,
+    loop_budget: LoopGrowthBudget | None = None,
 ) -> FenceBreach | None:
     """Return the ``codex_fix_growth_budget_exceeded`` park, or ``None``.
 
     Measures the cycle's staged diff against its baseline tree, so additions
-    committed before the cycle began never count.
+    committed before the cycle began never count against the per-cycle
+    budget. With *loop_budget* (#2648), a cycle that adds net lines is also
+    held to the loop-wide total measured from the loop's start commit.
     """
     file_diffs, added, _window, _changed = _parse_unified_diff(
         cycle_diff(worktree, baseline)
@@ -184,7 +240,12 @@ def check_growth_budget(
     flagged += defs[_MAX_NEW_TOP_LEVEL_DEFS:]
     net = net_source_lines(file_diffs, added)
     allowed = effective_budget(budget_lines, len(open_findings))
-    if not flagged and net <= allowed:
+    cumulative_line = (
+        None
+        if loop_budget is None
+        else _cumulative_breach_line(worktree, loop_budget, net)
+    )
+    if not flagged and net <= allowed and cumulative_line is None:
         return None
     lines = [
         f"codex fix cycle {cycle} added code inside allowed file(s) beyond what "
@@ -208,6 +269,9 @@ def check_growth_budget(
         "on that lane in clients.yaml (or globally in orchestrator.yaml). "
         f"{LEFT_STAGED_HINT}"
     )
+    if cumulative_line is not None:
+        lines.append(cumulative_line)
+        hint = f"{hint} {_CUMULATIVE_HINT}"
     details = redact_and_cap("\n".join(lines), max_line_chars=POSTED_TEXT_MAX_CHARS)
     paths = tuple(sorted({a.path for a in flagged} or set(added)))
     return FenceBreach(CODEX_FIX_GROWTH_BUDGET, paths, details, hint)
