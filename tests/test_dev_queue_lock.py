@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
@@ -19,8 +20,9 @@ from click.testing import CliRunner
 import cw.config
 from cw import _flock
 from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
+from cw._lock_hold import LockHoldRecord, read_window
 from cw.cli import main
-from cw.config import save_state
+from cw.config import save_state, sessions_lock, state_dir
 from cw.dev_queue import (
     add_ticket,
     approve_must_fix_override_ticket,
@@ -40,7 +42,7 @@ from cw.dev_queue import (
 )
 from cw.dev_queue import storage as dev_queue_storage
 from cw.dev_queue.crud import register_or_adopt_watched_pr
-from cw.exceptions import CwError
+from cw.exceptions import CwError, LockTimeoutError
 from cw.models import CwState, DevQueueStore, QueueItemStatus
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import (
@@ -449,3 +451,51 @@ class TestMultiTicketContention:
         assert result.exit_code != 0
         assert "Not removed (lock timed out)" not in result.stderr
         assert "dev_queue lock" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Lock-hold recording through the shared seam (#2637)
+# ---------------------------------------------------------------------------
+
+
+def _recorded_holds() -> list[LockHoldRecord]:
+    return read_window(state_dir(), now=datetime.now(UTC)).records
+
+
+class TestDevQueueLockHoldRecording:
+    @pytest.fixture(autouse=True)
+    def _record_every_hold(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cw._lock_hold.RECORD_MIN_S", 0.0)
+
+    @pytest.mark.usefixtures("acme")
+    def test_hold_records_dev_queue_with_caller_and_no_state_io(self) -> None:
+        with dev_queue_storage.dev_queue_lock():
+            pass
+
+        (record,) = _recorded_holds()
+        assert record.lock == "dev_queue"
+        assert record.caller == (
+            "tests.test_dev_queue_lock:TestDevQueueLockHoldRecording"
+            ".test_hold_records_dev_queue_with_caller_and_no_state_io"
+        )
+        assert record.state_io_s is None
+        assert record.state_bytes is None
+
+    def test_nested_holds_flush_after_the_outer_release(self) -> None:
+        with sessions_lock():
+            with dev_queue_storage.dev_queue_lock():
+                pass
+            assert _recorded_holds() == []
+
+        assert sorted(r.lock for r in _recorded_holds()) == ["dev_queue", "sessions"]
+
+    @pytest.mark.usefixtures("fake_lock_clock")
+    def test_bounded_timeout_records_nothing(self) -> None:
+        with (
+            _hold_flock(cw.config.dev_queue_lock()),
+            pytest.raises(LockTimeoutError),
+            dev_queue_storage.dev_queue_lock(bounded=True),
+        ):
+            pass
+
+        assert _recorded_holds() == []

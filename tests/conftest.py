@@ -27,7 +27,10 @@ import yaml
 # (#1756). isort keeps a plain ``import`` ahead of the ``from cw ...`` lines;
 # tests/test_conftest.py::TestHomeRedirectByConstruction pins the ordering.
 import tests._session_home
-from cw.config import load_state, save_state, sessions_lock_file
+from cw import _lock_hold as lock_hold_module
+from cw._lock_hold import LockHoldRecord
+from cw._lock_hold import day_path as lock_hold_day_path
+from cw.config import load_state, save_state, sessions_lock_file, state_dir
 from cw.disk import DiskUsage, InodeUsage
 from cw.models import (
     AGENT_SPAWN_STAMP_KEY,
@@ -1269,6 +1272,74 @@ def held_sessions_lock() -> Iterator[Path]:
     """Fixture form of :func:`_hold_sessions_lock` for whole-test contention."""
     with _hold_sessions_lock() as lock_path:
         yield lock_path
+
+
+# Defaults for one seeded lock-hold record; ``at`` is filled in at call time.
+_LOCK_HOLD_DEFAULTS: dict[str, object] = {
+    "lock": "sessions",
+    "held_s": 1.0,
+    "waited_s": 0.0,
+    "caller": "tests.fake:caller",
+    "pid": 1,
+    "state_io_s": None,
+    "state_bytes": None,
+}
+
+
+def _seed_lock_holds(
+    *holds: Mapping[str, object], raw_lines: Sequence[str] = ()
+) -> Path:
+    """Append lock-hold records to the dated sidecar under ``state_dir()`` (#2637).
+
+    Each mapping overrides :data:`_LOCK_HOLD_DEFAULTS` (``at`` defaults to now,
+    UTC), is validated through ``LockHoldRecord`` and lands in the file for its
+    own ``at`` day, so a record from yesterday lands in yesterday's file.
+    *raw_lines* are appended verbatim to today's file (malformed lines, capped
+    markers). Returns today's path.
+    """
+    sink = state_dir()
+    sink.mkdir(parents=True, exist_ok=True)
+    for hold in holds:
+        record = LockHoldRecord.model_validate(
+            {**_LOCK_HOLD_DEFAULTS, "at": datetime.now(UTC), **hold}
+        )
+        path = lock_hold_day_path(sink, record.at.astimezone(UTC).date())
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(record.model_dump_json() + "\n")
+    today = lock_hold_day_path(sink, datetime.now(UTC).date())
+    if raw_lines:
+        with today.open("a", encoding="utf-8") as handle:
+            handle.writelines(f"{line}\n" for line in raw_lines)
+    return today
+
+
+@pytest.fixture(autouse=True)
+def _lock_hold_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each test fresh lock-hold recorder state with recording on (#2637).
+
+    The pending notes and the state-I/O accumulator are thread-local module
+    state, so a test that leaves either behind would leak into the next test's
+    first record. ``RECORD_ENABLED`` is read once at import from
+    ``CW_LOCK_HOLD_RECORD``; pinning it keeps a developer's shell setting out of
+    the suite.
+    """
+    monkeypatch.setattr("cw._lock_hold._STATE", lock_hold_module._ThreadState())
+    monkeypatch.setattr("cw._lock_hold.RECORD_ENABLED", True)
+
+
+@pytest.fixture
+def lock_hold_clock(monkeypatch: pytest.MonkeyPatch) -> _FakeClock:
+    """One :class:`_FakeClock` behind the seam's and the recorder's ``monotonic``.
+
+    The hold is timed in ``cw.config`` (``_guarded_state_lock``) and the state
+    I/O in ``cw._lock_hold`` (``timed_state_io``); both read ``time.monotonic``
+    through their own module, so both are patched to the same clock. The
+    ``cw._flock.time`` patch used for bounded waits does not reach either.
+    """
+    clock = _FakeClock()
+    monkeypatch.setattr("cw.config.time", clock)
+    monkeypatch.setattr("cw._lock_hold.time", clock)
+    return clock
 
 
 class _RecordingLockPath:

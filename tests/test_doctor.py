@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +36,7 @@ from tests.conftest import (
     _make_daemon_session,
     _make_tick_summary,
     _make_ticket_task,
+    _seed_lock_holds,
     _seed_sessions,
 )
 
@@ -8506,6 +8507,218 @@ class TestCheckSessionsSize:
         entry = next(c for c in payload["checks"] if c["name"] == "sessions-size")
         assert entry["warn"] is True
         assert entry["ok"] is True
+
+
+def _lock_hold_marker(stage: str, at: datetime) -> str:
+    """A raw capped-marker line as the lock-hold sidecar writer emits it."""
+    return json.dumps(
+        {
+            "kind": "capped",
+            "stage": stage,
+            "at": at.isoformat(),
+            "cap_bytes": 1_048_576,
+            "ceiling_bytes": 2_097_152,
+            "detail": "seeded",
+        }
+    )
+
+
+class TestCheckLockHolds:
+    """Tests for _check_lock_holds — completed sessions/dev-queue holds (#2637)."""
+
+    def test_no_records_ok_and_explains_the_window(self, tmp_config_dir: Path) -> None:
+        from cw.doctor import _check_lock_holds
+
+        result = _check_lock_holds()
+        assert result.name == "lock-holds"
+        assert result.ok is True
+        assert result.warn is False
+        assert "no records found" in result.detail
+        assert "last 1h" in result.detail
+        assert "0.25s" in result.detail
+        assert "DEBUG on logger cw._lock_hold" in result.detail
+        assert result.detail.endswith("(completed holds only)")
+
+    def test_long_sessions_hold_warns_with_caller_age_cap_and_size(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.doctor import _check_lock_holds
+
+        now = datetime.now(UTC)
+        _seed_lock_holds(
+            {
+                "at": now - timedelta(minutes=14),
+                "held_s": 12.4,
+                "state_io_s": 9.0,
+                "state_bytes": 28_000_000,
+                "caller": "cw.dispatch.tick:dispatch_tick",
+            }
+        )
+
+        result = _check_lock_holds()
+        assert result.ok is True
+        assert result.warn is True
+        assert "cw.dispatch.tick:dispatch_tick" in result.detail
+        assert "14m ago" in result.detail
+        assert "at least 1 recorded (cap 1 MiB/day)" in result.detail
+        assert "aggregate state load/save 73%" in result.detail
+        assert "sessions.json 28000000B" in result.detail
+        assert result.detail.endswith("(completed holds only)")
+
+    def test_short_holds_do_not_warn(self, tmp_config_dir: Path) -> None:
+        from cw.doctor import _check_lock_holds
+
+        _seed_lock_holds({"held_s": 0.4, "state_io_s": 0.1})
+
+        result = _check_lock_holds()
+        assert result.ok is True
+        assert result.warn is False
+        assert "at least 1 recorded" in result.detail
+
+    def test_dominating_state_io_adds_the_prune_pointer(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.doctor import _check_lock_holds
+
+        _seed_lock_holds(
+            {"held_s": 10.0, "state_io_s": 6.0}, {"held_s": 10.0, "state_io_s": 4.0}
+        )
+
+        result = _check_lock_holds()
+        assert "state load/save dominates recorded sessions holds" in result.detail
+        assert "cw session prune" in result.detail
+        assert "Reading lock-hold numbers" in result.detail
+
+    def test_aggregate_not_longest_ratio_decides(self, tmp_config_dir: Path) -> None:
+        """R2 seed: the longest io-carrying record's own ratio is 0.75, aggregate 9/40."""
+        from cw.doctor import _check_lock_holds
+
+        _seed_lock_holds(
+            {"held_s": 12.0, "state_io_s": 9.0},
+            {"held_s": 10.0, "state_io_s": 0.0},
+            {"held_s": 10.0, "state_io_s": 0.0},
+            {"held_s": 8.0, "state_io_s": 0.0},
+            {"held_s": 100.0, "state_io_s": None},
+        )
+
+        result = _check_lock_holds()
+        assert result.warn is True
+        assert "aggregate state load/save 22%" in result.detail
+        assert "cw session prune" not in result.detail
+
+    def test_dev_queue_only_prints_na_and_no_advisory(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.doctor import _check_lock_holds
+
+        _seed_lock_holds({"lock": "dev_queue", "held_s": 15.0})
+
+        result = _check_lock_holds()
+        assert result.warn is True
+        assert "dev_queue 15.0s" in result.detail
+        assert "n/a" in result.detail
+        assert "cw session prune" not in result.detail
+
+    def test_wait_only_record_warns_and_names_the_wait(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.doctor import _check_lock_holds
+
+        _seed_lock_holds(
+            {"held_s": 0.01, "waited_s": 30.0, "caller": "cw.reconcile:reconcile"}
+        )
+
+        result = _check_lock_holds()
+        assert result.warn is True
+        assert "longest wait 30.0s (cw.reconcile:reconcile" in result.detail
+
+    @pytest.mark.parametrize(
+        ("stage", "ceiling_text"),
+        [("cap", False), ("ceiling", True)],
+    )
+    def test_capped_marker_says_counts_are_lower_bounds(
+        self, tmp_config_dir: Path, stage: str, ceiling_text: bool
+    ) -> None:
+        from cw.doctor import _check_lock_holds
+
+        _seed_lock_holds(
+            {"held_s": 1.0}, raw_lines=[_lock_hold_marker(stage, datetime.now(UTC))]
+        )
+
+        result = _check_lock_holds()
+        assert "record cap reached; counts are lower bounds" in result.detail
+        assert ("nothing more is recorded today" in result.detail) is ceiling_text
+
+    def test_stale_marker_is_ignored(self, tmp_config_dir: Path) -> None:
+        from cw.doctor import _check_lock_holds
+
+        stale = datetime.now(UTC) - timedelta(days=2)
+        _seed_lock_holds(
+            {"held_s": 1.0}, raw_lines=[_lock_hold_marker("ceiling", stale)]
+        )
+
+        result = _check_lock_holds()
+        assert "record cap reached" not in result.detail
+
+    def test_malformed_lines_degrade_to_ok(self, tmp_config_dir: Path) -> None:
+        from cw.doctor import _check_lock_holds
+
+        _seed_lock_holds(raw_lines=["not json", "[]", '{"lock": 3}'])
+
+        result = _check_lock_holds()
+        assert result.ok is True
+        assert "no records found" in result.detail
+
+    def test_unreadable_sink_degrades_to_ok(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.doctor import _check_lock_holds
+
+        not_a_dir = tmp_path / "regular-file"
+        not_a_dir.write_text("")
+        monkeypatch.setattr("cw.doctor.lock_holds.state_dir", lambda: not_a_dir)
+
+        result = _check_lock_holds()
+        assert result.ok is True
+        assert result.warn is False
+
+    def test_never_loads_state(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.doctor import _check_lock_holds
+
+        error_msg = "load_state must not be called by the lock-holds check"
+
+        def fail_load_state() -> object:
+            raise AssertionError(error_msg)
+
+        monkeypatch.setattr("cw.config.load_state", fail_load_state)
+        _seed_lock_holds({"held_s": 11.0})
+
+        assert _check_lock_holds().warn is True
+
+    def test_lock_holds_check_registered_in_run_doctor(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """run_doctor() includes the lock-holds check."""
+        _stub_claude_version_ok(monkeypatch)
+        report = run_doctor()
+        assert "lock-holds" in {c.name for c in report.checks}
+
+    def test_lock_holds_in_json_report_exit_zero(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A long hold is advisory: doctor's exit code is unchanged."""
+        _stub_claude_version_ok(monkeypatch)
+        _seed_lock_holds({"held_s": 20.0})
+
+        result = CliRunner().invoke(main, ["doctor", "--json"])
+
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        entry = next(c for c in payload["checks"] if c["name"] == "lock-holds")
+        assert entry["ok"] is True
+        assert entry["warn"] is True
 
 
 # ---------------------------------------------------------------------------
