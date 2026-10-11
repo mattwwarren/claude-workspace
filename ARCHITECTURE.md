@@ -76,13 +76,15 @@ the full decisions, invariants, and alternatives considered.
 **ADR-0006 — reaping is gated by an authority.** `reconcile()` splits into a
 **detect** phase (classify phantoms, budget-exceeded, silently-idle sessions —
 no mutation) and an **act** phase (revert `TicketTask` RUNNING→PENDING, stop
-the daemon surface, force-remove the worktree). The act phase is gated by a
+the daemon surface; no reconcile act removes a worktree, ADR-0014). The act phase is gated by a
 `reap_policy` that defaults to `signal_only`: detection emits a distress event
 and routes the owning task to `BLOCKED_ON_USER`, but performs no destructive
 mutation until an authority — the lane's long-lived `ORCHESTRATE` session, or
 an explicit operator command (`cw doctor --reap`, `cw reconcile --apply`; per
 ADR-0020 the orchestrator session counts as the operator) — authorizes it. Automatic reaping (`reap_policy: auto`) is opt-in per lane, not
-the default. Callers must count `BLOCKED_ON_USER`/`REAP_PROPOSED` sessions as
+the default. The daemon stops that are not gated (including the merged-PR,
+routed-sentinel and foreign-result completions and the leaked-worker sweep) act
+on workers whose owning session is terminal or absent. Callers must count `BLOCKED_ON_USER`/`REAP_PROPOSED` sessions as
 occupying capacity — a stalled, signal-only session does not free its slot
 just because it stopped making progress.
 

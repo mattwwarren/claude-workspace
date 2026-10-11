@@ -92,6 +92,7 @@ from tests._codex_recovery_helpers import (
     _task_without_base_ref,
     _use_auto_reap_policy,
 )
+from tests._host_probe_guard import scoped_process_iter
 from tests._reconcile_helpers import _mk_headless_daemon_session
 from tests.conftest import commit_tracked_file, git_in
 
@@ -1155,6 +1156,7 @@ class TestCodexProcessesIn:
             worktree.rmdir()
             name = psutil.Process(proc.pid).name()
             monkeypatch.setattr(codex_boot, "_CODEX_PROCESS_NAME", name)
+            monkeypatch.setattr(psutil, "process_iter", scoped_process_iter({proc.pid}))
 
             found = _codex_processes_in(worktree)
 
@@ -1190,10 +1192,23 @@ class TestCodexProcessesIn:
 
         assert _codex_processes_in(tmp_path) is None
 
-    def test_real_process_table_has_no_codex_in_a_fresh_dir(
-        self, tmp_path: Path
+    def test_real_psutil_reader_finds_no_codex_in_a_fresh_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The real psutil reader concludes ``[]`` for a directory nobody is in.
+
+        The reader's results are scoped to this test's own pid (#2664): the
+        host table may hold a zombie or foreign-owned ``codex`` whose
+        unreadable cwd makes a whole-table scan inconclusive (``None``), which
+        is correct production behaviour but a host-dependent test. That makes
+        this deliberately weaker than the whole-table scan it replaces -- it no
+        longer proves a full real scan concludes on a CI runner; that
+        host-dependence is exactly what was removed.
+        """
+        monkeypatch.setattr(psutil, "process_iter", scoped_process_iter({os.getpid()}))
+
         assert _codex_processes_in(tmp_path) == []
+        assert _codex_processes_in(tmp_path / "x") == []
 
 
 def _auto(*, auto: bool) -> OrchestratorConfig:

@@ -120,6 +120,43 @@ reconciliation plan.
   no mutation; act-phase asserts mutation only under `auto` or explicit
   authorization.
 
+## Amendment (#2630)
+
+The act phase no longer removes worktrees. #1747 / ADR-0014 deleted the
+reconcile-side `remove_worktree(..., force=True)` that the **Decision**
+paragraph above and the "every force-remove" line under **Consequences**
+describe. The acts reconcile still performs are the RUNNING→PENDING /
+BLOCKED_ON_USER queue routing and the daemon surface stop. Those two
+passages are left as written, as the decision's history; this amendment
+supersedes their worktree clause.
+
+- **No reconcile act removes a worktree.** A worktree is removed only at
+  dispatch claim time (an unoccupied, clean stale tree, after liveness and
+  dirt re-checks) or by an explicit operator command (`cw done --cleanup`,
+  `cw worktree gc --apply`).
+  `tests/test_reconcile_worktree_removal_guard.py` pins the reconcile side
+  as a tripwire, not a proof.
+- **What the cached dirty check selects.** For the phantom sweep and
+  backstops the pre-lock capture (#2548) only selects the queue
+  disposition, RUNNING→PENDING versus BLOCKED_ON_USER. "Destructive" here
+  means on-disk work loss; the RUNNING→PENDING revert still consumes a
+  capture up to 90 s old, so an in-bound clean capture of a tree dirtied
+  since can route a row to PENDING (on a `reap_policy: auto` lane for the
+  phantom sweep, on any lane for the backstops).
+- **Not every daemon stop is gated.** Invariant 2 reads as if every
+  act-phase mutation were gated by `reap_policy`. The ungated stops include the
+  merged-PR, routed-sentinel and stalled foreign-result completions (queued
+  on the post-lock sink)
+  and the leaked-worker sweep (`sweep_leaked_daemon_workers`, called from
+  `_reconcile_locked` and queued on the post-lock sink); they act on workers
+  whose owning session is terminal or absent. The leaked-worker sweep can
+  also stop a just-spawned worker whose session is not yet recorded (a
+  pre-existing hazard, documented in `leaked_workers.py`). The mid-turn
+  usage-limit act's stop is chosen only under `reap_policy: auto`.
+- **Tracked, not fixed here.** `cw worktree gc --apply` force-removes after
+  a classification pass with no fresh re-check (#2669); the reconcile
+  dirty helper reads helper errors as clean, fail-open (#2662).
+
 ## Alternatives considered
 
 - **Rely on ADR-0005 alone.** Rejected. The state lock stops *lost* writes

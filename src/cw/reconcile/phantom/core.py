@@ -235,9 +235,10 @@ def _act_on_phantom_candidates(
     merged (from merged_ticket_ids pre-pass; GitHub #637).
 
     Under ``ReapPolicy.SIGNAL_ONLY`` (default), CRASH_COMPLETE candidates
-    (non-dirty only) are routed to BLOCKED_ON_USER instead of triggering
-    stop/remove.  Dirty-worktree CRASH_COMPLETE already routes to
-    BLOCKED_ON_USER in both policies — the gate only affects clean phantoms.
+    (non-dirty only) are routed to BLOCKED_ON_USER instead of being reverted to
+    PENDING (merged-PR and gh-blocked tickets pass through, #637).  Dirty-worktree
+    CRASH_COMPLETE already routes to BLOCKED_ON_USER in both policies — the gate
+    only affects clean phantoms.
     SALVAGE_COMPLETION candidates pass through unaffected.
     Per-lane resolution: each clean CRASH_COMPLETE candidate's effective policy
     is resolved individually via resolve_reap_policy (GitHub #560).

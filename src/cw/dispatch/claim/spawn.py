@@ -592,11 +592,11 @@ def _spawn_claimed_task(
             )
         except StaleWorktreeError:
             # A stale worktree (wrong branch / not a worktree) refused
-            # reuse (#404). No session exists yet, so reconcile's
-            # TIMED_OUT cleanup will never fire for it — without
-            # removing it here the task reverts to PENDING and re-hits
-            # the same stale tree every tick (an infinite spin). Force-
-            # remove it (best-effort) so the next claim rebuilds fresh,
+            # reuse (#404). No session exists yet and no reconcile cleanup
+            # exists, so without removing an unoccupied, clean stale tree here
+            # the task reverts to PENDING and re-hits the same stale tree every
+            # tick (an infinite spin). Force-remove it (best-effort, after the
+            # guards below) so the next claim rebuilds fresh,
             # then re-raise into the handler below to revert to PENDING.
             # Caught narrowly as StaleWorktreeError (not WorktreeError)
             # so the main-checkout guard never triggers a removal.
