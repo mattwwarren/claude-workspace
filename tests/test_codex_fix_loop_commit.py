@@ -7,13 +7,15 @@ the cycle before codex runs, and the commit carries only the measured paths.
 from __future__ import annotations
 
 import subprocess
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from cw.codex_fix_loop import _build_fix_prompt, _commit_fix_cycle, commit
 from cw.codex_fix_loop.baseline import CycleBaseline, DirtyStart
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, StagedSetMismatchError
+from cw.codex_fix_loop.growth import LoopGrowthBudget
 from cw.codex_review import (
     CODEX_FIX_DIRTY_START,
     CODEX_FIX_HOOK_FAILED,
@@ -48,6 +50,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
+    from cw.codex_fix_loop.fence import FenceBreach
 
 _SENSITIVE = {
     ".claude/sensitive-files.yml": _MANIFEST,
@@ -281,6 +284,50 @@ class TestCycleBreachOrder:
         out, _ = _run_loop(runner, worktree, session_id="s-breach-order")
 
         assert _blocker_reason(out) == CODEX_FIX_SCOPE_VIOLATION
+
+
+class TestGrowthBreachLoopBudget:
+    """#2648: the loop-wide budget rides the growth guard's switch."""
+
+    _BUDGET = LoopGrowthBudget(
+        start_sha="a" * 40, per_finding_lines=40, allowed_lines=40
+    )
+
+    @staticmethod
+    def _spy(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+        calls: list[dict[str, object]] = []
+
+        def _check(*_args: object, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+        monkeypatch.setattr(commit, "check_growth_budget", _check)
+        return calls
+
+    def _breach(self, tmp_path: Path, *, enabled: bool) -> FenceBreach | None:
+        ctx = SimpleNamespace(worktree=tmp_path, cycle=2)
+        return commit._growth_breach(
+            cast("commit._CycleContext", ctx),
+            CycleBaseline(head_sha="h", tree_sha="t"),
+            findings=[_make_finding()],
+            allowed_files=frozenset({"new.py"}),
+            guards=commit._GrowthGuards(enabled, 40, None, loop_budget=self._BUDGET),
+        )
+
+    def test_loop_budget_is_forwarded_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._spy(monkeypatch)
+
+        assert self._breach(tmp_path, enabled=True) is None
+        assert [c["loop_budget"] for c in calls] == [self._BUDGET]
+
+    def test_switch_off_skips_the_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._spy(monkeypatch)
+
+        assert self._breach(tmp_path, enabled=False) is None
+        assert calls == []
 
 
 class TestInvocationFailure:

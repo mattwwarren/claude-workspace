@@ -13,8 +13,10 @@ they were committed work.
 exactly ``HEAD``'s tree, and the cycle's commit carries only what the cycle
 itself changed.** Nothing the cycle did not do can appear in
 :func:`cycle_touched_paths`, :func:`cycle_diff`, the scope fence, the growth
-budget or the commit. A dirty start is reported as a :class:`DirtyStart`; the
-caller parks the cycle uncommitted (``codex_fix_dirty_start``).
+budget or the commit. :func:`diff_since` generalizes :func:`cycle_diff` to any
+base, which the loop-wide growth budget (#2648) uses with the loop's start
+commit. A dirty start is reported as a :class:`DirtyStart`; the caller parks
+the cycle uncommitted (``codex_fix_dirty_start``).
 
 Pure measurement: this module imports nothing from the guard modules. It runs
 inside the codex executor's review step, outside every lock.
@@ -172,8 +174,16 @@ def cycle_touched_paths(worktree: Path, baseline: CycleBaseline) -> set[str]:
     return {line for line in out.splitlines() if line}
 
 
+def diff_since(worktree: Path, rev: str) -> str:
+    """Return the staged zero-context diff against *rev* (a commit or tree).
+
+    Against the fix loop's start commit (#2648) this is every earlier cycle's
+    commit plus the current, still-staged cycle. Any git failure (an
+    unresolvable *rev*) propagates as ``CalledProcessError``.
+    """
+    return git_output(["diff", "--cached", "-U0", "--no-renames", rev], cwd=worktree)
+
+
 def cycle_diff(worktree: Path, baseline: CycleBaseline) -> str:
     """Return the staged zero-context diff of the cycle against its baseline tree."""
-    return git_output(
-        ["diff", "--cached", "-U0", "--no-renames", baseline.tree_sha], cwd=worktree
-    )
+    return diff_since(worktree, baseline.tree_sha)

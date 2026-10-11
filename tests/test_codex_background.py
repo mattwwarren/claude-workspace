@@ -43,7 +43,10 @@ from cw.codex_background import (
     join_outstanding_codex_threads,
 )
 from cw.codex_fix_loop.divergence import _DIVERGENCE_STALL_CYCLES
-from cw.codex_fix_loop.growth import DEFAULT_GROWTH_BUDGET_LINES
+from cw.codex_fix_loop.growth import (
+    DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES,
+    DEFAULT_GROWTH_BUDGET_LINES,
+)
 from cw.codex_review import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     CODEX_MUST_FIX_FINDINGS,
@@ -2063,6 +2066,10 @@ def test_new_knob_defaults_match_fix_loop_constants() -> None:
 
     assert config.codex_fix_loop_stall_cycles == _DIVERGENCE_STALL_CYCLES
     assert config.codex_fix_loop_growth_budget_lines == DEFAULT_GROWTH_BUDGET_LINES
+    assert (
+        config.codex_fix_loop_cumulative_growth_budget_lines
+        == DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2090,12 +2097,16 @@ def test_fix_loop_receives_budget_switch_and_login(
                 codex_fix_loop_growth_guard_enabled=False,
             )
         ],
-        config=OrchestratorConfig(codex_fix_loop_growth_budget_lines=25),
+        config=OrchestratorConfig(
+            codex_fix_loop_growth_budget_lines=25,
+            codex_fix_loop_cumulative_growth_budget_lines=70,
+        ),
     )
 
     kwargs = fix_loop_mock.call_args.kwargs
     assert kwargs["stall_cycles"] == 2
     assert kwargs["growth_budget_lines"] == 25
+    assert kwargs["cumulative_growth_budget_lines"] == 70
     assert kwargs["growth_guard_enabled"] is False
     assert kwargs["operator_login"] == "operator-login"
     assert _login_mock().call_count == 1

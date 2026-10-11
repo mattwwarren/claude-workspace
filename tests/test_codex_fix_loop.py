@@ -22,6 +22,7 @@ from cw.codex_fix_loop import (
     run_review_with_fix_loop,
 )
 from cw.codex_fix_loop.convergence import _open_finding_key, _track_open_findings
+from cw.codex_fix_loop.growth import LoopGrowthBudget
 from cw.codex_fix_loop.park import _ESCALATE_AT_CYCLE
 from cw.codex_fix_loop.snapshot import _verdict_snapshot_filename
 from cw.codex_review import (
@@ -1276,8 +1277,8 @@ class TestFixLoopCapAndEscalation:
 _GROWN_LINES_PER_CYCLE = 100
 
 
-def _grown_content(cycle: int) -> str:
-    return "".join(f"grown_{cycle}_{i} = {i}\n" for i in range(_GROWN_LINES_PER_CYCLE))
+def _grown_content(cycle: int, lines: int = _GROWN_LINES_PER_CYCLE) -> str:
+    return "".join(f"grown_{cycle}_{i} = {i}\n" for i in range(lines))
 
 
 def _grown_finding(cycle: int) -> dict[str, object]:
@@ -1297,6 +1298,19 @@ def _growing_editors(cycles: int) -> list[_FixBehavior]:
     return [
         _editor(filename=f"fix{cycle}.py", content=_grown_content(cycle))
         for cycle in range(1, cycles + 1)
+    ]
+
+
+def _cumulative_editors(cycles: int, lines: int = 12) -> list[_FixBehavior]:
+    """#2648: cycle n rewrites ``new.py`` keeping its two original lines plus
+    *lines* new ones per cycle so far, so every cycle nets +*lines*.
+    """
+    return [
+        _editor(
+            "new.py",
+            _CONTENT + "".join(_grown_content(c, lines=lines) for c in range(1, n + 1)),
+        )
+        for n in range(1, cycles + 1)
     ]
 
 
@@ -2777,8 +2791,67 @@ class TestGrowthBudgetThroughLoop:
         assert out.status == "stage_complete"
         assert out.review.had_real_commit is True
 
+    def test_five_small_cycles_park_at_cumulative_budget(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#2648: the #2590 shape — each cycle is small, the loop total is not."""
+        worktree = _with_plan(_worktree(make_git_repo, "wt-growth-cumulative"))
+        start = git_in(worktree, "rev-parse", "HEAD")
+        runner = _FixLoopRunner([_MF_DOC], fix_behaviors=_cumulative_editors(5))
+
+        out, _ = _run_loop(runner, worktree, session_id="s-growth-cumulative")
+
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_GROWTH_BUDGET
+        assert out.blocker.reason != FIX_LOOP_DIVERGING
+        assert "cumulative" in out.blocker.details
+        assert runner.fix_calls == 4
+        assert git_in(worktree, "rev-list", "--count", f"{start}..HEAD") == "3"
+        assert out.review.had_real_commit is True
+
+    def test_single_small_corrective_cycle_unaffected(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _with_plan(_worktree(make_git_repo, "wt-growth-one-cycle"))
+        runner = _FixLoopRunner(
+            [_MF_DOC, _CLEAN_DOC], fix_behaviors=_cumulative_editors(1)
+        )
+
+        out, _ = _run_loop(runner, worktree, session_id="s-growth-one-cycle")
+
+        assert out.status == "stage_complete"
+
+    def test_no_manifest_no_cumulative_guard(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-growth-cumulative-noplan")
+        runner = _FixLoopRunner([_MF_DOC], fix_behaviors=_cumulative_editors(5))
+
+        out, _ = _run_loop(runner, worktree, session_id="s-growth-cumulative-np")
+
+        assert out.blocker is not None
+        assert out.blocker.reason != CODEX_FIX_GROWTH_BUDGET
+        assert runner.fix_calls == _MAX_FIX_CYCLES
+
 
 class TestGuardSwitch:
+    def test_switch_off_ignores_cumulative_budget(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _with_plan(_worktree(make_git_repo, "wt-switch-cumulative"))
+        runner = _FixLoopRunner([_MF_DOC], fix_behaviors=_cumulative_editors(5))
+
+        out, _ = _run_loop(
+            runner,
+            worktree,
+            session_id="s-switch-cumulative",
+            growth_guard_enabled=False,
+        )
+
+        assert out.blocker is not None
+        assert out.blocker.reason != CODEX_FIX_GROWTH_BUDGET
+        assert runner.fix_calls == _MAX_FIX_CYCLES
+
     def test_switch_off_lets_a_growth_cycle_proceed(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
@@ -3026,6 +3099,7 @@ def test_driver_threads_stall_and_budget_to_state(
     make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     worktree = _worktree(make_git_repo, "wt-thread-knobs")
+    start = git_in(worktree, "rev-parse", "HEAD")
     seen: dict[str, object] = {}
     real_cycle = _driver._run_fix_and_commit
     real_state = _driver.initial_divergence_state
@@ -3047,9 +3121,14 @@ def test_driver_threads_stall_and_budget_to_state(
         stall_cycles=3,
         growth_budget_lines=7,
         growth_guard_enabled=False,
+        cumulative_growth_budget_lines=9,
     )
 
     assert seen["stall_cycles"] == 3
     assert seen["growth_budget_lines"] == 7
     assert seen["growth_guard_enabled"] is False
     assert seen["constraints"] is None
+    # #2648: one original finding, so the loop allowance is the per-finding 9.
+    assert seen["loop_growth_budget"] == LoopGrowthBudget(
+        start_sha=start, per_finding_lines=9, allowed_lines=9
+    )

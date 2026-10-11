@@ -19,6 +19,7 @@ from cw.codex_fix_loop.baseline import (
     capture_cycle_baseline,
     cycle_diff,
     cycle_touched_paths,
+    diff_since,
 )
 from cw.codex_review import _parse_unified_diff
 from cw.review_findings import REVIEW_VERDICT_JSON_RELATIVE_PATH
@@ -329,3 +330,31 @@ class TestCycleDiff:
         assert not [
             line for line in file_diffs["a.py"].splitlines() if line.startswith(" ")
         ]
+
+    def test_diff_since_baseline_tree_matches_cycle_diff(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        baseline = _head_baseline(repo)
+        _write(repo / "a.py", "a = 2\nb = 3\n")
+        cycle_touched_paths(repo, baseline)
+
+        assert diff_since(repo, baseline.tree_sha) == cycle_diff(repo, baseline)
+
+    def test_diff_since_older_commit_covers_committed_and_staged_work(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#2648: the loop-wide diff spans earlier cycles' commits plus this one."""
+        repo = _repo(make_git_repo)
+        start = git_in(repo, "rev-parse", "HEAD")
+        _write(repo / "a.py", "a = 1\nearlier = 1\n")
+        git_in(repo, "commit", "-am", "earlier cycle")
+        baseline = _head_baseline(repo)
+        _write(repo / "a.py", "a = 1\nearlier = 1\ncurrent = 1\n")
+        cycle_touched_paths(repo, baseline)
+
+        diff = diff_since(repo, start)
+
+        assert "+earlier = 1" in diff
+        assert "+current = 1" in diff
+        assert "+earlier = 1" not in cycle_diff(repo, baseline)
