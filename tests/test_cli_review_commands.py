@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -61,7 +62,6 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from click.testing import Result
 
@@ -1495,6 +1495,31 @@ class TestReviewSettle:
         assert "dispatch worker" in result.output
         assert not out_path.exists()
         assert read_events() == []
+
+    def test_a_neutral_fallback_tmpdir_still_refuses_on_the_cwd_clause(
+        self,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A worker whose TMPDIR is the neutral ``~/.cw/tmp`` fallback (#2672).
+
+        A daemon worker lacking its ``settings.local.json`` env block inherits
+        the supervisor's worktree-independent ``~/.cw/tmp``, which lies under no
+        headless worktree, so the TMPDIR clause is false; the cwd clause alone
+        must still refuse.
+        """
+        worker = tmp_path / "worker-wt"
+        _write_session_context(worker, headless=True)
+        monkeypatch.chdir(worker)
+        monkeypatch.setenv("TMPDIR", str(Path.home() / ".cw" / "tmp"))
+        out_path = tmp_path / "settle.md"
+
+        result = self._invoke(runner, _settle_payload(), "--out", str(out_path))
+
+        assert result.exit_code != 0
+        assert "dispatch worker" in result.output
+        assert not out_path.exists()
 
     @pytest.mark.parametrize("shape", ["interactive", "nearest_is_session", "root"])
     def test_a_non_worker_tmpdir_does_not_refuse(
