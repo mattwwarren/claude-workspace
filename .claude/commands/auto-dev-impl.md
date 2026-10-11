@@ -421,9 +421,9 @@ python3 "$KEY_SCRIPT" --branch '<branch-name>' --claim --key "$GATE_KEY" --gate-
 gate_wt_cleanup() {
   [ -z "${GATE_WT_CLEANED:-}" ] || return 0; GATE_WT_CLEANED=1
   cleanup_failed=0
-  git worktree remove --force "$TMPWT" 2>/dev/null || cleanup_failed=1
-  rm -rf "$TMPWT" 2>/dev/null || cleanup_failed=1
-  rm -rf "$TMPDIR" 2>/dev/null || cleanup_failed=1
+  git worktree remove --force "$TMPWT" 2>/dev/null || :
+  rm -rf "$TMPWT" 2>/dev/null || :
+  rm -rf "$TMPDIR" 2>/dev/null || :
   [ ! -e "$TMPWT" ] && [ ! -L "$TMPWT" ] || cleanup_failed=1
   [ ! -e "$TMPDIR" ] && [ ! -L "$TMPDIR" ] || cleanup_failed=1
   if [ "$cleanup_failed" -ne 0 ]; then

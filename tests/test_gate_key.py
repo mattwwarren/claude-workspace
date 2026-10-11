@@ -341,6 +341,24 @@ def test_git_common_dir_resolution_failure_exits_1(
     )
 
 
+def test_malformed_git_common_dir_exits_1(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        _mod.subprocess,
+        "run",
+        lambda *args, **_kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout="\x00\n", stderr=""
+        ),
+    )
+    _assert_key_failure(
+        capsys,
+        ["--branch", BRANCH],
+        "git common dir",
+    )
+
+
 def test_git_not_runnable_exits_1(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -193,7 +193,7 @@ def git_common_dir() -> str:
     common_path = Path(common)
     try:
         resolved = common_path.resolve()
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         msg = f"git common dir {common_path} could not be resolved: {exc}"
         raise GateKeyError(msg) from exc
     return str(resolved)

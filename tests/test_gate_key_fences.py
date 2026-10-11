@@ -600,8 +600,8 @@ def test_same_worker_overlap_with_a_live_gate_shell_refuses(
     assert "SECOND=1" in result.stdout, result.stdout + result.stderr
     assert "gate path in use by a live run" in result.stderr
     assert "SENTINEL_KEPT" in result.stdout
-    assert owner.exists()
-    assert "gate cleanup failed; owner record retained" in result.stderr
+    assert not owner.exists()
+    assert "gate cleanup failed; owner record retained" not in result.stderr
 
 
 def test_setup_fence_twice_in_one_shell_is_a_takeover_not_a_refusal(
