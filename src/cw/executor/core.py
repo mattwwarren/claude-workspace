@@ -16,7 +16,7 @@ from cw.auto_dev_result import AutoDevResult
 from cw.codex_review._const import _CODEX_VERSION_RE
 from cw.config import load_state, save_state, sessions_lock
 from cw.events import record_event as _record_orchestrator_event
-from cw.exceptions import EmitSessionNotFoundError
+from cw.exceptions import CwError, EmitSessionNotFoundError, WorkerLaunchedError
 from cw.executor_diagnostics import (
     append_diagnostics_pointer,
     build_executor_failure,
@@ -28,6 +28,7 @@ from cw.local_runner import (
     read_process_start_time_ns,
 )
 from cw.models import (
+    CODEX_BACKEND,
     ClientConfig,
     CompletionReason,
     LastResultSource,
@@ -43,7 +44,7 @@ from cw.models import (
 )
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX
 from cw.result import emit_result_locked
-from cw.spawn import spawn_create_impl
+from cw.spawn import emit_spawn_post_launch_attention, spawn_create_impl
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -146,6 +147,14 @@ class StageExecutor(Protocol):
     # process fire-and-forget through ``_spawn_fire_and_forget``, records the
     # handle, and returns without blocking, so reconcile/local can recover the
     # session if cw dies mid-run.
+    #
+    # Post-launch contract (#2592): once ``runner.launch`` returned, a failure
+    # to read the process start time or to store the handle (after one
+    # immediate retry) never crash-completes the session. The session stays
+    # ACTIVE with no handle, the process keeps running, the operator is paged,
+    # and ``spawn()`` raises ``WorkerLaunchedError`` so dispatch keeps the row
+    # bound instead of reverting and respawning it. Such a session is not
+    # auto-harvested; the page carries the recovery steps.
     #
     # For CodexExecutor (RFC 0014 A2, #2388) that process is a detached
     # ``cw codex run`` job: it completes the session itself through the door,
@@ -447,7 +456,10 @@ def _complete_crashed_launch(
     """Mark *sid* COMPLETED/CRASHED with an UNEXPECTED_ERROR blocked result.
 
     SESSION_COMPLETED is NOT emitted; dispatch's exception handler reverts the
-    task to PENDING, which is the correct recovery path.
+    task to PENDING, which is the correct recovery path. Only for a failure
+    while no worker process runs: before ``runner.launch`` returned, or after
+    the unreadable-start-time branch killed it. A live worker is never
+    crash-completed (#2592): see ``_adopt_launched_process``.
     """
     detail = f"unexpected error during {executor_name} launch"
     _persist_runtime_error_diagnostics(
@@ -459,6 +471,188 @@ def _complete_crashed_launch(
     ).model_dump(mode="json")
     with sessions_lock():
         _complete_session_via_door(sid, payload, guard_already_completed=True)
+
+
+def _complete_inline(*, sess: Session, task: TicketTask, result: AutoDevResult) -> None:
+    """Complete *sess* through the door (source=EXECUTOR_DIRECT), then emit
+    SESSION_COMPLETED. For a session no process is running for."""
+    with sessions_lock():
+        _complete_session_via_door(sess.id, result.model_dump(mode="json"))
+    _record_orchestrator_event(
+        OrchestratorEventType.SESSION_COMPLETED,
+        {
+            "session_id": sess.id,
+            "ticket_id": task.ticket_id,
+            "session_name": sess.name,
+        },
+    )
+
+
+def _record_liveness_handle(
+    *, sid: str, handle: LocalLivenessHandle, ticket_id: str
+) -> None:
+    """Store *handle* on *sid*, retrying once immediately on a write failure.
+
+    No sleep and no backoff: this runs on the dispatch tick thread. A second
+    failure, or any other exception type, propagates.
+    """
+    try:
+        _store_liveness_handle(sid, handle)
+    except (CwError, OSError):
+        _log.warning(
+            "fire-and-forget liveness handle store failed, retrying once:"
+            " %s pid %d (session %s, ticket=%s)",
+            handle.backend,
+            handle.pid,
+            sid,
+            ticket_id,
+            exc_info=True,
+        )
+        _store_liveness_handle(sid, handle)
+
+
+def _post_launch_recovery_guidance(*, executor_name: str, sid: str) -> str:
+    """Return the operator's recovery steps for a live, handle-less worker.
+
+    The one place the text varies by backend (#2592). A ``cw codex run`` job
+    completes its own session when it finishes, so a healthy one is left
+    alone. ``cw spawn close`` stops only a worker with a ``surface_ref``, so
+    an aider or opencode process must be stopped first.
+    """
+    if executor_name == CODEX_BACKEND:
+        return (
+            "a codex job completes its own session when it finishes, so do"
+            " nothing while that pid is alive and making progress. If the pid"
+            f" is gone or hung, stop it, then run `cw spawn close {sid}`."
+            " Stopping a healthy job kills an in-flight review, and"
+            " `cw spawn close` cancels the row."
+        )
+    return (
+        f"stop that process, then run `cw spawn close {sid}`. `cw spawn close`"
+        " alone does not stop the process, and requeueing before it is stopped"
+        " starts a second worker on the same worktree."
+    )
+
+
+def _launched_worker_error(
+    *,
+    sess: Session,
+    task: TicketTask,
+    proc: subprocess.Popen[bytes],
+    executor_name: LocalLivenessBackend,
+    exc: Exception,
+) -> WorkerLaunchedError:
+    """Log and page a live worker that could not be recorded; build its error.
+
+    The page's error text puts the recovery steps first, so the emitter's
+    character cap can only cut the cause. The page is best effort and is sent
+    with no lock held.
+    """
+    _log.error(
+        "spawn_post_launch_failed: %s worker pid %d (session %s) is live but"
+        " recording it failed (ticket=%s)",
+        executor_name,
+        proc.pid,
+        sess.id,
+        task.ticket_id,
+        exc_info=exc,
+    )
+    guidance = _post_launch_recovery_guidance(executor_name=executor_name, sid=sess.id)
+    error = (
+        f"{executor_name} pid {proc.pid} is still running and its liveness"
+        f" handle was not recorded. Recovery: {guidance}"
+        f" Cause: {type(exc).__name__}: {exc}"
+    )
+    emit_spawn_post_launch_attention(
+        session_id=sess.id,
+        session_name=sess.name,
+        client=sess.client,
+        ticket_id=task.ticket_id,
+        lane=sess.lane,
+        claude_session_id=None,
+        surface_ref=None,
+        error=error,
+    )
+    msg = (
+        f"Launched {executor_name} worker pid {proc.pid} (session {sess.id}) is"
+        f" live, but recording it failed: {exc}. Do not spawn it again."
+    )
+    return WorkerLaunchedError(msg, session_id=sess.id, surface_ref=None)
+
+
+def _complete_unreadable_launch(
+    *,
+    sess: Session,
+    task: TicketTask,
+    proc: subprocess.Popen[bytes],
+    executor_name: LocalLivenessBackend,
+    argv: list[str],
+    blocked_ctor: BlockedCtor,
+) -> None:
+    """Kill a process whose start time was unreadable; complete *sess* inline.
+
+    ``_liveness_unavailable_result`` kills the process first, so a later
+    failure crash-completes and re-raises, as a pre-launch failure does.
+    """
+    try:
+        result = _liveness_unavailable_result(
+            proc=proc,
+            sid=sess.id,
+            executor_name=executor_name,
+            argv=argv,
+            blocked_ctor=blocked_ctor,
+        )
+        _complete_inline(sess=sess, task=task, result=result)
+    except Exception:
+        _complete_crashed_launch(
+            sid=sess.id,
+            executor_name=executor_name,
+            argv=argv,
+            blocked_ctor=blocked_ctor,
+        )
+        raise
+
+
+def _adopt_launched_process(
+    *,
+    sess: Session,
+    task: TicketTask,
+    proc: subprocess.Popen[bytes],
+    executor_name: LocalLivenessBackend,
+    argv: list[str],
+    blocked_ctor: BlockedCtor,
+) -> str:
+    """Record the launched process's liveness handle; return the sid (#2592).
+
+    A start-time read or handle-store failure (after one immediate retry)
+    leaves the session ACTIVE with no handle and the process running, pages
+    the operator, and raises ``WorkerLaunchedError``. An unreadable start time
+    (``None``) kills the process and completes the session inline.
+    """
+    try:
+        start_time_ns = read_process_start_time_ns(proc.pid)
+        if start_time_ns is not None:
+            _record_liveness_handle(
+                sid=sess.id,
+                handle=LocalLivenessHandle(
+                    pid=proc.pid, start_time_ns=start_time_ns, backend=executor_name
+                ),
+                ticket_id=task.ticket_id,
+            )
+    except Exception as exc:
+        raise _launched_worker_error(
+            sess=sess, task=task, proc=proc, executor_name=executor_name, exc=exc
+        ) from exc
+    if start_time_ns is None:
+        _complete_unreadable_launch(
+            sess=sess,
+            task=task,
+            proc=proc,
+            executor_name=executor_name,
+            argv=argv,
+            blocked_ctor=blocked_ctor,
+        )
+    return sess.id
 
 
 def _spawn_fire_and_forget(
@@ -482,56 +676,46 @@ def _spawn_fire_and_forget(
     *executor_name*, leaving the session ACTIVE for reconcile/local harvest)
     or completes the session inline through the door (source=EXECUTOR_DIRECT)
     and emits SESSION_COMPLETED. Returns the sid without ever waiting on the
-    run. Any unexpected error -- in the pre-flight or the launch -- completes
-    the session COMPLETED/CRASHED so it is never left ACTIVE, then re-raises.
+    run.
+
+    Before ``runner.launch`` returns (the pre-flight, the launch itself, or
+    the inline completion of a blocked pre-flight), no worker exists: any
+    unexpected error completes the session COMPLETED/CRASHED so it is never
+    left ACTIVE, then re-raises. After it returns, the worker is live
+    (#2592): a start-time read or handle-store failure keeps the session
+    ACTIVE, pages the operator and raises ``WorkerLaunchedError``, so the
+    caller never spawns it again (see ``_adopt_launched_process``).
     """
     sess = _create_executor_session(
         task=task, worktree=worktree, client=client, stage=stage
     )
-    sid = sess.id
     # Empty until the launch path sets it, so the except branch (which may
     # fire before launch) can still persist an argv-less bundle.
     argv: list[str] = []
+    proc: subprocess.Popen[bytes] | None = None
     try:
         preflight = preflight_fn(sess)
         if isinstance(preflight, _PreflightOK):
             argv = preflight.argv
             proc = runner.launch(worktree, argv, preflight.env)
-            start_time_ns = read_process_start_time_ns(proc.pid)
-            if start_time_ns is not None:
-                _store_liveness_handle(
-                    sid,
-                    LocalLivenessHandle(
-                        pid=proc.pid,
-                        start_time_ns=start_time_ns,
-                        backend=executor_name,
-                    ),
-                )
-                return sid
-            completion_result = _liveness_unavailable_result(
-                proc=proc,
-                sid=sid,
-                executor_name=executor_name,
-                argv=argv,
-                blocked_ctor=blocked_ctor,
-            )
         else:
-            completion_result = preflight
-
-        with sessions_lock():
-            _complete_session_via_door(sid, completion_result.model_dump(mode="json"))
-        _record_orchestrator_event(
-            OrchestratorEventType.SESSION_COMPLETED,
-            {
-                "session_id": sid,
-                "ticket_id": task.ticket_id,
-                "session_name": sess.name,
-            },
-        )
+            _complete_inline(sess=sess, task=task, result=preflight)
     except Exception:
         _complete_crashed_launch(
-            sid=sid, executor_name=executor_name, argv=argv, blocked_ctor=blocked_ctor
+            sid=sess.id,
+            executor_name=executor_name,
+            argv=argv,
+            blocked_ctor=blocked_ctor,
         )
         raise
 
-    return sid
+    if proc is None:
+        return sess.id
+    return _adopt_launched_process(
+        sess=sess,
+        task=task,
+        proc=proc,
+        executor_name=executor_name,
+        argv=argv,
+        blocked_ctor=blocked_ctor,
+    )
