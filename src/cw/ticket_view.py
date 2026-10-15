@@ -38,6 +38,7 @@ from cw.exceptions import CwError
 from cw.models import DispatchSkipReason, OrchestratorEventType, QueueItemStatus
 from cw.models.ticket_view import (
     ApprovalView,
+    DispatchSource,
     DispatchView,
     LastResultView,
     MustFixOverrideView,
@@ -386,7 +387,7 @@ def _dispatch_view(
     lane_paused = _lane_paused(task, client_cfg)
     view = DispatchView(
         skip_reason=None,
-        source="none",
+        source=DispatchSource.NONE,
         as_of=None,
         stale=False,
         backoff_until=task.next_eligible_at,
@@ -397,14 +398,18 @@ def _dispatch_view(
     row_reason = _row_skip_reason(task, ceiling, lane_paused, now=now, sources=sources)
     if row_reason is not None:
         return view.model_copy(
-            update={"skip_reason": row_reason, "source": "row", "as_of": now}
+            update={
+                "skip_reason": row_reason,
+                "source": DispatchSource.ROW,
+                "as_of": now,
+            }
         )
     event = _latest_ticket_event(sources.dispatch_ticks, task)
     if event is not None:
         return view.model_copy(
             update={
                 "skip_reason": str(event.payload.get("skip_reason", "none")),
-                "source": "event",
+                "source": DispatchSource.EVENT,
                 "as_of": event.created_at,
                 "stale": _is_stale(event.created_at, now),
             }
@@ -415,7 +420,7 @@ def _dispatch_view(
     return view.model_copy(
         update={
             "skip_reason": snapshot.skip_reason,
-            "source": "last_tick",
+            "source": DispatchSource.LAST_TICK,
             "as_of": snapshot.tick_at,
             "stale": _is_stale(snapshot.tick_at, now),
             "lane_stats": snapshot.lanes.get(task.lane),
@@ -512,15 +517,19 @@ def _lane_snapshot_text(lane: str, dispatch: DispatchView) -> str:
 
 
 def _skip_detail(lane: str, dispatch: DispatchView, now: datetime) -> str:
-    if dispatch.source == "row":
+    if dispatch.source == DispatchSource.ROW:
         if dispatch.skip_reason == DispatchSkipReason.SPAWN_ERROR_BACKOFF.value:
-            return f"source=row, until {_ts(dispatch.backoff_until)}"
+            return f"source={DispatchSource.ROW.value}, until {_ts(dispatch.backoff_until)}"
         detail = _ROW_SKIP_DETAILS.get(dispatch.skip_reason or "", "")
-        return f"source=row, {detail}" if detail else "source=row"
+        return (
+            f"source={DispatchSource.ROW.value}, {detail}"
+            if detail
+            else f"source={DispatchSource.ROW.value}"
+        )
     age = int((now - dispatch.as_of).total_seconds()) if dispatch.as_of else 0
     stale = ", stale" if dispatch.stale else ""
-    head = f"source={dispatch.source}, {age}s ago{stale}"
-    if dispatch.source == "last_tick":
+    head = f"source={dispatch.source.value}, {age}s ago{stale}"
+    if dispatch.source == DispatchSource.LAST_TICK:
         return f"{head}, {_lane_snapshot_text(lane, dispatch)}"
     return head
 

@@ -16,7 +16,7 @@ re-exported from ``cw.models``.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -24,11 +24,14 @@ from cw.models.enums import QueueItemStatus, Stage
 
 TICKET_VIEW_SCHEMA_VERSION = 1
 
-# Where a pending row's ``dispatch.skip_reason`` came from: ``row`` (derived
-# live from the row and lane config), ``event`` (the latest per-ticket
-# dispatch.tick event), ``last_tick`` (the client's latest client-wide tick
-# snapshot), ``none`` (nothing known).
-SkipReasonSource = Literal["row", "event", "last_tick", "none"]
+
+class DispatchSource(StrEnum):
+    """Where a pending row's dispatch skip reason came from."""
+
+    ROW = "row"
+    EVENT = "event"
+    LAST_TICK = "last_tick"
+    NONE = "none"
 
 
 class NextCommand(BaseModel):
@@ -101,7 +104,7 @@ class DispatchView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     skip_reason: str | None
-    source: SkipReasonSource
+    source: DispatchSource
     as_of: datetime | None
     stale: bool
     backoff_until: datetime | None
