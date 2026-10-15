@@ -784,7 +784,9 @@ def _newest_by_created_at(tasks: list[TicketTask]) -> TicketTask:
     return max(tasks, key=lambda t: t.created_at)
 
 
-def _find_ticket(store: DevQueueStore, ticket_id: str, client: str) -> TicketTask:
+def _find_ticket(
+    store: DevQueueStore, ticket_id: str, client: str, *, warn: bool = True
+) -> TicketTask:
     """Return the TicketTask matching (ticket_id, client) or raise CwError.
 
     Selection priority: PENDING/RUNNING (live, newest created_at) →
@@ -793,7 +795,8 @@ def _find_ticket(store: DevQueueStore, ticket_id: str, client: str) -> TicketTas
     pick up re-enqueued tasks on the next tick automatically.
 
     Emits a one-time stderr warning when multiple live PENDING/RUNNING tasks
-    exist for the same (ticket_id, client).
+    exist for the same (ticket_id, client), unless *warn* is False (the
+    ``cw dev-queue show`` view, which reports the count itself, #2691).
     """
     # Why: add-after-terminal creates duplicate (client, ticket_id) rows.
     # Returning the oldest terminal record would cause wait to resolve
@@ -813,7 +816,7 @@ def _find_ticket(store: DevQueueStore, ticket_id: str, client: str) -> TicketTas
         if t.status in {QueueItemStatus.PENDING, QueueItemStatus.RUNNING}
     ]
     if live:
-        if len(live) > 1:
+        if warn and len(live) > 1:
             click.echo(
                 f"Warning: {len(live)} live tasks for ticket '{ticket_id}' "
                 f"in client '{client}'; binding to newest.",

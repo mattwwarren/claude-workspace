@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from cw.auto_dev_result import AutoDevResult
 from cw.models import Session, TicketTask
+from cw.models.ticket_view import TicketView
 from cw.review_findings import ReviewVerdict
 
 if TYPE_CHECKING:
@@ -27,6 +28,8 @@ REGISTRY: dict[str, type[BaseModel]] = {
     # (EscalationMetadata, StrippedEscalation, ...) surface automatically in
     # model_json_schema()'s $defs — no separate registration.
     "review-verdict": ReviewVerdict,
+    # The `cw dev-queue show --json` contract (#2691).
+    "ticket-view": TicketView,
 }
 
 # Fields absent from model_json_schema() `required` arrays but enforced at

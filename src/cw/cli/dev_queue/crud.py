@@ -42,8 +42,10 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import get_native_daemon_client
+from cw.ticket_view import ViewSources
 
 from ._group import dev_queue
+from .show import echo_resulting_row
 
 # Stage vocabulary shared by `dev-queue add --stage` and `dev-queue requeue
 # --stage` (GitHub #1682) -- HARDEN is excluded, matching requeue's original
@@ -152,6 +154,7 @@ def dev_queue_add(
     stage_value: Stage = (
         Stage(stage_override) if stage_override is not None else DEFAULT_STAGE
     )
+    sources = ViewSources()
     for index, ticket_id in enumerate(tickets):
         resolved = resolve_client(ticket_id, config, client)
         try:
@@ -200,6 +203,7 @@ def dev_queue_add(
                 " by re-adding (#1653).",
                 err=True,
             )
+            echo_resulting_row(ticket_id, resolved, sources=sources)
             continue
         record_event(
             OrchestratorEventType.TICKET_ENQUEUED,
@@ -211,6 +215,7 @@ def dev_queue_add(
             },
         )
         click.echo(f"Enqueued {ticket_id} -> {resolved} (priority={priority})")
+        echo_resulting_row(ticket_id, resolved, sources=sources)
 
 
 @dev_queue.command(
@@ -278,6 +283,7 @@ def dev_queue_move(
             f"Reprioritized {ticket_id} ({client}):"
             f" {result['from_priority']} -> {result['to_priority']}"
         )
+    echo_resulting_row(ticket_id, client)
 
 
 @dev_queue.command(name="requeue")
@@ -306,7 +312,7 @@ def dev_queue_move(
         "Allow requeuing a CANCELLED ticket back to PENDING at its current"
         " stage (e.g. after `cw spawn close --confirmed-dead` on a RUNNING"
         " row). Accepts any CANCELLED row regardless of why it was"
-        " cancelled — check `cw dev-queue tasks -t <T> -c <CLIENT>` /"
+        " cancelled — check `cw dev-queue show <T> -c <CLIENT>` /"
         " event history first if the ticket may have been deliberately"
         " killed. See docs/dispatch-runbook.md."
     ),
@@ -320,7 +326,7 @@ def dev_queue_move(
         "Allow requeuing a FAILED ticket back to PENDING at its current"
         " stage (e.g. an abandoned row whose underlying session actually"
         " completed clean). Accepts any FAILED row regardless of why it"
-        " failed — check `cw dev-queue tasks -t <T> -c <CLIENT>` / event"
+        " failed — check `cw dev-queue show <T> -c <CLIENT>` / event"
         " history first. See docs/dispatch-runbook.md."
     ),
 )
@@ -334,7 +340,7 @@ def dev_queue_move(
         " stage (e.g. a shipped PR that later went conflicting because a"
         " sibling PR in the same wave merged first). Accepts any COMPLETED"
         " row regardless of why the recovery is needed — check"
-        " `cw dev-queue tasks -t <T> -c <CLIENT>` / event history first."
+        " `cw dev-queue show <T> -c <CLIENT>` / event history first."
         " See docs/dispatch-runbook.md."
     ),
 )
@@ -445,6 +451,7 @@ def dev_queue_requeue(
         f"Requeued {ticket_id} ({resolved}):"
         f" {result['from_stage']} -> {result['to_stage']} (PENDING)"
     )
+    echo_resulting_row(ticket_id, resolved)
 
 
 @dev_queue.command(name="drain")
@@ -623,6 +630,7 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
     """Cancel dev-queue task(s) and stop any running session."""
     state = load_state()
     daemon = get_native_daemon_client()
+    sources = ViewSources()
     for index, ticket in enumerate(tickets):
         try:
             # bounded=True (#2501): operator command; only read-only state and
@@ -650,6 +658,7 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
                 ):
                     daemon.stop(sess.surface_ref)
         click.echo(f"Cancelled {ticket} in {client} dev-queue.")
+        echo_resulting_row(ticket, client, sources=sources)
 
 
 @dev_queue.command(name="clear")

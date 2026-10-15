@@ -21,6 +21,8 @@ below is what registers those commands. Submodules:
 - ``wait`` — the sentinel-aware ``dev-queue wait`` loop and its emit helpers.
 - ``tasks`` — task inspection (tasks) + repo refresh (refresh-all) + attention
   helpers shared with ``status``.
+- ``show`` — the one-ticket view (``show``) and the best-effort row echo the
+  mutating verbs print after their confirmation (#2691).
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from cw.cli.dev_queue import (  # noqa: F401  (command registration side effects
     approve,
     crud,
     run,
+    show,
     status,
     tasks,
     wait,

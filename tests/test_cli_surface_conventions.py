@@ -117,6 +117,7 @@ class TestTreeWalk:
         paths = [path for path, _cmd in _walk(main)]
         assert len(paths) > _MIN_COMMAND_COUNT
         assert ("dev-queue", "tasks") in paths
+        assert ("dev-queue", "show") in paths
         assert ("event", "tail") in paths
 
 
@@ -163,7 +164,7 @@ class TestHelpMentionsResolve:
 
 class TestResolver:
     def test_phantom_subcommand_is_unresolved(self) -> None:
-        assert _mention_unresolved("cw dev-queue show")
+        assert _mention_unresolved("cw dev-queue inspect")
 
     def test_real_command_with_flags_resolves(self) -> None:
         assert not _mention_unresolved("cw dev-queue tasks -t <T>")

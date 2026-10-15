@@ -705,6 +705,17 @@ def _latest_tick_by_client(
     return result
 
 
+def client_tick_snapshots(
+    events: list[OrchestratorEvent],
+) -> dict[str, TickSummary]:
+    """:func:`_latest_tick_by_client` over client-wide ticks only (#2691).
+
+    Per-ticket dispatch.tick events (those carrying ``ticket_id``) would
+    otherwise overwrite a client's latest snapshot with a lane-less one.
+    """
+    return _latest_tick_by_client([e for e in events if "ticket_id" not in e.payload])
+
+
 def _count_unresolved(thread_status: dict[str, Any]) -> int:
     """Return the number of unresolved threads in a thread_status dict."""
     count = 0

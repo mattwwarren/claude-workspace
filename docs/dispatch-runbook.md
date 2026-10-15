@@ -347,6 +347,64 @@ for scripting and field reads; it prints two distinct sections:
     When every counted session is owned, or the state file cannot be read, the
     original generic text is shown.
 
+### Reading one ticket (`cw dev-queue show`, #2691)
+
+`cw dev-queue show <T> [-c <CLIENT>]` prints one row in full: one
+`key: value` per line, a fixed key order, every key always present (`-` when
+absent), no truncation, ISO-8601 UTC timestamps. A multi-line `details:`
+value continues on lines indented two spaces. It ends with `next:` and the
+commands that are legal for the row as it stands, each runnable as printed
+(`# ...` is a shell comment); `<paths>` and `"<why>"` are the only
+placeholders. Without `-c` the one client queueing the ticket is used; a
+ticket queued under several clients needs `-c`.
+
+`add`, `move`, `requeue`, `approve` and `cancel` print the same block after
+their usual confirmation line (one block per ticket), so the resulting row
+is visible without a second command. The echo is best-effort: if the row
+cannot be read it prints nothing and the verb's exit code is unchanged.
+
+Fields worth knowing:
+
+- `details:` is the bound session's full `blocker.details`; when the row
+  names a session that is no longer in state it reads
+  `- (session not found)`.
+- `attempt_ceiling:` is the resolved lane-or-global ceiling that
+  `unproductive_attempts` counts toward; `none` means the lane disables it.
+- `session:` shows the bound session's status, latched liveness bucket and
+  whether its daemon worker is in the live roster (`in_roster=unknown;
+  roster: unreadable` when the roster file cannot be read).
+- `pr:` is the last hydrated PR state; nothing is fetched live, and
+  `hydrated: no` means the PR was never hydrated.
+- `skip_reason:` (PENDING rows only) says why the row is not dispatching and
+  where the answer came from: `source=row` (live: spawn-error backoff, the
+  attempt ceiling, or the lane's circuit breaker), `source=event` (the latest
+  per-ticket dispatch tick for this client and ticket) or `source=last_tick`
+  (the client-wide snapshot, with the lane's counts and occupants). Event
+  and snapshot answers carry their age and are marked `stale` past 90s. A
+  plain operator lane pause shows as `[lane paused]`.
+- `approval:` lists the approvals recorded on the row: the plan approval
+  time and bound draft (`approver: not recorded` -- no approval records who
+  approved), a must-fix override with its actor and reason, a scope-drift
+  grant (files and the head it is bound to; cleared by the next spawn).
+  `-` means none is recorded on the row. Tracker-comment approvals are not
+  mirrored onto the row, so `-` does not mean the plan is unapproved.
+- `other_rows:` counts other rows for the same ticket and client; the one
+  shown is the one `wait` and `requeue` bind to.
+
+`--json` emits the `TicketView` model (`cw schema show ticket-view`):
+`schema_version`, `ticket_id`, `client`, `status`, `stage`, `disposition`,
+`blocked_reason`, `blocker_details`, `advisory_note`, `lane`, `priority`,
+`scope_hint`, `attempts`, `unproductive_attempts`, `attempt_ceiling` (null =
+no ceiling), `session` (null, or `id`/`status`/`liveness_bucket`/
+`in_roster`/`attention_state`; `status` null = session no longer in state),
+`last_result`, `pr` (`hydrated_at` null = never hydrated), `stage_base_ref`,
+`dispatch` (null unless PENDING: `skip_reason`, `source` of
+`row`/`event`/`last_tick`/`none`, `as_of`, `stale`, `backoff_until`,
+`lane_paused`, `lane_stats`, `lane_occupants`), `approval` (null = none on
+the row; no approver field), `other_rows`, `created_at`, `completed_at`,
+`next` (`command`, `purpose`). Compatibility rule: fields may be added
+without a version change; renaming or removing one bumps `schema_version`.
+
 ---
 
 ## 4. Monitor
@@ -1338,7 +1396,7 @@ row, regardless of why it was cancelled — the row carries no record of
 provenance by the time it reaches either flag. If the ticket may have been
 deliberately cancelled (e.g. via `cw dev-queue cancel` as a duplicate or
 superseded ticket) rather than stranded by `spawn close`, check `cw
-dev-queue tasks -t <T> -c <CLIENT>` / the event history before requeuing it.
+dev-queue show <T> -c <CLIENT>` / the event history before requeuing it.
 
 ### FAILED row recovery (`--from-failed`)
 
@@ -1357,7 +1415,7 @@ cw dev-queue requeue <T> -c <CLIENT> --from-failed
 
 **Caveat:** `--from-failed` accepts *any* FAILED row, regardless of why it
 failed — the row carries no record of provenance by the time it reaches this
-flag. Check `cw dev-queue tasks -t <T> -c <CLIENT>` / the event history
+flag. Check `cw dev-queue show <T> -c <CLIENT>` / the event history
 before requeuing it to confirm the failure isn't a genuine, still-unresolved
 defect.
 
@@ -1381,7 +1439,7 @@ cw dev-queue requeue <T> -c <CLIENT> --from-completed
 
 **Caveat:** `--from-completed` accepts *any* COMPLETED row, regardless of why
 the recovery is needed -- the row carries no record of provenance by the time
-it reaches this flag. Check `cw dev-queue tasks -t <T> -c <CLIENT>` / the
+it reaches this flag. Check `cw dev-queue show <T> -c <CLIENT>` / the
 event history before requeuing it.
 
 ### Legacy codex session recovery (`cw codex migrate-legacy`, RFC 0014 B1)

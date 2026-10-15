@@ -18,6 +18,7 @@ class TestSchemaList:
         assert "ticket-task" in result.output
         assert "session" in result.output
         assert "review-verdict" in result.output
+        assert "ticket-view" in result.output
 
     def test_list_json_is_valid_array(self) -> None:
         runner = CliRunner()
@@ -29,7 +30,8 @@ class TestSchemaList:
         assert "ticket-task" in parsed
         assert "session" in parsed
         assert "review-verdict" in parsed
-        assert len(parsed) == 4
+        assert "ticket-view" in parsed
+        assert len(parsed) == 5
 
 
 class TestSchemaShow:
@@ -111,6 +113,25 @@ class TestSchemaShowReviewVerdict:
         )
         assert result.exit_code == 0
         assert "blocking" in result.output
+
+
+class TestSchemaShowTicketView:
+    """The ``cw dev-queue show --json`` contract (#2691)."""
+
+    def test_json_format_parses(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["schema", "show", "ticket-view", "--format=json"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert "schema_version" in parsed["properties"]
+        assert "next" in parsed["properties"]
+        assert "NextCommand" in parsed["$defs"]
+
+    def test_tldr_renders(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["schema", "show", "ticket-view", "--format=tldr"])
+        assert result.exit_code == 0
+        assert "schema_version" in result.output
 
 
 class TestSchemaStageOutput:
