@@ -78,6 +78,7 @@ def codex_run(
 )
 @click.option(
     "--client",
+    "-c",
     "client_name",
     default=None,
     help="Recover this client (required when multiple clients exist).",

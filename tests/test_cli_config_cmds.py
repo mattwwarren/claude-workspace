@@ -6,11 +6,14 @@ side effect before their lock, so they acquire ``clients_lock`` /
 ``bounded=True``: a held lock surfaces as a clean non-zero exit naming that
 lock instead of a silent hang. The broader lane/concurrency behaviour tests
 live in ``tests/test_cli.py``.
+
+Also covers ``cw config concurrency get -c/--client`` (#2690).
 """
 
 from __future__ import annotations
 
 import fcntl
+import json
 from typing import TYPE_CHECKING
 
 import pytest
@@ -21,7 +24,7 @@ from cw import _flock
 from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
 from cw._lock_guard import held_locks
 from cw.cli import main
-from cw.models import LaneConfig
+from cw.models import ClientConcurrencyOverride, ConcurrencyOverrides, LaneConfig
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import _FakeClock, _hold_flock
 
@@ -156,3 +159,85 @@ class TestFreeLocksStillWork:
 
         assert result.exit_code == 0, result.output
         assert held_locks() == ()
+
+
+def _concurrency_get_json(*args: str) -> dict[str, object]:
+    result = CliRunner().invoke(main, ["config", "concurrency", "get", *args, "--json"])
+    assert result.exit_code == 0, result.output
+    data: dict[str, object] = json.loads(result.output)
+    return data
+
+
+class TestConcurrencyGetClient:
+    """``cw config concurrency get -c/--client`` (#2690)."""
+
+    def test_default_ceiling_when_nothing_declared(self) -> None:
+        data = _concurrency_get_json("-c", _CLIENT)
+        assert data["client"] == {"name": _CLIENT, "ceiling": 2, "source": "default"}
+
+    def test_declared_per_client_ceiling(self) -> None:
+        path = cw.config.orchestrator_config_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("default_ceiling: 2\nper_client_ceiling:\n  acme: 3\n")
+
+        data = _concurrency_get_json("--client", _CLIENT)
+
+        assert data["client"] == {"name": _CLIENT, "ceiling": 3, "source": "declared"}
+
+    def test_override_ceiling_wins(self) -> None:
+        path = cw.config.orchestrator_config_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("default_ceiling: 2\nper_client_ceiling:\n  acme: 3\n")
+        cw.config._save_concurrency_overrides(
+            ConcurrencyOverrides(
+                clients={_CLIENT: ClientConcurrencyOverride(ceiling=5)}
+            )
+        )
+
+        data = _concurrency_get_json("-c", _CLIENT)
+
+        assert data["client"] == {"name": _CLIENT, "ceiling": 5, "source": "override"}
+
+    def test_override_without_ceiling_never_wins(self) -> None:
+        path = cw.config.orchestrator_config_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("default_ceiling: 2\nper_client_ceiling:\n  acme: 3\n")
+        cw.config._save_concurrency_overrides(
+            ConcurrencyOverrides(clients={_CLIENT: ClientConcurrencyOverride()})
+        )
+
+        data = _concurrency_get_json("-c", _CLIENT)
+
+        assert data["client"] == {"name": _CLIENT, "ceiling": 3, "source": "declared"}
+
+    def test_text_mode_appends_client_line(self) -> None:
+        path = cw.config.orchestrator_config_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("default_ceiling: 2\nper_client_ceiling:\n  acme: 3\n")
+
+        result = CliRunner().invoke(
+            main, ["config", "concurrency", "get", "-c", _CLIENT]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Declared (orchestrator.yaml):" in result.output
+        assert "Override (concurrency_overrides.json):" in result.output
+        assert "Effective (merged):" in result.output
+        assert result.output.rstrip("\n").endswith(
+            f"Client {_CLIENT} configured ceiling: 3 (source: declared)"
+        )
+
+    def test_without_client_output_is_unchanged(self) -> None:
+        data = _concurrency_get_json()
+        assert set(data) == {"declared", "override", "effective"}
+
+        result = CliRunner().invoke(main, ["config", "concurrency", "get"])
+        assert result.exit_code == 0, result.output
+        assert "Client " not in result.output
+
+    def test_unknown_client_fails(self) -> None:
+        result = CliRunner().invoke(
+            main, ["config", "concurrency", "get", "-c", "nope"]
+        )
+        assert result.exit_code != 0
+        assert "Unknown client 'nope'" in result.output

@@ -45,6 +45,11 @@ if TYPE_CHECKING:
 
 _SCHEMA_VERSION: Literal[4] = 4
 
+# Serialized keys of the intake-produced ticket context, shared with the
+# codex-review reader.
+TICKET_TITLE_KEY = "ticket_title"
+TICKET_BODY_KEY = "ticket_body"
+
 # --- Reason-string constants (exported for tests and callers) ---
 # Public (like TASK_CONTEXT_RELATIVE_PATH): cw.reconcile.local probes it to verify
 # a recorded aider backend. _launch_logged_subprocess opens it ("w") before
@@ -277,8 +282,8 @@ def build_task_message(
     if ctx_path.exists():
         try:
             ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
-            title: str = ctx.get("title", "")
-            body: str = ctx.get("body", "")
+            title: str = ctx.get(TICKET_TITLE_KEY, "")
+            body: str = ctx.get(TICKET_BODY_KEY, "")
             if title or body:
                 header = f"## Ticket: {title}\n\n{body}\n\n"
         except (OSError, json.JSONDecodeError):

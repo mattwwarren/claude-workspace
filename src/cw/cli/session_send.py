@@ -38,18 +38,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _resolve_body(message: str | None, message_file: Path | None) -> str:
-    """Return the message body, or raise a UsageError on a bad flag pair."""
-    if message is not None and message_file is not None:
-        msg = "Pass exactly one of --message or --message-file, not both."
+def _resolve_body(
+    message: str | None,
+    message_file: Path | None,
+    message_arg: str | None = None,
+) -> str:
+    """Return the message body, or raise a UsageError unless exactly one source.
+
+    The sources are the positional MESSAGE (*message_arg*), ``--message`` and
+    ``--message-file``.
+    """
+    supplied = [s for s in (message_arg, message, message_file) if s is not None]
+    if len(supplied) != 1:
+        msg = "Pass exactly one of MESSAGE, --message or --message-file."
         raise click.UsageError(msg)
-    if message is not None:
-        body = message
-    elif message_file is not None:
-        body = message_file.read_text()
-    else:
-        msg = "Pass exactly one of --message or --message-file."
-        raise click.UsageError(msg)
+    source = supplied[0]
+    body = source.read_text() if isinstance(source, Path) else source
     body = body.strip()
     if not body:
         msg = "Message body is empty."
@@ -96,7 +100,13 @@ def _ambiguous_matches(state: CwState, prefix: str) -> list[Session]:
 
 @session_group.command(name="send")
 @click.argument("session_ref")
-@click.option("--message", "-m", default=None, help="Message body, inline.")
+@click.argument("message_arg", required=False, default=None, metavar="[MESSAGE]")
+@click.option(
+    "--message",
+    "-m",
+    default=None,
+    help="Message body, inline (same as the positional MESSAGE).",
+)
 @click.option(
     "--message-file",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -111,6 +121,7 @@ def _ambiguous_matches(state: CwState, prefix: str) -> list[Session]:
 @handle_errors
 def session_send(
     session_ref: str,
+    message_arg: str | None,
     message: str | None,
     message_file: Path | None,
     author: str | None,
@@ -119,12 +130,15 @@ def session_send(
 
     SESSION_REF is a short session id or claude_session_id prefix.
 
+    MESSAGE may be given positionally (cw session send <id> "text") or via
+    --message / --message-file; pass exactly one.
+
     The message is appended to the session's durable inbox first, then a
     resume is attempted. A session that is genuinely live and mid-task cannot
     be woken yet (deferred to #2255): the message still queues, and the
     command still exits 0, with the reason printed as a warning.
     """
-    body = _resolve_body(message, message_file)
+    body = _resolve_body(message, message_file, message_arg)
 
     # Single load, reused for both the ambiguity check and the actual
     # resolution below -- two separate reads previously judged ambiguity

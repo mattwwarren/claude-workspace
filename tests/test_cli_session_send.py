@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from cw.native_daemon import FakeNativeDaemonClient
 
 _SESSION_ID = "sess2212"
+_USAGE_ERROR_EXIT = 2
 
 
 @pytest.fixture
@@ -130,6 +131,21 @@ class TestHappyPath:
         assert [m.body for m in session_inbox.read_messages(_SESSION_ID)] == [
             "use the second approach"
         ]
+
+    def test_positional_message_queues_like_dash_m(
+        self, sample_client: ClientConfig, runner: CliRunner
+    ) -> None:
+        _persist(_session(sample_client))
+        code, _output, fake = _invoke(runner, [_SESSION_ID, "hello"])
+        assert code == 0
+        positional = session_inbox.read_messages(_SESSION_ID)
+        assert [m.body for m in positional] == ["hello"]
+        assert fake.trigger_calls == [(_SESSION_ID, positional[0].id)]
+
+        code, _output, _fake = _invoke(runner, [_SESSION_ID, "-m", "hello"])
+        assert code == 0
+        bodies = [m.body for m in session_inbox.read_messages(_SESSION_ID)]
+        assert bodies == ["hello", "hello"]
 
     def test_author_defaults_to_the_local_os_user(
         self, sample_client: ClientConfig, runner: CliRunner
@@ -272,6 +288,47 @@ class TestRefusals:
         _persist(_session(sample_client))
         code, _output, _fake = _invoke(runner, [_SESSION_ID, "--message", "   "])
         assert code != 0
+        assert session_inbox.read_messages(_SESSION_ID) == []
+
+    def test_positional_and_message_flag_is_refused(
+        self, sample_client: ClientConfig, runner: CliRunner
+    ) -> None:
+        _persist(_session(sample_client))
+        code, output, fake = _invoke(runner, [_SESSION_ID, "hello", "-m", "hello"])
+        assert code == _USAGE_ERROR_EXIT
+        assert "exactly one of" in output
+        assert fake.trigger_calls == []
+        assert session_inbox.read_messages(_SESSION_ID) == []
+
+    def test_positional_and_message_file_is_refused(
+        self, sample_client: ClientConfig, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        _persist(_session(sample_client))
+        body_file = tmp_path / "answer.md"
+        body_file.write_text("from file")
+        code, output, _fake = _invoke(
+            runner, [_SESSION_ID, "hello", "--message-file", str(body_file)]
+        )
+        assert code == _USAGE_ERROR_EXIT
+        assert "exactly one of" in output
+        assert session_inbox.read_messages(_SESSION_ID) == []
+
+    def test_no_body_source_is_a_usage_error(
+        self, sample_client: ClientConfig, runner: CliRunner
+    ) -> None:
+        _persist(_session(sample_client))
+        code, output, _fake = _invoke(runner, [_SESSION_ID])
+        assert code == _USAGE_ERROR_EXIT
+        assert "MESSAGE" in output
+        assert session_inbox.read_messages(_SESSION_ID) == []
+
+    def test_whitespace_only_positional_is_refused(
+        self, sample_client: ClientConfig, runner: CliRunner
+    ) -> None:
+        _persist(_session(sample_client))
+        code, output, _fake = _invoke(runner, [_SESSION_ID, "   "])
+        assert code == _USAGE_ERROR_EXIT
+        assert "Message body is empty." in output
         assert session_inbox.read_messages(_SESSION_ID) == []
 
     def test_missing_message_file_is_refused(
