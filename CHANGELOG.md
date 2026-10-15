@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The dead-process local harvest completes a session whose worker already ran `cw result emit` instead of refusing it every tick (#2699).** A DAEMON-origin LOCAL session (the opencode backend, for instance) whose worker emitted a terminal result and then exited stayed `ACTIVE` forever: the harvest synthesized a second result from git, the first-writer-wins door refused it (`cw result emit: refusing overwrite ... existing_source=emit_cli attempted_source=git_synthesis`), and the refused branch skipped the completion stamp, so the next tick repeated it and the dev-queue row kept holding its lane slot. Before synthesizing, the harvest now routes a still-staged `emit_cli` result to its row through `_apply_sentinel_to_task` (the authority `cw spawn close` uses, #2458) and completes the session through the normal harvest tail. A result a partial route already consumed completes the session without re-routing, a row already terminal completes it too, and a blocked result that lands the row FAILED completes it, because a dead worker will never produce another leg. A permanent stage mismatch of the emitted result now pages once (`session.needs_attention`, `paused_status=sentinel_stage_mismatch_dead_session`, built from the worker's real result) and latches the session so it is no longer re-offered every tick (#2490). A row that moved on to a non-terminal state, and a terminal result from any other authority, keep the previous refuse-and-leave behavior. cw's responsibility ends at the emitted result, never at CI, review or merge. The logic lives in the new `cw.reconcile.emitted_result`; unifying it with `cw spawn close`'s own routing helper is tracked in #2704.
+
 ## [1.71.1] - 2026-10-15
 
 ### Added
