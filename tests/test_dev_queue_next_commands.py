@@ -17,10 +17,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import click
-import cw.dev_queue.next_commands as next_commands_mod
 import pytest
-from cw.dev_queue.next_commands import next_commands
 
+import cw.dev_queue.next_commands as next_commands_mod
 from cw.cli import main
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS
 from cw.config import load_state
@@ -35,6 +34,7 @@ from cw.dev_queue import (
     precheck_requeue,
 )
 from cw.dev_queue.must_fix_override import _require_codex_must_fix_park
+from cw.dev_queue.next_commands import next_commands
 from cw.exceptions import ApproveGateError
 from cw.models import (
     MustFixOverride,

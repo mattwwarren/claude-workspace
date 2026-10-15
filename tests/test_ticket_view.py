@@ -10,18 +10,10 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-import cw.ticket_view
 import pytest
-from cw.models.ticket_view import TicketView
-from cw.ticket_view import (
-    ViewSources,
-    build_ticket_view,
-    find_ticket_clients,
-    render_ticket_view,
-    resolve_view_client,
-)
 from freezegun import freeze_time
 
+import cw.ticket_view
 from cw.config import load_orchestrator_config
 from cw.events import record_event
 from cw.exceptions import CwError
@@ -37,7 +29,15 @@ from cw.models import (
     SessionStatus,
     Stage,
 )
+from cw.models.ticket_view import TicketView
 from cw.orchestrate import _latest_tick_by_client, client_tick_snapshots
+from cw.ticket_view import (
+    ViewSources,
+    build_ticket_view,
+    find_ticket_clients,
+    render_ticket_view,
+    resolve_view_client,
+)
 from tests._ticket_view_helpers import (
     bound_session_for,
     patch_roster,
@@ -130,7 +130,7 @@ def _build(ticket: str = _T, client: str = _C) -> TicketView:
 
 
 def _text(view: TicketView) -> str:
-    return render_ticket_view(view)
+    return render_ticket_view(view, now=_NOW)
 
 
 def _line(text: str, key: str) -> str:
