@@ -123,6 +123,7 @@ def worktree_group() -> None:
 )
 @click.option(
     "--client",
+    "-c",
     "client_name",
     default=None,
     shell_complete=_complete_client,

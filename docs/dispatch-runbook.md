@@ -64,7 +64,8 @@ cw dev-queue add <TICKET-ID> [<TICKET-ID> ...] --client <client> \
     orchestrator never approves — it notifies the human (ADR-0020).
 - `-p/--priority` — higher dispatches sooner. An already-queued row's
   priority can be edited in place with `cw dev-queue move <T> -c <client>
-  --priority <n>` — no cancel+requeue needed; it takes effect on the next
+  --priority <n>` (`--to <lane>`, alias `--lane <lane>`, re-lanes it in the
+  same call) — no cancel+requeue needed; it takes effect on the next
   claim evaluation with no other action required.
 - (The former `-t/--timeout` wall-clock budget override was removed with the
   process-kill timeouts — see ADR-0014. Sessions are never dispositioned on
@@ -72,7 +73,7 @@ cw dev-queue add <TICKET-ID> [<TICKET-ID> ...] --client <client> \
   instead.)
 - `--lane` — target lane (must be declared for the client; default
   `default`). Move a pending ticket later with `cw dev-queue move <T> -c
-  <client> --to <lane>`.
+  <client> --to <lane>` (`--lane <lane>` is an alias of `--to`).
 - `--signoff operator` — require an explicit operator signoff before this
   ticket ships (see below). This is a gate the human opts into, so it stays a
   human's to clear (ADR-0020).
@@ -754,13 +755,26 @@ row is the ambiguous case that still needs your eyes.
 **Answer it.**
 
 ```bash
-# Inline
-cw session send <session-id> --message "Use the second approach; the first
-one breaks the lane cap."
+# Inline, positionally
+cw session send <session-id> "Use the second approach; the first one breaks
+the lane cap."
+
+# Inline via the flag (same thing)
+cw session send <session-id> --message "Use the second approach."
 
 # Or from a file, for anything longer than a sentence
 cw session send <session-id> --message-file ./answer.md
 ```
+
+Pass exactly one of the positional MESSAGE, `--message` or `--message-file`;
+two or none is a usage error and nothing is queued.
+
+**Read what it parked on.** `cw session result <session-id>` prints the
+session's `last_result` JSON; `--field PATH` (repeatable, dotted, numeric
+segments index lists) prints just one value, e.g.
+`cw session result <session-id> --field blocker.reason`. One `--field` prints
+the bare value, several print a JSON object keyed by path, and a missing path
+exits 1.
 
 The message is appended to the session's durable mailbox first, then a resume
 is attempted. The command exits 0 whenever the message was **queued**, which

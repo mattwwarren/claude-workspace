@@ -360,6 +360,7 @@ def _validate_collapse_repeats(collapse_repeats: bool, *, follow: bool) -> None:
 )
 @click.option(
     "--client",
+    "-c",
     "client_filter",
     multiple=True,
     help="Filter by payload.client field (repeatable).",
@@ -505,6 +506,7 @@ def event_tail(
 )
 @click.option(
     "--client",
+    "-c",
     "client",
     default=None,
     help="Filter by payload client field.",

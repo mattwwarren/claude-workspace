@@ -281,14 +281,69 @@ def session_wait(
         time.sleep(_WAIT_POLL_INTERVAL)
 
 
+def _lookup_dotted(data: object, path: str) -> object:
+    """Return the value at dotted *path* in *data*; raise KeyError on a miss.
+
+    Segments walk dict keys; an all-digit segment indexes a list. Keys that
+    themselves contain a literal ``.`` are not addressable.
+    """
+    current = data
+    for segment in path.split("."):
+        if isinstance(current, dict) and segment in current:
+            current = current[segment]
+        elif (
+            isinstance(current, list)
+            and segment.isdigit()
+            and int(segment) < len(current)
+        ):
+            current = current[int(segment)]
+        else:
+            raise KeyError(path)
+    return current
+
+
+def _format_field_value(value: object) -> str:
+    """A single ``--field`` value: strings raw, everything else as JSON."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict | list):
+        return json.dumps(value, indent=2)
+    return json.dumps(value)
+
+
 @session_group.command(name="result")
 @click.argument("session_ref")
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    default=False,
+    help="Accepted for consistency with sibling commands; the output is already"
+    " JSON (no-op).",
+)
+@click.option(
+    "--field",
+    "fields",
+    multiple=True,
+    metavar="PATH",
+    help="Print only this dotted path of last_result (e.g. blocker.reason);"
+    " repeatable. One --field prints the bare value; several print a JSON"
+    " object keyed by path.",
+)
 @handle_errors
-def session_result(session_ref: str) -> None:
+def session_result(
+    session_ref: str, output_json: bool, fields: tuple[str, ...]
+) -> None:
     """Print last_result JSON for a session.
 
-    Exit 1 if the session is not found or has no recorded result.
+    Output is JSON; --json is accepted as a no-op. --field PATH (repeatable)
+    prints just that dotted path, e.g. --field blocker.reason; numeric
+    segments index lists.
+
+    Exit 1 if the session is not found, has no recorded result, or a --field
+    path is missing.
     """
+    del output_json  # no-op: the output is always JSON
     session = _resolve_session(session_ref)
     if session is None:
         click.echo(f"Session not found: {session_ref}", err=True)
@@ -296,4 +351,20 @@ def session_result(session_ref: str) -> None:
     if session.last_result is None:
         click.echo(f"No result recorded for session {session.id}.", err=True)
         raise click.exceptions.Exit(1)
-    click.echo(json.dumps(session.last_result, indent=2))
+    if not fields:
+        click.echo(json.dumps(session.last_result, indent=2))
+        return
+    values: dict[str, object] = {}
+    for path in fields:
+        try:
+            values[path] = _lookup_dotted(session.last_result, path)
+        except KeyError:
+            click.echo(
+                f"Field not found: {path} in last_result of session {session.id}.",
+                err=True,
+            )
+            raise click.exceptions.Exit(1) from None
+    if len(fields) == 1:
+        click.echo(_format_field_value(values[fields[0]]))
+    else:
+        click.echo(json.dumps(values, indent=2))

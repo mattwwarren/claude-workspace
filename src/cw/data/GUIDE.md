@@ -166,7 +166,8 @@ a sentinel carries one — and they never share values, so always say which.
 - `cw dev-queue status`, `cw dev-queue tasks` — the queue (task status).
   `BLOCKED` in the status summary counts `blocked_on_user` only.
 - `cw board` — lanes × stages. `cw queue peek` — a liveness verdict per
-  `running` session. `cw session result` — one session's `last_result`.
+  `running` session. `cw session result [--field a.b]` — one session's
+  `last_result` (or one dotted field of it).
 
 ## Orient (start of every sprint)
 
@@ -234,7 +235,7 @@ cw dev-queue approve <ticket> -c <client>        # clear a plan/review/signoff g
 cw dev-queue requeue <ticket> -c <client>        # BLOCKED_ON_USER → PENDING (--stage/--regress;
                                                  #   --from-cancelled / --from-failed to recover)
 cw dev-queue unblock <ticket> -c <client>        # clear salvage-park markers and requeue
-cw dev-queue move <ticket> -c <client> --to <lane>   # re-lane
+cw dev-queue move <ticket> -c <client> --to|--lane <lane>   # re-lane
 cw dev-queue cancel|remove -c <client>           # queue hygiene, one ticket at a time
 cw dev-queue prune --older-than <days> -c <c>    # bulk-retire stale terminal rows (dry-run
                                                  #   by default; needs --confirm to delete)

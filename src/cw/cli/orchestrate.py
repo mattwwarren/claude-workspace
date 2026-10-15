@@ -174,6 +174,7 @@ _ORCHESTRATE_WATCH_DEPRECATION = (
 )
 @click.option(
     "--client",
+    "-c",
     "client_filter",
     default=None,
     shell_complete=_complete_client,
@@ -282,6 +283,7 @@ def orchestrate_parent(worker_id: str, as_json: bool) -> None:
 )
 @click.option(
     "--client",
+    "-c",
     "client_name",
     default=None,
     help="Client name (defaults to first configured client).",
@@ -468,6 +470,7 @@ def _drain_reap_proposals(client: str, lane: str) -> int:
 )
 @click.option(
     "--client",
+    "-c",
     "client_name",
     default=None,
     help="Client name (defaults to first configured client).",
@@ -537,6 +540,7 @@ _ORCHESTRATOR_CHANNEL = "server:cw-pr-events"
 @click.option("--name", default=_ORCHESTRATOR_AGENT, help="Session label.")
 @click.option(
     "--client",
+    "-c",
     default=None,
     help="Client to scope the orchestrator to. Defaults to first configured client.",
 )
