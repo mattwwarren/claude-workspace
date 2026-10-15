@@ -63,9 +63,17 @@ unresolvable case defaults to `small`/Sonnet, and the operator can re-dispatch w
 `--scope large` to force Opus.
 
 **Every variant below also passes `subagent_type: "general-purpose"`** — never omitted,
-and never a fork. An unnamed or forked spawn takes no `cw` roster entry, so the
+and never a fork. An untyped or forked spawn takes no `cw` roster entry, so the
 orchestrator can neither see it start nor stop it (#2017/#2211); in a headless worker
 `cw agent-spawn-pre` refuses an explicit fork outright.
+
+**Never set `name` on an Agent spawn (#2688).** `name` turns the spawn into an
+addressable in-process teammate: it goes idle instead of returning, stays registered in
+the Stop hook's `background_tasks`, and strands this worker's session (daemon never
+stopped, next stage blocked on `worktree_occupied`). A plain, unnamed subagent spawn
+reports back through the ordinary completion notification. In a headless worker
+`cw agent-spawn-pre` refuses a named spawn with exit 2; retry the same call without
+`name`.
 
 **Spawn shape depends on mode AND dispatch context** (all variants pass `model: $IMPL_MODEL`
 resolved above — Sonnet for Small scope, Opus for Large):

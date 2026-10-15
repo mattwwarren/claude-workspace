@@ -1332,6 +1332,57 @@ def _headless_worktree(tmp_path: Path, name: str = "wt") -> Path:
     return worktree
 
 
+def _seed_session(tmp_path: Path, sess_id: str = "sess940g") -> Session:
+    """Seed a DAEMON session whose id matches ``_write_hook_context_file``'s.
+
+    The default *sess_id* must equal the ``session_id`` default that
+    ``_write_hook_context_file`` above hardcodes (``"sess940g"``, #1646) --
+    matching the id is what lets whole-object ``state.sessions`` snapshot
+    assertions prove the Stop hook's deferral/clear paths never touch session
+    state, mirroring ``TestSignalStop._seed_session`` in ``tests/test_cli.py``
+    (not reused directly: that helper is a private method of a class in a
+    different module). Hoisted from ``tests/test_cli_stop_hook.py`` (#2688) so
+    the stop-hook stamp tests share it.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True, exist_ok=True)
+    session = _make_daemon_session(
+        id=sess_id,
+        name="client-a/impl",
+        client="client-a",
+        workspace_path=workspace,
+        worktree_path=worktree,
+        surface_ref=None,
+        started_at=datetime.now(UTC),
+    )
+    state = load_state()
+    state.sessions.append(session)
+    save_state(state)
+    return session
+
+
+def _read_stamp(worktree: Path) -> dict[str, object]:
+    """Return the worktree context's ``agent_spawn_stamp`` dict (#2688 hoist)."""
+    context = json.loads(
+        (worktree / HOOK_CONTEXT_RELATIVE_PATH).read_text(encoding="utf-8")
+    )
+    stamp = context[AGENT_SPAWN_STAMP_KEY]
+    assert isinstance(stamp, dict)
+    return stamp
+
+
+def _stop_payload(worktree: Path, **extra: object) -> dict[str, object]:
+    """A minimal Stop hook payload for *worktree*, plus *extra* keys (#2688 hoist)."""
+    return {
+        "session_id": "claude-uuid-2229",
+        "cwd": str(worktree),
+        "hook_event_name": "Stop",
+        **extra,
+    }
+
+
 def _symlink_loop(base: Path, name: str = "loop") -> Path:
     """Create two symlinks under *base* pointing at each other; return one."""
     first, second = base / f"{name}-a", base / f"{name}-b"
