@@ -5,13 +5,10 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from click.testing import CliRunner
+import pytest
+from click.testing import CliRunner, Result
 from freezegun import freeze_time
-
-if TYPE_CHECKING:
-    import pytest
 
 from cw.cli import main
 from cw.cli.session_inspect import (
@@ -547,6 +544,102 @@ class TestSessionResult:
         runner = CliRunner()
         result = runner.invoke(main, ["session", "result", "noexist"])
         assert result.exit_code != 0
+
+
+_FIELD_RESULT: dict[str, object] = {
+    "status": "shipped",
+    "pr": 42,
+    "blocker": {"reason": "x_foo", "details": "d"},
+    "commits": [{"sha": "abc123"}, {"sha": "def456"}],
+}
+
+
+class TestSessionResultFields:
+    """``session result --json`` / ``--field PATH`` (#2690)."""
+
+    def _invoke(self, tmp_path: Path, *args: str) -> Result:
+        _seed_sessions(_make_session(tmp_path, last_result=_FIELD_RESULT))
+        return CliRunner().invoke(main, ["session", "result", "abcd1234", *args])
+
+    def test_json_flag_is_a_no_op(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        _seed_sessions(_make_session(tmp_path, last_result=_FIELD_RESULT))
+        runner = CliRunner()
+        plain = runner.invoke(main, ["session", "result", "abcd1234"])
+        flagged = runner.invoke(main, ["session", "result", "abcd1234", "--json"])
+        assert flagged.exit_code == 0
+        assert flagged.output == plain.output
+
+    def test_string_field_prints_bare_value(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        result = self._invoke(tmp_path, "--field", "status")
+        assert result.exit_code == 0
+        assert result.output == "shipped\n"
+
+    def test_dotted_field_walks_nested_dicts(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        result = self._invoke(tmp_path, "--field", "blocker.reason")
+        assert result.output == "x_foo\n"
+
+    def test_int_field_prints_json_scalar(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        result = self._invoke(tmp_path, "--field", "pr")
+        assert result.output == "42\n"
+
+    def test_dict_field_prints_indented_json(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        result = self._invoke(tmp_path, "--field", "blocker")
+        assert result.output == json.dumps(_FIELD_RESULT["blocker"], indent=2) + "\n"
+
+    def test_numeric_segment_indexes_a_list(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        result = self._invoke(tmp_path, "--field", "commits.1.sha")
+        assert result.exit_code == 0
+        assert result.output == "def456\n"
+
+    def test_repeated_field_prints_object_keyed_by_path_in_order(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        result = self._invoke(
+            tmp_path, "--field", "status", "--field", "blocker.reason"
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert list(data) == ["status", "blocker.reason"]
+        assert data == {"status": "shipped", "blocker.reason": "x_foo"}
+
+    @pytest.mark.parametrize(
+        "path", ["nope", "blocker.nope", "commits.9.sha", "commits.x", "status.x"]
+    )
+    def test_missing_path_exits_1_naming_the_path(
+        self, tmp_config_dir: Path, tmp_path: Path, path: str
+    ) -> None:
+        result = self._invoke(tmp_path, "--field", path)
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert f"Field not found: {path}" in result.stderr
+
+    def test_one_missing_among_several_exits_1(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        result = self._invoke(tmp_path, "--field", "status", "--field", "nope")
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert "nope" in result.stderr
+
+    def test_field_with_no_result_keeps_no_result_message(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _seed_sessions(_make_session(tmp_path, last_result=None))
+        result = CliRunner().invoke(
+            main, ["session", "result", "abcd1234", "--field", "status"]
+        )
+        assert result.exit_code == 1
+        assert "No result recorded" in result.output
 
 
 # ---------------------------------------------------------------------------
