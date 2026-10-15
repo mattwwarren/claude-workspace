@@ -43,6 +43,7 @@ from tests.conftest import (
     _headless_worktree,
     _hold_context_lock,
     _invoke_hook_command,
+    _read_stamp,
     _write_hook_context_file,
 )
 
@@ -335,6 +336,18 @@ def _fork_payload(cwd: Path) -> dict[str, object]:
     return {**_PRE_PAYLOAD, "cwd": str(cwd), "tool_input": tool_input}
 
 
+def _named_payload(
+    cwd: Path, subagent_type: str = "general-purpose", name: str = "impl-2688"
+) -> dict[str, object]:
+    """The real capture plus a top-level ``name`` (#2688): a teammate spawn.
+
+    Redacted rendering of the observed transcript shape
+    ``"subagent_type":"general-purpose","name":"impl-44"``.
+    """
+    tool_input = {**_pre_tool_input(), "subagent_type": subagent_type, "name": name}
+    return {**_PRE_PAYLOAD, "cwd": str(cwd), "tool_input": tool_input}
+
+
 def _untyped_payload(cwd: Path) -> dict[str, object]:
     """The real capture with the ``subagent_type`` key removed entirely."""
     tool_input = {k: v for k, v in _pre_tool_input().items() if k != "subagent_type"}
@@ -423,3 +436,65 @@ def test_pre_hook_reads_stdin_exactly_once(
 
     assert excinfo.value.code == 2
     assert reads == [1]
+
+
+def test_pre_hook_refuses_a_named_spawn(tmp_path: Path) -> None:
+    """#2688: a named spawn is an addressable teammate — exit 2, no stamp.
+
+    Same contract as the #2211 refusals: the spawn never happens, so the
+    counter must not advance.
+    """
+    worktree = _headless_worktree(tmp_path)
+
+    result = _invoke_hook_command("agent-spawn-pre", _named_payload(worktree))
+
+    assert result.exit_code == 2
+    assert "#2688" in result.output
+    assert _read_count(worktree) == 0
+
+
+def test_pre_hook_allows_a_named_spawn_in_a_non_headless_worker(
+    tmp_path: Path,
+) -> None:
+    """An operator's interactive session keeps its named spawn, and its stamp."""
+    worktree = tmp_path / "interactive"
+    worktree.mkdir()
+    _write_hook_context_file(worktree, headless=False)
+
+    result = _invoke_hook_command("agent-spawn-pre", _named_payload(worktree))
+
+    assert result.exit_code == 0
+    assert _read_count(worktree) == 1
+
+
+def test_pre_hook_increment_drops_stale_entries(tmp_path: Path) -> None:
+    """A spawn increment rewrites the stamp wholesale (#2688 non-goal, pinned).
+
+    The Stop hook's diagnostic ``entries`` summary described the previous
+    Stop's ``background_tasks``; the new spawn has made it stale, so dropping
+    it until the next Stop re-snapshots is acceptable — and is what happens.
+    """
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _write_hook_context_file(
+        worktree,
+        headless=True,
+        stamp={
+            AGENT_SPAWN_UNRESOLVED_COUNT_KEY: 1,
+            "last_stamped_at": "2026-10-15T00:00:00+00:00",
+            "entries": [
+                {
+                    "entry_type": "dict",
+                    "keys": ["id"],
+                    "types": {"id": "str"},
+                    "values": {"id": "t1"},
+                }
+            ],
+        },
+    )
+
+    result = _invoke_hook_command("agent-spawn-pre", _payload(_PRE_PAYLOAD, worktree))
+
+    assert result.exit_code == 0
+    assert _read_count(worktree) == 2
+    assert "entries" not in _read_stamp(worktree)

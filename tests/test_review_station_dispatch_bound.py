@@ -1,8 +1,10 @@
 """Doc-structure guards for #2156: review stations must dispatch exclusively
 through the Agent tool's subagent spawn shape, never through a teammate/
-agent-team message — a teammate reply carries no Stop-hook `background_tasks`
-tracking, so a coordinator that ends its turn awaiting a second teammate
-message can never be woken (the same no-notification-path shape #2157's
+agent-team message — a teammate reply has no completion-notification path
+(an idle named teammate does stay in the Stop hook's `background_tasks`,
+#2688, but nothing resumes the coordinator when it replies), so a coordinator
+that ends its turn awaiting a second teammate message can never be woken
+(the same no-notification-path shape #2157's
 Worker Execution Discipline rule 3 already forbids for a raw backgrounded Bash
 call).
 
@@ -191,6 +193,24 @@ def test_appendix_extends_parent_subagent_symmetry_with_teammate_rationale() -> 
     section = _appendix_parent_subagent_section()
     assert "teammate" in section
     assert "background_tasks" in section
+
+
+def test_appendix_no_longer_claims_teammates_are_untracked() -> None:
+    """#2688: an idle named teammate DOES keep ``background_tasks`` non-empty
+    (that is what strands the session), so the old "not tracked ... at all"
+    claim is gone; the prohibition itself stands."""
+    content = _appendix("review")
+    section = _appendix_parent_subagent_section()
+    assert "is not tracked in the Stop hook's" not in content
+    assert "#2688" in section
+    assert "SendMessage" in section
+
+
+def test_step3a_no_longer_claims_teammates_are_untracked() -> None:
+    """The Step 3a dispatch-shape section mirrors the appendix correction."""
+    section = _step3a_dispatch_section()
+    assert "has no Stop-hook `background_tasks` tracking" not in section
+    assert "#2688" in section
 
 
 def test_worker_execution_discipline_cross_references_review_station_rule() -> None:
