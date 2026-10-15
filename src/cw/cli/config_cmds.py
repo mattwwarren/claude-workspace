@@ -30,6 +30,7 @@ from cw.models import (
     OCCUPIED_LANE_STATUSES,
     ConcurrencyOverrides,
     LaneConcurrencyOverride,
+    OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
 )
@@ -64,33 +65,76 @@ def config_concurrency() -> None:
     """Manage concurrency overrides (max_parallel_clients, per-client ceilings)."""
 
 
+def _client_ceiling(
+    name: str,
+    declared: OrchestratorConfig,
+    overrides: ConcurrencyOverrides,
+    effective: OrchestratorConfig,
+) -> dict[str, object]:
+    """One client's configured ceiling and the layer it came from.
+
+    Mirrors ``load_effective_config``'s per-client merge: an override with a
+    non-``None`` ceiling wins, else the declared ``per_client_ceiling`` entry,
+    else ``default_ceiling``.
+    """
+    override = overrides.clients.get(name)
+    if override is not None and override.ceiling is not None:
+        source = "override"
+    elif name in declared.per_client_ceiling:
+        source = "declared"
+    else:
+        source = "default"
+    ceiling = effective.per_client_ceiling.get(name, effective.default_ceiling)
+    return {"name": name, "ceiling": ceiling, "source": source}
+
+
 @config_concurrency.command("get", help="Show concurrency configuration layers.")
 @click.option("--json", "as_json", is_flag=True, default=False)
+@click.option(
+    "--client",
+    "-c",
+    "client_name",
+    default=None,
+    help="Also show this client's configured ceiling (additive; existing output"
+    " unchanged).",
+)
 @handle_errors
-def config_concurrency_get(as_json: bool) -> None:
-    """Show concurrency configuration: declared, override, and effective layers."""
+def config_concurrency_get(as_json: bool, client_name: str | None) -> None:
+    """Show concurrency configuration: declared, override, and effective layers.
+
+    With -c, also show that client's configured ceiling (per_client_ceiling,
+    else default_ceiling). Per-client caps live in orchestrator.yaml
+    per_client_ceiling and concurrency_overrides.json clients.<name>.ceiling.
+    Lane max_parallel caps and the host budget also apply to real admission,
+    so this is the configured ceiling, not a guaranteed slot count.
+    """
+    if client_name is not None:
+        get_client(client_name)
     declared = load_orchestrator_config()
     overrides = _load_concurrency_overrides()
     effective = load_effective_config()
+    client = (
+        _client_ceiling(client_name, declared, overrides, effective)
+        if client_name is not None
+        else None
+    )
     if as_json:
-        click.echo(
-            json.dumps(
-                {
-                    "declared": {
-                        "max_parallel_clients": declared.max_parallel_clients,
-                        "default_ceiling": declared.default_ceiling,
-                        "per_client_ceiling": declared.per_client_ceiling,
-                    },
-                    "override": overrides.model_dump(),
-                    "effective": {
-                        "max_parallel_clients": effective.max_parallel_clients,
-                        "default_ceiling": effective.default_ceiling,
-                        "per_client_ceiling": effective.per_client_ceiling,
-                    },
-                },
-                indent=2,
-            )
-        )
+        payload: dict[str, object] = {
+            "declared": {
+                "max_parallel_clients": declared.max_parallel_clients,
+                "default_ceiling": declared.default_ceiling,
+                "per_client_ceiling": declared.per_client_ceiling,
+            },
+            "override": overrides.model_dump(),
+            "effective": {
+                "max_parallel_clients": effective.max_parallel_clients,
+                "default_ceiling": effective.default_ceiling,
+                "per_client_ceiling": effective.per_client_ceiling,
+            },
+        }
+        if client is not None:
+            payload["client"] = client
+        click.echo(json.dumps(payload, indent=2))
     else:
         click.echo("Declared (orchestrator.yaml):")
         click.echo(f"  max_parallel_clients: {declared.max_parallel_clients}")
@@ -104,6 +148,11 @@ def config_concurrency_get(as_json: bool) -> None:
         click.echo(f"  max_parallel_clients: {effective.max_parallel_clients}")
         click.echo(f"  default_ceiling: {effective.default_ceiling}")
         click.echo(f"  per_client_ceiling: {effective.per_client_ceiling}")
+        if client is not None:
+            click.echo(
+                f"Client {client['name']} configured ceiling: {client['ceiling']}"
+                f" (source: {client['source']})"
+            )
 
 
 _CONCURRENCY_SET_KEYS: frozenset[str] = frozenset({"max_parallel_clients"})
