@@ -300,9 +300,9 @@ def dev_queue_move(
         "Allow requeuing a CANCELLED ticket back to PENDING at its current"
         " stage (e.g. after `cw spawn close --confirmed-dead` on a RUNNING"
         " row). Accepts any CANCELLED row regardless of why it was"
-        " cancelled — check `cw dev-queue show` / event history first if"
-        " the ticket may have been deliberately killed. See"
-        " docs/dispatch-runbook.md."
+        " cancelled — check `cw dev-queue tasks -t <T> -c <CLIENT>` /"
+        " event history first if the ticket may have been deliberately"
+        " killed. See docs/dispatch-runbook.md."
     ),
 )
 @click.option(
@@ -314,8 +314,8 @@ def dev_queue_move(
         "Allow requeuing a FAILED ticket back to PENDING at its current"
         " stage (e.g. an abandoned row whose underlying session actually"
         " completed clean). Accepts any FAILED row regardless of why it"
-        " failed — check `cw dev-queue show` / event history first. See"
-        " docs/dispatch-runbook.md."
+        " failed — check `cw dev-queue tasks -t <T> -c <CLIENT>` / event"
+        " history first. See docs/dispatch-runbook.md."
     ),
 )
 @click.option(

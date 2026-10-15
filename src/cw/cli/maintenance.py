@@ -186,7 +186,7 @@ def doctor(
     wedge/repo-ahead-of-queue (advisory only)
       Branch is pushed to remote but queue task is still RUNNING.
       No automatic mutation — inspect and resolve manually.
-      Recipe: cw spawn-complete <ticket_id> [--status shipped]
+      Recipe: cw spawn complete <session_id> --status shipped
 
     \b
     wedge/active-no-daemon-entry
