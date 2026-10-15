@@ -871,9 +871,27 @@ equally one that names no `subagent_type` at all.
 A forked subagent inherits the parent's tools *and* its context, and takes no
 `cw` roster entry, so cw can neither observe it nor stop it (#2017). #2211 is
 the incident: a fork spawned for a read-only lookup inherited the
-implementation mandate and pushed to a live feature branch. An unnamed spawn
+implementation mandate and pushed to a live feature branch. An untyped spawn
 is unrostered for the same reason, and additionally leaves no record of what
 it was permitted to do.
+
+**Named spawns (#2688).** The same policy also refuses, in a headless worker,
+a spawn whose top-level `name` is a non-blank string, whatever its type
+(checked after the type, so a named fork is refused as a fork). `name` makes
+the spawn an addressable in-process teammate: it goes idle instead of
+returning, stays registered in the Stop hook's `background_tasks`, and so the
+worker's session is never completed (daemon never stopped, next stage blocked
+on `worktree_occupied`). The refusal tells the caller to retry the same call
+without `name`; a plain subagent spawn reports back through the ordinary
+completion notification. A blank or `null` `name` allows, and a non-string
+`name` warns and allows. The Stop-hook reap rule for a teammate that gets past
+this (a guard-off lane) is deferred to #2710, which also owns widening the
+`agent_spawn_stamp.entries` capture once a teammate entry is observed.
+
+**The toggle is a coarse kill switch.** `subagent_spawn_guard_enabled` gates
+the whole spawn-shape policy: setting it `false` disables the #2211 fork and
+omitted-type refusals as well as the #2688 named-spawn refusal, not only the
+one you meant to turn off.
 
 Interactive sessions are never affected, and any cwd with no ancestor
 `.claude/cw-context.json` is structurally exempt.
