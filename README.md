@@ -150,6 +150,7 @@ Use the `/cw-session-watch` skill to read a session's exit status without hand-g
 | `cw dev-queue serve` | Run the dispatch loop with automatic restart on crash |
 | `cw dev-queue status` | Show queue state and last tick summary |
 | `cw dev-queue tasks` | List dev-queue tasks with typed field output |
+| `cw dev-queue show <ticket> [-c <client>] [--json]` | One ticket's full row (blocker details, attempts vs ceiling, session liveness, PR, skip reason, approvals) and the legal next commands |
 | `cw dev-queue wait <ticket>` | Block until terminal; structured JSON exit codes |
 | `cw dev-queue approve <ticket>` | Approve a plan/review gate, or clear an operator-signoff hold |
 | `cw dev-queue requeue <ticket>` | Requeue a `BLOCKED_ON_USER` ticket back to pending |

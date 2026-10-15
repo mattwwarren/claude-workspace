@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`cw dev-queue show <TICKET> [-c CLIENT] [--json]` (#2691).** Prints one dev-queue row in full, one `key: value` per line with a fixed key order and nothing truncated: status, stage, disposition, blocker reason and full details, lane, priority, attempts and unproductive attempts against the resolved attempt ceiling, the bound session with its daemon-roster liveness, the last result, the stored PR state, why a PENDING row is not dispatching (labelled with its source, `row`/`event`/`last_tick`, its age and a stale marker), the approvals recorded on the row (who approved is not recorded, and tracker-comment approvals are not mirrored), and `next:` with the commands that are legal for the row as it stands. Without `-c` the one client queueing the ticket is used. `--json` emits the new `TicketView` model, registered as `cw schema show ticket-view` (`schema_version` 1). `show` takes no lock, runs no subprocess and records no event. `cw dev-queue add`, `move`, `requeue`, `approve` and `cancel` now print the same row block after their unchanged confirmation line (best-effort: a row that cannot be read prints nothing and never changes the exit code). The `--from-cancelled`/`--from-failed`/`--from-completed` and `cw spawn close --requeue` help now point at `cw dev-queue show <T> -c <CLIENT>`. The state-to-command mapping lives in `cw.dev_queue.next_commands` for reuse by #2692.
+
 ## [1.71.1] - 2026-10-15
 
 ### Added

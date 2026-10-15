@@ -165,6 +165,8 @@ a sentinel carries one — and they never share values, so always say which.
 - `cw status`, `cw list`, `cw session show` — sessions.
 - `cw dev-queue status`, `cw dev-queue tasks` — the queue (task status).
   `BLOCKED` in the status summary counts `blocked_on_user` only.
+- `cw dev-queue show <ticket>` — one task in full plus the legal `next:`
+  commands; `add`/`move`/`requeue`/`approve`/`cancel` print the same block.
 - `cw board` — lanes × stages. `cw queue peek` — a liveness verdict per
   `running` session. `cw session result [--field a.b]` — one session's
   `last_result` (or one dotted field of it).
@@ -263,6 +265,7 @@ cw watch                                 # live work board (j/k, p=peek, c=spawn
 cw board [--once]                        # lane x stage pipeline cockpit (--once for a snapshot)
 cw status                                # live sessions
 cw dev-queue status|tasks [--json]       # queue summary / typed per-task rows
+cw dev-queue show <ticket> [--json]      # one task in full + legal next commands
 cw queue peek [-c <client>]              # RUNNING sessions: age, idle gap, WAIT/PEEK/STOP verdict
 cw peek <session> [-n <lines>]           # tail a worker's output — no manual transcript digging
 cw session show|result|wait <session>    # one session's state / last sentinel / block-until-status
