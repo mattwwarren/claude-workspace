@@ -188,6 +188,8 @@ CWCTXEOF
 - **`github-issues` mode:** use the `comments` returned by the Step 3 fetch (`gh issue view <n> --json title,body,state,url,comments`), which already carries `createdAt` and `author.login`; do not re-fetch.
 - **`linear` mode:** `list_comments(<id>)` is a **mandatory op that MUST run before Step 0d** — run it explicitly and populate `comments` from its result. Do NOT rely on model initiative to decide whether comments are worth fetching.
 
+**Key names are a reader contract (#2700).** `ticket_title` and `ticket_body` are read by two Python readers (`_load_ticket_context` in `src/cw/codex_review/_context/core.py` and `build_task_message` in `src/cw/local_runner.py`), pinned by `tests/test_auto_dev_intake_context_schema.py`; a rename must change the heredoc, both readers, and that test together. `comments` entries written here are always `{author, created_at, body}` — GitHub's verbatim `createdAt`/`author.login` shape appears only in the live-fetched `.cw/impl-comments.json`.
+
 **WARN on comments-fetch failure:** a comments fetch that exits non-zero or
 returns malformed JSON is rare — emit an attention signal and continue with
 `comments: []`. The exact `cw event record` call, why `stage.errored` is the

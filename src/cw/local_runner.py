@@ -277,8 +277,8 @@ def build_task_message(
     if ctx_path.exists():
         try:
             ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
-            title: str = ctx.get("title", "")
-            body: str = ctx.get("body", "")
+            title: str = ctx.get("ticket_title", "")
+            body: str = ctx.get("ticket_body", "")
             if title or body:
                 header = f"## Ticket: {title}\n\n{body}\n\n"
         except (OSError, json.JSONDecodeError):
