@@ -16,7 +16,19 @@ do. This module refuses both, in headless dispatch workers only:
 
 - an explicit ``fork`` (any case) or blank ``subagent_type`` → **deny**;
 - ``subagent_type`` absent from the payload entirely → **deny**;
+- a non-blank string ``name`` (#2688), checked only after the type passes
+  → **deny**;
 - anything else, or any shape it cannot classify → no verdict.
+
+#2688 is a different hazard from the two above. ``name`` makes the spawn an
+addressable in-process teammate: it goes idle instead of returning, stays
+registered in the Stop hook's ``background_tasks``, and so the Stop hook
+never completes the worker's session. The plain spawn the retry asks for
+reports back through the ordinary completion notification. The type is
+classified first, so a named fork or a named untyped spawn is refused for
+its #2211 reason; a type shape-warning still falls through to the name
+check. The deferred Stop-hook reap rule for a teammate that slips past this
+(a guard-off lane) is #2710.
 
 Denying the omitted case was gated on a complete spawn-site inventory, for a
 concrete reason: refusing a caller that has nothing correct to retry with is
@@ -31,15 +43,17 @@ ships.
 
 The deferred half of #2211 — refusing a *git mutation* from a non-writer
 subagent, and the durable ``guard.subagent_action`` event that would record
-one — is #2248. Nothing here records an event: a refusal is visible in the
-worker's own transcript via the stderr reason, and nothing is allowed-but-
-noteworthy any more now that the omitted case denies.
+one — is #2248. Nothing here records an event: a refusal, the #2688 one
+included, is visible only in the worker's own transcript via the stderr
+reason, and nothing is allowed-but-noteworthy any more now that the omitted
+case denies.
 
 Fail-open throughout, like every other cw hook: a missing or malformed
 context, an unreadable config, or any unexpected shape yields no verdict.
-The two denials above are the only deliberate exceptions, and both ship
+The three denials above are the only deliberate exceptions, and all ship
 behind :attr:`~cw.models.OrchestratorConfig.subagent_spawn_guard_enabled` so
 an operator can switch them off per-lane or globally without a code release.
+That switch is coarse: turning it off disables all three, not one.
 """
 
 from __future__ import annotations
@@ -62,16 +76,28 @@ _AGENT_TOOL_NAMES = frozenset({"Agent", "Task"})
 
 _SUBAGENT_TYPE_KEY = "subagent_type"
 
-# Shared by both denial reasons below: what to do about it. Kept as one
-# constant so the two messages cannot drift apart the way the rest of this
+# The top-level ``tool_input`` key that makes a spawn an addressable
+# in-process teammate (#2688). Confirmed from the Agent tool's own input
+# schema ("Name for the spawned agent. Makes it addressable via
+# SendMessage") and from redacted transcripts, where it is a sibling of
+# ``subagent_type``.
+_NAME_KEY = "name"
+
+# Shared by every denial reason below: how to switch the policy off. Kept as
+# one constant so the messages cannot drift apart the way the rest of this
 # paragraph already did once (#2211 round 3).
+_KILL_SWITCH_GUIDANCE = (
+    "False positive? Disable via subagent_spawn_guard_enabled: false "
+    "(per-lane or global) in orchestrator.yaml -- see CONFIG_REFERENCE.md."
+)
+
+# Shared by both #2211 denial reasons below: what to retry with.
 _RETRY_GUIDANCE = (
     "Retry with an explicitly named subagent_type: "
     '"general-purpose" for real work, or "Read Only Helper" '
     "(tools: Read/Grep/Glob, no Bash) for an extraction or lookup that must "
     "not be able to write.\n"
-    "False positive? Disable via subagent_spawn_guard_enabled: false "
-    "(per-lane or global) in orchestrator.yaml -- see CONFIG_REFERENCE.md."
+    f"{_KILL_SWITCH_GUIDANCE}"
 )
 
 _DENY_REASON = (
@@ -90,15 +116,28 @@ _OMITTED_DENY_REASON = (
     f"{_RETRY_GUIDANCE}"
 )
 
+_NAMED_DENY_REASON = (
+    "BLOCKED (#2688): cw agent-spawn-pre refused a subagent spawn that set "
+    "`name`. A named spawn is an addressable in-process teammate: it goes "
+    "idle instead of returning, stays registered in the Stop hook's "
+    "background_tasks, and strands this worker's session (daemon never "
+    "stopped, next stage blocked on worktree_occupied).\n"
+    "Retry the same Agent call WITHOUT `name` (keep subagent_type; a plain "
+    "subagent spawn reports back through the ordinary completion "
+    "notification).\n"
+    f"{_KILL_SWITCH_GUIDANCE}"
+)
+
 
 def _warn_unexpected_shape(detail: str) -> None:
     """Emit the loud fail-open warning, mirroring ``cw guard-busy-wait``'s.
 
     This command is wired only to the ``^(Agent|Task)$`` matcher, so a
-    ``tool_input`` that is not a dict — or a ``subagent_type`` that is not a
-    string — is anomalous, never routine. A wrong inference about the payload
-    shape must degrade to "policy does not fire, and says so on every call it
-    does not fire for" rather than "policy silently never fires".
+    ``tool_input`` that is not a dict — or a ``subagent_type`` or ``name``
+    that is not a string — is anomalous, never routine. A wrong inference
+    about the payload shape must degrade to "policy does not fire, and says
+    so on every call it does not fire for" rather than "policy silently
+    never fires".
     """
     click.echo(
         f"WARN (cw agent-spawn-pre, #2211): unexpected Agent PreToolUse "
@@ -129,6 +168,24 @@ def _classify_subagent_type(raw: object) -> str | None:
     return None
 
 
+def _classify_name(raw: object) -> str | None:
+    """Return the #2688 refusal reason for this ``name``, or None to allow.
+
+    Only a non-blank string names a teammate. An absent key, JSON ``null``
+    and a whitespace-only string all allow: none of them makes the spawn
+    addressable, and over-refusing is an outage. A non-string value is an
+    unexpected shape, so it warns and fails open like every other one here.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        _warn_unexpected_shape(f"tool_input.name is {type(raw).__name__}, expected str")
+        return None
+    if not raw.strip():
+        return None
+    return _NAMED_DENY_REASON
+
+
 def classify_spawn(payload: dict[str, object] | None) -> str | None:
     """Return this spawn's refusal reason, or None to allow it silently.
 
@@ -155,4 +212,17 @@ def classify_spawn(payload: dict[str, object] | None) -> str | None:
             f"tool_input is {type(tool_input).__name__}, expected dict"
         )
         return None
-    return _classify_subagent_type(tool_input.get(_SUBAGENT_TYPE_KEY))
+    return _classify_tool_input(tool_input)
+
+
+def _classify_tool_input(tool_input: dict[str, object]) -> str | None:
+    """Chain the per-key classifiers over an Agent ``tool_input``.
+
+    Type first, so a named fork or a named untyped spawn is refused for its
+    #2211 reason. A type shape-warning returns None and still falls through
+    to the #2688 name check: the chain never short-circuits on a warning.
+    """
+    type_reason = _classify_subagent_type(tool_input.get(_SUBAGENT_TYPE_KEY))
+    if type_reason is not None:
+        return type_reason
+    return _classify_name(tool_input.get(_NAME_KEY))

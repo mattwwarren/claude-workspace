@@ -28,10 +28,13 @@ section for the no-backgrounding rule that applies there.
 **Why review-station dispatch may never use a teammate (#2156).** The same
 asymmetry rules out `SendMessage`/agent-teams teammate messaging for reviewer
 dispatch, for a sharper reason than the raw-Bash case above: a teammate reply
-is not tracked in the Stop hook's `background_tasks` list at all — that list
-enumerates in-flight Agent-tool subagent spawns only (ADR-0003) — so a
-coordinator that ends its turn expecting a second teammate message has no
-completion-notification path to resume it, ever. This is why
+message has no completion-notification path that resumes a coordinator, so a
+coordinator that ends its turn expecting a second teammate message is never
+woken. Registration is a separate matter and makes it worse, not better: a
+named in-process teammate (an `Agent` spawn that set `name`) **does** keep the
+Stop hook's `background_tasks` non-empty after it goes idle, so the
+coordinator's session is never completed either (#2688; what that entry looks
+like is not yet captured). This is why
 `.claude/commands/auto-dev-review.md`'s Step 3a dispatch-shape section states
 review stations are Agent-tool subagent spawns only, never a teammate.
 

@@ -128,6 +128,49 @@ class TestImplDocSpawnRules:
         assert "#2248" in _appendix("impl")
 
 
+def _appendix_refusal_list() -> str:
+    """The impl appendix's "What `cw agent-spawn-pre` now refuses" list."""
+    content = _appendix("impl")
+    start = content.index("### What `cw agent-spawn-pre` now refuses")
+    end = content.index("**Why the omitted case was gated behind an inventory.**")
+    return content[start:end]
+
+
+class TestNamedSpawnDocs:
+    """#2688: a named spawn is an idle teammate that strands the session."""
+
+    def test_impl_doc_forbids_a_named_spawn(self) -> None:
+        content = _cmd("auto-dev-impl.md")
+
+        assert "Never set `name` on an Agent spawn (#2688)" in content
+
+    def test_impl_doc_says_untyped_not_unnamed(self) -> None:
+        """ "Unnamed" meant "no ``subagent_type``"; with the ``name`` rule it
+        would now read as a contradiction, so the paragraph says "untyped"."""
+        content = _cmd("auto-dev-impl.md")
+
+        assert "An untyped or forked spawn takes no `cw` roster entry" in content
+        assert "An unnamed or forked spawn" not in content
+
+    def test_appendix_refusal_list_names_the_named_spawn(self) -> None:
+        section = _appendix_refusal_list()
+
+        assert "non-blank `name`" in section
+        assert "#2688" in section
+
+    def test_appendix_carries_the_named_spawn_subsection(self) -> None:
+        content = _appendix("impl")
+
+        assert "Named spawns / idle teammates (#2688)" in content
+        assert "#2710" in content
+
+    def test_appendix_still_states_the_kill_switch(self) -> None:
+        content = _appendix("impl")
+        start = content.index("Named spawns / idle teammates (#2688)")
+
+        assert "subagent_spawn_guard_enabled" in content[start:]
+
+
 class TestAgentSpawnRule:
     """The cross-stage rule in auto-dev.md.
 

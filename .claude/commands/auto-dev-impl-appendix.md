@@ -383,6 +383,10 @@ with the guard enabled:
 - `subagent_type` explicitly `fork` (any case) or blank → **refused**, exit 2.
   The spawn does not happen and no stamp is written.
 - `subagent_type` **not named at all** → **refused**, exit 2, same as a fork.
+- a non-blank `name` (any type) → **refused**, exit 2 (#2688). Checked after
+  the type, so a named fork or a named untyped spawn is refused for its #2211
+  reason. A blank or `null` `name` allows; a non-string `name` warns and
+  allows. See "Named spawns / idle teammates (#2688)" below.
 - any named type → allowed silently.
 - anything it cannot classify, any non-headless session, any cwd with no
   ancestor cw-context.json → allowed, no verdict.
@@ -433,6 +437,58 @@ clients:
 ```
 
 See `config/CONFIG_REFERENCE.md`, section "Subagent Spawn Guard (#2211)".
+
+### Named spawns / idle teammates (#2688)
+
+**The observed failure.** A headless worker made an `Agent` spawn with a
+top-level `name` (redacted transcripts show the shape as
+`"subagent_type":"general-purpose","name":"impl-44"`). `name` makes the spawn an addressable in-process
+teammate. The teammate finished its work and went idle instead of returning;
+the worker emitted its `stage_complete` result and the Stop hook routed it,
+but `background_tasks` was still non-empty at that Stop, so `cw signal-stop`
+deferred `SESSION_COMPLETED`. The daemon was never stopped, and the next
+stage's dispatch blocked on `worktree_occupied`. What the teammate's
+`background_tasks` entry looks like is **not yet captured**.
+
+**The fix here is prevention.** `cw agent-spawn-pre` refuses a named spawn in
+a headless worker (exit 2, "retry WITHOUT `name`"). No cw-authored spawn site
+in `.claude/commands/*.md` sets `name`, so the plain retry is always
+available. A refusal emits only the stderr reason in the worker's own
+transcript: no stamp and no durable event (the event is #2248's).
+
+**The capture.** On every deferring Stop, `cw signal-stop` now also writes
+`agent_spawn_stamp.entries` into `.claude/cw-context.json` and logs one
+`agent_spawn_stamp snapshot:` INFO line. Per entry (first 8 only; the true
+count stays in `unresolved_count`) it records key names, value type names, and
+values only for an allow-list of structural keys (`type`, `status`, `id`,
+timestamps and close variants) holding a short scalar. Every other value is
+dropped, never truncated, so no free text (`name`, `description`, `prompt`,
+...) reaches disk. A spawn increment rewrites the stamp and drops `entries`
+until the next Stop.
+
+**Capturing a teammate entry (guard-off canary lane, owned by #2710).** With
+the guard on, a named spawn never registers, so the capture only ever sees
+ordinary subagent entries. To capture a teammate: set
+`subagent_spawn_guard_enabled: false` on one canary lane in `clients.yaml`,
+dispatch one impl ticket whose worker makes a named spawn, then read
+`agent_spawn_stamp.entries` from that worktree's `.claude/cw-context.json`
+(the INFO line is secondary evidence). #2710 then widens the allow-list and
+writes the reap rule against the real shape.
+
+**Residual gaps.**
+
+- The Stop-hook reap rule (complete a session whose only remaining
+  `background_tasks` are idle teammates) is **not** shipped here; it is
+  #2710, gated on the capture above.
+- A lane with `subagent_spawn_guard_enabled: false` keeps the old failure
+  mode. The #2524 stranded-routed-result page is the backstop there; it pages
+  and does not reap.
+- `cw doctor --reap --routed-session-id`'s 30-minute transcript-staleness gate
+  is unchanged; that is #2708.
+- Headless workers can load user-level skills outside this repo's spawn-site
+  inventory. A skill that names a spawn is refused by the same policy; the
+  kill switch (`subagent_spawn_guard_enabled`) is the remedy, and it is
+  coarse: it also turns off the #2211 fork and omitted-type refusals.
 
 ### Residual gaps
 
