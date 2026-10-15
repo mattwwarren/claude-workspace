@@ -367,6 +367,10 @@ class TestSkipReasonPrecedence:
         assert view.dispatch is not None
         assert view.dispatch.skip_reason == "attempt_cap_blocked"
         assert view.dispatch.source == "row"
+        assert _line(_text(view), "skip_reason") == (
+            "skip_reason: attempt_cap_blocked"
+            " (source=row, unproductive attempts at ceiling)"
+        )
 
     def test_row_lane_circuit_paused(self) -> None:
         write_lane_override(_C, "default", paused=True, consecutive_spawn_errors=3)
@@ -376,6 +380,11 @@ class TestSkipReasonPrecedence:
         assert view.dispatch.skip_reason == "lane_circuit_paused"
         assert view.dispatch.source == "row"
         assert view.dispatch.lane_paused is True
+        # A breaker pause is already the reason: no extra [lane paused] tag.
+        assert _line(_text(view), "skip_reason") == (
+            "skip_reason: lane_circuit_paused"
+            " (source=row, lane paused by its circuit breaker)"
+        )
 
     def test_config_paused_lane_with_tripped_breaker(self, tmp_path: Path) -> None:
         write_lane_client(_C, tmp_path / "ws", paused=True)

@@ -195,6 +195,12 @@ _CASES: dict[str, _Case] = {
         _blocked(stage=Stage.REVIEW, disposition=FINALIZE_GATE_HELD_DISPOSITION),
         expected=[_cmd("approve"), _cmd("requeue", "--stage review")],
     ),
+    "rule9_harden_gate_has_no_stage_flag": _Case(
+        # HARDEN is not a `requeue --stage` choice; requeue's own default
+        # (the current stage) is the same move.
+        _blocked(stage=Stage.HARDEN, disposition="approval_gate"),
+        expected=[_cmd("approve"), _cmd("requeue")],
+    ),
     "rule10_plain_blocked_no_session": _Case(
         _blocked(stage=Stage.PLAN),
         with_session=False,
