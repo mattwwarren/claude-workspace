@@ -357,7 +357,7 @@ def spawn(
         "into this one command). No-ops with a message if no ticket_id "
         "resolves from the session name. Same caveat as --from-cancelled: "
         "accepts a CANCELLED row regardless of why it was cancelled -- check "
-        "`cw dev-queue tasks -t <T> -c <CLIENT>` / event history first if the "
+        "`cw dev-queue show <T> -c <CLIENT>` / event history first if the "
         "ticket may have been deliberately cancelled. Redundant with the "
         "cancelled_row_restore "
         "concierge recipe when concierge_enabled: true and the worktree has "

@@ -7,11 +7,10 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import click
-import cw.cli.dev_queue.show as show_mod
 import pytest
 from click.testing import CliRunner, Result
-from cw.models.ticket_view import TicketView
 
+import cw.cli.dev_queue.show as show_mod
 from cw.cli import main
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS
 from cw.dev_queue import load_dev_queue, save_dev_queue
@@ -22,6 +21,7 @@ from cw.models import (
     QueueItemStatus,
     Stage,
 )
+from cw.models.ticket_view import TicketView
 from tests._ticket_view_helpers import (
     bound_session_for,
     patch_roster,

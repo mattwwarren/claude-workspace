@@ -39,6 +39,7 @@ from ._plan_marker import (
     _marker_present,
     _plan_approved_marker,
 )
+from .show import echo_resulting_row
 
 if TYPE_CHECKING:
     from cw.models import OrchestratorConfig
@@ -224,6 +225,7 @@ def _approve_scope_drift(
         f" {result['approved_head'][:_HEAD_SHA_DISPLAY_LEN]}; the next dispatch"
         " re-runs the scope-conformance gate with them allowed."
     )
+    echo_resulting_row(ticket_id, resolved)
     _close_orphans_after_approve(
         ticket_id, resolved, config, command="approve --scope-drift"
     )
@@ -243,6 +245,7 @@ def _approve_must_fix_override(ticket_id: str, resolved: str, reason: str) -> No
         " is unchanged; run `cw dev-queue requeue"
         f" {ticket_id} --client {resolved} --stage finalize` to ship it."
     )
+    echo_resulting_row(ticket_id, resolved)
 
 
 @dev_queue.command(name="approve")
@@ -448,4 +451,7 @@ def dev_queue_approve(
             f"Approved {ticket_id} ({resolved}):"
             f" {result['from_stage']} -> {result['to_stage']}{promoted_note}"
         )
+    # After the whole confirmation chain (incl. the --post-marker tip) and
+    # before the orphan close, so a close failure still shows the row.
+    echo_resulting_row(ticket_id, resolved)
     _close_orphans_after_approve(ticket_id, resolved, config, command="approve")
