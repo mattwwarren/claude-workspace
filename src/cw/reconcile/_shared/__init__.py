@@ -150,6 +150,7 @@ from cw.reconcile._shared._routing import (
     _route_stopped_without_sentinel,
     _TaskLookupResult,
     find_running_task_for_session,
+    route_emitted_result,
 )
 from cw.reconcile._shared._sentinels import (
     _SALVAGE_TERMINAL_STATUSES,
@@ -363,6 +364,7 @@ __all__ = [
     "resolve_reap_policy",
     "resolve_session_for_task",
     "resolve_session_liveness_for_task",
+    "route_emitted_result",
     "salvage_terminal_result",
     "session_daemon_liveness",
     "stage_refusal_latched",

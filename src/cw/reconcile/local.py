@@ -94,6 +94,7 @@ from cw.reconcile._shared import (
     StageRefusalPage,
     _apply_sentinel_to_task_audited,
     emit_stage_refusal_pages,
+    route_emitted_result,
     stage_refusal_latched,
     stage_refusal_page,
     ticket_id_for_session,
@@ -668,6 +669,30 @@ def _harvest_task_for(
     )
 
 
+def _stamp_harvest_completed(
+    session: Session,
+    candidate: ReapCandidate,
+    *,
+    now: datetime,
+    harvested_ticket_ids: list[str],
+    pending_events: list[dict[str, object]],
+) -> None:
+    """Mark a dead LOCAL session COMPLETED and queue its SESSION_COMPLETED payload."""
+    if candidate.ticket_id:
+        harvested_ticket_ids.append(candidate.ticket_id)
+    session.status = SessionStatus.COMPLETED
+    session.completed_reason = CompletionReason.NORMAL
+    session.completed_at = now
+    harvest_payload: dict[str, object] = {
+        "session_id": session.id,
+        "session_name": session.name,
+        "crashed": False,
+    }
+    if candidate.ticket_id:
+        harvest_payload["ticket_id"] = candidate.ticket_id
+    pending_events.append(harvest_payload)
+
+
 def _harvest_default_branch(client_cfg: ClientConfig | None) -> str:
     """The branch a harvest's fork point is measured against."""
     return client_cfg.default_branch if client_cfg is not None else "main"
@@ -887,6 +912,18 @@ def _act_on_local_harvest_candidates(
             )
             continue
 
+        # #2699: the worker already emitted its terminal result -- route it and
+        # complete, before any git synthesis the door would only refuse.
+        if route_emitted_result(session, candidate.ticket_id):
+            _stamp_harvest_completed(
+                session,
+                candidate,
+                now=now,
+                harvested_ticket_ids=harvested_ticket_ids,
+                pending_events=pending_events,
+            )
+            continue
+
         # A recorded "aider" is verified against the launch logs and spawn stage
         # (#2512); None = unproven, which parks the row instead of guessing.
         backend = _resolve_harvest_backend(
@@ -941,19 +978,13 @@ def _act_on_local_harvest_candidates(
         # stamp, and the SESSION_COMPLETED event. The shared audited seam has
         # already arbitrated first-writer-wins and recorded the event before
         # persisting a routed queue mutation.
-        if candidate.ticket_id:
-            harvested_ticket_ids.append(candidate.ticket_id)
-        session.status = SessionStatus.COMPLETED
-        session.completed_reason = CompletionReason.NORMAL
-        session.completed_at = now
-        harvest_payload: dict[str, object] = {
-            "session_id": session.id,
-            "session_name": session.name,
-            "crashed": False,
-        }
-        if candidate.ticket_id:
-            harvest_payload["ticket_id"] = candidate.ticket_id
-        pending_events.append(harvest_payload)
+        _stamp_harvest_completed(
+            session,
+            candidate,
+            now=now,
+            harvested_ticket_ids=harvested_ticket_ids,
+            pending_events=pending_events,
+        )
 
     # Pages BEFORE the save and before every SESSION_COMPLETED write: the latch
     # stamped inside is persisted by this one save_state, so a session is never

@@ -45,7 +45,14 @@ from cw.reconcile._shared._constants import (
     _LOGGER_NAME,
     _STOPPED_WITHOUT_SENTINEL_REASON,
 )
-from cw.result import EmitOutcome, _record_result_emitted_audit, emit_result_on_audited
+from cw.reconcile._shared._sentinels import holds_staged_emit_result
+from cw.result import (
+    EmitOutcome,
+    _record_result_emitted_audit,
+    emit_result_on_audited,
+    has_terminal_result,
+    reconstruct_staged_sentinel,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -584,6 +591,36 @@ def _apply_sentinel_to_task_audited(
         # accepted emit directly after the lookup result is known.
         emit_outcome = emit_result_on_audited(session, payload, source=source)
     return AuditedSentinelRouteOutcome(route, emit_outcome)
+
+
+def route_emitted_result(session: Session, ticket_id: str | None) -> bool:
+    """True when the worker's own ``cw result emit`` result is dispositioned (#2699).
+
+    A dead worker that already emitted a terminal result is finished: cw's
+    responsibility ends at that result, never at CI, review or merge. Routes a
+    still-staged result to its row exactly as ``cw spawn close`` does (#2458),
+    so the caller can complete the session instead of synthesizing a second
+    result from git that the first-writer-wins door would refuse every tick.
+
+    Scoped to EMIT_CLI: a terminal result from another authority keeps the
+    door's refuse-and-leave behavior. Returns False -- fall through to the
+    caller's existing path -- when the staged dict does not reconstruct, or the
+    route is refused (a stage mismatch, or a row that moved on non-terminal).
+    """
+    if session.last_result_source is not LastResultSource.EMIT_CLI:
+        return False
+    if not has_terminal_result(session.last_result):
+        return False
+    if not holds_staged_emit_result(session):
+        # A #2458 partial route already consumed it: nothing left to route.
+        return True
+    staged = reconstruct_staged_sentinel(session.last_result)
+    if staged is None:
+        return False
+    if ticket_id is None:
+        return True
+    outcome = _apply_sentinel_to_task(ticket_id, session, staged)
+    return outcome.routed or outcome.task_already_terminal or outcome.landed_terminal
 
 
 def _requeue_blocked_result_under_cap(

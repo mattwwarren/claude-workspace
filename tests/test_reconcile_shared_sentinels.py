@@ -35,6 +35,7 @@ from cw.models import (
     CompletionReason,
     CwState,
     DevQueueStore,
+    LastResultSource,
     OrchestratorEventType,
     QueueItemStatus,
     Session,
@@ -52,6 +53,7 @@ from cw.reconcile import (
     compute_drift,
     reconcile,
 )
+from cw.reconcile._shared import route_emitted_result
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._dirty_check_helpers import (
     revert_completed_silent_prefetched,
@@ -4237,3 +4239,40 @@ def test_salvaged_sentinel_scope_survives_unresolvable_client_config(
 
     assert result.scope.files == SCOPE_GUARD_FILES
     assert result.scope.lines_actual == SCOPE_GUARD_LINES
+
+
+# ---------------------------------------------------------------------------
+# route_emitted_result (#2699)
+# ---------------------------------------------------------------------------
+
+
+def _emit_cli_session(last_result: dict[str, Any] | None) -> Session:
+    session = _make_daemon_session(id="rer-1", name="client-a/auto-dev/rer-1")
+    session.last_result = last_result
+    session.last_result_source = LastResultSource.EMIT_CLI
+    return session
+
+
+def test_route_emitted_result_ignores_other_authorities() -> None:
+    session = _emit_cli_session(_stage_complete_payload())
+    session.last_result_source = LastResultSource.STOP_HOOK_HARVEST
+
+    assert route_emitted_result(session, "rer-1") is False
+
+
+def test_route_emitted_result_ignores_non_terminal_result() -> None:
+    session = _emit_cli_session({"paused_status": "silently_idle"})
+
+    assert route_emitted_result(session, "rer-1") is False
+
+
+def test_route_emitted_result_unreconstructable_staged_result_falls_through() -> None:
+    session = _emit_cli_session({"status": "shipped", "schema_version": 4})
+
+    assert route_emitted_result(session, "rer-1") is False
+
+
+def test_route_emitted_result_without_ticket_has_nothing_to_route() -> None:
+    session = _emit_cli_session(_stage_complete_payload())
+
+    assert route_emitted_result(session, None) is True

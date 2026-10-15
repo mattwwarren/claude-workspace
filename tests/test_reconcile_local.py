@@ -51,6 +51,7 @@ from cw.opencode_runner import (
     make_blocked as make_opencode_blocked,
 )
 from cw.reconcile import (
+    ReapCandidate,
     _act_on_local_harvest_candidates,
     _detect_local_harvest_candidates,
     reconcile,
@@ -388,6 +389,144 @@ def test_local_harvest_refused_by_door_leaves_session_and_task_untouched(
     assert not any(e.payload.get("session_id") == "harv-refused" for e in events)
     # A refusal never reaches the audit append, even with a broken inbox.
     assert attempts == []
+
+
+def _emit_cli_dead_session(
+    worktree: Path, ticket_id: str, *, consumed: bool = False
+) -> Session:
+    """A dead LOCAL session whose worker already ran ``cw result emit`` (#2699)."""
+    from cw.reconcile._shared import _stamp_sentinel_partial_route_consumed
+
+    sess = _mk_local_session(
+        ticket_id, worktree, LocalLivenessHandle(pid=2_000_000_000, start_time_ns=7)
+    )
+    sess.last_result = {**_stage_complete_payload(), "ticket_id": ticket_id}
+    sess.last_result_source = LastResultSource.EMIT_CLI
+    if consumed:
+        _stamp_sentinel_partial_route_consumed(sess)
+    return sess
+
+
+def _run_emit_cli_harvest(
+    sess: Session, row_status: QueueItemStatus, row_stage: Stage
+) -> tuple[list[str], list[ReapCandidate]]:
+    """Persist *sess* + one row, run one harvest tick, return both outputs."""
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=sess.id,
+                    client="client-a",
+                    status=row_status,
+                    session_id=sess.id,
+                    stage=row_stage,
+                )
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
+    harvested = act_on_local_harvest(
+        state,
+        candidates,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+        task_by_ticket=task_by_ticket,
+    )
+    return harvested, candidates
+
+
+def test_local_harvest_emitted_result_routes_row_and_completes_session(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#2699: a dead worker that already emitted a terminal result is finished.
+
+    The staged result is routed to the row (IMPL -> REVIEW, as ``cw spawn close``
+    does), the session is COMPLETED, the worker's own result is kept
+    byte-identical, the door never logs a refused overwrite, and the next tick
+    no longer re-detects the session.
+    """
+    worktree = _local_git_worktree(make_git_repo, "wt-2699-routed", with_commit=True)
+    sess = _emit_cli_dead_session(worktree, "t2699-routed")
+    emitted = dict(sess.last_result or {})
+
+    with caplog.at_level(logging.WARNING):
+        harvested, candidates = _run_emit_cli_harvest(
+            sess, QueueItemStatus.RUNNING, Stage.IMPL
+        )
+
+    assert len(candidates) == 1
+    assert harvested == ["t2699-routed"]
+    assert "refusing overwrite" not in caplog.text
+    reloaded = next(s for s in load_state().sessions if s.id == "t2699-routed")
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.completed_reason == CompletionReason.NORMAL
+    assert reloaded.last_result == emitted
+    assert reloaded.last_result_source == LastResultSource.EMIT_CLI
+    row = next(t for t in load_dev_queue().tasks if t.ticket_id == "t2699-routed")
+    assert row.stage == Stage.REVIEW
+    assert _detect_local_harvest_candidates(load_state(), load_dev_queue().tasks) == []
+
+
+def test_local_harvest_emitted_result_completes_when_row_already_terminal(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2699: a row raced to COMPLETED does not keep the dead session ACTIVE."""
+    worktree = _local_git_worktree(make_git_repo, "wt-2699-term", with_commit=True)
+    sess = _emit_cli_dead_session(worktree, "t2699-term")
+
+    harvested, _ = _run_emit_cli_harvest(sess, QueueItemStatus.COMPLETED, Stage.IMPL)
+
+    assert harvested == ["t2699-term"]
+    reloaded = next(s for s in load_state().sessions if s.id == "t2699-term")
+    assert reloaded.status == SessionStatus.COMPLETED
+    row = next(t for t in load_dev_queue().tasks if t.ticket_id == "t2699-term")
+    assert row.status == QueueItemStatus.COMPLETED
+
+
+def test_local_harvest_emitted_result_already_routed_completes_without_routing(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2699: a result a #2458 partial route already consumed is not re-routed."""
+    worktree = _local_git_worktree(make_git_repo, "wt-2699-consumed", with_commit=True)
+    sess = _emit_cli_dead_session(worktree, "t2699-consumed", consumed=True)
+
+    harvested, _ = _run_emit_cli_harvest(sess, QueueItemStatus.RUNNING, Stage.IMPL)
+
+    assert harvested == ["t2699-consumed"]
+    reloaded = next(s for s in load_state().sessions if s.id == "t2699-consumed")
+    assert reloaded.status == SessionStatus.COMPLETED
+    row = next(t for t in load_dev_queue().tasks if t.ticket_id == "t2699-consumed")
+    assert row.status == QueueItemStatus.RUNNING
+    assert row.stage == Stage.IMPL
+
+
+def test_local_harvest_emitted_result_stage_mismatch_keeps_session_active(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2699: a refused route (row already past the emitted stage) falls through.
+
+    The session is not completed and the row is untouched -- the pre-existing
+    refuse-and-leave behavior, never a silent completion that orphans the row.
+    """
+    worktree = _local_git_worktree(make_git_repo, "wt-2699-mismatch", with_commit=True)
+    sess = _emit_cli_dead_session(worktree, "t2699-mismatch")
+
+    harvested, _ = _run_emit_cli_harvest(sess, QueueItemStatus.RUNNING, Stage.REVIEW)
+
+    assert harvested == []
+    reloaded = next(s for s in load_state().sessions if s.id == "t2699-mismatch")
+    assert reloaded.status == SessionStatus.ACTIVE
+    row = next(t for t in load_dev_queue().tasks if t.ticket_id == "t2699-mismatch")
+    assert row.status == QueueItemStatus.RUNNING
+    assert row.stage == Stage.REVIEW
 
 
 def test_local_harvest_queue_save_failure_keeps_audit_event(
