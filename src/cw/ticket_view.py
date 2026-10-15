@@ -519,7 +519,8 @@ def _lane_snapshot_text(lane: str, dispatch: DispatchView) -> str:
 def _skip_detail(lane: str, dispatch: DispatchView, now: datetime) -> str:
     if dispatch.source == DispatchSource.ROW:
         if dispatch.skip_reason == DispatchSkipReason.SPAWN_ERROR_BACKOFF.value:
-            return f"source={DispatchSource.ROW.value}, until {_ts(dispatch.backoff_until)}"
+            until = _ts(dispatch.backoff_until)
+            return f"source={DispatchSource.ROW.value}, until {until}"
         detail = _ROW_SKIP_DETAILS.get(dispatch.skip_reason or "", "")
         return (
             f"source={DispatchSource.ROW.value}, {detail}"
