@@ -46,7 +46,7 @@ from cw.gh import (
     fetch_issue_comments,
     is_agent_authored,
 )
-from cw.local_runner import resolve_tier
+from cw.local_runner import TICKET_BODY_KEY, TICKET_TITLE_KEY, resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH, HOOK_CONTEXT_RELATIVE_PATH
 from cw.review_adjudication import parse_voided_findings_block
 from cw.review_finding_dispositions import (
@@ -82,7 +82,9 @@ def _load_ticket_context(worktree: Path) -> tuple[str | None, str | None]:
 
     Reuses ``local_runner.build_task_message``'s read pattern (no tracker/network
     call): the approved plan text and the ticket's title+body already
-    materialized in the worktree at Stage 1.
+    materialized in the worktree at Stage 1. The ticket text is read from the
+    ``ticket_title``/``ticket_body`` keys that ``auto-dev-intake.md`` Step 0d
+    writes.
     """
     plan_text = _load_optional_text(worktree / ".cw" / "plan.md")
     ticket_text: str | None = None
@@ -93,8 +95,8 @@ def _load_ticket_context(worktree: Path) -> tuple[str | None, str | None]:
         except json.JSONDecodeError:
             data = None
         if isinstance(data, dict):
-            title = str(data.get("title") or "")
-            body = str(data.get("body") or "")
+            title = str(data.get(TICKET_TITLE_KEY) or "")
+            body = str(data.get(TICKET_BODY_KEY) or "")
             combined = "\n\n".join(part for part in (title, body) if part)
             ticket_text = combined or None
     return plan_text, ticket_text

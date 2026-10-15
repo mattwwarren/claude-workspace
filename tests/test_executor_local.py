@@ -888,7 +888,7 @@ def test_local_preflight_threads_read_only_path_into_preflight_ok(
     cw_dir.mkdir(exist_ok=True)
     (cw_dir / "plan.md").write_text("plan body here", encoding="utf-8")
     (cw_dir / "context.json").write_text(
-        '{"title": "T", "body": "B"}', encoding="utf-8"
+        '{"ticket_title": "T", "ticket_body": "B"}', encoding="utf-8"
     )
 
     config = StageExecutorConfig(
@@ -905,7 +905,7 @@ def test_local_preflight_threads_read_only_path_into_preflight_ok(
     assert read_only_path == worktree / TASK_CONTEXT_RELATIVE_PATH
     context = read_only_path.read_text(encoding="utf-8")
     assert "plan body here" in context
-    assert "T" in context
+    assert "## Ticket: T" in context
 
 
 def test_local_executor_spawn_passes_file_flags_to_argv(
