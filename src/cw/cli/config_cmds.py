@@ -67,20 +67,18 @@ def config_concurrency() -> None:
 
 def _client_ceiling(
     name: str,
-    declared: OrchestratorConfig,
     overrides: ConcurrencyOverrides,
     effective: OrchestratorConfig,
 ) -> dict[str, object]:
     """One client's configured ceiling and the layer it came from.
 
-    Mirrors ``load_effective_config``'s per-client merge: an override with a
-    non-``None`` ceiling wins, else the declared ``per_client_ceiling`` entry,
-    else ``default_ceiling``.
+    ``load_effective_config`` owns the per-client merge.  The override model
+    is only needed here to identify the source of the already-merged value.
     """
     override = overrides.clients.get(name)
     if override is not None and override.ceiling is not None:
         source = "override"
-    elif name in declared.per_client_ceiling:
+    elif name in effective.per_client_ceiling:
         source = "declared"
     else:
         source = "default"
@@ -114,7 +112,7 @@ def config_concurrency_get(as_json: bool, client_name: str | None) -> None:
     overrides = _load_concurrency_overrides()
     effective = load_effective_config()
     client = (
-        _client_ceiling(client_name, declared, overrides, effective)
+        _client_ceiling(client_name, overrides, effective)
         if client_name is not None
         else None
     )
