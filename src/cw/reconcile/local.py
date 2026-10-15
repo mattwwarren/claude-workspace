@@ -94,7 +94,6 @@ from cw.reconcile._shared import (
     StageRefusalPage,
     _apply_sentinel_to_task_audited,
     emit_stage_refusal_pages,
-    route_emitted_result,
     stage_refusal_latched,
     stage_refusal_page,
     ticket_id_for_session,
@@ -111,6 +110,7 @@ from cw.reconcile.codex_boot import (
     CleanProbeUnavailableError,
     lookup_probe,
 )
+from cw.reconcile.emitted_result import handle_emitted_result, stamp_harvest_completed
 from cw.reconcile.harvest_synthesis import (
     HARVEST_CAPTURE_BUDGET_SECONDS,
     HarvestFacts,
@@ -669,30 +669,6 @@ def _harvest_task_for(
     )
 
 
-def _stamp_harvest_completed(
-    session: Session,
-    candidate: ReapCandidate,
-    *,
-    now: datetime,
-    harvested_ticket_ids: list[str],
-    pending_events: list[dict[str, object]],
-) -> None:
-    """Mark a dead LOCAL session COMPLETED and queue its SESSION_COMPLETED payload."""
-    if candidate.ticket_id:
-        harvested_ticket_ids.append(candidate.ticket_id)
-    session.status = SessionStatus.COMPLETED
-    session.completed_reason = CompletionReason.NORMAL
-    session.completed_at = now
-    harvest_payload: dict[str, object] = {
-        "session_id": session.id,
-        "session_name": session.name,
-        "crashed": False,
-    }
-    if candidate.ticket_id:
-        harvest_payload["ticket_id"] = candidate.ticket_id
-    pending_events.append(harvest_payload)
-
-
 def _harvest_default_branch(client_cfg: ClientConfig | None) -> str:
     """The branch a harvest's fork point is measured against."""
     return client_cfg.default_branch if client_cfg is not None else "main"
@@ -859,6 +835,14 @@ def _act_on_local_harvest_candidates(
     un-latched and is re-paged next tick
     (:func:`cw.reconcile._shared.emit_stage_refusal_pages`).
 
+    GitHub #2699: a session whose worker already ran ``cw result emit`` is
+    dispositioned BEFORE any git synthesis by
+    :func:`cw.reconcile.emitted_result.handle_emitted_result` -- its staged
+    result is routed to the row and the session completed, or a permanent
+    stage mismatch is paged and latched from that real result. Synthesizing a
+    second result would only be refused by the first-writer-wins door on every
+    tick.
+
     GitHub #2140: a ``not routed`` outcome can also mean
     ``task_already_terminal`` -- the dev-queue task was raced to a genuinely
     terminal status by a concurrent caller before this lookup ran, not a
@@ -913,15 +897,17 @@ def _act_on_local_harvest_candidates(
             continue
 
         # #2699: the worker already emitted its terminal result -- route it and
-        # complete, before any git synthesis the door would only refuse.
-        if route_emitted_result(session, candidate.ticket_id):
-            _stamp_harvest_completed(
-                session,
-                candidate,
-                now=now,
-                harvested_ticket_ids=harvested_ticket_ids,
-                pending_events=pending_events,
-            )
+        # complete (or page a permanent stage refusal) before any git synthesis
+        # the door would only refuse.
+        if handle_emitted_result(
+            session,
+            candidate,
+            subject=f"dead {session.local_liveness.backend} process",
+            now=now,
+            harvested_ticket_ids=harvested_ticket_ids,
+            pending_events=pending_events,
+            refusal_pages=refusal_pages,
+        ):
             continue
 
         # A recorded "aider" is verified against the launch logs and spawn stage
@@ -978,7 +964,7 @@ def _act_on_local_harvest_candidates(
         # stamp, and the SESSION_COMPLETED event. The shared audited seam has
         # already arbitrated first-writer-wins and recorded the event before
         # persisting a routed queue mutation.
-        _stamp_harvest_completed(
+        stamp_harvest_completed(
             session,
             candidate,
             now=now,

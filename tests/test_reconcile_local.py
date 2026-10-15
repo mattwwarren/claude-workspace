@@ -469,6 +469,16 @@ def test_local_harvest_emitted_result_routes_row_and_completes_session(
     assert reloaded.last_result_source == LastResultSource.EMIT_CLI
     row = next(t for t in load_dev_queue().tasks if t.ticket_id == "t2699-routed")
     assert row.stage == Stage.REVIEW
+    completed = [
+        e
+        for e in read_events(
+            consumer="test-2699-routed",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        if e.payload.get("session_id") == "t2699-routed"
+    ]
+    assert len(completed) == 1
+    assert completed[0].payload["ticket_id"] == "t2699-routed"
     assert _detect_local_harvest_candidates(load_state(), load_dev_queue().tasks) == []
 
 
@@ -507,26 +517,76 @@ def test_local_harvest_emitted_result_already_routed_completes_without_routing(
     assert row.stage == Stage.IMPL
 
 
-def test_local_harvest_emitted_result_stage_mismatch_keeps_session_active(
+def test_local_harvest_emitted_result_stage_mismatch_pages_once_and_latches(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """#2699: a refused route (row already past the emitted stage) falls through.
+    """#2699: a permanently mismatched emitted result pages once, then latches.
 
-    The session is not completed and the row is untouched -- the pre-existing
-    refuse-and-leave behavior, never a silent completion that orphans the row.
+    The row already sits past the stage the worker emitted. The dead worker will
+    never produce a matching result, so the harvest pages from the worker's REAL
+    result (not a git-synthesized one), stamps the latch, and stops re-offering
+    the session: one ``sentinel.stage_mismatch`` and one page across three ticks.
+    The session stays ACTIVE and keeps the worker's own result.
     """
     worktree = _local_git_worktree(make_git_repo, "wt-2699-mismatch", with_commit=True)
     sess = _emit_cli_dead_session(worktree, "t2699-mismatch")
+    emitted = dict(sess.last_result or {})
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="t2699-mismatch",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="t2699-mismatch",
+                    stage=Stage.REVIEW,
+                )
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
 
-    harvested, _ = _run_emit_cli_harvest(sess, QueueItemStatus.RUNNING, Stage.REVIEW)
+    for _tick in range(3):
+        state = load_state()
+        candidates = _detect_local_harvest_candidates(
+            state, list(task_by_ticket.values())
+        )
+        harvested = act_on_local_harvest(
+            state,
+            candidates,
+            now=datetime(2026, 1, 2, tzinfo=UTC),
+            task_by_ticket=task_by_ticket,
+        )
+        assert harvested == []
 
-    assert harvested == []
+    attention = _attention_events("test-2699-mismatch", "t2699-mismatch")
+    assert len(attention) == 1
+    assert attention[0]["paused_status"] == "sentinel_stage_mismatch_dead_session"
+    assert "stage_complete at stage2_impl" in str(attention[0]["breadcrumbs"])
+    mismatches = [
+        e
+        for e in read_events(
+            consumer="test-2699-mismatch",
+            event_types=[OrchestratorEventType.SENTINEL_STAGE_MISMATCH],
+        )
+        if e.payload.get("ticket_id") == "t2699-mismatch"
+    ]
+    assert len(mismatches) == 1
     reloaded = next(s for s in load_state().sessions if s.id == "t2699-mismatch")
     assert reloaded.status == SessionStatus.ACTIVE
+    assert reloaded.last_result_source == LastResultSource.EMIT_CLI
+    assert {k: v for k, v in (reloaded.last_result or {}).items() if k in emitted} == (
+        emitted
+    )
     row = next(t for t in load_dev_queue().tasks if t.ticket_id == "t2699-mismatch")
-    assert row.status == QueueItemStatus.RUNNING
-    assert row.stage == Stage.REVIEW
+    assert (row.status, row.stage) == (QueueItemStatus.RUNNING, Stage.REVIEW)
+    assert (
+        _detect_local_harvest_candidates(load_state(), list(task_by_ticket.values()))
+        == []
+    )
 
 
 def test_local_harvest_queue_save_failure_keeps_audit_event(
