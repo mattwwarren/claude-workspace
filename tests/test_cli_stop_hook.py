@@ -54,6 +54,9 @@ from tests.conftest import (
     _STAMP_ABSENT,
     _invoke_hook_command,
     _make_daemon_session,
+    _read_stamp,
+    _seed_session,
+    _stop_payload,
     _write_hook_context_file,
     _write_stop_hook_transcript,
 )
@@ -64,44 +67,6 @@ if TYPE_CHECKING:
 
     from cw._lock_guard import HeldLock
     from cw.models import Session
-
-
-def _seed_session(tmp_path: Path, sess_id: str = "sess940g") -> Session:
-    """Seed a DAEMON session whose id matches ``_write_hook_context_file``'s.
-
-    ``_write_hook_context_file`` hardcodes ``session_id="sess940g"`` (#1646) --
-    matching the id here is what lets the whole-object ``state.sessions``
-    snapshot assertions below prove the deferral/clear paths never touch
-    session state, mirroring ``TestSignalStop._seed_session`` in
-    ``tests/test_cli.py`` (not reused directly: that helper is a private
-    method of a class in a different module).
-    """
-    workspace = tmp_path / "workspace"
-    workspace.mkdir(parents=True, exist_ok=True)
-    worktree = tmp_path / "worktree"
-    worktree.mkdir(parents=True, exist_ok=True)
-    session = _make_daemon_session(
-        id=sess_id,
-        name="client-a/impl",
-        client="client-a",
-        workspace_path=workspace,
-        worktree_path=worktree,
-        surface_ref=None,
-        started_at=datetime.now(UTC),
-    )
-    state = load_state()
-    state.sessions.append(session)
-    save_state(state)
-    return session
-
-
-def _read_stamp(worktree: Path) -> dict[str, object]:
-    context = json.loads(
-        (worktree / HOOK_CONTEXT_RELATIVE_PATH).read_text(encoding="utf-8")
-    )
-    stamp = context[AGENT_SPAWN_STAMP_KEY]
-    assert isinstance(stamp, dict)
-    return stamp
 
 
 def test_signal_stop_defer_snapshots_bg_task_count_to_agent_spawn_stamp(
@@ -374,15 +339,6 @@ def _context_snapshot(worktree: Path) -> tuple[bytes, int, int]:
 def _lock_path(worktree: Path) -> Path:
     """The per-worktree lock ``_context_lock`` opens (with ``"w"``) on entry."""
     return worktree / (str(HOOK_CONTEXT_RELATIVE_PATH) + ".lock")
-
-
-def _stop_payload(worktree: Path, **extra: object) -> dict[str, object]:
-    return {
-        "session_id": "claude-uuid-2229",
-        "cwd": str(worktree),
-        "hook_event_name": "Stop",
-        **extra,
-    }
 
 
 def test_signal_stop_cheap_exit_on_clear_stamp_touches_nothing_and_completes(
