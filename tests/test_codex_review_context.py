@@ -342,7 +342,7 @@ class TestLoadTicketContext:
         _write(tmp_path / ".cw" / "plan.md", "THE PLAN")
         _write(
             tmp_path / ".cw" / "context.json",
-            json.dumps({"title": "Ticket Title", "body": "Ticket Body"}),
+            json.dumps({"ticket_title": "Ticket Title", "ticket_body": "Ticket Body"}),
         )
         plan_text, ticket_text = _load_ticket_context(tmp_path)
         assert plan_text == "THE PLAN"
@@ -361,7 +361,10 @@ class TestLoadTicketContext:
         assert ticket_text is None
 
     def test_empty_title_body(self, tmp_path: Path) -> None:
-        _write(tmp_path / ".cw" / "context.json", json.dumps({"title": "", "body": ""}))
+        _write(
+            tmp_path / ".cw" / "context.json",
+            json.dumps({"ticket_title": "", "ticket_body": ""}),
+        )
         _plan, ticket_text = _load_ticket_context(tmp_path)
         assert ticket_text is None
 

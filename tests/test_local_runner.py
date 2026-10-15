@@ -661,7 +661,7 @@ def test_build_task_message_supplements_context(tmp_path: Path) -> None:
     cw_dir.mkdir()
     (cw_dir / "plan.md").write_text("plan content", encoding="utf-8")
     (cw_dir / "context.json").write_text(
-        json.dumps({"title": "My Ticket", "body": "Ticket body"}),
+        json.dumps({"ticket_title": "My Ticket", "ticket_body": "Ticket body"}),
         encoding="utf-8",
     )
 
@@ -725,7 +725,7 @@ def test_build_task_message_materializes_task_context_file_with_full_plan_and_he
     cw_dir.mkdir()
     (cw_dir / "plan.md").write_text(_EXCLUSION_PLAN, encoding="utf-8")
     (cw_dir / "context.json").write_text(
-        json.dumps({"title": "Ticket title", "body": "Ticket body"}),
+        json.dumps({"ticket_title": "Ticket title", "ticket_body": "Ticket body"}),
         encoding="utf-8",
     )
 
