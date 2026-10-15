@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.71.1] - 2026-10-15
+
 ### Added
 
 - **Orchestrator CLI papercuts (#2690).** Every `--client` option now also takes `-c` (`cw board`, `cw codex migrate-legacy`, `cw event tail`/`wait`, `cw orchestrate run`/`start`/`watch`, `cw orchestrator-start`, `cw worktree gc`). `cw dev-queue tasks` takes the ticket positionally (`cw dev-queue tasks ACM-1`, same as `-t ACM-1`; passing both is a usage error). `cw session send` takes the message positionally (`cw session send <id> "text"`; exactly one of MESSAGE, `--message` or `--message-file`). `cw session result` accepts `--json` (a no-op: the output is already JSON) and `--field PATH` (repeatable, dotted, numeric segments index lists; one field prints the bare value, several a JSON object keyed by path, a missing path exits 1). `cw dev-queue move` accepts `--lane` as an alias of `--to`. `cw config concurrency get -c <client>` also reports that client's configured ceiling and its source (`override`, `declared` or `default`) as a `client` object in `--json` and one trailing line in text mode; output without `-c` is unchanged.
