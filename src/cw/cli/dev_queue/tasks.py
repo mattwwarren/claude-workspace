@@ -139,7 +139,13 @@ def _print_tasks_human(
 
 
 @dev_queue.command(name="tasks")
-@click.option("--ticket", "-t", default=None, help="Filter by ticket id.")
+@click.argument("ticket_arg", required=False, default=None, metavar="[TICKET]")
+@click.option(
+    "--ticket",
+    "-t",
+    default=None,
+    help="Filter by ticket id (same as the optional TICKET argument).",
+)
 @click.option(
     "--status",
     "-s",
@@ -151,12 +157,15 @@ def _print_tasks_human(
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON array.")
 @handle_errors
 def dev_queue_tasks(
+    ticket_arg: str | None,
     ticket: str | None,
     status: str | None,
     client: str | None,
     output_json: bool,
 ) -> None:
     """List dev-queue tasks with typed field output.
+
+    TICKET may be given positionally or via -t/--ticket (not both).
 
     Programmatic inspection view. For the human aggregate summary use dev-queue status.
 
@@ -168,6 +177,11 @@ def dev_queue_tasks(
     shown verbatim, the flag just says cw does not recognise it as a documented
     routing code.
     """
+    if ticket_arg is not None and ticket is not None:
+        msg = "Pass the ticket either positionally or via -t/--ticket, not both."
+        raise click.UsageError(msg)
+    ticket = ticket_arg if ticket_arg is not None else ticket
+
     queue = load_dev_queue()
     tasks: list[TicketTask] = queue.tasks
 
