@@ -38,7 +38,10 @@ also applies :mod:`cw.cli._subagent_policy`'s spawn-shape policy, which in a
 headless worker refuses both an explicitly-forked subagent and one that names
 no ``subagent_type`` at all — neither enters cw's session roster, so cw can
 neither see it nor stop it (#2017), and a fork additionally inherits the
-parent's implementation mandate. Those refusals are default-on but gated by
+parent's implementation mandate. #2688 added a third refusal: a spawn that
+sets a non-blank ``name`` is an addressable in-process teammate that goes
+idle instead of returning, stays in the Stop hook's ``background_tasks``, and
+strands the worker's session. Those refusals are default-on but gated by
 ``subagent_spawn_guard_enabled``; every other shape allows. The policy runs
 *before* the stamp so a refused spawn leaves no unresolved count behind — the
 spawn never happens, and a count left at 1 would make the worker look like it
@@ -116,6 +119,12 @@ def _adjust_unresolved_count(delta: int, payload: dict[str, object] | None) -> N
     ``last_stamped_at`` advances only when the count increases — it answers
     "when did the oldest unresolved spawn begin", which is what an operator
     reading a parked row wants; refreshing it on a decrease would erase that.
+
+    The stamp is rewritten wholesale as exactly ``{unresolved_count,
+    last_stamped_at}``, so a spawn increment drops the Stop hook's diagnostic
+    ``entries`` summary until the next Stop re-snapshots it. That is a
+    deliberate #2688 non-goal: the entries described the previous Stop's
+    ``background_tasks``, which this spawn has just made stale.
     """
     cwd_value = _hook_cwd(payload)
     if cwd_value is None:
@@ -142,8 +151,10 @@ def agent_spawn_pre() -> None:
 
     Reads the PreToolUse hook JSON from stdin **once** and hands it to both
     :func:`cw.cli._subagent_policy.classify_spawn` and the stamp. Exits 0 in
-    every case except a refused spawn shape — an explicit fork, or no
-    ``subagent_type`` named at all — which exits 2; see module docstring.
+    every case except a refused spawn shape — an explicit fork, no
+    ``subagent_type`` named at all, or a non-blank ``name`` (#2688) — which
+    exits 2; see module docstring. A refusal writes only the stderr reason:
+    no stamp, no event.
 
     :func:`~cw.cli._hook_io.enforce` signals that refusal with
     ``sys.exit(2)``, i.e. ``SystemExit``, which is not an ``Exception`` and
