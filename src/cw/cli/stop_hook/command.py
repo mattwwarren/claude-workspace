@@ -24,6 +24,7 @@ from cw.cli.stop_hook.agent_stamp import (
     _agent_spawn_stamp_is_clear,
     _clear_agent_spawn_stamp,
     _snapshot_agent_spawn_stamp,
+    _summarize_background_tasks,
 )
 from cw.cli.stop_hook.locked import _resolve_stop_under_lock
 from cw.cli.stop_hook.payload import _resolve_signal_stop_context
@@ -101,8 +102,15 @@ def signal_stop() -> None:
         # silently (missing file, lock contention, malformed context) via
         # _write_cw_context_locked's own contract -- never raises, never
         # blocks the Stop hook's remaining duties.
+        #
+        # #2688: also persist a structural summary of the entries (key names,
+        # value types, allow-listed scalars; never free text). Computed once,
+        # here, outside the lambda: a raise inside the mutate function would
+        # be swallowed and silently drop the count snapshot too.
+        entries = _summarize_background_tasks(bg_tasks)
         _write_cw_context_locked(
-            cwd_value, lambda ctx: _snapshot_agent_spawn_stamp(ctx, bg_count)
+            cwd_value,
+            lambda ctx: _snapshot_agent_spawn_stamp(ctx, bg_count, entries=entries),
         )
         # #2458: that "another Stop hook will fire" is not guaranteed (#1889:
         # the upstream async-completion wakeup can be dropped), so a result
