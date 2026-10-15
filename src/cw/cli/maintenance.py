@@ -538,6 +538,7 @@ def schema_stage_output(stage: str) -> None:
 )
 @click.option(
     "--client",
+    "-c",
     "client_filter",
     default=None,
     shell_complete=_complete_client,
