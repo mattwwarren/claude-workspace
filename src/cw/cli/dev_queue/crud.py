@@ -218,7 +218,13 @@ def dev_queue_add(
 )
 @click.argument("ticket_id")
 @click.option("--client", "-c", required=True, help="Client name.")
-@click.option("--to", "to_lane", default=None, help="Target lane name.")
+@click.option(
+    "--to",
+    "--lane",
+    "to_lane",
+    default=None,
+    help="Target lane name (--lane is an alias of --to).",
+)
 @click.option(
     "--priority",
     "-p",
@@ -233,12 +239,12 @@ def dev_queue_move(
 ) -> None:
     """Move TICKET_ID to a different lane and/or reprioritize it within CLIENT.
 
-    At least one of --to or --priority must be given. Only PENDING tickets
-    can be moved or reprioritized; RUNNING and BLOCKED_ON_USER tasks must
-    be resolved before lane reassignment or priority editing.
+    At least one of --to (alias --lane) or --priority must be given. Only
+    PENDING tickets can be moved or reprioritized; RUNNING and BLOCKED_ON_USER
+    tasks must be resolved before lane reassignment or priority editing.
     """
     if to_lane is None and priority is None:
-        msg = "Must pass --to and/or --priority."
+        msg = "Must pass --to and/or --priority (--lane is an alias of --to)."
         raise click.UsageError(msg)
     # bounded=True (#2501): operator command; nothing precedes the lock.
     result = move_ticket(
