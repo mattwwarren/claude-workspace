@@ -284,9 +284,8 @@ class TestSettleLaggingRow:
 
 
 class TestRealSeam:
-    def test_routes_every_pending_completion(self, tmp_path: Path) -> None:
-        """No patching: settle routes this row and, documented, every other
-        pending SESSION_COMPLETED event too, and advances the dispatch cursor."""
+    def test_routes_only_the_requested_pending_completion(self, tmp_path: Path) -> None:
+        """No patching: settle leaves unrelated pending events for dispatch."""
         mine = make_task(
             status=QueueItemStatus.RUNNING, stage=Stage.REVIEW, session_id=_SID
         )
@@ -303,7 +302,7 @@ class TestRealSeam:
                 bound_session_for(other, last_result=_REVIEW_PENDING),
             ],
         )
-        for task in (other, mine):
+        for task in (mine, other):
             record_event(
                 OrchestratorEventType.SESSION_COMPLETED,
                 {
@@ -319,10 +318,10 @@ class TestRealSeam:
         statuses = {t.ticket_id: t.status for t in load_dev_queue().tasks}
         assert statuses == {
             "ACM-1": QueueItemStatus.BLOCKED_ON_USER,
-            "ACM-2": QueueItemStatus.BLOCKED_ON_USER,
+            "ACM-2": QueueItemStatus.RUNNING,
         }
         events = read_events(event_types=[OrchestratorEventType.SESSION_COMPLETED])
-        assert load_cursor("dispatch") == events[-1].id
+        assert load_cursor("dispatch") == events[0].id
 
     def test_no_pending_event_for_this_session_takes_no_lock(
         self, monkeypatch: pytest.MonkeyPatch

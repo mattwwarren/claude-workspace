@@ -15,7 +15,7 @@ It is also the single definition of the ``"approval_gate"`` string
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from cw.auto_dev_result import SCOPE_GATED_APPROVAL_STATUSES
 from cw.dev_queue.lifecycle import (
@@ -34,6 +34,13 @@ if TYPE_CHECKING:
 # scope_hint escalation park (#1640) and the SESSION_NEEDS_ATTENTION
 # `paused_status` dispatch emits for it.
 APPROVAL_GATE_REASON = "approval_gate"
+
+# Status vocabulary used by the dev-queue refusal table. Keep these public so
+# guidance keys use shared identifiers rather than copying status strings in a
+# consumer.
+AMBIGUITIES_PENDING_RESOLUTION_STATUS: Final = "ambiguities_pending_resolution"
+PREMISES_PENDING_VERIFICATION_STATUS: Final = "premises_pending_verification"
+MERGE_GATE_BLOCKED_STATUS: Final = "merge_gate_blocked"
 
 # RFC 0011 A4 R11: drain's selection is the Rule-5 availability-park subset
 # of HOLD_DISPOSITIONS, EXCLUDING the A3 force-hold disposition (#1160's

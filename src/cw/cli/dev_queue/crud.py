@@ -31,8 +31,9 @@ from cw.dev_queue import (
     select_prunable_tickets,
     unblock_ticket,
 )
+from cw.dev_queue.next_commands import human_gate_settled_notice, is_human_kept_gate
 from cw.events import record_event
-from cw.exceptions import LockTimeoutError, RequeueLiveSessionError
+from cw.exceptions import ApproveGateError, LockTimeoutError, RequeueLiveSessionError
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
@@ -47,7 +48,7 @@ from cw.ticket_view import ViewSources
 
 from ._group import dev_queue
 from ._requeue_echo import echo_pending_noop, echo_requeue_outcome
-from ._settle import settle_lagging_row
+from ._settle import SettleOutcome, settle_lagging_row
 from .show import echo_resulting_row
 
 # Stage vocabulary shared by `dev-queue add --stage` and `dev-queue requeue
@@ -79,6 +80,28 @@ def _report_partial_progress(
         f" {remaining_label}: {', '.join(remaining) or '(none)'}. {retry_note}",
         err=True,
     )
+
+
+def _raise_if_forward_requeue_settled_into_human_gate(
+    outcome: SettleOutcome, stage_override: str | None
+) -> None:
+    """Do not jump past a human gate discovered by this invocation's settle."""
+    if (
+        not outcome.routed
+        or outcome.row is None
+        or not is_human_kept_gate(outcome.row)
+        or stage_override is None
+    ):
+        return
+    stage_order = {
+        Stage.PLAN: 0,
+        Stage.IMPL: 1,
+        Stage.REVIEW: 2,
+        Stage.FINALIZE: 3,
+        Stage.HARDEN: 4,
+    }
+    if stage_order[Stage(stage_override)] > stage_order[outcome.row.stage]:
+        raise ApproveGateError(human_gate_settled_notice(outcome.row))
 
 
 @dev_queue.command(name="add")
@@ -395,7 +418,9 @@ def dev_queue_requeue(
     # One client for the orphan close, the pre-check and the requeue guard, so
     # all three read the same roster (#2517).
     daemon = get_native_daemon_client()
-    row = settle_lagging_row(ticket_id, resolved).row
+    outcome = settle_lagging_row(ticket_id, resolved)
+    _raise_if_forward_requeue_settled_into_human_gate(outcome, stage_override)
+    row = outcome.row
     # #2692: the idempotent no-op exits before the routed-orphan close and the
     # live-session guard, so it stops nothing; a live session is only named.
     if row is not None and is_pending_requeue_noop(row, stage_override, regress):

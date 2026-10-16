@@ -39,8 +39,11 @@ from cw.auto_dev_result import (
 )
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS
 from cw.dev_queue.gates import (
+    AMBIGUITIES_PENDING_RESOLUTION_STATUS,
     APPROVAL_GATE_REASON,
     DRAIN_DISPOSITIONS,
+    MERGE_GATE_BLOCKED_STATUS,
+    PREMISES_PENDING_VERIFICATION_STATUS,
     _not_at_approval_gate,
 )
 from cw.dev_queue.lifecycle import (
@@ -98,11 +101,11 @@ _FROM_FLAGS: dict[QueueItemStatus, str] = {
 # refusal's commands. Dispositions without an entry fall through to the rule
 # commands alone.
 _PARK_GUIDANCE: dict[str, str] = {
-    "ambiguities_pending_resolution": (
+    AMBIGUITIES_PENDING_RESOLUTION_STATUS: (
         "The worker parked on open ambiguities. Answer them on the ticket, then"
         " re-run the stage."
     ),
-    "premises_pending_verification": (
+    PREMISES_PENDING_VERIFICATION_STATUS: (
         "The worker parked on unverified premises. Verify them and record the"
         " results on the ticket, then re-run the stage."
     ),
@@ -117,7 +120,7 @@ _PARK_GUIDANCE: dict[str, str] = {
         "The branch is behind the default branch. Rebase it, then re-run the"
         " stage; approving would ship a tree that no longer matches main."
     ),
-    "merge_gate_blocked": (
+    MERGE_GATE_BLOCKED_STATUS: (
         "A prior pipeline PR for this ticket is still open. Merge or close it,"
         " then re-run the stage."
     ),

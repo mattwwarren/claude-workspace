@@ -13,9 +13,8 @@ Lock rules (ADR-0019): settle holds no lock itself; the one lock is the
 STATE-rank ``dev_queue_lock(bounded=True)`` in :func:`_consume_pending_bounded`,
 preceded only by a lock-free event read, never nested under
 ``sessions_lock``, and its :class:`~cw.exceptions.LockTimeoutError` is caught
-so the verb proceeds. Routing applies EVERY pending SESSION_COMPLETED event
-for the dispatch cursor, not only this ticket's -- the same effect
-``cw dev-queue wait`` and the dispatch loop have.
+so the verb proceeds. Settlement consumes only this row's leading pending
+completion, leaving unrelated events for the dispatch consumer to route.
 
 Also holds :func:`live_session_notes`, the read-only diagnostic the
 idempotent PENDING ``requeue`` no-op prints instead of the live-session guard
@@ -99,10 +98,13 @@ def _recorded_terminal_status(session: Session | None) -> str | None:
 def _consume_pending_bounded(session_id: str) -> bool:
     """Route pending completions if one is *session_id*'s; True iff it was."""
     events = read_pending_completions()
-    if not any(e.payload.get("session_id") == session_id for e in events):
+    if not events or events[0].payload.get("session_id") != session_id:
         return False
     with dev_queue_lock(bounded=True):
-        apply_pending_completions(events)
+        # The dispatch cursor is ordered. Applying a later event would skip
+        # unrelated earlier events, so only settle when this row owns the
+        # cursor's next event and advance it by that one event.
+        apply_pending_completions(events[:1])
     return True
 
 
@@ -147,6 +149,12 @@ def _settle_loop(row: TicketTask, session_id: str, status: str) -> SettleOutcome
                 refreshed is not None and refreshed.status != QueueItemStatus.RUNNING
             )
             return SettleOutcome(refreshed, routed=routed)
+        except _READ_ERRORS as exc:
+            _note(
+                f"could not read or route the recorded completion for session"
+                f" {session_id} ({exc}); continuing with the row as it stands"
+            )
+            return SettleOutcome(row, routed=False)
         refreshed = _read_row(row.ticket_id, row.client)
         if refreshed is None:
             return SettleOutcome(None, routed=False)
