@@ -23,6 +23,7 @@ entry's text, no ``--approve``) records neither event nor save (R4).
 from __future__ import annotations
 
 import hashlib
+import importlib
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypedDict
@@ -289,8 +290,11 @@ def _stamp_at_gate(
             " operator-initiated. Nothing was recorded."
         )
         raise ApproveGateError(msg)
-    from cw.executor import resolve_pipeline_stages  # noqa: PLC0415
-
+    # Keep this cycle-breaking import deferred; ``cw.executor`` imports code
+    # that reaches back through the ``cw.dev_queue`` package initializer.
+    resolve_pipeline_stages = importlib.import_module(
+        "cw.executor"
+    ).resolve_pipeline_stages
     stages = resolve_pipeline_stages(task, client_cfg)
     if task.stage not in stages:
         _raise_stage_not_in_pipeline(ticket_id, task, stages, client_name)
