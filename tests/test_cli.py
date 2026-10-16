@@ -6,6 +6,7 @@ import fcntl
 import io
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -8824,6 +8825,152 @@ class TestSessionsLockTimeoutCli:
         assert SESSIONS_LOCK_TIMEOUT_ENV in result.output
         # One message, not the same text twice (log-and-raise duplication).
         assert result.output.count("Timed out") == 1
+
+
+_LOCK_WAIT_SID = "wait-sess-1"
+_LOCK_WAIT_COMMANDS: dict[str, list[str]] = {
+    "list": ["list"],
+    "status": ["status"],
+    "spawn-close": ["spawn", "close", _LOCK_WAIT_SID],
+    "dev-queue-cancel": ["dev-queue", "cancel", "WAIT-1", "-c", "test-client"],
+}
+
+
+def _seed_lock_wait_world(tmp_path: Path, fake: FakeNativeDaemonClient) -> None:
+    """A RUNNING ``WAIT-1`` row bound to a live DAEMON session."""
+    from cw.dev_queue import save_dev_queue
+    from cw.models import DevQueueStore, QueueItemStatus
+    from tests.conftest import _make_ticket_task
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    save_state(
+        CwState(
+            sessions=[
+                _make_daemon_session(
+                    id=_LOCK_WAIT_SID,
+                    name="test-client/auto-dev/WAIT-1",
+                    client="test-client",
+                    workspace_path=workspace,
+                    surface_ref=fake.seed_live_worker(workspace),
+                    worktree_path=None,
+                    started_at=datetime.now(UTC),
+                )
+            ]
+        )
+    )
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                _make_ticket_task(
+                    ticket_id="WAIT-1",
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=_LOCK_WAIT_SID,
+                )
+            ]
+        )
+    )
+
+
+class TestOperatorCommandLockWait:
+    """list/status/spawn close/cancel wait 5 s, not 60 s, on a held lock (#2694)."""
+
+    @pytest.fixture(autouse=True)
+    def _fake_daemon(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        from cw import _flock
+        from tests.conftest import _FakeClock
+
+        for target in (
+            "cw.cli.spawn.get_native_daemon_client",
+            "cw.cli.dev_queue.crud.get_native_daemon_client",
+            "cw.reconcile._deps.get_native_daemon_client",
+        ):
+            monkeypatch.setattr(target, lambda: mock_native_daemon)
+        _seed_lock_wait_world(tmp_path, mock_native_daemon)
+        self.clock = _FakeClock()
+        monkeypatch.setattr(_flock, "time", self.clock)
+
+    @pytest.mark.parametrize(
+        ("raw", "read_wait", "close_wait"),
+        [(None, 5.0, 5.0), ("abc", 5.0, 5.0), ("300", 300.0, 5.0)],
+        ids=["unset", "invalid", "explicit-300"],
+    )
+    @pytest.mark.parametrize("command", list(_LOCK_WAIT_COMMANDS))
+    def test_wait_then_fail_non_zero(
+        self,
+        held_sessions_lock: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        command: str,
+        raw: str | None,
+        read_wait: float,
+        close_wait: float,
+    ) -> None:
+        if raw is None:
+            monkeypatch.delenv(SESSIONS_LOCK_TIMEOUT_ENV, raising=False)
+        else:
+            monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, raw)
+
+        result = CliRunner().invoke(main, _LOCK_WAIT_COMMANDS[command])
+
+        assert result.exit_code == 1, result.output
+        expected = read_wait if command in {"list", "status"} else close_wait
+        assert self.clock.now == pytest.approx(expected)
+
+    @pytest.mark.parametrize("command", list(_LOCK_WAIT_COMMANDS))
+    def test_timeout_names_the_recorded_holder(
+        self, monkeypatch: pytest.MonkeyPatch, command: str
+    ) -> None:
+        from cw.config import sessions_lock_file
+
+        monkeypatch.delenv(SESSIONS_LOCK_TIMEOUT_ENV, raising=False)
+        lock = sessions_lock_file()
+        lock.write_text(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "cmd": "cw dev-queue serve",
+                    "acquired_at": datetime.now(UTC).isoformat(),
+                }
+            )
+        )
+
+        with lock.open("a+") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            result = CliRunner().invoke(main, _LOCK_WAIT_COMMANDS[command])
+
+        assert result.exit_code == 1
+        assert result.output.count("Timed out") == 1
+        assert f"Recorded holder: pid {os.getpid()} (`cw dev-queue serve`)" in (
+            result.output
+        )
+        assert "CLIENT" not in result.output  # no stale-state table
+
+
+@pytest.mark.parametrize(
+    "first",
+    ["cw.cli", "cw.cli.spawn", "cw.cli.routed_orphan_close", "cw.cli.dev_queue.crud"],
+)
+def test_cli_imports_from_a_cold_interpreter(first: str) -> None:
+    """No import cycle among the operator-close modules, whichever loads first.
+
+    ``cw.cli.routed_orphan_close`` imports ``cw.cli.spawn`` and
+    ``cw.cli.dev_queue.crud`` imports both (#2694). Same interpreter, fresh
+    process (no foreign python: compiled deps are ABI-bound).
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", f"import {first}; import cw.cli"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
 
 
 class TestPeek:
