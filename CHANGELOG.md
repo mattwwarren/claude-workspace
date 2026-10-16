@@ -18,6 +18,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **An invalid `CW_SESSIONS_LOCK_TIMEOUT_S` no longer silently restores the 60 s wait for these three commands (#2694)**; it yields their 5 s wait (other callers still fall back to 60 s).
+- **`cw dev-queue resolve` records a plan park's answers on the row (#2702).** `cw dev-queue resolve <T> -c <client> --file <decisions.md>` appends the operator's decisions to the row's new `operator_resolutions` list (dev-queue schema v46; append-only, survives every requeue) and requeues the row at the plan stage with lane and priority unchanged, composing `cw dev-queue requeue`. The next plan-stage spawn receives the list as `queue_metadata.operator_resolutions` (cw-context schema v12) and reads it as binding resolutions with the same authority as a `<!-- auto-dev-preflight-resolutions -->` comment, so no tracker comment is needed; marker comments become mirrors. A file identical to the latest entry records nothing new. The command prints a ready-to-post relay block (`--post` mirrors it on GitHub), refuses inside a dispatch worker, and records a `ticket.resolution_recorded` event. `--approve` stamps plan approval through the same gate as `cw dev-queue approve`; the plan stage keeps it only if the revised draft's fingerprint is unchanged. The `plan-stage-resolutions-applied` line accepts `source=row:<N>`. Restart a running dispatch loop before first use: an old loop that saves the queue drops the new field.
 
 ## [1.73.0] - 2026-10-16
 
