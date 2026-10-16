@@ -10,6 +10,11 @@ the package's layering. Split out of the flat ``doctor/wedge.py`` (#2164).
 from __future__ import annotations
 
 from cw.auto_dev_result import PAUSED_FOR_USER_INPUT_STATUSES
+from cw.dev_queue.lifecycle import (
+    FINALIZE_GATE_HELD_DISPOSITION,
+    STALE_DISPATCH_GATE_DISPOSITION,
+)
+from cw.models import DispatchSkipReason
 
 # Pinned logger name for every record this package emits. Deliberately a
 # literal, not ``__name__``: the pre-split ``doctor/wedge.py`` logged under
@@ -55,6 +60,31 @@ _HUMAN_GATED_PARK_DISPOSITIONS: frozenset[str] = PAUSED_FOR_USER_INPUT_STATUSES
 # `cw dev-queue requeue`; never the reap path. Kept as a local literal rather
 # than added to the schema set above, which enumerates sentinel statuses.
 _DIRTY_WORKTREE_DISPOSITION = "dirty_worktree"
+
+# Operator-gated parks (#2730): deliberate holds that wait on an operator
+# verb, not a wedge. finalize_gate_held and stale_dispatch_gate are released
+# by `cw dev-queue` gate verbs; attempt_cap_blocked parks a ticket whose
+# unproductive-attempt ceiling is reached. Each row looks "dead" to the
+# class-5 heuristic (its worker exited or never spawned), but the reap's
+# PENDING revert just re-derives the same park on the next dispatch pass, or
+# re-dispatches a ticket that already has a PR. Sourced from the owning
+# constants so the strings cannot drift.
+_OPERATOR_GATED_PARK_DISPOSITIONS: frozenset[str] = frozenset(
+    {
+        FINALIZE_GATE_HELD_DISPOSITION,
+        STALE_DISPATCH_GATE_DISPOSITION,
+        DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value,
+    }
+)
+
+# Prefix shared by every codex fix-loop breach reason stamped onto
+# ``TicketTask.blocked_reason`` (``cw.codex_review._const.CODEX_FIX_*``, e.g.
+# codex_fix_scope_drift, codex_fix_growth_budget_exceeded). Those rows carry
+# disposition ``blocked``, so only the reason identifies them. They wait on an
+# operator reading the breach; a reap revert re-dispatches a ticket that
+# already has a PR and re-runs the fix loop into the same breach (#2730). A
+# prefix, not an enumeration, so a new breach reason is covered automatically.
+_CODEX_FIX_BLOCKED_REASON_PREFIX = "codex_fix_"
 
 # Wedge class for ACTIVE/IDLE sessions with no matching daemon entry (crash/SSH
 # failure path that leaves roster absent but session still "active" in cw state).

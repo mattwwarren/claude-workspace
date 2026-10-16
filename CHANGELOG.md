@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`cw doctor` no longer flags operator-gated parks as dead-session wedges (#2730).** `wedge/blocked-on-user-dead-session` and its `--reap` collapse now skip `finalize_gate_held`, `stale_dispatch_gate` and `attempt_cap_blocked` rows and rows whose `blocked_reason` starts with `codex_fix_`; reverting them to PENDING only re-derived the park or re-dispatched a ticket that already has a PR.
+
 ## [1.74.0] - 2026-10-16
 
 ### Added

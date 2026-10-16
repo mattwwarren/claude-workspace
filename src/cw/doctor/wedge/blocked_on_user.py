@@ -19,9 +19,11 @@ from cw.config import state_file
 from cw.dev_queue import transition_task_status
 from cw.doctor._shared import WedgeFinding
 from cw.doctor.wedge._constants import (
+    _CODEX_FIX_BLOCKED_REASON_PREFIX,
     _DIRTY_WORKTREE_DISPOSITION,
     _HUMAN_GATED_PARK_DISPOSITIONS,
     _LOGGER_NAME,
+    _OPERATOR_GATED_PARK_DISPOSITIONS,
     _WEDGE_BLOCKED_DEAD_SESSION,
     _WEDGE_TERMINAL_SIBLING,
 )
@@ -73,6 +75,24 @@ def _is_terminal_sibling_disposition(task: TicketTask) -> bool:
     return task.disposition == ReapReason.TERMINAL_SIBLING.value
 
 
+def _is_operator_gated_park(task: TicketTask) -> bool:
+    """True iff *task* is parked on a deliberate operator gate (#2730).
+
+    Disposition in ``_OPERATOR_GATED_PARK_DISPOSITIONS`` (finalize_gate_held,
+    stale_dispatch_gate, attempt_cap_blocked), OR a ``blocked_reason`` carrying
+    the codex fix-loop prefix (those rows have disposition ``blocked``). Such a
+    row always looks dead, but a reap revert re-derives the same park or
+    re-dispatches a ticket that already has a PR. Shared by the class-5
+    detector and the collapse so the two can never disagree.
+    """
+    if task.disposition in _OPERATOR_GATED_PARK_DISPOSITIONS:
+        return True
+    return bool(
+        task.blocked_reason
+        and task.blocked_reason.startswith(_CODEX_FIX_BLOCKED_REASON_PREFIX)
+    )
+
+
 def _check_wedge_dead_session_blocked_on_user(
     state: CwState,
     queue: DevQueueStore,
@@ -86,6 +106,11 @@ def _check_wedge_dead_session_blocked_on_user(
     excluded outright (#1653): their worker exited by design, so they always
     look "dead" to this heuristic, but they are waiting on an operator, not
     wedged — reverting them re-runs the identical park.
+
+    Operator-gated parks (#2730: finalize_gate_held, stale_dispatch_gate,
+    attempt_cap_blocked, and codex_fix_* blocked reasons) are excluded the same
+    way, via _is_operator_gated_park: reverting one re-derives the park or
+    re-dispatches a ticket that already has a PR.
 
     A terminal_sibling park (#2100) is likewise excluded outright: it too
     always has session_id is None (park_terminal_sibling_tasks clears it) and
@@ -102,6 +127,7 @@ def _check_wedge_dead_session_blocked_on_user(
         and t.disposition not in _HUMAN_GATED_PARK_DISPOSITIONS
         and t.disposition != _DIRTY_WORKTREE_DISPOSITION
         and not _is_terminal_sibling_disposition(t)
+        and not _is_operator_gated_park(t)
     ]
     if not candidates:
         return []
@@ -199,6 +225,9 @@ def _collapse_blocked_on_user_tasks(
     helper is also reached from loop_health._reap_session_by_selector, whose
     callers select tickets by other criteria.
 
+    Operator-gated parks (#2730, see _is_operator_gated_park) are filtered out
+    the same way.
+
     A terminal_sibling park (#2100) is excluded the same way, for the same
     defense-in-depth reason — reverting one to PENDING here would just get it
     re-parked terminal_sibling on the next reconcile pass, the exact
@@ -222,11 +251,13 @@ def _collapse_blocked_on_user_tasks(
             if t.disposition not in _HUMAN_GATED_PARK_DISPOSITIONS
             and t.disposition != _DIRTY_WORKTREE_DISPOSITION
             and not _is_terminal_sibling_disposition(t)
+            and not _is_operator_gated_park(t)
         ]
         if len(tasks_for_ticket) < len(all_blocked):
             _log.warning(
-                "Ticket %s: %d BLOCKED_ON_USER row(s) parked on a human gate "
-                "or terminal_sibling (#2100) left untouched by collapse; "
+                "Ticket %s: %d BLOCKED_ON_USER row(s) parked on a human or "
+                "operator gate (#2730) or terminal_sibling (#2100) left "
+                "untouched by collapse; "
                 "release via requeue/approve/a gate recipe, or "
                 "cw doctor --reap for a terminal_sibling row.",
                 ticket_id,

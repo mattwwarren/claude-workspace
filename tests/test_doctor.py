@@ -5265,6 +5265,7 @@ class TestWedgeDeadSessionBlockedOnUser:
         created_at: datetime | None = None,
         pr_url: str | None = None,
         disposition: str | None = None,
+        blocked_reason: str | None = None,
     ) -> TicketTask:
         from cw.models import QueueItemStatus
 
@@ -5277,6 +5278,7 @@ class TestWedgeDeadSessionBlockedOnUser:
                 created_at=created_at,
                 pr_url=pr_url,
                 disposition=disposition,
+                blocked_reason=blocked_reason,
             )
         return _make_ticket_task(
             ticket_id=ticket_id,
@@ -5285,6 +5287,7 @@ class TestWedgeDeadSessionBlockedOnUser:
             session_id=session_id,
             pr_url=pr_url,
             disposition=disposition,
+            blocked_reason=blocked_reason,
         )
 
     def test_blocked_on_user_dead_surface_detected_and_reverted(
@@ -5480,6 +5483,141 @@ class TestWedgeDeadSessionBlockedOnUser:
             if f.wedge_class == "wedge/blocked-on-user-dead-session"
             and f.ticket_id == "TST-2114"
         ] == []
+
+    @pytest.mark.parametrize(
+        ("disposition", "blocked_reason"),
+        [
+            ("finalize_gate_held", None),
+            ("stale_dispatch_gate", None),
+            ("attempt_cap_blocked", None),
+            ("blocked", "codex_fix_scope_drift"),
+            ("blocked", "codex_fix_growth_budget_exceeded"),
+        ],
+    )
+    def test_operator_gated_park_not_detected_or_reverted(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        disposition: str,
+        blocked_reason: str | None,
+    ) -> None:
+        """An operator-gated park with a dead session is not a wedge (#2730).
+
+        The reap's PENDING revert re-derives the same park or re-dispatches a
+        ticket that already has a PR, so neither a finding nor a revert.
+        """
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client", lambda: daemon
+        )
+        save_state(CwState(sessions=[]))
+        task = self._make_blocked_task(
+            "TST-2730-A",
+            session_id=None,
+            disposition=disposition,
+            blocked_reason=blocked_reason,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        report = run_doctor(reap=True)
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "TST-2730-A")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.disposition == disposition
+        assert t.blocked_reason == blocked_reason
+        assert [
+            f
+            for f in report.wedge_findings
+            if f.wedge_class == "wedge/blocked-on-user-dead-session"
+            and f.ticket_id == "TST-2730-A"
+        ] == []
+
+    @pytest.mark.parametrize(
+        ("disposition", "blocked_reason"),
+        [("blocked", "impl_failed"), (None, None)],
+    )
+    def test_non_gated_dead_session_park_still_detected(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        disposition: str | None,
+        blocked_reason: str | None,
+    ) -> None:
+        """Positive control (#2730): no operator gate -> finding with --reap recipe."""
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.models import CwState, DevQueueStore
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client", lambda: daemon
+        )
+        save_state(CwState(sessions=[]))
+        task = self._make_blocked_task(
+            "TST-2730-B",
+            session_id=None,
+            disposition=disposition,
+            blocked_reason=blocked_reason,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        report = run_doctor()
+
+        findings = [
+            f
+            for f in report.wedge_findings
+            if f.wedge_class == "wedge/blocked-on-user-dead-session"
+            and f.ticket_id == "TST-2730-B"
+        ]
+        assert len(findings) == 1
+        assert "cw doctor --reap" in findings[0].recipe
+
+    def test_collapse_leaves_operator_gated_row_untouched(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """Collapse never reverts an operator-gated row, even the oldest (#2730)."""
+        from cw.doctor.wedge import _collapse_blocked_on_user_tasks
+        from cw.models import DevQueueStore, QueueItemStatus
+
+        gated_oldest = self._make_blocked_task(
+            "TST-2730-C",
+            session_id=None,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            disposition="blocked",
+            blocked_reason="codex_fix_scope_drift",
+        )
+        plain_younger = self._make_blocked_task(
+            "TST-2730-C",
+            session_id=None,
+            created_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        queue = DevQueueStore(tasks=[gated_oldest, plain_younger])
+
+        changed = _collapse_blocked_on_user_tasks(queue, {"TST-2730-C"})
+
+        assert changed is True
+        assert gated_oldest.status == QueueItemStatus.BLOCKED_ON_USER
+        assert plain_younger.status == QueueItemStatus.PENDING
+
+    def test_collapse_all_operator_gated_is_noop(self, tmp_config_dir: Path) -> None:
+        """A ticket whose only blocked row is operator-gated is not mutated."""
+        from cw.doctor.wedge import _collapse_blocked_on_user_tasks
+        from cw.models import DevQueueStore, QueueItemStatus
+
+        task = self._make_blocked_task(
+            "TST-2730-D", session_id=None, disposition="finalize_gate_held"
+        )
+        queue = DevQueueStore(tasks=[task])
+
+        assert _collapse_blocked_on_user_tasks(queue, {"TST-2730-D"}) is False
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
 
     def test_collapse_leaves_human_gated_sibling_untouched(
         self,
