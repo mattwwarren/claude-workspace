@@ -21,12 +21,11 @@ from freezegun import freeze_time
 import cw.events
 from cw.cli import main
 from cw.cli.review.dispositions import _age_cell
-from cw.dev_queue import add_ticket, load_dev_queue
+from cw.dev_queue import load_dev_queue
 from cw.events import read_events
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     OrchestratorConfig,
-    Stage,
     TicketTask,
 )
 from cw.models.enums import OrchestratorEventType
@@ -42,14 +41,19 @@ from cw.review_finding_dispositions import (
 )
 from tests._cli_review_helpers import (
     _CONSOLIDATE_DIFF,
+    _OPERATOR,
+    _SETTLE_REASON,
     _TICKET,
     _accepted_payload,
     _branch_repo,
     _consolidate_payload,
+    _enter_operator_machine,
     _extract_settle_payloads,
+    _seed_review_row,
     _settle_entry,
     _settle_payload,
     _verdict_payload,
+    _write_session_context,
 )
 from tests.conftest import (
     _cmd,
@@ -75,7 +79,6 @@ _URL = "https://github.com/acme/widgets/pull/42"
 #: What a failing ``record_event`` raises in the settle audit-ordering tests.
 #: Asserted on in the command's own error output, so it is one literal.
 _EVENT_STORE_FAILURE = "event inbox is read-only"
-_OPERATOR = "mattwwarren"
 
 
 def _patch_identity(
@@ -893,25 +896,10 @@ class TestReviewVerifyFixesCommand:
         assert '"ticket_id": "$TICKET"' in envelope_lines[0]
 
 
-_SETTLE_REASON = "operator rejected: intentional tradeoff, see ADR-0012"
-
-
-def _write_session_context(root: Path, *, headless: bool) -> None:
-    """Stamp *root* with the ``.claude/cw-context.json`` ``cw`` would write.
-
-    Shared by every settle case because the refusal now fails CLOSED (#2210
-    round 4): a directory with no resolvable dispatch context refuses, so
-    "operator's machine" has to be expressed as a context reporting
-    ``headless: false`` rather than as the absence of one. Joins
-    :data:`~cw.models.HOOK_CONTEXT_RELATIVE_PATH`, the same constant the
-    writer and the guard use, so this fixture cannot drift onto another path.
-    """
-    path = root / HOOK_CONTEXT_RELATIVE_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"schema_version": 8, "session_id": "abc", "headless": headless}),
-        encoding="utf-8",
-    )
+#: The ticket every settle test records onto unless it names another (#2701).
+_SETTLE_TICKET = "T-2701"
+#: The client every settle test passes with ``-c``.
+_SETTLE_CLIENT = "acme"
 
 
 class TestReviewSettle:
@@ -928,19 +916,8 @@ class TestReviewSettle:
     def _operator_machine(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Run every settle test from a non-worker cw session worktree.
-
-        The repo checkout this suite runs in carries a real context of its own
-        (``headless: true`` under dispatch), so every case writes its own
-        nearer one; writing it here rather than per test keeps the cases about
-        what they are testing. ``TMPDIR`` is cleared for the same reason: a
-        dispatch worker running this suite has it pointed into its own
-        headless worktree, which the guard reads as a worker.
-        """
-        _write_session_context(tmp_path, headless=False)
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("TMPDIR", raising=False)
-        monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: _OPERATOR)
+        """Run every settle test from a non-worker cw session worktree."""
+        _enter_operator_machine(monkeypatch, tmp_path)
 
     @staticmethod
     def _require_no_ancestor_context(tmp_path: Path) -> None:
@@ -957,18 +934,124 @@ class TestReviewSettle:
         ):
             pytest.skip("a cw context sits above tmp_path (suite runs in a worker)")
 
-    def _invoke(self, runner: CliRunner, payload: dict[str, Any], *args: str) -> Result:
+    def _invoke(
+        self,
+        runner: CliRunner,
+        payload: dict[str, Any],
+        *args: str,
+        ticket: str = _SETTLE_TICKET,
+    ) -> Result:
+        """Settle *payload* onto *ticket*'s row, seeding the row first (#2701)."""
+        _seed_review_row(ticket, _SETTLE_CLIENT)
         extra = list(args)
         if "--reason" not in extra:
             extra = ["--reason", _SETTLE_REASON, *extra]
         return runner.invoke(
             main,
-            ["review", "settle", *extra, "-"],
+            [
+                "review",
+                "settle",
+                *extra,
+                "--ticket",
+                ticket,
+                "-c",
+                _SETTLE_CLIENT,
+                "-",
+            ],
             input=json.dumps(payload),
         )
 
     def _only_entry(self, output: str) -> FindingDisposition:
         return next(iter(parse_finding_disposition_block([output])[0].values()))
+
+    def _row(self, ticket: str = _SETTLE_TICKET) -> TicketTask:
+        return next(
+            t
+            for t in load_dev_queue().tasks
+            if t.ticket_id == ticket and t.client == _SETTLE_CLIENT
+        )
+
+    def test_ticket_is_required(self, runner: CliRunner) -> None:
+        """#2701: the settle is recorded on a row, so it has to name one."""
+        result = runner.invoke(
+            main,
+            ["review", "settle", "--reason", _SETTLE_REASON, "-c", "acme", "-"],
+            input=json.dumps(_settle_payload()),
+        )
+
+        assert result.exit_code == 2
+        assert "--ticket" in result.output
+        assert read_events() == []
+
+    @freeze_time("2026-09-20T12:00:00Z")
+    def test_settle_records_the_ledger_on_the_row(self, runner: CliRunner) -> None:
+        """#2701: the row, not the marker, is the record every tracker reads."""
+        result = self._invoke(runner, _settle_payload())
+
+        assert result.exit_code == 0, result.output
+        key = _disposition_key("src/cw/foo.py", "Bug here")
+        assert key is not None
+        entry = self._row().finding_dispositions[key]
+        assert entry.actor == _OPERATOR
+        assert entry.recorded_at == "2026-09-20T12:00:00Z"
+        assert entry.reviewed_sha == "abc1234"
+        assert entry.summary == "Bug here"
+        assert entry.outcome == "REJECTED"
+        assert (
+            self._row().finding_dispositions
+            == (parse_finding_disposition_block([result.stdout])[0])
+        )
+
+    def test_success_is_silent_on_stderr(self, runner: CliRunner) -> None:
+        result = self._invoke(runner, _settle_payload())
+
+        assert result.exit_code == 0, result.output
+        assert result.stderr == ""
+        assert result.stdout.startswith("## Review Finding Dispositions")
+
+    def test_events_are_correlated_to_the_ticket(self, runner: CliRunner) -> None:
+        result = self._invoke(runner, _settle_payload())
+
+        assert result.exit_code == 0, result.output
+        assert [e.correlation_id for e in read_events()] == [_SETTLE_TICKET]
+
+    def test_worker_refusal_fires_before_any_row_write(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        _write_session_context(tmp_path, headless=True)
+        result = self._invoke(runner, _settle_payload())
+
+        assert result.exit_code != 0
+        assert "dispatch worker" in result.output
+        assert self._row().finding_dispositions == {}
+
+    def test_a_failed_audit_event_leaves_the_row_unchanged(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Events first, then the row (#2701): no event, no durable record."""
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise OSError(_EVENT_STORE_FAILURE)
+
+        monkeypatch.setattr("cw.events.record_event", _boom)
+        result = self._invoke(runner, _settle_payload())
+
+        assert result.exit_code != 0
+        assert _EVENT_STORE_FAILURE in result.output
+        assert self._row().finding_dispositions == {}
+
+    def test_help_states_the_row_first_ordering_and_the_degrade(
+        self, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(main, ["review", "settle", "--help"])
+
+        assert result.exit_code == 0, result.output
+        text = " ".join(result.output.split())
+        assert "recorded FIRST, then the ledger is merged onto the row" in text
+        assert "degrades to mirror-only" in text
+        assert "Ticket id (required)." in text
+        assert "Client that owns the ticket's dev-queue row." in text
+        assert "-c, --client" in text
 
     def test_happy_path_renders_the_postable_marker(self, runner: CliRunner) -> None:
         result = self._invoke(runner, _settle_payload())
@@ -1029,7 +1112,7 @@ class TestReviewSettle:
     def test_missing_reason_is_a_usage_error(self, runner: CliRunner) -> None:
         result = runner.invoke(
             main,
-            ["review", "settle", "-"],
+            ["review", "settle", "--ticket", "T", "-c", "acme", "-"],
             input=json.dumps(_settle_payload()),
         )
         assert result.exit_code != 0
@@ -1127,8 +1210,7 @@ class TestReviewSettle:
                 _settle_entry(),
                 _settle_entry(summary="Second bug", file="src/cw/bar.py"),
             ),
-            "--ticket",
-            "2210",
+            ticket="2210",
         )
 
         assert result.exit_code == 0, result.output
@@ -1302,8 +1384,7 @@ class TestReviewSettle:
         result = self._invoke(
             runner,
             _settle_payload(_settle_entry(outcome="REVERSED")),
-            "--ticket",
-            "2232",
+            ticket="2232",
         )
 
         assert result.exit_code == 0, result.output
@@ -1562,7 +1643,17 @@ class TestReviewSettle:
     def test_malformed_json_exits_one(self, runner: CliRunner) -> None:
         result = runner.invoke(
             main,
-            ["review", "settle", "--reason", _SETTLE_REASON, "-"],
+            [
+                "review",
+                "settle",
+                "--reason",
+                _SETTLE_REASON,
+                "--ticket",
+                "T",
+                "-c",
+                "acme",
+                "-",
+            ],
             input="{not json",
         )
         assert result.exit_code != 0
@@ -1813,17 +1904,22 @@ class TestReviewDispositions:
             }
             payload.update(overrides)
             ledger[key] = FindingDisposition.model_validate(payload)
-        add_ticket(
-            TicketTask(
-                ticket_id=ticket_id,
-                client="acme",
-                stage=Stage.REVIEW,
-                finding_dispositions=ledger,
-            )
-        )
+        _seed_review_row(ticket_id, "acme", ledger=ledger)
 
     def _invoke(self, runner: CliRunner, *args: str) -> Result:
         return runner.invoke(main, ["review", "dispositions", *args])
+
+    def test_help_names_the_full_settle_command_and_the_row_read(
+        self, runner: CliRunner
+    ) -> None:
+        """#2701 R8: the re-settle hint is runnable, the snapshot prose current."""
+        result = runner.invoke(main, ["review", "dispositions", "--help"])
+
+        assert result.exit_code == 0, result.output
+        text = " ".join(result.output.split())
+        assert "--ticket <ID> -c <CLIENT>" in text
+        assert "last-synced copy" not in text
+        assert "writes it directly (#2701)" in text
 
     def test_a_ticket_with_no_records_says_so(self, runner: CliRunner) -> None:
         self._seed()

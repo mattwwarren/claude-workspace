@@ -15,6 +15,8 @@ module is now a package of focused submodules:
   prune) and the ticket-resolution helpers (resolve/list/find).
 * ``approval`` — the plan/review approval + operator-signoff-clearing gates.
 * ``must_fix_override`` — the operator's override of a codex MUST_FIX park.
+* ``review_records`` — operator review decisions recorded on the row
+  (``cw review settle``'s disposition ledger, #2701).
 * ``plan_promotion`` — promote an approved ``.cw/plan-draft.md`` to
   ``.cw/plan.md`` on the approve gate's plan->impl advance.
 * ``requeue`` — re-run a stage, regress, or clear a salvage park.
@@ -119,6 +121,12 @@ from cw.dev_queue.requeue import (
     requeue_ticket,
     unblock_ticket,
 )
+from cw.dev_queue.review_records import (
+    TERMINAL_ROW_STATUSES,
+    RecordedDispositions,
+    find_ticket_row,
+    record_finding_dispositions,
+)
 from cw.dev_queue.storage import (
     _lock,
     dev_queue_lock,
@@ -147,6 +155,7 @@ __all__ = [
     "SIGNOFF_GATE_DISPOSITION",
     "STALE_DISPATCH_DISPOSITION",
     "STALE_DISPATCH_GATE_DISPOSITION",
+    "TERMINAL_ROW_STATUSES",
     "TRACKER_MCP_GATE_DISPOSITION",
     "UNCONCLUDED_FINALIZE_REGRESS_MERGE_GATE_DISPOSITION",
     "_PLAN_SOUNDNESS_MARKER",
@@ -154,6 +163,7 @@ __all__ = [
     "_PRE_DISPATCH_STALE_PR_REASON",
     "_PRE_DISPATCH_TRACKER_MCP_REASON",
     "LaneNotFoundError",
+    "RecordedDispositions",
     "_advance_task_pointer",
     "_apply_requeue_stage",
     "_approve_ticket_locked",
@@ -184,6 +194,7 @@ __all__ = [
     "consume_completed_sessions",
     "dev_queue_lock",
     "drain_held_tickets",
+    "find_ticket_row",
     "is_pending_requeue_noop",
     "list_tickets",
     "load_dev_queue",
@@ -194,6 +205,7 @@ __all__ = [
     "precheck_requeue",
     "promote_plan_draft",
     "prune_tickets",
+    "record_finding_dispositions",
     "register_watched_pr",
     "remove_ticket",
     "requeue_ticket",

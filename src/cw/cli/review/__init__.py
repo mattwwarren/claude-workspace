@@ -13,6 +13,10 @@ grown to 951 lines, into focused submodules:
 - ``commands`` — ``register``, ``adjudicate``, ``settle`` (#2210, plus
   #2232's ``REVERSED`` rollback outcome), and ``verify-fixes``, plus the
   ``check-voided`` request/response envelopes.
+- ``_settle_store`` — ``settle``'s tracker-aware row write (#2701): record
+  the ledger on the dev-queue row, degrade to mirror-only on a GitHub-tracked
+  client when the row cannot be recorded, fail on every other tracker. No
+  command of its own, so it needs no registration import below.
 - ``dispositions`` — the read-only ``cw review dispositions`` ledger
   inspection view (#2232). Its own submodule rather than a fifth command in
   ``commands``: everything there parses an operator-supplied payload and
