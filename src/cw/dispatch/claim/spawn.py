@@ -74,6 +74,16 @@ _log = logging.getLogger("cw.dispatch")
 # this is a wait, not a retry of a broken operation.
 _OCCUPIED_DEFER_SECONDS: int = 30
 
+# Why: no-worker spawn failures of these types revert WITHOUT charging the
+# unproductive-attempt ceiling (#2695). The tree has no adapter or auth-fetch
+# exception class, so a raw ``OSError`` is the only typed infra signal there
+# is. The production ``NativeDaemonClient.spawn_bg`` wraps its failures (SSH
+# wall, flag break, missing binary) in plain ``CwError``, which therefore
+# still charges, as do ``WorktreeError`` and unknown exceptions. Typing the
+# host- and credential-level failures is #2722; extend this tuple when a typed
+# class lands.
+_INFRA_SPAWN_ERRORS: tuple[type[BaseException], ...] = (OSError,)
+
 
 def _apply_plan_bypass_if_available(
     task: TicketTask, client: ClientConfig, worktree_path: Path
@@ -773,6 +783,7 @@ def _spawn_claimed_task(
                 client.name,
                 task.ticket_id,
                 stamp_backoff=True,
+                unproductive=not isinstance(exc, _INFRA_SPAWN_ERRORS),
                 created_at=task.created_at,
             )
             outcome = _SpawnOutcome(spawn_error=True, error=str(exc))

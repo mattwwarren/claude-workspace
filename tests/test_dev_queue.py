@@ -10957,6 +10957,220 @@ class TestRequeueTicket:
 
         assert result.available is True
 
+    # -- #2695: reset_attempts -------------------------------------------------
+
+    @staticmethod
+    def _seed_counted(
+        *,
+        unproductive_attempts: int,
+        disposition: str | None = "attempt_cap_blocked",
+        stage: Stage = Stage.PLAN,
+        status: QueueItemStatus = QueueItemStatus.BLOCKED_ON_USER,
+    ) -> TicketTask:
+        task = _make_blocked_task(
+            stage=stage,
+            session_id="sess-reset",
+            status=status,
+            disposition=disposition,
+            scope_hint="large",
+            lane="fast",
+        )
+        task.unproductive_attempts = unproductive_attempts
+        task.attempts = 12
+        task.priority = 7
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    @staticmethod
+    def _reset_keys(result: dict[str, str | bool | int]) -> tuple[object, ...]:
+        return (
+            result["attempts_reset"],
+            result["prior_unproductive_attempts"],
+            result["attempts_reset_was_capped"],
+        )
+
+    def test_reset_attempts_zeroes_only_the_ceiling_counter(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_counted(unproductive_attempts=10)
+
+        result = requeue_ticket("GEN-500", "genhealth", reset_attempts=True)
+
+        assert self._reset_keys(result) == (True, 10, True)
+        t = load_dev_queue().tasks[0]
+        assert t.status == QueueItemStatus.PENDING
+        assert t.unproductive_attempts == 0
+        assert t.attempts == 12
+        assert t.lane == "fast"
+        assert t.priority == 7
+        assert t.scope_hint == "large"
+        # The capped fact was read before the transition cleared it.
+        assert t.disposition is None
+
+    @pytest.mark.parametrize(
+        ("unproductive_attempts", "disposition", "expected"),
+        [
+            (10, "attempt_cap_blocked", (True, 10, True)),
+            (0, "attempt_cap_blocked", (True, 0, True)),
+            (3, "abandoned", (True, 3, False)),
+        ],
+    )
+    def test_reset_attempts_result_matrix(
+        self,
+        unproductive_attempts: int,
+        disposition: str,
+        expected: tuple[object, ...],
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_counted(
+            unproductive_attempts=unproductive_attempts, disposition=disposition
+        )
+
+        result = requeue_ticket("GEN-500", "genhealth", reset_attempts=True)
+
+        assert self._reset_keys(result) == expected
+        assert load_dev_queue().tasks[0].unproductive_attempts == 0
+
+    def test_default_leaves_the_counters_alone(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_counted(unproductive_attempts=4)
+
+        result = requeue_ticket("GEN-500", "genhealth")
+
+        assert self._reset_keys(result) == (False, 0, False)
+        t = load_dev_queue().tasks[0]
+        assert t.unproductive_attempts == 4
+        assert t.attempts == 12
+
+    def test_reset_attempts_with_allow_regress(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_counted(unproductive_attempts=6, stage=Stage.REVIEW)
+
+        result = requeue_ticket(
+            "GEN-500",
+            "genhealth",
+            stage_override="impl",
+            allow_regress=True,
+            reset_attempts=True,
+        )
+
+        assert result["regressed"] is True
+        assert self._reset_keys(result) == (True, 6, True)
+        assert load_dev_queue().tasks[0].unproductive_attempts == 0
+
+    def test_reset_attempts_with_from_failed(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_counted(
+            unproductive_attempts=5,
+            disposition="abandoned",
+            stage=Stage.IMPL,
+            status=QueueItemStatus.FAILED,
+        )
+
+        result = requeue_ticket(
+            "GEN-500", "genhealth", from_failed=True, reset_attempts=True
+        )
+
+        assert result["from_failed_applied"] is True
+        assert self._reset_keys(result) == (True, 5, False)
+        assert load_dev_queue().tasks[0].unproductive_attempts == 0
+
+    @pytest.mark.parametrize(
+        ("stage", "stage_override", "allow_regress"),
+        [
+            (Stage.PLAN, None, False),
+            (Stage.PLAN, "review", False),
+            (Stage.REVIEW, "impl", True),
+        ],
+        ids=["same_stage", "forward_advance", "regress"],
+    )
+    def test_transition_event_reports_the_reset_counter(
+        self,
+        stage: Stage,
+        stage_override: str | None,
+        allow_regress: bool,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """R2: the reset precedes every transition, so no event is stale."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_counted(unproductive_attempts=9, stage=stage)
+        events = capture_events(
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_TRANSITION
+        )
+
+        requeue_ticket(
+            "GEN-500",
+            "genhealth",
+            stage_override=stage_override,
+            allow_regress=allow_regress,
+            reset_attempts=True,
+        )
+
+        assert events
+        assert [payload["unproductive_attempts"] for _, payload, _ in events] == [
+            0
+        ] * len(events)
+
+    def test_raise_after_the_reset_discards_it(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStateError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_counted(
+            unproductive_attempts=8,
+            disposition=None,
+            status=QueueItemStatus.RUNNING,
+        )
+
+        with pytest.raises(RequeueStateError):
+            requeue_ticket("GEN-500", "genhealth", reset_attempts=True)
+
+        assert load_dev_queue().tasks[0].unproductive_attempts == 8
+
+    def test_idempotent_pending_noop_ignores_reset_attempts(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._seed_counted(
+            unproductive_attempts=4, disposition=None, status=QueueItemStatus.PENDING
+        )
+        before = load_dev_queue().model_dump()
+
+        result = requeue_ticket(
+            "GEN-500", "genhealth", idempotent_pending=True, reset_attempts=True
+        )
+
+        assert result["already_pending"] is True
+        assert self._reset_keys(result) == (False, 0, False)
+        assert load_dev_queue().model_dump() == before
+
 
 # ---------------------------------------------------------------------------
 # TestRequeueLiveSessionGuard — #2275 refuse requeue while a session is live

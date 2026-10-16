@@ -11742,6 +11742,7 @@ class TestDevQueueTasksNextColumn:
             ("rule5_scope_drift_no_session", "approve --scope-drift <paths>"),
             ("rule6_must_fix_no_session", _OVERRIDE_CELL),
             ("rule6a_scope_hint_large_ship_dropped", _OVERRIDE_CELL),
+            ("rule6b_attempt_cap_blocked", "requeue --reset-attempts"),
         ],
     )
     def test_cell(self, tmp_config_dir: Path, case_id: str, cell: str) -> None:
@@ -11822,6 +11823,88 @@ class TestDevQueueTasksNextColumn:
 
         monkeypatch.setattr("cw.ticket_view.load_orchestrator_config", _boom)
         task = CASES["rule6a_must_fix_override_recorded"].task
+        seed_queue([task])
+        result = CliRunner().invoke(main, ["dev-queue", "tasks", "--json"])
+        assert result.exit_code == 0, result.output
+        assert _json.loads(result.output) == [task.model_dump(mode="json")]
+
+
+def _unproductive_cells(output: str) -> list[str]:
+    """The UNPRODUCTIVE column of a ``dev-queue tasks`` table, by header offset."""
+    lines = [line for line in output.splitlines() if line.strip()]
+    header, *rest = [line for line in lines if not line.startswith("-")]
+    start, end = header.index("UNPRODUCTIVE"), header.index("LANE")
+    return [line[start:end].strip() for line in rest]
+
+
+class TestDevQueueTasksUnproductiveColumn:
+    """#2695: the UNPRODUCTIVE cell shows ``unproductive_attempts/ceiling``."""
+
+    @staticmethod
+    def _tasks_cells(unproductive_attempts: int) -> list[str]:
+        from tests._ticket_view_helpers import make_task, seed_queue
+
+        seed_queue([make_task(unproductive_attempts=unproductive_attempts)])
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        return _unproductive_cells(result.output)
+
+    def test_configured_client_without_override_shows_the_default(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from tests._ticket_view_helpers import write_lane_client
+
+        write_lane_client("acme", tmp_path / "ws")
+        assert self._tasks_cells(0) == ["0/10"]
+
+    def test_lane_override_is_shown(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        from tests._ticket_view_helpers import write_lane_client
+
+        write_lane_client("acme", tmp_path / "ws", attempt_ceiling=25)
+        assert self._tasks_cells(3) == ["3/25"]
+
+    def test_disabled_ceiling_shows_none(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from tests._ticket_view_helpers import write_lane_client
+
+        write_lane_client("acme", tmp_path / "ws", attempt_ceiling=False)
+        assert self._tasks_cells(3) == ["3/none"]
+
+    def test_unconfigured_client_falls_back_to_the_global_ceiling(
+        self, tmp_config_dir: Path
+    ) -> None:
+        orchestrator_config_file().parent.mkdir(parents=True, exist_ok=True)
+        orchestrator_config_file().write_text("global_attempt_ceiling: 7\n")
+        assert self._tasks_cells(2) == ["2/7"]
+
+    def test_unresolvable_ceiling_shows_a_question_mark(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[object] = []
+
+        def _boom(*args: object, **_kw: object) -> int | None:
+            calls.append(args)
+            msg = "ceiling unreadable"
+            raise CwError(msg)
+
+        monkeypatch.setattr("cw.cli.dev_queue.tasks.resolve_attempt_ceiling", _boom)
+        assert self._tasks_cells(3) == ["3/?"]
+        assert len(calls) == 1
+
+    def test_unparseable_orchestrator_config_shows_a_question_mark(
+        self, tmp_config_dir: Path
+    ) -> None:
+        orchestrator_config_file().parent.mkdir(parents=True, exist_ok=True)
+        orchestrator_config_file().write_text("default_finalize_gate: [not, valid\n")
+        assert self._tasks_cells(3) == ["3/?"]
+
+    def test_json_carries_no_ceiling_key(self, tmp_config_dir: Path) -> None:
+        import json as _json
+
+        from tests._ticket_view_helpers import make_task, seed_queue
+
+        task = make_task(unproductive_attempts=3)
         seed_queue([task])
         result = CliRunner().invoke(main, ["dev-queue", "tasks", "--json"])
         assert result.exit_code == 0, result.output

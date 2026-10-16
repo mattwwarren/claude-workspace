@@ -54,7 +54,7 @@ from cw.dev_queue.lifecycle import (
     REVIEW_STALENESS_GATE_DISPOSITION,
     STALE_DISPATCH_DISPOSITION,
 )
-from cw.models import QueueItemStatus, ReapReason, Stage
+from cw.models import DispatchSkipReason, QueueItemStatus, ReapReason, Stage
 from cw.models.ticket_view import NextCommand
 
 if TYPE_CHECKING:
@@ -288,6 +288,13 @@ def _must_fix_overridden(task: TicketTask, session: Session | None) -> bool:
     return _must_fix(task, session) and task.must_fix_override is not None
 
 
+def _attempt_capped(task: TicketTask, _session: Session | None) -> bool:
+    return (
+        _is_blocked(task)
+        and task.disposition == DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value
+    )
+
+
 def _salvage_parked(task: TicketTask, session: Session | None) -> bool:
     return (
         _is_blocked(task)
@@ -417,6 +424,17 @@ def _must_fix_held_commands(task: TicketTask) -> list[NextCommand]:
     ]
 
 
+def _attempt_capped_commands(task: TicketTask) -> list[NextCommand]:
+    return [
+        _requeue(
+            task,
+            "re-run the stage with the unproductive-attempt counter reset"
+            " (lane and priority kept)",
+            "--reset-attempts",
+        )
+    ]
+
+
 def _salvage_commands(task: TicketTask) -> list[NextCommand]:
     return [
         NextCommand(
@@ -466,8 +484,11 @@ class _Rule(NamedTuple):
 # First match wins. Rules 0a/0b run first and cover every human-kept gate;
 # rules 5-11 are BLOCKED_ON_USER only; 2-4 cover the other statuses. Scope-drift
 # and must-fix approvals never consult the session, so only the plain-approve
-# rules (9/10) and 0a depend on it. Rule 8 runs before 9 so an availability
-# hold is released by requeue/drain, and DRAIN_DISPOSITIONS deliberately
+# rules (9/10) and 0a depend on it. Rule 6b (attempt_cap_blocked, #2695) runs
+# before 9 so a capped row bound to a gate session still points at
+# `requeue --reset-attempts`; plain requeue would re-park it. Rule 8 runs
+# before 9 so an availability hold is released by requeue/drain, and
+# DRAIN_DISPOSITIONS deliberately
 # excludes branch_behind_main (#1823), which falls to the generic requeue.
 _RULES: tuple[_Rule, ...] = (
     _Rule(_human_gate_sessionless, _human_gate_sessionless_commands),  # 0a
@@ -482,6 +503,7 @@ _RULES: tuple[_Rule, ...] = (
         _must_fix_overridden_held_commands,
     ),  # 6a
     _Rule(_must_fix, _must_fix_commands, _must_fix_held_commands),  # 6
+    _Rule(_attempt_capped, _attempt_capped_commands),  # 6b
     _Rule(_salvage_parked, _salvage_commands),  # 7
     _Rule(_drain_held, _drain_commands),  # 8
     _Rule(_at_approval_gate, _gate_commands),  # 9

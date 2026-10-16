@@ -8,8 +8,15 @@ the same code path, so every shape either producer can emit is covered here.
 
 from __future__ import annotations
 
+import itertools
+from typing import ClassVar
+
 import pytest
 
+from cw.auto_dev_result import (
+    OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
+    PAUSED_FOR_USER_INPUT_STATUSES,
+)
 from cw.dispatch.productivity import (
     ClaimEvidence,
     extract_claim_evidence,
@@ -22,7 +29,10 @@ class TestExtractClaimEvidence:
 
     def test_none_payload_yields_all_false(self) -> None:
         assert extract_claim_evidence(None) == ClaimEvidence(
-            had_commits=False, had_findings=False, resolution_consumed=False
+            had_commits=False,
+            had_findings=False,
+            resolution_consumed=False,
+            human_input_park=False,
         )
 
     @pytest.mark.parametrize(
@@ -37,12 +47,18 @@ class TestExtractClaimEvidence:
         # Defensive: last_result is typed dict|None but reaches us from a
         # persisted JSON blob, so a scalar must degrade, not raise.
         assert extract_claim_evidence(payload) == ClaimEvidence(  # type: ignore[arg-type]
-            had_commits=False, had_findings=False, resolution_consumed=False
+            had_commits=False,
+            had_findings=False,
+            resolution_consumed=False,
+            human_input_park=False,
         )
 
     def test_empty_dict_yields_all_false(self) -> None:
         assert extract_claim_evidence({}) == ClaimEvidence(
-            had_commits=False, had_findings=False, resolution_consumed=False
+            had_commits=False,
+            had_findings=False,
+            resolution_consumed=False,
+            human_input_park=False,
         )
 
     def test_empty_commits_list_is_not_evidence(self) -> None:
@@ -125,7 +141,10 @@ class TestExtractClaimEvidence:
             "blocker": {"reason": "merge_gate_blocked", "detail": "CI red"},
         }
         assert extract_claim_evidence(payload) == ClaimEvidence(
-            had_commits=False, had_findings=False, resolution_consumed=False
+            had_commits=False,
+            had_findings=False,
+            resolution_consumed=False,
+            human_input_park=False,
         )
 
     def test_full_productive_sentinel(self) -> None:
@@ -137,7 +156,10 @@ class TestExtractClaimEvidence:
             "resolution_evidence": {"comment_id": "1"},
         }
         assert extract_claim_evidence(payload) == ClaimEvidence(
-            had_commits=True, had_findings=True, resolution_consumed=True
+            had_commits=True,
+            had_findings=True,
+            resolution_consumed=True,
+            human_input_park=False,
         )
 
     def test_producer_shaped_autodevresult_dump_is_read_as_consumed(self) -> None:
@@ -215,39 +237,120 @@ class TestExtractClaimEvidence:
             "resolution_evidence": {"comment_id": "1", "items": ["A2"]},
         }
         assert extract_claim_evidence(payload) == ClaimEvidence(
-            had_commits=False, had_findings=False, resolution_consumed=True
+            had_commits=False,
+            had_findings=False,
+            resolution_consumed=True,
+            human_input_park=False,
         )
 
 
-class TestIsUnproductive:
-    """OR-combination truth table across the three evidence fields."""
+class TestHumanInputPark:
+    """#2695: human-input parks do not charge, except ``plan_pending_approval``."""
+
+    _EXPECTED_PARK_CHARGE: ClassVar[dict[str, bool]] = {
+        "ambiguities_pending_resolution": True,
+        "premises_pending_verification": True,
+        "review_pending_approval": True,
+        # R5: auto_adopt_clean_plan can re-claim this park with no human, so
+        # the ceiling stays its bound.
+        "plan_pending_approval": False,
+    }
+
+    def test_expected_map_covers_the_whole_vocabulary(self) -> None:
+        # A vocabulary addition must force an intentional charged/uncharged
+        # decision here rather than silently inheriting one.
+        assert set(self._EXPECTED_PARK_CHARGE) == PAUSED_FOR_USER_INPUT_STATUSES
+
+    @pytest.mark.parametrize("status", sorted(PAUSED_FOR_USER_INPUT_STATUSES))
+    def test_paused_status_classification(self, status: str) -> None:
+        payload: dict[str, object] = {"status": status, "commits": []}
+        assert (
+            extract_claim_evidence(payload).human_input_park
+            is self._EXPECTED_PARK_CHARGE[status]
+        )
+
+    def test_plan_pending_approval_still_charges(self) -> None:
+        payload: dict[str, object] = {"status": "plan_pending_approval"}
+        evidence = extract_claim_evidence(payload)
+        assert evidence.human_input_park is False
+        assert is_unproductive(evidence) is True
 
     @pytest.mark.parametrize(
-        ("had_commits", "had_findings", "resolution_consumed", "expected"),
+        "status", ["blocked", "shipped", "no_op", "stage_complete"]
+    )
+    def test_non_park_status_is_not_a_park(self, status: str) -> None:
+        payload: dict[str, object] = {"status": status}
+        assert extract_claim_evidence(payload).human_input_park is False
+
+    @pytest.mark.parametrize("reason", sorted(OPERATOR_UNAVAILABLE_BLOCKER_REASONS))
+    def test_operator_unavailable_blocker_is_a_park(self, reason: str) -> None:
+        payload: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "stage4_finalize", "reason": reason},
+        }
+        evidence = extract_claim_evidence(payload)
+        assert evidence.human_input_park is True
+        assert is_unproductive(evidence) is False
+
+    @pytest.mark.parametrize(
+        "reason",
+        ["agent_block", "ambiguity_scan_unconverged", "deferred_stub_unresolved"],
+    )
+    def test_chargeable_blocker_is_not_a_park(self, reason: str) -> None:
+        # The #2154 hard-exits keep a bound on a non-converging plan stage.
+        payload: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "stage1_plan", "reason": reason},
+        }
+        evidence = extract_claim_evidence(payload)
+        assert evidence.human_input_park is False
+        assert is_unproductive(evidence) is True
+
+    @pytest.mark.parametrize(
+        "payload",
         [
-            (False, False, False, True),
-            (True, False, False, False),
-            (False, True, False, False),
-            (False, False, True, False),
-            (True, True, False, False),
-            (True, False, True, False),
-            (False, True, True, False),
-            (True, True, True, False),
+            {"status": ["ambiguities_pending_resolution"]},
+            {"status": 7},
+            {"status": "blocked", "blocker": {"reason": ["push_auth_failed"]}},
+            {"status": "blocked", "blocker": {"reason": None}},
+            {"status": "blocked", "blocker": "push_auth_failed"},
+            {"status": "blocked", "blocker": ["push_auth_failed"]},
         ],
+    )
+    def test_malformed_values_degrade_without_raising(
+        self, payload: dict[str, object]
+    ) -> None:
+        assert extract_claim_evidence(payload).human_input_park is False
+
+
+class TestIsUnproductive:
+    """OR-combination truth table across the four evidence fields."""
+
+    @pytest.mark.parametrize(
+        (
+            "had_commits",
+            "had_findings",
+            "resolution_consumed",
+            "human_input_park",
+        ),
+        list(itertools.product([False, True], repeat=4)),
     )
     def test_truth_table(
         self,
         had_commits: bool,
         had_findings: bool,
         resolution_consumed: bool,
-        expected: bool,
+        human_input_park: bool,
     ) -> None:
         evidence = ClaimEvidence(
             had_commits=had_commits,
             had_findings=had_findings,
             resolution_consumed=resolution_consumed,
+            human_input_park=human_input_park,
         )
-        assert is_unproductive(evidence) is expected
+        # Only the all-False row (no signal at all) is unproductive.
+        all_false = (had_commits, had_findings, resolution_consumed, human_input_park)
+        assert is_unproductive(evidence) is (all_false == (False, False, False, False))
 
     def test_no_payload_at_all_is_unproductive(self) -> None:
         # The #1653 crashloop shape: a dead session leaves no sentinel, so the

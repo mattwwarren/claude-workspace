@@ -58,7 +58,12 @@ from cw.exceptions import (
     UnblockStateError,
 )
 from cw.gh import fetch_approved_plan_comment
-from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.models import (
+    DispatchSkipReason,
+    OrchestratorEventType,
+    QueueItemStatus,
+    Stage,
+)
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import (
@@ -657,6 +662,7 @@ def requeue_ticket(
     bounded: bool = False,
     idempotent_pending: bool = False,
     infer_regress: bool = False,
+    reset_attempts: bool = False,
 ) -> dict[str, str | bool | int]:
     """Requeue a BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF ticket, optionally
     at a specific stage.
@@ -716,6 +722,13 @@ def requeue_ticket(
             live-session guard still runs first.
         infer_regress: when True (CLI only), a backward *stage_override* on a
             parked row regresses without ``allow_regress``.
+        reset_attempts: when True (CLI: --reset-attempts, #2695), zero
+            ``unproductive_attempts`` (never raw ``attempts``) before any stage
+            or transition call, so the ``task.transition`` event reports 0.
+            The result's ``attempts_reset``, ``prior_unproductive_attempts``
+            and ``attempts_reset_was_capped`` (the row was
+            ``attempt_cap_blocked``) report it; the PENDING no-op returns
+            their defaults (False, 0, False) because nothing is written.
 
     Raises:
         RequeueLiveSessionError: if a daemon-live session exists for the
@@ -751,6 +764,11 @@ def requeue_ticket(
     with _lock(bounded=bounded):
         store = load_dev_queue()
         task = _find_ticket(store, ticket_id, client_name)
+        # Before any transition (its event reads the counter, and the move to
+        # PENDING clears the disposition). A raise before save discards it.
+        prior, was_capped = (
+            _reset_unproductive_attempts(task) if reset_attempts else (0, False)
+        )
 
         client_cfg = get_client(client_name)
         stages = resolve_pipeline_stages(task, client_cfg)
@@ -841,7 +859,18 @@ def requeue_ticket(
         regressed=regressed,
         regress_inferred=regressed and not allow_regress,
         applied=(from_cancelled_applied, from_failed_applied, from_completed_applied),
+        attempts_reset=reset_attempts,
+        prior_unproductive_attempts=prior,
+        attempts_reset_was_capped=was_capped,
     )
+
+
+def _reset_unproductive_attempts(task: TicketTask) -> tuple[int, bool]:
+    """Zero the ceiling counter; return its prior value and the capped fact."""
+    prior = task.unproductive_attempts
+    was_capped = task.disposition == DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value
+    task.unproductive_attempts = 0
+    return prior, was_capped
 
 
 def _requeue_result(
@@ -852,6 +881,9 @@ def _requeue_result(
     regressed: bool = False,
     regress_inferred: bool = False,
     applied: tuple[bool, bool, bool] = (False, False, False),
+    attempts_reset: bool = False,
+    prior_unproductive_attempts: int = 0,
+    attempts_reset_was_capped: bool = False,
 ) -> dict[str, str | bool | int]:
     """:func:`requeue_ticket`'s result; the defaults are the PENDING no-op's."""
     from_cancelled_applied, from_failed_applied, from_completed_applied = applied
@@ -867,6 +899,9 @@ def _requeue_result(
         "from_completed_applied": from_completed_applied,
         "already_pending": already_pending,
         "regress_inferred": regress_inferred,
+        "attempts_reset": attempts_reset,
+        "prior_unproductive_attempts": prior_unproductive_attempts,
+        "attempts_reset_was_capped": attempts_reset_was_capped,
     }
 
 

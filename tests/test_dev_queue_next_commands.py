@@ -195,6 +195,7 @@ _STATE_CASES = (
     "rule6a_must_fix_override_recorded",
     "rule6_scope_hint_large_ship_dropped",
     "rule6a_scope_hint_large_ship_dropped",
+    "rule6b_attempt_cap_blocked",
     "rule7_salvage_parked",
     "rule8_awaiting_operator",
     "rule9_review_gate",
