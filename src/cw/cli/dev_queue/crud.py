@@ -9,9 +9,10 @@ from typing import Literal
 import click
 from pydantic import ValidationError
 
+from cw._flock import operator_close_lock_wait_seconds
 from cw.cli._base import handle_errors
 from cw.cli.routed_orphan_close import close_routed_result_sessions_for_ticket
-from cw.config import load_orchestrator_config, load_state
+from cw.config import load_orchestrator_config
 from cw.dev_queue import (
     DEFAULT_PRUNE_OLDER_THAN_DAYS,
     _prune_age_basis,
@@ -37,11 +38,11 @@ from cw.models import (
     DEFAULT_STAGE,
     OrchestratorEventType,
     QueueItemStatus,
-    SessionOrigin,
     Stage,
     TicketTask,
 )
 from cw.native_daemon import get_native_daemon_client
+from cw.reconcile.session_close import close_sessions_for_cancel
 from cw.ticket_view import ViewSources
 
 from ._group import dev_queue
@@ -627,15 +628,22 @@ def dev_queue_remove(
 @click.option("--client", "-c", "client", required=True, help="Client name")
 @handle_errors
 def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
-    """Cancel dev-queue task(s) and stop any running session."""
-    state = load_state()
+    """Cancel dev-queue task(s), stop any running session and mark it completed.
+
+    The session step waits at most 5s for the sessions lock; if it is busy the
+    worker is still stopped and the session's close is queued for the next
+    reconcile pass (exit stays 0).
+    """
     daemon = get_native_daemon_client()
     sources = ViewSources()
+    pending: list[str] = []
+    unrecorded: list[str] = []
     for index, ticket in enumerate(tickets):
         try:
-            # bounded=True (#2501): operator command; only read-only state and
-            # daemon-client setup precede the lock, and each earlier ticket is
-            # fully committed (queue write + daemon.stop) before the next one.
+            # bounded=True (#2501): operator command; only daemon-client setup
+            # precedes the lock, and each earlier ticket is fully committed
+            # (queue write, session close or queued close, daemon.stop) before
+            # the next one.
             cleared_session_ids = cancel_ticket(ticket, client, bounded=True)
         except LockTimeoutError:
             _report_partial_progress(
@@ -648,17 +656,38 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
                 ),
             )
             raise
-        for old_session_id in cleared_session_ids:
-            if old_session_id is not None:
-                sess = state.find_by_name_or_id(old_session_id)
-                if (
-                    sess is not None
-                    and sess.surface_ref is not None
-                    and sess.origin is SessionOrigin.DAEMON
-                ):
-                    daemon.stop(sess.surface_ref)
+        # #2694: flip the cleared sessions COMPLETED(USER), flip-only (the row is
+        # already CANCELLED) and with no dev-queue lock. After the first sessions
+        # lock timeout, later tickets only record their closes (one bounded wait
+        # per command, not per ticket).
+        outcome = close_sessions_for_cancel(
+            cleared_session_ids,
+            timeout_s=operator_close_lock_wait_seconds(),
+            skip_lock=bool(pending),
+        )
+        for surface_ref in outcome.surfaces_to_stop:
+            daemon.stop(surface_ref)
+        pending.extend(outcome.pending_ids)
+        unrecorded.extend(outcome.unrecorded_ids)
         click.echo(f"Cancelled {ticket} in {client} dev-queue.")
         echo_resulting_row(ticket, client, sources=sources)
+    _report_unclosed_sessions(pending, unrecorded)
+
+
+def _report_unclosed_sessions(pending: list[str], unrecorded: list[str]) -> None:
+    """Name the cancelled tickets' sessions the cancel could not mark completed."""
+    if pending:
+        click.echo(
+            f"QUEUED, session(s) {', '.join(pending)} not yet marked"
+            " completed: the sessions lock is busy; the worker was already stopped"
+            " and the close is applied by the next reconcile pass."
+        )
+    for session_id in unrecorded:
+        click.echo(
+            f"Session {session_id} was stopped but could not be marked completed"
+            f" or queued (sessions lock busy); run `cw spawn close {session_id}`.",
+            err=True,
+        )
 
 
 @dev_queue.command(name="clear")
