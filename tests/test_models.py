@@ -46,6 +46,7 @@ from cw.models import (
     WatchedPr,
     counts_toward_client_ceiling,
 )
+from cw.models.operator_resolution import OPERATOR_RESOLUTIONS_KEY, OperatorResolution
 from cw.review_finding_dispositions import FindingDisposition
 from tests.conftest import _make_daemon_session
 
@@ -1262,7 +1263,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 45
+        assert DEV_QUEUE_SCHEMA_VERSION == 46
 
     def test_ticket_task_old_row_without_codex_orphan_fields_defaults_none(
         self,
@@ -2765,6 +2766,62 @@ class TestMustFixOverrideField:
         store = DevQueueStore.model_validate(migrate_dev_queue(raw))
         assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION
         assert store.tasks[0].must_fix_override is None
+
+
+class TestOperatorResolutionsField:
+    """v46 (#2702): the row's append-only ``cw dev-queue resolve`` ledger."""
+
+    def _resolution(self, round_: int = 1) -> OperatorResolution:
+        return OperatorResolution(
+            text="1. Use the row.",
+            recorded_at=datetime(2026, 10, 16, 8, 0, tzinfo=UTC),
+            actor="octocat",
+            round=round_,
+        )
+
+    def test_key_names_the_field(self) -> None:
+        assert OPERATOR_RESOLUTIONS_KEY == "operator_resolutions"
+        assert OPERATOR_RESOLUTIONS_KEY in TicketTask.model_fields
+
+    def test_field_defaults_empty(self) -> None:
+        task = TicketTask(ticket_id="GEN-1", client="acme")
+        assert task.operator_resolutions == []
+
+    def test_model_round_trips_through_json_mode_dump(self) -> None:
+        resolution = self._resolution()
+        dumped = resolution.model_dump(mode="json")
+        assert dumped == {
+            "text": "1. Use the row.",
+            "recorded_at": "2026-10-16T08:00:00Z",
+            "actor": "octocat",
+            "round": 1,
+        }
+        assert OperatorResolution.model_validate(dumped) == resolution
+
+    def test_round_zero_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            self._resolution(round_=0)
+
+    def test_previous_schema_version_row_loads_with_empty_list(self) -> None:
+        """A pre-v46 row carries no key and loads with ``[]`` -- no migration
+        filler exists for it (the v42/v44/v45 precedent)."""
+        from cw.dev_queue.migrate import migrate_dev_queue
+
+        raw: dict[str, object] = {
+            "schema_version": DEV_QUEUE_SCHEMA_VERSION - 1,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-2702",
+                    "client": "acme",
+                    "priority": 0,
+                    "status": "blocked_on_user",
+                    "stage": "plan",
+                }
+            ],
+        }
+        store = DevQueueStore.model_validate(migrate_dev_queue(raw))
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION
+        assert store.tasks[0].operator_resolutions == []
 
 
 class TestClaimedAtField:

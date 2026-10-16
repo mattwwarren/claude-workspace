@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from cw.models.enums import OCCUPIED_LANE_STATUSES, QueueItemStatus, ReapReason, Stage
 from cw.models.events import PrState, WatchedPr
+from cw.models.operator_resolution import OperatorResolution
 
 # Runtime (not TYPE_CHECKING) because ``finding_dispositions``' annotation
 # resolves at class-build time under ``from __future__ import annotations``,
@@ -218,7 +219,11 @@ from cw.review_finding_dispositions import FindingDisposition
 #      worker's surface. ``| None`` with a ``None`` default, so no migration
 #      filler is needed (same as v13/v38/v40/v42/v44); a pre-v45 row recorded
 #      no unconfirmed worker.
-DEV_QUEUE_SCHEMA_VERSION = 45
+# v46: added TicketTask.operator_resolutions (GitHub #2702) — the append-only
+#      ledger `cw dev-queue resolve` writes. ``Field(default_factory=list)``,
+#      so no migration filler is needed; a pre-v46 row recorded no
+#      resolutions.
+DEV_QUEUE_SCHEMA_VERSION = 46
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -933,6 +938,10 @@ class TicketTask(BaseModel):
     # the ticket; clearing it on requeue would re-open every finding the
     # operator has already closed, which IS the bug this field fixes.
     finding_dispositions: dict[str, FindingDisposition] = Field(default_factory=dict)
+    # GitHub #2702 — the operator's `cw dev-queue resolve` answers, in round
+    # order. No clear site, like finding_dispositions: durable and
+    # append-only, it survives every requeue.
+    operator_resolutions: list[OperatorResolution] = Field(default_factory=list)
     # GitHub #1713 — durable detection latch for
     # cw.reconcile.tasks.release_stale_gated_tasks: stamped when a
     # BLOCKED_ON_USER row's gate condition is observed to have cleared (its

@@ -263,6 +263,8 @@ class OrchestratorEventType(StrEnum):
     # --priority` edits a queued row's priority in place.
     TICKET_REPRIORITIZED = "ticket.reprioritized"
     TICKET_APPROVED = "ticket.approved"
+    # #2702 -- cw dev-queue resolve recorded an operator resolution on the row.
+    OPERATOR_RESOLUTION_RECORDED = "ticket.resolution_recorded"
     PLAN_APPROVAL_REVOKED = "plan.approval_revoked"
     # #2311 -- advisory audit trail: `cw dev-queue approve` found the ticket
     # body changed since the plan stage last evaluated it. Never blocks.
