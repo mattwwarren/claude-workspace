@@ -4091,6 +4091,43 @@ class TestCLIDevQueueCancel:
         assert result.exit_code == 0, result.output
         assert self._session().status == SessionStatus.COMPLETED
 
+    def test_session_resumed_during_the_cancel_is_left_running(
+        self,
+        tmp_dev_queue: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """Cancel, resume (new incarnation), apply: the newer one keeps running."""
+        from cw.config import load_state, save_state
+        from cw.reconcile.session_close import pending_queued_closes
+
+        self._use_daemon(monkeypatch, mock_native_daemon)
+        self._seed_running()
+        real_cancel = cancel_ticket
+
+        def _cancel_then_resume(
+            ticket_id: str, client: str, *, bounded: bool = False
+        ) -> list[str | None]:
+            cleared = real_cancel(ticket_id, client, bounded=bounded)
+            state = load_state()
+            state.sessions[0].resumed_at = datetime.now(UTC)
+            state.sessions[0].surface_ref = "ref-resumed"
+            save_state(state)
+            return cleared
+
+        monkeypatch.setattr("cw.cli.dev_queue.crud.cancel_ticket", _cancel_then_resume)
+
+        result = self._cancel()
+
+        assert result.exit_code == 0, result.output
+        resumed = self._session()
+        assert resumed.status == SessionStatus.ACTIVE
+        assert resumed.surface_ref == "ref-resumed"
+        assert mock_native_daemon.stop_calls == []
+        assert pending_queued_closes() == []
+        assert "was resumed into a new incarnation" in result.output
+        assert "cw spawn close cancel-s1" in result.output
+
     def test_repeat_cancel_closes_nothing(
         self,
         tmp_dev_queue: Path,

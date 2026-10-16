@@ -42,7 +42,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import get_native_daemon_client
-from cw.reconcile.session_close import close_sessions_for_cancel
+from cw.reconcile.session_close import close_sessions_for_cancel, read_cancel_fence
 from cw.ticket_view import ViewSources
 
 from ._group import dev_queue
@@ -638,7 +638,11 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
     sources = ViewSources()
     pending: list[str] = []
     unrecorded: list[str] = []
+    refused: list[str] = []
     for index, ticket in enumerate(tickets):
+        # #2694: the session incarnations this cancel is about, read before the
+        # row is cancelled; a session resumed after it is left running.
+        fence = read_cancel_fence()
         try:
             # bounded=True (#2501): operator command; only daemon-client setup
             # precedes the lock, and each earlier ticket is fully committed
@@ -662,6 +666,7 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
         # per command, not per ticket).
         outcome = close_sessions_for_cancel(
             cleared_session_ids,
+            fence=fence,
             timeout_s=operator_close_lock_wait_seconds(),
             skip_lock=bool(pending),
         )
@@ -669,12 +674,15 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
             daemon.stop(surface_ref)
         pending.extend(outcome.pending_ids)
         unrecorded.extend(outcome.unrecorded_ids)
+        refused.extend(outcome.refused_ids)
         click.echo(f"Cancelled {ticket} in {client} dev-queue.")
         echo_resulting_row(ticket, client, sources=sources)
-    _report_unclosed_sessions(pending, unrecorded)
+    _report_unclosed_sessions(pending, unrecorded, refused)
 
 
-def _report_unclosed_sessions(pending: list[str], unrecorded: list[str]) -> None:
+def _report_unclosed_sessions(
+    pending: list[str], unrecorded: list[str], refused: list[str]
+) -> None:
     """Name the cancelled tickets' sessions the cancel could not mark completed."""
     if pending:
         click.echo(
@@ -686,6 +694,13 @@ def _report_unclosed_sessions(pending: list[str], unrecorded: list[str]) -> None
         click.echo(
             f"Session {session_id} was stopped but could not be marked completed"
             f" or queued (sessions lock busy); run `cw spawn close {session_id}`.",
+            err=True,
+        )
+    for session_id in refused:
+        click.echo(
+            f"Session {session_id} was resumed into a new incarnation after the"
+            " cancel read it; it was left running and not stopped. Run"
+            f" `cw spawn close {session_id}` if it should not run.",
             err=True,
         )
 

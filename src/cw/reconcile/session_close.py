@@ -9,15 +9,17 @@ Three parts, kept together because they share one close body:
   so the body lives here.
 - A lock-free queued-close store under ``state_dir()/queued_closes/``: one
   JSON file per session, written atomically, fenced to the session
-  incarnation (``resumed_at`` + ``surface_ref``) it was issued against. An
-  operator close that met a held sessions lock records itself here instead
-  of waiting, and the file is the retry path.
+  incarnation (``started_at`` + ``resumed_at`` + ``surface_ref``) it was
+  issued against. An operator close that met a held sessions lock records
+  itself here instead of waiting, and the file is the retry path.
 - Two appliers that share one per-entry function (``_apply_entry``):
   :func:`apply_queued_closes`, called inside reconcile's sessions-lock hold
   (ADR-0005: no second write path), and :func:`close_sessions_for_cancel`,
-  the cancel command's inline attempt. An entry's ``origin`` is the only
-  row-handling switch: ``spawn_close`` is a full close (route a staged
-  result, else cancel the RUNNING row, #2458), ``cancel`` is flip-only.
+  the cancel command's inline attempt, fenced to the incarnations
+  :func:`read_cancel_fence` read before the row was cancelled. An entry's
+  ``origin`` is the only row-handling switch: ``spawn_close`` is a full
+  close (route a staged result, else cancel the RUNNING row, #2458),
+  ``cancel`` is flip-only.
 
 Authority (ADR-0006 invariant 2): every close here is a recorded explicit
 operator command, never a policy reap. Nothing here calls a daemon ``stop``
@@ -64,7 +66,7 @@ from cw.reconcile.deferred import defer_surface_stop
 from cw.result import reconstruct_staged_sentinel
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
     from pathlib import Path
 
     from cw.models import CwState, Session
@@ -87,11 +89,19 @@ _SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 @dataclass(frozen=True, slots=True)
 class QueuedClose:
-    """One recorded operator close awaiting the sessions lock."""
+    """One recorded operator close awaiting the sessions lock.
+
+    ``started_at``/``resumed_at``/``surface_ref`` fence it to the session
+    incarnation it was issued against (``claude_session_id`` is not part of
+    the fence: reconcile backfills it within one incarnation). ``started_at``
+    is ``None`` only for an entry written before it was recorded; such an
+    entry can never match a session, so it is voided rather than applied.
+    """
 
     session_id: str
     queued_at: datetime
     origin: QueuedCloseOrigin
+    started_at: datetime | None
     resumed_at: datetime | None
     surface_ref: str | None
 
@@ -100,16 +110,20 @@ class QueuedClose:
 class CancelCloseOutcome:
     """What ``cw dev-queue cancel``'s session step did.
 
-    *surfaces_to_stop*: every resolved DAEMON session's surface (the caller
-    stops them, as cancel always has). *pending_ids*: sessions whose close is
-    recorded but not applied (the sessions lock was busy). *unrecorded_ids*:
-    sessions neither closed nor recorded (the entry write failed and the lock
-    was busy), which need a manual ``cw spawn close``.
+    *surfaces_to_stop*: the surface of every resolved DAEMON session still in
+    the incarnation the cancel fenced (the caller stops them, as cancel
+    always has). *pending_ids*: sessions whose close is recorded but not
+    applied (the sessions lock was busy). *unrecorded_ids*: sessions neither
+    closed nor recorded (the entry write failed and the lock was busy), which
+    need a manual ``cw spawn close``. *refused_ids*: sessions resumed into a
+    new incarnation since the cancel's snapshot; they are neither closed nor
+    stopped.
     """
 
     surfaces_to_stop: tuple[str, ...] = ()
     pending_ids: tuple[str, ...] = ()
     unrecorded_ids: tuple[str, ...] = ()
+    refused_ids: tuple[str, ...] = ()
 
 
 class _Outcome(StrEnum):
@@ -216,6 +230,10 @@ def close_session_in_state(sess: Session, *, settle_row: bool = True) -> str | N
 # ---------------------------------------------------------------------------
 
 
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
 def queued_closes_dir() -> Path:
     """Directory of queued-close entries (read at call time; tests redirect it)."""
     return state_dir() / QUEUED_CLOSES_DIRNAME
@@ -235,6 +253,7 @@ def _entry_for(
         session_id=session.id,
         queued_at=now,
         origin=origin,
+        started_at=session.started_at,
         resumed_at=session.resumed_at,
         surface_ref=session.surface_ref,
     )
@@ -246,7 +265,8 @@ def _write_entry(entry: QueuedClose) -> Path:
         "session_id": entry.session_id,
         "queued_at": entry.queued_at.isoformat(),
         "origin": entry.origin,
-        "resumed_at": entry.resumed_at.isoformat() if entry.resumed_at else None,
+        "started_at": _iso(entry.started_at),
+        "resumed_at": _iso(entry.resumed_at),
         "surface_ref": entry.surface_ref,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -301,6 +321,7 @@ def _parse_entry(raw: str) -> QueuedClose:
         session_id=session_id,
         queued_at=queued_at,
         origin=cast("QueuedCloseOrigin", origin),
+        started_at=_optional_time(data.get("started_at")),
         resumed_at=_optional_time(data.get("resumed_at")),
         surface_ref=surface_ref,
     )
@@ -389,15 +410,13 @@ def _clear_settled(session_ids: Iterable[str]) -> None:
 def _fence_mismatch(sess: Session, entry: QueuedClose) -> list[str]:
     """The incarnation fields that changed since *entry* was recorded."""
     mismatched: list[str] = []
+    if sess.started_at != entry.started_at:
+        mismatched.append("started_at")
     if sess.resumed_at != entry.resumed_at:
         mismatched.append("resumed_at")
     if sess.surface_ref != entry.surface_ref:
         mismatched.append("surface_ref")
     return mismatched
-
-
-def _iso(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
 
 
 def _apply_entry(state: CwState, entry: QueuedClose) -> _EntryResult:
@@ -421,12 +440,15 @@ def _apply_entry(state: CwState, entry: QueuedClose) -> _EntryResult:
     if mismatched:
         _log.warning(
             "queued_close_void: session=%s origin=%s queued_at=%s mismatched=%s"
+            " entry_started_at=%s current_started_at=%s"
             " entry_resumed_at=%s current_resumed_at=%s entry_surface_ref=%s"
             " current_surface_ref=%s",
             entry.session_id,
             entry.origin,
             entry.queued_at.isoformat(),
             ",".join(mismatched),
+            _iso(entry.started_at),
+            _iso(sess.started_at),
             _iso(entry.resumed_at),
             _iso(sess.resumed_at),
             entry.surface_ref,
@@ -513,58 +535,118 @@ def _record_entry(entry: QueuedClose) -> bool:
     return True
 
 
+def read_cancel_fence() -> dict[str, Session]:
+    """Snapshot every DAEMON session's incarnation, BEFORE ``cancel_ticket`` runs.
+
+    Lock-free. :func:`close_sessions_for_cancel` acts on a cleared session
+    only while it is still the incarnation recorded here, so a session
+    resumed after the operator's cancel (a new incarnation the cancelled row
+    never ran) is left running instead of being closed and stopped.
+    """
+    return {s.id: s for s in load_state().sessions if s.origin is SessionOrigin.DAEMON}
+
+
+def _fenced_sessions(
+    wanted: set[str], fence: Mapping[str, Session], now: datetime
+) -> tuple[list[Session], list[str]]:
+    """The cleared DAEMON sessions still in their fenced incarnation, and the rest.
+
+    A session absent from *fence* was created after the snapshot (a fresh
+    spawn the row was bound to), so there is no older incarnation to confuse
+    it with and its current one is used.
+    """
+    matched: list[Session] = []
+    refused: list[str] = []
+    for sess in load_state().sessions:
+        if sess.id not in wanted or sess.origin is not SessionOrigin.DAEMON:
+            continue
+        fenced = _entry_for(fence.get(sess.id, sess), origin=_CANCEL_ORIGIN, now=now)
+        mismatched = _fence_mismatch(sess, fenced)
+        if not mismatched:
+            matched.append(sess)
+            continue
+        _log.warning(
+            "cancel_close_refused: session=%s mismatched=%s"
+            " fenced_started_at=%s current_started_at=%s"
+            " fenced_resumed_at=%s current_resumed_at=%s"
+            " fenced_surface_ref=%s current_surface_ref=%s action=left_running",
+            sess.id,
+            ",".join(mismatched),
+            _iso(fenced.started_at),
+            _iso(sess.started_at),
+            _iso(fenced.resumed_at),
+            _iso(sess.resumed_at),
+            fenced.surface_ref,
+            sess.surface_ref,
+        )
+        refused.append(sess.id)
+    return matched, refused
+
+
 def close_sessions_for_cancel(
-    session_ids: Iterable[str | None], *, timeout_s: float, skip_lock: bool
+    session_ids: Iterable[str | None],
+    *,
+    fence: Mapping[str, Session],
+    timeout_s: float,
+    skip_lock: bool,
 ) -> CancelCloseOutcome:
     """Close the sessions ``cancel_ticket`` just unbound from their rows.
 
+    *fence* is :func:`read_cancel_fence`, taken before ``cancel_ticket``.
     Resolves each id with one lock-free read taken AFTER ``cancel_ticket``
-    (so a session created since the command started is seen). For every live
-    DAEMON session it writes a ``cancel`` entry FIRST, then makes one bounded
-    sessions-lock attempt of *timeout_s* that applies the entries flip-only
-    and clears them. On a timeout -- or with *skip_lock*, after an earlier
-    ticket's attempt already timed out -- the entries stay for the next
-    reconcile pass. USER-origin and unknown ids are skipped; TERMINAL
-    sessions are not flipped but their surfaces are still returned, as cancel
-    always stopped every DAEMON session it cleared.
+    (so a session created since the snapshot is seen); a session resumed
+    into a new incarnation since the snapshot is refused (logged, neither
+    closed nor stopped). For every other live DAEMON session it writes a
+    ``cancel`` entry FIRST, then makes one bounded sessions-lock attempt of
+    *timeout_s* that applies the entries flip-only (re-checking the fence
+    under the lock) and clears them. On a timeout -- or with *skip_lock*,
+    after an earlier ticket's attempt already timed out -- the entries stay
+    for the next reconcile pass. USER-origin and unknown ids are skipped;
+    TERMINAL sessions are not flipped but their surfaces are still returned,
+    as cancel always stopped every DAEMON session it cleared.
     """
     wanted = {sid for sid in session_ids if sid is not None}
     if not wanted:
         return CancelCloseOutcome()
-    sessions = [
-        s
-        for s in load_state().sessions
-        if s.id in wanted and s.origin is SessionOrigin.DAEMON
-    ]
-    surfaces = tuple(s.surface_ref for s in sessions if s.surface_ref is not None)
     now = datetime.now(UTC)
+    sessions, refused = _fenced_sessions(wanted, fence, now)
     entries = [
         _entry_for(s, origin=_CANCEL_ORIGIN, now=now)
         for s in sessions
         if s.status not in TERMINAL_SESSION_STATUSES
     ]
     unrecorded = {entry.session_id for entry in entries if not _record_entry(entry)}
-    settled: set[str] = set()
+    results: dict[str, _EntryResult] = {}
 
     def _flip(state: CwState) -> None:
         for entry in entries:
-            if _apply_entry_isolated(state, entry) is not None:
-                settled.add(entry.session_id)
+            result = _apply_entry_isolated(state, entry)
+            if result is not None:
+                results[entry.session_id] = result
 
     if entries and not skip_lock:
         with contextlib.suppress(SessionsLockTimeoutError):
             mutate_state(_flip, bounded=True, timeout_s=timeout_s)
-    _clear_settled(settled - unrecorded)
+    _clear_settled(set(results) - unrecorded)
+    voided = {sid for sid, r in results.items() if r.outcome is _Outcome.VOID}
     return CancelCloseOutcome(
-        surfaces_to_stop=surfaces,
+        surfaces_to_stop=tuple(
+            s.surface_ref
+            for s in sessions
+            if s.surface_ref is not None and s.id not in voided
+        ),
         pending_ids=tuple(
             e.session_id
             for e in entries
-            if e.session_id not in settled and e.session_id not in unrecorded
+            if e.session_id not in results and e.session_id not in unrecorded
         ),
         unrecorded_ids=tuple(
             e.session_id
             for e in entries
-            if e.session_id in unrecorded and e.session_id not in settled
+            if e.session_id in unrecorded and e.session_id not in results
+        ),
+        refused_ids=(
+            *refused,
+            *(e.session_id for e in entries if e.session_id in voided),
         ),
     )

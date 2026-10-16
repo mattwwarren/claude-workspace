@@ -686,9 +686,16 @@ bounded caller keeps the 60 s default. A timeout names the recorded holder
   run; the message prints the `cw dev-queue requeue <T> -c <C>
   --from-cancelled` to run once the close has applied.
 - To withdraw a queued close, delete its file. An entry is fenced to the
-  session incarnation it was issued against: if the session is resumed
-  first, the entry is voided (logged `queued_close_void`) instead of closing
-  the new incarnation.
+  session incarnation it was issued against (`started_at`, `resumed_at`,
+  `surface_ref`): if the session is resumed first, the entry is voided
+  (logged `queued_close_void`) instead of closing the new incarnation. An
+  entry with no `started_at` (written by a pre-release build) cannot prove
+  its incarnation and is voided the same way; re-run the close.
+- `cw dev-queue cancel` reads each session's incarnation before it cancels
+  the row. A session resumed after that read is a new incarnation the
+  cancelled row never ran: it is left running and not stopped (logged
+  `cancel_close_refused`; stderr names it), so run `cw spawn close <id>` if
+  it should stop.
 - `cw dev-queue cancel` now also marks the stopped session COMPLETED(USER)
   (flip-only: its row was already cancelled, so nothing is routed or
   re-cancelled; a TIMED_OUT session is left as is). If the sessions lock is

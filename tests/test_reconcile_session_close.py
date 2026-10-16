@@ -51,8 +51,14 @@ from cw.reconcile.session_close import (
     pending_queued_closes,
     queue_close,
     queued_closes_dir,
+    read_cancel_fence,
 )
-from tests.conftest import _FakeClock, _make_daemon_session, _make_ticket_task
+from tests.conftest import (
+    _FakeClock,
+    _hold_sessions_lock,
+    _make_daemon_session,
+    _make_ticket_task,
+)
 from tests.test_result import _valid_payload
 
 _LOGGER = "cw.reconcile.session_close"
@@ -161,6 +167,21 @@ def _apply(deferred: DeferredReconcileJobs | None = None) -> int:
         return apply_queued_closes(state, deferred=jobs)
 
 
+def _cancel_close(
+    session_ids: list[str | None],
+    *,
+    skip_lock: bool = False,
+    fence: dict[str, Session] | None = None,
+) -> CancelCloseOutcome:
+    """``close_sessions_for_cancel`` with the fence read now, unless given."""
+    return close_sessions_for_cancel(
+        session_ids,
+        fence=read_cancel_fence() if fence is None else fence,
+        timeout_s=5.0,
+        skip_lock=skip_lock,
+    )
+
+
 def _messages(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:
     return [r for r in caplog.records if r.getMessage().startswith(f"{event}:")]
 
@@ -176,8 +197,9 @@ def _entry_path(sid: str) -> Path:
 
 class TestStore:
     def test_queue_close_writes_the_fenced_entry(self, tmp_config_dir: Path) -> None:
+        started = _NOW - timedelta(hours=2)
         resumed = _NOW - timedelta(hours=1)
-        sess = _session(resumed_at=resumed)
+        sess = _session(started_at=started, resumed_at=resumed)
 
         path = queue_close(sess, origin="spawn_close", now=_NOW)
 
@@ -186,6 +208,7 @@ class TestStore:
             "session_id": "sess-1",
             "queued_at": _NOW.isoformat(),
             "origin": "spawn_close",
+            "started_at": started.isoformat(),
             "resumed_at": resumed.isoformat(),
             "surface_ref": "ref-sess-1",
         }
@@ -284,6 +307,16 @@ class TestStore:
                     "surface_ref": None,
                 }
             ),
+            json.dumps(
+                {
+                    "session_id": "sess-9",
+                    "queued_at": _NOW.isoformat(),
+                    "origin": "cancel",
+                    "started_at": ["2026"],
+                    "resumed_at": None,
+                    "surface_ref": None,
+                }
+            ),
         ],
         ids=[
             "zero-length",
@@ -296,6 +329,7 @@ class TestStore:
             "unsafe-session-id",
             "naive-queued-at",
             "resumed-at-wrong-type",
+            "started-at-wrong-type",
         ],
     )
     def test_corrupt_entries_are_removed_with_a_warning(
@@ -678,9 +712,11 @@ class TestApplyQueuedCloses:
     @pytest.mark.parametrize(
         ("field", "value", "mismatched"),
         [
+            ("started_at", _NOW - timedelta(days=3), "started_at"),
             ("resumed_at", _NOW, "resumed_at"),
             ("surface_ref", "ref-new", "surface_ref"),
         ],
+        ids=["reused-id-new-session", "resumed", "resumed-new-surface"],
     )
     def test_fence_mismatch_voids_the_entry(
         self,
@@ -709,10 +745,44 @@ class TestApplyQueuedCloses:
             f"queued_close_void: session=sess-1 origin=spawn_close"
             f" queued_at={_NOW.isoformat()} mismatched={mismatched} "
         )
+        assert f"entry_started_at={sess.started_at.isoformat()}" in message
+        current_started = value if field == "started_at" else sess.started_at
+        assert isinstance(current_started, datetime)
+        assert f"current_started_at={current_started.isoformat()}" in message
         assert "entry_resumed_at=None" in message
         assert "entry_surface_ref=ref-sess-1" in message
         current_surface = value if field == "surface_ref" else "ref-sess-1"
         assert f"current_surface_ref={current_surface}" in message
+
+    def test_an_entry_without_started_at_is_voided_not_applied(
+        self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """An entry in the pre-``started_at`` shape cannot prove its incarnation."""
+        sess = _session()
+        _seed(sess)
+        queued_closes_dir().mkdir(parents=True)
+        _entry_path("sess-1").write_text(
+            json.dumps(
+                {
+                    "session_id": "sess-1",
+                    "queued_at": _NOW.isoformat(),
+                    "origin": "cancel",
+                    "resumed_at": None,
+                    "surface_ref": "ref-sess-1",
+                }
+            )
+        )
+        jobs = DeferredReconcileJobs()
+        caplog.set_level(logging.WARNING, logger=_LOGGER)
+
+        assert _apply(jobs) == 0
+
+        assert _stored("sess-1").status == SessionStatus.ACTIVE
+        assert jobs.post_lock == []
+        assert pending_queued_closes() == []
+        (record,) = _messages(caplog, "queued_close_void")
+        assert "mismatched=started_at " in record.getMessage()
+        assert "entry_started_at=None" in record.getMessage()
 
     def test_both_fence_fields_mismatched_are_named(
         self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
@@ -860,7 +930,7 @@ class TestCloseSessionsForCancel:
         _seed(_session())
         _forbid_dev_queue_steps(monkeypatch)
 
-        outcome = close_sessions_for_cancel(["sess-1"], timeout_s=5.0, skip_lock=False)
+        outcome = _cancel_close(["sess-1"])
 
         assert outcome == CancelCloseOutcome(
             surfaces_to_stop=("ref-sess-1",), pending_ids=(), unrecorded_ids=()
@@ -873,7 +943,7 @@ class TestCloseSessionsForCancel:
     def test_user_origin_session_is_untouched(self, tmp_config_dir: Path) -> None:
         _seed(_session(origin=SessionOrigin.USER))
 
-        outcome = close_sessions_for_cancel(["sess-1"], timeout_s=5.0, skip_lock=False)
+        outcome = _cancel_close(["sess-1"])
 
         assert outcome == CancelCloseOutcome((), (), ())
         assert _stored("sess-1").status == SessionStatus.ACTIVE
@@ -887,7 +957,7 @@ class TestCloseSessionsForCancel:
     ) -> None:
         _seed(_session(status=status))
 
-        outcome = close_sessions_for_cancel(["sess-1"], timeout_s=5.0, skip_lock=False)
+        outcome = _cancel_close(["sess-1"])
 
         assert outcome.surfaces_to_stop == ("ref-sess-1",)
         assert outcome.pending_ids == ()
@@ -901,9 +971,7 @@ class TestCloseSessionsForCancel:
         clock = _FakeClock()
         monkeypatch.setattr(_flock, "time", clock)
 
-        outcome = close_sessions_for_cancel(
-            [None, "nobody"], timeout_s=5.0, skip_lock=False
-        )
+        outcome = _cancel_close([None, "nobody"])
 
         assert outcome == CancelCloseOutcome((), (), ())
         assert _stored("sess-1").status == SessionStatus.ACTIVE
@@ -915,7 +983,7 @@ class TestCloseSessionsForCancel:
         clock = _FakeClock()
         monkeypatch.setattr(_flock, "time", clock)
 
-        outcome = close_sessions_for_cancel(["sess-1"], timeout_s=5.0, skip_lock=False)
+        outcome = _cancel_close(["sess-1"])
 
         assert outcome == CancelCloseOutcome(
             surfaces_to_stop=("ref-sess-1",),
@@ -935,7 +1003,7 @@ class TestCloseSessionsForCancel:
         clock = _FakeClock()
         monkeypatch.setattr(_flock, "time", clock)
 
-        outcome = close_sessions_for_cancel(["sess-1"], timeout_s=5.0, skip_lock=True)
+        outcome = _cancel_close(["sess-1"], skip_lock=True)
 
         assert outcome.pending_ids == ("sess-1",)
         assert outcome.surfaces_to_stop == ("ref-sess-1",)
@@ -953,11 +1021,71 @@ class TestCloseSessionsForCancel:
             lambda: CwState(sessions=[stale]),
         )
 
-        outcome = close_sessions_for_cancel(["sess-1"], timeout_s=5.0, skip_lock=False)
+        outcome = _cancel_close(["sess-1"])
 
         assert outcome.pending_ids == ()
+        assert outcome.surfaces_to_stop == ()
+        assert outcome.refused_ids == ("sess-1",)
         assert _stored("sess-1").status == SessionStatus.ACTIVE
         assert pending_queued_closes() == []
+
+    def test_resumed_after_the_cancel_is_refused_and_left_running(
+        self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Cancel, resume (a new incarnation), apply: the newer one keeps running."""
+        _seed(_session())
+        fence = read_cancel_fence()
+        _seed(_session(resumed_at=_NOW, surface_ref="ref-new"))
+        caplog.set_level(logging.WARNING, logger=_LOGGER)
+
+        outcome = _cancel_close(["sess-1"], fence=fence)
+
+        assert outcome == CancelCloseOutcome(refused_ids=("sess-1",))
+        resumed = _stored("sess-1")
+        assert resumed.status == SessionStatus.ACTIVE
+        assert resumed.surface_ref == "ref-new"
+        assert pending_queued_closes() == []
+        (record,) = _messages(caplog, "cancel_close_refused")
+        assert record.levelno == logging.WARNING
+        message = record.getMessage()
+        assert message.startswith(
+            "cancel_close_refused: session=sess-1 mismatched=resumed_at,surface_ref "
+        )
+        assert "fenced_surface_ref=ref-sess-1 current_surface_ref=ref-new" in message
+        assert message.endswith("action=left_running")
+
+    def test_a_queued_cancel_voids_once_the_session_is_resumed(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed(_session())
+        monkeypatch.setattr(_flock, "time", _FakeClock())
+        with _hold_sessions_lock():
+            queued = _cancel_close(["sess-1"])
+        assert queued.pending_ids == ("sess-1",)
+        _seed(_session(resumed_at=_NOW, surface_ref="ref-new"))
+        jobs = DeferredReconcileJobs()
+
+        assert _apply(jobs) == 0
+
+        assert _stored("sess-1").status == SessionStatus.ACTIVE
+        assert jobs.post_lock == []
+        assert pending_queued_closes() == []
+
+    def test_a_session_absent_from_the_fence_uses_its_current_incarnation(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A session first seen after the snapshot is a fresh spawn: no older one."""
+        _seed(_session())
+
+        outcome = _cancel_close(["sess-1"], fence={})
+
+        assert outcome.surfaces_to_stop == ("ref-sess-1",)
+        assert _stored("sess-1").status == SessionStatus.COMPLETED
+
+    def test_the_fence_holds_only_daemon_sessions(self, tmp_config_dir: Path) -> None:
+        _seed(_session("d-1"), _session("u-1", origin=SessionOrigin.USER))
+
+        assert set(read_cancel_fence()) == {"d-1"}
 
     def test_entry_write_failure_is_reported_and_the_lock_still_tried(
         self, held_sessions_lock: Path, monkeypatch: pytest.MonkeyPatch
@@ -971,7 +1099,7 @@ class TestCloseSessionsForCancel:
 
         monkeypatch.setattr("cw.reconcile.session_close.atomic_write_text", _disk_full)
 
-        outcome = close_sessions_for_cancel(["sess-1"], timeout_s=5.0, skip_lock=False)
+        outcome = _cancel_close(["sess-1"])
 
         assert outcome.unrecorded_ids == ("sess-1",)
         assert outcome.pending_ids == ()
@@ -988,7 +1116,7 @@ class TestCloseSessionsForCancel:
 
         monkeypatch.setattr("cw.reconcile.session_close.atomic_write_text", _disk_full)
 
-        outcome = close_sessions_for_cancel(["sess-1"], timeout_s=5.0, skip_lock=False)
+        outcome = _cancel_close(["sess-1"])
 
         assert outcome.unrecorded_ids == ()
         assert _stored("sess-1").status == SessionStatus.COMPLETED
