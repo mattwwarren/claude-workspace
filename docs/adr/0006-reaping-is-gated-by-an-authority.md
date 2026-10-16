@@ -81,7 +81,11 @@ and #402 sit in.
   `SESSION_REAP_PROPOSED` from the event bus and authorizes or salvages
   per lane. Authorizing a reap in lane X never reaps a session in lane Y.
 - **`cw status`/`list`/`start`** trigger detection only; never reap under
-  the default policy. They surface `REAP_PROPOSED` distinctly.
+  the default policy. They surface `REAP_PROPOSED` distinctly. (Their
+  reconcile pass does apply operator closes that `cw spawn close` or
+  `cw dev-queue cancel` recorded while the sessions lock was busy, #2694;
+  that is the explicit-operator-command arm of invariant 2, not a policy
+  reap.)
 - **#542 specifically:** a sentinel-aware `wait` must observe
   `REAP_PROPOSED`/`BLOCKED_ON_USER` and resolve to ATTENTION rather than
   riding the wall-clock to 124 — the gated path makes that state

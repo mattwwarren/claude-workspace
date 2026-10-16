@@ -668,6 +668,42 @@ exited cleanly), skip straight to `cw dev-queue remove`; use `cw done
 <session-name>` only for a session that never had a live daemon surface to
 close.
 
+**When the sessions lock is busy (#2694).** `cw spawn close` waits at most
+5 s for the sessions lock (`min(CW_SESSIONS_LOCK_TIMEOUT_S, 5)`; an unset or
+invalid value means 5 s). `cw list` / `cw status` also wait 5 s, unless
+`CW_SESSIONS_LOCK_TIMEOUT_S` is set, which they honour as-is; every other
+bounded caller keeps the 60 s default. A timeout names the recorded holder
+(pid, command, held-for); confirm it with `lsof`.
+
+- A timed-out `cw spawn close` records the close in
+  `~/.local/share/cw/queued_closes/<session-id>.json` and **exits 1** with
+  `QUEUED, NOT YET CLOSED`: the session is still live, so a `cw spawn close X
+  && ...` chain stops. The next reconcile pass (the serve tick, or any `cw
+  list` / `cw status`) applies it, exactly as an inline close would (staged
+  result routed, else the RUNNING row cancelled). It is not applied while
+  serve itself is the wedged holder — restart serve if `dispatch.tick` has
+  stopped. Re-running the close is safe. With `--requeue` the requeue is not
+  run; the message prints the `cw dev-queue requeue <T> -c <C>
+  --from-cancelled` to run once the close has applied.
+- To withdraw a queued close, delete its file. An entry is fenced to the
+  session incarnation it was issued against: if the session is resumed
+  first, the entry is voided (logged `queued_close_void`) instead of closing
+  the new incarnation.
+- `cw dev-queue cancel` now also marks the stopped session COMPLETED(USER)
+  (flip-only: its row was already cancelled, so nothing is routed or
+  re-cancelled; a TIMED_OUT session is left as is). If the sessions lock is
+  busy it still stops the worker, prints one `QUEUED, session(s) ... not yet
+  marked completed` line and **exits 0**; the closes apply on the next
+  reconcile pass. Like `cw spawn close`, the flip follows an unconfirmed
+  `daemon.stop`, and a completed session no longer protects its worktree, so
+  wait for the worker to leave the roster before `requeue --from-cancelled`
+  into the same worktree. If cancel was killed after the row was cancelled
+  but before the session close was recorded, a repeat cancel is a no-op;
+  run `cw spawn close <session-id>` instead.
+- Applied, void and failed queued closes are logged at WARNING
+  (`queued_close_applied` / `queued_close_void` / `queued_close_failed`); a
+  failing entry is kept and retried every pass until fixed or deleted.
+
 If the task is already in a terminal queue status but wedged (e.g.,
 `RUNNING` with no live session), `cw doctor --reap` detects and repairs
 common wedge conditions:
@@ -1710,9 +1746,16 @@ A `session.needs_attention` with `paused_status=dispatch_loop_stale` (#1875)
 says: **this client has pending work, its last `dispatch.tick` is older than
 90s, and it is not sitting behind a live executor-blocked marker.** It recurs
 every `dispatch_stale_notify_interval_minutes` (default 15) until the
-condition clears. `breadcrumbs` carries `pending=<n> age_s=<n>`; the client
-is in the `client` field (`ticket_id` is null — this signal is client-scoped,
-not ticket-scoped).
+condition clears. `breadcrumbs` carries `pending=<n> age_s=<n> skip=<reason>
+occupied=<n> running=<r>/<cap> orphan_sessions=<none | <id> (<ticket>), ...>`
+(#2694); the client is in the `client` field (`ticket_id` is null — this
+signal is client-scoped, not ticket-scoped). The `skip=`, `occupied=` and
+`running=` fields are the **last** tick's (`age_s` ago), so `skip=cap_full`
+or `skip=lane_cap_blocked` says the loop was ticking but full; the
+`orphan_sessions=` list is read **now** and names ceiling-counted sessions
+no occupied row owns — the usual reason a client sits at `cap_full` with
+nothing RUNNING (close each with `cw spawn close <id>`). A degraded page
+(state unreadable) carries only the old `pending=<n> age_s=<n>`.
 
 Triage in this order — the page does *not* tell you which of these it is:
 
@@ -1774,6 +1817,10 @@ A hold is recorded when it was **held or waited for at least 0.25 s**.
 - *Completed holds only.* A hold still in progress, or a process killed
   mid-hold, leaves no record. For a lock that is held right now, find the
   holder with `lsof ~/.local/share/cw/.sessions.lock` (or `.dev_queue.lock`).
+  The sessions lock also records its cw holder (`pid`, command path,
+  acquired-at) while held, and a bounded sessions-lock timeout names it
+  (#2694); `lsof` stays the confirmation, since a record proves liveness, not
+  identity.
   A bounded acquisition that timed out was never held and leaves no record
   either.
 - *Counts are lower bounds.* Records are capped at 1 MiB per UTC day. Past

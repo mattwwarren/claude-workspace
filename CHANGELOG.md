@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A busy sessions lock queues an operator close instead of hanging it (#2694).** `cw spawn close` and the `cw dev-queue cancel` session step make one bounded sessions-lock attempt; on a timeout they record the close in `state_dir()/queued_closes/<session-id>.json` (atomic, lock-free, fenced to the session's `resumed_at` + `surface_ref` so a resumed incarnation voids it) and the next reconcile pass (the serve tick, or any `cw list`/`cw status`/`cw start`) applies it under its existing lock hold. A `spawn_close` entry is a full close (a staged `cw result emit` result is routed, else the RUNNING row cancelled, #2458); a `cancel` entry only marks the session COMPLETED(USER). Applied, void, unknown-session, failed and corrupt entries each log one WARNING (`queued_close_*`); a failing entry is kept and retried, a corrupt one removed. Deleting the file withdraws the close.
+- **A sessions-lock timeout names its holder (#2694).** While a cw process holds `.sessions.lock` it records `{pid, cmd, acquired_at}` in it (the Click command path, never option values; best effort, cleared before release), and the lock is opened `"a+"` so a waiting contender no longer erases the record. The timeout message then reads `Recorded holder: pid <pid> (`<cmd>`), held for <n>s; confirm with `lsof <path>`.` instead of "the lock file records no PID". The other state locks are unchanged.
+
+### Changed
+
+- **`cw list`, `cw status`, `cw spawn close` and the `cw dev-queue cancel` session step wait 5 s, not 60 s, for the sessions lock (#2694).** `cw list`/`cw status` honour an explicit `CW_SESSIONS_LOCK_TIMEOUT_S` and otherwise fail after 5 s (exit 1, holder named, no stale-state output); a legitimate hold longer than that now fails them unless the env var is raised. `cw spawn close` and the cancel step use `min(CW_SESSIONS_LOCK_TIMEOUT_S, 5 s)`. Every other bounded caller (`cw start`, `cw spawn complete`, `cw done`, `cw doctor --reap`, the serve tick) keeps the 60 s default. The bound covers the lock wait only, not reconcile's lockless pre-passes.
+- **A queued `cw spawn close` exits 1; a queued cancel exits 0 (#2694).** `cw spawn close` behind a held lock prints `QUEUED, NOT YET CLOSED: ...` (with the entry path to delete to withdraw it) followed by the timeout text once, and exits 1 so `cw spawn close X && ...` stops; with `--requeue` it prints the `cw dev-queue requeue <T> -c <C> --from-cancelled` follow-up instead of requeueing. `cw dev-queue cancel` still stops the worker, prints one `QUEUED, session(s) ... not yet marked completed` line and exits 0, since its row is already CANCELLED. `_spawn_close_impl` itself still raises on a timeout and never queues.
+
+### Fixed
+
+- **`cw dev-queue cancel` leaves no session ACTIVE (#2694).** Cancel stopped the daemon worker but never wrote `Session.status`, so the session kept counting against the client ceiling. It now marks each live DAEMON session it cleared COMPLETED(USER), reading state after the cancel. The step is flip-only: the row is already CANCELLED, so nothing is routed or re-cancelled and no dev-queue lock is taken inside the sessions hold; a TIMED_OUT session is left as is and USER-origin sessions are untouched. As with `cw spawn close`, the flip follows an unconfirmed `daemon.stop`, so a completed session stops protecting its worktree before the worker has necessarily exited.
+- **An invalid `CW_SESSIONS_LOCK_TIMEOUT_S` no longer silently restores the 60 s wait for these four commands (#2694)**; it yields their 5 s wait (other callers still fall back to 60 s).
+- **The `dispatch_loop_stale` page says why the loop is stuck (#2694).** Its breadcrumb now appends the last tick's `skip=` reason (`cap_full`, `lane_cap_blocked`, ...), `occupied=`, `running=<r>/<cap>` and `orphan_sessions=` (ceiling-counted sessions no occupied row owns, read when the page fires, at most 5 then `(+K more)`, or `none`) after the unchanged `pending=<n> age_s=<n>` prefix; unreadable state degrades to the old text with a `stale_breadcrumbs_degraded` WARNING. Payload keys are unchanged.
+
 ## [1.72.0] - 2026-10-15
 
 ### Added
