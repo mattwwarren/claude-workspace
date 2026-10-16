@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import fcntl
 import inspect
+import json
 import logging
 import os
 import select
@@ -18,7 +20,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 from unittest.mock import MagicMock
 
+import click
 import pytest
+from click.testing import CliRunner
 
 import cw.config
 from cw import _flock
@@ -41,6 +45,7 @@ from cw.config import (
     sessions_lock_file,
     show_config,
 )
+from cw.dev_queue import dev_queue_lock
 from cw.exceptions import (
     CwError,
     CwLockReentrancyError,
@@ -2092,6 +2097,10 @@ _CHILD_READY_TIMEOUT_S = 10.0
 # lock-free ``precheck_requeue``, and a timeout after it leaves the row parked
 # and the session COMPLETED -- the state a normal park leaves. ``approve``
 # closes after its lock, so nothing irreversible precedes that one.
+# A second accepted exception (#2694): ``close_sessions_for_cancel``, the
+# ``cw dev-queue cancel`` session flip, runs after ``cancel_ticket`` committed
+# the row CANCELLED. A timeout there loses nothing: the queued-close entry is
+# written first and is the retry path, and the step is flip-only.
 _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/cli/maintenance.py", "doctor"): 1,  # `cw doctor --reap <SESSION>`
     ("cw/cli/maintenance.py", "init"): 1,  # `cw init` -> init_client (#2501)
@@ -2125,6 +2134,12 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/doctor/routed_result_wedge.py", "reap_routed_result_findings"): 1,
     ("cw/orchestrate.py", "retire_merged_prs"): 1,  # `cw orchestrate retire`
     ("cw/reconcile/core.py", "reconcile"): 1,  # list/status/start + tick pre-pass
+    # `cw dev-queue cancel` session flip (#2694): `cancel_ticket` already
+    # committed the row CANCELLED and the queued-close entry is written first,
+    # so a timeout loses nothing (the entry is the retry path); the step is
+    # flip-only (`settle_row=False`) and takes no dev-queue lock inside the
+    # sessions-lock hold.
+    ("cw/reconcile/session_close.py", "close_sessions_for_cancel"): 1,
     ("cw/session.py", "background_session"): 1,  # `cw bg`
     ("cw/session.py", "resume_session"): 1,  # live-surface `_update_live` only
     ("cw/session.py", "done_session"): 1,  # `cw done`
@@ -2533,6 +2548,169 @@ class TestSessionsLockBounded:
         # Holder is dead -> its fd is gone -> the lock is free again.
         with sessions_lock(bounded=True):
             pass
+
+
+def _read_holder_file() -> dict[str, object]:
+    raw = sessions_lock_file().read_text()
+    return json.loads(raw) if raw else {}
+
+
+def _raise_runtime(*_args: object, **_kwargs: object) -> None:
+    msg = "holder bookkeeping exploded"
+    raise RuntimeError(msg)
+
+
+class TestSessionsLockHolderRecord:
+    """``sessions_lock()`` records who holds it (#2694), best effort only."""
+
+    def test_records_pid_and_argv0_outside_click_and_clears_on_exit(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["/venv/bin/cw", "session", "--message", "x"])
+
+        with sessions_lock():
+            inside = _read_holder_file()
+
+        assert inside["pid"] == os.getpid()
+        assert inside["cmd"] == "cw"
+        assert isinstance(inside["acquired_at"], str)
+        assert sessions_lock_file().read_text() == ""
+
+    def test_records_the_click_command_path_never_option_values(
+        self, tmp_config_dir: Path
+    ) -> None:
+        seen: list[dict[str, object]] = []
+
+        @click.group(name="cw")
+        def root() -> None:
+            pass
+
+        @root.command(name="send")
+        @click.option("--message")
+        def send(message: str) -> None:
+            del message
+            with sessions_lock():
+                seen.append(_read_holder_file())
+
+        result = CliRunner().invoke(root, ["send", "--message", "secret-text"])
+
+        assert result.exit_code == 0, result.output
+        (record,) = seen
+        assert record["cmd"] == "cw send"
+        assert "secret-text" not in json.dumps(record)
+
+    def test_empty_argv_outside_click_still_acquires_and_releases(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", [])
+
+        with sessions_lock():
+            assert _read_holder_file()["cmd"] == "cw"
+
+        with sessions_lock(bounded=True, timeout_s=0):
+            pass
+
+    def test_record_failure_never_leaks_the_lock(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.config.record_lock_holder", _raise_runtime)
+        ran = False
+
+        with sessions_lock():
+            ran = True
+
+        assert ran
+        with sessions_lock(bounded=True, timeout_s=0):
+            pass
+
+    def test_clear_failure_still_unlocks_closes_and_notes_the_hold(
+        self,
+        recording_lock_path: _RecordingLockPath,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr("cw.config.clear_lock_holder", _raise_runtime)
+        notes: list[str] = []
+        real_note = cw.config._lock_hold.note_hold
+
+        def _note(lock_name: str, **kwargs: float) -> None:
+            notes.append(lock_name)
+            real_note(lock_name, **kwargs)
+
+        monkeypatch.setattr("cw.config._lock_hold.note_hold", _note)
+
+        with sessions_lock():
+            pass
+
+        assert [h.closed for h in recording_lock_path.handles] == [True]
+        assert notes == ["sessions"]
+        with sessions_lock(bounded=True, timeout_s=0):
+            pass
+
+    def test_contender_timeout_names_the_holder_and_keeps_its_record(
+        self,
+        held_sessions_lock_recorded: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(_flock, "time", _FakeClock())
+
+        with (
+            pytest.raises(SessionsLockTimeoutError) as exc_info,
+            sessions_lock(bounded=True, timeout_s=0),
+        ):
+            pytest.fail("must not reach body")
+
+        assert f"pid {os.getpid()}" in str(exc_info.value)
+        assert "records no PID" not in str(exc_info.value)
+        # The loser opened "a+": the holder's record survives its attempt.
+        assert _read_holder_file()["pid"] == os.getpid()
+
+    @pytest.mark.parametrize(
+        ("acquire", "path"),
+        [
+            (cw.config.clients_lock, cw.config.clients_lock_file),
+            (
+                cw.config.concurrency_override_lock,
+                cw.config.concurrency_override_lock_file,
+            ),
+            (dev_queue_lock, cw.config.dev_queue_lock),
+        ],
+        ids=["clients", "concurrency_override", "dev_queue"],
+    )
+    def test_other_state_locks_record_nothing(
+        self,
+        tmp_config_dir: Path,
+        acquire: Callable[[], contextlib.AbstractContextManager[None]],
+        path: Callable[[], Path],
+    ) -> None:
+        with acquire():
+            assert path().read_text() == ""
+
+    def test_explicit_timeout_is_honoured(
+        self, held_sessions_lock: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "60")
+        clock = _FakeClock()
+        monkeypatch.setattr(_flock, "time", clock)
+
+        with (
+            pytest.raises(SessionsLockTimeoutError),
+            sessions_lock(bounded=True, timeout_s=5.0),
+        ):
+            pytest.fail("must not reach body")
+
+        assert clock.now == 5.0
+
+    def test_mutate_state_forwards_timeout(
+        self, held_sessions_lock: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "60")
+        clock = _FakeClock()
+        monkeypatch.setattr(_flock, "time", clock)
+
+        with pytest.raises(SessionsLockTimeoutError):
+            mutate_state(lambda _state: None, bounded=True, timeout_s=0.5)
+
+        assert clock.now == 0.5
 
 
 class TestBoundedSessionsLockAllowlist:

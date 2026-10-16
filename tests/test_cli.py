@@ -8826,6 +8826,148 @@ class TestSessionsLockTimeoutCli:
         assert result.output.count("Timed out") == 1
 
 
+_LOCK_WAIT_SID = "wait-sess-1"
+_LOCK_WAIT_COMMANDS: dict[str, list[str]] = {
+    "list": ["list"],
+    "status": ["status"],
+    "spawn-close": ["spawn", "close", _LOCK_WAIT_SID],
+    "dev-queue-cancel": ["dev-queue", "cancel", "WAIT-1", "-c", "test-client"],
+}
+_LOCK_WAIT_EXIT = {"list": 1, "status": 1, "spawn-close": 1, "dev-queue-cancel": 0}
+
+
+def _seed_lock_wait_fixtures(tmp_path: Path) -> None:
+    from cw.dev_queue import save_dev_queue
+    from cw.models import DevQueueStore, QueueItemStatus
+    from tests.conftest import _make_ticket_task
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    save_state(
+        CwState(
+            sessions=[
+                _make_daemon_session(
+                    id=_LOCK_WAIT_SID,
+                    name="test-client/auto-dev/WAIT-1",
+                    client="test-client",
+                    workspace_path=workspace,
+                    surface_ref="wait-ref",
+                    worktree_path=None,
+                    started_at=datetime.now(UTC),
+                )
+            ]
+        )
+    )
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                _make_ticket_task(
+                    ticket_id="WAIT-1",
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=_LOCK_WAIT_SID,
+                )
+            ]
+        )
+    )
+
+
+class TestOperatorCommandLockWait:
+    """list/status/spawn close/cancel wait 5 s, not 60 s, on a held lock (#2694)."""
+
+    @pytest.fixture(autouse=True)
+    def _fake_daemon(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        for target in (
+            "cw.cli.spawn.get_native_daemon_client",
+            "cw.cli.dev_queue.crud.get_native_daemon_client",
+            "cw.reconcile._deps.get_native_daemon_client",
+        ):
+            monkeypatch.setattr(target, lambda: mock_native_daemon)
+
+    @pytest.mark.parametrize(
+        ("raw", "read_wait", "close_wait"),
+        [
+            (None, 5.0, 5.0),
+            ("abc", 5.0, 5.0),
+            ("300", 300.0, 5.0),
+            ("0.2", 0.2, 0.2),
+        ],
+        ids=["unset", "invalid", "explicit-300", "explicit-0.2"],
+    )
+    @pytest.mark.parametrize("command", list(_LOCK_WAIT_COMMANDS))
+    def test_wait_and_exit_code(
+        self,
+        held_sessions_lock: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        command: str,
+        raw: str | None,
+        read_wait: float,
+        close_wait: float,
+    ) -> None:
+        from cw import _flock
+        from tests.conftest import _FakeClock
+
+        if raw is None:
+            monkeypatch.delenv(SESSIONS_LOCK_TIMEOUT_ENV, raising=False)
+        else:
+            monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, raw)
+        _seed_lock_wait_fixtures(tmp_path)
+        clock = _FakeClock()
+        monkeypatch.setattr(_flock, "time", clock)
+
+        result = CliRunner().invoke(main, _LOCK_WAIT_COMMANDS[command])
+
+        assert result.exit_code == _LOCK_WAIT_EXIT[command], result.output
+        expected = read_wait if command in {"list", "status"} else close_wait
+        assert clock.now == pytest.approx(expected)
+
+    @pytest.mark.parametrize("command", ["list", "status"])
+    def test_list_and_status_name_the_recorded_holder(
+        self,
+        held_sessions_lock_recorded: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        command: str,
+    ) -> None:
+        import os
+
+        from cw import _flock
+        from tests.conftest import _FakeClock
+
+        monkeypatch.delenv(SESSIONS_LOCK_TIMEOUT_ENV, raising=False)
+        _seed_lock_wait_fixtures(tmp_path)
+        monkeypatch.setattr(_flock, "time", _FakeClock())
+
+        result = CliRunner().invoke(main, [command])
+
+        assert result.exit_code == 1
+        assert f"pid {os.getpid()}" in result.output
+        assert str(held_sessions_lock_recorded) in result.output
+        assert "Recorded holder" in result.output
+        assert "CLIENT" not in result.output  # no stale-state table
+
+    def test_start_keeps_the_sixty_second_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``cw start`` (``session.start_session``) calls a bare ``reconcile()``,
+        so its sessions-lock wait stays the env-or-60 s default."""
+        import inspect
+
+        from cw import _flock, session
+
+        monkeypatch.delenv(SESSIONS_LOCK_TIMEOUT_ENV, raising=False)
+
+        assert "reconcile()" in inspect.getsource(session.start_session)
+        assert "lock_timeout_s" not in inspect.getsource(session.start_session)
+        assert _flock.sessions_lock_timeout_seconds() == 60.0
+        assert _flock.DEFAULT_SESSIONS_LOCK_TIMEOUT_S == 60.0
+
+
 class TestPeek:
     """Tests for `cw peek` — read-only session output snapshot from transcript."""
 

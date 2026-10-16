@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import logging
+import os
 import threading
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import pytest
 
@@ -42,7 +45,8 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
+    from typing import IO
 
     from tests.conftest import _RecordingLockPath
 
@@ -623,3 +627,384 @@ class TestBoundedStateLocks:
 
         assert [h.closed for h in recorder.handles] == [True]
         assert held_locks() == ()
+
+
+# ---------------------------------------------------------------------------
+# #2694: operator-command waits, explicit timeout_s, holder record
+# ---------------------------------------------------------------------------
+
+_INVALID_RAWS = ["abc", "-1", "nan", "inf", "1,5"]
+
+
+class TestReadEnvLockTimeout:
+    """The shared env parse: ``None`` means "not set to a usable value"."""
+
+    def test_unset_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(SESSIONS_LOCK_TIMEOUT_ENV, raising=False)
+
+        assert _flock._read_env_lock_timeout() is None
+
+    def test_blank_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "   ")
+
+        assert _flock._read_env_lock_timeout() is None
+
+    @pytest.mark.parametrize(("raw", "expected"), [("0", 0.0), ("7", 7.0)])
+    def test_valid_values(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str, expected: float
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, raw)
+
+        assert _flock._read_env_lock_timeout() == expected
+
+    @pytest.mark.parametrize("raw", _INVALID_RAWS)
+    def test_invalid_is_none_with_one_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        raw: str,
+    ) -> None:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, raw)
+        caplog.set_level(logging.WARNING, logger="cw._flock")
+
+        first = _flock._read_env_lock_timeout()
+        second = _flock._read_env_lock_timeout()
+
+        assert first is None
+        assert second is None
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert SESSIONS_LOCK_TIMEOUT_ENV in warnings[0].getMessage()
+        assert repr(raw) in warnings[0].getMessage()
+
+
+class TestOperatorLockWaits:
+    """``cw list``/``cw status`` vs ``cw spawn close``/cancel waits (#2694)."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (None, 5.0),
+            ("  ", 5.0),
+            ("abc", 5.0),
+            ("7", 7.0),
+            ("300", 300.0),
+            ("0", 0.0),
+        ],
+    )
+    def test_read_wait_env_wins_else_five_seconds(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str | None, expected: float
+    ) -> None:
+        if raw is None:
+            monkeypatch.delenv(SESSIONS_LOCK_TIMEOUT_ENV, raising=False)
+        else:
+            monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, raw)
+
+        assert _flock.operator_read_lock_wait_seconds() == expected
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (None, 5.0),
+            ("abc", 5.0),
+            ("0.2", 0.2),
+            ("7", 5.0),
+            ("300", 5.0),
+            ("0", 0.0),
+        ],
+    )
+    def test_close_wait_is_capped_at_five_seconds(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str | None, expected: float
+    ) -> None:
+        if raw is None:
+            monkeypatch.delenv(SESSIONS_LOCK_TIMEOUT_ENV, raising=False)
+        else:
+            monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, raw)
+
+        assert _flock.operator_close_lock_wait_seconds() == expected
+
+    def test_default_constant_is_five_seconds(self) -> None:
+        assert _flock.OPERATOR_COMMAND_LOCK_WAIT_S == 5.0
+
+
+class TestExplicitTimeout:
+    """An explicit ``timeout_s`` overrides the env for one acquisition."""
+
+    def test_explicit_timeout_is_honoured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = _FakeClock()
+        _install_clock(monkeypatch, clock)
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "60")
+        lock = tmp_path / "lock"
+
+        with (
+            _hold_flock(lock),
+            lock.open("w") as fd,
+            pytest.raises(SessionsLockTimeoutError) as exc_info,
+        ):
+            acquire_sessions_flock(fd, lock, bounded=True, timeout_s=5.0)
+
+        assert clock.now == 5.0
+        assert exc_info.value.waited_s == pytest.approx(5.0)
+        assert "(seconds; currently 5)" in str(exc_info.value)
+
+    def test_zero_is_one_attempt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = _FakeClock()
+        _install_clock(monkeypatch, clock)
+        lock = tmp_path / "lock"
+
+        with (
+            _hold_flock(lock),
+            lock.open("w") as fd,
+            pytest.raises(SessionsLockTimeoutError),
+        ):
+            acquire_sessions_flock(fd, lock, bounded=True, timeout_s=0)
+
+        assert clock.sleeps == []
+
+    def test_none_falls_back_to_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = _FakeClock()
+        _install_clock(monkeypatch, clock)
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, str(_TIMEOUT_S))
+        lock = tmp_path / "lock"
+
+        with (
+            _hold_flock(lock),
+            lock.open("w") as fd,
+            pytest.raises(SessionsLockTimeoutError),
+        ):
+            acquire_sessions_flock(fd, lock, bounded=True, timeout_s=None)
+
+        assert clock.now == _TIMEOUT_S
+
+    def test_unbounded_ignores_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[int] = []
+
+        def _record(_fd: object, operation: int) -> None:
+            calls.append(operation)
+
+        monkeypatch.setattr(_flock, "fcntl", _fake_fcntl(_record))
+        lock = tmp_path / "lock"
+
+        with lock.open("w") as fd:
+            acquire_sessions_flock(fd, lock, bounded=False, timeout_s=0)
+
+        assert calls == [fcntl.LOCK_EX]
+
+
+def _live_holder_json(pid: int, *, cmd: str = "cw list") -> str:
+    acquired = datetime.now(UTC) - timedelta(seconds=12)
+    return json.dumps({"pid": pid, "cmd": cmd, "acquired_at": acquired.isoformat()})
+
+
+class TestHolderRecord:
+    """The sessions-lock holder record (#2694): best effort, never a failure."""
+
+    def test_record_writes_pid_cmd_and_iso_acquired_at(self, tmp_path: Path) -> None:
+        lock = tmp_path / "lock"
+
+        with lock.open("a+") as fd:
+            fd.write("stale previous content")
+            fd.flush()
+            _flock.record_lock_holder(fd, cmd="cw spawn close")
+
+        data = json.loads(lock.read_text())
+        assert set(data) == {"pid", "cmd", "acquired_at"}
+        assert data["pid"] == os.getpid()
+        assert data["cmd"] == "cw spawn close"
+        assert datetime.fromisoformat(data["acquired_at"]).tzinfo is not None
+
+    def test_record_needs_no_wall_clock_time_function(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Tests replace ``cw._flock.time`` with a clock that has no ``time()``."""
+        _install_clock(monkeypatch, _FakeClock())
+        lock = tmp_path / "lock"
+
+        with lock.open("a+") as fd:
+            _flock.record_lock_holder(fd, cmd="cw list")
+
+        assert json.loads(lock.read_text())["cmd"] == "cw list"
+
+    def test_clear_empties_the_file(self, tmp_path: Path) -> None:
+        lock = tmp_path / "lock"
+
+        with lock.open("a+") as fd:
+            _flock.record_lock_holder(fd, cmd="cw list")
+            _flock.clear_lock_holder(fd)
+
+        assert lock.read_text() == ""
+
+    def test_read_returns_the_live_holder(self, tmp_path: Path) -> None:
+        lock = tmp_path / "lock"
+        lock.write_text(_live_holder_json(os.getpid()))
+
+        with lock.open("a+") as fd:
+            holder = _flock.read_lock_holder(fd)
+
+        assert holder is not None
+        assert holder.pid == os.getpid()
+        assert holder.cmd == "cw list"
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "",
+            "{not json",
+            "[1, 2]",
+            json.dumps({"pid": "12", "cmd": "cw", "acquired_at": "2026-01-01"}),
+            json.dumps({"pid": True, "cmd": "cw", "acquired_at": "2026-01-01"}),
+            json.dumps({"pid": 12, "cmd": 3, "acquired_at": "2026-01-01"}),
+            json.dumps({"pid": 12, "cmd": "cw", "acquired_at": "yesterday"}),
+            json.dumps({"pid": 12, "cmd": "cw"}),
+        ],
+        ids=[
+            "empty",
+            "malformed",
+            "not-an-object",
+            "pid-str",
+            "pid-bool",
+            "cmd-int",
+            "bad-timestamp",
+            "missing-key",
+        ],
+    )
+    def test_read_returns_none_for_unusable_content(
+        self, tmp_path: Path, content: str
+    ) -> None:
+        lock = tmp_path / "lock"
+        lock.write_text(content)
+
+        with lock.open("a+") as fd:
+            assert _flock.read_lock_holder(fd) is None
+
+    def test_read_returns_none_for_a_write_only_fd(self, tmp_path: Path) -> None:
+        lock = tmp_path / "lock"
+
+        with lock.open("w") as fd:
+            assert _flock.read_lock_holder(fd) is None
+
+    def test_read_returns_none_for_a_dead_pid(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _gone(_pid: int, _sig: int) -> None:
+            raise ProcessLookupError
+
+        monkeypatch.setattr(_flock.os, "kill", _gone)
+        lock = tmp_path / "lock"
+        lock.write_text(_live_holder_json(424242))
+
+        with lock.open("a+") as fd:
+            assert _flock.read_lock_holder(fd) is None
+
+    def test_permission_error_counts_as_alive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _other_user(_pid: int, _sig: int) -> None:
+            raise PermissionError
+
+        monkeypatch.setattr(_flock.os, "kill", _other_user)
+        lock = tmp_path / "lock"
+        lock.write_text(_live_holder_json(1))
+
+        with lock.open("a+") as fd:
+            holder = _flock.read_lock_holder(fd)
+
+        assert holder is not None
+        assert holder.pid == 1
+
+    def test_record_and_clear_swallow_oserror_with_a_debug_log(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        class _BrokenFd:
+            def seek(self, _offset: int) -> int:
+                raise OSError(5, "disk on fire")
+
+        caplog.set_level(logging.DEBUG, logger="cw._flock")
+        broken = cast("IO[str]", _BrokenFd())
+
+        _flock.record_lock_holder(broken, cmd="cw list")
+        _flock.clear_lock_holder(broken)
+
+        debug = [r for r in caplog.records if r.levelno == logging.DEBUG]
+        assert len(debug) == 2
+        assert all(r.exc_info is not None for r in debug)
+
+
+class TestHolderInTimeoutMessage:
+    def test_message_names_the_recorded_holder(self) -> None:
+        holder = _flock.LockHolder(
+            pid=4242,
+            cmd="cw dev-queue serve",
+            acquired_at=datetime.now(UTC) - timedelta(seconds=30),
+        )
+
+        message = lock_timeout_message(
+            "sessions", Path("P"), waited_s=5.0, timeout_s=5.0, holder=holder
+        )
+
+        assert "Recorded holder: pid 4242 (`cw dev-queue serve`), held for" in message
+        assert "confirm with `lsof P`" in message
+        assert "records no PID" not in message
+        assert "cw dev-queue serve" in message
+        assert "wedged" in message
+        assert SESSIONS_LOCK_TIMEOUT_ENV in message
+
+    def test_no_holder_is_byte_identical(self) -> None:
+        message = lock_timeout_message(
+            "sessions", Path("P"), waited_s=60.04, timeout_s=60.0, holder=None
+        )
+
+        assert message == _SESSIONS_GOLDEN
+
+    def test_sessions_timeout_reads_the_holder_through_the_contender_fd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_clock(monkeypatch, _FakeClock())
+        lock = tmp_path / ".sessions.lock"
+        lock.write_text(_live_holder_json(os.getpid(), cmd="cw status"))
+
+        with (
+            _hold_flock_append(lock),
+            lock.open("a+") as fd,
+            pytest.raises(SessionsLockTimeoutError) as exc_info,
+        ):
+            acquire_sessions_flock(fd, lock, bounded=True, timeout_s=0)
+
+        assert f"pid {os.getpid()} (`cw status`)" in str(exc_info.value)
+
+    def test_other_locks_never_read_a_holder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_clock(monkeypatch, _FakeClock())
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0")
+        lock = tmp_path / ".dev_queue.lock"
+        lock.write_text(_live_holder_json(os.getpid()))
+
+        with (
+            _hold_flock_append(lock),
+            lock.open("a+") as fd,
+            pytest.raises(LockTimeoutError) as exc_info,
+        ):
+            acquire_flock(fd, lock, lock_name="dev_queue", bounded=True)
+
+        assert "records no PID" in str(exc_info.value)
+        assert "Recorded holder" not in str(exc_info.value)
+
+
+@contextlib.contextmanager
+def _hold_flock_append(path: Path) -> Iterator[None]:
+    """Hold *path* on a second fd opened ``"a+"`` so its content survives."""
+    with path.open("a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
