@@ -676,6 +676,7 @@ CLI commands emit thin audit events; payloads carry the obvious fields:
 | `ticket.moved` | `cw dev-queue move` | `{ticket_id, client, from_lane, to_lane}` |
 | `ticket.reprioritized` | `cw dev-queue move --priority` | `{ticket_id, client, from_priority, to_priority}` |
 | `ticket.approved` | `cw dev-queue approve` | `{ticket_id, client, from_stage, to_stage}`; scope-drift approvals also carry `{old_status, new_status, scope_drift_approved_extra_files, scope_drift_approved_head, approved_at, actor}` |
+| `ticket.resolution_recorded` | `cw dev-queue resolve` (#2702; recorded before the row is saved; not recorded for a pure duplicate) | `{ticket_id, client, round, actor, duplicate, approved, operator_initiated, plan_approved_fingerprint, plan_reviewed, text_sha256, text_bytes}` with `correlation_id=ticket_id`; the decisions text itself is never in the payload |
 | `plan.approval_revoked` | `cw dev-queue revoke-plan-approval` | `{ticket_id, client, previous_fingerprint, revoked_at, initiating_service, resolutions_source, reason}` |
 | `plan.approval_body_drift_warned` | `cw dev-queue approve` (advisory-only; never blocks or mutates the approval) | `{ticket_id, client, persisted_body_sha, live_body_sha, plan_approved_fingerprint, actor}` |
 | `ticket.approval_failed` | scope-drift approval compensation | `{ticket_id, client, approval_event, approval_payload, error, rolled_back, recovery_required}` |

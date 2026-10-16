@@ -20,6 +20,8 @@ below is what registers those commands. Submodules:
   (#2337).
 - ``crud`` — queue mutation commands (add, move, requeue, unblock, remove,
   cancel, clear, prune).
+- ``resolve`` — record the operator's answers to a plan park on the row, then
+  requeue it through ``crud``'s ``requeue`` (#2702).
 - ``status`` — aggregate status table + lane breakdown rendering.
 - ``run`` — dispatch-driving commands (run, serve, plan).
 - ``wait`` — the sentinel-aware ``dev-queue wait`` loop and its emit helpers.
@@ -34,6 +36,7 @@ from __future__ import annotations
 from cw.cli.dev_queue import (  # noqa: F401  (command registration side effects)
     approve,
     crud,
+    resolve,
     run,
     show,
     status,

@@ -53,7 +53,7 @@ _APPROVAL_REVOKED_LINE = re.compile(
 )
 _RESOLUTIONS_APPLIED_LINE = re.compile(
     r"<!-- plan-stage-resolutions-applied: "
-    r"source=(?:comment:[^\n]+?|body:[0-9a-f]{64}|none) -->\n?"
+    r"source=(?:comment:[^\n]+?|body:[0-9a-f]{64}|row:[0-9]+|none) -->\n?"
 )
 # Single-occurrence lines that follow the settled block, in grammar order.
 _TRAILING_BOOKKEEPING_LINES = (

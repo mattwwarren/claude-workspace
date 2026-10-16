@@ -131,6 +131,16 @@ a sentinel carries one — and they never share values, so always say which.
   `--from-completed` recover terminal rows. `--reset-attempts` also zeroes
   `unproductive_attempts` (only the ceiling counter), for an
   `attempt_cap_blocked` row.
+- **Resolve** (`cw dev-queue resolve --file <decisions.md>`) — for a row parked
+  at the plan stage (open ambiguities or unverified premises): records the
+  operator's answers on the row's `operator_resolutions`, then requeues it at
+  the same stage, lane and priority kept. The plan stage reads them from
+  `cw-context.json` as binding resolutions; no tracker comment is needed (the
+  printed relay block, or `--post`, is an optional mirror). Interactive only:
+  refused inside a dispatch worker. A re-enqueued row starts with an empty list.
+  Restart `cw dev-queue serve` before using it: a dispatch loop older than the
+  release that ships `resolve` rewrites the queue without the ledger and erases
+  recorded resolutions (stale-loop detection: #2729).
 - **Unblock** (`cw dev-queue unblock`) — requeue plus clearing the session's
   salvage-park markers (`last_result`, `reap_reason`). Salvage parks only.
 - **MUST_FIX park (codex)** — `approve --override-must-fix --reason "<why>"`
@@ -257,6 +267,9 @@ cw dev-queue approve <ticket> -c <client>        # clear a plan/review/signoff g
 cw dev-queue requeue <ticket> -c <client>        # BLOCKED_ON_USER → PENDING (--stage/--regress;
                                                  #   --from-cancelled / --from-failed to recover;
                                                  #   --reset-attempts for attempt_cap_blocked)
+cw dev-queue resolve <ticket> -c <client> --file <decisions.md>
+                                                 # answer a plan park on the row, then requeue
+                                                 #   (--approve at an approval gate; --post mirrors)
 cw dev-queue unblock <ticket> -c <client>        # clear salvage-park markers and requeue
 cw dev-queue move <ticket> -c <client> --to|--lane <lane>   # re-lane
 cw dev-queue cancel|remove -c <client>           # queue hygiene, one ticket at a time
@@ -403,7 +416,10 @@ cw `session_id` → `sessions.json` `surface_ref` / `claude_session_id` →
   `plan_pending_approval` quoting both fingerprints — a stale-approval re-ask, not operator
   inaction. `--post-marker` posts an audit-only comment that nothing reads back. The comment
   path (`<!-- auto-dev-comment-approval -->` as its own reply) is the CLI-free alternative;
-  Linear-tracked tickets have only the row path.
+  Linear-tracked tickets have only the row path. `cw dev-queue resolve --approve` stamps
+  through the same gate; an approval survives the plan stage's row-delivered revision
+  only if the revised draft's fingerprint is unchanged, otherwise it is revoked and asked
+  again.
 - **Monitor noise drowns the signal:** a watcher that emits on every status change reports
   `pending → running` inside a single stage — roughly half of all events, none actionable.
   Key emission on stage transitions plus arrivals at `blocked_on_user`; let the periodic beat

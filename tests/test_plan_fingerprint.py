@@ -21,6 +21,8 @@ from cw.plan_fingerprint import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from cw.models import ClientConfig
+
 _BODY = "# Plan\n\nreconciled draft body\n"
 _BODY_SHA = hashlib.sha256(_BODY.encode("utf-8")).hexdigest()
 
@@ -111,6 +113,70 @@ class TestComputePlanDraftFingerprint:
         bookkeeping and must change the digest."""
         malformed = "<!-- plan-stage-settled: A1: ADOPTED (operator note) -->\n"
         assert compute_plan_draft_fingerprint(_ROUND + malformed + _BODY) != _BODY_SHA
+
+
+_APPLIED_ROW = "<!-- plan-stage-resolutions-applied: source=row:3 -->\n"
+_ATTEMPTED_ROW = (
+    "<!-- plan-stage-resolutions-attempted: source=row:3; outcome=succeeded -->\n"
+)
+
+
+class TestRowResolutionsSource:
+    """``source=row:<N>`` (#2702): row-delivered resolutions are inputs, never
+    plan body, so the applied line is bookkeeping like the other sources."""
+
+    def test_row_applied_line_hashes_equal_to_the_bare_body(self) -> None:
+        """Outcome 1: a bookkeeping-only change keeps the same ``draft_fp``."""
+        text = _ROUND + _LAST_EVALUATED + _APPLIED_ROW + _BODY
+        assert compute_plan_draft_fingerprint(text) == _BODY_SHA
+
+    def test_row_line_with_reset_counter_and_attempt_hashes_equal(self) -> None:
+        text = (
+            "<!-- plan-stage-scan-round: 0 -->\n"
+            + _LAST_EVALUATED
+            + _ATTEMPTED_ROW
+            + _APPLIED_ROW
+            + _BODY
+        )
+        assert compute_plan_draft_fingerprint(text) == _BODY_SHA
+
+    def test_non_numeric_row_source_is_content(self) -> None:
+        malformed = "<!-- plan-stage-resolutions-applied: source=row:x -->\n"
+        assert compute_plan_draft_fingerprint(_ROUND + malformed + _BODY) != _BODY_SHA
+
+    def test_a_new_conformance_line_changes_the_fingerprint(self) -> None:
+        """Outcome 2: a plan-text change from folding in answers moves ``draft_fp``."""
+        revised = (
+            _BODY
+            + "\n## Pre-flight Resolution Conformance\n\n"
+            + "- R1: use the row — honored [SATISFIED]\n"
+        )
+        assert compute_plan_draft_fingerprint(
+            _ROUND + _APPLIED_ROW + revised
+        ) != compute_plan_draft_fingerprint(_ROUND + _APPLIED_ROW + _BODY)
+
+    def test_promotion_accepts_a_draft_carrying_a_row_applied_line(
+        self, tmp_path: Path, sample_client: ClientConfig
+    ) -> None:
+        from cw.dev_queue.plan_promotion import promote_plan_draft
+        from cw.models import QueueItemStatus, Stage
+        from tests.conftest import _make_ticket_task
+
+        cw_dir = tmp_path / "wt" / ".cw"
+        cw_dir.mkdir(parents=True)
+        (cw_dir / "plan-draft.md").write_text(
+            _ROUND + _APPLIED_ROW + _BODY, encoding="utf-8"
+        )
+        task = _make_ticket_task(
+            ticket_id="GEN-2702",
+            client="test-client",
+            stage=Stage.PLAN,
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            worktree_path=cw_dir.parent,
+        )
+
+        assert promote_plan_draft(task, sample_client, expected_fingerprint=_BODY_SHA)
+        assert (cw_dir / "plan.md").exists()
 
 
 class TestExtractPersistedBodySha:
