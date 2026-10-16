@@ -103,11 +103,15 @@ _FROM_FLAGS: dict[QueueItemStatus, str] = {
 _PARK_GUIDANCE: dict[str, str] = {
     AMBIGUITIES_PENDING_RESOLUTION_STATUS: (
         "The worker parked on open ambiguities. Answer them on the ticket, then"
-        " re-run the stage."
+        " re-run the stage. At the plan stage, `cw dev-queue resolve --file"
+        " <decisions.md>` records the answers on the row and requeues it, with"
+        " no tracker comment needed."
     ),
     PREMISES_PENDING_VERIFICATION_STATUS: (
         "The worker parked on unverified premises. Verify them and record the"
-        " results on the ticket, then re-run the stage."
+        " results on the ticket, then re-run the stage. At the plan stage,"
+        " `cw dev-queue resolve --file <decisions.md>` records the verification"
+        " results on the row and requeues it."
     ),
     REVIEW_HEALTH_GATE_DISPOSITION: (
         "Review health is degraded. This clears by re-running review, not by approving."

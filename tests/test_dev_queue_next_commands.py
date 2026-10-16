@@ -509,6 +509,16 @@ class TestRefusalSuffix:
         suffix = refusal_suffix(task, session=None)
         assert f"(disposition '{disposition}'). {_GUIDED[disposition]}" in suffix
 
+    @pytest.mark.parametrize(
+        "disposition",
+        ["ambiguities_pending_resolution", "premises_pending_verification"],
+    )
+    def test_plan_park_guidance_points_at_resolve(self, disposition: str) -> None:
+        """#2702: a plan park names the row-recording verb."""
+        task = make_blocked(stage=Stage.PLAN, disposition=disposition)
+        suffix = refusal_suffix(task, session=None)
+        assert "`cw dev-queue resolve --file <decisions.md>`" in suffix
+
     def test_exact_format_with_alternative(self) -> None:
         task = make_blocked(stage=Stage.REVIEW, disposition="review_health_gate")
         assert refusal_suffix(task, session=None) == (
