@@ -874,6 +874,38 @@ class TestOpenHolderLockFd:
             (logging.WARNING, "sessions_lock_holder_open_failed")
         ] * 2
 
+    def test_all_holder_open_modes_fail_before_ordinary_fallback(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        lock = tmp_path / "lock"
+        real_open = Path.open
+
+        def _open(self: Path, mode: str = "r") -> IO[str]:
+            if mode in {"a+", "r", "a"}:
+                message = "holder open failed"
+                raise _UnexpectedError(message)
+            return real_open(self, mode)
+
+        monkeypatch.setattr(Path, "open", _open)
+        caplog.set_level(logging.DEBUG, logger="cw._flock")
+
+        with _flock.open_holder_lock_fd(lock) as fd:
+            assert fd.mode == "w"
+
+        assert lock.exists()
+        assert len(caplog.records) == 3
+
+        def _all_open_fail(self: Path, mode: str = "r") -> IO[str]:
+            message = f"open failed: {mode}"
+            raise _UnexpectedError(message)
+
+        monkeypatch.setattr(Path, "open", _all_open_fail)
+        with pytest.raises(OSError, match="sessions lock unavailable"):
+            _flock.open_holder_lock_fd(lock)
+
 
 class TestHolderInTimeoutMessage:
     def test_message_names_the_recorded_holder(self) -> None:

@@ -30,6 +30,7 @@ from cw.dev_queue import (
 from cw.dispatch import _DISPATCH_CONSUMER, _apply_events_to_store
 from cw.events import advance_cursor, record_event
 from cw.exceptions import CwError, RequeueStateError
+from cw.history import EventType, HistoryEvent
 from cw.history import record_event as record_history_event
 from cw.models import (
     ClientConfig,
@@ -46,7 +47,6 @@ from cw.reconcile import (
     holds_staged_emit_result,
     ticket_id_for_session,
 )
-from cw.reconcile.session_close import record_operator_close
 from cw.result import reconstruct_staged_sentinel
 from cw.spawn import spawn_create_impl
 
@@ -116,6 +116,43 @@ def _route_staged_emit_result(sess: Session) -> bool:
         return False
     outcome = _apply_sentinel_to_task(task.ticket_id, sess, staged)
     return outcome.routed or outcome.task_already_terminal
+
+
+def record_operator_close(
+    sess: Session, *, command: str, prior_status: SessionStatus
+) -> None:
+    """Record the one durable history event of an operator close (#2694)."""
+    metadata = {
+        "actor": "operator",
+        "command": command,
+        "session_id": sess.id,
+        "ticket_id": ticket_id_for_session(sess.name) or "",
+        "surface_ref": sess.surface_ref or "",
+        "claude_session_id": sess.claude_session_id or "",
+        "started_at": sess.started_at.isoformat(),
+        "prior_status": prior_status.value,
+        "resulting_status": sess.status.value,
+    }
+    event = HistoryEvent(
+        event_type=EventType.SESSION_COMPLETED,
+        client=sess.client,
+        session_id=sess.id,
+        session_name=sess.name,
+        purpose=sess.purpose,
+        detail=OPERATOR_CLOSE_DETAIL,
+        metadata=metadata,
+    )
+    try:
+        record_history_event(sess.client, event)
+    except (OSError, ValueError) as exc:
+        logger.exception(
+            "operator_close_audit_failed: session_id=%s command=%s", sess.id, command
+        )
+        message = (
+            f"Session {sess.id} was closed, but its audit record could not be"
+            f" written: {exc}"
+        )
+        raise CwError(message) from exc
 
 
 def _spawn_close_impl(
@@ -203,16 +240,7 @@ def _spawn_close_impl(
     try:
         if closed is not None and audit_command is not None:
             record_operator_close(
-                closed[0],
-                command=audit_command,
-                prior_status=closed[1],
-                ticket_id=ticket_id_for_session(closed[0].name) or "",
-                details={
-                    "claude_session_id": closed[0].claude_session_id or "",
-                    "started_at": closed[0].started_at.isoformat(),
-                },
-                detail=OPERATOR_CLOSE_DETAIL,
-                record=record_history_event,
+                closed[0], command=audit_command, prior_status=closed[1]
             )
     finally:
         if surface_to_stop is not None and not surface_already_stopped:

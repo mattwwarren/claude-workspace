@@ -260,7 +260,7 @@ def fail_open_holder_bookkeeping[T](what: str, action: Callable[[], T]) -> T | N
 
 # The holder-recording opens tried before giving up, in order.  Every mode is
 # non-truncating: a losing contender must never erase the live holder record.
-_HOLDER_OPEN_MODES = ("a+", "r")
+_HOLDER_OPEN_MODES = ("a+", "r", "a")
 
 
 def open_holder_lock_fd(lock_path: Path) -> IO[str]:
@@ -275,14 +275,21 @@ def open_holder_lock_fd(lock_path: Path) -> IO[str]:
     acquisition path is retained.
     """
     for mode in _HOLDER_OPEN_MODES:
-        with _FailOpen("open"):
-            return lock_path.open(mode)
-    fd = fail_open_holder_bookkeeping("open", lambda: lock_path.open("a"))
+        fd = fail_open_holder_bookkeeping(
+            "open", lambda mode=mode: lock_path.open(mode)
+        )
+        if fd is not None:
+            return fd
+
+    # Keep the ordinary acquisition fallback inside the same fail-open
+    # boundary. Unlike the holder-specific attempts, failure here means the
+    # lock file itself is unavailable and must remain an explicit error.
+    fd = fail_open_holder_bookkeeping("open", lambda: lock_path.open("w"))
     if fd is not None:
         return fd
-    # If holder-specific opens all fail, preserve the ordinary state-lock
-    # acquisition path; a failure here is the lock-file failure itself.
-    return lock_path.open("w")
+    error = OSError("sessions lock unavailable")
+    error.add_note(str(lock_path))
+    raise error
 
 
 def record_lock_holder(fd: IO[str], *, cmd: str) -> None:
