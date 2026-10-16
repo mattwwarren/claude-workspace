@@ -205,8 +205,8 @@ def operator_close_lock_wait_seconds() -> float:
     """The sessions-lock wait for ``cw spawn close`` and the cancel session step.
 
     ``min(CW_SESSIONS_LOCK_TIMEOUT_S, OPERATOR_COMMAND_LOCK_WAIT_S)``: a held
-    lock queues the close instead of waiting (#2694), so a larger env value
-    only delays the queue. Unset or invalid -> the 5 s ceiling.
+    lock fails the close after the wait, naming the holder (#2694), so a larger
+    env value cannot stretch it. Unset or invalid -> the 5 s ceiling.
     """
     env = _read_env_lock_timeout()
     if env is None:
