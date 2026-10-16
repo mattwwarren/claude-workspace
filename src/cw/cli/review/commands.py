@@ -41,7 +41,6 @@ refusal to run inside a headless dispatch worker. See ADR-0016 and ADR-0020.
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -50,6 +49,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from cw.atomic import atomic_write_text
 from cw.cli._base import handle_errors
+from cw.cli._worker_guard import refuse_inside_dispatch_worker
 from cw.cli.review._diff_integrity import (
     _NO_BASE_CHECK_HELP,
     _require_base_xor_no_base_check,
@@ -417,38 +417,6 @@ _SETTLE_IN_WORKER_MSG = (
 )
 
 
-def _path_is_in_headless_worker(path: Path) -> bool:
-    """True iff the nearest cw context at or above *path* reports ``headless: true``."""
-    from cw.cli._hook_io import find_cw_context
-
-    context = find_cw_context(path)
-    return context is not None and context.get("headless") is True
-
-
-def _refuse_settle_inside_a_dispatch_worker() -> None:
-    """Refuse to mint a suppression from inside a headless worker (#2210).
-
-    A worker settling findings raised by its own reviewer is the pipeline
-    adjudicating itself, so it is refused outright. The refusal fires only on
-    positive evidence of a worker (ADR-0020): the nearest
-    ``.claude/cw-context.json`` (searched upward from cwd) reports
-    ``headless: true``, or ``$TMPDIR`` lies inside a worktree whose context
-    does. Every other context proceeds — the main checkout, a directory
-    outside any repository, a worktree with no context file, a context file
-    that cannot be read. Failing to prove a session is not a worker is not a
-    reason to hand the settle to a human; the orchestrator session runs it.
-
-    ``$TMPDIR`` is checked first: every cw executor points a worker's
-    ``TMPDIR`` at its own worktree (``apply_worker_tmpdir``, #2470), and that
-    survives a ``cd`` that would get a worker past the cwd check.
-    """
-    tmpdir = os.environ.get("TMPDIR")
-    if (tmpdir and _path_is_in_headless_worker(Path(tmpdir))) or (
-        _path_is_in_headless_worker(Path.cwd())
-    ):
-        raise CwError(_SETTLE_IN_WORKER_MSG)
-
-
 def _resolve_settle_actor() -> str:
     """The gh login recorded as having settled these findings (#2210).
 
@@ -670,7 +638,7 @@ def review_settle(
     stderr).
     On failure: exits 1, prints 'field.path: message' lines to stderr.
     """
-    _refuse_settle_inside_a_dispatch_worker()
+    refuse_inside_dispatch_worker(_SETTLE_IN_WORKER_MSG)
     settle_reason = reason.strip()
     if not settle_reason:
         msg = (
