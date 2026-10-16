@@ -4905,6 +4905,53 @@ class TestCheckProjectConfigs:
         assert results[0].ok is False
         assert "jira" in results[0].detail
 
+    def test_an_unrecognized_tracker_says_settles_live_in_the_cw_store(
+        self, tmp_path: Path
+    ) -> None:
+        """#2701: a non-GitHub tracker reads no marker; the row is the record."""
+        from cw.doctor import _check_project_configs
+        from cw.doctor.config_checks import CW_STORE_SETTLE_NOTE
+
+        self._write_config(tmp_path, "jira")
+        results = _check_project_configs({"client-a": self._client(tmp_path)})
+        assert results[0].ok is False
+        assert CW_STORE_SETTLE_NOTE in results[0].detail
+
+    def test_a_missing_system_key_says_settles_live_in_the_cw_store(
+        self, tmp_path: Path
+    ) -> None:
+        from cw.doctor import _check_project_configs
+        from cw.doctor.config_checks import CW_STORE_SETTLE_NOTE
+
+        cfg_dir = tmp_path / ".claude"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        (cfg_dir / "project-config.yaml").write_text(
+            "tracking:\n  primary: {}\n", encoding="utf-8"
+        )
+        results = _check_project_configs({"client-a": self._client(tmp_path)})
+        assert results[0].ok is False
+        assert "None" in results[0].detail
+        assert CW_STORE_SETTLE_NOTE in results[0].detail
+
+    def test_the_linear_info_line_says_settles_live_in_the_cw_store(
+        self, tmp_path: Path
+    ) -> None:
+        from cw.doctor import _check_project_configs
+        from cw.doctor.config_checks import CW_STORE_SETTLE_NOTE
+
+        self._write_config(tmp_path, "linear")
+        results = _check_project_configs({"client-a": self._client(tmp_path)})
+        assert results[0].ok is True
+        assert CW_STORE_SETTLE_NOTE in results[0].detail
+        assert "requires Linear MCP reachable in worker" in results[0].detail
+
+    def test_the_cw_store_note_names_the_full_settle_command(self) -> None:
+        from cw.doctor.config_checks import CW_STORE_SETTLE_NOTE
+
+        assert (
+            "cw review settle <payload> --reason '<why>' --ticket <ID> -c <client>"
+        ) in CW_STORE_SETTLE_NOTE
+
     def test_missing_file_warns_legacy_linear_default(self, tmp_path: Path) -> None:
         # An absent project-config.yaml means the worker falls back to the
         # legacy Linear MCP default, which stalls headless on OAuth — the warn
@@ -4917,6 +4964,8 @@ class TestCheckProjectConfigs:
         detail = results[0].detail.lower()
         assert "linear" in detail
         assert "pin" in detail
+        # #2701: the absent-file WARN is unchanged; it carries no settle note.
+        assert "cw store" not in detail
 
     def test_malformed_yaml_fails(self, tmp_path: Path) -> None:
         from cw.doctor import _check_project_configs
