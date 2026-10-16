@@ -391,6 +391,14 @@ Fields worth knowing:
 - `other_rows:` counts other rows for the same ticket and client; the one
   shown is the one `wait` and `requeue` bind to.
 
+`cw dev-queue tasks` shows the first of those commands in its trailing `NEXT`
+column, without the `cw dev-queue` prefix and the row's ticket and client; a
+gate the human opted into reads `HUMAN GATE: approve` (#2692). Every
+`approve`, `requeue`, `unblock` and `move` refusal ends with the same
+information: the row's status, stage and disposition, why it is parked when
+that is known, and `Run: <command>` for the legal next step (see "Which verb
+for which park" in §5).
+
 `--json` emits the `TicketView` model (`cw schema show ticket-view`):
 `schema_version`, `ticket_id`, `client`, `status`, `stage`, `disposition`,
 `blocked_reason`, `blocker_details`, `advisory_note`, `lane`, `priority`,
@@ -608,6 +616,56 @@ Also not a sentinel status:
 auto-requeues the ticket to PENDING (clearing `session_id`) until the
 attempt cap, then fails it. If it recurs, inspect the raw JSON with
 `cw result validate` before re-dispatching.
+
+### Which verb for which park (#2692)
+
+`approve` releases a gate an operator holds; `requeue` re-runs a stage;
+`unblock` clears a salvage park. There is no verb that does whichever fits:
+every refusal names the right one for the row (`Run: ...`), and
+`cw dev-queue show` lists them all.
+
+- Plan or review approval gate (`plan_pending_approval`,
+  `review_pending_approval`, disposition `approval_gate`) without
+  `scope_hint: large`: `approve`; `requeue --stage <current>` re-runs it
+  instead.
+- Human-kept gates — `AWAITING_OPERATOR_SIGNOFF` (`signoff: operator`), a
+  finalize hold (`finalize_gate_held`: `hold_finalize` /
+  `finalize_gate: manual`), a `scope_hint: large` approval gate: the
+  operator runs `approve`; an agent notifies the human. `show` and every
+  refusal label the row's only command `operator-only human gate; not for
+  an agent to run`, never suggest a `requeue`, and `tasks` shows
+  `HUMAN GATE: approve`. A sessionless one is refused by `approve` itself
+  until the operator resolves it (#2718).
+- `review_health_gate`, `review_artifacts_stale`, `awaiting_operator`,
+  `codex_must_fix_mechanically_rejected`: `requeue` (re-runs the stage), or
+  `drain --held` for every such park of the client. `approve` never releases
+  them.
+- `branch_behind_main`: rebase, then `requeue`. Not drained, not approved.
+- `ambiguities_pending_resolution` / `premises_pending_verification`:
+  answer or verify on the ticket, then `requeue`.
+- `merge_gate_blocked` / `stale_dispatch`: merge or close the open PR, then
+  `requeue`.
+- `plan_scope_drift` (IMPL): `approve --scope-drift <paths>`, or `requeue`
+  to re-run impl without them.
+- Codex MUST_FIX park (`codex_must_fix_findings`):
+  `approve --override-must-fix --reason "<why>"`, then
+  `requeue --stage finalize` (§7); if the ticket or lane has a finalize
+  hold, operator signoff or scope_hint: large, this step is the human's.
+- Salvage park (session `reap_reason: SALVAGE_PARKED`): `unblock`, or
+  `requeue`. `unblock` applies to salvage parks only.
+- `PENDING`: `wait` (a `requeue` is an exit-0 no-op); `RUNNING`: `wait` or
+  `cw queue peek`; `COMPLETED`/`FAILED`/`CANCELLED`:
+  `requeue --from-completed|--from-failed|--from-cancelled`.
+
+**Row lag.** A worker can record its result before the dispatch loop routes
+its completion, so the row still reads `RUNNING` while `cw dev-queue wait`
+already reports the park. `approve` and `requeue` first route such a row
+the way the dispatch loop would (bounded at 10s, one stderr line saying what
+was routed); if the completion is not routable yet they refuse as before,
+naming `cw dev-queue wait`. When that routing just parked the row at a
+human-kept gate, `approve` refuses with `its recorded sentinel was just
+routed` and releases nothing: the operator reviews the row and runs a
+second `approve`.
 
 ---
 
@@ -913,6 +971,12 @@ uv run cw dev-queue approve <TICKET> -c <CLIENT> --override-must-fix \
 # 2. Ship it.
 uv run cw dev-queue requeue <TICKET> -c <CLIENT> --stage finalize
 ```
+
+If the ticket or lane has a finalize hold, operator signoff or
+`scope_hint: large`, this step is the human's. `requeue --stage finalize`
+moves the stage pointer past REVIEW, where those gates are evaluated, so for
+such a ticket `cw dev-queue show` and `tasks` list only the override (#2692)
+and an agent notifies the human instead of shipping.
 
 The override is bound to the verdict it was given for: its `reviewed_sha` and
 the `fingerprint_v1` identity of every MUST_FIX finding on it. FINALIZE honors
@@ -1519,9 +1583,19 @@ every later run a no-op that prints `already completed at <ts>`.
 ### Requeue at a different stage (`--stage` / `--regress`)
 
 `cw dev-queue requeue` defaults to re-running the ticket's **current** stage.
-`--stage plan|impl|review|finalize` requeues at a forward stage instead; add
-`--regress` to allow a **backward** target on a blocked ticket (e.g. a
-plan-deviation review exit back to `impl`). `cw dev-queue add --stage`
+`--stage plan|impl|review|finalize` requeues at a forward stage instead. A
+**backward** target on a parked ticket (e.g. a plan-deviation review exit back
+to `impl`) is a regress: since #2692 it is inferred without `--regress` and
+announced on stdout before the `Requeued` line, with the new
+`regress_attempts` and the evidence the regress cleared (into `plan`: the plan
+approval; into `review`: any recorded MUST_FIX override). `--regress` is still
+accepted and makes the regress explicit. A ticket that is already `PENDING`
+(no `--stage`, or its own stage) is an idempotent no-op: `requeue` exits 0,
+prints `... is already PENDING at <stage>; nothing to requeue.`, stops and
+closes nothing, records no event, and names any daemon-live session for the
+ticket on stderr with the `cw spawn close <sid> --requeue` that would close it.
+A `PENDING` row asked for a different stage refuses and names
+`cw dev-queue remove` plus `cw dev-queue add --stage`. `cw dev-queue add --stage`
 (§2, GitHub #1682) shares this same `--stage` vocabulary for enqueuing a
 *new* row directly at a stage, rather than requeuing an existing one.
 
