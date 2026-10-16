@@ -3385,6 +3385,49 @@ class TestCancelSessionCloser:
         assert fake.stop_calls == []
         assert _status_of("sess-1") is SessionStatus.ACTIVE
 
+    def test_resume_during_the_stop_is_not_flipped(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeNativeDaemonClient()
+        read = _seed_cancel_sessions(fake, "sess-1")
+        real_stop = fake.stop
+
+        def _stop_then_resume(short_id: str) -> None:
+            real_stop(short_id)
+            resumed = read["sess-1"].model_copy(
+                update={"resumed_at": datetime.now(UTC)}
+            )
+            save_state(CwState(sessions=[resumed]))
+
+        monkeypatch.setattr(fake, "stop", _stop_then_resume)
+        closer = _closer(fake)
+
+        closer.close(read)
+
+        with pytest.raises(CwError, match=r"sess-1 .*left running"):
+            closer.finish()
+        assert _status_of("sess-1") is SessionStatus.ACTIVE
+        assert _operator_close_events(_CANCEL_CLIENT) == []
+
+    def test_audit_failure_is_reported_after_the_flip(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeNativeDaemonClient()
+        read = _seed_cancel_sessions(fake, "sess-1")
+
+        def _fail(*_args: object) -> None:
+            message = "disk full"
+            raise OSError(message)
+
+        monkeypatch.setattr("cw.cli.spawn.record_history_event", _fail)
+        closer = _closer(fake)
+
+        closer.close(read)
+
+        with pytest.raises(CwError, match="audit record could not be written"):
+            closer.finish()
+        assert _status_of("sess-1") is SessionStatus.COMPLETED
+
     def test_terminal_session_is_stopped_but_others_are_left_alone(
         self, tmp_config_dir: Path
     ) -> None:
