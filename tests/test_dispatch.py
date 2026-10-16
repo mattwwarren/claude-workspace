@@ -20753,7 +20753,7 @@ class TestClaimNextPendingTrackerMcpGate:
         """R6 case 3: parked BLOCKED_ON_USER, nothing charged, nothing spawned,
         and the attention event carries the R1 additive detail fields."""
         from cw.dev_queue import TRACKER_MCP_GATE_DISPOSITION
-        from cw.dev_queue.lifecycle import _PRE_DISPATCH_TRACKER_MCP_REASON
+        from cw.dev_queue.dispositions import _PRE_DISPATCH_TRACKER_MCP_REASON
 
         write_clients_yaml(self._gated_client(sample_client_config))
         self._stub_resolver(monkeypatch, "GEN-2442")

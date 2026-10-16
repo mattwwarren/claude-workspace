@@ -291,8 +291,8 @@ def _record_approve_scope_routing_decision(
 
     The ``"finalize_hold_branch"``/``"signoff_branch"`` literals below are
     deliberately spelled distinct from
-    ``lifecycle.FINALIZE_GATE_HELD_DISPOSITION``
-    (``"finalize_gate_held"``)/``lifecycle.SIGNOFF_GATE_DISPOSITION``
+    ``dispositions.FINALIZE_GATE_HELD_DISPOSITION``
+    (``"finalize_gate_held"``)/``dispositions.SIGNOFF_GATE_DISPOSITION``
     (``"signoff_gate"``) -- this function's four branches describe *which
     code path fired inside* ``_approve_ticket_locked``, a different semantic
     axis from ``task.disposition`` at the ``routing.py`` sites, and reusing

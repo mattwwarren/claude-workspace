@@ -630,6 +630,7 @@ _IMPORT_FIRST = (
     "cw.dev_queue.approval",
     "cw.dev_queue.drain",
     "cw.dev_queue.scope_drift",
+    "cw.dev_queue.dispositions",
 )
 
 

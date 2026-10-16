@@ -14767,7 +14767,7 @@ class TestStaleDispatchDispositions:
         )
 
     def test_pre_dispatch_stale_pr_reason_value(self) -> None:
-        from cw.dev_queue.lifecycle import _PRE_DISPATCH_STALE_PR_REASON
+        from cw.dev_queue.dispositions import _PRE_DISPATCH_STALE_PR_REASON
 
         assert _PRE_DISPATCH_STALE_PR_REASON == "pr_already_open_pre_dispatch"
 
@@ -14777,7 +14777,7 @@ class TestStaleDispatchDispositions:
             STALE_DISPATCH_GATE_DISPOSITION,
             transition_task_status,
         )
-        from cw.dev_queue.lifecycle import _PRE_DISPATCH_STALE_PR_REASON
+        from cw.dev_queue.dispositions import _PRE_DISPATCH_STALE_PR_REASON
 
         task = TicketTask(
             ticket_id="GEN-1862-park",

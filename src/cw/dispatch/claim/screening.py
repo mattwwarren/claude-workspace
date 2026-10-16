@@ -23,7 +23,7 @@ from cw.dev_queue import (
     save_dev_queue,
     transition_task_status,
 )
-from cw.dev_queue.lifecycle import (
+from cw.dev_queue.dispositions import (
     _PRE_DISPATCH_STALE_PR_REASON,
     _PRE_DISPATCH_TRACKER_MCP_REASON,
 )

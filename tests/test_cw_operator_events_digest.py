@@ -44,10 +44,8 @@ from cw.cw_operator_events import (
     unsubscribe,
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
-from cw.dev_queue.lifecycle import (
-    AWAITING_OPERATOR_DISPOSITION,
-    transition_task_status,
-)
+from cw.dev_queue.dispositions import AWAITING_OPERATOR_DISPOSITION
+from cw.dev_queue.lifecycle import transition_task_status
 from cw.events import record_event
 from cw.models import (
     DevQueueStore,

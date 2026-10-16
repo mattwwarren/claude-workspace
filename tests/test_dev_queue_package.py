@@ -46,6 +46,28 @@ _OWNER: dict[str, str] = {
     "approve_scope_drift_ticket": _SCOPE_DRIFT,
     "_scope_drift_command": _SCOPE_DRIFT,
     "_approve_scope_drift_locked": _SCOPE_DRIFT,
+    "SIGNOFF_GATE_DISPOSITION": _DISPOSITIONS,
+    "AWAITING_OPERATOR_DISPOSITION": _DISPOSITIONS,
+    "FINALIZE_GATE_HELD_DISPOSITION": _DISPOSITIONS,
+    "REVIEW_HEALTH_GATE_DISPOSITION": _DISPOSITIONS,
+    "REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION": _DISPOSITIONS,
+    "BRANCH_STALENESS_GATE_DISPOSITION": _DISPOSITIONS,
+    "EMPTY_DIFF_GATE_DISPOSITION": _DISPOSITIONS,
+    "REVIEW_STALENESS_GATE_DISPOSITION": _DISPOSITIONS,
+    "UNCONCLUDED_FINALIZE_REGRESS_MERGE_GATE_DISPOSITION": _DISPOSITIONS,
+    "STALE_DISPATCH_DISPOSITION": _DISPOSITIONS,
+    "STALE_DISPATCH_GATE_DISPOSITION": _DISPOSITIONS,
+    "_PRE_DISPATCH_STALE_PR_REASON": _DISPOSITIONS,
+    "TRACKER_MCP_GATE_DISPOSITION": _DISPOSITIONS,
+    "_PRE_DISPATCH_TRACKER_MCP_REASON": _DISPOSITIONS,
+    "_SALVAGE_NO_SENTINEL_DISPOSITION": _DISPOSITIONS,
+    "HOLD_DISPOSITIONS": _DISPOSITIONS,
+    "_VERBATIM_DISPOSITION_STATUSES": _DISPOSITIONS,
+    "_derive_disposition": _DISPOSITIONS,
+    "_hold_aware_disposition": _DISPOSITIONS,
+    "_result_blocker_reason": _DISPOSITIONS,
+    "_extract_pr_url": _DISPOSITIONS,
+    "_extract_pr_url_or_info": _DISPOSITIONS,
 }
 
 # Module-level ``str``/``frozenset`` constants: they carry no ``__module__``, so
@@ -53,6 +75,23 @@ _OWNER: dict[str, str] = {
 _CONSTANTS = frozenset(
     {
         "_SCOPE_DRIFT_RECOVERY_MARKER",
+        "SIGNOFF_GATE_DISPOSITION",
+        "AWAITING_OPERATOR_DISPOSITION",
+        "FINALIZE_GATE_HELD_DISPOSITION",
+        "REVIEW_HEALTH_GATE_DISPOSITION",
+        "REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION",
+        "BRANCH_STALENESS_GATE_DISPOSITION",
+        "EMPTY_DIFF_GATE_DISPOSITION",
+        "REVIEW_STALENESS_GATE_DISPOSITION",
+        "UNCONCLUDED_FINALIZE_REGRESS_MERGE_GATE_DISPOSITION",
+        "STALE_DISPATCH_DISPOSITION",
+        "STALE_DISPATCH_GATE_DISPOSITION",
+        "_PRE_DISPATCH_STALE_PR_REASON",
+        "TRACKER_MCP_GATE_DISPOSITION",
+        "_PRE_DISPATCH_TRACKER_MCP_REASON",
+        "_SALVAGE_NO_SENTINEL_DISPOSITION",
+        "HOLD_DISPOSITIONS",
+        "_VERBATIM_DISPOSITION_STATUSES",
     }
 )
 
@@ -67,6 +106,8 @@ _NOT_REEXPORTED = frozenset(
         "_emit_scope_drift_compensation",
         "_scope_drift_command",
         "_approve_scope_drift_locked",
+        "_SALVAGE_NO_SENTINEL_DISPOSITION",
+        "_VERBATIM_DISPOSITION_STATUSES",
     }
 )
 
@@ -84,7 +125,7 @@ def _owner(name: str) -> ModuleType:
 
 def test_owner_table_covers_every_moved_name() -> None:
     """The owner, constant and not-re-exported tables describe the same names."""
-    assert len(_OWNER) == 7
+    assert len(_OWNER) == 29
     assert _CONSTANTS.issubset(_OWNER)
     assert _NOT_REEXPORTED.issubset(_OWNER)
 
