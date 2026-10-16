@@ -260,7 +260,8 @@ def fail_open_holder_bookkeeping[T](what: str, action: Callable[[], T]) -> T | N
     return None
 
 
-# The holder-recording opens tried before the plain ``"w"`` open, in order.
+# The holder-recording opens tried before giving up, in order.  Every mode is
+# non-truncating: a losing contender must never erase the live holder record.
 _HOLDER_OPEN_MODES = ("a+", "r")
 
 
@@ -270,14 +271,14 @@ def open_holder_lock_fd(lock_path: Path) -> IO[str]:
     ``"a+"`` first: ``"w"`` truncates on open, so a losing contender would
     erase the holder's record. Then ``"r"`` (a lock file this process cannot
     write: ``flock`` works on any fd, so the lock is still taken and only the
-    record write fails open). Each failed attempt, whatever it raises, logs a
-    WARNING. Last comes the plain ``"w"`` open every other state lock uses; only
-    its failure propagates, as it did before the holder record existed.
+    record write fails open), and finally write-only ``"a"`` when reading is
+    unavailable. Failures of the recording attempts, whatever they raise,
+    log a WARNING; failure of all non-truncating modes propagates.
     """
     for mode in _HOLDER_OPEN_MODES:
         with _FailOpen("open"):
             return lock_path.open(mode)
-    return lock_path.open("w")
+    return lock_path.open("a")
 
 
 def record_lock_holder(fd: IO[str], *, cmd: str) -> None:

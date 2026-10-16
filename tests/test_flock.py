@@ -831,13 +831,13 @@ class TestOpenHolderLockFd:
 
         assert [r.levelno for r in caplog.records] == [logging.WARNING]
 
-    def test_any_open_failure_falls_back_to_the_plain_open(
+    def test_any_open_failure_falls_back_to_nontruncating_open(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """``"a+"`` raising anything, then ``"r"`` failing, still yields a lock fd."""
+        """``"a+"`` raising and ``"r"`` failing still use writable ``"a"``."""
         lock = tmp_path / "absent.lock"
         real_open = Path.open
 
@@ -851,7 +851,7 @@ class TestOpenHolderLockFd:
         caplog.set_level(logging.DEBUG, logger="cw._flock")
 
         with _flock.open_holder_lock_fd(lock) as fd:
-            assert fd.mode == "w"
+            assert fd.mode == "a"
 
         assert [(r.levelno, r.getMessage().split(":")[0]) for r in caplog.records] == [
             (logging.WARNING, "sessions_lock_holder_open_failed")

@@ -18,8 +18,7 @@ from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
 from cw._lock_guard import held_locks
 from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION, Status
 from cw.cli import main
-from cw.cli.routed_orphan_close import stop_and_confirm_gone
-from cw.cli.spawn import CancelSessionCloser
+from cw.cli.spawn import CancelSessionCloser, stop_and_confirm_gone
 from cw.codex_review import CODEX_REVIEW_UNPARSEABLE
 from cw.config import load_state, orchestrator_config_file, save_state
 from cw.dev_queue import load_dev_queue
@@ -3353,7 +3352,7 @@ class TestCancelSessionCloser:
         read = _seed_cancel_sessions(fake, "sess-1")
         make_unconfirmable(monkeypatch, fake)
         monkeypatch.setattr(
-            "cw.cli.routed_orphan_close._ROUTED_STOP_CONFIRM_TIMEOUT_SECS", 0.0
+            "cw.cli.spawn._CANCEL_STOP_CONFIRM_TIMEOUT_SECS", 0.0
         )
         closer = _closer(fake)
 

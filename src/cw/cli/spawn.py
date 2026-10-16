@@ -44,12 +44,17 @@ from cw.models import (
     SessionOrigin,
     SessionStatus,
 )
-from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
+from cw.native_daemon import (
+    NativeDaemonClient,
+    get_native_daemon_client,
+    wait_for_roster_presence,
+)
 from cw.reconcile import (
     _apply_sentinel_to_task,
     holds_staged_emit_result,
     ticket_id_for_session,
 )
+from cw.reconcile.routed_result_sessions import _roster_outage_shaped
 from cw.result import reconstruct_staged_sentinel
 from cw.spawn import spawn_create_impl
 
@@ -65,6 +70,55 @@ logger = logging.getLogger(__name__)
 OPERATOR_CLOSE_DETAIL = "operator_close"
 _SPAWN_CLOSE_COMMAND = "cw spawn close"
 _CANCEL_COMMAND = "cw dev-queue cancel"
+_CANCEL_STOP_CONFIRM_TIMEOUT_SECS = 5.0
+_CANCEL_STOP_CONFIRM_INTERVAL_SECS = 0.5
+
+
+def _read_live_roster(daemon: NativeDaemonClient) -> set[str] | None:
+    """Read the daemon roster for the cancel workflow, fail closed."""
+    try:
+        return daemon.list_live_session_short_ids_fail_closed()
+    except (OSError, ValueError):
+        return None
+
+
+def stop_and_confirm_gone(
+    daemon: NativeDaemonClient,
+    surface_ref: str,
+    *,
+    candidate_ids: frozenset[str],
+    candidate_surfaces: frozenset[str],
+    pre_stop_live: set[str] | None = None,
+) -> tuple[str | None, OSError | ValueError | None]:
+    """Stop a cancel target and confirm that it left the daemon roster."""
+    if pre_stop_live is None:
+        pre_stop_live = _read_live_roster(daemon) or set()
+    daemon.stop(surface_ref)
+    wait_error: OSError | ValueError | None = None
+    try:
+        gone = wait_for_roster_presence(
+            daemon,
+            surface_ref,
+            present=False,
+            timeout=_CANCEL_STOP_CONFIRM_TIMEOUT_SECS,
+            interval=_CANCEL_STOP_CONFIRM_INTERVAL_SECS,
+        )
+    except (OSError, ValueError) as exc:
+        gone, wait_error = False, exc
+    after = _read_live_roster(daemon)
+    if after is None:
+        reason = "roster_unreadable_after_stop"
+    elif not gone or surface_ref in after:
+        reason = "worker_still_listed"
+    elif (
+        not after
+        and pre_stop_live - candidate_surfaces
+        and _roster_outage_shaped(load_state(), after, exclude_ids=candidate_ids)
+    ):
+        reason = "roster_unreadable_after_stop"
+    else:
+        reason = None
+    return reason, wait_error
 
 
 def _spawn_create_impl(
@@ -319,9 +373,7 @@ class CancelSessionCloser:
 
     One per command (#2694). :meth:`close` handles one cancelled row: each
     DAEMON session bound to it is stopped lock-free and confirmed gone from
-    the roster by *stop_and_confirm* (the routed-orphan close's
-    :func:`cw.cli.routed_orphan_close.stop_and_confirm_gone`, passed in
-    because that module imports this one), then flipped COMPLETED(USER)
+    the roster by *stop_and_confirm_gone*, then flipped COMPLETED(USER)
     under one bounded sessions-lock wait
     (:func:`~cw._flock.operator_close_lock_wait_seconds`) with one
     operator-close audit event each. A session that is not the incarnation
@@ -337,9 +389,14 @@ class CancelSessionCloser:
     pending: list[str] = field(default_factory=list)
     lock_timeout: str | None = None
 
-    def close(self, bound: Mapping[str, Session | None]) -> None:
+    def close(
+        self,
+        bound: Mapping[str, Session | None],
+        *,
+        current: CwState | None = None,
+    ) -> None:
         """Close one row's sessions: cleared id -> the session read before cancel."""
-        to_flip = self._stop_confirmed(self._targets(bound))
+        to_flip = self._stop_confirmed(self._targets(bound, current=current))
         if not to_flip:
             return
         if self.lock_timeout is not None:
@@ -356,12 +413,18 @@ class CancelSessionCloser:
         self.problems.extend(_other_incarnation_message(sid) for sid in resumed)
         self.problems.extend(_audit_flipped(flipped))
 
-    def _targets(self, bound: Mapping[str, Session | None]) -> list[Session]:
+    def _targets(
+        self,
+        bound: Mapping[str, Session | None],
+        *,
+        current: CwState | None = None,
+    ) -> list[Session]:
         """The bound DAEMON sessions still the incarnation that was read."""
-        current = {s.id: s for s in load_state().sessions} if bound else {}
+        current_state = current if current is not None else load_state()
+        current_by_id = {s.id: s for s in current_state.sessions} if bound else {}
         targets: list[Session] = []
         for sid, read in bound.items():
-            sess = current.get(sid)
+            sess = current_by_id.get(sid)
             if sess is None or sess.origin is not SessionOrigin.DAEMON:
                 continue
             if read is None or _incarnation(sess) != _incarnation(read):
@@ -376,8 +439,21 @@ class CancelSessionCloser:
         surfaces = frozenset(cast("str", s.surface_ref) for s in targets)
         to_flip: dict[str, Session] = {}
         for sess in targets:
-            surface_ref = cast("str", sess.surface_ref)
-            if sess.status in TERMINAL_SESSION_STATUSES:
+            pre_stop_live = _read_live_roster(self.daemon)
+            latest_sess = next(
+                (
+                    candidate
+                    for candidate in load_state().sessions
+                    if candidate.id == sess.id
+                ),
+                None,
+            )
+            if latest_sess is None or _incarnation(latest_sess) != _incarnation(sess):
+                self.problems.append(_other_incarnation_message(sess.id))
+                continue
+            target = latest_sess
+            surface_ref = cast("str", target.surface_ref)
+            if target.status in TERMINAL_SESSION_STATUSES:
                 # Nothing to flip; stop a leaked worker as cancel always has.
                 self.daemon.stop(surface_ref)
                 continue
@@ -386,9 +462,10 @@ class CancelSessionCloser:
                 surface_ref,
                 candidate_ids=ids,
                 candidate_surfaces=surfaces,
+                pre_stop_live=pre_stop_live or set(),
             )
             if reason is None:
-                to_flip[sess.id] = sess
+                to_flip[target.id] = target
             else:
                 self.problems.append(
                     f"Session {sess.id}: the stop of worker {surface_ref} is not"
