@@ -271,12 +271,18 @@ def open_holder_lock_fd(lock_path: Path) -> IO[str]:
     write: ``flock`` works on any fd, so the lock is still taken and only the
     record write fails open), and finally write-only ``"a"`` when reading is
     unavailable. Failures of the recording attempts, whatever they raise,
-    log a WARNING; failure of all non-truncating modes propagates.
+    log a WARNING; if all non-truncating modes fail, the ordinary ``"w"``
+    acquisition path is retained.
     """
     for mode in _HOLDER_OPEN_MODES:
         with _FailOpen("open"):
             return lock_path.open(mode)
-    return lock_path.open("a")
+    fd = fail_open_holder_bookkeeping("open", lambda: lock_path.open("a"))
+    if fd is not None:
+        return fd
+    # If holder-specific opens all fail, preserve the ordinary state-lock
+    # acquisition path; a failure here is the lock-file failure itself.
+    return lock_path.open("w")
 
 
 def record_lock_holder(fd: IO[str], *, cmd: str) -> None:
