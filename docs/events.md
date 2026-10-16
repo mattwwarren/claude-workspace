@@ -628,18 +628,6 @@ with `proposed_action: "close_routed_result_session"` (the same value as its
 `mutations: ["session_status_completed", "daemon_stopped"]`; it never reverts
 a queue row.
 
-Every explicit operator session close emits it too, through the shared close
-audit (`cw.reconcile.close_audit`, #2694): the routed-result orphan close of
-`cw dev-queue approve`/`requeue` (`proposed_action:
-"close_routed_result_session"`), and inline or queued `cw spawn close` and the
-`cw dev-queue cancel` session step (`proposed_action: "operator_close"`,
-`mutations: ["session_status_completed"]`, `daemon_stop_succeeded: null`
-because the stop runs after the audit, backed by the leaked-worker sweep).
-The payload is written to a durable outbox before the close and delivered
-after it, so it also carries `audit_id` (`"<session_id>@<recorded_at>"`),
-which deduplicates a redelivery of the same close while a later close of the
-same session (after a resume) is delivered again.
-
 ### `session.spawn_unregistered`
 
 **Emitter:** `cw.spawn` roster-registration poll

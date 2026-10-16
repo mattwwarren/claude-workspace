@@ -2097,10 +2097,6 @@ _CHILD_READY_TIMEOUT_S = 10.0
 # lock-free ``precheck_requeue``, and a timeout after it leaves the row parked
 # and the session COMPLETED -- the state a normal park leaves. ``approve``
 # closes after its lock, so nothing irreversible precedes that one.
-# A second accepted exception (#2694): ``close_sessions_for_cancel``, the
-# ``cw dev-queue cancel`` session flip, runs after ``cancel_ticket`` committed
-# the row CANCELLED. A timeout there loses nothing: the queued-close entry is
-# written first and is the retry path, and the step is flip-only.
 _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/cli/maintenance.py", "doctor"): 1,  # `cw doctor --reap <SESSION>`
     ("cw/cli/maintenance.py", "init"): 1,  # `cw init` -> init_client (#2501)
@@ -2134,12 +2130,6 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/doctor/routed_result_wedge.py", "reap_routed_result_findings"): 1,
     ("cw/orchestrate.py", "retire_merged_prs"): 1,  # `cw orchestrate retire`
     ("cw/reconcile/core.py", "reconcile"): 1,  # list/status/start + tick pre-pass
-    # `cw dev-queue cancel` session flip (#2694): `cancel_ticket` already
-    # committed the row CANCELLED and the queued-close entry is written first,
-    # so a timeout loses nothing (the entry is the retry path); the step is
-    # flip-only (`settle_row=False`) and takes no dev-queue lock inside the
-    # sessions-lock hold.
-    ("cw/reconcile/session_close.py", "close_sessions_for_cancel"): 1,
     ("cw/session.py", "background_session"): 1,  # `cw bg`
     ("cw/session.py", "resume_session"): 1,  # live-surface `_update_live` only
     ("cw/session.py", "done_session"): 1,  # `cw done`

@@ -767,7 +767,7 @@ event log still holds the page.
 - `src/cw/cli/signal_park.py` — `cw signal-park`, the §6c park-marker writer.
 - `src/cw/cli/stop_hook/command.py:_page_sentinel_unroutable` — the §6d page; `src/cw/cli/stop_hook/staged_emit.py:_peek_staged_emit_result` — the lock-free staged-result peek on the `background_tasks` path.
 - `src/cw/reconcile/idle/_detect.py:_staged_emit_candidate` — the §6d idle-sweep backstop producer.
-- `src/cw/reconcile/session_close.py:route_staged_emit_result` — `cw spawn close`'s route-before-cancel (also applied by a queued `spawn_close` entry).
+- `src/cw/cli/spawn.py:_route_staged_emit_result` — `cw spawn close`'s route-before-cancel.
 - `src/cw/models/park_comment_marker.py` — the marker model and its reader.
 - `src/cw/reconcile/_shared/_transcripts.py:_locate_session_transcript` — transcript path resolver.
 - `src/cw/reconcile/_shared/_transcripts.py:_csid_from_transcript` — claude_session_id derivation.

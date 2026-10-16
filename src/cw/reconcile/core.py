@@ -105,7 +105,6 @@ from cw.reconcile.review_recipes import (
 )
 from cw.reconcile.review_recipes.core import capture_review_repo_slugs
 from cw.reconcile.routed_result_sessions import sweep_routed_result_sessions
-from cw.reconcile.session_close import apply_queued_closes
 from cw.reconcile.stalled import (
     _act_on_stalled_candidates,
     _detect_stalled_candidates,
@@ -734,9 +733,6 @@ def _reconcile_locked(
         clients = load_clients()
     state = load_state()
     now = datetime.now(UTC)
-    # Recorded operator closes (#2694) apply first: a `spawn_close` entry may
-    # cancel its RUNNING row, which every sweep below must then see.
-    apply_queued_closes(state, deferred=deferred)
 
     # Foreign-result sweep: completes headless DAEMON sessions whose
     # last_result already carries a terminal sentinel recorded by another

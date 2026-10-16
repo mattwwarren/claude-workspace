@@ -552,7 +552,7 @@ _UNGUARDED: dict[tuple[str, str], str] = {
     ("cw/_hook_context.py", "_context_lock"): (
         "per-worktree, bounded try_flock_until, fails open"
     ),
-    ("cw/reconcile/close_audit.py", "_audit_outbox_lock"): (
+    ("cw/doctor/routed_result_wedge.py", "_audit_outbox_lock"): (
         "deliberately reentrant by contextvar depth permit"
     ),
     ("cw/codex_legacy_recovery.py", "codex_legacy_marker_lock"): (

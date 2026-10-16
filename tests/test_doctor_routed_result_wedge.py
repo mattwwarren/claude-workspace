@@ -26,7 +26,11 @@ from cw.doctor import format_report_json, run_doctor
 from cw.doctor._shared import WedgeFinding
 from cw.doctor.routed_result_wedge import (
     WEDGE_ROUTED_RESULT_STRANDED,
+    _audit_outbox_path,
     _check_wedge_routed_result_session,
+    _emit_audit_record,
+    _finalize_audit_intent,
+    _read_audit_outbox,
     _retry_pending_audits,
     has_pending_routed_result_audits,
     reap_routed_result_findings,
@@ -49,12 +53,6 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from cw.reconcile.close_audit import (
-    audit_outbox_path,
-    emit_audit_record,
-    finalize_audit_intent,
-    read_audit_outbox,
-)
 from cw.reconcile.leaked_workers import sweep_leaked_daemon_workers
 from tests._reconcile_helpers import (
     LockProbeDaemon,
@@ -214,10 +212,7 @@ def test_reap_audit_event_payload(
     events = read_events(event_types=[OrchestratorEventType.SESSION_REAP_AUTHORIZED])
     assert len(events) == 1
     assert events[0].correlation_id == _SID
-    payload = dict(events[0].payload)
-    # Delivery is deduplicated per intent (#2694): "<session_id>@<recorded_at>".
-    assert str(payload.pop("audit_id")).startswith(f"{_SID}@")
-    assert payload == {
+    assert dict(events[0].payload) == {
         "session_id": _SID,
         "session_name": f"client-a/auto-dev/{_SID}",
         "client": "client-a",
@@ -489,7 +484,7 @@ def _outbox_record(
 
 
 def _write_outbox(records: object) -> None:
-    path = audit_outbox_path()
+    path = _audit_outbox_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(records), encoding="utf-8")
 
@@ -501,7 +496,7 @@ def _complete_seeded_session(session: Session) -> None:
 
 def test_no_outbox_means_no_pending_audits() -> None:
     assert has_pending_routed_result_audits() is False
-    assert read_audit_outbox() == []
+    assert _read_audit_outbox() == []
 
 
 def test_pending_record_is_reported_as_pending() -> None:
@@ -512,13 +507,13 @@ def test_pending_record_is_reported_as_pending() -> None:
 
 @pytest.mark.parametrize("raw", ["not json", '{"a": 1}', "[1, 2]"])
 def test_malformed_outbox_fails_closed(raw: str) -> None:
-    path = audit_outbox_path()
+    path = _audit_outbox_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(raw, encoding="utf-8")
 
     assert has_pending_routed_result_audits() is True
     with pytest.raises(ValueError, match=r"audit outbox|Expecting value"):
-        read_audit_outbox()
+        _read_audit_outbox()
 
 
 def test_reap_leaves_outbox_empty_after_audit_lands(
@@ -529,7 +524,7 @@ def test_reap_leaves_outbox_empty_after_audit_lands(
 
     assert reap_routed_result_findings(_routed_findings()) == [_SID]
 
-    assert read_audit_outbox() == []
+    assert _read_audit_outbox() == []
     assert len(_events(OrchestratorEventType.SESSION_REAP_AUTHORIZED)) == 1
 
 
@@ -543,7 +538,7 @@ def test_reap_reuses_a_preexisting_audit_intent(
 
     assert reap_routed_result_findings(_routed_findings()) == [_SID]
 
-    assert read_audit_outbox() == []
+    assert _read_audit_outbox() == []
     assert len(_events(OrchestratorEventType.SESSION_REAP_AUTHORIZED)) == 1
 
 
@@ -560,7 +555,7 @@ def test_retry_completes_a_pending_stop_for_a_closed_session(
     (event,) = _events(OrchestratorEventType.SESSION_REAP_AUTHORIZED)
     assert event["daemon_stop_succeeded"] is True
     assert event["mutations"] == ["session_status_completed", "daemon_stopped"]
-    assert read_audit_outbox() == []
+    assert _read_audit_outbox() == []
 
 
 def test_retry_records_a_failed_stop_in_the_audit(
@@ -593,7 +588,7 @@ def test_retry_leaves_intent_pending_while_session_is_still_open(
     _retry_pending_audits(daemon)
 
     assert daemon.stop_calls == []
-    assert [r["session_id"] for r in read_audit_outbox()] == [_SID, "ghost"]
+    assert [r["session_id"] for r in _read_audit_outbox()] == [_SID, "ghost"]
     assert _events(OrchestratorEventType.SESSION_REAP_AUTHORIZED) == []
 
 
@@ -612,7 +607,7 @@ def test_retry_skips_a_record_whose_state_cannot_be_read(
     _retry_pending_audits(daemon)
 
     assert daemon.stop_calls == []
-    assert len(read_audit_outbox()) == 1
+    assert len(_read_audit_outbox()) == 1
 
 
 def test_retry_emits_a_pending_event_record(
@@ -625,14 +620,14 @@ def test_retry_emits_a_pending_event_record(
 
     (event,) = _events(OrchestratorEventType.SESSION_REAP_AUTHORIZED)
     assert event["daemon_stop_succeeded"] is True
-    assert read_audit_outbox() == []
+    assert _read_audit_outbox() == []
 
 
 def test_retry_with_unreadable_outbox_does_not_raise(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _home, daemon = _install_fake_daemon_roster(tmp_path, monkeypatch)
-    path = audit_outbox_path()
+    path = _audit_outbox_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("not json", encoding="utf-8")
 
@@ -643,7 +638,7 @@ def test_retry_with_unreadable_outbox_does_not_raise(
 
 def test_finalize_without_a_durable_intent_returns_none() -> None:
     assert (
-        finalize_audit_intent(
+        _finalize_audit_intent(
             "no-such-session",
             mutations=["session_status_completed"],
             stop_succeeded=True,
@@ -663,10 +658,10 @@ def test_emit_failure_keeps_the_record_in_the_outbox(
         msg = "event inbox unavailable"
         raise OSError(msg)
 
-    monkeypatch.setattr("cw.reconcile.close_audit.record_event", _inbox_down)
+    monkeypatch.setattr("cw.doctor.routed_result_wedge.record_event", _inbox_down)
 
-    assert emit_audit_record(record) is False
-    assert len(read_audit_outbox()) == 1
+    assert _emit_audit_record(record) is False
+    assert len(_read_audit_outbox()) == 1
 
 
 def test_outbox_cleanup_failure_after_emit_still_reports_delivery(
@@ -679,16 +674,18 @@ def test_outbox_cleanup_failure_after_emit_still_reports_delivery(
         msg = "disk full"
         raise OSError(msg)
 
-    monkeypatch.setattr("cw.reconcile.close_audit._write_audit_outbox", _write_fails)
+    monkeypatch.setattr(
+        "cw.doctor.routed_result_wedge._write_audit_outbox", _write_fails
+    )
 
-    assert emit_audit_record(record) is True
+    assert _emit_audit_record(record) is True
     assert len(_events(OrchestratorEventType.SESSION_REAP_AUTHORIZED)) == 1
 
 
 def test_finalize_skips_records_for_other_sessions() -> None:
     _write_outbox([_outbox_record(session_id="other"), _outbox_record()])
 
-    record = finalize_audit_intent(
+    record = _finalize_audit_intent(
         _SID,
         mutations=["session_status_completed", "daemon_stopped"],
         stop_succeeded=True,
@@ -698,6 +695,6 @@ def test_finalize_skips_records_for_other_sessions() -> None:
     assert record is not None
     assert record["session_id"] == _SID
     assert record["status"] == "pending_event"
-    by_id = {r["session_id"]: r for r in read_audit_outbox()}
+    by_id = {r["session_id"]: r for r in _read_audit_outbox()}
     assert by_id["other"]["status"] == "pending_stop"
     assert by_id[_SID]["status"] == "pending_event"

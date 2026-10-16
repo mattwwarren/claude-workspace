@@ -16,7 +16,6 @@ import pytest
 
 from cw.config import load_state, save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
-from cw.events import read_events
 from cw.exceptions import CwError
 from cw.history import EventType, load_history
 from cw.models import (
@@ -24,13 +23,11 @@ from cw.models import (
     CwState,
     DevQueueStore,
     OrchestratorConfig,
-    OrchestratorEventType,
     QueueItemStatus,
     Session,
     SessionStatus,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from cw.reconcile.close_audit import CloseAudit, read_audit_outbox
 from cw.reconcile.liveness_page import close_command
 from cw.worktree import live_home_reason
 from tests._reconcile_helpers import (
@@ -243,49 +240,12 @@ def test_close_surfaces_audit_write_failure(
         msg = "history unavailable"
         raise OSError(msg)
 
-    monkeypatch.setattr("cw.reconcile.close_audit.record_history_event", _fail)
+    monkeypatch.setattr(f"{_MODULE}.record_event", _fail)
 
     with pytest.raises(CwError, match="durable audit record could not be written"):
         _close(daemon, after_transition=True)
 
     assert _status_of(orphan.id) == SessionStatus.COMPLETED
-
-
-def test_close_delivers_its_intent_through_the_shared_audit_outbox(
-    tmp_path: Path,
-) -> None:
-    """One audit mechanism (#2694): the intent lands as ``session.reap_authorized``."""
-    daemon = FakeNativeDaemonClient()
-    (orphan,) = _seed_orphans(tmp_path, daemon)
-
-    assert _close(daemon, after_transition=True) == [orphan.id]
-
-    (event,) = read_events(event_types=[OrchestratorEventType.SESSION_REAP_AUTHORIZED])
-    assert event.payload["session_id"] == orphan.id
-    assert event.payload["proposed_action"] == "close_routed_result_session"
-    assert event.payload["ticket_id"] == _TICKET
-    assert event.payload["mutations"] == ["session_status_completed", "daemon_stopped"]
-    assert event.payload["daemon_stop_succeeded"] is True
-    assert read_audit_outbox() == []
-
-
-def test_an_unpreparable_intent_refuses_before_any_flip(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    daemon = FakeNativeDaemonClient()
-    (orphan,) = _seed_orphans(tmp_path, daemon)
-
-    def _outbox_down(_records: object) -> None:
-        raise OSError(5, "Input/output error")
-
-    monkeypatch.setattr("cw.reconcile.close_audit._write_audit_outbox", _outbox_down)
-
-    with pytest.raises(CwError, match="Could not prepare the durable audit record"):
-        _close(daemon, after_transition=True)
-
-    assert _status_of(orphan.id) == SessionStatus.ACTIVE
-    assert load_history(_CLIENT) == []
 
 
 def test_leaves_unrelated_sessions_and_other_tickets_alone(tmp_path: Path) -> None:
@@ -827,7 +787,6 @@ def test_flip_error_after_confirmed_stop_refuses_then_retry_flips(
         session_id: str,
         native_daemon: NativeDaemonClient | None = None,
         surface_already_stopped: bool = False,
-        audit: CloseAudit | None = None,
     ) -> None:
         calls.append(session_id)
         if len(calls) == 1:
@@ -837,7 +796,6 @@ def test_flip_error_after_confirmed_stop_refuses_then_retry_flips(
             session_id=session_id,
             native_daemon=native_daemon,
             surface_already_stopped=surface_already_stopped,
-            audit=audit,
         )
 
     monkeypatch.setattr(f"{_MODULE}._spawn_close_impl", _fail_once)
@@ -859,40 +817,6 @@ def test_flip_error_after_confirmed_stop_refuses_then_retry_flips(
     assert _close(daemon, after_transition=after_transition) == [orphan.id]
     assert daemon.stop_calls == [orphan.surface_ref]
     assert _status_of(orphan.id) == SessionStatus.COMPLETED
-
-
-@_AFTER_TRANSITION
-def test_timed_out_flip_is_refused_and_not_audited_as_completed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    held_sessions_lock: Path,
-    orphan_logs: pytest.LogCaptureFixture,
-    after_transition: bool,
-) -> None:
-    """#2694 guard: ``_flip_closed`` reaches ``_spawn_close_impl``, which still
-    RAISES on a held sessions lock (it never queues), so the orphan close is
-    refused, the session stays ACTIVE, nothing is audited as completed and no
-    queued-close entry is written on this path."""
-    from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
-    from cw.reconcile.session_close import pending_queued_closes
-
-    monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.05")
-    daemon = FakeNativeDaemonClient()
-    (orphan,) = _seed_orphans(tmp_path, daemon)
-
-    with pytest.raises(CwError) as excinfo:
-        _close(daemon, after_transition=after_transition)
-
-    assert close_command(orphan.id) in _flat(str(excinfo.value))
-    assert _status_of(orphan.id) == SessionStatus.ACTIVE
-    assert [
-        e for e in load_history(_CLIENT) if e.event_type is EventType.SESSION_COMPLETED
-    ] == []
-    assert pending_queued_closes() == []
-    assert _records(orphan_logs, "routed_orphan_close_failed")
-    # The intent is written under the lock, right before the flip: a refused
-    # flip leaves no stale intent behind.
-    assert read_audit_outbox() == []
 
 
 def test_stop_that_makes_roster_unreadable_refuses(

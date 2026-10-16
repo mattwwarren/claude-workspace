@@ -22,7 +22,7 @@ from cw import _flock
 from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
 from cw._lock_hold import LockHoldRecord, read_window
 from cw.cli import main
-from cw.config import load_state, save_state, sessions_lock, state_dir
+from cw.config import save_state, sessions_lock, state_dir
 from cw.dev_queue import (
     add_ticket,
     approve_must_fix_override_ticket,
@@ -43,18 +43,11 @@ from cw.dev_queue import (
 from cw.dev_queue import storage as dev_queue_storage
 from cw.dev_queue.crud import register_or_adopt_watched_pr
 from cw.exceptions import CwError, LockTimeoutError
-from cw.models import (
-    CompletionReason,
-    CwState,
-    DevQueueStore,
-    QueueItemStatus,
-    SessionStatus,
-)
+from cw.models import CwState, DevQueueStore, QueueItemStatus
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import (
     _FakeClock,
     _hold_flock,
-    _hold_sessions_lock_recorded,
     _make_daemon_session,
     _make_ticket_task,
 )
@@ -406,11 +399,6 @@ class TestMultiTicketContention:
         monkeypatch.setattr(
             "cw.cli.dev_queue.crud.get_native_daemon_client", lambda: mock_native_daemon
         )
-        cancel_task_calls: list[str] = []
-        monkeypatch.setattr(
-            "cw.reconcile.session_close.cancel_task_for_session",
-            cancel_task_calls.append,
-        )
         _contend_second_acquisition(monkeypatch)
 
         result = CliRunner().invoke(
@@ -428,14 +416,6 @@ class TestMultiTicketContention:
             " idempotent: re-running the full command is safe."
         ) in result.stderr
         assert _dev_queue_timeout_message(cw.config.dev_queue_lock()) in result.stderr
-        # #2694: the flip-only session step closed A's session without ever
-        # reaching the unbounded `cancel_task_for_session` (which would have
-        # been the contended 2nd `crud._lock` acquisition and hung here).
-        statuses = {s.id: s for s in load_state().sessions}
-        assert statuses["sess-a"].status is SessionStatus.COMPLETED
-        assert statuses["sess-a"].completed_reason is CompletionReason.USER
-        assert statuses["sess-b"].status is SessionStatus.ACTIVE
-        assert cancel_task_calls == []
 
     def test_timeout_at_the_first_ticket_reports_none_done(
         self, monkeypatch: pytest.MonkeyPatch
@@ -471,167 +451,6 @@ class TestMultiTicketContention:
         assert result.exit_code != 0
         assert "Not removed (lock timed out)" not in result.stderr
         assert "dev_queue lock" in result.stderr
-
-
-# ---------------------------------------------------------------------------
-# Sessions-lock contention on `cw dev-queue cancel` (#2694)
-# ---------------------------------------------------------------------------
-
-
-def _seed_two_running_with_sessions() -> None:
-    save_state(
-        CwState(
-            sessions=[
-                _make_daemon_session(
-                    id="sess-a", name=f"{_CLIENT}/auto-dev/A", surface_ref="ref-a"
-                ),
-                _make_daemon_session(
-                    id="sess-b", name=f"{_CLIENT}/auto-dev/B", surface_ref="ref-b"
-                ),
-            ]
-        )
-    )
-    save_dev_queue(
-        DevQueueStore(
-            tasks=[
-                _make_ticket_task(
-                    ticket_id=ticket,
-                    client=_CLIENT,
-                    status=QueueItemStatus.RUNNING,
-                    session_id=sid,
-                )
-                for ticket, sid in (("A", "sess-a"), ("B", "sess-b"))
-            ]
-        )
-    )
-
-
-class _RaisingStopDaemon:
-    """A daemon client whose stop always fails (``stop`` is best effort)."""
-
-    def __init__(self) -> None:
-        self.stop_calls: list[str] = []
-
-    def stop(self, short_id: str) -> None:
-        self.stop_calls.append(short_id)
-        msg = "daemon socket gone"
-        raise OSError(msg)
-
-
-@pytest.mark.usefixtures("acme")
-class TestCancelSessionsLockContention:
-    def test_queues_both_sessions_with_one_bounded_attempt(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        mock_native_daemon: FakeNativeDaemonClient,
-        held_sessions_lock_recorded: Path,
-    ) -> None:
-        from cw.reconcile.session_close import pending_queued_closes
-
-        monkeypatch.delenv(SESSIONS_LOCK_TIMEOUT_ENV, raising=False)
-        clock = _FakeClock()
-        monkeypatch.setattr(_flock, "time", clock)
-        monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.get_native_daemon_client", lambda: mock_native_daemon
-        )
-        _seed_two_running_with_sessions()
-
-        result = CliRunner().invoke(
-            main, ["dev-queue", "cancel", "A", "B", "-c", _CLIENT]
-        )
-
-        assert result.exit_code == 0, result.output
-        assert _queue_by_ticket() == {
-            "A": QueueItemStatus.CANCELLED,
-            "B": QueueItemStatus.CANCELLED,
-        }
-        assert mock_native_daemon.stop_calls == ["ref-a", "ref-b"]
-        assert [e.session_id for e in pending_queued_closes()] == ["sess-a", "sess-b"]
-        queued_lines = [
-            line for line in result.output.splitlines() if line.startswith("QUEUED")
-        ]
-        assert len(queued_lines) == 1
-        assert "sess-a" in queued_lines[0]
-        assert "sess-b" in queued_lines[0]
-        assert "not yet marked completed" in queued_lines[0]
-        assert clock.now == 5.0
-        assert {s.status for s in load_state().sessions} == {SessionStatus.ACTIVE}
-
-    def test_unrecorded_close_names_the_manual_recovery(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        mock_native_daemon: FakeNativeDaemonClient,
-        held_sessions_lock_recorded: Path,
-    ) -> None:
-        monkeypatch.setattr(_flock, "time", _FakeClock())
-        monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.get_native_daemon_client", lambda: mock_native_daemon
-        )
-
-        def _disk_full(_path: Path, _text: str) -> None:
-            raise OSError(28, "No space left on device")
-
-        monkeypatch.setattr("cw.reconcile.session_close.atomic_write_text", _disk_full)
-        _seed_two_running_with_sessions()
-
-        result = CliRunner().invoke(main, ["dev-queue", "cancel", "A", "-c", _CLIENT])
-
-        assert result.exit_code == 0, result.output
-        assert mock_native_daemon.stop_calls == ["ref-a"]
-        assert "run `cw spawn close sess-a`" in result.stderr
-        assert "QUEUED" not in result.output
-
-    def test_entries_are_written_before_the_stops(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        held_sessions_lock_recorded: Path,
-    ) -> None:
-        from cw.reconcile.session_close import pending_queued_closes
-
-        monkeypatch.setattr(_flock, "time", _FakeClock())
-        daemon = _RaisingStopDaemon()
-        monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.get_native_daemon_client", lambda: daemon
-        )
-        _seed_two_running_with_sessions()
-
-        result = CliRunner().invoke(
-            main, ["dev-queue", "cancel", "A", "B", "-c", _CLIENT]
-        )
-
-        assert result.exit_code != 0
-        assert daemon.stop_calls == ["ref-a"]
-        assert [e.session_id for e in pending_queued_closes()] == ["sess-a"]
-
-    def test_reconcile_applies_the_queued_cancels_flip_only(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        mock_native_daemon: FakeNativeDaemonClient,
-    ) -> None:
-        from cw.reconcile import reconcile
-        from cw.reconcile.session_close import pending_queued_closes
-
-        monkeypatch.setattr(_flock, "time", _FakeClock())
-        monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.get_native_daemon_client", lambda: mock_native_daemon
-        )
-        monkeypatch.setattr(
-            "cw.reconcile._deps.get_native_daemon_client", lambda: mock_native_daemon
-        )
-        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
-        _seed_two_running_with_sessions()
-        with _hold_sessions_lock_recorded():
-            result = CliRunner().invoke(
-                main, ["dev-queue", "cancel", "A", "B", "-c", _CLIENT]
-            )
-        assert result.exit_code == 0, result.output
-        queue_before = cw.config.dev_queue_file().read_bytes()
-
-        reconcile()
-
-        assert {s.status for s in load_state().sessions} == {SessionStatus.COMPLETED}
-        assert cw.config.dev_queue_file().read_bytes() == queue_before
-        assert pending_queued_closes() == []
 
 
 # ---------------------------------------------------------------------------
