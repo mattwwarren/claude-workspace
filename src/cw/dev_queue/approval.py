@@ -12,9 +12,12 @@ Layering: imports ``crud`` (``_find_ticket`` / ``_APPROVABLE_STATUSES``) and
 ``dev_queue ↔ dispatch`` cycle break — ``_should_gate_for_signoff``,
 ``_should_force_hold_finalize``, and (#1617) ``_resolve_scope_tier`` /
 ``_extract_scope_tier`` — stays a function-level deferred import inside
-``_approve_ticket_locked``. (#1640) ``_APPROVAL_GATE_REASON`` and
-``SCOPE_GATED_APPROVAL_STATUSES`` are deferred imports inside
-``_not_at_approval_gate`` instead, the sole site that now consumes them.
+``_approve_ticket_locked``. ``_not_at_approval_gate`` lives in the leaf
+``gates`` module (#2692), which also holds the single definition of the
+``"approval_gate"`` string, so no deferred ``cw.dispatch`` import is needed
+for it. Refusals name the row's legal next command through ``next_commands``
+(``refusal_suffix``) and ``refusal`` (``refusal_hint``), imported at module
+level: neither imports ``approval`` back.
 """
 
 from __future__ import annotations
@@ -29,17 +32,22 @@ from cw.atomic import atomic_write_text
 from cw.auto_dev_result import PLAN_SCOPE_DRIFT_BLOCKER_REASON
 from cw.config import dev_queue_file, get_client
 from cw.dev_queue.crud import _APPROVABLE_STATUSES, _find_ticket
+from cw.dev_queue.gates import _not_at_approval_gate
 from cw.dev_queue.lifecycle import (
-    BRANCH_STALENESS_GATE_DISPOSITION,
-    FINALIZE_GATE_HELD_DISPOSITION,
-    REVIEW_STALENESS_GATE_DISPOSITION,
     _advance_task_pointer,
     _clear_signoff_gate,
     _plan_is_reviewed,
     _reset_for_same_stage_requeue,
     _tracker_allows_github_fetch,
 )
+from cw.dev_queue.next_commands import (
+    SCOPE_DRIFT_PATHS_PLACEHOLDER,
+    dev_queue_command,
+    is_human_kept_gate,
+    refusal_suffix,
+)
 from cw.dev_queue.plan_promotion import DEV_QUEUE_APPROVE_ACTOR, promote_plan_draft
+from cw.dev_queue.refusal import refusal_hint
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
@@ -521,61 +529,6 @@ def _record_body_drift(
     return persisted_body_sha, live_body_sha
 
 
-def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
-    """True iff neither release condition for the approval gate is met.
-
-    Extracted from ``_approve_ticket_locked`` to keep that function under the
-    PLR0915 statement ceiling (#1640), following the same extraction pattern
-    as ``_record_approve_scope_routing_decision`` above. Two independent
-    conditions can satisfy the gate: the session's ``last_result`` status is
-    one of ``SCOPE_GATED_APPROVAL_STATUSES`` (the ``plan_pending_approval`` /
-    ``review_pending_approval`` release path), or the task's ``disposition``
-    records a park this entry point is authorised to release --
-    ``_APPROVAL_GATE_REASON`` (the ``scope_hint`` escalation gate, GitHub
-    #1640) or ``FINALIZE_GATE_HELD_DISPOSITION`` (the RFC 0011 A3 force hold,
-    GitHub #2410 -- a plain ``stage_complete`` completion never satisfies the
-    status condition, so without this the operator-initiated bypass inside
-    ``_approve_ticket_locked`` is never reached). ``approve`` proceeds if
-    either condition holds -- unless the #1823 branch-staleness override below
-    fires first, which vetoes both.
-    """
-    from cw.auto_dev_result import SCOPE_GATED_APPROVAL_STATUSES
-    from cw.dispatch import _APPROVAL_GATE_REASON
-
-    # #1823: ahead of both conditions below, and returning True unconditionally
-    # rather than joining the `and`. A branch-staleness park leaves the
-    # *sentinel* untouched -- session.last_result.status is still
-    # "review_pending_approval" -- and only diverges task.disposition. So
-    # not_at_status_gate is False and not_at_disposition_gate is True, the
-    # `and` yields False, and the row would read as "at the approval gate":
-    # `approve` would release a ticket whose reviewed tree no longer matches
-    # origin/<default_branch>. The gate must fail closed until the branch is
-    # rebased; recovery is `cw dev-queue requeue`/`drain`, not `approve`.
-    if task.disposition == BRANCH_STALENESS_GATE_DISPOSITION:
-        return True
-
-    # #2123: chained immediately after #1823's override, on identical
-    # reasoning. A review-staleness park likewise leaves the sentinel reading
-    # "review_pending_approval" and diverges only task.disposition, so without
-    # this the row reads as "at the approval gate" and `approve` would release
-    # a tree that no reviewer ran against. That is the exact incident: a
-    # review-stage park released via `requeue` can return to this status with
-    # stale artifacts. Recovery is `cw dev-queue requeue`/`drain` (which
-    # re-runs review), not `approve`.
-    if task.disposition == REVIEW_STALENESS_GATE_DISPOSITION:
-        return True
-
-    not_at_status_gate = (
-        session.last_result is None
-        or session.last_result.get("status") not in SCOPE_GATED_APPROVAL_STATUSES
-    )
-    not_at_disposition_gate = task.disposition not in (
-        _APPROVAL_GATE_REASON,
-        FINALIZE_GATE_HELD_DISPOSITION,
-    )
-    return not_at_status_gate and not_at_disposition_gate
-
-
 def _raise_stage_not_in_pipeline(
     ticket_id: str, task: TicketTask, stages: list[Stage], client_name: str
 ) -> None:
@@ -590,6 +543,9 @@ def _raise_stage_not_in_pipeline(
         f"Cannot approve ticket '{ticket_id}':"
         f" stage {task.stage!r} not in pipeline for lane {task.lane!r} of"
         f" client {client_name!r}. Lane pipeline stages: {stages}."
+        " No approve or requeue can act on it until the lane pipeline includes"
+        " that stage; fix the lane's pipeline.stages, or run"
+        f" `{dev_queue_command('remove', task)}` and re-add the ticket."
     )
     raise ApproveGateError(msg)
 
@@ -611,6 +567,7 @@ def _raise_if_not_at_approval_gate(
         " Expected disposition 'approval_gate' or 'finalize_gate_held', or"
         " last_result status one of: plan_pending_approval,"
         " review_pending_approval."
+        f"{refusal_suffix(task, session=session)}"
     )
     raise ApproveGateError(msg)
 
@@ -707,6 +664,7 @@ def _approve_ticket_locked(
             f"Cannot approve ticket '{ticket_id}': status is {task.status.value!r},"
             " expected BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF."
             " Use 'requeue' to re-run a stage."
+            f"{refusal_hint(task)}"
         )
         raise ApproveGateError(msg)
 
@@ -749,7 +707,14 @@ def _approve_ticket_locked(
         msg = (
             f"Cannot approve ticket '{ticket_id}': session not found"
             f" (session_id={task.session_id!r}). The session may have been"
-            " cleaned up. Use 'requeue' to re-run the stage."
+            " cleaned up."
+            # A human-kept gate is never requeued by an agent (#2692 R1).
+            + (
+                ""
+                if is_human_kept_gate(task)
+                else " Use 'requeue' to re-run the stage."
+            )
+            + refusal_suffix(task, session=None)
         )
         raise ApproveGateError(msg)
 
@@ -759,6 +724,7 @@ def _approve_ticket_locked(
         msg = (
             f"Cannot approve ticket '{ticket_id}':"
             f" already at terminal stage {task.stage!r}."
+            f"{refusal_suffix(task, session=session, skip='approve')}"
         )
         raise ApproveGateError(msg)
 
@@ -954,6 +920,11 @@ def approve_scope_drift_ticket(
         )
 
 
+def _scope_drift_command(task: TicketTask, paths: str) -> str:
+    """``cw dev-queue approve <T> -c <C> --scope-drift <paths>`` for a retry."""
+    return dev_queue_command("approve", task, "--scope-drift", paths)
+
+
 def _approve_scope_drift_locked(
     ticket_id: str,
     client_name: str,
@@ -973,6 +944,7 @@ def _approve_scope_drift_locked(
         msg = (
             f"Cannot approve scope drift for ticket '{ticket_id}': status is"
             f" {task.status.value!r}, expected BLOCKED_ON_USER."
+            f"{refusal_hint(task)}"
         )
         raise ApproveGateError(msg)
     if task.stage != Stage.IMPL:
@@ -980,14 +952,14 @@ def _approve_scope_drift_locked(
             f"Cannot approve scope drift for ticket '{ticket_id}': stage is"
             f" {task.stage.value!r}, expected 'impl' (plan_scope_drift parks"
             " at Step 2.5 of the IMPL stage)."
+            f"{refusal_hint(task)}"
         )
         raise ApproveGateError(msg)
     if task.blocked_reason != PLAN_SCOPE_DRIFT_BLOCKER_REASON:
         msg = (
             f"Cannot approve scope drift for ticket '{ticket_id}':"
             f" blocked_reason is {task.blocked_reason!r}, expected"
-            f" {PLAN_SCOPE_DRIFT_BLOCKER_REASON!r}. Use plain 'approve' or"
-            " 'requeue' for other parks."
+            f" {PLAN_SCOPE_DRIFT_BLOCKER_REASON!r}.{refusal_hint(task)}"
         )
         raise ApproveGateError(msg)
     approved_files = sorted(set(extra_files))
@@ -995,6 +967,7 @@ def _approve_scope_drift_locked(
         msg = (
             f"Cannot approve scope drift for ticket '{ticket_id}': no extra"
             " files given. Pass the repo-relative paths to allow, comma-separated."
+            f" Retry: `{_scope_drift_command(task, SCOPE_DRIFT_PATHS_PLACEHOLDER)}`."
         )
         raise ApproveGateError(msg)
 
@@ -1008,7 +981,8 @@ def _approve_scope_drift_locked(
             f"Cannot approve scope drift for ticket '{ticket_id}': could not"
             f" resolve the head of origin/{branch} (gh unavailable, branch not"
             " pushed, or a transient error) -- the approval has nothing to be"
-            " bound to."
+            f" bound to. Retry once origin/{branch} resolves:"
+            f" `{_scope_drift_command(task, ','.join(approved_files))}`."
         )
         raise ApproveGateError(msg)
 

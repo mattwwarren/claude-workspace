@@ -10,7 +10,11 @@ MUST_FIX finding on it. FINALIZE's ``check_must_fix_override.py`` honors it only
 while the live verdict and HEAD still match.
 
 Stamp-only: the row keeps its status and stage, and the operator still runs
-``cw dev-queue requeue --stage finalize``. Split out of ``approval.py`` beside
+``cw dev-queue requeue --stage finalize`` (a human step when the ticket or lane
+carries a finalize hold, operator signoff or scope_hint: large). Every refusal
+names the command legal from the row's state (#2692): the park refusals append
+the ``next_commands`` suffix, the verdict refusals name a review re-run (never
+the finalize jump or the override flag). Split out of ``approval.py`` beside
 ``plan_promotion``/``requeue`` to keep that module under the size ceiling.
 """
 
@@ -25,10 +29,12 @@ from pydantic import ValidationError
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS
 from cw.config import get_client
 from cw.dev_queue.crud import _find_ticket
+from cw.dev_queue.next_commands import dev_queue_command
+from cw.dev_queue.refusal import refusal_hint
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
-from cw.models import MustFixOverride, OrchestratorEventType, QueueItemStatus
+from cw.models import MustFixOverride, OrchestratorEventType, QueueItemStatus, Stage
 from cw.operator_identity import resolve_operator_login
 from cw.review_debt import fingerprint_v1
 from cw.review_findings import REVIEW_VERDICT_JSON_RELATIVE_PATH, ReviewVerdictEnvelope
@@ -104,7 +110,7 @@ def _approve_must_fix_override_locked(
     task = _find_ticket(store, ticket_id, client_name)
     _require_codex_must_fix_park(task)
     verdict = _load_owned_verdict(task, client_name)
-    finding_ids = _finding_ids(ticket_id, verdict)
+    finding_ids = _finding_ids(task, verdict)
 
     client_cfg = get_client(client_name)
     actor = resolve_operator_login(client_cfg)
@@ -165,17 +171,22 @@ def _require_codex_must_fix_park(task: TicketTask) -> None:
     if task.status != QueueItemStatus.BLOCKED_ON_USER:
         msg = (
             f"Cannot override MUST_FIX for ticket '{task.ticket_id}': status is"
-            f" {task.status.value!r}, expected BLOCKED_ON_USER."
+            f" {task.status.value!r}, expected BLOCKED_ON_USER.{refusal_hint(task)}"
         )
         raise ApproveGateError(msg)
     if task.blocked_reason != CODEX_MUST_FIX_FINDINGS:
         msg = (
             f"Cannot override MUST_FIX for ticket '{task.ticket_id}':"
             f" blocked_reason is {task.blocked_reason!r}, expected"
-            f" {CODEX_MUST_FIX_FINDINGS!r}. Use plain 'approve' or 'requeue'"
-            " for other parks."
+            f" {CODEX_MUST_FIX_FINDINGS!r}.{refusal_hint(task)}"
         )
         raise ApproveGateError(msg)
+
+
+def _review_rerun(task: TicketTask) -> str:
+    """The sentence a verdict refusal appends: re-run review, never ship."""
+    command = dev_queue_command("requeue", task, "--stage", Stage.REVIEW.value)
+    return f" Re-run review to produce a current verdict: `{command}`."
 
 
 def _verdict_path(task: TicketTask, client_name: str) -> Path:
@@ -185,7 +196,7 @@ def _verdict_path(task: TicketTask, client_name: str) -> Path:
         msg = (
             f"Cannot override MUST_FIX for ticket '{task.ticket_id}': its"
             " worktree could not be resolved, so there is no review verdict to"
-            " bind the override to."
+            f" bind the override to.{_review_rerun(task)}"
         )
         raise ApproveGateError(msg)
     return worktree / REVIEW_VERDICT_JSON_RELATIVE_PATH
@@ -199,7 +210,7 @@ def _load_owned_verdict(task: TicketTask, client_name: str) -> ReviewVerdict:
     except (OSError, UnicodeDecodeError) as exc:
         msg = (
             f"Cannot override MUST_FIX for ticket '{task.ticket_id}': could not"
-            f" read {path} ({exc.__class__.__name__}: {exc})."
+            f" read {path} ({exc.__class__.__name__}: {exc}).{_review_rerun(task)}"
         )
         raise ApproveGateError(msg) from exc
     try:
@@ -208,27 +219,27 @@ def _load_owned_verdict(task: TicketTask, client_name: str) -> ReviewVerdict:
         msg = (
             f"Cannot override MUST_FIX for ticket '{task.ticket_id}': {path} is"
             f" not a valid review verdict ({exc.error_count()} validation"
-            " error(s))."
+            f" error(s)).{_review_rerun(task)}"
         )
         raise ApproveGateError(msg) from exc
     if envelope.ticket_id != task.ticket_id:
         msg = (
             f"Cannot override MUST_FIX for ticket '{task.ticket_id}': {path}"
             f" belongs to ticket {envelope.ticket_id!r}, so it is stale or"
-            " foreign."
+            f" foreign.{_review_rerun(task)}"
         )
         raise ApproveGateError(msg)
     if not envelope.verdict.blocking:
         msg = (
             f"Cannot override MUST_FIX for ticket '{task.ticket_id}': the"
             f" verdict in {path} is not blocking -- there is nothing to"
-            " override."
+            f" override.{_review_rerun(task)}"
         )
         raise ApproveGateError(msg)
     return envelope.verdict
 
 
-def _finding_ids(ticket_id: str, verdict: ReviewVerdict) -> list[tuple[str, str]]:
+def _finding_ids(task: TicketTask, verdict: ReviewVerdict) -> list[tuple[str, str]]:
     """Sorted, deduped fingerprints of *verdict*'s MUST_FIX findings.
 
     Fails closed on a finding with no fingerprint (``file == "N/A"``): the
@@ -239,10 +250,11 @@ def _finding_ids(ticket_id: str, verdict: ReviewVerdict) -> list[tuple[str, str]
         fingerprint = fingerprint_v1(finding.file, finding.summary)
         if fingerprint is None:
             msg = (
-                f"Cannot override MUST_FIX for ticket '{ticket_id}': finding"
+                f"Cannot override MUST_FIX for ticket '{task.ticket_id}': finding"
                 f" {finding.summary!r} has no diff anchor (file"
                 f" {finding.file!r}), so it has no identity to bind the override"
                 " to. Resolve it, or re-review once it is anchored."
+                f"{_review_rerun(task)}"
             )
             raise ApproveGateError(msg)
         ids.add(fingerprint)

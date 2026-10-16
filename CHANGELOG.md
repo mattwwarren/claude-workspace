@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Every dev-queue refusal names the command that is legal from the row's state; `approve`/`requeue` tolerate row lag (#2692).** `approve` (plain, `--scope-drift`, `--override-must-fix`), `requeue`, `unblock` and `move` refusals now end with the row's status, stage and disposition, why it is parked when that is known, and `Run: <command>` from the `cw.dev_queue.next_commands` table that `cw dev-queue show` renders; the no-row error names `cw dev-queue add`/`tasks`. `cw dev-queue requeue` on a row that is already `PENDING` (no `--stage`, or its own stage) is now an idempotent no-op: it exits 0, stops and closes nothing, records no event, and names any daemon-live session for the ticket on stderr with `cw spawn close <sid> --requeue`. A backward `--stage` on a parked row is an inferred regress, announced on stdout with the new `regress_attempts` and the evidence it cleared; `--regress` stays accepted. Before acting, `approve` and `requeue` route a `RUNNING` row whose session already recorded its result the way the dispatch loop would (bounded at 10s, through the same `cw.dispatch.loop` read/apply halves `consume_completed_sessions` now composes), so they see the state `cw dev-queue wait` reports. `cw dev-queue tasks` gains a trailing `NEXT` column with each row's first legal command (`tasks --json` is unchanged). The runbook and GUIDE carry a "which verb for which park" list. The library defaults of `requeue_ticket`/`precheck_requeue` are unchanged (both opt-ins are CLI-only), so `cw spawn close --requeue`, `drain` and `auto_fix_ci` behave as before.
+
+### Changed
+
+- **Human-kept gates are labelled, never routed around (#2692).** A row parked at a gate the human opted into (`AWAITING_OPERATOR_SIGNOFF`, a finalize hold, a `scope_hint: large` approval gate) now lists exactly one command in `show`, refusals and the `tasks` NEXT cell: the operator's `cw dev-queue approve`, labelled `operator-only human gate; not for an agent to run` (`HUMAN GATE: approve` in `tasks`), and never a `requeue`. A sessionless one is still refused by `approve` itself (tracked in #2718). For a codex MUST_FIX park on a ticket that carries `scope_hint: large`, `hold_finalize: manual` or `signoff: operator`, the `requeue --stage finalize` suggestion is dropped (that jump skips the REVIEW-stage gates); `show` and `tasks` also drop it for a lane or global finalize hold or signoff, while library refusals see only the row's own fields and keep the suggestion with a "this step is the human's" caveat. When `approve`'s row-lag settle routes a row straight into a human-kept gate, `approve` refuses (`its recorded sentinel was just routed`) and releases nothing; a second `approve` releases it.
+
 ## [1.72.0] - 2026-10-15
 
 ### Added

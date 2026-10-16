@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 import click
+import yaml
 
 from cw.auto_dev_result import is_known_blocker_reason
 from cw.cli._base import handle_errors, print_fixed_width_table
@@ -19,8 +20,15 @@ from cw.dev_queue import (
     session_attention_state,
     task_attention_state,
 )
+from cw.dev_queue.next_commands import (
+    HUMAN_GATE_CELL_LABEL,
+    compact_command,
+    is_human_kept_gate,
+    next_commands,
+)
 from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
 from cw.models import QueueItemStatus, Session, TicketTask
+from cw.ticket_view import ViewSources, resolve_human_opt_in
 from cw.worktree import fast_forward_main
 
 from ._group import dev_queue
@@ -90,8 +98,36 @@ def _attention_cell(task: TicketTask, sessions_by_id: dict[str, Session]) -> str
     return session_attention_state(task, session) or task_attention_state(task) or "—"
 
 
+def _human_opt_in(task: TicketTask, sources: ViewSources) -> bool:
+    """The resolved human opt-in; an unreadable config counts as armed.
+
+    Failing closed only ever removes the ``requeue --stage finalize`` jump
+    from a MUST_FIX row's cell, never adds one (#2692 R5).
+    """
+    try:
+        return resolve_human_opt_in(
+            task, sources.effective_client(task.client), sources.orchestrator_config
+        )
+    except (CwError, OSError, ValueError, yaml.YAMLError):
+        return True
+
+
+def _next_cell(
+    task: TicketTask, sessions_by_id: dict[str, Session], sources: ViewSources
+) -> str:
+    """The row's first legal command, compacted; labelled for a human gate."""
+    session = sessions_by_id.get(task.session_id) if task.session_id else None
+    first = next_commands(
+        task, session=session, operator_opt_in=_human_opt_in(task, sources)
+    )[0]
+    cell = compact_command(task, first.command)
+    return f"{HUMAN_GATE_CELL_LABEL}{cell}" if is_human_kept_gate(task) else cell
+
+
 def _print_tasks_human(
-    tasks: list[TicketTask], sessions_by_id: dict[str, Session]
+    tasks: list[TicketTask],
+    sessions_by_id: dict[str, Session],
+    sources: ViewSources,
 ) -> None:
     if not tasks:
         click.echo("No tasks found.")
@@ -112,8 +148,9 @@ def _print_tasks_human(
         "PR",
         "ATTENTION",
         "STALE_GATE",
+        "NEXT",
     ]
-    col_widths = [12, 16, 16, 12, 8, 12, 12, 12, 20, 10, 20, 20, 10, 18, 10]
+    col_widths = [12, 16, 16, 12, 8, 12, 12, 12, 20, 10, 20, 20, 10, 18, 10, 44]
     rows: list[list[str]] = []
     for t in tasks:
         attention = _attention_cell(t, sessions_by_id)
@@ -133,6 +170,8 @@ def _print_tasks_human(
             (t.pr_url or "—")[:10],
             attention[:18],
             ("yes" if t.stale_gate_detected_at else "—")[:10],
+            # Never truncated: the column fits the longest first command.
+            _next_cell(t, sessions_by_id, sources),
         ]
         rows.append(row)
     print_fixed_width_table(headers, col_widths, rows)
@@ -176,6 +215,11 @@ def dev_queue_tasks(
     declare itself freeform with an ``x_`` prefix (#2097) — the value is still
     shown verbatim, the flag just says cw does not recognise it as a documented
     routing code.
+
+    NEXT is the row's first legal command (``cw dev-queue show`` lists them
+    all), without the ``cw dev-queue`` prefix and the row's own ticket and
+    client. A gate the human opted into reads ``HUMAN GATE: approve``: the
+    operator's release, not a step for an agent (#2692).
     """
     if ticket_arg is not None and ticket is not None:
         msg = "Pass the ticket either positionally or via -t/--ticket, not both."
@@ -198,7 +242,7 @@ def dev_queue_tasks(
     if output_json:
         click.echo(json.dumps([_task_to_dict(t) for t in tasks]))
     else:
-        _print_tasks_human(tasks, _sessions_by_id())
+        _print_tasks_human(tasks, _sessions_by_id(), ViewSources())
 
 
 @dev_queue.command(name="refresh-all")

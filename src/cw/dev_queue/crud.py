@@ -17,11 +17,13 @@ here via a deferred import to keep this edge one-way.
 
 from __future__ import annotations
 
+import shlex
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
 from cw.config import get_client
 from cw.dev_queue.lifecycle import _raise_stage_high_water, transition_task_status
+from cw.dev_queue.refusal import refusal_hint
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import CwError, LaneMoveError, LaneNotFoundError, RequeueStageError
@@ -69,6 +71,20 @@ DEFAULT_PRUNE_OLDER_THAN_DAYS: int = 90
 # (cw.models.enums) is already the codebase's single source of truth for it --
 # so _select_prune_candidates gates on that constant directly rather than
 # minting an equivalent one that could drift from it.
+
+
+_RETRY_MOVE = " Once the row is PENDING again, retry move."
+
+
+def _no_row_message(ticket_id: str, client: str) -> str:
+    """The no-row refusal, naming how to enqueue or list the row (#2692)."""
+    ticket = shlex.quote(ticket_id)
+    quoted_client = shlex.quote(client)
+    return (
+        f"No dev-queue task found for ticket '{ticket_id}' in client '{client}'."
+        f" Enqueue it with `cw dev-queue add {ticket} -c {quoted_client}`, or list"
+        f" rows with `cw dev-queue tasks -c {quoted_client}`."
+    )
 
 
 def _validate_stage_in_pipeline(
@@ -463,11 +479,7 @@ def move_ticket(
             None,
         )
         if task is None:
-            msg = (
-                f"No dev-queue task found for ticket '{ticket_id}'"
-                f" in client '{client_name}'."
-            )
-            raise CwError(msg)
+            raise CwError(_no_row_message(ticket_id, client_name))
 
         if to_lane is not None:
             client = get_client(client_name)
@@ -485,6 +497,7 @@ def move_ticket(
                 f"Cannot reprioritize ticket '{ticket_id}':"
                 f" task is {task.status.value}."
                 " Only PENDING tasks can be reprioritized."
+                f"{refusal_hint(task)}{_RETRY_MOVE}"
             )
             raise LaneMoveError(msg)
 
@@ -493,6 +506,7 @@ def move_ticket(
                 f"Cannot move ticket '{ticket_id}':"
                 f" task is {task.status.value}."
                 " Only PENDING tasks can be moved."
+                f"{refusal_hint(task)}{_RETRY_MOVE}"
             )
             raise LaneMoveError(msg)
 
@@ -807,8 +821,7 @@ def _find_ticket(
         t for t in store.tasks if t.ticket_id == ticket_id and t.client == client
     ]
     if not matches:
-        msg = f"No dev-queue task found for ticket '{ticket_id}' in client '{client}'."
-        raise CwError(msg)
+        raise CwError(_no_row_message(ticket_id, client))
 
     live = [
         t

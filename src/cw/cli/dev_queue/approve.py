@@ -23,7 +23,9 @@ from cw.dev_queue import (
     resolve_client,
     revoke_plan_approval,
 )
+from cw.dev_queue.next_commands import human_gate_settled_notice, is_human_kept_gate
 from cw.events import record_event
+from cw.exceptions import ApproveGateError
 from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments, post_issue_comment
 from cw.models import (
     PLAN_APPROVED_FINGERPRINT_KEY,
@@ -39,6 +41,7 @@ from ._plan_marker import (
     _marker_present,
     _plan_approved_marker,
 )
+from ._settle import SettleOutcome, settle_lagging_row
 from .show import echo_resulting_row
 
 if TYPE_CHECKING:
@@ -210,8 +213,11 @@ def _approve_scope_drift(
 ) -> None:
     """The ``--scope-drift`` branch of ``dev_queue_approve`` (#2337)."""
     extra_files = [path.strip() for path in scope_drift.split(",") if path.strip()]
-    # bounded=True (#2501): operator command; nothing precedes the lock; the
-    # routed-orphan close (#2517) runs after the transition.
+    # bounded=True (#2501): operator command. settle_lagging_row (#2692) may
+    # first route this row's recorded sentinel under its OWN bounded lock (the
+    # routing the dispatch loop would apply); a timeout here leaves the row
+    # parked where the loop would have put it, a clean retry. The routed-orphan
+    # close (#2517) runs after the transition.
     result = approve_scope_drift_ticket(
         ticket_id,
         resolved,
@@ -233,7 +239,10 @@ def _approve_scope_drift(
 
 def _approve_must_fix_override(ticket_id: str, resolved: str, reason: str) -> None:
     """The ``--override-must-fix`` branch of ``dev_queue_approve`` (#2205)."""
-    # bounded=True (#2501): operator command; nothing precedes the lock.
+    # bounded=True (#2501): operator command. settle_lagging_row (#2692) may
+    # first route this row's recorded sentinel under its OWN bounded lock (the
+    # routing the dispatch loop would apply); a timeout here leaves the row
+    # parked where the loop would have put it, a clean retry.
     result = approve_must_fix_override_ticket(ticket_id, resolved, reason, bounded=True)
     count = len(result["finding_ids"])
     noun = "finding" if count == 1 else "findings"
@@ -244,8 +253,21 @@ def _approve_must_fix_override(ticket_id: str, resolved: str, reason: str) -> No
         f" {result['reviewed_sha'][:_HEAD_SHA_DISPLAY_LEN]}, by {actor}. The row"
         " is unchanged; run `cw dev-queue requeue"
         f" {ticket_id} --client {resolved} --stage finalize` to ship it."
+        " If the ticket or lane has a finalize hold, operator signoff or"
+        " scope_hint: large, this step is the human's."
     )
     echo_resulting_row(ticket_id, resolved)
+
+
+def _raise_if_settled_into_human_gate(outcome: SettleOutcome) -> None:
+    """Stop a plain approve whose settle just routed the row to a human gate.
+
+    #2692 R8: the caller never saw the parked row, so releasing it in the
+    same invocation would let one blind ``approve`` ship past a gate the
+    human opted into. An explicit second ``approve`` releases it.
+    """
+    if outcome.routed and outcome.row is not None and is_human_kept_gate(outcome.row):
+        raise ApproveGateError(human_gate_settled_notice(outcome.row))
 
 
 @dev_queue.command(name="approve")
@@ -386,15 +408,21 @@ def dev_queue_approve(
             msg = "--override-must-fix requires --reason"
             raise click.UsageError(msg)
         resolved = resolve_client(ticket_id, load_orchestrator_config(), client)
+        settle_lagging_row(ticket_id, resolved)
         _approve_must_fix_override(ticket_id, resolved, override_reason)
         return
     config = load_orchestrator_config()
     resolved = resolve_client(ticket_id, config, client)
+    outcome = settle_lagging_row(ticket_id, resolved)
     if scope_drift is not None:
         _approve_scope_drift(ticket_id, resolved, scope_drift, config)
         return
-    # bounded=True (#2501): operator command; nothing precedes the lock; the
-    # routed-orphan close (#2517) runs after the transition.
+    _raise_if_settled_into_human_gate(outcome)
+    # bounded=True (#2501): operator command. settle_lagging_row (#2692) may
+    # first route this row's recorded sentinel under its OWN bounded lock (the
+    # routing the dispatch loop would apply); a timeout here leaves the row
+    # parked where the loop would have put it, a clean retry. The routed-orphan
+    # close (#2517) runs after the transition.
     result = approve_ticket(ticket_id, resolved, bounded=True)
     # #2311: advisory only -- the approval already landed. approve_ticket
     # recorded the audit event itself; the CLI just surfaces the warning.

@@ -121,11 +121,20 @@ a sentinel carries one — and they never share values, so always say which.
   (`plan_approved_at` + `plan_approved_fingerprint`, bound to the draft as it
   stands) and moves the row past a plan, review, signoff, or finalize-hold
   gate. `--post-marker` posts an audit-only comment that nothing reads back.
+  Opted-in human gates (`signoff: operator`, a finalize hold,
+  `scope_hint: large`) are the operator's `approve`; an agent notifies the
+  human. Every refusal names the legal next command (`Run: ...`).
 - **Requeue** (`cw dev-queue requeue`) — `blocked_on_user` → `pending`, at the
-  same stage or `--stage`/`--regress`; `--from-cancelled`, `--from-failed`,
+  same stage or `--stage`; a backward `--stage` on a parked row is an inferred
+  regress (announced; `--regress` optional). Requeueing a row that is already
+  `pending` is an exit-0 no-op. `--from-cancelled`, `--from-failed`,
   `--from-completed` recover terminal rows.
 - **Unblock** (`cw dev-queue unblock`) — requeue plus clearing the session's
-  salvage-park markers (`last_result`, `reap_reason`).
+  salvage-park markers (`last_result`, `reap_reason`). Salvage parks only.
+- **MUST_FIX park (codex)** — `approve --override-must-fix --reason "<why>"`
+  records the override, then `requeue --stage finalize` ships it; if the
+  ticket or lane has a finalize hold, operator signoff or scope_hint: large,
+  this step is the human's.
 - **Signoff** — the `awaiting_operator_signoff` gate armed by `add --signoff
   operator` or a lane's `signoff:`; distinct from plan/review approval.
 
@@ -323,6 +332,8 @@ cw `session_id` → `sessions.json` `surface_ref` / `claude_session_id` →
 5. **Watch**: `cw dev-queue wait <id>` / `cw watch` / `cw queue peek` (status + >25-min
    transcript silence). Gates park as BLOCKED_ON_USER — adjudicate them and clear with
    `cw dev-queue approve` (opted-in human gates — `signoff: operator`, a finalize hold, `scope_hint: large` — you notify the human about instead).
+   After a MUST_FIX override, if the ticket or lane has a finalize hold, operator signoff or
+   `scope_hint: large`, the `requeue --stage finalize` step is the human's.
 6. **Verify on terminal**: read the worker's OWN sentinel (assistant/`tool_result`, never the
    prompt's illustrative example) — `cw session result <session>` or the `cw-validate-result`
    skill — run the gate, check the PR. Sequential deps: harden N+1 against post-N main and

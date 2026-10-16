@@ -10,7 +10,7 @@ requeue_ticket in the drain-command interpretation of RFC 0011 A4's
 requeue_ticket's same-stage default (R3, R7).
 
 Scope: A3 force-holds (proactive stop-before-finalize, #1160) are explicitly
-OUT of scope -- see DRAIN_DISPOSITIONS below and RFC 0011 A4 R11. #1702's
+OUT of scope -- see DRAIN_DISPOSITIONS (``gates``) and RFC 0011 A4 R11. #1702's
 review-health gate is explicitly IN scope (it clears by re-running review),
 even though it is not a HOLD_DISPOSITIONS member -- see DRAIN_DISPOSITIONS.
 """
@@ -19,13 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, TypedDict
 
-from cw.dev_queue.lifecycle import (
-    FINALIZE_GATE_HELD_DISPOSITION,
-    HOLD_DISPOSITIONS,
-    REVIEW_HEALTH_GATE_DISPOSITION,
-    REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
-    REVIEW_STALENESS_GATE_DISPOSITION,
-)
+from cw.dev_queue.gates import DRAIN_DISPOSITIONS
 from cw.dev_queue.requeue import classify_requeue_live_session_error, requeue_ticket
 from cw.dev_queue.storage import load_dev_queue
 from cw.exceptions import CwError, RequeueLiveSessionError
@@ -56,46 +50,6 @@ class DrainOutcome(TypedDict):
     detail: str
     from_stage: str | None
     to_stage: str | None
-
-
-# RFC 0011 A4 R11: drain's selection is the Rule-5 availability-park subset
-# of HOLD_DISPOSITIONS, EXCLUDING the A3 force-hold disposition (#1160's
-# FINALIZE_GATE_HELD_DISPOSITION) -- a force hold is never batch-released.
-# Derived by subtraction now that #1160 has landed (the original hand-pin
-# existed only because the constant wasn't importable yet); a future hold
-# disposition added to HOLD_DISPOSITIONS therefore flows into drain's
-# selection automatically -- exclude it here explicitly if it must not be
-# batch-releasable, mirroring the A3 exclusion.
-#
-# #1702 adds REVIEW_HEALTH_GATE_DISPOSITION by explicit union rather than
-# through HOLD_DISPOSITIONS (it is deliberately not a member of that set, see
-# lifecycle.py). The two exclusion/inclusion calls have opposite answers for a
-# reason: an A3 force hold is a deliberate operator stop, so batch-releasing it
-# would override the operator; a review-health park is "the review that ran did
-# not vouch for its own coverage", which clears by re-running review -- exactly
-# what drain does. Including it here does NOT make it concierge-false-park-
-# eligible; those sets are independent by design.
-# #1714 joins on the same terms as #1702's union above and for the same reason:
-# a mechanically-rejected MUST_FIX park says "review dropped a finding before
-# adjudicating it", which clears by re-running review -- exactly what drain
-# does. Also not an operator stop, so batch-releasing it overrides nobody.
-# #2123 joins on those same terms, and the contrast with
-# BRANCH_STALENESS_GATE_DISPOSITION -- still deliberately absent from this set
-# -- is the load-bearing part. A stale *branch* needs an operator rebase before
-# a re-run means anything, so batch-releasing it would spin the same stale tree
-# back through the pipeline. Stale review *artifacts* need only a fresh review
-# against the current HEAD, which is precisely what a drain-triggered requeue
-# produces; and if that re-run is itself still stale, the gate re-fires rather
-# than advancing.
-DRAIN_DISPOSITIONS: frozenset[str] = (
-    HOLD_DISPOSITIONS - frozenset({FINALIZE_GATE_HELD_DISPOSITION})
-) | frozenset(
-    {
-        REVIEW_HEALTH_GATE_DISPOSITION,
-        REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
-        REVIEW_STALENESS_GATE_DISPOSITION,
-    }
-)
 
 
 def select_held_tickets(client: str, *, lane: str | None = None) -> list[TicketTask]:

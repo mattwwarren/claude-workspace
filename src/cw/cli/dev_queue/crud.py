@@ -20,6 +20,7 @@ from cw.dev_queue import (
     classify_requeue_live_session_error,
     clear_tickets,
     drain_held_tickets,
+    is_pending_requeue_noop,
     move_ticket,
     precheck_requeue,
     prune_tickets,
@@ -30,8 +31,9 @@ from cw.dev_queue import (
     select_prunable_tickets,
     unblock_ticket,
 )
+from cw.dev_queue.next_commands import human_gate_settled_notice, is_human_kept_gate
 from cw.events import record_event
-from cw.exceptions import LockTimeoutError, RequeueLiveSessionError
+from cw.exceptions import ApproveGateError, LockTimeoutError, RequeueLiveSessionError
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
@@ -45,6 +47,8 @@ from cw.native_daemon import get_native_daemon_client
 from cw.ticket_view import ViewSources
 
 from ._group import dev_queue
+from ._requeue_echo import echo_pending_noop, echo_requeue_outcome
+from ._settle import SettleOutcome, settle_lagging_row
 from .show import echo_resulting_row
 
 # Stage vocabulary shared by `dev-queue add --stage` and `dev-queue requeue
@@ -76,6 +80,28 @@ def _report_partial_progress(
         f" {remaining_label}: {', '.join(remaining) or '(none)'}. {retry_note}",
         err=True,
     )
+
+
+def _raise_if_forward_requeue_settled_into_human_gate(
+    outcome: SettleOutcome, stage_override: str | None
+) -> None:
+    """Do not jump past a human gate discovered by this invocation's settle."""
+    if (
+        not outcome.routed
+        or outcome.row is None
+        or not is_human_kept_gate(outcome.row)
+        or stage_override is None
+    ):
+        return
+    stage_order = {
+        Stage.PLAN: 0,
+        Stage.IMPL: 1,
+        Stage.REVIEW: 2,
+        Stage.FINALIZE: 3,
+        Stage.HARDEN: 4,
+    }
+    if stage_order[Stage(stage_override)] > stage_order[outcome.row.stage]:
+        raise ApproveGateError(human_gate_settled_notice(outcome.row))
 
 
 @dev_queue.command(name="add")
@@ -294,14 +320,22 @@ def dev_queue_move(
     "stage_override",
     type=click.Choice(_STAGE_CHOICES),
     default=None,
-    help="Stage to requeue at (default: current stage). Forward-only.",
+    help=(
+        "Stage to requeue at (default: current stage). A later stage advances"
+        " the ticket; an earlier stage on a parked ticket is a regress"
+        " (inferred, and announced on stdout)."
+    ),
 )
 @click.option(
     "--regress",
     "regress",
     is_flag=True,
     default=False,
-    help="Allow a backward --stage target on a blocked ticket (e.g. review->impl).",
+    help=(
+        "Optional. Explicitly allow a backward --stage on a blocked ticket"
+        " (e.g. review->impl). A backward --stage on a parked ticket is"
+        " inferred as a regress without this flag."
+    ),
 )
 @click.option(
     "--from-cancelled",
@@ -356,12 +390,18 @@ def dev_queue_requeue(
 ) -> None:
     """Requeue a BLOCKED_ON_USER ticket back to PENDING.
 
-    Defaults to re-running the current stage. Use --stage to advance forward.
-    Use --regress with a backward --stage to move a blocked ticket backward
-    (e.g. a plan-deviation review exit back to impl). Use --from-cancelled
-    to recover a CANCELLED ticket, --from-failed to recover a FAILED
-    ticket, or --from-completed to recover a COMPLETED ticket
-    (forward/same-stage only).
+    Defaults to re-running the current stage. Use --stage to advance forward;
+    a backward --stage on a parked ticket is a regress (e.g. a plan-deviation
+    review exit back to impl), inferred and announced on stdout, so --regress
+    is optional. Use --from-cancelled to recover a CANCELLED ticket,
+    --from-failed to recover a FAILED ticket, or --from-completed to recover
+    a COMPLETED ticket (forward/same-stage only).
+
+    A ticket that is already PENDING (with no --stage, or its own stage) is
+    an idempotent no-op: it exits 0, stops nothing and records no event, and
+    names any daemon-live session for the ticket on stderr. A RUNNING row
+    whose session already recorded its result is first routed the way the
+    dispatch loop would (bounded wait), so the requeue sees the real state.
 
     Before requeueing, a leftover routed-result session for the ticket (its
     result already routed, never completed) is closed once its worker is
@@ -378,6 +418,14 @@ def dev_queue_requeue(
     # One client for the orphan close, the pre-check and the requeue guard, so
     # all three read the same roster (#2517).
     daemon = get_native_daemon_client()
+    outcome = settle_lagging_row(ticket_id, resolved)
+    _raise_if_forward_requeue_settled_into_human_gate(outcome, stage_override)
+    row = outcome.row
+    # #2692: the idempotent no-op exits before the routed-orphan close and the
+    # live-session guard, so it stops nothing; a live session is only named.
+    if row is not None and is_pending_requeue_noop(row, stage_override, regress):
+        echo_pending_noop(ticket_id, resolved, row.stage.value, daemon)
+        return
 
     def _precheck(will_close: frozenset[str]) -> None:
         precheck_requeue(
@@ -390,6 +438,8 @@ def dev_queue_requeue(
             from_completed=from_completed,
             native_daemon=daemon,
             ignore_session_ids=will_close,
+            idempotent_pending=True,
+            infer_regress=True,
         )
 
     try:
@@ -412,46 +462,23 @@ def dev_queue_requeue(
             from_completed=from_completed,
             native_daemon=daemon,
             ignore_session_ids=frozenset(closed),
-            # bounded=True (#2501): operator command. The lock-free pre-checks
-            # and a confirmed routed-orphan close (#2517) precede the dev-queue
-            # lock; a timeout there leaves the row parked and the session
-            # closed, the state a normal park leaves.
+            # bounded=True (#2501): operator command. settle_lagging_row
+            # (#2692) may first route this row's recorded sentinel under its
+            # OWN bounded lock (the routing the dispatch loop would apply); the
+            # lock-free pre-checks and a confirmed routed-orphan close (#2517)
+            # also precede the dev-queue lock. A timeout there leaves the row
+            # parked and the session closed, the state a normal park leaves.
             bounded=True,
+            idempotent_pending=True,
+            infer_regress=True,
         )
     except RequeueLiveSessionError as exc:
         _reason_tag, message = classify_requeue_live_session_error(exc)
         raise click.ClickException(message) from exc
-    if result["regressed"]:
-        reason = "cli_regress"
-    elif result["from_cancelled_applied"]:
-        reason = "cli_requeue_from_cancelled"
-    elif result["from_failed_applied"]:
-        reason = "cli_requeue_from_failed"
-    elif result["from_completed_applied"]:
-        reason = "cli_requeue_from_completed"
-    else:
-        reason = "cli_requeue"
-    record_event(
-        OrchestratorEventType.TICKET_REQUEUED,
-        {
-            "ticket_id": ticket_id,
-            "client": resolved,
-            "from_stage": result["from_stage"],
-            "to_stage": result["to_stage"],
-            "reason": reason,
-            "regressed": result["regressed"],
-            **(
-                {"regress_attempts": result["regress_attempts"]}
-                if result["regressed"]
-                else {}
-            ),
-        },
-    )
-    click.echo(
-        f"Requeued {ticket_id} ({resolved}):"
-        f" {result['from_stage']} -> {result['to_stage']} (PENDING)"
-    )
-    echo_resulting_row(ticket_id, resolved)
+    if result["already_pending"]:
+        echo_pending_noop(ticket_id, resolved, str(result["to_stage"]), daemon)
+        return
+    echo_requeue_outcome(ticket_id, resolved, result)
 
 
 @dev_queue.command(name="drain")
