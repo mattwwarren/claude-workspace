@@ -15,16 +15,6 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from cw.reconcile.session_close import (
-    CancelCloseOutcome,
-    apply_queued_closes,
-    clear_queued_close,
-    close_session_in_state,
-    close_sessions_for_cancel,
-    pending_queued_closes,
-    queue_close,
-    queued_closes_dir,
-)
 
 from cw import _flock
 from cw.config import (
@@ -52,6 +42,16 @@ from cw.models import (
 )
 from cw.reconcile import session_close
 from cw.reconcile.deferred import DeferredReconcileJobs, is_surface_stop_queued
+from cw.reconcile.session_close import (
+    CancelCloseOutcome,
+    apply_queued_closes,
+    clear_queued_close,
+    close_session_in_state,
+    close_sessions_for_cancel,
+    pending_queued_closes,
+    queue_close,
+    queued_closes_dir,
+)
 from tests.conftest import _FakeClock, _make_daemon_session, _make_ticket_task
 from tests.test_result import _valid_payload
 
@@ -152,7 +152,7 @@ def _close_in_lock(sid: str, *, settle_row: bool = True) -> str | None:
         state = load_state()
         sess = state.find_by_name_or_id(sid)
         assert sess is not None
-        surface = close_session_in_state(state, sess, settle_row=settle_row)
+        surface = close_session_in_state(sess, settle_row=settle_row)
         save_state(state)
     return surface
 
@@ -680,11 +680,11 @@ class TestApplyQueuedCloses:
         queue_close(second, origin="spawn_close", now=_NOW)
         real_close = session_close.close_session_in_state
 
-        def _poison(state: CwState, sess: Session, **kwargs: bool) -> str | None:
+        def _poison(sess: Session, *, settle_row: bool = True) -> str | None:
             if sess.id == "sess-a":
                 msg = "poison entry"
                 raise CwError(msg)
-            return real_close(state, sess, **kwargs)
+            return real_close(sess, settle_row=settle_row)
 
         monkeypatch.setattr(
             "cw.reconcile.session_close.close_session_in_state", _poison
