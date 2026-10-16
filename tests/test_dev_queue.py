@@ -3942,6 +3942,39 @@ class TestCLIDevQueueCancel:
         assert mock_native_daemon.stop_calls == ["ref-cancel-s1"]
         assert pending_queued_closes() == []
 
+    def test_a_failed_session_close_is_not_reported_as_a_lock_timeout(
+        self,
+        tmp_dev_queue: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """Only a sessions-lock timeout is QUEUED/exit 0; any other failure exits 1."""
+        from cw.reconcile.session_close import pending_queued_closes
+
+        self._use_daemon(monkeypatch, mock_native_daemon)
+        self._seed_running()
+
+        def _save_fails(*_args: object, **_kwargs: object) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr("cw.reconcile.session_close.mutate_state", _save_fails)
+
+        result = self._cancel()
+
+        assert result.exit_code == 1
+        assert "Cancelled CLI-C2 in genhealth dev-queue." in result.output
+        assert "sessions lock is busy" not in result.output
+        assert "QUEUED" not in result.output
+        assert "could not be marked completed" in result.output
+        assert "OSError: [Errno 28] No space left on device" in result.output
+        assert "not a sessions-lock timeout" in result.output
+        assert "cw spawn close cancel-s1" in result.output
+        assert self._session().status == SessionStatus.ACTIVE
+        assert mock_native_daemon.stop_calls == ["ref-cancel-s1"]
+        assert [e.session_id for e in pending_queued_closes()] == ["cancel-s1"]
+        (row,) = load_dev_queue().tasks
+        assert row.status == QueueItemStatus.CANCELLED
+
     def test_cancel_never_takes_the_dev_queue_lock_for_the_session_step(
         self,
         tmp_dev_queue: Path,

@@ -32,7 +32,7 @@ from cw.dev_queue import (
     unblock_ticket,
 )
 from cw.events import record_event
-from cw.exceptions import LockTimeoutError, RequeueLiveSessionError
+from cw.exceptions import CwError, LockTimeoutError, RequeueLiveSessionError
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
@@ -632,13 +632,15 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
 
     The session step waits at most 5s for the sessions lock; if it is busy the
     worker is still stopped and the session's close is queued for the next
-    reconcile pass (exit stays 0).
+    reconcile pass (exit stays 0). Any other failure to mark the session
+    completed exits 1 (the row is still cancelled and the worker stopped).
     """
     daemon = get_native_daemon_client()
     sources = ViewSources()
     pending: list[str] = []
     unrecorded: list[str] = []
     refused: list[str] = []
+    failed: list[tuple[str, str]] = []
     for index, ticket in enumerate(tickets):
         # #2694: the session incarnations this cancel is about, read before the
         # row is cancelled; a session resumed after it is left running.
@@ -675,9 +677,21 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
         pending.extend(outcome.pending_ids)
         unrecorded.extend(outcome.unrecorded_ids)
         refused.extend(outcome.refused_ids)
+        failed.extend(outcome.failed)
         click.echo(f"Cancelled {ticket} in {client} dev-queue.")
         echo_resulting_row(ticket, client, sources=sources)
     _report_unclosed_sessions(pending, unrecorded, refused)
+    if failed:
+        reasons = "; ".join(
+            f"{sid} ({error}); retry now with `cw spawn close {sid}`"
+            for sid, error in failed
+        )
+        msg = (
+            "The worker was stopped and the row cancelled, but these sessions"
+            f" could not be marked completed (not a sessions-lock timeout): {reasons}."
+            " The recorded close is retried by the next reconcile pass."
+        )
+        raise CwError(msg)
 
 
 def _report_unclosed_sessions(
