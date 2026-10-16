@@ -236,18 +236,37 @@ def consume_completed_sessions() -> int:
     ``ticket_id`` in its payload, the corresponding TicketTask (if found in
     RUNNING state) is marked COMPLETED.
 
-    Advances the cursor after processing.
+    Advances the cursor after processing. A composition of the lock-free
+    read half and the apply half (#2692), which the CLI's row-lag settle
+    also uses under its own bounded lock.
 
     Returns:
         Number of TicketTasks transitioned to COMPLETED.
     """
-    events = read_events(
+    events = read_pending_completions()
+    if not events:
+        return 0
+    with dev_queue_lock():
+        return apply_pending_completions(events)
+
+
+def read_pending_completions() -> list[OrchestratorEvent]:
+    """The unconsumed SESSION_COMPLETED events for the dispatch cursor.
+
+    Read-only: takes no dev-queue lock and moves no cursor (#2692).
+    """
+    return read_events(
         consumer=_DISPATCH_CONSUMER,
         event_types=[OrchestratorEventType.SESSION_COMPLETED],
     )
-    if not events:
-        return 0
 
+
+def apply_pending_completions(events: list[OrchestratorEvent]) -> int:
+    """Route *events* (non-empty) and advance the dispatch cursor past them.
+
+    The caller holds ``dev_queue_lock``. Returns the number of TicketTasks
+    routed out of RUNNING.
+    """
     # ``last_result`` is populated by the RFC 0012 door at each producer's
     # write site BEFORE SESSION_COMPLETED is emitted -- the Stop hook via
     # ``emit_result_locked`` (A1), executors via ``_complete_session_via_door``
@@ -259,15 +278,30 @@ def consume_completed_sessions() -> int:
     # gap this replaces (a door write landing but the task mutation below not
     # yet persisted) now sits at each producer's door-write-vs-task-routing
     # boundary rather than inside this consumer; still tracked by #867.
-    with dev_queue_lock():
-        store = load_dev_queue()
-        clients = load_effective_clients()
-        completed = _apply_events_to_store(store, events, clients=clients)
-        # Advance cursor inside the dev-queue lock so the cursor never
-        # moves past events whose queue mutations haven't been persisted yet.
-        advance_cursor(_DISPATCH_CONSUMER, events[-1].id)
-
+    completed = _apply_pending_completion_events(events)
+    # Advance cursor inside the dev-queue lock so the cursor never
+    # moves past events whose queue mutations haven't been persisted yet.
+    advance_cursor(_DISPATCH_CONSUMER, events[-1].id)
     return completed
+
+
+def _apply_pending_completion_events(events: list[OrchestratorEvent]) -> int:
+    """Load routing state and apply pending completion *events*."""
+    store = load_dev_queue()
+    clients = load_effective_clients()
+    return _apply_events_to_store(store, events, clients=clients)
+
+
+def apply_pending_completion(event: OrchestratorEvent) -> int:
+    """Route one pending completion without moving the shared cursor.
+
+    The CLI row-lag settle uses this when the requested event is behind other
+    tenants' events in the dispatch inbox.  The normal consumer still drains
+    the cursor in order later; this targeted path must not consume or route
+    the unrelated prefix merely because one operator asked about this row.
+    Caller must hold ``dev_queue_lock``.
+    """
+    return _apply_pending_completion_events([event])
 
 
 TICK_STALE_SECONDS = 90  # 3x default tick_interval_seconds=30

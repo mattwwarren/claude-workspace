@@ -270,15 +270,25 @@ def _spawn_close_impl(
 
 
 class CancelCloseOutcome(NamedTuple):
-    """What the ``cw dev-queue cancel`` session step left unfinished (#2694).
+    """What the ``cw dev-queue cancel`` session steps left unfinished (#2694).
 
-    *problems* holds one operator-facing line per session it did not mark
-    completed; *lock_timed_out* tells the caller a later ticket need not wait
-    for the sessions lock again.
+    Accumulated across one command's tickets: *problems* holds one
+    operator-facing line per session not marked completed; *lock_timed_out*
+    means a later ticket tries the sessions lock once without waiting.
     """
 
     problems: tuple[str, ...] = ()
     lock_timed_out: bool = False
+
+    def report(self) -> None:
+        """Echo every problem to stderr (before another error ends the command)."""
+        for problem in self.problems:
+            click.echo(problem, err=True)
+
+    def raise_if_unfinished(self) -> None:
+        """Fail the command (exit 1) naming every unfinished session."""
+        if self.problems:
+            raise CwError("\n".join(self.problems))
 
 
 def _incarnation(sess: Session) -> tuple[object, ...]:
@@ -347,9 +357,8 @@ def _flip_cancelled(
 
 def close_cancelled_sessions(
     session_ids: Iterable[str | None],
-    *,
     daemon: NativeDaemonClient,
-    lock_timeout_s: float,
+    prior: CancelCloseOutcome,
 ) -> CancelCloseOutcome:
     """Stop, confirm gone, then mark completed each session a cancel unbound.
 
@@ -357,10 +366,12 @@ def close_cancelled_sessions(
     row: the sessions bound to it at cancel time (#2694). Each DAEMON session
     is read lock-free and its worker stopped and confirmed gone; only then is
     it flipped COMPLETED(USER) under one sessions-lock wait of
-    *lock_timeout_s*, re-checked against the incarnation that was read, and
+    :func:`~cw._flock.operator_close_lock_wait_seconds` (none once *prior*
+    timed out), re-checked against the incarnation that was read, and
     audited once (:func:`record_operator_close`). USER-origin and unknown ids
     are untouched. A sessions-lock timeout leaves the stopped sessions
-    unflipped and reports the pending flip; nothing is queued.
+    unflipped and reports the pending flip; nothing is queued. Returns
+    *prior* extended with this ticket's problems.
     """
     wanted = {sid for sid in session_ids if sid is not None}
     read = {
@@ -368,7 +379,7 @@ def close_cancelled_sessions(
         for s in (load_state().sessions if wanted else ())
         if s.id in wanted and s.origin is SessionOrigin.DAEMON
     }
-    problems: list[str] = []
+    problems = list(prior.problems)
     to_flip: dict[str, Session] = {}
     for sess in read.values():
         problem = _stop_until_gone(sess, daemon)
@@ -377,9 +388,10 @@ def close_cancelled_sessions(
         elif sess.status not in TERMINAL_SESSION_STATUSES:
             to_flip[sess.id] = sess
     if not to_flip:
-        return CancelCloseOutcome(tuple(problems))
+        return prior._replace(problems=tuple(problems))
+    wait_s = 0.0 if prior.lock_timed_out else operator_close_lock_wait_seconds()
     try:
-        flipped, resumed = _flip_cancelled(to_flip, lock_timeout_s)
+        flipped, resumed = _flip_cancelled(to_flip, wait_s)
     except SessionsLockTimeoutError as exc:
         problems.extend(
             f"Session {sid}: the worker was stopped, but the record flip is"
@@ -402,7 +414,7 @@ def close_cancelled_sessions(
             )
         except CwError as exc:
             problems.append(str(exc))
-    return CancelCloseOutcome(tuple(problems))
+    return prior._replace(problems=tuple(problems))
 
 
 def _spawn_close_requeue_impl(

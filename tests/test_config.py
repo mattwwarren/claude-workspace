@@ -2096,7 +2096,13 @@ _CHILD_READY_TIMEOUT_S = 10.0
 # ``except`` that reverts the row to PENDING, the stop runs only after the
 # lock-free ``precheck_requeue``, and a timeout after it leaves the row parked
 # and the session COMPLETED -- the state a normal park leaves. ``approve``
-# closes after its lock, so nothing irreversible precedes that one.
+# and ``requeue`` both run ``settle_lagging_row`` (#2692) first, which may
+# route the row's already-recorded sentinel under its OWN bounded lock, the
+# routing the dispatch loop would have applied; a timeout in the verb's own
+# lock leaves the row parked where the loop would have put it, a clean retry.
+# ``approve`` still closes after its lock. The settle's own bounded lock
+# (``_consume_pending_bounded``) is preceded only by a lock-free event read,
+# and its LockTimeoutError is caught so the verb proceeds.
 # A second accepted exception (#2694): ``_flip_cancelled``, the ``cw dev-queue
 # cancel`` session flip, runs after ``cancel_ticket`` committed the row
 # CANCELLED and the worker was stopped and confirmed gone. A timeout there
@@ -2123,6 +2129,9 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/cli/dev_queue/approve.py", "_approve_scope_drift"): 1,
     ("cw/cli/dev_queue/approve.py", "_approve_must_fix_override"): 1,
     ("cw/cli/dev_queue/approve.py", "dev_queue_approve"): 1,
+    # row-lag settle before approve/requeue (#2692): read-only precheck, no
+    # side effect before the lock; LockTimeoutError caught, verb proceeds
+    ("cw/cli/dev_queue/_settle.py", "_consume_pending_bounded"): 1,
     # `cw config concurrency ...` / `cw lane ...`: clients, concurrency_override
     # and (lane rm) dev_queue locks (#2501)
     ("cw/cli/config_cmds.py", "config_concurrency_set"): 1,

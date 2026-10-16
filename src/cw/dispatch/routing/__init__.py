@@ -65,6 +65,7 @@ from cw.codex_review import (
     CODEX_REVIEW_UNPARSEABLE,
 )
 from cw.dev_queue import (
+    APPROVAL_GATE_REASON,
     REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
     _advance_task_pointer,
     _extract_pr_url,
@@ -200,7 +201,7 @@ _PLAN_PARKED_REASON = "plan_parked"
 # _PLAN_PARKED_REASON -- that constant is scoped to the v4
 # ambiguities/premises statuses, an unrelated park reason -- per the
 # operator's R1 resolution. See GitHub #1302.
-_APPROVAL_GATE_REASON = "approval_gate"
+_APPROVAL_GATE_REASON = APPROVAL_GATE_REASON
 
 
 # Disposition stamped by _stage_advance_unchecked when the task's client is

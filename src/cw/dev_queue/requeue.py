@@ -1,9 +1,11 @@
 """Dev-queue requeue + unblock: re-run a stage, regress, or clear a salvage park.
 
 Extracted from the flat ``cw.dev_queue`` module (#1318, part 2). Owns the
-stage-resolution helper (``_apply_requeue_stage``), the forward-gate error
-message builder (``_requeue_state_error_message``), the ``requeue_ticket``
-entry point, and ``unblock_ticket`` (salvage-park clearing).
+stage-resolution helper (``_apply_requeue_stage``), the ``requeue_ticket``
+entry point, the idempotent-PENDING predicate (``is_pending_requeue_noop``,
+#2692), and ``unblock_ticket`` (salvage-park clearing). The refusal-message
+builders live in ``_requeue_messages`` (#2692); every refusal names the row's
+legal next command through ``next_commands``/``refusal``.
 
 Layering: imports ``crud`` (``_find_ticket`` / ``_APPROVABLE_STATUSES``) and
 ``lifecycle`` (the transition + stage helpers) at module level. The
@@ -21,6 +23,15 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from cw.branch_ahead import merge_in_progress
 from cw.config import get_client, load_state
+from cw.dev_queue._requeue_messages import (
+    _REQUEUE_FROM_CANCELLED_STATUSES,
+    _REQUEUE_FROM_COMPLETED_STATUSES,
+    _REQUEUE_FROM_FAILED_STATUSES,
+    _UNBLOCK_SALVAGE_ONLY,
+    _pending_restage_hint,
+    _regress_needs_stage_message,
+    _requeue_state_error_message,
+)
 from cw.dev_queue.crud import (
     _APPROVABLE_STATUSES,
     _find_ticket,
@@ -35,6 +46,8 @@ from cw.dev_queue.lifecycle import (
     _stage_regress,
     transition_task_status,
 )
+from cw.dev_queue.next_commands import dev_queue_command, refusal_suffix
+from cw.dev_queue.refusal import refusal_hint
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import (
@@ -58,45 +71,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import ClientConfig, TicketTask
-
-# Issue #917: --regress requires an explicit backward --stage target.
-_REGRESS_NEEDS_BACKWARD_STAGE_MSG = (
-    "--regress requires a backward --stage target on a blocked task."
-)
-
-# Statuses requeue_ticket's forward/same-stage path additionally accepts, but
-# ONLY when the caller explicitly opts in via from_cancelled=True (CLI:
-# --from-cancelled). Deliberately NOT folded into _APPROVABLE_STATUSES, which
-# is shared by _find_ticket's tie-break, approve_ticket, and the regress gate
-# in _apply_requeue_stage — widening that frozenset would silently change
-# behavior at all three. See GitHub #1018: `cw spawn close <sid>
-# --confirmed-dead` on a RUNNING row transitions it to CANCELLED (not
-# BLOCKED_ON_USER), leaving no CLI path back to PENDING.
-_REQUEUE_FROM_CANCELLED_STATUSES: frozenset[QueueItemStatus] = frozenset(
-    [QueueItemStatus.CANCELLED]
-)
-
-# Mirrors _REQUEUE_FROM_CANCELLED_STATUSES above for FAILED/abandoned rows
-# whose underlying session may have actually completed clean (a valid
-# terminal sentinel) but the row itself has no requeue path today. Same
-# "deliberately NOT folded into _APPROVABLE_STATUSES" rationale -- this is
-# a blind operator-trust escape hatch (CLI: --from-failed), not automatic
-# sentinel re-verification. See GitHub #1190.
-_REQUEUE_FROM_FAILED_STATUSES: frozenset[QueueItemStatus] = frozenset(
-    [QueueItemStatus.FAILED]
-)
-
-# Mirrors _REQUEUE_FROM_CANCELLED_STATUSES / _REQUEUE_FROM_FAILED_STATUSES
-# above for COMPLETED rows: a ticket that shipped and landed can later go
-# conflicting because a sibling ticket in the same wave merged first,
-# leaving no CLI path back to PENDING short of deleting and re-adding the
-# row (which would lose its attempt/cost history). Same "deliberately NOT
-# folded into _APPROVABLE_STATUSES" rationale -- this is a blind
-# operator-trust escape hatch (CLI: --from-completed), not automatic
-# re-verification of the shipped PR's state. See GitHub #2023.
-_REQUEUE_FROM_COMPLETED_STATUSES: frozenset[QueueItemStatus] = frozenset(
-    [QueueItemStatus.COMPLETED]
-)
 
 
 def _impl_bypass_worktree_path(task: TicketTask, client_cfg: ClientConfig) -> Path:
@@ -199,35 +173,82 @@ def _impl_bypass_plan_available(
     return _ImplBypassPlanCheck(available, tracker_checked=True, tracker=tracker)
 
 
+def is_pending_requeue_noop(
+    task: TicketTask, stage_override: str | None, allow_regress: bool
+) -> bool:
+    """True iff requeueing *task* is the idempotent PENDING no-op (#2692).
+
+    The row is already PENDING, no ``--regress`` was asked for, and no
+    ``--stage`` (or the row's own stage) was named. The single rule behind
+    the CLI's lock-free exit, ``precheck_requeue(idempotent_pending=True)``
+    and ``requeue_ticket(idempotent_pending=True)``.
+    """
+    return (
+        task.status == QueueItemStatus.PENDING
+        and not allow_regress
+        and (stage_override is None or stage_override == task.stage.value)
+    )
+
+
+def _validate_requeue_stages(
+    task: TicketTask, stages: list[Stage], target_stage: Stage
+) -> None:
+    """Both stages must be in the lane pipeline; refusals name the way out."""
+    try:
+        _validate_stage_in_pipeline(
+            task.stage, stages, client=task.client, lane=task.lane
+        )
+    except RequeueStageError as exc:
+        msg = (
+            f"{exc} No requeue can act on a row whose stage is not in its lane"
+            " pipeline; fix the lane's pipeline.stages, or run"
+            f" `{dev_queue_command('remove', task)}` and re-add the ticket."
+        )
+        raise RequeueStageError(msg) from exc
+    try:
+        _validate_stage_in_pipeline(
+            target_stage, stages, client=task.client, lane=task.lane
+        )
+    except RequeueStageError as exc:
+        legal = ", ".join(s.value for s in stages)
+        msg = (
+            f"{exc} Legal stages for this row: {legal}. Re-run the current stage"
+            f" with `{dev_queue_command('requeue', task)}`, or name one of those"
+            " stages with `--stage`."
+        )
+        raise RequeueStageError(msg) from exc
+
+
 def _classify_requeue_move(
     task: TicketTask,
     stages: list[Stage],
     target_stage: Stage,
     *,
     allow_regress: bool,
+    infer_regress: bool = False,
 ) -> Literal["regress", "forward"]:
     """The pure, lock-free stage gate of a requeue: regress or forward move.
 
     Validates both stages against the resolved pipeline and refuses the two
     backward moves that are never allowed: a regress without
-    ``allow_regress``, and a regress of a row that is not parked. Shared by
-    :func:`_apply_requeue_stage` and :func:`precheck_requeue` so the
-    prediction and the real call cannot drift (#2517). "forward" includes
-    the same-stage move.
+    ``allow_regress`` (unless *infer_regress*, the CLI's #2692 opt-in, treats
+    any backward target as a regress), and a regress of a row that is not
+    parked. Shared by :func:`_apply_requeue_stage` and
+    :func:`precheck_requeue` so the prediction and the real call cannot drift
+    (#2517). "forward" includes the same-stage move. Refusals name the row's
+    legal next command (#2692).
     """
-    _validate_stage_in_pipeline(task.stage, stages, client=task.client, lane=task.lane)
-    _validate_stage_in_pipeline(
-        target_stage, stages, client=task.client, lane=task.lane
-    )
+    _validate_requeue_stages(task, stages, target_stage)
     if stages.index(target_stage) >= stages.index(task.stage):
         return "forward"
-    if not allow_regress:
+    hint = f"{refusal_hint(task)}{_pending_restage_hint(task, target_stage.value)}"
+    if not (allow_regress or infer_regress):
         msg = (
             f"Cannot requeue ticket '{task.ticket_id}'"
             f" to stage '{target_stage.value}':"
             f" that would regress from '{task.stage.value}'."
             " Only same-stage or forward advancement is allowed."
-            " Use --regress to move backward."
+            f" Use --regress to move backward.{hint}"
         )
         raise RequeueStageError(msg)
     if task.status not in _APPROVABLE_STATUSES:
@@ -235,7 +256,7 @@ def _classify_requeue_move(
             f"Cannot regress ticket '{task.ticket_id}'"
             f" to stage '{target_stage.value}': status is"
             f" {task.status.value!r}, expected BLOCKED_ON_USER or"
-            " AWAITING_OPERATOR_SIGNOFF."
+            f" AWAITING_OPERATOR_SIGNOFF.{hint}"
         )
         raise RequeueStageError(msg)
     return "regress"
@@ -248,21 +269,27 @@ def _forward_gate_applied(
     from_cancelled: bool,
     from_failed: bool,
     from_completed: bool,
+    stage_override: str | None = None,
 ) -> tuple[bool, bool, bool]:
     """The forward/same-stage status gate; returns the three applied flags.
 
     The row must be at a BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF gate,
     OR (opt-in) CANCELLED/FAILED/COMPLETED; otherwise raises
-    :class:`RequeueStateError`. Returns ``(from_cancelled_applied,
-    from_failed_applied, from_completed_applied)``. Pure and shared with
-    :func:`precheck_requeue` (#2517).
+    :class:`RequeueStateError`, naming the row's legal next command and, for a
+    PENDING row asked for another *stage_override*, the remove/add route
+    (#2692). Returns ``(from_cancelled_applied, from_failed_applied,
+    from_completed_applied)``. Shared with :func:`precheck_requeue` (#2517).
     """
     approvable = task.status in _APPROVABLE_STATUSES
     cancelled_ok = from_cancelled and task.status in _REQUEUE_FROM_CANCELLED_STATUSES
     failed_ok = from_failed and task.status in _REQUEUE_FROM_FAILED_STATUSES
     completed_ok = from_completed and task.status in _REQUEUE_FROM_COMPLETED_STATUSES
     if not (approvable or cancelled_ok or failed_ok or completed_ok):
-        raise RequeueStateError(_requeue_state_error_message(ticket_id, task.status))
+        msg = (
+            f"{_requeue_state_error_message(ticket_id, task.status)}"
+            f"{refusal_hint(task)}{_pending_restage_hint(task, stage_override)}"
+        )
+        raise RequeueStateError(msg)
     return cancelled_ok, failed_ok, completed_ok
 
 
@@ -273,6 +300,7 @@ def _apply_requeue_stage(
     client_cfg: ClientConfig,
     *,
     allow_regress: bool,
+    infer_regress: bool = False,
 ) -> bool:
     """Resolve a requeue stage_override and mutate ``task``; report regress.
 
@@ -301,7 +329,11 @@ def _apply_requeue_stage(
 
     target_stage = Stage(stage_override)
     move = _classify_requeue_move(
-        task, stages, target_stage, allow_regress=allow_regress
+        task,
+        stages,
+        target_stage,
+        allow_regress=allow_regress,
+        infer_regress=infer_regress,
     )
 
     if move == "regress":
@@ -353,10 +385,12 @@ def _apply_requeue_stage(
                     " if so, Stage 2's tracker-aware plan recovery can pick"
                     " it up directly instead of re-running Stage 1 (plan)."
                 )
+            replan = dev_queue_command("requeue", task, "--stage", Stage.PLAN.value)
             msg = (
                 f"Cannot requeue ticket '{task.ticket_id}' to stage 'impl':"
                 f" no approved plan is available. '{wt_path / '.cw' / 'plan.md'}'"
                 f"{availability_clause}{remediation_clause}"
+                f" To re-run planning: `{replan}`."
             )
             raise RequeueStageError(msg)
 
@@ -438,28 +472,6 @@ def _review_reentry_deliverable(
         backend,
         tracker,
     )
-
-
-def _requeue_state_error_message(ticket_id: str, status: QueueItemStatus) -> str:
-    """Build the RequeueStateError message for the forward/same-stage gate.
-
-    Names the --from-cancelled, --from-failed, or --from-completed escape
-    hatch only when it would actually apply (status is CANCELLED, FAILED, or
-    COMPLETED, respectively) so the message doesn't mislead callers hitting
-    the gate from PENDING/RUNNING/etc. See GitHub #1018, #1190, #2023.
-    """
-    base = (
-        f"Cannot requeue ticket '{ticket_id}':"
-        f" status is {status.value!r},"
-        " expected BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF"
-    )
-    if status in _REQUEUE_FROM_CANCELLED_STATUSES:
-        return base + " (or CANCELLED with --from-cancelled)."
-    if status in _REQUEUE_FROM_FAILED_STATUSES:
-        return base + " (or FAILED with --from-failed)."
-    if status in _REQUEUE_FROM_COMPLETED_STATUSES:
-        return base + " (or COMPLETED with --from-completed)."
-    return base + "."
 
 
 RequeueRefusalTag = Literal["skipped_live_session", "skipped_roster_unreadable"]
@@ -568,6 +580,8 @@ def precheck_requeue(
     from_completed: bool = False,
     native_daemon: NativeDaemonClient,
     ignore_session_ids: frozenset[str] = frozenset(),
+    idempotent_pending: bool = False,
+    infer_regress: bool = False,
 ) -> None:
     """Raise what :func:`requeue_ticket` would refuse with, writing nothing.
 
@@ -584,7 +598,17 @@ def precheck_requeue(
     filesystem and tracker read), the FINALIZE ``merge_in_progress`` probe
     (git I/O), the bounded-lock timeout, and any concurrent change between
     this check and the call.
+
+    With *idempotent_pending* (#2692) the row lookup comes first and an
+    idempotent PENDING no-op (:func:`is_pending_requeue_noop`) returns before
+    the live-session guard; *infer_regress* is passed to the stage gate.
     """
+    if idempotent_pending and is_pending_requeue_noop(
+        _find_ticket(load_dev_queue(), ticket_id, client_name),
+        stage_override,
+        allow_regress,
+    ):
+        return
     _refuse_if_live_session(
         ticket_id,
         client_name,
@@ -597,10 +621,14 @@ def precheck_requeue(
     task = _find_ticket(load_dev_queue(), ticket_id, client_name)
     stages = resolve_pipeline_stages(task, get_client(client_name))
     if allow_regress and stage_override is None:
-        raise RequeueStageError(_REGRESS_NEEDS_BACKWARD_STAGE_MSG)
+        raise RequeueStageError(_regress_needs_stage_message(task, stages))
     if stage_override is not None and (
         _classify_requeue_move(
-            task, stages, Stage(stage_override), allow_regress=allow_regress
+            task,
+            stages,
+            Stage(stage_override),
+            allow_regress=allow_regress,
+            infer_regress=infer_regress,
         )
         == "regress"
     ):
@@ -611,6 +639,7 @@ def precheck_requeue(
         from_cancelled=from_cancelled,
         from_failed=from_failed,
         from_completed=from_completed,
+        stage_override=stage_override,
     )
 
 
@@ -626,15 +655,22 @@ def requeue_ticket(
     native_daemon: NativeDaemonClient | None = None,
     ignore_session_ids: frozenset[str] = frozenset(),
     bounded: bool = False,
+    idempotent_pending: bool = False,
+    infer_regress: bool = False,
 ) -> dict[str, str | bool | int]:
     """Requeue a BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF ticket, optionally
     at a specific stage.
 
     Returns dict with from_stage, to_stage, ticket_id, client, regressed,
-    regress_attempts, from_cancelled_applied, from_failed_applied, and
-    from_completed_applied for event emission. ``regressed`` is True only on
-    a genuine backward regress (``allow_regress`` + backward
-    ``stage_override`` + blocked task); ``regress_attempts`` is the
+    regress_attempts, from_cancelled_applied, from_failed_applied,
+    from_completed_applied, already_pending and regress_inferred for event
+    emission. ``already_pending`` is True only for the *idempotent_pending*
+    no-op (#2692: nothing written, ``from_stage == to_stage``);
+    ``regress_inferred`` is True when a backward *stage_override* regressed
+    the row through *infer_regress* rather than ``allow_regress``.
+    ``regressed`` is True only on a genuine backward regress
+    (``allow_regress`` or *infer_regress* + backward ``stage_override`` +
+    blocked task); ``regress_attempts`` is the
     post-mutation attempt count (0 on the forward/same-stage path).
     ``from_cancelled_applied`` is True only when the CANCELLED-acceptance
     branch actually admitted the row — i.e. ``from_cancelled=True`` AND the
@@ -674,6 +710,12 @@ def requeue_ticket(
         ignore_session_ids: ``Session.id`` values excluded from the
             live-session guard (e.g. the session ``cw spawn close --requeue``
             just closed, whose roster entry may lag the close).
+        idempotent_pending: when True (CLI only), a row already PENDING with
+            no other stage asked for returns the ``already_pending`` no-op
+            under the lock instead of raising RequeueStateError. The
+            live-session guard still runs first.
+        infer_regress: when True (CLI only), a backward *stage_override* on a
+            parked row regresses without ``allow_regress``.
 
     Raises:
         RequeueLiveSessionError: if a daemon-live session exists for the
@@ -715,15 +757,24 @@ def requeue_ticket(
 
         from_stage = task.stage
 
-        if allow_regress and stage_override is None:
-            raise RequeueStageError(_REGRESS_NEEDS_BACKWARD_STAGE_MSG)
+        if idempotent_pending and is_pending_requeue_noop(
+            task, stage_override, allow_regress
+        ):
+            return _requeue_result(task, from_stage, already_pending=True)
 
+        if allow_regress and stage_override is None:
+            raise RequeueStageError(_regress_needs_stage_message(task, stages))
+
+        # The forward gate's refusal describes the row as found, before the
+        # stage pointer moves (#2692).
+        row_as_found = task.model_copy()
         regressed = _apply_requeue_stage(
             task,
             stages,
             stage_override=stage_override,
             client_cfg=client_cfg,
             allow_regress=allow_regress,
+            infer_regress=infer_regress,
         )
 
         from_cancelled_applied = False
@@ -736,11 +787,12 @@ def requeue_ticket(
             # CANCELLED/FAILED/COMPLETED.
             from_cancelled_applied, from_failed_applied, from_completed_applied = (
                 _forward_gate_applied(
-                    task,
+                    row_as_found,
                     ticket_id,
                     from_cancelled=from_cancelled,
                     from_failed=from_failed,
                     from_completed=from_completed,
+                    stage_override=stage_override,
                 )
             )
             _reset_for_same_stage_requeue(task)
@@ -751,7 +803,6 @@ def requeue_ticket(
             task.regressed_into_stage = None
 
         to_stage = task.stage
-        regress_attempts = task.regress_attempts if regressed else 0
 
         # #1730: every successful requeue landing at REVIEW is, by construction,
         # a review-stage re-entry of a previously-parked ticket -- i.e. the
@@ -784,16 +835,38 @@ def requeue_ticket(
 
         save_dev_queue(store)
 
+    return _requeue_result(
+        task,
+        from_stage,
+        regressed=regressed,
+        regress_inferred=regressed and not allow_regress,
+        applied=(from_cancelled_applied, from_failed_applied, from_completed_applied),
+    )
+
+
+def _requeue_result(
+    task: TicketTask,
+    from_stage: Stage,
+    *,
+    already_pending: bool = False,
+    regressed: bool = False,
+    regress_inferred: bool = False,
+    applied: tuple[bool, bool, bool] = (False, False, False),
+) -> dict[str, str | bool | int]:
+    """:func:`requeue_ticket`'s result; the defaults are the PENDING no-op's."""
+    from_cancelled_applied, from_failed_applied, from_completed_applied = applied
     return {
         "from_stage": from_stage.value,
-        "to_stage": to_stage.value,
-        "ticket_id": ticket_id,
-        "client": client_name,
+        "to_stage": task.stage.value,
+        "ticket_id": task.ticket_id,
+        "client": task.client,
         "regressed": regressed,
-        "regress_attempts": regress_attempts,
+        "regress_attempts": task.regress_attempts if regressed else 0,
         "from_cancelled_applied": from_cancelled_applied,
         "from_failed_applied": from_failed_applied,
         "from_completed_applied": from_completed_applied,
+        "already_pending": already_pending,
+        "regress_inferred": regress_inferred,
     }
 
 
@@ -816,7 +889,7 @@ def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
     if task.status != QueueItemStatus.BLOCKED_ON_USER:
         msg = (
             f"Cannot unblock ticket '{ticket_id}': status is {task.status.value!r},"
-            " expected BLOCKED_ON_USER."
+            f" expected BLOCKED_ON_USER.{_UNBLOCK_SALVAGE_ONLY}{refusal_hint(task)}"
         )
         raise UnblockStateError(msg)
 
@@ -846,6 +919,9 @@ def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
                     f" (reap_reason={session.reap_reason!r},"
                     " expected SALVAGE_PARKED)."
                 )
+            # Pure suffix from the already-loaded session: no state read under
+            # sessions_lock (#2692).
+            msg += f"{_UNBLOCK_SALVAGE_ONLY}{refusal_suffix(task, session=session)}"
             raise UnblockStateError(msg)
 
         # bounded=True (#2501): explicit operator command (the orchestrator
@@ -860,6 +936,7 @@ def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
                 msg = (
                     f"Cannot unblock ticket '{ticket_id}': status changed to"
                     f" {task.status.value!r} concurrently. Re-check and retry."
+                    f"{_UNBLOCK_SALVAGE_ONLY}{refusal_suffix(task, session=session)}"
                 )
                 raise UnblockStateError(msg)
             transition_task_status(task, QueueItemStatus.PENDING)

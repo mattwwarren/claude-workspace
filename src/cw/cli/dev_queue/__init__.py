@@ -11,6 +11,10 @@ below is what registers those commands. Submodules:
 - ``_plan_marker`` — pure builders/matchers for the ``approve --post-marker``
   plan-approved audit comment (bare and draft-fingerprint-bound forms, #2194),
   used by ``approve``.
+- ``_settle`` — the CLI-layer row-lag settle (#2692) approve and requeue run
+  first; also the read-only live-session note for the requeue no-op.
+- ``_requeue_echo`` — the requeue no-op echo, the inferred ``--regress``
+  announcement and the ``TICKET_REQUEUED`` event (#2692), used by ``crud``.
 - ``approve`` — the ``approve`` command (plan/review/operator-signoff gate
   clearing, ``--post-marker``, ``--scope-drift``), split out of ``crud``
   (#2337).
