@@ -83,6 +83,7 @@ _SHIP_STEP_IS_HUMANS = (
     " or scope_hint: large"
 )
 _SHOW_PURPOSE = "inspect the row and its legal next commands"
+RESOLVE_COMMAND = "cw dev-queue resolve --file <decisions.md>"
 
 # A scope_hint: large gate is recorded as one of these dispositions: the
 # REVIEW->FINALIZE scope-hint park stamps APPROVAL_GATE_REASON, a Rule 1 park
@@ -103,14 +104,14 @@ _FROM_FLAGS: dict[QueueItemStatus, str] = {
 _PARK_GUIDANCE: dict[str, str] = {
     AMBIGUITIES_PENDING_RESOLUTION_STATUS: (
         "The worker parked on open ambiguities. Answer them on the ticket, then"
-        " re-run the stage. At the plan stage, `cw dev-queue resolve --file"
-        " <decisions.md>` records the answers on the row and requeues it, with"
+        f" re-run the stage. At the plan stage, `{RESOLVE_COMMAND}` records"
+        " the answers on the row and requeues it, with"
         " no tracker comment needed."
     ),
     PREMISES_PENDING_VERIFICATION_STATUS: (
         "The worker parked on unverified premises. Verify them and record the"
         " results on the ticket, then re-run the stage. At the plan stage,"
-        " `cw dev-queue resolve --file <decisions.md>` records the verification"
+        f" `{RESOLVE_COMMAND}` records the verification"
         " results on the row and requeues it."
     ),
     REVIEW_HEALTH_GATE_DISPOSITION: (
