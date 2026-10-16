@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from cw._git import git_output
 from cw.codex_fix_loop.baseline import cycle_diff
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
+from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, SETTLE_FINDING_HINT, FenceBreach
 from cw.codex_fix_loop.growth import AdditionKind, detect_additions, is_source_path
 from cw.codex_fix_loop.posted_text import (
     POSTED_TEXT_MAX_CHARS,
@@ -369,7 +369,7 @@ def constraint_breach(
         "The operator's resolutions comment rules this out. If the constraint is "
         "stale, post a newer `auto-dev-preflight-resolutions` comment that "
         "supersedes it and requeue REVIEW; otherwise settle the finding that "
-        "asked for the mechanism (`cw review settle`). To disable this guard for "
+        f"asked for the mechanism ({SETTLE_FINDING_HINT}). To disable this guard for "
         f"a lane, set `{CODEX_FIX_LOOP_GROWTH_GUARD_KEY}: false` on that lane in "
         "clients.yaml (or globally in orchestrator.yaml). "
         f"{LEFT_STAGED_HINT}"

@@ -25,7 +25,11 @@ first production writer. #1838 shipped that ledger's renderer, parser and
 mechanical backstop but nothing that ever CALLED the renderer, so the runbook
 told operators to compute the key by hand from a ``python -c`` one-liner. This
 turns a payload — the one every blocking codex review comment now prints — into
-the postable ``REVIEW-FINDING-DISPOSITIONS`` marker.
+the postable ``REVIEW-FINDING-DISPOSITIONS`` marker. As of #2701 it also
+records the ledger on the ticket's cw dev-queue row, the ledger every review
+pass reads first on every tracker, so the marker is now the human-readable
+mirror of that record; the tracker-aware handling of a row it cannot record
+lives in :mod:`cw.cli.review._settle_store`.
 
 ``settle`` is the only command here that mints a durable, blocking
 SUPPRESSION rather than recording one pass's outcome, so it carries an audit
@@ -56,6 +60,14 @@ from cw.cli.review._group import (
     _parse_payload_or_exit,
     review,
 )
+from cw.cli.review._settle_store import (
+    SettleRowOutcome,
+    preflight_settle_row,
+    record_settle_on_row,
+    settle_stderr_lines,
+)
+from cw.config import load_effective_config
+from cw.dev_queue.crud import resolve_client
 from cw.exceptions import CwError
 from cw.review_adjudication import (
     REJECTED_ENTRY_SEVERITY,
@@ -513,9 +525,10 @@ def _emit_settle_events(
             msg = (
                 f"Could not record the {event_type.value} audit event for "
                 f"{file} ({entry.summary!r}): {exc}. Nothing was written — no "
-                "marker, no --out file. A suppression with no audit record is "
-                "invisible, so the settle is refused rather than recorded "
-                "half-way. Fix the event store and re-run the same payload."
+                "row write, no marker, no --out file. A suppression with no "
+                "audit record is invisible, so the settle is refused rather "
+                "than recorded half-way. Fix the event store and re-run the "
+                "same payload."
             )
             raise CwError(msg) from exc
 
@@ -543,17 +556,31 @@ def _emit_settle_events(
 )
 @click.option(
     "--ticket",
+    required=True,
+    type=str,
+    help=(
+        "Ticket id (required). The settle is recorded on that ticket's "
+        "dev-queue row, and the audit events are correlated to it."
+    ),
+)
+@click.option(
+    "--client",
+    "-c",
     default=None,
     type=str,
-    help="Ticket id to correlate the settle/reversal audit events to.",
+    help=(
+        "Client that owns the ticket's dev-queue row. Defaults to the client "
+        "the ticket's prefix maps to in linear_prefix_map; required when the "
+        "prefix does not resolve (GitHub issue numbers carry none)."
+    ),
 )
 @click.option(
     "--out",
     default=None,
     type=click.Path(path_type=Path),
     help=(
-        "Also write the rendered marker to this path, ready to post with "
-        "`gh issue comment --body-file`."
+        "Also write the rendered marker to this path, ready to post with your "
+        "tracker's own tool (`gh issue comment --body-file` on GitHub)."
     ),
 )
 @handle_errors
@@ -561,10 +588,12 @@ def review_settle(
     path: str,
     reason: str,
     reviewed_sha: str,
-    ticket: str | None,
+    ticket: str,
+    client: str | None,
     out: Path | None,
 ) -> None:
-    """Record operator-settled findings as a postable marker (#2210).
+    """Record operator-settled findings on the cw dev-queue row and print a
+    postable marker (#2210, #2701).
 
     The orchestrator session runs this from anywhere outside a headless
     dispatch worker. It refuses only inside such a worker (a
@@ -579,15 +608,21 @@ def review_settle(
     "reviewed_sha": "<sha>"}]}. Every blocking codex review comment prints one
     such payload per finding under "### Settle a finding" — paste it unedited.
 
+    --ticket is REQUIRED: the settle is recorded on that ticket's cw dev-queue
+    row (the ledger the next review pass reads first, on every tracker), and
+    the audit events are correlated to it. -c/--client names the client that
+    owns the row; it defaults from the ticket's prefix (linear_prefix_map) and
+    is required for a GitHub issue number, which carries none.
+
     ROLLBACK (#2232): `outcome: "REVERSED"` withdraws a settle you already
     made. Paste the SAME `file` and `summary` the earlier settle used — read
     them off `cw review dispositions <ticket> --json` (its `summary` field is
     always the full verbatim text) or the original settle marker; the human
-    table truncates long summaries for scanning and is not a payload source —
-    and post the marker this prints. The newest-`recorded_at`-wins merge is
-    what makes the withdrawal stick, so no new command and no new write path
-    is involved; a reversed record matches neither suppression tier and is not
-    shown to the reviewer as a decision. It stays visible in `cw review
+    table truncates long summaries for scanning and is not a payload source.
+    The newest-`recorded_at`-wins merge is what makes the withdrawal stick, on
+    the row and on a GitHub thread alike, so no new command and no new write
+    path is involved; a reversed record matches neither suppression tier and
+    is not shown to the reviewer as a decision. It stays visible in `cw review
     dispositions`, because reversal history is part of the audit trail.
 
     --reason is REQUIRED and must be non-blank; it is the rationale recorded
@@ -606,19 +641,33 @@ def review_settle(
     reviewed sha it was raised against. An entry with no resolvable sha is
     refused; pass --reviewed-sha for a hand-written payload.
 
-    The marker is ADDITIVE across comments: the reader unions every marker on
-    the thread, so post only what you are settling now rather than re-posting
-    the whole ledger. Only `REJECTED` suppresses a later re-raise; `ACCEPTED`
-    is a record-only annotation that reaches the reviewer's prompt.
+    The marker is ADDITIVE across comments: on a GitHub-tracked ticket the
+    reader unions every marker on the thread, so post only what you are
+    settling now rather than re-posting the whole ledger (the row merge is
+    additive too). Only `REJECTED` suppresses a later re-raise; `ACCEPTED` is
+    a record-only annotation that reaches the reviewer's prompt.
 
     Emits one audit event per settled finding — `review.finding_settled`, or
     `review.finding_disposition_reverted` for a `REVERSED` entry (#2232) —
-    correlated to --ticket when given. The events are recorded BEFORE the
-    marker is written: if any of them cannot be recorded the settle is
-    refused outright — no marker, no --out file, non-zero exit — because a
-    durable suppression with no audit record is invisible.
+    correlated to --ticket. The order is: the events are recorded FIRST, then
+    the ledger is merged onto the row (provenance-gated, newest `recorded_at`
+    wins per key, under the dev-queue lock), then --out and the marker are
+    written. If an event cannot be recorded the settle is refused outright —
+    no row write, no marker, no --out file, non-zero exit — because a durable
+    suppression with no audit record is invisible. The marker is the
+    human-readable mirror of the row: post it with your tracker's own tool.
 
-    On success: exits 0, prints the marker to stdout.
+    If the row cannot be recorded (no row for the ticket, lock timeout,
+    unwritable store) the outcome depends on the client's tracker. On a
+    `github-issues` client the settle degrades to mirror-only: the marker is
+    printed as usual with a WARNING on stderr, and the GitHub review pass
+    reads it back. On every other tracker, or when the tracker cannot be
+    resolved, it fails: non-zero exit and no marker, because a marker no
+    review pass reads would be inert. A missing row is refused before any
+    event is recorded.
+
+    On success: exits 0, prints the marker to stdout (warnings and notes go to
+    stderr).
     On failure: exits 1, prints 'field.path: message' lines to stderr.
     """
     _refuse_settle_inside_a_dispatch_worker()
@@ -649,20 +698,32 @@ def review_settle(
         )
         for entry in parsed.entries
     )
-    # The audit events go FIRST, and the marker is written only once every one
-    # of them has recorded. The two failure directions are not symmetric: an
-    # audit record with no effect is noise, a durable suppression with no audit
-    # record is invisible — which is the exact hole round 1 added this event to
-    # close. Do not "fix" this back to save-then-emit: #1617's precedent orders
-    # a STATE MUTATION before its event so the event cannot claim something
-    # that did not land, and here the record IS the safety mechanism, so it
-    # goes first. Atomicity is all-events-then-one-write for the same reason:
-    # if any event fails, no marker is written at all.
+    resolved_client = resolve_client(ticket, load_effective_config(), client)
+    # Lock-free pre-flight BEFORE any event: a missing row on a non-GitHub
+    # tracker refuses here, so nothing at all is recorded (#2701 R1).
+    degraded_reason = preflight_settle_row(ticket, resolved_client)
+    # The audit events go FIRST, and the row write (the durable suppression,
+    # #2701) follows only once every one of them has recorded. The two failure
+    # directions are not symmetric: an audit record with no effect is noise, a
+    # durable suppression with no audit record is invisible — which is the
+    # exact hole round 1 added this event to close. Do not "fix" this back to
+    # save-then-emit: #1617's precedent orders a STATE MUTATION before its
+    # event so the event cannot claim something that did not land, and here
+    # the record IS the safety mechanism, so it goes first. Atomicity is
+    # all-events-then-the-writes for the same reason: if any event fails, no
+    # row write, marker or --out file happens at all.
     _emit_settle_events(ledger, ticket)
+    outcome = (
+        SettleRowOutcome(degraded_reason=degraded_reason)
+        if degraded_reason is not None
+        else record_settle_on_row(ledger, ticket, resolved_client)
+    )
     rendered = render_finding_disposition_block(ledger)
     if out is not None:
         out.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(out, rendered)
+    for line in settle_stderr_lines(outcome, ticket, resolved_client):
+        click.echo(line, err=True)
     click.echo(rendered)
 
 

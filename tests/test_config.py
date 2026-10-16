@@ -2129,6 +2129,12 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/cli/config_cmds.py", "lane_rm"): 2,
     ("cw/cli/config_cmds.py", "lane_pause"): 1,
     ("cw/cli/config_cmds.py", "lane_resume"): 1,
+    # `cw review settle`'s row write (#2701). It runs after the settle's audit
+    # events by design (events-before-effect, ADR-0016 invariant 10); a timeout
+    # leaves those events with no effect, which is documented accepted noise,
+    # not orphaned work, and the operator re-runs the same payload. No
+    # unattended loop reaches it.
+    ("cw/cli/review/_settle_store.py", "record_settle_on_row"): 1,
     ("cw/doctor/wedge/reap.py", "_reap_daemon_sessions"): 1,  # `cw doctor --reap`
     # `cw doctor --reap`, stranded routed-result close (#2524)
     ("cw/doctor/routed_result_wedge.py", "reap_routed_result_findings"): 1,
@@ -2169,6 +2175,7 @@ _BOUNDED_FORWARDERS_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/dev_queue/approval.py", "approve_scope_drift_ticket"): 1,
     ("cw/dev_queue/must_fix_override.py", "approve_must_fix_override_ticket"): 1,
     ("cw/dev_queue/requeue.py", "requeue_ticket"): 1,
+    ("cw/dev_queue/review_records.py", "record_finding_dispositions"): 1,
     # cw/_flock.py has NO entry by design: acquire_flock and
     # acquire_sessions_flock branch on ``bounded`` themselves, and the shared
     # poll helper takes no ``bounded`` parameter.

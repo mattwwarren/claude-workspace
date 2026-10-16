@@ -149,8 +149,11 @@ table it points at — the line between what you simply do and what you ask.
   `finalize_gate_held`, `scope_hint: large`) — notify the human instead.
 - Adjudicating codex MUST_FIX findings against the ticket's sources of truth
   (`/cw-followup`): settle an out-of-scope, already-decided or
-  non-reproducible finding with `cw review settle`, citing the source, and
-  requeue a real in-scope defect into the fix loop.
+  non-reproducible finding with `cw review settle <file> --reason <why>
+  --ticket <ID> -c <CLIENT>`, citing the source (that records it on the cw
+  dev-queue row on every tracker; then mirror the printed marker onto the
+  ticket with your own tool), and requeue a real in-scope defect into the fix
+  loop.
 
 **The human decides (product/scope forks and opted-in gates only):**
 

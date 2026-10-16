@@ -56,6 +56,15 @@ if TYPE_CHECKING:
 # built-in default (Linear MCP) and stall on OAuth (see #675 / project-config).
 _RECOGNIZED_TRACKERS: frozenset[str] = frozenset({"github-issues", "linear"})
 _SESSIONS_SIZE_CHECK_NAME = "sessions-size"
+# Appended to the tracker detail of every client whose tracker is not
+# github-issues (#2701): the codex review pass reads no marker comment there,
+# so a settle has to be recorded through the CLI onto the dev-queue row.
+CW_STORE_SETTLE_NOTE = (
+    "Review settles for this client are recorded in the cw store (`cw review "
+    "settle <payload> --reason '<why>' --ticket <ID> -c <client>`), not read "
+    "from the tracker: post the printed marker with your own tracker tool as a "
+    "human-readable mirror."
+)
 
 
 def _gh_on_path() -> bool:
@@ -92,7 +101,10 @@ def _tracker_prereq_result(name: str, system: object, path: Path) -> CheckResult
     return CheckResult(
         name,
         ok=True,
-        detail=f"linear tracker ({path}); requires Linear MCP reachable in worker",
+        detail=(
+            f"linear tracker ({path}); requires Linear MCP reachable in worker."
+            f" {CW_STORE_SETTLE_NOTE}"
+        ),
     )
 
 
@@ -138,7 +150,8 @@ def _check_project_configs(clients: dict[str, ClientConfig]) -> list[CheckResult
                     ok=False,
                     detail=(
                         f"tracking.primary.system={system!r} is not recognized"
-                        f" (expected one of {sorted(_RECOGNIZED_TRACKERS)})"
+                        f" (expected one of {sorted(_RECOGNIZED_TRACKERS)})."
+                        f" {CW_STORE_SETTLE_NOTE}"
                     ),
                 )
             )
