@@ -3826,9 +3826,8 @@ class TestReconcileAppliesQueuedCloses:
     def test_cancel_entry_flips_only_the_session(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from cw.reconcile.session_close import pending_queued_closes, queue_close
-
         from cw.config import dev_queue_file
+        from cw.reconcile.session_close import pending_queued_closes, queue_close
 
         daemon = _install_probe_daemon(monkeypatch)
         sess = _seed_queued_close_session(QueueItemStatus.CANCELLED)

@@ -3924,9 +3924,8 @@ class TestCLIDevQueueCancel:
         monkeypatch: pytest.MonkeyPatch,
         mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
-        from cw.reconcile.session_close import pending_queued_closes
-
         from cw.models import CompletionReason, counts_toward_client_ceiling
+        from cw.reconcile.session_close import pending_queued_closes
 
         self._use_daemon(monkeypatch, mock_native_daemon)
         self._seed_running()

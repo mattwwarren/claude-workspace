@@ -12,10 +12,10 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from cw.dispatch.stale_breadcrumbs import build_stale_breadcrumbs
 
 from cw.config import save_state
 from cw.dev_queue import save_dev_queue
+from cw.dispatch.stale_breadcrumbs import build_stale_breadcrumbs
 from cw.exceptions import CwError
 from cw.models import CwState, DevQueueStore, QueueItemStatus
 from tests._reconcile_helpers import events_doc_bullet
