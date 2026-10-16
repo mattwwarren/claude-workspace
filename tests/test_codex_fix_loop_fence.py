@@ -12,6 +12,7 @@ from cw.codex_fix_loop.baseline import (
 )
 from cw.codex_fix_loop.fence import (
     LEFT_STAGED_HINT,
+    SETTLE_FINDING_HINT,
     StagedSetMismatchError,
     check_fix_fence,
     cycle_start_breach,
@@ -137,6 +138,7 @@ class TestRevertGuard:
         assert breach.paths == ("a.py", "b.py", "c.py")
         assert "empty the branch diff" in breach.details
         assert "git diff --cached" in breach.recovery_hint
+        assert SETTLE_FINDING_HINT in breach.recovery_hint
         # Nothing was committed: HEAD still carries the feature commit.
         assert git_in(repo, "log", "-1", "--format=%s").strip() == "feature"
 
@@ -208,6 +210,7 @@ class TestScopeFence:
         assert breach is not None
         assert breach.reason == CODEX_FIX_SCOPE_DRIFT
         assert breach.paths == ("server/route.py",)
+        assert SETTLE_FINDING_HINT in breach.recovery_hint
 
     def test_in_fence_changes_pass(self, make_git_repo: Callable[..., Path]) -> None:
         repo = _branch_repo(make_git_repo, "f-infence", base=_BASE3, feature=_FEATURE3)
@@ -395,6 +398,7 @@ class TestScopeViolationBreach:
         # Advisory soundness RISK 1: the measurement stages the cycle's
         # changes, so the hint says where they are.
         assert LEFT_STAGED_HINT in breach.recovery_hint
+        assert SETTLE_FINDING_HINT in breach.recovery_hint
 
 
 class TestLeftStagedHint:

@@ -2377,6 +2377,8 @@ class TestRenderAdjudicatedFindingsBlock:
         # parser owns, never a second spelling — asserted against the imported
         # constant so it moves with it instead of pinning a copy of the text.
         assert f"`{DISPOSITION_SENTINEL}` block yourself" in _ADJUDICATED_INSTRUCTIONS
+        # #2701 R8: the supported producer is named with its required flags.
+        assert "--ticket <ID> -c <CLIENT>" in _ADJUDICATED_INSTRUCTIONS
         block = _render_adjudicated_findings_block(_disposition_ledger())
         assert block is not None
         assert DISPOSITION_SENTINEL in block
@@ -2474,17 +2476,118 @@ class TestBuildReviewerPromptAdjudicatedFindings:
 class TestPrepareReviewPassFindingDispositions:
     """#1838: the ledger is merged, prompted, and carried on the pass inputs."""
 
-    def _repo(self, make_git_repo: Callable[[str], Path], name: str) -> Path:
+    def _repo(
+        self,
+        make_git_repo: Callable[[str], Path],
+        name: str,
+        tracker: str | None = "github-issues",
+    ) -> Path:
+        """A one-commit feature branch; *tracker* ``None`` writes no project-config."""
         repo = make_git_repo(name)
         git_in(repo, "checkout", "-b", "feature")
         (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
         git_in(repo, "add", "mod.py")
         git_in(repo, "commit", "-m", "add mod.py")
-        _write(
-            repo / ".claude" / "project-config.yaml",
-            "tracking:\n  primary:\n    system: github-issues\n",
-        )
+        if tracker is not None:
+            _write(
+                repo / ".claude" / "project-config.yaml",
+                f"tracking:\n  primary:\n    system: {tracker}\n",
+            )
         return repo
+
+    @pytest.mark.parametrize("tracker", ["linear", None])
+    def test_row_ledger_is_honoured_with_no_tracker_fetch(
+        self,
+        tracker: str | None,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2701 (char): on a non-GitHub tracker the row is the whole ledger."""
+        repo = self._repo(make_git_repo, f"wt-2701-row-{tracker}", tracker)
+
+        def _no_fetch(*_args: object, **_kwargs: object) -> None:
+            msg = "no tracker fetch on a non-GitHub tracker"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.codex_review._context.core.fetch_issue_comments", _no_fetch
+        )
+        ledger = _disposition_ledger()
+        prepared = _prepare_review_pass(
+            _make_ticket_task(
+                ticket_id="T-1", client="test", finding_dispositions=ledger
+            ),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id=f"s-2701-row-{tracker}",
+        )
+
+        assert prepared.finding_dispositions == ledger
+        assert prepared.roles
+        for role in prepared.roles:
+            assert (
+                "## Previously Adjudicated Findings" in prepared.prompts_by_role[role]
+            )
+
+    @pytest.mark.parametrize(
+        ("row_at", "thread_at", "winner"),
+        [
+            ("2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z", "thread"),
+            ("2026-10-02T00:00:00Z", "2026-10-01T00:00:00Z", "row"),
+        ],
+    )
+    def test_row_and_thread_resolve_newest_wins_on_github(
+        self,
+        row_at: str,
+        thread_at: str,
+        winner: str,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2701 (char): a settle on the row and a GitHub marker, same key."""
+        repo = self._repo(make_git_repo, f"wt-2701-newest-{winner}")
+        row = _disposition_ledger(rationale="row decision", recorded_at=row_at)
+        thread = _disposition_ledger(
+            outcome="ACCEPTED", rationale="thread decision", recorded_at=thread_at
+        )
+        self._thread(monkeypatch, thread)
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **_kwargs: None,
+        )
+
+        prepared = _prepare_review_pass(
+            _make_ticket_task(ticket_id="T-1", client="test", finding_dispositions=row),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id=f"s-2701-newest-{winner}",
+        )
+
+        assert prepared.finding_dispositions == (thread if winner == "thread" else row)
+
+    def test_marker_only_ledger_is_unchanged_on_github(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2701 (char): acceptance 2, a marker with no row entry still applies."""
+        repo = self._repo(make_git_repo, "wt-2701-marker-only")
+        fresh = _disposition_ledger()
+        self._thread(monkeypatch, fresh)
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **_kwargs: None,
+        )
+
+        prepared = _prepare_review_pass(
+            _make_ticket_task(ticket_id="T-1", client="test"),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-2701-marker-only",
+        )
+
+        assert prepared.finding_dispositions == fresh
 
     def test_stored_ledger_alone_reaches_the_prompt_and_the_inputs(
         self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch

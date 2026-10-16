@@ -19,7 +19,7 @@ from cw.codex_fix_loop.constraints import (
     render_section,
     select_constraint_comment,
 )
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT
+from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, SETTLE_FINDING_HINT
 from cw.codex_fix_loop.growth import AdditionKind
 from cw.codex_fix_loop.posted_text import WITHHELD
 from cw.codex_review import CODEX_FIX_CONSTRAINT_VIOLATION
@@ -504,6 +504,7 @@ class TestConstraintBreach:
         assert breach is not None
         assert breach.recovery_hint is not None
         assert LEFT_STAGED_HINT in breach.recovery_hint
+        assert SETTLE_FINDING_HINT in breach.recovery_hint
         assert "codex_fix_loop_growth_guard_enabled" in breach.recovery_hint
 
     def test_reason_is_constraint_violation(

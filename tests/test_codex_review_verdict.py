@@ -1890,6 +1890,9 @@ class TestRenderStaleDispositions:
         assert "bbbbbbb" in body
         # It must say what the operator is supposed to do about it.
         assert "cw review settle" in body
+        # #2701 R8: and the command it names must be runnable as written.
+        assert "--ticket <ticket> -c <client>" in body
+        assert "re-run `cw review settle` for it" not in body
 
     def test_the_note_says_the_record_was_not_expired(self) -> None:
         """ADR-0016 rejects silent expiry, so the text must not imply one."""
@@ -2032,9 +2035,22 @@ class TestRenderSettlePayloads:
         payloads = _extract_settle_payloads(comment)
         assert payloads[0]["entries"][0]["summary"] == summary
 
-    def test_settle_section_states_github_only_scope(self) -> None:
+    def test_settle_section_names_the_row_and_the_mirror(self) -> None:
+        """#2701: the settle records on the row on every tracker."""
         comment = self._comment(_make_finding(severity="MUST_FIX"))
-        assert "This works only on GitHub-tracked tickets" in comment
+        assert "--ticket <ticket> -c <client>" in comment
+        assert "cw dev-queue row" in comment
+        assert "`settle.md` is the human-readable mirror of it" in comment
+        assert "This works only on GitHub-tracked tickets" not in comment
+
+    @pytest.mark.parametrize(
+        "note",
+        [_SETTLE_OVERFLOW_NOTE, _REFUSED_DISPOSITION_NOTE, _STALE_DISPOSITION_NOTE],
+        ids=["overflow", "refused", "stale"],
+    )
+    def test_every_settle_hint_names_ticket_and_client(self, note: str) -> None:
+        """#2701 R8: every runnable settle hint carries the required flags."""
+        assert "--ticket <ticket> -c <client>" in note
 
     def test_blocking_comment_never_contains_the_disposition_sentinel(self) -> None:
         # Self-ingest hazard: the dispositions reader parses EVERY comment body

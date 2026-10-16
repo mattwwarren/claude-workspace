@@ -25,7 +25,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.codex_fix_loop.baseline import cycle_diff, diff_since
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
+from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, SETTLE_FINDING_HINT, FenceBreach
 from cw.codex_fix_loop.posted_text import (
     POSTED_TEXT_MAX_CHARS,
     describe_added_line,
@@ -264,7 +264,7 @@ def check_growth_budget(
     hint = (
         "If the mechanism is wanted, add it to the plan or to a finding that asks "
         "for it, then requeue REVIEW; otherwise settle the finding that led to it "
-        "(`cw review settle`). To raise the net-line budget set "
+        f"({SETTLE_FINDING_HINT}). To raise the net-line budget set "
         "`codex_fix_loop_growth_budget_lines` in orchestrator.yaml. To disable "
         f"this guard for a lane, set `{CODEX_FIX_LOOP_GROWTH_GUARD_KEY}: false` "
         "on that lane in clients.yaml (or globally in orchestrator.yaml). "

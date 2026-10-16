@@ -130,18 +130,21 @@ _BACKTICK_RUN_RE = re.compile(r"`+")
 
 _SETTLE_INTRO = (
     "Each payload below records one blocking finding as settled. Save one to "
-    "a file, run `cw review settle <file> --reason '<why>' --out settle.md` "
-    "from the orchestrator session (anywhere outside a headless dispatch "
-    "worker), and post `settle.md` as a ticket comment. "
+    "a file and run `cw review settle <file> --reason '<why>' --ticket "
+    "<ticket> -c <client> --out settle.md` from the orchestrator session "
+    "(anywhere outside a headless dispatch worker). That records the "
+    "decision on the cw dev-queue row, which the next review pass reads "
+    "whatever the ticket's tracker is. `settle.md` is the human-readable "
+    "mirror of it: post it as its own comment, unedited, with your tracker's "
+    "own tool (on a GitHub-tracked ticket the codex lane also reads it back, "
+    "and only when it opens the comment body). "
     "`file`, `summary` and `reviewed_sha` are the finding's identity and "
     "provenance, copied verbatim, so nothing needs editing; put your "
     "reasoning in `--reason` (or a per-entry `rationale`), or set `outcome` "
     "to `ACCEPTED` if you uphold the finding. The command refuses to run "
-    "inside a headless dispatch worker — a settled finding is never re-raised, so the "
-    "pipeline must not be able to settle its own reviewer's findings. Post "
-    "`settle.md` as its own comment, unedited: the marker is read only when "
-    "it opens the comment body. This works only on GitHub-tracked tickets: a "
-    "marker posted on any other tracker is not read by the codex lane."
+    "inside a headless dispatch worker — a settled finding is never "
+    "re-raised, so the pipeline must not be able to settle its own "
+    "reviewer's findings."
 )
 
 # Hard caps on the settle section. A blocking pass with many MUST_FIX findings
@@ -160,8 +163,9 @@ _SETTLE_MAX_COMPACT_ROWS = 40
 _SETTLE_COMPACT_SUMMARY_MAX = 120
 _SETTLE_OVERFLOW_NOTE = (
     "Not enough room for the remaining findings' payloads. Settle any of "
-    "these with a hand-written `cw review settle` payload — the identity is "
-    "the file and the verbatim summary from its MUST_FIX line above:"
+    "these by writing a payload by hand and passing it to `cw review settle "
+    "<file> --reason '<why>' --ticket <ticket> -c <client>` — the identity "
+    "is the file and the verbatim summary from its MUST_FIX line above:"
 )
 
 # #2210 round 2: disposition records the reader refused to apply. A refusal's
@@ -177,8 +181,10 @@ _REFUSED_DISPOSITION_NOTE = (
     "block is unsupported — `cw review settle` "
     "is the only supported producer, because it is the only path that records "
     "provenance and refuses to run inside a dispatch worker. Re-settle each "
-    "finding below with it and post "
-    "the marker it renders as its own comment."
+    "finding below with `cw review settle <file> --reason '<why>' --ticket "
+    "<ticket> -c <client> --out settle.md`: that records the decision on the "
+    "cw dev-queue row, and `settle.md` is the marker to post as its own "
+    "comment."
 )
 # Bounded for the same reason the settle section is: the rest of the comment
 # needs the remaining budget, and GitHub caps a body at 65,536 characters. A
@@ -200,8 +206,9 @@ _STALE_DISPOSITION_NOTE = (
     "rather than silently suppressed against code nobody adjudicated. The "
     "ledger record has not been expired — it is still there, and still "
     "applies to any pass where that file has not moved. If the finding is "
-    "still settled against the current code, re-run `cw review settle` for "
-    "it with the new reviewed sha; if the change reintroduced the problem, "
+    "still settled against the current code, re-run `cw review settle <file> "
+    "--reason '<why>' --ticket <ticket> -c <client>` for it with the new "
+    "reviewed sha; if the change reintroduced the problem, "
     "fix it. Reviewing the diff between the two shas below is how you tell "
     "the two apart."
 )
