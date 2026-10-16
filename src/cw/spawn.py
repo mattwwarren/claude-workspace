@@ -19,6 +19,7 @@ from cw.config import (
     save_state,
     sessions_lock,
 )
+from cw.context_queue_metadata import build_queue_metadata
 from cw.events import record_event
 from cw.exceptions import (
     CwError,
@@ -34,10 +35,6 @@ from cw.models import (
     BASH_TOOL_NAME,
     HOOK_CONTEXT_RELATIVE_PATH,
     MONITOR_TOOL_NAME,
-    MUST_FIX_OVERRIDE_KEY,
-    PLAN_APPROVED_FINGERPRINT_KEY,
-    SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY,
-    SCOPE_DRIFT_APPROVED_HEAD_KEY,
     TERMINAL_SESSION_STATUSES,
     OrchestratorEventType,
     Session,
@@ -115,7 +112,12 @@ _log = logging.getLogger(__name__)
 #     `jq -r '.merge_gate_ignore_paths // [] | .[]'` and passed to
 #     check_merge_gate_overlap.py as repeated `--ignore-path` arguments — the
 #     fence has no other route to a ClientConfig field from inside agent bash.)
-CW_CONTEXT_SCHEMA_VERSION = 11
+# v12: added `queue_metadata.operator_resolutions` (dev-queue schema v46 —
+#     GitHub #2702 — the row's append-only `[{text, recorded_at, actor,
+#     round}]` list `cw dev-queue resolve` writes, [] when empty. Read by
+#     auto-dev-plan.md Step 1b as binding resolutions. The block is built by
+#     cw.context_queue_metadata.build_queue_metadata.)
+CW_CONTEXT_SCHEMA_VERSION = 12
 
 
 def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:
@@ -790,42 +792,7 @@ def _write_hook_context(
                     "model": "AutoDevResult",
                     "version": AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION,
                 },
-                "queue_metadata": {
-                    "scope_hint": task.scope_hint,
-                    "plan_source": task.plan_source,
-                    "headless_timeout_override": task.headless_timeout_override,
-                    # #1794: Stage is a StrEnum, so json.dumps renders this as
-                    # the plain stage value (or null) with no .value call.
-                    "regressed_into_stage": task.regressed_into_stage,
-                    # #1730: sibling per-arrival marker -- true means this
-                    # re-entry may carry an operator send-back the review stage
-                    # must treat as a binding adjudication input.
-                    "pending_operator_comment": task.pending_operator_comment,
-                    # v7: tracker-neutral plan-approval evidence for the
-                    # plan stage's Checkpoint 1 (Large-scope carve-out).
-                    "plan_approved_at": (
-                        task.plan_approved_at.isoformat()
-                        if task.plan_approved_at is not None
-                        else None
-                    ),
-                    # v8 (#2102): the draft the approval above was bound to.
-                    # Checkpoint 1 requires it to equal the resumed draft's own
-                    # fingerprint before the approval counts as evidence.
-                    PLAN_APPROVED_FINGERPRINT_KEY: task.plan_approved_fingerprint,
-                    # v9 (#2337): the operator's plan_scope_drift grant and the
-                    # branch head it is bound to, read by Step 2.5 gate 2.
-                    SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY: (
-                        task.scope_drift_approved_extra_files
-                    ),
-                    SCOPE_DRIFT_APPROVED_HEAD_KEY: task.scope_drift_approved_head,
-                    # v10 (#2205): the operator's MUST_FIX override, read by
-                    # FINALIZE's check_must_fix_override.py.
-                    MUST_FIX_OVERRIDE_KEY: (
-                        task.must_fix_override.model_dump(mode="json")
-                        if task.must_fix_override is not None
-                        else None
-                    ),
-                },
+                "queue_metadata": build_queue_metadata(task),
                 "world_state_snapshot": {
                     "origin_main_sha_at_spawn": origin_sha,
                     "origin_main_branch": default_branch,
