@@ -1000,16 +1000,17 @@ the finding. They can be combined.
 ### Settle a review finding for good (#1838)
 
 When a codex review round raises a finding you reject, and the *next* round
-re-derives the same finding and re-parks the ticket, post a
-`REVIEW-FINDING-DISPOSITIONS` marker comment on the ticket. It is read
-mechanically on every subsequent review pass — no LLM interprets it — and is
-persisted onto the queue row, so it survives regress, redispatch, and worktree
-teardown.
+re-derives the same finding and re-parks the ticket, run `cw review settle` for
+it. The decision is recorded on the ticket's cw dev-queue row, which every
+subsequent review pass reads first, on every tracker, mechanically (no LLM
+interprets it), so it survives regress, redispatch, and worktree teardown. On a
+GitHub-tracked ticket the marker it prints is also read back from the thread,
+so post it there too.
 
 **A prose adjudication comment does nothing on the codex lane.** There is no
 LLM on that path to correlate "these four are settled, don't reopen" to a
-specific finding — only a sentinel-bearing comment counts. Free-text ingestion
-is a deliberate non-goal here (follow-up F1).
+specific finding — only a recorded row or a sentinel-bearing comment counts.
+Free-text ingestion is a deliberate non-goal here (follow-up F1).
 
 **Hand-authoring the marker is unsupported (#2210).** `cw review settle` is
 the only supported producer, because it is the only path that records
@@ -1059,7 +1060,11 @@ editing:
 # (the command refuses only inside a dispatch worker; see below):
 uv run cw review settle settle.json \
   --reason "intentional tradeoff, see ADR-0012" \
-  --ticket "$TICKET" --out marker.md
+  --ticket "$TICKET" -c <CLIENT> --out marker.md
+# That recorded the settle on the ticket's dev-queue row. Verify it:
+uv run cw review dispositions "$TICKET" -c <CLIENT>
+# marker.md is the human-readable mirror: post it as its own comment
+# (GitHub shown; use your tracker's own tool elsewhere).
 gh issue comment "$TICKET" --repo "$REPO" --body-file marker.md
 ```
 
@@ -1082,7 +1087,7 @@ every session it spawns:
 Ahead of that cwd check, a `$TMPDIR` inside a headless worker's worktree
 refuses too: every cw executor points a worker's `TMPDIR` there, so a worker
 that changes directory is still recognized. A refusal exits non-zero and
-writes nothing — no marker, no `--out` file, no event. There is no bypass
+writes nothing — no row write, no marker, no `--out` file, no event. There is no bypass
 flag. A worker that has a payload hands it to the orchestrator, which runs
 the command.
 
@@ -1095,7 +1100,8 @@ already-decided work, or that does not reproduce against the code, with
 defect into the fix loop, and escalates to the human only a finding that raises a
 product question or would grow scope beyond the plan.
 
-**Post the marker as its own comment, unedited.** The reader recognises a
+**On a GitHub-tracked ticket, post the marker as its own comment, unedited.**
+The reader recognises a
 disposition record by *position* as well as shape: the block must open the
 comment body, directly under its `## Review Finding Dispositions` title, which
 is exactly what `--out` writes. A block pasted below a preamble, quoted in a
@@ -1105,6 +1111,8 @@ you will see the finding re-appear, with nothing in the refused-records section
 text from minting a suppression: marker syntax inside a finding's summary,
 file, evidence or contest claim is escaped on render (you will see it as
 `REVIEW-FINDING\-DISPOSITIONS`), and would not parse at that position anyway.
+On any other tracker the row is the record: post the marker with that
+tracker's own tool for human readers, knowing no review pass reads it.
 
 Every record it writes carries provenance: your resolved `gh` login, a UTC
 timestamp stamped by the command (`recorded_at` is **rejected** as a payload
@@ -1113,8 +1121,8 @@ sha. An entry with no resolvable sha is refused; pass `--reviewed-sha <sha>`
 for a hand-written payload. The command exits non-zero rather than recording an
 anonymous settle if `gh api user` cannot resolve your identity.
 
-Each settled finding emits one audit event, correlated to `--ticket` when you
-pass it: `review.finding_settled` for an `ACCEPTED`/`REJECTED` entry, or
+Each settled finding emits one audit event, correlated to `--ticket`
+(required): `review.finding_settled` for an `ACCEPTED`/`REJECTED` entry, or
 `review.finding_disposition_reverted` for a `REVERSED` one (#2232) — the type
 carries the semantic, so `cw event tail --type
 review.finding_disposition_reverted --json` answers "what have I withdrawn"
@@ -1123,12 +1131,35 @@ payload entries with the same file and byte-identical summary are one entry
 and one event. `-` reads the
 payload from stdin.
 
-**The events are recorded before the marker is written.** If any of them
-cannot be recorded, the settle is refused outright — no marker on stdout, no
-`--out` file, non-zero exit, and a message naming the finding and the failure.
-An audit record with no effect is noise; a durable suppression with no audit
-record is invisible, so the ordering favours the first. Re-run the same
+**The events are recorded first, then the row, then the marker.** If any event
+cannot be recorded, the settle is refused outright — no row write, no marker on
+stdout, no `--out` file, non-zero exit, and a message naming the finding and the
+failure. An audit record with no effect is noise; a durable suppression with no
+audit record is invisible, so the ordering favours the first. Re-run the same
 payload once the event store is healthy.
+
+When the row itself cannot be recorded, the outcome depends on the client's
+tracker (`tracking.primary.system` in its `.claude/project-config.yaml`):
+
+- **No dev-queue row for the ticket.** GitHub-tracked client: exit 0, the
+  events are recorded, a stderr WARNING says the row was NOT recorded, and the
+  marker prints; `cw review dispositions` shows nothing until a review pass
+  reads the posted marker. Any other tracker, or an unresolvable one: exit 1
+  and nothing is recorded (no event, no marker, no `--out`); enqueue the ticket
+  and re-run.
+- **The row write fails** (bounded-lock timeout, `OSError`, a row that vanished
+  since the pre-flight). GitHub-tracked client: exit 0, events recorded, the
+  same WARNING, marker printed. Any other tracker, or an unresolvable one: exit
+  1; the events are recorded, but no marker and no `--out` are written; re-run
+  once the cause is fixed.
+- **It lands on a terminal row.** It records, on every tracker, with the stderr
+  note below.
+
+A settle recorded on a TERMINAL row is lost if the ticket is re-enqueued
+(`cw dev-queue add` creates a new row and nothing is carried forward). Settle
+prints a note when it lands on one; re-run it on the new row. `cw doctor` says
+the same thing for a client whose tracker is not GitHub: settles are recorded
+in the cw store.
 
 The rendered marker looks like this. Every field below is required for the
 record to be *applied* — a block missing any of them parses but is refused:
@@ -1156,7 +1187,8 @@ REVIEW-FINDING-DISPOSITIONS -->
 **The settle section is capped.** A pass with many MUST_FIX findings prints at
 most 10 payloads (and at most 12,000 characters of them); the rest are listed
 compactly under the payloads, by file and trimmed summary. Write a payload for
-one of those by hand and run `cw review settle` on it — the identity is its
+one of those by hand and pass it to
+`cw review settle <file> --reason '<why>' --ticket <ticket> -c <client>` — the identity is its
 file and the verbatim summary from its MUST_FIX line in the same comment. A
 hand-written *payload* is fine; a hand-written *marker* is not, because only
 the command records the provenance the reader requires. A payload block is
@@ -1183,10 +1215,10 @@ can copy out of the section is complete.
   field of it.
 - `outcome` is `REJECTED` or `ACCEPTED`. Only `REJECTED` suppresses the
   finding; `ACCEPTED` is recorded and shown to the reviewer but changes no gate.
-- The marker is **additive** across comments: the reader unions every marker on
-  the thread. Post only what you are settling now.
+- On GitHub the reader unions every marker on the thread, and the row merge is
+  additive too. Post only what you are settling now.
 - Changed your mind? Re-run `cw review settle` for the same finding with
-  `"outcome": "ACCEPTED"` and post the new marker — its `recorded_at` is later,
+  `"outcome": "ACCEPTED"` (and, on GitHub, post the new marker) — its `recorded_at` is later,
   and newest wins per key. Removing the marker does **not** un-settle anything;
   the ledger is forward-only by design. There is no per-record rollback command
   yet (tracked as a follow-up); the provenance fields exist so one can target
@@ -1207,10 +1239,13 @@ Distinct from `cw review check-voided`'s `VOIDED-REVIEW-FINDINGS` record
 as soon as the cited evidence changes. Use this one when you want the decision
 to *stick*.
 
-**Linear-tracked tickets cannot feed this ledger yet.** The codex path's
-comment fetch is GitHub-only (`linear` reads go through MCP tools only a Claude
-session holds), so a marker posted on a Linear ticket is never read. The
-`### Settle a finding` section still renders and says so. Follow-up F5.
+**Linear and other non-GitHub tickets feed this ledger through the row
+(#2701).** The codex path's comment fetch is still GitHub-only, so a marker
+posted on a Linear ticket is never read. `cw review settle --ticket <id> -c
+<client>` writes the ledger onto the dev-queue row directly, and the review pass
+reads the row first on every tracker. Post the marker with the tracker's own
+tool for human readers only. Follow-up F5 (reading markers off Linear) is no
+longer needed for settles.
 
 #### The reworded re-raise, and the claim tier (#2210)
 
@@ -1309,10 +1344,11 @@ carrying no reviewed sha to compare against; `?` is never "not stale". AGE is
 rendered `?` the same way for a record whose `recorded_at` is missing or
 unparseable.
 
-This reads the **dev-queue row's** last-synced copy of the ledger, refreshed
-after each review pass — not a live fetch of the ticket thread. A settle you
-posted since the last pass will not show up until the next one runs. Same
-snapshot convention as `cw dev-queue tasks`.
+This reads the **dev-queue row's** ledger: `cw review settle` writes it
+directly (#2701), so a settle recorded through the CLI shows up immediately,
+and a marker posted on a GitHub ticket appears once a review pass has read it.
+It is not a live fetch of the ticket thread. Same snapshot convention as
+`cw dev-queue tasks`.
 
 **Undo one.** Rollback is `cw review settle` with a third outcome, not a new
 command. Paste the SAME `file` and `summary` the original settle used (read
@@ -1321,9 +1357,10 @@ them off `cw review dispositions`, or the original marker) with `"outcome":
 
 ```bash
 cw review settle --reason "the tradeoff no longer holds: X changed" \
-  --ticket GEN-123 --reviewed-sha "$(git rev-parse HEAD)" --out /tmp/reverse.md -
+  --ticket GEN-123 -c <CLIENT> --reviewed-sha "$(git rev-parse HEAD)" --out /tmp/reverse.md -
 # {"entries": [{"file": "src/cw/foo.py", "summary": "<verbatim>",
 #               "outcome": "REVERSED", "reviewed_sha": "<sha>"}]}
+# GitHub mirror only; the row already holds the withdrawal
 gh issue comment 123 --body-file /tmp/reverse.md
 ```
 

@@ -30,6 +30,7 @@ import yaml
 # tests/test_conftest.py::TestHomeRedirectByConstruction pins the ordering.
 import tests._session_home
 from cw import _lock_hold as lock_hold_module
+from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
 from cw._lock_hold import LockHoldRecord
 from cw._lock_hold import day_path as lock_hold_day_path
 from cw.config import load_state, save_state, sessions_lock_file, state_dir
@@ -1466,6 +1467,20 @@ class _FakeClock:
         self.now += seconds
         if self._on_sleep is not None:
             self._on_sleep(len(self.sleeps))
+
+
+@pytest.fixture
+def fake_lock_clock(monkeypatch: pytest.MonkeyPatch) -> _FakeClock:
+    """Bound every ``cw._flock`` acquisition at 0.5s on a fake clock.
+
+    No wall-clock waiting. Returns the clock so a caller may inspect
+    ``clock.sleeps``. A module-local fixture of the same name still shadows
+    this one (``tests/test_dev_queue_lock.py``, ``tests/test_cli_config_cmds.py``).
+    """
+    monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.5")
+    clock = _FakeClock()
+    monkeypatch.setattr("cw._flock.time", clock)
+    return clock
 
 
 def _fake_fcntl(flock_fn: Callable[..., object]) -> SimpleNamespace:

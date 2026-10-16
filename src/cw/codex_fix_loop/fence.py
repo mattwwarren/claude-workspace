@@ -62,6 +62,13 @@ LEFT_STAGED_HINT = (
     "work and `git reset --hard HEAD` discards only that; run it before "
     "requeueing."
 )
+# The runnable settle command every guard park's hint names (#2701 R8): the
+# settle is recorded on the ticket's dev-queue row, so `--ticket` is required
+# and `-c` names the row's client. One spelling, imported by the sibling
+# guards beside LEFT_STAGED_HINT.
+SETTLE_FINDING_HINT = (
+    "`cw review settle <payload> --reason '<why>' --ticket <ID> -c <CLIENT>`"
+)
 # Listing cap for the dirty-start and staged-set park details.
 _MAX_LISTED = 20
 _PORCELAIN_PATH_OFFSET = 3
@@ -162,7 +169,7 @@ def _revert_breach(
     hint = (
         "Compare the branch HEAD (the last good commit before this fix cycle) "
         "with the staged changes to see what the fix tried to undo, then "
-        "requeue REVIEW, or settle the finding (`cw review settle`) if it "
+        f"requeue REVIEW, or settle the finding ({SETTLE_FINDING_HINT}) if it "
         f"cannot be fixed without reverting the feature. {LEFT_STAGED_HINT}"
     )
     return FenceBreach(CODEX_FIX_REVERTED_BRANCH, paths, details, hint)
@@ -190,7 +197,7 @@ def _scope_breach(
     hint = (
         "If the out-of-scope change is wanted, add the path(s) to the plan's "
         "Files Modified section and requeue REVIEW; otherwise settle the "
-        "finding that asked for it (`cw review settle`) or file it as a "
+        f"finding that asked for it ({SETTLE_FINDING_HINT}) or file it as a "
         f"follow-up ticket. {LEFT_STAGED_HINT}"
     )
     return FenceBreach(CODEX_FIX_SCOPE_DRIFT, drifted, details, hint)
@@ -361,7 +368,7 @@ def scope_violation_breach(violations: list[_SensitiveHit], cycle: int) -> Fence
     hint = (
         "If the sensitive change is wanted, add the path(s) to the plan and get "
         "it reviewed, then requeue REVIEW; otherwise settle the finding that "
-        f"asked for it (`cw review settle`). {LEFT_STAGED_HINT}"
+        f"asked for it ({SETTLE_FINDING_HINT}). {LEFT_STAGED_HINT}"
     )
     return FenceBreach(
         CODEX_FIX_SCOPE_VIOLATION,

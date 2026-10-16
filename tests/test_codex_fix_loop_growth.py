@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.codex_fix_loop.baseline import cycle_touched_paths
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT
+from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, SETTLE_FINDING_HINT
 from cw.codex_fix_loop.growth import (
     DEFAULT_GROWTH_BUDGET_LINES,
     AdditionKind,
@@ -237,6 +237,7 @@ class TestCheckGrowthBudget:
             breach.details
         )
         assert LEFT_STAGED_HINT in breach.recovery_hint
+        assert SETTLE_FINDING_HINT in breach.recovery_hint
         assert "codex_fix_loop_growth_budget_lines" in breach.recovery_hint
         assert "codex_fix_loop_growth_guard_enabled" in breach.recovery_hint
 

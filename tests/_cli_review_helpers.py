@@ -18,6 +18,12 @@ As of #2319 it also hosts the raw ``ReviewVerdict`` / ``AcceptedFinding``
 payload builders (:func:`_verdict_payload`, :func:`_accepted_payload`) and the
 :data:`_TICKET` id, shared by ``test_cli_review_commands.py`` and the
 ``check-voided`` tests in ``test_cli_review_voided.py``.
+
+As of #2701 it also hosts the ``cw review settle`` operator-machine setup
+(:data:`_OPERATOR`, :data:`_SETTLE_REASON`, :func:`_write_session_context`,
+:func:`_enter_operator_machine`) and :func:`_seed_review_row`, moved out of
+``test_cli_review_commands.py`` so ``test_cli_review_settle_store.py`` shares
+them rather than copying them.
 """
 
 from __future__ import annotations
@@ -27,6 +33,8 @@ import re
 import subprocess
 from typing import TYPE_CHECKING, Any
 
+from cw.dev_queue import add_ticket
+from cw.models import HOOK_CONTEXT_RELATIVE_PATH, QueueItemStatus, Stage, TicketTask
 from tests.conftest import (
     _clean_git_env,
     _finding_kwargs,
@@ -37,6 +45,77 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    import pytest
+
+    from cw.review_finding_dispositions import FindingDisposition
+
+
+#: The gh login every settle test resolves as the settling operator.
+_OPERATOR = "mattwwarren"
+#: The ``--reason`` every settle test passes unless it is testing the reason.
+_SETTLE_REASON = "operator rejected: intentional tradeoff, see ADR-0012"
+
+
+def _write_session_context(root: Path, *, headless: bool) -> None:
+    """Stamp *root* with the ``.claude/cw-context.json`` ``cw`` would write.
+
+    Shared by every settle case: "operator's machine" is expressed as a
+    context reporting ``headless: false`` rather than as the absence of one,
+    because the suite itself may run inside a headless worker whose context
+    the upward search would otherwise find. Joins
+    :data:`~cw.models.HOOK_CONTEXT_RELATIVE_PATH`, the same constant the
+    writer and the guard use, so this fixture cannot drift onto another path.
+    """
+    path = root / HOOK_CONTEXT_RELATIVE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"schema_version": 8, "session_id": "abc", "headless": headless}),
+        encoding="utf-8",
+    )
+
+
+def _enter_operator_machine(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, login: str = _OPERATOR
+) -> None:
+    """Run a settle test from a non-worker cw session worktree (#2701).
+
+    A plain function rather than a fixture: a fixture imported from a
+    non-conftest module trips F401/F811, so each consumer keeps a three-line
+    autouse fixture that calls this. The repo checkout the suite runs in may
+    carry a real ``headless: true`` context (under dispatch), so a nearer
+    ``headless: false`` one is written into *tmp_path*; ``TMPDIR`` is cleared
+    for the same reason, because a dispatch worker points it into its own
+    headless worktree, which the guard reads as a worker.
+    """
+    _write_session_context(tmp_path, headless=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TMPDIR", raising=False)
+    monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: login)
+
+
+def _seed_review_row(
+    ticket_id: str,
+    client: str = "acme",
+    *,
+    ledger: dict[str, FindingDisposition] | None = None,
+    status: QueueItemStatus = QueueItemStatus.PENDING,
+) -> TicketTask:
+    """Enqueue a REVIEW-stage row for *ticket_id* carrying *ledger* (#2701).
+
+    Idempotent: ``add_ticket`` declines a second live row for the same
+    ``(client, ticket_id)``, so a test may seed before every invoke. Returns
+    the task it asked to enqueue.
+    """
+    task = TicketTask(
+        ticket_id=ticket_id,
+        client=client,
+        stage=Stage.REVIEW,
+        status=status,
+        finding_dispositions=ledger or {},
+    )
+    add_ticket(task)
+    return task
 
 
 # A single-file unified diff: hunk starts at new line 1, one context line

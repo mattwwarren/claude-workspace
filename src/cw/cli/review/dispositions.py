@@ -195,20 +195,24 @@ def review_dispositions(
     each record was settled against and that worktree's HEAD — the same check
     the review pass itself now runs (#2232). A stale record is NOT expired:
     it still applies on any pass where its file has not moved. Re-settle it
-    against the current code with `cw review settle`, or withdraw it with
-    `outcome: REVERSED`. STALE reads '?' whenever the question cannot be
-    answered — no --worktree, an unreadable one, or a record carrying no
-    reviewed sha to compare against.
+    against the current code with `cw review settle <payload> --reason
+    '<why>' --ticket <ID> -c <CLIENT>`, or withdraw it with `outcome:
+    REVERSED`. STALE reads '?' whenever the question cannot be answered — no
+    --worktree, an unreadable one, or a record carrying no reviewed sha to
+    compare against.
 
     REASON is the settling operator's own words and AGE is how long ago the
     record was stamped; both answer "is this suppression still the decision
     someone meant to make". A record whose `recorded_at` is blank or
     unparseable renders AGE as '?' rather than failing the listing.
 
-    This reads the dev-queue row's last-synced copy of the ledger, which is
-    updated after each review pass — NOT a live fetch of the ticket thread. A
-    settle posted since the last pass will not appear here until the next one
-    runs. Same snapshot-of-the-row convention as `cw dev-queue tasks`.
+    This reads the dev-queue row's ledger: `cw review settle` writes it
+    directly (#2701), and each review pass also folds in any marker comment it
+    could read from a GitHub ticket thread. It is NOT a live fetch of the
+    ticket thread, so a marker posted on a GitHub ticket that no review pass
+    has read yet will not appear here; a settle recorded through the CLI
+    appears immediately. Same snapshot-of-the-row convention as `cw dev-queue
+    tasks`.
     """
     config = load_effective_config()
     resolved_client = resolve_client(ticket_id, config, client)
