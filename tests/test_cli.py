@@ -13019,12 +13019,12 @@ class TestDevQueueApproveCli:
             )
         )
         monkeypatch.setattr(
-            "cw.dev_queue.approval.branch_head_sha_on_origin",
+            "cw.dev_queue.scope_drift.branch_head_sha_on_origin",
             lambda *_a, **_kw: (self._SCOPE_DRIFT_HEAD, True),
         )
         events: list[tuple[object, dict[str, object]]] = []
         monkeypatch.setattr(
-            "cw.dev_queue.approval.record_event",
+            "cw.dev_queue.scope_drift.record_event",
             lambda event_type, payload, **_kw: events.append((event_type, payload)),
         )
         return events

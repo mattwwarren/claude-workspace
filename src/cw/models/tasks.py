@@ -618,7 +618,7 @@ class TicketTask(BaseModel):
     plan_approved_fingerprint: str | None = None
     # The operator's plan_scope_drift grant (v40, #2337): the sorted, deduped
     # repo-relative paths `cw dev-queue approve --scope-drift` allowed beyond
-    # the plan's Files Modified. Stamped by dev_queue/approval.py's
+    # the plan's Files Modified. Stamped by dev_queue/scope_drift.py's
     # _approve_scope_drift_locked, only on a row parked at IMPL with
     # blocked_reason plan_scope_drift; threaded into the worker's
     # cw-context.json queue_metadata at spawn (spawn.py), where Step 2.5 gate 2

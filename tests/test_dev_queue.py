@@ -7824,7 +7824,7 @@ class TestApproveScopeDrift:
             return head
 
         monkeypatch.setattr(
-            "cw.dev_queue.approval.branch_head_sha_on_origin", _fake_head
+            "cw.dev_queue.scope_drift.branch_head_sha_on_origin", _fake_head
         )
         monkeypatch.setattr(
             "cw.operator_identity.cached_gh_login", lambda: "test-operator"
@@ -7981,7 +7981,7 @@ class TestApproveScopeDrift:
             msg = "event inbox unavailable"
             raise OSError(msg)
 
-        monkeypatch.setattr("cw.dev_queue.approval.record_event", _raise_event)
+        monkeypatch.setattr("cw.dev_queue.scope_drift.record_event", _raise_event)
 
         with pytest.raises(OSError, match="event inbox unavailable"):
             approve_scope_drift_ticket("GEN-500", "genhealth", ["a.py"])
@@ -8012,7 +8012,7 @@ class TestApproveScopeDrift:
                 error = "simulated post-write failure"
                 raise OSError(error)
 
-        monkeypatch.setattr("cw.dev_queue.approval.record_event", _event_then_fail)
+        monkeypatch.setattr("cw.dev_queue.scope_drift.record_event", _event_then_fail)
 
         with pytest.raises(OSError, match="simulated post-write failure"):
             approve_scope_drift_ticket("GEN-500", "genhealth", ["a.py"])
@@ -8048,7 +8048,7 @@ class TestApproveScopeDrift:
             real_save_dev_queue(store)
 
         monkeypatch.setattr(
-            "cw.dev_queue.approval.save_dev_queue", _save_with_failed_rollback
+            "cw.dev_queue.scope_drift.save_dev_queue", _save_with_failed_rollback
         )
 
         def _event_then_fail(
@@ -8060,7 +8060,7 @@ class TestApproveScopeDrift:
                 error = "event unavailable"
                 raise OSError(error)
 
-        monkeypatch.setattr("cw.dev_queue.approval.record_event", _event_then_fail)
+        monkeypatch.setattr("cw.dev_queue.scope_drift.record_event", _event_then_fail)
 
         with (
             caplog.at_level("CRITICAL"),
@@ -8072,6 +8072,91 @@ class TestApproveScopeDrift:
         assert marker.exists()
         assert '"recovery_required": true' in marker.read_text()
         assert any("rollback failed" in record.message for record in caplog.records)
+
+    def test_compensation_failure_writes_marker_and_alerts_operator(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A failed compensating event leaves a marker; the rollback still holds."""
+        from cw.config import dev_queue_file
+        from cw.dev_queue import approve_scope_drift_ticket
+        from cw.models import OrchestratorEventType
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        before = load_dev_queue().model_dump()
+        events: list[OrchestratorEventType] = []
+
+        def _every_event_fails(
+            event_type: OrchestratorEventType,
+            _payload: dict[str, object],
+            **_kwargs: object,
+        ) -> None:
+            events.append(event_type)
+            error = f"event unavailable: {event_type.value}"
+            raise OSError(error)
+
+        monkeypatch.setattr("cw.dev_queue.scope_drift.record_event", _every_event_fails)
+
+        with (
+            caplog.at_level("CRITICAL"),
+            pytest.raises(OSError, match=r"^event unavailable: ticket\.approved$"),
+        ):
+            approve_scope_drift_ticket("GEN-500", "genhealth", ["a.py"])
+
+        assert events == [
+            OrchestratorEventType.TICKET_APPROVED,
+            OrchestratorEventType.TICKET_APPROVAL_FAILED,
+        ]
+        marker = dev_queue_file().with_name("scope-drift-approval-recovery.jsonl")
+        assert marker.exists()
+        marker_text = marker.read_text()
+        assert '"rolled_back": true' in marker_text
+        assert '"recovery_required": false' in marker_text
+        assert any(
+            "audit compensation failed" in record.message for record in caplog.records
+        )
+        assert load_dev_queue().model_dump() == before
+
+    def test_unwritable_recovery_marker_alerts_without_masking_error(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A marker-write failure is logged, never raised over the event error."""
+        from cw.config import dev_queue_file
+        from cw.dev_queue import approve_scope_drift_ticket
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+
+        def _every_event_fails(*_args: object, **_kwargs: object) -> None:
+            error = "event unavailable"
+            raise OSError(error)
+
+        def _marker_write_fails(_path: Path, _text: str) -> None:
+            error = "marker disk full"
+            raise OSError(error)
+
+        monkeypatch.setattr("cw.dev_queue.scope_drift.record_event", _every_event_fails)
+        monkeypatch.setattr(
+            "cw.dev_queue.scope_drift.atomic_write_text", _marker_write_fails
+        )
+
+        with (
+            caplog.at_level("CRITICAL"),
+            pytest.raises(OSError, match=r"^event unavailable$"),
+        ):
+            approve_scope_drift_ticket("GEN-500", "genhealth", ["a.py"])
+
+        marker = dev_queue_file().with_name("scope-drift-approval-recovery.jsonl")
+        assert not marker.exists()
+        assert any(
+            "could not be persisted" in record.message for record in caplog.records
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -13685,7 +13770,7 @@ class TestCLIApproveRoutedOrphan:
             return head
 
         monkeypatch.setattr(
-            "cw.dev_queue.approval.branch_head_sha_on_origin", _fake_head
+            "cw.dev_queue.scope_drift.branch_head_sha_on_origin", _fake_head
         )
         monkeypatch.setattr(
             "cw.operator_identity.cached_gh_login", lambda: "test-operator"
@@ -17017,7 +17102,7 @@ class TestScopeDriftRefusalsNameNextCommand:
         from cw.exceptions import ApproveGateError
 
         monkeypatch.setattr(
-            "cw.dev_queue.approval.branch_head_sha_on_origin",
+            "cw.dev_queue.scope_drift.branch_head_sha_on_origin",
             lambda *_a, **_kw: (None, False),
         )
         seed_queue([make_blocked(stage=Stage.IMPL, blocked_reason="plan_scope_drift")])

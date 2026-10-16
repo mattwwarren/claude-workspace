@@ -14,6 +14,8 @@ module is now a package of focused submodules:
 * ``crud`` — operator-facing queue mutations (add/remove/cancel/move/clear/
   prune) and the ticket-resolution helpers (resolve/list/find).
 * ``approval`` — the plan/review approval + operator-signoff-clearing gates.
+* ``scope_drift`` — the operator's grant of a ``plan_scope_drift`` park
+  (``approve_scope_drift_ticket``), split out of ``approval`` (#2719).
 * ``must_fix_override`` — the operator's override of a codex MUST_FIX park.
 * ``operator_resolutions`` — the operator's answers to a plan park, recorded
   on the row by ``cw dev-queue resolve`` (#2702).
@@ -44,7 +46,6 @@ from __future__ import annotations
 from cw.dev_queue.approval import (
     BODY_DRIFT_WARNING_KEY,
     _approve_ticket_locked,
-    approve_scope_drift_ticket,
     approve_ticket,
     revoke_plan_approval,
 )
@@ -130,6 +131,7 @@ from cw.dev_queue.review_records import (
     find_ticket_row,
     record_finding_dispositions,
 )
+from cw.dev_queue.scope_drift import approve_scope_drift_ticket
 from cw.dev_queue.storage import (
     _lock,
     dev_queue_lock,

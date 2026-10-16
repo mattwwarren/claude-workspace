@@ -2182,7 +2182,7 @@ _BOUNDED_FORWARDERS_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/dev_queue/crud.py", "prune_tickets"): 1,
     ("cw/dev_queue/approval.py", "approve_ticket"): 1,
     ("cw/dev_queue/approval.py", "revoke_plan_approval"): 1,
-    ("cw/dev_queue/approval.py", "approve_scope_drift_ticket"): 1,
+    ("cw/dev_queue/scope_drift.py", "approve_scope_drift_ticket"): 1,
     ("cw/dev_queue/must_fix_override.py", "approve_must_fix_override_ticket"): 1,
     ("cw/dev_queue/operator_resolutions.py", "record_operator_resolution"): 1,
     ("cw/dev_queue/requeue.py", "requeue_ticket"): 1,
