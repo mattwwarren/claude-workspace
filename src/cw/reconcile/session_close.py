@@ -307,23 +307,44 @@ def _parse_entry(raw: str) -> QueuedClose:
 
 
 def _read_entry(path: Path) -> QueuedClose | None:
-    """Parse *path*; a corrupt entry can never apply, so it is removed."""
+    """Parse *path*, or ``None``; never raises, so one entry cannot abort a pass.
+
+    A corrupt entry (malformed, truncated, not UTF-8) can never apply, so it is
+    removed. An entry that cannot be read at all (``OSError``, e.g. a
+    permission error) may still be valid, so it is skipped and kept.
+    """
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    try:
-        return _parse_entry(raw)
-    except (ValueError, TypeError) as exc:
+    except OSError as exc:
         _log.warning(
-            "queued_close_corrupt: path=%s error=%s: %s action=entry_removed",
+            "queued_close_unreadable: path=%s error=%s: %s action=entry_kept",
             path,
             type(exc).__name__,
             exc,
         )
-        with contextlib.suppress(OSError):
-            path.unlink()
         return None
+    except UnicodeDecodeError as exc:
+        _discard_corrupt(path, exc)
+        return None
+    try:
+        return _parse_entry(raw)
+    except (ValueError, TypeError) as exc:
+        _discard_corrupt(path, exc)
+        return None
+
+
+def _discard_corrupt(path: Path, exc: Exception) -> None:
+    """Remove the corrupt entry at *path*, logging why (best effort)."""
+    _log.warning(
+        "queued_close_corrupt: path=%s error=%s: %s action=entry_removed",
+        path,
+        type(exc).__name__,
+        exc,
+    )
+    with contextlib.suppress(OSError):
+        path.unlink()
 
 
 def pending_queued_closes() -> list[QueuedClose]:
@@ -340,6 +361,24 @@ def clear_queued_close(session_id: str) -> None:
     """Remove *session_id*'s entry; a missing entry is a no-op."""
     with contextlib.suppress(FileNotFoundError):
         _entry_path(session_id).unlink()
+
+
+def _clear_settled(session_ids: Iterable[str]) -> None:
+    """Remove each settled entry; a failed removal is logged, never raised.
+
+    The entry is then kept, and the next pass finds its session already
+    closed (or voided), so re-applying it changes nothing.
+    """
+    for session_id in session_ids:
+        try:
+            clear_queued_close(session_id)
+        except OSError as exc:
+            _log.warning(
+                "queued_close_clear_failed: session=%s error=%s: %s action=entry_kept",
+                session_id,
+                type(exc).__name__,
+                exc,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -455,8 +494,7 @@ def apply_queued_closes(state: CwState, *, deferred: DeferredReconcileJobs) -> i
             )
     if applied:
         save_state(state)
-    for session_id in settled:
-        clear_queued_close(session_id)
+    _clear_settled(settled)
     return applied
 
 
@@ -516,8 +554,7 @@ def close_sessions_for_cancel(
     if entries and not skip_lock:
         with contextlib.suppress(SessionsLockTimeoutError):
             mutate_state(_flip, bounded=True, timeout_s=timeout_s)
-    for session_id in settled - unrecorded:
-        clear_queued_close(session_id)
+    _clear_settled(settled - unrecorded)
     return CancelCloseOutcome(
         surfaces_to_stop=surfaces,
         pending_ids=tuple(

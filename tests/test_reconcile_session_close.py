@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
@@ -54,9 +54,6 @@ from cw.reconcile.session_close import (
 )
 from tests.conftest import _FakeClock, _make_daemon_session, _make_ticket_task
 from tests.test_result import _valid_payload
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 _LOGGER = "cw.reconcile.session_close"
 _CLIENT = "test-client"
@@ -318,6 +315,63 @@ class TestStore:
         assert f"path={corrupt}" in message
         assert "error=" in message
         assert "action=entry_removed" in message
+
+    @pytest.mark.parametrize(
+        "raw",
+        [b'{"session_id": "sess-9", "queued_at": "2026-10-', b"\xff\xfe\x00{\x9c}"],
+        ids=["truncated", "non-utf8"],
+    )
+    def test_truncated_and_non_utf8_entries_never_abort_the_pass(
+        self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture, raw: bytes
+    ) -> None:
+        sess = _session()
+        _seed(sess)
+        queue_close(sess, origin="spawn_close", now=_NOW)
+        corrupt = queued_closes_dir() / "sess-9.json"
+        corrupt.write_bytes(raw)
+        caplog.set_level(logging.WARNING, logger=_LOGGER)
+
+        assert _apply() == 1
+
+        assert _stored("sess-1").status == SessionStatus.COMPLETED
+        assert not corrupt.exists()
+        (record,) = _messages(caplog, "queued_close_corrupt")
+        assert f"path={corrupt}" in record.getMessage()
+        assert "action=entry_removed" in record.getMessage()
+
+    def test_an_unreadable_entry_is_skipped_kept_and_the_pass_continues(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        sess = _session()
+        _seed(sess)
+        queue_close(sess, origin="spawn_close", now=_NOW)
+        queue_close(_session("sess-9"), origin="cancel", now=_NOW)
+        unreadable = _entry_path("sess-9")
+        real_read_text = Path.read_text
+
+        def _read_text(
+            self: Path, encoding: str | None = None, errors: str | None = None
+        ) -> str:
+            if self == unreadable:
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_read_text(self, encoding=encoding, errors=errors)
+
+        monkeypatch.setattr(Path, "read_text", _read_text)
+        caplog.set_level(logging.WARNING, logger=_LOGGER)
+
+        assert _apply() == 1
+
+        assert _stored("sess-1").status == SessionStatus.COMPLETED
+        assert unreadable.exists()
+        (record,) = _messages(caplog, "queued_close_unreadable")
+        assert record.levelno == logging.WARNING
+        assert record.getMessage() == (
+            f"queued_close_unreadable: path={unreadable} error=PermissionError:"
+            f" [Errno 13] Permission denied: '{unreadable}' action=entry_kept"
+        )
 
     def test_pending_lists_oldest_first(self, tmp_config_dir: Path) -> None:
         queue_close(_session("b-newer"), origin="cancel", now=_NOW)
@@ -740,6 +794,36 @@ class TestApplyQueuedCloses:
             f" queued_at={(_NOW - timedelta(minutes=1)).isoformat()}"
             " action=entry_kept"
         )
+
+    def test_a_failed_clear_is_logged_and_never_aborts_the_pass(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        sess = _session()
+        _seed(sess)
+        queue_close(sess, origin="spawn_close", now=_NOW)
+        stuck = _entry_path("sess-1")
+        real_unlink = Path.unlink
+
+        def _unlink(self: Path, *, missing_ok: bool = False) -> None:
+            if self == stuck:
+                raise PermissionError(13, "Permission denied", str(self))
+            real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", _unlink)
+        caplog.set_level(logging.WARNING, logger=_LOGGER)
+
+        assert _apply() == 1
+
+        assert _stored("sess-1").status == SessionStatus.COMPLETED
+        assert stuck.exists()
+        (record,) = _messages(caplog, "queued_close_clear_failed")
+        assert record.getMessage().startswith(
+            "queued_close_clear_failed: session=sess-1 error=PermissionError:"
+        )
+        assert record.getMessage().endswith("action=entry_kept")
 
     def test_emits_no_orchestrator_event(self, tmp_config_dir: Path) -> None:
         sess = _session()

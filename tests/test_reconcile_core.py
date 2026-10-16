@@ -3841,6 +3841,26 @@ class TestReconcileAppliesQueuedCloses:
         assert daemon.probes == [("free", {_QC_SID: SessionStatus.COMPLETED})]
         assert pending_queued_closes() == []
 
+    def test_a_non_utf8_entry_never_aborts_the_pass(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.reconcile.session_close import (
+            pending_queued_closes,
+            queue_close,
+            queued_closes_dir,
+        )
+
+        _install_probe_daemon(monkeypatch)
+        sess = _seed_queued_close_session(QueueItemStatus.CANCELLED)
+        queue_close(sess, origin="cancel", now=_QC_NOW)
+        (queued_closes_dir() / "zz-corrupt.json").write_bytes(b"\xff\xfe\x00{")
+
+        reconcile()
+
+        assert load_state().sessions[0].status is SessionStatus.COMPLETED
+        assert pending_queued_closes() == []
+        assert not (queued_closes_dir() / "zz-corrupt.json").exists()
+
     def test_applied_before_the_sweeps_read_the_queue(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
