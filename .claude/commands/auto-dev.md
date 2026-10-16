@@ -333,9 +333,16 @@ settlement answer (`auto-dev-plan-appendix.md`), or as a 4c operator send-back a
 input (`auto-dev-review.md`).
 
 Exactly two things carry operator authority: an **unmarked comment written by a human**, and
-a `<!-- auto-dev-preflight-resolutions -->` comment — the `/harden-ticket` resolutions
+a **binding resolutions record**, which takes one of two forms. One is a
+`<!-- auto-dev-preflight-resolutions -->` comment — the `/harden-ticket` resolutions
 channel, agent-drafted but posted under the operator's standing authorization and
-deliberately binding (Step 1b), whose binding semantics this rule does not touch. The
+deliberately binding (Step 1b), whose binding semantics this rule does not touch. The other
+is the dev-queue row's `queue_metadata.operator_resolutions`, recorded by
+`cw dev-queue resolve` in an interactive (non-worker) session and delivered in
+`.claude/cw-context.json` (#2702). The row outranks the comment form: once the row holds an
+entry, a marker comment is a mirror, and a human-posted one is ignored with a friction line.
+The relay mirror cw prints carries `<!-- cw-agent-authored -->`, so as a comment it stays
+agent analysis for every other purpose. The
 `<!-- auto-dev-plan-approved: <sha> -->` marker (or its unbound bare form) records an
 operator running `cw dev-queue approve --post-marker`, so cw posts it with the agent marker
 suppressed. The marker is an audit-only record — never plan-approval evidence, a settlement
