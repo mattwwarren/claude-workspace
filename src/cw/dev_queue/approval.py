@@ -40,7 +40,14 @@ from cw.dev_queue.lifecycle import (
     _reset_for_same_stage_requeue,
     _tracker_allows_github_fetch,
 )
+from cw.dev_queue.next_commands import (
+    SCOPE_DRIFT_PATHS_PLACEHOLDER,
+    dev_queue_command,
+    is_human_kept_gate,
+    refusal_suffix,
+)
 from cw.dev_queue.plan_promotion import DEV_QUEUE_APPROVE_ACTOR, promote_plan_draft
+from cw.dev_queue.refusal import refusal_hint
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
@@ -536,6 +543,9 @@ def _raise_stage_not_in_pipeline(
         f"Cannot approve ticket '{ticket_id}':"
         f" stage {task.stage!r} not in pipeline for lane {task.lane!r} of"
         f" client {client_name!r}. Lane pipeline stages: {stages}."
+        " No approve or requeue can act on it until the lane pipeline includes"
+        " that stage; fix the lane's pipeline.stages, or run"
+        f" `{dev_queue_command('remove', task)}` and re-add the ticket."
     )
     raise ApproveGateError(msg)
 
@@ -557,6 +567,7 @@ def _raise_if_not_at_approval_gate(
         " Expected disposition 'approval_gate' or 'finalize_gate_held', or"
         " last_result status one of: plan_pending_approval,"
         " review_pending_approval."
+        f"{refusal_suffix(task, session=session)}"
     )
     raise ApproveGateError(msg)
 
@@ -653,6 +664,7 @@ def _approve_ticket_locked(
             f"Cannot approve ticket '{ticket_id}': status is {task.status.value!r},"
             " expected BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF."
             " Use 'requeue' to re-run a stage."
+            f"{refusal_hint(task)}"
         )
         raise ApproveGateError(msg)
 
@@ -695,7 +707,14 @@ def _approve_ticket_locked(
         msg = (
             f"Cannot approve ticket '{ticket_id}': session not found"
             f" (session_id={task.session_id!r}). The session may have been"
-            " cleaned up. Use 'requeue' to re-run the stage."
+            " cleaned up."
+            # A human-kept gate is never requeued by an agent (#2692 R1).
+            + (
+                ""
+                if is_human_kept_gate(task)
+                else " Use 'requeue' to re-run the stage."
+            )
+            + refusal_suffix(task, session=None)
         )
         raise ApproveGateError(msg)
 
@@ -705,6 +724,7 @@ def _approve_ticket_locked(
         msg = (
             f"Cannot approve ticket '{ticket_id}':"
             f" already at terminal stage {task.stage!r}."
+            f"{refusal_suffix(task, session=session, skip='approve')}"
         )
         raise ApproveGateError(msg)
 
@@ -900,6 +920,11 @@ def approve_scope_drift_ticket(
         )
 
 
+def _scope_drift_command(task: TicketTask, paths: str) -> str:
+    """``cw dev-queue approve <T> -c <C> --scope-drift <paths>`` for a retry."""
+    return dev_queue_command("approve", task, "--scope-drift", paths)
+
+
 def _approve_scope_drift_locked(
     ticket_id: str,
     client_name: str,
@@ -919,6 +944,7 @@ def _approve_scope_drift_locked(
         msg = (
             f"Cannot approve scope drift for ticket '{ticket_id}': status is"
             f" {task.status.value!r}, expected BLOCKED_ON_USER."
+            f"{refusal_hint(task)}"
         )
         raise ApproveGateError(msg)
     if task.stage != Stage.IMPL:
@@ -926,14 +952,14 @@ def _approve_scope_drift_locked(
             f"Cannot approve scope drift for ticket '{ticket_id}': stage is"
             f" {task.stage.value!r}, expected 'impl' (plan_scope_drift parks"
             " at Step 2.5 of the IMPL stage)."
+            f"{refusal_hint(task)}"
         )
         raise ApproveGateError(msg)
     if task.blocked_reason != PLAN_SCOPE_DRIFT_BLOCKER_REASON:
         msg = (
             f"Cannot approve scope drift for ticket '{ticket_id}':"
             f" blocked_reason is {task.blocked_reason!r}, expected"
-            f" {PLAN_SCOPE_DRIFT_BLOCKER_REASON!r}. Use plain 'approve' or"
-            " 'requeue' for other parks."
+            f" {PLAN_SCOPE_DRIFT_BLOCKER_REASON!r}.{refusal_hint(task)}"
         )
         raise ApproveGateError(msg)
     approved_files = sorted(set(extra_files))
@@ -941,6 +967,7 @@ def _approve_scope_drift_locked(
         msg = (
             f"Cannot approve scope drift for ticket '{ticket_id}': no extra"
             " files given. Pass the repo-relative paths to allow, comma-separated."
+            f" Retry: `{_scope_drift_command(task, SCOPE_DRIFT_PATHS_PLACEHOLDER)}`."
         )
         raise ApproveGateError(msg)
 
@@ -954,7 +981,8 @@ def _approve_scope_drift_locked(
             f"Cannot approve scope drift for ticket '{ticket_id}': could not"
             f" resolve the head of origin/{branch} (gh unavailable, branch not"
             " pushed, or a transient error) -- the approval has nothing to be"
-            " bound to."
+            f" bound to. Retry once origin/{branch} resolves:"
+            f" `{_scope_drift_command(task, ','.join(approved_files))}`."
         )
         raise ApproveGateError(msg)
 

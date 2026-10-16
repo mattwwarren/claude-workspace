@@ -77,6 +77,14 @@ from cw.models import (
 from cw.reconcile.liveness_page import close_command
 from cw.worktree import is_genuinely_live_home_reason, worktree_path_for
 from tests._reconcile_helpers import _routed_last_result, _write_agent_spawn_stamp
+from tests._ticket_view_helpers import (
+    CASES,
+    bound_session_for,
+    install_acme_client,
+    make_blocked,
+    make_task,
+    seed_queue,
+)
 from tests._worktree_helpers import patch_worktree
 from tests.conftest import (
     _make_daemon_session,
@@ -8083,6 +8091,19 @@ def _must_fix_override() -> MustFixOverride:
     )
 
 
+_GEN_REVIEW_RERUN = (
+    "Re-run review to produce a current verdict:"
+    " `cw dev-queue requeue GEN-500 -c genhealth --stage review`."
+)
+
+
+def _assert_names_review_rerun(msg: str) -> None:
+    """#2692: a verdict refusal names the review re-run, never the finalize jump."""
+    assert msg.endswith(f" {_GEN_REVIEW_RERUN}")
+    assert "--stage finalize" not in msg
+    assert "--override-must-fix" not in msg
+
+
 class TestApproveMustFixOverride:
     """#2205: the operator records a durable, audited override of a codex
     MUST_FIX park, bound to the verdict's reviewed_sha and finding identities.
@@ -8323,6 +8344,7 @@ class TestApproveMustFixOverride:
             approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
 
         assert str(verdict_path) in str(excinfo.value)
+        assert str(excinfo.value).endswith(f" {_GEN_REVIEW_RERUN}")
         assert events == []
         assert load_dev_queue().model_dump() == before
 
@@ -8345,8 +8367,12 @@ class TestApproveMustFixOverride:
         verdict_path.write_text(body, encoding="utf-8")
         before = load_dev_queue().model_dump()
 
-        with pytest.raises(ApproveGateError, match="not a valid review verdict"):
+        with pytest.raises(
+            ApproveGateError, match="not a valid review verdict"
+        ) as excinfo:
             approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        _assert_names_review_rerun(str(excinfo.value))
 
         assert events == []
         assert load_dev_queue().model_dump() == before
@@ -8363,8 +8389,12 @@ class TestApproveMustFixOverride:
         )
         before = load_dev_queue().model_dump()
 
-        with pytest.raises(ApproveGateError, match="belongs to ticket 'GEN-999'"):
+        with pytest.raises(
+            ApproveGateError, match="belongs to ticket 'GEN-999'"
+        ) as excinfo:
             approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        _assert_names_review_rerun(str(excinfo.value))
 
         assert events == []
         assert load_dev_queue().model_dump() == before
@@ -8378,8 +8408,10 @@ class TestApproveMustFixOverride:
         _, events = self._seed(tmp_config_dir, tmp_path, monkeypatch, must_fix=())
         before = load_dev_queue().model_dump()
 
-        with pytest.raises(ApproveGateError, match="not blocking"):
+        with pytest.raises(ApproveGateError, match="not blocking") as excinfo:
             approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        _assert_names_review_rerun(str(excinfo.value))
 
         assert events == []
         assert load_dev_queue().model_dump() == before
@@ -8400,8 +8432,10 @@ class TestApproveMustFixOverride:
         )
         before = load_dev_queue().model_dump()
 
-        with pytest.raises(ApproveGateError, match="Missing follow-up"):
+        with pytest.raises(ApproveGateError, match="Missing follow-up") as excinfo:
             approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+
+        _assert_names_review_rerun(str(excinfo.value))
 
         assert events == []
         assert load_dev_queue().model_dump() == before
@@ -8682,9 +8716,10 @@ class TestApproveScopeHintGateRelease:
     def test_approve_error_message_no_longer_suggests_requeue(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """A genuinely-not-at-gate task raises without the misleading
-        'requeue' suggestion, which belongs to the missing-session message
-        (approval.py:286-292) but not to this disposition/last_result gate."""
+        """A genuinely-not-at-gate task raises without the generic
+        "Use 'requeue'" boilerplate, which belongs to the missing-session
+        message but not to this disposition/last_result gate. #2692: it now
+        names the row's legal next command instead (a same-stage requeue)."""
         from cw.config import save_state
         from cw.dev_queue import approve_ticket
         from cw.exceptions import ApproveGateError
@@ -8703,9 +8738,13 @@ class TestApproveScopeHintGateRelease:
             approve_ticket("GEN-500", "genhealth")
 
         msg = str(excinfo.value)
-        assert "requeue" not in msg.lower()
+        assert "Use 'requeue'" not in msg
         assert "not at an approval gate" in msg
         assert "disposition=None" in msg
+        assert msg.endswith(
+            " This row is blocked_on_user at stage plan. Run:"
+            " `cw dev-queue requeue GEN-500 -c genhealth` (re-run the plan stage)."
+        )
 
     def test_approve_genuinely_not_at_gate_still_raises(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -16553,3 +16592,288 @@ class TestSessionAttentionState:
         from cw.dev_queue import session_attention_state
 
         assert session_attention_state(self._task(), None) is None
+
+
+# ---------------------------------------------------------------------------
+# #2692: every library refusal names the command legal from the row's state
+# ---------------------------------------------------------------------------
+
+_ACME_APPROVE = "cw dev-queue approve ACM-1 -c acme"
+_ACME_REVIEW_RERUN = (
+    "Re-run review to produce a current verdict:"
+    " `cw dev-queue requeue ACM-1 -c acme --stage review`."
+)
+# Rows whose plain approve the verb refuses: no plain approve offered, plus the
+# sessionless human-kept gates (labelled approve listed, refused, #2718). The
+# order_* rows sit at a releasable gate behind a higher-priority rule, so
+# approve succeeds on them.
+_APPROVE_REFUSED_CASES = tuple(
+    sorted(
+        case_id
+        for case_id, case in CASES.items()
+        if (_ACME_APPROVE not in case.expected and not case_id.startswith("order_"))
+        or (
+            case.task.status == QueueItemStatus.BLOCKED_ON_USER
+            and not case.with_session
+        )
+    )
+)
+
+
+class TestApproveRefusalsNameNextCommand:
+    @pytest.fixture(autouse=True)
+    def _acme(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        install_acme_client(tmp_path, monkeypatch)
+
+    @staticmethod
+    def _refusal(case_id: str) -> str:
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+
+        case = CASES[case_id]
+        session = case.session()
+        seed_queue([case.task], [session] if session is not None else [])
+        with pytest.raises(ApproveGateError) as excinfo:
+            approve_ticket("ACM-1", "acme")
+        return str(excinfo.value)
+
+    @pytest.mark.parametrize("case_id", _APPROVE_REFUSED_CASES)
+    def test_refusal_carries_the_row_suffix(self, case_id: str) -> None:
+        from cw.dev_queue.next_commands import refusal_suffix
+
+        msg = self._refusal(case_id)
+        case = CASES[case_id]
+        if "not in pipeline" in msg:
+            assert "`cw dev-queue remove ACM-1 -c acme`" in msg
+            return
+        suffix = refusal_suffix(case.task, session=case.session())
+        assert msg.endswith(suffix)
+        assert f"`{case.expected[0]}`" in msg
+
+    @pytest.mark.parametrize(
+        "case_id",
+        ["rule0_finalize_held_no_session", "rule0_scope_hint_large_no_session"],
+    )
+    def test_sessionless_human_gate_never_suggests_requeue(self, case_id: str) -> None:
+        msg = self._refusal(case_id)
+        assert "session not found" in msg
+        assert "human-kept gate" in msg
+        assert "operator-only; not for an agent to run" in msg
+        assert _ACME_APPROVE in msg
+        assert "cw dev-queue requeue" not in msg
+        assert "Use 'requeue'" not in msg
+
+    def test_ordinary_sessionless_row_keeps_the_requeue_sentence(self) -> None:
+        msg = self._refusal("rule10_plain_blocked_no_session")
+        assert "Use 'requeue' to re-run the stage." in msg
+        assert "Run: `cw dev-queue requeue ACM-1 -c acme`" in msg
+
+    def test_terminal_stage_names_requeue_not_approve(self) -> None:
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+
+        task = make_blocked(stage=Stage.FINALIZE, disposition="approval_gate")
+        seed_queue([task], [bound_session_for(task)])
+        with pytest.raises(ApproveGateError, match="already at terminal") as excinfo:
+            approve_ticket("ACM-1", "acme")
+        msg = str(excinfo.value)
+        assert "Run: `cw dev-queue requeue ACM-1 -c acme --stage finalize`" in msg
+        assert _ACME_APPROVE not in msg
+
+    @pytest.mark.parametrize(
+        ("status", "command"),
+        [
+            (QueueItemStatus.PENDING, "cw dev-queue wait ACM-1 -c acme"),
+            (QueueItemStatus.RUNNING, "cw dev-queue wait ACM-1 -c acme"),
+            (
+                QueueItemStatus.COMPLETED,
+                "cw dev-queue requeue ACM-1 -c acme --from-completed",
+            ),
+        ],
+    )
+    def test_status_not_approvable(self, status: QueueItemStatus, command: str) -> None:
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+
+        seed_queue([make_task(status=status)])
+        with pytest.raises(ApproveGateError, match="expected BLOCKED_ON_USER") as exc:
+            approve_ticket("ACM-1", "acme")
+        assert f"Run: `{command}`" in str(exc.value)
+
+    def test_stage_not_in_pipeline_names_remove(self) -> None:
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+
+        seed_queue([make_blocked(stage=Stage.HARDEN, disposition="approval_gate")])
+        with pytest.raises(ApproveGateError, match="not in pipeline") as excinfo:
+            approve_ticket("ACM-1", "acme")
+        assert str(excinfo.value).endswith(
+            " No approve or requeue can act on it until the lane pipeline includes"
+            " that stage; fix the lane's pipeline.stages, or run"
+            " `cw dev-queue remove ACM-1 -c acme` and re-add the ticket."
+        )
+
+
+class TestScopeDriftRefusalsNameNextCommand:
+    @pytest.fixture(autouse=True)
+    def _acme(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        install_acme_client(tmp_path, monkeypatch)
+
+    @pytest.mark.parametrize(
+        ("task", "command"),
+        [
+            (make_task(status=QueueItemStatus.PENDING), "cw dev-queue wait"),
+            (
+                make_blocked(stage=Stage.REVIEW, blocked_reason="plan_scope_drift"),
+                "cw dev-queue requeue",
+            ),
+            (make_blocked(stage=Stage.IMPL), "cw dev-queue requeue"),
+        ],
+        ids=["status", "stage", "reason"],
+    )
+    def test_gate_refusals_name_the_table_command(
+        self, task: TicketTask, command: str
+    ) -> None:
+        from cw.dev_queue import approve_scope_drift_ticket
+        from cw.exceptions import ApproveGateError
+
+        seed_queue([task])
+        with pytest.raises(ApproveGateError) as excinfo:
+            approve_scope_drift_ticket("ACM-1", "acme", ["a.py"])
+        assert f"Run: `{command} ACM-1 -c acme" in str(excinfo.value)
+        assert "Use plain 'approve'" not in str(excinfo.value)
+
+    def test_no_files_names_the_retry(self) -> None:
+        from cw.dev_queue import approve_scope_drift_ticket
+        from cw.exceptions import ApproveGateError
+
+        seed_queue([make_blocked(stage=Stage.IMPL, blocked_reason="plan_scope_drift")])
+        with pytest.raises(ApproveGateError, match="no extra files") as excinfo:
+            approve_scope_drift_ticket("ACM-1", "acme", [])
+        assert str(excinfo.value).endswith(
+            " Retry: `cw dev-queue approve ACM-1 -c acme --scope-drift <paths>`."
+        )
+
+    def test_head_unresolved_names_the_retry_with_the_paths(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_scope_drift_ticket
+        from cw.exceptions import ApproveGateError
+
+        monkeypatch.setattr(
+            "cw.dev_queue.approval.branch_head_sha_on_origin",
+            lambda *_a, **_kw: (None, False),
+        )
+        seed_queue([make_blocked(stage=Stage.IMPL, blocked_reason="plan_scope_drift")])
+        with pytest.raises(ApproveGateError, match="could not") as excinfo:
+            approve_scope_drift_ticket("ACM-1", "acme", ["b.py", "a.py"])
+        assert "Retry once origin/" in str(excinfo.value)
+        assert str(excinfo.value).endswith(
+            " resolves: `cw dev-queue approve ACM-1 -c acme --scope-drift a.py,b.py`."
+        )
+
+
+class TestMustFixRefusalsNameNextCommand:
+    @pytest.fixture(autouse=True)
+    def _acme(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        install_acme_client(tmp_path, monkeypatch)
+
+    @pytest.mark.parametrize(
+        ("task", "command"),
+        [
+            (make_task(status=QueueItemStatus.PENDING), "cw dev-queue wait"),
+            (
+                make_blocked(stage=Stage.IMPL, blocked_reason="plan_scope_drift"),
+                "cw dev-queue approve",
+            ),
+        ],
+        ids=["status", "blocked_reason"],
+    )
+    def test_park_refusals_name_the_table_command(
+        self, task: TicketTask, command: str
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.exceptions import ApproveGateError
+
+        seed_queue([task])
+        with pytest.raises(ApproveGateError) as excinfo:
+            approve_must_fix_override_ticket("ACM-1", "acme", "why")
+        msg = str(excinfo.value)
+        assert f"Run: `{command} ACM-1 -c acme" in msg
+        assert "Use plain 'approve' or 'requeue'" not in msg
+
+    def test_unresolved_worktree_names_the_review_rerun(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.exceptions import ApproveGateError
+
+        monkeypatch.setattr(
+            "cw.dev_queue.must_fix_override.resolve_task_worktree",
+            lambda *_a, **_kw: None,
+        )
+        seed_queue(
+            [make_blocked(stage=Stage.REVIEW, blocked_reason="codex_must_fix_findings")]
+        )
+        with pytest.raises(ApproveGateError, match="could not be resolved") as exc:
+            approve_must_fix_override_ticket("ACM-1", "acme", "why")
+        msg = str(exc.value)
+        assert msg.endswith(f" {_ACME_REVIEW_RERUN}")
+        assert "--stage finalize" not in msg
+        assert "--override-must-fix" not in msg
+
+
+class TestMoveAndFindRefusalsNameNextCommand:
+    @pytest.fixture(autouse=True)
+    def _acme(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        install_acme_client(tmp_path, monkeypatch)
+
+    @pytest.mark.parametrize(
+        ("to_lane", "priority", "match"),
+        [("fast", None, "Cannot move"), (None, 3, "reprioritize")],
+        ids=["move", "reprioritize"],
+    )
+    def test_non_pending_move_names_the_table_command(
+        self, to_lane: str | None, priority: int | None, match: str
+    ) -> None:
+        from cw.dev_queue import move_ticket
+        from cw.exceptions import LaneMoveError
+
+        case = CASES["rule9_review_gate"]
+        session = bound_session_for(case.task, last_result=case.session_last_result)
+        seed_queue([case.task], [session])
+        with pytest.raises(LaneMoveError, match=match) as excinfo:
+            move_ticket("ACM-1", "acme", to_lane=to_lane, priority=priority)
+        msg = str(excinfo.value)
+        assert f"Run: `{_ACME_APPROVE}`" in msg
+        assert msg.endswith(" Once the row is PENDING again, retry move.")
+
+    def test_move_of_a_human_kept_row_uses_the_operator_only_form(self) -> None:
+        from cw.dev_queue import move_ticket
+        from cw.exceptions import LaneMoveError
+
+        seed_queue([CASES["rule0_finalize_held_no_session"].task])
+        with pytest.raises(LaneMoveError) as excinfo:
+            move_ticket("ACM-1", "acme", to_lane="fast")
+        msg = str(excinfo.value)
+        assert "human-kept gate" in msg
+        assert "Run:" not in msg
+
+    def test_move_of_a_missing_row_names_add_and_tasks(self) -> None:
+        from cw.dev_queue import move_ticket
+
+        seed_queue([])
+        with pytest.raises(CwError, match="No dev-queue task found") as excinfo:
+            move_ticket("ACM-9", "acme", to_lane="fast")
+        assert str(excinfo.value).endswith(
+            " Enqueue it with `cw dev-queue add ACM-9 -c acme`, or list rows with"
+            " `cw dev-queue tasks -c acme`."
+        )
+
+    def test_find_ticket_no_row_names_add_and_tasks(self) -> None:
+        with pytest.raises(CwError, match="No dev-queue task found") as excinfo:
+            _find_ticket(DevQueueStore(tasks=[]), "ACM-9", "acme")
+        assert str(excinfo.value).endswith(
+            " Enqueue it with `cw dev-queue add ACM-9 -c acme`, or list rows with"
+            " `cw dev-queue tasks -c acme`."
+        )
