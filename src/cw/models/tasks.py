@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from cw.models.enums import OCCUPIED_LANE_STATUSES, QueueItemStatus, ReapReason, Stage
 from cw.models.events import PrState, WatchedPr
@@ -1075,6 +1075,39 @@ class DevQueueStore(BaseModel):
     schema_version: int = DEV_QUEUE_SCHEMA_VERSION
     tasks: list[TicketTask] = Field(default_factory=list)
     watched_prs: list[WatchedPr] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_mixed_resolution_schema(cls, value: Any) -> Any:
+        """Refuse a pre-v46 payload that carries the v46 ledger.
+
+        A process with an older queue schema cannot round-trip this field.
+        Failing before validation prevents a mixed-version reader from
+        treating the ledger as harmless extra data and subsequently writing
+        it away.
+        """
+        if not isinstance(value, dict):
+            return value
+        try:
+            schema_version = int(value.get("schema_version", DEV_QUEUE_SCHEMA_VERSION))
+        except (TypeError, ValueError):
+            return value
+        tasks = value.get("tasks")
+        if (
+            schema_version < DEV_QUEUE_SCHEMA_VERSION
+            and isinstance(tasks, list)
+            and any(
+                isinstance(task, dict) and task.get("operator_resolutions")
+                for task in tasks
+            )
+        ):
+            message = (
+                f"dev-queue schema v{schema_version} cannot load "
+                "operator_resolutions; restart the dispatch loop with "
+                f"v{DEV_QUEUE_SCHEMA_VERSION} before writing queue state"
+            )
+            raise ValueError(message)
+        return value
 
     def pending(self) -> list[TicketTask]:
         return [t for t in self.tasks if t.status == QueueItemStatus.PENDING]
