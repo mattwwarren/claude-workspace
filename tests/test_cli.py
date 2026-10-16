@@ -8872,11 +8872,6 @@ def _seed_lock_wait_fixtures(tmp_path: Path) -> None:
     )
 
 
-# What the state dir holds after a failed operator command: the seeded state,
-# its lock and the dev queue -- no queued-close or intent file (#2694).
-_STATE_DIR_FILES = [".sessions.lock", "dev_queue.json", "sessions.json"]
-
-
 class TestOperatorCommandLockWait:
     """list/status/spawn close/cancel wait 5 s, not 60 s, on a held lock (#2694)."""
 
@@ -8931,7 +8926,7 @@ class TestOperatorCommandLockWait:
         assert result.exit_code == 1, result.output
         expected = read_wait if command in {"list", "status"} else close_wait
         assert clock.now == pytest.approx(expected)
-        assert sorted(p.name for p in state_dir().iterdir()) == _STATE_DIR_FILES
+        assert not (state_dir() / "queued_closes").exists()
 
     @pytest.mark.parametrize("command", list(_LOCK_WAIT_COMMANDS))
     def test_timeout_names_the_recorded_holder(

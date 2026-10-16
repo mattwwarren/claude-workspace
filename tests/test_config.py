@@ -2097,10 +2097,16 @@ _CHILD_READY_TIMEOUT_S = 10.0
 # lock-free ``precheck_requeue``, and a timeout after it leaves the row parked
 # and the session COMPLETED -- the state a normal park leaves. ``approve``
 # closes after its lock, so nothing irreversible precedes that one.
+# A second accepted exception (#2694): ``_flip_cancelled``, the ``cw dev-queue
+# cancel`` session flip, runs after ``cancel_ticket`` committed the row
+# CANCELLED and the worker was stopped and confirmed gone. A timeout there
+# leaves only the session flip pending, which the command reports (exit 1,
+# naming ``cw spawn close``); it is flip-only and takes no dev-queue lock.
 _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/cli/maintenance.py", "doctor"): 1,  # `cw doctor --reap <SESSION>`
     ("cw/cli/maintenance.py", "init"): 1,  # `cw init` -> init_client (#2501)
     ("cw/cli/spawn.py", "_spawn_close_impl"): 1,  # `cw spawn close`
+    ("cw/cli/spawn.py", "_flip_cancelled"): 1,  # `cw dev-queue cancel` (#2694)
     # `cw spawn complete`: sessions_lock + nested dev_queue_lock (#2501)
     ("cw/cli/spawn.py", "_spawn_complete_impl"): 2,
     # `cw dev-queue unblock`: sessions_lock + nested _lock (#2501)

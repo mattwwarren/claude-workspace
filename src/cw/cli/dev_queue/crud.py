@@ -9,9 +9,11 @@ from typing import Literal
 import click
 from pydantic import ValidationError
 
+from cw._flock import operator_close_lock_wait_seconds
 from cw.cli._base import handle_errors
 from cw.cli.routed_orphan_close import close_routed_result_sessions_for_ticket
-from cw.config import load_orchestrator_config, load_state
+from cw.cli.spawn import close_cancelled_sessions
+from cw.config import load_orchestrator_config
 from cw.dev_queue import (
     DEFAULT_PRUNE_OLDER_THAN_DAYS,
     _prune_age_basis,
@@ -31,13 +33,12 @@ from cw.dev_queue import (
     unblock_ticket,
 )
 from cw.events import record_event
-from cw.exceptions import LockTimeoutError, RequeueLiveSessionError
+from cw.exceptions import CwError, LockTimeoutError, RequeueLiveSessionError
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
     OrchestratorEventType,
     QueueItemStatus,
-    SessionOrigin,
     Stage,
     TicketTask,
 )
@@ -627,17 +628,25 @@ def dev_queue_remove(
 @click.option("--client", "-c", "client", required=True, help="Client name")
 @handle_errors
 def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
-    """Cancel dev-queue task(s) and stop any running session."""
-    state = load_state()
+    """Cancel dev-queue task(s), stop any running session and mark it completed.
+
+    Each cleared session's worker is stopped and confirmed gone before the
+    session is marked completed; the sessions lock is waited on for at most
+    5s. A session left unfinished exits 1, naming it and the next step.
+    """
     daemon = get_native_daemon_client()
     sources = ViewSources()
+    problems: list[str] = []
+    lock_busy = False
     for index, ticket in enumerate(tickets):
         try:
-            # bounded=True (#2501): operator command; only read-only state and
-            # daemon-client setup precede the lock, and each earlier ticket is
-            # fully committed (queue write + daemon.stop) before the next one.
+            # bounded=True (#2501): operator command; only daemon-client setup
+            # precedes the lock, and each earlier ticket is fully committed
+            # (queue write, session stop and flip) before the next one.
             cleared_session_ids = cancel_ticket(ticket, client, bounded=True)
         except LockTimeoutError:
+            for problem in problems:
+                click.echo(problem, err=True)
             _report_partial_progress(
                 list(tickets[:index]),
                 list(tickets[index:]),
@@ -648,17 +657,18 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
                 ),
             )
             raise
-        for old_session_id in cleared_session_ids:
-            if old_session_id is not None:
-                sess = state.find_by_name_or_id(old_session_id)
-                if (
-                    sess is not None
-                    and sess.surface_ref is not None
-                    and sess.origin is SessionOrigin.DAEMON
-                ):
-                    daemon.stop(sess.surface_ref)
+        # #2694: after one sessions-lock timeout, later tickets try it once.
+        outcome = close_cancelled_sessions(
+            cleared_session_ids,
+            daemon=daemon,
+            lock_timeout_s=0.0 if lock_busy else operator_close_lock_wait_seconds(),
+        )
+        lock_busy = lock_busy or outcome.lock_timed_out
+        problems.extend(outcome.problems)
         click.echo(f"Cancelled {ticket} in {client} dev-queue.")
         echo_resulting_row(ticket, client, sources=sources)
+    if problems:
+        raise CwError("\n".join(problems))
 
 
 @dev_queue.command(name="clear")

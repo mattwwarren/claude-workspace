@@ -8,6 +8,7 @@ import logging
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 import pytest
@@ -53,6 +54,7 @@ from cw.dispatch import (
 )
 from cw.dispatch.claim.screening import resolve_occupied_ticket_ids
 from cw.exceptions import CwError
+from cw.history import EventType, load_history
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
@@ -74,6 +76,7 @@ from cw.models import (
     UsageLimitAct,
     WatchedPr,
 )
+from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile.liveness_page import close_command
 from cw.worktree import is_genuinely_live_home_reason, worktree_path_for
 from tests._reconcile_helpers import _routed_last_result, _write_agent_spawn_stamp
@@ -90,13 +93,12 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-    from pathlib import Path
+    from collections.abc import Callable, Iterator
 
     from click.testing import Result
 
+    from cw.history import HistoryEvent
     from cw.models import ReapReason, Session
-    from cw.native_daemon import FakeNativeDaemonClient
     from tests.conftest import CapturedEvent
 
 
@@ -3862,6 +3864,239 @@ class TestCLIDevQueueCancel:
         )
         assert result.exit_code != 0
         assert "No dev-queue task found" in result.output
+
+
+_CANCEL_CLIENT = "client-a"
+
+
+def _seed_cancel_world(
+    *, status: SessionStatus = SessionStatus.ACTIVE, **overrides: object
+) -> FakeNativeDaemonClient:
+    """A RUNNING ``T-1`` row bound to DAEMON session ``sess-1`` (worker live)."""
+    from cw.config import save_state
+    from cw.models import CwState
+
+    fake = FakeNativeDaemonClient()
+    surface = fake.seed_live_worker(Path("/tmp/wt"))
+    session = _make_daemon_session(surface_ref=surface, status=status, **overrides)
+    save_state(CwState(sessions=[session]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                _make_ticket_task(
+                    ticket_id="T-1",
+                    client=_CANCEL_CLIENT,
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                )
+            ]
+        )
+    )
+    return fake
+
+
+def _cancel(monkeypatch: pytest.MonkeyPatch, fake: FakeNativeDaemonClient) -> Result:
+    monkeypatch.setattr("cw.cli.dev_queue.crud.get_native_daemon_client", lambda: fake)
+    return CliRunner().invoke(
+        main, ["dev-queue", "cancel", "T-1", "--client", _CANCEL_CLIENT]
+    )
+
+
+def _session(session_id: str = "sess-1") -> Session:
+    from cw.config import load_state
+
+    sess = load_state().find_by_name_or_id(session_id)
+    assert sess is not None
+    return sess
+
+
+def _cancel_close_events() -> list[HistoryEvent]:
+    return [
+        e
+        for e in load_history(_CANCEL_CLIENT, event_types=[EventType.SESSION_COMPLETED])
+        if e.detail == "operator_close"
+    ]
+
+
+@pytest.mark.usefixtures("tmp_config_dir")
+class TestCLIDevQueueCancelClosesSession:
+    """`cancel` stops the session, confirms it is gone, then flips it (#2694)."""
+
+    def test_stops_confirms_then_marks_completed_and_audits_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.models import CompletionReason, counts_toward_client_ceiling
+
+        fake = _seed_cancel_world()
+        surface = _session().surface_ref
+        status_at_stop: list[SessionStatus] = []
+        real_stop = fake.stop
+
+        def _stop(short_id: str) -> None:
+            status_at_stop.append(_session().status)
+            real_stop(short_id)
+
+        monkeypatch.setattr(fake, "stop", _stop)
+
+        result = _cancel(monkeypatch, fake)
+
+        assert result.exit_code == 0, result.output
+        assert "Cancelled T-1" in result.output
+        assert fake.stop_calls == [surface]
+        # The flip comes after the stop, never before it.
+        assert status_at_stop == [SessionStatus.ACTIVE]
+        sess = _session()
+        assert sess.status is SessionStatus.COMPLETED
+        assert sess.completed_reason is CompletionReason.USER
+        assert sess.completed_at is not None
+        assert not counts_toward_client_ceiling(sess, _CANCEL_CLIENT)
+        (event,) = _cancel_close_events()
+        assert event.metadata["command"] == "cw dev-queue cancel"
+        assert event.metadata["session_id"] == "sess-1"
+        assert event.metadata["ticket_id"] == "T-1"
+        assert event.metadata["surface_ref"] == surface
+        assert event.metadata["prior_status"] == "active"
+
+    @pytest.mark.parametrize(
+        "make_unconfirmable",
+        [_stop_leaves_worker_listed, _stop_makes_roster_unreadable],
+        ids=["still-listed", "roster-unreadable"],
+    )
+    def test_an_unconfirmed_stop_leaves_the_session_and_exits_one(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        make_unconfirmable: Callable[
+            [pytest.MonkeyPatch, FakeNativeDaemonClient], None
+        ],
+    ) -> None:
+        fake = _seed_cancel_world()
+        make_unconfirmable(monkeypatch, fake)
+        monkeypatch.setattr("cw.cli.spawn._CANCEL_STOP_CONFIRM_TIMEOUT_S", 0.0)
+
+        result = _cancel(monkeypatch, fake)
+
+        assert result.exit_code == 1
+        assert "still in the daemon roster" in result.output
+        assert "cw spawn close sess-1" in result.output
+        assert _session().status is SessionStatus.ACTIVE
+        assert _cancel_close_events() == []
+        assert load_dev_queue().tasks[0].status is QueueItemStatus.CANCELLED
+
+    def test_a_resumed_incarnation_is_left_running_and_reported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The session resumes into a new surface after cancel read it: skip."""
+        from cw.config import load_state, save_state
+
+        fake = _seed_cancel_world()
+        real_stop = fake.stop
+
+        def _stop_then_resume(short_id: str) -> None:
+            real_stop(short_id)
+            state = load_state()
+            state.sessions[0].surface_ref = "new-incarnation"
+            state.sessions[0].resumed_at = datetime.now(UTC)
+            save_state(state)
+
+        monkeypatch.setattr(fake, "stop", _stop_then_resume)
+
+        result = _cancel(monkeypatch, fake)
+
+        assert result.exit_code == 1
+        assert "resumed into a new incarnation" in result.output
+        sess = _session()
+        assert sess.status is SessionStatus.ACTIVE
+        assert sess.surface_ref == "new-incarnation"
+        assert _cancel_close_events() == []
+
+    def test_a_terminal_session_is_stopped_but_not_flipped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.models import CompletionReason
+
+        fake = _seed_cancel_world(
+            status=SessionStatus.COMPLETED,
+            completed_reason=CompletionReason.CRASHED,
+        )
+
+        result = _cancel(monkeypatch, fake)
+
+        assert result.exit_code == 0, result.output
+        assert len(fake.stop_calls) == 1
+        assert _session().completed_reason is CompletionReason.CRASHED
+        assert _cancel_close_events() == []
+
+    def test_a_user_origin_session_is_untouched(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.models import SessionOrigin
+
+        fake = _seed_cancel_world(origin=SessionOrigin.USER)
+
+        result = _cancel(monkeypatch, fake)
+
+        assert result.exit_code == 0, result.output
+        assert fake.stop_calls == []
+        assert _session().status is SessionStatus.ACTIVE
+
+    def test_a_daemon_session_without_a_surface_is_flipped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _seed_cancel_world()
+        from cw.config import load_state, save_state
+
+        state = load_state()
+        state.sessions[0].surface_ref = None
+        save_state(state)
+
+        result = _cancel(monkeypatch, fake)
+
+        assert result.exit_code == 0, result.output
+        assert fake.stop_calls == []
+        assert _session().status is SessionStatus.COMPLETED
+
+    def test_an_audit_write_failure_is_reported_and_the_close_stands(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _seed_cancel_world()
+
+        def _fail(*_args: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.cli.spawn.record_history_event", _fail)
+
+        result = _cancel(monkeypatch, fake)
+
+        assert result.exit_code == 1
+        assert "audit record could not be written" in result.output
+        assert _session().status is SessionStatus.COMPLETED
+
+    def test_the_session_step_takes_no_dev_queue_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only ``cancel_ticket`` takes ``crud._lock``; the flip never does."""
+        import contextlib
+
+        from cw.dev_queue import crud as crud_mod
+
+        fake = _seed_cancel_world()
+        real_lock = crud_mod._lock
+        calls: list[bool] = []
+
+        @contextlib.contextmanager
+        def _counting(*, bounded: bool = False) -> Iterator[None]:
+            calls.append(bounded)
+            with real_lock(bounded=bounded):
+                yield
+
+        monkeypatch.setattr("cw.dev_queue.crud._lock", _counting)
+
+        result = _cancel(monkeypatch, fake)
+
+        assert result.exit_code == 0, result.output
+        assert calls == [True]
+        assert _session().status is SessionStatus.COMPLETED
 
 
 class TestMigrateDevQueue:
