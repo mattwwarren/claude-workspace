@@ -10,11 +10,6 @@ import click
 from pydantic import ValidationError
 
 from cw.cli._base import handle_errors
-from cw.cli.routed_orphan_close import (
-    close_routed_result_sessions_for_ticket,
-    stop_and_confirm_gone,
-)
-from cw.cli.spawn import CancelSessionCloser
 from cw.config import load_orchestrator_config, load_state
 from cw.dev_queue import (
     DEFAULT_PRUNE_OLDER_THAN_DAYS,
@@ -468,6 +463,12 @@ def dev_queue_requeue(
         )
 
     try:
+        # Deferred: routed_orphan_close imports spawn, while this command
+        # module is imported by the CLI command graph during startup.
+        from cw.cli.routed_orphan_close import (  # noqa: PLC0415
+            close_routed_result_sessions_for_ticket,
+        )
+
         closed = close_routed_result_sessions_for_ticket(
             ticket_id,
             resolved,
@@ -690,9 +691,20 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
 
     A session left unfinished exits 1, naming it and the next step (#2694).
     """
+    # Deferred: spawn and routed_orphan_close both participate in the CLI
+    # command graph, so neither belongs in this module's import-time graph.
+    from cw.cli.spawn import (  # noqa: PLC0415
+        CancelSessionCloser,
+        stop_and_confirm_gone,
+    )
+
     closer = CancelSessionCloser(get_native_daemon_client(), stop_and_confirm_gone)
     sources = ViewSources()
     for index, ticket in enumerate(tickets):
+        # Snapshot before the row is cancelled. The closer compares this
+        # incarnation with fresh state and refuses a changed binding.
+        state = load_state()
+        bound_before = {sess.id: sess for sess in state.sessions}
         try:
             # bounded=True (#2501): operator command; only read-only state and
             # daemon-client setup precede the lock, and each earlier ticket is
@@ -710,13 +722,9 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
                 ),
             )
             raise
-        # The cancellation lock has committed the exact row/session binding;
-        # capture that session incarnation only after the locked operation.
-        current = load_state()
-        current_by_id = {sess.id: sess for sess in current.sessions}
         closer.close(
             {
-                sid: current_by_id.get(sid)
+                sid: bound_before.get(sid)
                 for sid in cleared_session_ids
                 if sid is not None
             }

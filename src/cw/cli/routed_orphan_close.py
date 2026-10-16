@@ -392,8 +392,7 @@ def _unconfirmed_reason(
     gone: bool,
     after: set[str] | None,
     surface_ref: str,
-    candidate_ids: frozenset[str],
-    candidate_surfaces: frozenset[str],
+    call: _OrphanCloseCall,
     pre_stop_live: set[str],
 ) -> str | None:
     """Why the stop is not confirmed, or None when the worker is gone.
@@ -411,55 +410,11 @@ def _unconfirmed_reason(
         return _REASON_STILL_LISTED
     if (
         not after
-        and pre_stop_live - candidate_surfaces
-        and _roster_outage_shaped(load_state(), after, exclude_ids=candidate_ids)
+        and pre_stop_live - call.candidate_surfaces
+        and _roster_outage_shaped(load_state(), after, exclude_ids=call.candidate_ids)
     ):
         return _REASON_UNREADABLE_AFTER_STOP
     return None
-
-
-def stop_and_confirm_gone(
-    daemon: NativeDaemonClient,
-    surface_ref: str,
-    *,
-    candidate_ids: frozenset[str],
-    candidate_surfaces: frozenset[str],
-    pre_stop_live: set[str] | None = None,
-) -> tuple[str | None, OSError | ValueError | None]:
-    """Stop the worker *surface_ref* and confirm it left the roster.
-
-    Returns ``(reason, wait_error)``: *reason* is None once the worker is
-    confirmed gone, else why not (still listed, or a roster unreadable or
-    outage-shaped after the stop); *wait_error* is a roster-poll failure, for
-    the caller's log. *candidate_ids*/*candidate_surfaces* are the caller's
-    whole target set, excluded from the outage check; *pre_stop_live* is the
-    roster read just before the stop (None: read it here). Shared by the
-    routed-orphan close and the ``cw dev-queue cancel`` session step (#2694);
-    each caller words its own refusal and never flips on a non-None reason.
-    """
-    if pre_stop_live is None:
-        pre_stop_live = _read_live_roster(daemon) or set()
-    daemon.stop(surface_ref)
-    wait_error: OSError | ValueError | None = None
-    try:
-        gone = wait_for_roster_presence(
-            daemon,
-            surface_ref,
-            present=False,
-            timeout=_ROUTED_STOP_CONFIRM_TIMEOUT_SECS,
-            interval=_ROUTED_STOP_CONFIRM_INTERVAL_SECS,
-        )
-    except (OSError, ValueError) as exc:
-        gone, wait_error = False, exc
-    reason = _unconfirmed_reason(
-        gone=gone,
-        after=_read_live_roster(daemon),
-        surface_ref=surface_ref,
-        candidate_ids=candidate_ids,
-        candidate_surfaces=candidate_surfaces,
-        pre_stop_live=pre_stop_live,
-    )
-    return reason, wait_error
 
 
 def _stop_until_gone(
@@ -473,11 +428,23 @@ def _stop_until_gone(
     """
     # A marker candidate always carries a surface (_is_routed_marker_candidate).
     surface_ref = cast("str", session.surface_ref)
-    reason, wait_error = stop_and_confirm_gone(
-        call.daemon,
-        surface_ref,
-        candidate_ids=call.candidate_ids,
-        candidate_surfaces=call.candidate_surfaces,
+    call.daemon.stop(surface_ref)
+    wait_error: OSError | ValueError | None = None
+    try:
+        gone = wait_for_roster_presence(
+            call.daemon,
+            surface_ref,
+            present=False,
+            timeout=_ROUTED_STOP_CONFIRM_TIMEOUT_SECS,
+            interval=_ROUTED_STOP_CONFIRM_INTERVAL_SECS,
+        )
+    except (OSError, ValueError) as exc:
+        gone, wait_error = False, exc
+    reason = _unconfirmed_reason(
+        gone=gone,
+        after=_read_live_roster(call.daemon),
+        surface_ref=surface_ref,
+        call=call,
         pre_stop_live=pre_stop_live,
     )
     if reason is None:

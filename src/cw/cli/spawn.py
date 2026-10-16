@@ -47,12 +47,14 @@ from cw.models import (
 from cw.native_daemon import (
     NativeDaemonClient,
     get_native_daemon_client,
+    wait_for_roster_presence,
 )
 from cw.reconcile import (
     _apply_sentinel_to_task,
     holds_staged_emit_result,
     ticket_id_for_session,
 )
+from cw.reconcile.routed_result_sessions import _roster_outage_shaped
 from cw.result import reconstruct_staged_sentinel
 from cw.spawn import spawn_create_impl
 
@@ -68,6 +70,55 @@ logger = logging.getLogger(__name__)
 OPERATOR_CLOSE_DETAIL = "operator_close"
 _SPAWN_CLOSE_COMMAND = "cw spawn close"
 _CANCEL_COMMAND = "cw dev-queue cancel"
+_CANCEL_STOP_CONFIRM_TIMEOUT_SECS = 5.0
+_CANCEL_STOP_CONFIRM_INTERVAL_SECS = 0.5
+
+
+def _read_live_roster(daemon: NativeDaemonClient) -> set[str] | None:
+    """Read the daemon roster for the cancel workflow, fail closed."""
+    try:
+        return daemon.list_live_session_short_ids_fail_closed()
+    except (OSError, ValueError):
+        return None
+
+
+def stop_and_confirm_gone(
+    daemon: NativeDaemonClient,
+    surface_ref: str,
+    *,
+    candidate_ids: frozenset[str],
+    candidate_surfaces: frozenset[str],
+    pre_stop_live: set[str] | None = None,
+) -> tuple[str | None, OSError | ValueError | None]:
+    """Stop a cancel target and confirm that it left the daemon roster."""
+    if pre_stop_live is None:
+        pre_stop_live = _read_live_roster(daemon) or set()
+    daemon.stop(surface_ref)
+    wait_error: OSError | ValueError | None = None
+    try:
+        gone = wait_for_roster_presence(
+            daemon,
+            surface_ref,
+            present=False,
+            timeout=_CANCEL_STOP_CONFIRM_TIMEOUT_SECS,
+            interval=_CANCEL_STOP_CONFIRM_INTERVAL_SECS,
+        )
+    except (OSError, ValueError) as exc:
+        gone, wait_error = False, exc
+    after = _read_live_roster(daemon)
+    if after is None:
+        reason = "roster_unreadable_after_stop"
+    elif not gone or surface_ref in after:
+        reason = "worker_still_listed"
+    elif (
+        not after
+        and pre_stop_live - candidate_surfaces
+        and _roster_outage_shaped(load_state(), after, exclude_ids=candidate_ids)
+    ):
+        reason = "roster_unreadable_after_stop"
+    else:
+        reason = None
+    return reason, wait_error
 
 
 def _spawn_create_impl(
@@ -321,7 +372,7 @@ class _IncarnationChangedError(Exception):
 
 
 class _IncarnationFencedDaemon:
-    """Delegate daemon operations, fencing ``stop`` to one session run."""
+    """Delegate daemon operations, fencing ``stop`` to one surface identity."""
 
     def __init__(self, daemon: NativeDaemonClient, expected: Session) -> None:
         self._daemon = daemon
@@ -331,15 +382,11 @@ class _IncarnationFencedDaemon:
         return getattr(self._daemon, name)
 
     def stop(self, surface_ref: str) -> None:
-        current = next(
-            (
-                candidate
-                for candidate in load_state().sessions
-                if candidate.id == self._expected.id
-            ),
-            None,
-        )
-        if current is None or _incarnation(current) != _incarnation(self._expected):
+        # The daemon's short surface id is the compare-and-stop key: it is
+        # unique to the worker incarnation and is the only identifier passed
+        # to the destructive operation. Do not perform a separate sessions
+        # state read here; a resume can commit between that read and stop.
+        if surface_ref != self._expected.surface_ref:
             raise _IncarnationChangedError
         self._daemon.stop(surface_ref)
 
