@@ -13,8 +13,8 @@ Lock rules (ADR-0019): settle holds no lock itself; the one lock is the
 STATE-rank ``dev_queue_lock(bounded=True)`` in :func:`_consume_pending_bounded`,
 preceded only by a lock-free event read, never nested under
 ``sessions_lock``, and its :class:`~cw.exceptions.LockTimeoutError` is caught
-so the verb proceeds. Settlement consumes only this row's leading pending
-completion, leaving unrelated events for the dispatch consumer to route.
+so the verb proceeds. Settlement consumes the pending completion prefix through
+this row's event, so unrelated earlier events are routed in cursor order too.
 
 Also holds :func:`live_session_notes`, the read-only diagnostic the
 idempotent PENDING ``requeue`` no-op prints instead of the live-session guard
@@ -98,13 +98,20 @@ def _recorded_terminal_status(session: Session | None) -> str | None:
 def _consume_pending_bounded(session_id: str) -> bool:
     """Route pending completions if one is *session_id*'s; True iff it was."""
     events = read_pending_completions()
-    if not events or events[0].payload.get("session_id") != session_id:
+    target_index = next(
+        (
+            index
+            for index, event in enumerate(events)
+            if event.payload.get("session_id") == session_id
+        ),
+        None,
+    )
+    if target_index is None:
         return False
     with dev_queue_lock(bounded=True):
-        # The dispatch cursor is ordered. Applying a later event would skip
-        # unrelated earlier events, so only settle when this row owns the
-        # cursor's next event and advance it by that one event.
-        apply_pending_completions(events[:1])
+        # The dispatch cursor is ordered. Apply the complete prefix through
+        # this row's event so earlier unrelated events are not skipped.
+        apply_pending_completions(events[: target_index + 1])
     return True
 
 
