@@ -54,6 +54,7 @@ from cw.dispatch import (
 )
 from cw.dispatch.claim.screening import resolve_occupied_ticket_ids
 from cw.exceptions import CwError
+from cw.history import EventType, HistoryEvent, load_history
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
@@ -3916,13 +3917,21 @@ def _session(session_id: str = "sess-1") -> Session:
     return sess
 
 
+def _cancel_close_events() -> list[HistoryEvent]:
+    return [
+        event
+        for event in load_history(
+            _CANCEL_CLIENT, event_types=[EventType.SESSION_COMPLETED]
+        )
+        if event.detail == "operator_close"
+    ]
+
+
 @pytest.mark.usefixtures("tmp_config_dir")
 class TestCLIDevQueueCancelClosesSession:
     """`cancel` stops the session, then flips it (#2694)."""
 
-    def test_stops_then_marks_completed(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_stops_then_marks_completed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cw.models import CompletionReason, counts_toward_client_ceiling
 
         fake = _seed_cancel_world()
@@ -3948,6 +3957,34 @@ class TestCLIDevQueueCancelClosesSession:
         assert sess.completed_reason is CompletionReason.USER
         assert sess.completed_at is not None
         assert not counts_toward_client_ceiling(sess, _CANCEL_CLIENT)
+        (event,) = _cancel_close_events()
+        assert event.metadata["command"] == "cw dev-queue cancel"
+        assert event.metadata["session_id"] == "sess-1"
+        assert event.metadata["prior_status"] == "active"
+        assert event.metadata["resulting_status"] == "completed"
+
+    @pytest.mark.parametrize(
+        "make_unconfirmable",
+        [_stop_leaves_worker_listed, _stop_makes_roster_unreadable],
+        ids=["still-listed", "roster-unreadable"],
+    )
+    def test_unconfirmed_stop_does_not_flip_session(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        make_unconfirmable: Callable[
+            [pytest.MonkeyPatch, FakeNativeDaemonClient], None
+        ],
+    ) -> None:
+        fake = _seed_cancel_world()
+        make_unconfirmable(monkeypatch, fake)
+        monkeypatch.setattr("cw.cli.spawn._CANCEL_STOP_CONFIRM_TIMEOUT_S", 0.0)
+
+        result = _cancel(monkeypatch, fake)
+
+        assert result.exit_code == 1
+        assert "still in the daemon roster" in result.output
+        assert _session().status is SessionStatus.ACTIVE
+        assert _cancel_close_events() == []
 
     def test_a_resumed_incarnation_is_left_running_and_reported(
         self, monkeypatch: pytest.MonkeyPatch

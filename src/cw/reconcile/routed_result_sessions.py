@@ -56,6 +56,7 @@ from cw.models import (
     ReapReason,
     SessionOrigin,
     SessionPurpose,
+    counts_toward_client_ceiling,
 )
 from cw.reconcile._shared import (
     _LIVE_STATUSES,
@@ -73,7 +74,7 @@ from cw.reconcile.liveness import _classify_liveness_bucket
 from cw.reconcile.liveness_page import close_command
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
     from datetime import datetime
 
     from cw.models import (
@@ -132,6 +133,39 @@ def session_pins_occupied_row(tasks: Iterable[TicketTask], session_id: str) -> b
     erring toward protecting the session.
     """
     return _first_pinning_row(tasks, session_id) is not None
+
+
+ORPHAN_SESSION_ID_CAP = 5
+
+
+def unowned_ceiling_sessions(
+    sessions: Iterable[Session], tasks: Sequence[TicketTask], client_name: str
+) -> tuple[Session, ...]:
+    """Return ceiling-counted sessions no occupied row owns, oldest first."""
+    return tuple(
+        sorted(
+            (
+                session
+                for session in sessions
+                if counts_toward_client_ceiling(session, client_name)
+                and not session_pins_occupied_row(tasks, session.id)
+            ),
+            key=lambda session: session.started_at,
+        )
+    )
+
+
+def format_orphan_sessions(
+    sessions: Sequence[Session], *, cap: int = ORPHAN_SESSION_ID_CAP
+) -> str:
+    """Render orphan sessions as ids and tickets with a bounded suffix."""
+    shown = ", ".join(
+        f"{session.id} ({ticket_id_for_session(session.name) or session.name})"
+        for session in sessions[:cap]
+    )
+    hidden = len(sessions) - cap
+    more = f" (+{hidden} more)" if hidden > 0 else ""
+    return f"{shown}{more}"
 
 
 def _first_pinning_row(

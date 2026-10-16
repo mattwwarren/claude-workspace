@@ -1804,9 +1804,15 @@ A `session.needs_attention` with `paused_status=dispatch_loop_stale` (#1875)
 says: **this client has pending work, its last `dispatch.tick` is older than
 90s, and it is not sitting behind a live executor-blocked marker.** It recurs
 every `dispatch_stale_notify_interval_minutes` (default 15) until the
-condition clears. `breadcrumbs` carries `pending=<n> age_s=<n>`; the client is
-in the `client` field (`ticket_id` is null — this signal is client-scoped,
-not ticket-scoped).
+condition clears. `breadcrumbs` carries `pending=<n> age_s=<n> skip=<reason>
+occupied=<n> running=<r>/<cap> orphan_sessions=<none | <id> (<ticket>), ...>`
+(#2694); the client is in the `client` field (`ticket_id` is null — this
+signal is client-scoped, not ticket-scoped). The `skip=`, `occupied=` and
+`running=` fields are the last tick's (`age_s` ago), so `skip=cap_full` or
+`skip=lane_cap_blocked` says the loop was ticking but full; the
+`orphan_sessions=` list is read now and names ceiling-counted sessions no
+occupied row owns. If state is unreadable, the breadcrumb degrades to the old
+`pending=<n> age_s=<n>` text and logs one WARNING.
 
 Triage in this order — the page does *not* tell you which of these it is:
 

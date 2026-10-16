@@ -19,6 +19,7 @@ from cw.codex_review import CODEX_REVIEW_UNPARSEABLE
 from cw.config import load_state, orchestrator_config_file, save_state
 from cw.dev_queue import load_dev_queue
 from cw.exceptions import CwError, SpawnUnregisteredError, WorkerLaunchedError
+from cw.history import EventType, HistoryEvent, load_history
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     MUST_FIX_OVERRIDE_KEY,
@@ -3192,6 +3193,7 @@ class TestSpawnCLI:
 
 class TestSpawnCloseLockWait:
     """`cw spawn close` waits 5 s for a held sessions lock (#2694)."""
+
     def test_held_lock_fails_after_five_seconds_naming_the_holder(
         self,
         tmp_config_dir: Path,
@@ -3269,6 +3271,55 @@ def _status_of(session_id: str) -> SessionStatus:
     sess = load_state().find_by_name_or_id(session_id)
     assert sess is not None
     return sess.status
+
+
+def _operator_close_events(client: str = "test-client") -> list[HistoryEvent]:
+    return [
+        event
+        for event in load_history(client, event_types=[EventType.SESSION_COMPLETED])
+        if event.detail == "operator_close"
+    ]
+
+
+class TestSpawnCloseAudit:
+    def test_inline_close_records_identity_and_status(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        sess = _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            surface_ref="ref-audit",
+            claude_session_id="csid-audit",
+        )
+        result = CliRunner().invoke(main, ["spawn", "close", sess.id])
+
+        assert result.exit_code == 0, result.output
+        (event,) = _operator_close_events()
+        assert event.session_id == sess.id
+        assert event.metadata["command"] == "cw spawn close"
+        assert event.metadata["prior_status"] == "active"
+        assert event.metadata["resulting_status"] == "completed"
+        assert event.metadata["surface_ref"] == "ref-audit"
+        assert event.metadata["claude_session_id"] == "csid-audit"
+
+    def test_audit_failure_is_reported_after_close(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir, surface_ref="ref-audit")
+
+        def _fail(*_args: object) -> None:
+            message = "disk full"
+            raise OSError(message)
+
+        monkeypatch.setattr("cw.cli.spawn.record_history_event", _fail)
+        result = CliRunner().invoke(main, ["spawn", "close", sess.id])
+
+        assert result.exit_code == 1
+        assert "audit record could not be written" in result.output
+        assert _status_of(sess.id) is SessionStatus.COMPLETED
 
 
 class TestSpawnCloseRequeue:

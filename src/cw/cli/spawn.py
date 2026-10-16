@@ -31,6 +31,8 @@ from cw.dev_queue import (
 from cw.dispatch import _DISPATCH_CONSUMER, _apply_events_to_store
 from cw.events import advance_cursor, record_event
 from cw.exceptions import CwError, RequeueStateError, SessionsLockTimeoutError
+from cw.history import EventType, HistoryEvent
+from cw.history import record_event as record_history_event
 from cw.models import (
     TERMINAL_SESSION_STATUSES,
     ClientConfig,
@@ -44,6 +46,7 @@ from cw.models import (
 from cw.native_daemon import (
     NativeDaemonClient,
     get_native_daemon_client,
+    wait_for_roster_presence,
 )
 from cw.reconcile import (
     _apply_sentinel_to_task,
@@ -60,6 +63,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ``detail`` of the one history record every operator session close leaves
+# (#2694): ``cw spawn close`` and the ``cw dev-queue cancel`` session step.
+OPERATOR_CLOSE_DETAIL = "operator_close"
+_SPAWN_CLOSE_COMMAND = "cw spawn close"
+_CANCEL_COMMAND = "cw dev-queue cancel"
+# How long the cancel session step polls the daemon roster for a stopped
+# worker to leave before it refuses to mark the session completed (#2694);
+# the routed-orphan close's confirmation window.
+_CANCEL_STOP_CONFIRM_TIMEOUT_S = 5.0
+_CANCEL_STOP_CONFIRM_INTERVAL_S = 0.5
 
 
 def _spawn_create_impl(
@@ -119,12 +132,50 @@ def _route_staged_emit_result(sess: Session) -> bool:
     return outcome.routed or outcome.task_already_terminal
 
 
+def record_operator_close(
+    sess: Session, *, command: str, prior_status: SessionStatus
+) -> None:
+    """Record the one durable history event of an operator close (#2694)."""
+    metadata = {
+        "actor": "operator",
+        "command": command,
+        "session_id": sess.id,
+        "ticket_id": ticket_id_for_session(sess.name) or "",
+        "surface_ref": sess.surface_ref or "",
+        "claude_session_id": sess.claude_session_id or "",
+        "started_at": sess.started_at.isoformat(),
+        "prior_status": prior_status.value,
+        "resulting_status": sess.status.value,
+    }
+    event = HistoryEvent(
+        event_type=EventType.SESSION_COMPLETED,
+        client=sess.client,
+        session_id=sess.id,
+        session_name=sess.name,
+        purpose=sess.purpose,
+        detail=OPERATOR_CLOSE_DETAIL,
+        metadata=metadata,
+    )
+    try:
+        record_history_event(sess.client, event)
+    except (OSError, ValueError) as exc:
+        logger.exception(
+            "operator_close_audit_failed: session_id=%s command=%s", sess.id, command
+        )
+        message = (
+            f"Session {sess.id} was closed, but its audit record could not be"
+            f" written: {exc}"
+        )
+        raise CwError(message) from exc
+
+
 def _spawn_close_impl(
     *,
     session_id: str,
     native_daemon: NativeDaemonClient | None = None,
     surface_already_stopped: bool = False,
     lock_timeout_s: float | None = None,
+    audit_command: str | None = None,
 ) -> None:
     """Close a daemon-spawned session.
 
@@ -141,9 +192,11 @@ def _spawn_close_impl(
     *lock_timeout_s* (#2694) bounds the sessions-lock wait (``None``: the
     env-or-60 s default); a held lock raises
     :class:`~cw.exceptions.SessionsLockTimeoutError` naming the recorded
-    holder and nothing is closed.
+    holder and nothing is closed. *audit_command* names the operator command
+    whose close is audited after the state save; ``None`` records nothing.
     """
     surface_to_stop: str | None = None
+    closed: tuple[Session, SessionStatus] | None = None
     # Why not mutate_state: cancel_task_for_session / _route_staged_emit_result
     # take dev_queue_lock inside the sessions_lock window (criterion 2: no
     # dual-lock).
@@ -189,6 +242,7 @@ def _spawn_close_impl(
             ):
                 cancel_task_for_session(sess.id)
 
+            closed = (sess, sess.status)
             sess.status = SessionStatus.COMPLETED
             sess.completed_at = datetime.now(UTC)
             sess.completed_reason = CompletionReason.USER
@@ -197,8 +251,14 @@ def _spawn_close_impl(
     # daemon.stop is best-effort and slow (up to 10s), so it runs after the lock
     # releases (#2547, mirrors signal_stop / done_session). A raise leaves the
     # state already stamped; a repeat close retries just the stop (#2480).
-    if surface_to_stop is not None and not surface_already_stopped:
-        (native_daemon or get_native_daemon_client()).stop(surface_to_stop)
+    try:
+        if closed is not None and audit_command is not None:
+            record_operator_close(
+                closed[0], command=audit_command, prior_status=closed[1]
+            )
+    finally:
+        if surface_to_stop is not None and not surface_already_stopped:
+            (native_daemon or get_native_daemon_client()).stop(surface_to_stop)
 
 
 class CancelCloseOutcome(NamedTuple):
@@ -226,6 +286,26 @@ class CancelCloseOutcome(NamedTuple):
 def _incarnation(sess: Session) -> tuple[object, ...]:
     """What identifies one run of *sess*; a resume changes it (#2694)."""
     return (sess.started_at, sess.resumed_at, sess.surface_ref)
+
+
+def _stop_until_gone(sess: Session, daemon: NativeDaemonClient) -> str | None:
+    """Stop *sess*'s worker and confirm it left the roster."""
+    if sess.surface_ref is None:
+        return None
+    daemon.stop(sess.surface_ref)
+    if sess.status in TERMINAL_SESSION_STATUSES or wait_for_roster_presence(
+        daemon,
+        sess.surface_ref,
+        present=False,
+        timeout=_CANCEL_STOP_CONFIRM_TIMEOUT_S,
+        interval=_CANCEL_STOP_CONFIRM_INTERVAL_S,
+    ):
+        return None
+    return (
+        f"Session {sess.id}: its worker {sess.surface_ref} is still in the daemon"
+        " roster (or the roster is unreadable) after the stop, so the session was"
+        f" not marked completed; run `cw spawn close {sess.id}` once it is gone."
+    )
 
 
 def _flip_cancelled(
@@ -261,6 +341,66 @@ def _flip_cancelled(
     return flipped, resumed
 
 
+def _resumed_message(sid: str) -> str:
+    """The line for a session whose incarnation changed since the cancel read it."""
+    return (
+        f"Session {sid} was resumed into a new incarnation after the cancel read"
+        " it, so it was left as is (not marked completed); run"
+        f" `cw spawn close {sid}` if it should not run."
+    )
+
+
+def _bound_daemon_sessions(
+    wanted: set[str], bound_sessions: Mapping[str, Session] | None
+) -> tuple[dict[str, Session], list[str]]:
+    """The cancelled row's DAEMON sessions to stop, plus one line per skip.
+
+    A session whose current incarnation differs from the *bound_sessions*
+    capture (or, without one, from itself) is reported, never returned.
+    """
+    read: dict[str, Session] = {}
+    skipped: list[str] = []
+    for sess in load_state().sessions if wanted else ():
+        if sess.id not in wanted or sess.origin is not SessionOrigin.DAEMON:
+            continue
+        bound = sess if bound_sessions is None else bound_sessions.get(sess.id)
+        if bound is None:
+            continue
+        if _incarnation(sess) != _incarnation(bound):
+            skipped.append(_resumed_message(sess.id))
+        else:
+            read[sess.id] = bound
+    return read, skipped
+
+
+def _stop_to_flip(
+    read: Mapping[str, Session], daemon: NativeDaemonClient
+) -> tuple[dict[str, Session], list[str]]:
+    """Stop each *read* worker; return those confirmed gone and still to flip."""
+    to_flip: dict[str, Session] = {}
+    problems: list[str] = []
+    for sess in read.values():
+        problem = _stop_until_gone(sess, daemon)
+        if problem is not None:
+            problems.append(problem)
+        elif sess.status not in TERMINAL_SESSION_STATUSES:
+            to_flip[sess.id] = sess
+    return to_flip, problems
+
+
+def _audit_flipped(flipped: Iterable[tuple[Session, SessionStatus]]) -> list[str]:
+    """Record the operator-close event of each flipped session; return failures."""
+    problems: list[str] = []
+    for sess, prior_status in flipped:
+        try:
+            record_operator_close(
+                sess, command=_CANCEL_COMMAND, prior_status=prior_status
+            )
+        except CwError as exc:
+            problems.append(str(exc))
+    return problems
+
+
 def close_cancelled_sessions(
     session_ids: Iterable[str | None],
     daemon: NativeDaemonClient,
@@ -274,48 +414,25 @@ def close_cancelled_sessions(
     row: the sessions bound to it at cancel time (#2694). The optional
     *bound_sessions* mapping is captured before the row cancellation; a
     changed incarnation is never stopped. Each matching DAEMON session is
-    stopped lock-free and then flipped COMPLETED(USER) under one sessions-lock wait of
+    stopped lock-free, confirmed gone from the daemon roster, and only then
+    flipped COMPLETED(USER) under one sessions-lock wait of
     :func:`~cw._flock.operator_close_lock_wait_seconds` (none once *prior*
     timed out), re-checked against the incarnation that was read. USER-origin
     and unknown ids are untouched. A sessions-lock timeout leaves the stopped
-    sessions unflipped and reports the pending flip; nothing is queued. Returns
-    *prior* extended with this ticket's problems.
+    sessions unflipped and reports the pending flip; nothing is queued. Each
+    flip records one operator-close audit event. Returns *prior* extended with
+    this ticket's problems.
     """
-    wanted = {sid for sid in session_ids if sid is not None}
-    current = {
-        s.id: s for s in (load_state().sessions if wanted else ()) if s.id in wanted
-    }
-    problems = list(prior.problems)
-    read: dict[str, Session] = {}
-    for sid, current_sess in current.items():
-        if bound_sessions is None:
-            bound = current_sess
-        else:
-            bound = bound_sessions.get(sid)
-            if bound is None:
-                continue
-        if current_sess.origin is not SessionOrigin.DAEMON:
-            continue
-        if _incarnation(current_sess) != _incarnation(bound):
-            problems.append(
-                f"Session {sid} was resumed into a new incarnation after the"
-                " cancel read"
-                " it, so it was left as is (not marked completed); run"
-                f" `cw spawn close {sid}` if it should not run."
-            )
-            continue
-        read[sid] = bound
-    to_flip: dict[str, Session] = {}
-    for sess in read.values():
-        if sess.surface_ref is not None:
-            daemon.stop(sess.surface_ref)
-        if sess.status not in TERMINAL_SESSION_STATUSES:
-            to_flip[sess.id] = sess
+    read, skipped = _bound_daemon_sessions(
+        {sid for sid in session_ids if sid is not None}, bound_sessions
+    )
+    to_flip, stop_problems = _stop_to_flip(read, daemon)
+    problems = [*prior.problems, *skipped, *stop_problems]
     if not to_flip:
         return prior._replace(problems=tuple(problems))
     wait_s = 0.0 if prior.lock_timed_out else operator_close_lock_wait_seconds()
     try:
-        _flipped, resumed = _flip_cancelled(to_flip, wait_s)
+        flipped, resumed = _flip_cancelled(to_flip, wait_s)
     except SessionsLockTimeoutError as exc:
         problems.extend(
             f"Session {sid}: the worker was stopped, but the record flip is"
@@ -325,12 +442,8 @@ def close_cancelled_sessions(
         )
         problems.append(str(exc))
         return CancelCloseOutcome(tuple(problems), lock_timed_out=True)
-    problems.extend(
-        f"Session {sid} was resumed into a new incarnation after the cancel read"
-        " it, so it was left as is (not marked completed); run"
-        f" `cw spawn close {sid}` if it should not run."
-        for sid in resumed
-    )
+    problems.extend(_resumed_message(sid) for sid in resumed)
+    problems.extend(_audit_flipped(flipped))
     return prior._replace(problems=tuple(problems))
 
 
@@ -550,6 +663,7 @@ def spawn_close(session_id: str, confirmed_dead: bool, requeue: bool) -> None:
     _spawn_close_impl(
         session_id=session_id,
         lock_timeout_s=operator_close_lock_wait_seconds(),
+        audit_command=_SPAWN_CLOSE_COMMAND,
     )
     click.echo(f"Closed session: {session_id}")
 
