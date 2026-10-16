@@ -30,6 +30,7 @@ from cw.dev_queue import (
     add_ticket,
     dev_queue_lock,
     load_dev_queue,
+    requeue_ticket,
     save_dev_queue,
     save_plan,
     transition_task_status,
@@ -20317,6 +20318,41 @@ class TestUnproductiveAttemptRouting:
         assert claimed.disposition != DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value
         assert claimed.unproductive_attempts == 1
         assert claimed.unproductive_attempts < ceiling
+
+    def test_reset_attempts_requeue_lets_an_attempt_capped_row_claim(
+        self, sample_client_config: ClientConfig, simple_config: OrchestratorConfig
+    ) -> None:
+        from cw.dispatch.claim import _claim_next_pending
+
+        write_clients_yaml(sample_client_config)
+        task = _make_ticket_task(
+            ticket_id="UP-2695-RST",
+            client="test-client",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            stage=Stage.IMPL,
+            disposition=DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value,
+            unproductive_attempts=DEFAULT_GLOBAL_ATTEMPT_CEILING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket(
+            "UP-2695-RST",
+            "test-client",
+            reset_attempts=True,
+            native_daemon=FakeNativeDaemonClient(),
+        )
+
+        assert result["attempts_reset"] is True
+        claimed, _skipped = _claim_next_pending(
+            "test-client",
+            lane="default",
+            client=sample_client_config,
+            config=simple_config,
+        )
+        assert claimed is not None
+        assert claimed.ticket_id == "UP-2695-RST"
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.unproductive_attempts == 0
 
 
 # ---------------------------------------------------------------------------

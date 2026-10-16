@@ -327,6 +327,15 @@ CASES: dict[str, Case] = {
         with_session=False,
         expected=[_OVERRIDE_CMD, _SHIP_CMD],
     ),
+    "rule6b_attempt_cap_blocked": Case(
+        make_blocked(
+            stage=Stage.IMPL,
+            disposition="attempt_cap_blocked",
+            unproductive_attempts=10,
+        ),
+        with_session=False,
+        expected=[cmd("requeue", "--reset-attempts")],
+    ),
     "rule7_salvage_parked": Case(
         make_blocked(stage=Stage.IMPL),
         reap_reason=ReapReason.SALVAGE_PARKED,
@@ -396,6 +405,11 @@ CASES: dict[str, Case] = {
         make_blocked(stage=Stage.REVIEW, blocked_reason=CODEX_MUST_FIX_FINDINGS),
         session_last_result=REVIEW_PENDING,
         expected=[_OVERRIDE_CMD, _SHIP_CMD],
+    ),
+    "order_rule6b_before_rule9": Case(
+        make_blocked(stage=Stage.PLAN, disposition="attempt_cap_blocked"),
+        session_last_result=PLAN_PENDING,
+        expected=[cmd("requeue", "--reset-attempts")],
     ),
     "order_rule7_before_rule9": Case(
         make_blocked(stage=Stage.PLAN, disposition="approval_gate"),
