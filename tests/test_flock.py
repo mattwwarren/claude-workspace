@@ -885,6 +885,48 @@ class TestHolderRecord:
         with lock.open("a+") as fd:
             assert _flock.read_lock_holder(fd) is None
 
+    @pytest.mark.parametrize(
+        "record",
+        [
+            {"pid": os.getpid(), "cmd": "cw", "acquired_at": "2026-10-01T12:00:00"},
+            {"pid": 0, "cmd": "cw", "acquired_at": "2026-10-01T12:00:00+00:00"},
+            {"pid": -5, "cmd": "cw", "acquired_at": "2026-10-01T12:00:00+00:00"},
+            {"pid": 2**70, "cmd": "cw", "acquired_at": "2026-10-01T12:00:00+00:00"},
+        ],
+        ids=["naive-timestamp", "pid-zero", "pid-negative", "pid-overflows-os-kill"],
+    )
+    def test_read_treats_an_unverifiable_record_as_no_holder(
+        self, tmp_path: Path, record: dict[str, object]
+    ) -> None:
+        """A naive timestamp or a pid ``os.kill`` cannot probe is an unknown holder."""
+        lock = tmp_path / "lock"
+        lock.write_text(json.dumps(record))
+
+        with lock.open("a+") as fd:
+            assert _flock.read_lock_holder(fd) is None
+
+    def test_naive_holder_timestamp_never_breaks_the_timeout_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_clock(monkeypatch, _FakeClock())
+        lock = tmp_path / ".sessions.lock"
+        naive = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=3)
+        lock.write_text(
+            json.dumps(
+                {"pid": os.getpid(), "cmd": "cw list", "acquired_at": naive.isoformat()}
+            )
+        )
+
+        with (
+            _hold_flock_append(lock),
+            lock.open("a+") as fd,
+            pytest.raises(SessionsLockTimeoutError) as exc_info,
+        ):
+            acquire_sessions_flock(fd, lock, bounded=True, timeout_s=0)
+
+        assert "the lock file records no PID" in str(exc_info.value)
+        assert "Recorded holder" not in str(exc_info.value)
+
     def test_read_returns_none_for_a_write_only_fd(self, tmp_path: Path) -> None:
         lock = tmp_path / "lock"
 

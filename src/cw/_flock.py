@@ -246,8 +246,26 @@ def clear_lock_holder(fd: IO[str]) -> None:
         _log.debug("lock_holder_clear_failed", exc_info=True)
 
 
+def _parse_aware_time(raw: object) -> datetime | None:
+    """*raw* as a timezone-aware datetime, or ``None`` (naive or unparseable)."""
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    # A naive value cannot be subtracted from the aware "now" the timeout
+    # message uses, so it is as unusable as an unparseable one.
+    return parsed if parsed.utcoffset() is not None else None
+
+
 def _parse_lock_holder(raw: str) -> LockHolder | None:
-    """Parse a holder record, or ``None`` when it is empty or malformed."""
+    """Parse a holder record, or ``None`` when it is empty or unusable.
+
+    Unusable: malformed JSON, a wrong-typed field, a pid that is not a
+    positive int (``os.kill`` reads 0 and negatives as process groups), or an
+    ``acquired_at`` that is not a timezone-aware ISO-8601 timestamp.
+    """
     try:
         data = json.loads(raw)
     except ValueError:
@@ -256,25 +274,25 @@ def _parse_lock_holder(raw: str) -> LockHolder | None:
         return None
     pid = data.get("pid")
     cmd = data.get("cmd")
-    acquired_raw = data.get("acquired_at")
-    if type(pid) is not int or not isinstance(cmd, str):
+    if type(pid) is not int or pid <= 0 or not isinstance(cmd, str):
         return None
-    if not isinstance(acquired_raw, str):
-        return None
-    try:
-        acquired_at = datetime.fromisoformat(acquired_raw)
-    except ValueError:
+    acquired_at = _parse_aware_time(data.get("acquired_at"))
+    if acquired_at is None:
         return None
     return LockHolder(pid=pid, cmd=cmd, acquired_at=acquired_at)
 
 
 def _pid_alive(pid: int) -> bool:
-    """True when *pid* names a live process (``PermissionError`` counts)."""
+    """True when *pid* names a live process (``PermissionError`` counts).
+
+    A pid too large for ``os.kill`` (``OverflowError``) is not alive: the
+    timeout path that calls this must never raise.
+    """
     try:
         os.kill(pid, 0)
     except PermissionError:
         return True
-    except OSError:
+    except (OSError, OverflowError):
         return False
     return True
 
