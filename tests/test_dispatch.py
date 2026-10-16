@@ -53,12 +53,16 @@ from cw.dispatch import (
 )
 from cw.dispatch.claim.codex_capability import _SpawnOutcome
 from cw.dispatch.claim.spawn import _handle_post_launch_failure
-from cw.dispatch.loop import _run_stale_client_watchdog_guarded
+from cw.dispatch.loop import (
+    _run_stale_client_watchdog_guarded,
+    apply_pending_completions,
+    read_pending_completions,
+)
 from cw.dispatch_state import (
     merge_and_save_usage_limited_until,
     save_usage_limit_armed_at,
 )
-from cw.events import read_events, record_event
+from cw.events import load_cursor, read_events, record_event
 from cw.exceptions import (
     ConfigValidationError,
     DispatchLoopLockedError,
@@ -112,6 +116,7 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
+    from cw.models import OrchestratorEvent
     from cw.native_daemon import NativeDaemonClient
     from cw.worktree import FetchWarningKey, UnresolvablePathWarningKey
     from tests.conftest import CapturedEvent
@@ -538,6 +543,72 @@ class TestConsumeCompletesTasks:
 
         updated_store = load_dev_queue()
         assert updated_store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+
+    def _seed_completion(self, sample_client_config: ClientConfig) -> None:
+        write_clients_yaml(sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-310",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-310",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {"ticket_id": "GEN-310", "session_id": "sess-310", "client": "test-client"},
+        )
+
+    def test_read_pending_completions_is_read_only(
+        self, sample_client_config: ClientConfig
+    ) -> None:
+        """#2692: the read half moves no cursor and takes no dev-queue lock."""
+        self._seed_completion(sample_client_config)
+        events = read_pending_completions()
+        assert [e.payload["session_id"] for e in events] == ["sess-310"]
+        assert load_cursor("dispatch") is None
+        assert read_pending_completions() == events
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
+
+    def test_apply_pending_completions_routes_and_advances_the_cursor(
+        self, sample_client_config: ClientConfig
+    ) -> None:
+        self._seed_completion(sample_client_config)
+        events = read_pending_completions()
+        with dev_queue_lock():
+            assert apply_pending_completions(events) == 1
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+        assert load_cursor("dispatch") == events[-1].id
+        assert read_pending_completions() == []
+
+    def test_consume_applies_under_the_dev_queue_lock(
+        self, sample_client_config: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import cw.dispatch.loop as loop_mod
+        from cw._lock_guard import LockRank, is_rank_held
+
+        self._seed_completion(sample_client_config)
+        real_apply = loop_mod.apply_pending_completions
+        held: list[bool] = []
+
+        def _spy(events: list[OrchestratorEvent]) -> int:
+            held.append(is_rank_held(LockRank.STATE))
+            return real_apply(events)
+
+        monkeypatch.setattr(loop_mod, "apply_pending_completions", _spy)
+        assert consume_completed_sessions() == 1
+        assert held == [True]
+
+    def test_consume_with_no_events_never_takes_the_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import cw.dispatch.loop as loop_mod
+
+        def _boom(*_a: object, **_kw: object) -> object:
+            msg = "lock taken with no events"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(loop_mod, "dev_queue_lock", _boom)
+        assert consume_completed_sessions() == 0
 
     def test_consume_skips_legacy_event_with_no_ticket_id_owning_client(
         self,

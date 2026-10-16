@@ -12484,10 +12484,10 @@ class TestCLIRequeue:
         assert result.exit_code == 0, result.output
         assert "plan -> impl" in result.output
 
-    def test_requeue_backward_stage_exits_nonzero(
+    def test_requeue_backward_stage_infers_regress(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """Backward --stage exits 1."""
+        """#2692: a backward --stage on a parked row is an inferred regress."""
         _write_client_yaml(tmp_config_dir, tmp_path)
         task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess6003")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -12505,7 +12505,15 @@ class TestCLIRequeue:
                 "plan",
             ],
         )
-        assert result.exit_code != 0
+        assert result.exit_code == 0, result.output
+        assert "Inferred --regress: 'plan' is behind 'review'." in result.stdout
+        assert "Requeued GEN-500 (genhealth): review -> plan (PENDING)" in (
+            result.stdout
+        )
+        row = load_dev_queue().tasks[0]
+        assert row.status == QueueItemStatus.PENDING
+        assert row.stage == Stage.PLAN
+        assert row.regress_attempts == 1
 
     def test_requeue_live_session_exits_nonzero(
         self,
@@ -12605,10 +12613,10 @@ class TestCLIRequeue:
         assert result.exit_code != 0
         assert ".cw/plan.md" in result.output
 
-    def test_requeue_non_blocked_exits_nonzero(
+    def test_requeue_pending_row_is_an_idempotent_noop(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """PENDING ticket exits 1."""
+        """#2692: requeue of a PENDING ticket is a no-op that exits 0."""
         _write_client_yaml(tmp_config_dir, tmp_path)
         task = TicketTask(
             ticket_id="GEN-500",
@@ -12617,13 +12625,19 @@ class TestCLIRequeue:
             stage=Stage.PLAN,
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
+        before = load_dev_queue().model_dump()
 
         runner = CliRunner()
         result = runner.invoke(
             main,
             ["dev-queue", "requeue", "GEN-500", "--client", "genhealth"],
         )
-        assert result.exit_code != 0
+        assert result.exit_code == 0, result.output
+        assert "is already PENDING at plan; nothing to requeue." in result.stdout
+        from cw.events import read_events
+
+        assert read_events(event_types=[OrchestratorEventType.TICKET_REQUEUED]) == []
+        assert load_dev_queue().model_dump() == before
 
     # -- Issue #917: --regress flag ----------------------------------------
 
@@ -12716,7 +12730,7 @@ class TestCLIRequeue:
 
         captured: list[dict[str, object]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.record_event",
+            "cw.cli.dev_queue._requeue_echo.record_event",
             lambda _type, payload=None, **__: captured.append(payload or {}),
         )
 
@@ -12758,7 +12772,7 @@ class TestCLIRequeue:
 
         captured: list[dict[str, object]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.record_event",
+            "cw.cli.dev_queue._requeue_echo.record_event",
             lambda _type, payload=None, **__: captured.append(payload or {}),
         )
 
@@ -12850,7 +12864,7 @@ class TestCLIRequeue:
 
         captured: list[dict[str, object]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.record_event",
+            "cw.cli.dev_queue._requeue_echo.record_event",
             lambda _type, payload=None, **__: captured.append(payload or {}),
         )
 
@@ -12889,7 +12903,7 @@ class TestCLIRequeue:
 
         captured: list[dict[str, object]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.record_event",
+            "cw.cli.dev_queue._requeue_echo.record_event",
             lambda _type, payload=None, **__: captured.append(payload or {}),
         )
 
@@ -12976,7 +12990,7 @@ class TestCLIRequeue:
 
         captured: list[dict[str, object]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.record_event",
+            "cw.cli.dev_queue._requeue_echo.record_event",
             lambda _type, payload=None, **__: captured.append(payload or {}),
         )
 
@@ -13015,7 +13029,7 @@ class TestCLIRequeue:
 
         captured: list[dict[str, object]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.record_event",
+            "cw.cli.dev_queue._requeue_echo.record_event",
             lambda _type, payload=None, **__: captured.append(payload or {}),
         )
 
@@ -13107,7 +13121,7 @@ class TestCLIRequeue:
 
         captured: list[dict[str, object]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.record_event",
+            "cw.cli.dev_queue._requeue_echo.record_event",
             lambda _type, payload=None, **__: captured.append(payload or {}),
         )
 
@@ -13146,7 +13160,7 @@ class TestCLIRequeue:
 
         captured: list[dict[str, object]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.record_event",
+            "cw.cli.dev_queue._requeue_echo.record_event",
             lambda _type, payload=None, **__: captured.append(payload or {}),
         )
 
@@ -13558,6 +13572,21 @@ class TestCLIRequeueRoutedOrphan:
         )
         assert closed_at < result.output.index("Requeued GEN-500")
 
+    def test_inferred_regress_closes_the_orphan_then_requeues(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2692: a backward --stage without --regress is inferred, so the
+        orphan close runs like any other legal requeue."""
+        world = self._seed(tmp_config_dir, tmp_path, monkeypatch)
+
+        result = _invoke("requeue", "--stage", "plan")
+
+        assert result.exit_code == 0, result.output
+        assert world.fake.stop_calls == [world.surface]
+        assert _orphan_status() == SessionStatus.COMPLETED
+        assert _gen500().status == QueueItemStatus.PENDING
+        assert _gen500().stage == Stage.PLAN
+
     @_STOP_FAILURE_SHAPES
     def test_unconfirmed_stop_refuses_and_leaves_the_row(
         self,
@@ -13614,12 +13643,8 @@ class TestCLIRequeueRoutedOrphan:
 
     @pytest.mark.parametrize(
         ("row_status", "args"),
-        [
-            (QueueItemStatus.PENDING, ()),
-            (QueueItemStatus.BLOCKED_ON_USER, ("--regress",)),
-            (QueueItemStatus.BLOCKED_ON_USER, ("--stage", "plan")),
-        ],
-        ids=["pending_row", "regress_without_stage", "backward_without_regress"],
+        [(QueueItemStatus.BLOCKED_ON_USER, ("--regress",))],
+        ids=["regress_without_stage"],
     )
     def test_predicted_refusals_stop_nothing(
         self,
@@ -13634,6 +13659,21 @@ class TestCLIRequeueRoutedOrphan:
         result = _invoke("requeue", *args)
 
         assert result.exit_code != 0
+        assert world.fake.stop_calls == []
+        assert _orphan_status() == SessionStatus.ACTIVE
+
+    def test_pending_row_noop_stops_nothing(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2692: the idempotent no-op exits before the routed-orphan close."""
+        world = self._seed(
+            tmp_config_dir, tmp_path, monkeypatch, row_status=QueueItemStatus.PENDING
+        )
+
+        result = _invoke("requeue")
+
+        assert result.exit_code == 0, result.output
+        assert "already PENDING" in result.output
         assert world.fake.stop_calls == []
         assert _orphan_status() == SessionStatus.ACTIVE
 
