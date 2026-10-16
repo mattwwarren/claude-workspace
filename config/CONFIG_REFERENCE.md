@@ -749,6 +749,12 @@ Both the dispatch admission gate and the concierge's recovery recipes resolve
 the ceiling through the same code path, so the concierge can never refuse to
 requeue a row that dispatch would have happily claimed.
 
+Human-input parks other than `plan_pending_approval`, operator-unavailable
+`blocked` results and raw-`OSError` spawn failures do not charge the counter
+(#2695); `cw dev-queue requeue <T> -c <CLIENT> --reset-attempts` zeroes it to
+clear an `attempt_cap_blocked` park, and `cw dev-queue tasks` shows it as
+`u/ceiling`.
+
 ```yaml
 clients:
   my-project:
@@ -1051,7 +1057,14 @@ operator_github_login_by_repo: {}
 # evidence of progress; #786, re-pointed at that counter by #1750) — a
 # spawn-time admission gate (parks BLOCKED_ON_USER as attempt_cap_blocked
 # instead of spawning again), not a process-kill timer. The raw `attempts`
-# claim counter is never compared against it.
+# claim counter is never compared against it. Not charged (#2695):
+# ambiguities_pending_resolution, premises_pending_verification and
+# review_pending_approval parks, blocked results whose blocker.reason is
+# operator-unavailable (push_auth_failed, operator_unavailable,
+# dependency_unmerged, impl_comments_unreadable_after_regress), and raw-OSError
+# spawn failures. plan_pending_approval still charges (auto_adopt_clean_plan
+# can re-claim it without a human), as do plain CwError wraps from
+# `claude --bg` (#2722). Clear a park with `requeue --reset-attempts`.
 global_attempt_ceiling: 10
 
 # Consecutive spawn errors at which a lane's circuit breaker trips and

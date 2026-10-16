@@ -30,8 +30,10 @@ from cw.dev_queue import (
     add_ticket,
     dev_queue_lock,
     load_dev_queue,
+    requeue_ticket,
     save_dev_queue,
     save_plan,
+    transition_task_status,
 )
 from cw.dispatch import (
     _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD,
@@ -65,6 +67,7 @@ from cw.dispatch_state import (
 from cw.events import load_cursor, read_events, record_event
 from cw.exceptions import (
     ConfigValidationError,
+    CwError,
     DispatchLoopLockedError,
     StaleWorktreeError,
     VersionDriftError,
@@ -2428,6 +2431,8 @@ class TestDispatchTickSpawnErrors:
         task = queue.tasks[0]
         assert task.status == QueueItemStatus.PENDING
         assert task.session_id is None
+        # #2695: a CalledProcessError is not a typed infra signal; it charges.
+        assert task.unproductive_attempts == 1
 
         assert any(
             "spawn failed" in record.getMessage().lower()
@@ -2464,6 +2469,9 @@ class TestDispatchTickSpawnErrors:
         task = queue.tasks[0]
         assert task.status == QueueItemStatus.PENDING
         assert task.session_id is None
+        # #2695: WorktreeError (incl. a git/SSH failure in create_worktree)
+        # stays charged.
+        assert task.unproductive_attempts == 1
 
         assert any(
             "spawn failed" in record.getMessage().lower()
@@ -2792,6 +2800,9 @@ class TestDispatchTickSpawnErrors:
         assert task.spawn_error_count == 1
         assert task.next_eligible_at is not None
         assert task.hook_context_conflict_session_id == self._CONFLICT_SESSION_ID
+        # #2695: a non-live conflict is deterministic until an operator acts,
+        # so it still charges; the ceiling is its real bound.
+        assert task.unproductive_attempts == 1
 
     def test_repeat_hook_context_conflict_does_not_re_stamp_backoff_differently(
         self,
@@ -6445,6 +6456,11 @@ class TestDispatchUsageLimitBackoff:
         assert isinstance(result, DispatchTickResult)
         assert result.usage_limit_detected is True
         assert result.spawned == 0
+        # #2695: usage-limit churn is the original #786 reason for the
+        # ceiling, so the revert still charges.
+        row = load_dev_queue().tasks[0]
+        assert row.status == QueueItemStatus.PENDING
+        assert row.unproductive_attempts == 1
 
     def test_usage_limit_skip_reason_in_event(
         self,
@@ -9502,6 +9518,95 @@ class TestRevertClaimedTaskExpectedSessionId:
 
         with pytest.raises(ValueError, match="2219"):
             _revert_claimed_task_to_pending("test-client", "REV-4")
+
+
+class TestRevertClaimedTaskUnproductive:
+    """#2695: the ``unproductive`` keyword on ``_revert_claimed_task_to_pending``.
+
+    The raw-``OSError`` spawn-failure path passes ``False`` so a host-level
+    fault does not ratchet the row toward ``attempt_cap_blocked``.
+    """
+
+    @staticmethod
+    def _seed_running(ticket_id: str, session_id: str) -> None:
+        add_ticket(
+            TicketTask(
+                ticket_id=ticket_id,
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+                session_id=session_id,
+                unproductive_attempts=2,
+                attempts=3,
+            )
+        )
+
+    def test_unproductive_false_reverts_without_charging(self) -> None:
+        self._seed_running("REVU-1", "sess-u1")
+
+        assert (
+            _revert_claimed_task_to_pending(
+                "test-client",
+                "REVU-1",
+                stamp_backoff=True,
+                unproductive=False,
+                expected_session_id="sess-u1",
+            )
+            is True
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.PENDING
+        assert task.unproductive_attempts == 2
+        assert task.attempts == 3
+        assert task.spawn_error_count == 1
+        assert task.next_eligible_at is not None
+
+    def test_default_charges(self) -> None:
+        self._seed_running("REVU-2", "sess-u2")
+
+        _revert_claimed_task_to_pending(
+            "test-client", "REVU-2", expected_session_id="sess-u2"
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.PENDING
+        assert task.unproductive_attempts == 3
+
+    def test_defer_for_never_charges_even_when_unproductive_is_true(self) -> None:
+        self._seed_running("REVU-3", "sess-u3")
+
+        _revert_claimed_task_to_pending(
+            "test-client",
+            "REVU-3",
+            defer_for=timedelta(seconds=30),
+            unproductive=True,
+            expected_session_id="sess-u3",
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.PENDING
+        assert task.unproductive_attempts == 2
+        assert task.attempts == 2
+
+    def test_unproductive_false_touches_only_the_created_at_matched_row(
+        self, sample_client_config: ClientConfig
+    ) -> None:
+        _worktree, row_a, row_b = _seed_duplicate_running_rows(sample_client_config)
+        row_a_before = _rows_by_created_at()[row_a.created_at].model_dump()
+
+        reverted = _revert_claimed_task_to_pending(
+            "test-client",
+            "GEN-DUP",
+            stamp_backoff=True,
+            unproductive=False,
+            created_at=row_b.created_at,
+        )
+
+        assert reverted is True
+        stored = _rows_by_created_at()
+        assert stored[row_a.created_at].model_dump() == row_a_before
+        assert stored[row_b.created_at].status is QueueItemStatus.PENDING
+        assert stored[row_b.created_at].unproductive_attempts == 0
 
 
 class TestFindRunningRowRequiresIdentity:
@@ -17442,17 +17547,114 @@ class TestSpawnFailureClassification:
     """#2502 (a): a failure before any worker exists keeps today's handling.
 
     Pins the unchanged pre-launch path: the row reverts to PENDING with the
-    spawn-error backoff, and the lane breaker counts it.
+    spawn-error backoff, and the lane breaker counts it. #2695: only a raw
+    ``OSError`` skips the unproductive-attempt charge; every other exception
+    type (including the plain ``CwError`` the real client raises) charges.
     """
 
     @staticmethod
-    def _assert_backend_failure(outcomes: list[_SpawnOutcome]) -> None:
+    def _assert_backend_failure(
+        outcomes: list[_SpawnOutcome], *, unproductive_attempts: int = 1
+    ) -> None:
         assert [o.spawn_error for o in outcomes] == [True]
         row = load_dev_queue().tasks[0]
         assert row.status == QueueItemStatus.PENDING
         assert row.session_id is None
         assert row.spawn_error_count == 1
+        assert row.unproductive_attempts == unproductive_attempts
         assert _lane_override().consecutive_spawn_errors == 1
+
+    def _tick_with_raising_daemon(
+        self,
+        ticket_id: str,
+        exc: BaseException,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> list[_SpawnOutcome]:
+        write_clients_yaml(sample_client_config)
+        _seed_lane_override(0)
+        add_ticket(TicketTask(ticket_id=ticket_id, client="test-client"))
+        outcomes = _spy_spawn_outcomes(monkeypatch)
+        dispatch_tick(breaker_config, native_daemon=_RaisingNativeDaemon(exc))
+        return outcomes
+
+    def test_worktree_error_is_a_charged_backend_failure(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        write_clients_yaml(sample_client_config)
+        _seed_lane_override(0)
+        add_ticket(TicketTask(ticket_id="GEN-2695W", client="test-client"))
+        outcomes = _spy_spawn_outcomes(monkeypatch)
+
+        def _boom(*_args: object, **_kwargs: object) -> Path:
+            msg = "git worktree add failed: ssh: permission denied"
+            raise WorktreeError(msg)
+
+        monkeypatch.setattr("cw.dispatch.claim.spawn.create_worktree", _boom)
+
+        dispatch_tick(breaker_config, native_daemon=FakeNativeDaemonClient())
+
+        self._assert_backend_failure(outcomes)
+        assert load_dev_queue().tasks[0].attempts == 1
+
+    def test_called_process_error_is_a_charged_backend_failure(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        outcomes = self._tick_with_raising_daemon(
+            "GEN-2695C",
+            subprocess.CalledProcessError(1, ["claude", "--bg"]),
+            sample_client_config,
+            breaker_config,
+            monkeypatch,
+        )
+
+        self._assert_backend_failure(outcomes)
+
+    def test_cwerror_from_the_real_client_shape_is_a_charged_backend_failure(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """R4 residual: plain CwError wraps from `claude --bg` stay charged."""
+        outcomes = self._tick_with_raising_daemon(
+            "GEN-2695E",
+            CwError("claude --bg exited 1: ssh: permission denied"),
+            sample_client_config,
+            breaker_config,
+            monkeypatch,
+        )
+
+        self._assert_backend_failure(outcomes)
+
+    @pytest.mark.parametrize("exc_type", [OSError, FileNotFoundError, PermissionError])
+    def test_oserror_is_an_uncharged_backend_failure(
+        self,
+        exc_type: type[OSError],
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Backoff, spawn_error_count and the breaker still count it."""
+        outcomes = self._tick_with_raising_daemon(
+            "GEN-2695O",
+            exc_type("adapter unreachable"),
+            sample_client_config,
+            breaker_config,
+            monkeypatch,
+        )
+
+        self._assert_backend_failure(outcomes, unproductive_attempts=0)
+        row = load_dev_queue().tasks[0]
+        assert row.attempts == 1
+        assert row.next_eligible_at is not None
 
     def test_launch_raise_is_a_backend_failure(
         self,
@@ -19736,6 +19938,9 @@ class TestUnproductiveAttemptRouting:
     # -- Rule 1: scope-gated approval park ----------------------------------
 
     def test_scope_gated_park_with_no_evidence_is_charged(self, tmp_path: Path) -> None:
+        # #2695 R5: pins the deliberately partial intent -- plan_pending_approval
+        # still charges, because auto_adopt_clean_plan can re-claim it with no
+        # human and the ceiling is the bound on that cycle.
         from cw.dispatch import apply_staged_decision
 
         task = self._make_running_task("UP-7", stage=Stage.PLAN, scope_hint="large")
@@ -19883,7 +20088,8 @@ class TestUnproductiveAttemptRouting:
 
         Four sequential plan-stage `ambiguities_pending_resolution` parks, three
         of which carry a genuine consumed-resolution claim and one of which
-        (the crashloop-shaped park) does not — only the fourth should charge.
+        does not. #2695: the fourth is a human-input park, so it no longer
+        charges either.
         """
         from cw.dispatch import apply_staged_decision
 
@@ -19909,7 +20115,7 @@ class TestUnproductiveAttemptRouting:
             )
 
         # Fourth round: no resolution evidence at all -- the baseline-omission
-        # shape, chargeable.
+        # shape. #2695: a human-input park, so still uncharged.
         task.status = QueueItemStatus.RUNNING
         apply_staged_decision(
             task,
@@ -19922,19 +20128,18 @@ class TestUnproductiveAttemptRouting:
             clients,
         )
 
-        assert task.unproductive_attempts == 1
-        assert task.unproductive_attempts < 10  # ceiling
+        assert task.unproductive_attempts == 0
 
-    def test_1896_plan_stage_pause_without_resolution_evidence_is_charged(
+    def test_1896_plan_stage_pause_without_resolution_evidence_is_not_charged(
         self, tmp_path: Path
     ) -> None:
         """Baseline-omission coverage only -- NOT a reclaim/staleness test.
 
-        Mirrors ``test_same_stage_block_with_no_evidence_is_charged`` (see
-        above), generalized to the plan stage: a plan-stage pause whose
-        payload omits ``resolution_consumed`` entirely is charged exactly
-        like any other evidence-free park. This test proves only that the
-        baseline (no keys present) is chargeable -- it says nothing about
+        Before #2695 a plan-stage pause whose payload omits
+        ``resolution_consumed`` entirely was charged like any other
+        evidence-free park. It is a human-input park, so it no longer charges:
+        the person answering it is the rate limiter. This test proves only the
+        baseline (no keys present) -- it says nothing about
         resolution *reuse* or *staleness* across rounds, which is stateless
         by design at this layer (the extractor reads a single payload in
         isolation) and untestable here; see
@@ -19959,7 +20164,195 @@ class TestUnproductiveAttemptRouting:
         )
 
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.unproductive_attempts == 0
+
+    # -- #2695: human-input parks ------------------------------------------
+
+    def test_premises_pending_verification_is_not_charged(self, tmp_path: Path) -> None:
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("UP-2695-P", stage=Stage.PLAN)
+        last_result: dict[str, object] = {
+            "status": "premises_pending_verification",
+            "commits": [],
+        }
+        apply_staged_decision(
+            task,
+            "premises_pending_verification",
+            last_result,
+            self._clients(tmp_path),
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.unproductive_attempts == 0
+
+    def test_review_pending_approval_is_not_charged(self, tmp_path: Path) -> None:
+        # auto_approve_clean_review advances the stage rather than re-queuing
+        # it, so no unattended re-park cycle needs the ceiling's bound.
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task(
+            "UP-2695-R", stage=Stage.PLAN, scope_hint="large"
+        )
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "large"},
+            "commits": [],
+        }
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.unproductive_attempts == 0
+
+    def test_push_auth_failed_block_is_not_charged(self, tmp_path: Path) -> None:
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("UP-2695-A", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "stage4_finalize", "reason": "push_auth_failed"},
+            "commits": [],
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.unproductive_attempts == 0
+
+    def test_plan_pending_approval_parks_still_charge_and_reach_the_ceiling(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """R5 pin: the bound on the auto_adopt_clean_plan re-park cycle."""
+        from cw.dispatch import apply_staged_decision
+        from cw.dispatch.claim import _claim_next_pending
+
+        write_clients_yaml(sample_client_config)
+        clients = {"test-client": sample_client_config}
+        task = self._make_running_task(
+            "UP-2695-CAP", stage=Stage.PLAN, scope_hint="large"
+        )
+        ceiling = DEFAULT_GLOBAL_ATTEMPT_CEILING
+
+        for _ in range(ceiling):
+            task.status = QueueItemStatus.RUNNING
+            apply_staged_decision(
+                task,
+                "plan_pending_approval",
+                {"status": "plan_pending_approval", "commits": []},
+                clients,
+            )
+
+        assert task.unproductive_attempts == ceiling
+        transition_task_status(task, QueueItemStatus.PENDING)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        claimed, _skipped = _claim_next_pending(
+            "test-client",
+            lane="default",
+            client=sample_client_config,
+            config=simple_config,
+        )
+
+        assert claimed is None
+        parked = load_dev_queue().tasks[0]
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value
+
+    def test_2695_ambiguity_rounds_past_the_default_ceiling_still_claim(
+        self, sample_client_config: ClientConfig
+    ) -> None:
+        """Acceptance: 12 ambiguity rounds charge 0; one plan park charges 1."""
+        from cw.dispatch import apply_staged_decision
+        from cw.dispatch.claim import _claim_next_pending
+        from cw.reconcile._shared import resolve_attempt_ceiling
+
+        write_clients_yaml(sample_client_config)
+        config = OrchestratorConfig(
+            tick_interval_seconds=30, per_client_max_parallel={"test-client": 1}
+        )
+        clients = {"test-client": sample_client_config}
+        task = self._make_running_task(
+            "UP-2695-ACC", stage=Stage.PLAN, scope_hint="large"
+        )
+        assert config.global_attempt_ceiling == DEFAULT_GLOBAL_ATTEMPT_CEILING == 10
+        ceiling = resolve_attempt_ceiling(sample_client_config, task, config)
+        assert ceiling == 10
+
+        for round_n in range(12):
+            task.status = QueueItemStatus.RUNNING
+            apply_staged_decision(
+                task,
+                "ambiguities_pending_resolution",
+                {
+                    "status": "ambiguities_pending_resolution",
+                    "ambiguities": [{"question": f"round {round_n}?"}],
+                    "next_actions": ["user_resolve"],
+                },
+                clients,
+            )
+        assert task.unproductive_attempts == 0
+
+        task.status = QueueItemStatus.RUNNING
+        apply_staged_decision(
+            task,
+            "plan_pending_approval",
+            {"status": "plan_pending_approval", "commits": []},
+            clients,
+        )
         assert task.unproductive_attempts == 1
+
+        # The approve-equivalent move: _reset_for_same_stage_requeue ends here.
+        transition_task_status(task, QueueItemStatus.PENDING)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        claimed, _skipped = _claim_next_pending(
+            "test-client", lane="default", client=sample_client_config, config=config
+        )
+
+        assert claimed is not None
+        assert claimed.ticket_id == "UP-2695-ACC"
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.disposition != DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value
+        assert claimed.unproductive_attempts == 1
+        assert claimed.unproductive_attempts < ceiling
+
+    def test_reset_attempts_requeue_lets_an_attempt_capped_row_claim(
+        self, sample_client_config: ClientConfig, simple_config: OrchestratorConfig
+    ) -> None:
+        from cw.dispatch.claim import _claim_next_pending
+
+        write_clients_yaml(sample_client_config)
+        task = _make_ticket_task(
+            ticket_id="UP-2695-RST",
+            client="test-client",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            stage=Stage.IMPL,
+            disposition=DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value,
+            unproductive_attempts=DEFAULT_GLOBAL_ATTEMPT_CEILING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket(
+            "UP-2695-RST",
+            "test-client",
+            reset_attempts=True,
+            native_daemon=FakeNativeDaemonClient(),
+        )
+
+        assert result["attempts_reset"] is True
+        claimed, _skipped = _claim_next_pending(
+            "test-client",
+            lane="default",
+            client=sample_client_config,
+            config=simple_config,
+        )
+        assert claimed is not None
+        assert claimed.ticket_id == "UP-2695-RST"
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.unproductive_attempts == 0
 
 
 # ---------------------------------------------------------------------------

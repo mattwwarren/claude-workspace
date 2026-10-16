@@ -378,6 +378,20 @@ def dev_queue_move(
         " See docs/dispatch-runbook.md."
     ),
 )
+@click.option(
+    "--reset-attempts",
+    "reset_attempts",
+    is_flag=True,
+    default=False,
+    help=(
+        "Zero the unproductive-attempt counter that the attempt ceiling"
+        " compares, so a row parked at attempt_cap_blocked can run again."
+        " Resets only unproductive_attempts; raw attempts, lane, priority,"
+        " stage and scope_hint are kept. Not applied when the row is already"
+        " PENDING (that requeue is a no-op). Check the counter and ceiling"
+        " with `cw dev-queue show <T> -c <CLIENT>`."
+    ),
+)
 @handle_errors
 def dev_queue_requeue(
     ticket_id: str,
@@ -387,6 +401,7 @@ def dev_queue_requeue(
     from_cancelled: bool,
     from_failed: bool,
     from_completed: bool,
+    reset_attempts: bool,
 ) -> None:
     """Requeue a BLOCKED_ON_USER ticket back to PENDING.
 
@@ -395,7 +410,8 @@ def dev_queue_requeue(
     review exit back to impl), inferred and announced on stdout, so --regress
     is optional. Use --from-cancelled to recover a CANCELLED ticket,
     --from-failed to recover a FAILED ticket, or --from-completed to recover
-    a COMPLETED ticket (forward/same-stage only).
+    a COMPLETED ticket (forward/same-stage only). Use --reset-attempts to
+    clear an attempt_cap_blocked park.
 
     A ticket that is already PENDING (with no --stage, or its own stage) is
     an idempotent no-op: it exits 0, stops nothing and records no event, and
@@ -424,7 +440,13 @@ def dev_queue_requeue(
     # #2692: the idempotent no-op exits before the routed-orphan close and the
     # live-session guard, so it stops nothing; a live session is only named.
     if row is not None and is_pending_requeue_noop(row, stage_override, regress):
-        echo_pending_noop(ticket_id, resolved, row.stage.value, daemon)
+        echo_pending_noop(
+            ticket_id,
+            resolved,
+            row.stage.value,
+            daemon,
+            reset_attempts_ignored=reset_attempts,
+        )
         return
 
     def _precheck(will_close: frozenset[str]) -> None:
@@ -471,12 +493,19 @@ def dev_queue_requeue(
             bounded=True,
             idempotent_pending=True,
             infer_regress=True,
+            reset_attempts=reset_attempts,
         )
     except RequeueLiveSessionError as exc:
         _reason_tag, message = classify_requeue_live_session_error(exc)
         raise click.ClickException(message) from exc
     if result["already_pending"]:
-        echo_pending_noop(ticket_id, resolved, str(result["to_stage"]), daemon)
+        echo_pending_noop(
+            ticket_id,
+            resolved,
+            str(result["to_stage"]),
+            daemon,
+            reset_attempts_ignored=reset_attempts,
+        )
         return
     echo_requeue_outcome(ticket_id, resolved, result)
 

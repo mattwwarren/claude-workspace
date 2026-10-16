@@ -2,7 +2,8 @@
 
 Covers the ``approve`` refusals through Click, the idempotent PENDING
 ``requeue`` no-op (with its read-only live-session note), inferred
-``--regress``, and the ``unblock``/``move`` refusals.
+``--regress``, ``requeue --reset-attempts`` (#2695, ``TestRequeueResetAttempts``)
+and the ``unblock``/``move`` refusals.
 """
 
 from __future__ import annotations
@@ -253,6 +254,143 @@ class TestInferredRegress:
         assert (
             stdout_lines(result)[0] == "Requeued ACM-1 (acme): review -> impl (PENDING)"
         )
+
+
+_RESET_HELP = (
+    "Zero the unproductive-attempt counter that the attempt ceiling compares,"
+    " so a row parked at attempt_cap_blocked can run again. Resets only"
+    " unproductive_attempts; raw attempts, lane, priority, stage and scope_hint"
+    " are kept. Not applied when the row is already PENDING (that requeue is a"
+    " no-op). Check the counter and ceiling with"
+    " `cw dev-queue show <T> -c <CLIENT>`."
+)
+_RESET_NOTE = (
+    "note: --reset-attempts was not applied; the row is already PENDING and"
+    " nothing was written."
+)
+
+
+class TestRequeueResetAttempts:
+    """#2695: ``requeue --reset-attempts`` clears an ``attempt_cap_blocked`` park."""
+
+    def test_capped_row_is_reset_and_keeps_lane_and_priority(self) -> None:
+        seed_queue(
+            [
+                make_task(
+                    status=QueueItemStatus.BLOCKED_ON_USER,
+                    disposition="attempt_cap_blocked",
+                    unproductive_attempts=10,
+                    lane="fast",
+                    priority=7,
+                )
+            ]
+        )
+        result = invoke_dev_queue(
+            "requeue", ACME_TICKET, "-c", ACME, "--reset-attempts"
+        )
+        assert result.exit_code == 0, result.output
+        lines = stdout_lines(result)
+        assert lines[0] == (
+            "Requeued ACM-1 (acme): plan -> plan (PENDING);"
+            " unproductive attempts reset (was 10)"
+        )
+        assert "unproductive_attempts: 0" in lines
+        assert "lane: fast" in lines
+        assert "priority: 7" in lines
+        row = load_dev_queue().tasks[0]
+        assert row.unproductive_attempts == 0
+        assert row.lane == "fast"
+        assert row.priority == 7
+
+    @pytest.mark.parametrize(
+        ("disposition", "unproductive_attempts"),
+        [("attempt_cap_blocked", 0), ("some_future_park", 3)],
+        ids=["capped_at_zero", "not_capped"],
+    )
+    def test_suffix_omits_the_prior_count(
+        self, disposition: str, unproductive_attempts: int
+    ) -> None:
+        seed_queue(
+            [
+                make_blocked(
+                    disposition=disposition,
+                    unproductive_attempts=unproductive_attempts,
+                )
+            ]
+        )
+        result = invoke_dev_queue(
+            "requeue", ACME_TICKET, "-c", ACME, "--reset-attempts"
+        )
+        assert result.exit_code == 0, result.output
+        assert stdout_lines(result)[0] == (
+            "Requeued ACM-1 (acme): plan -> plan (PENDING); unproductive attempts reset"
+        )
+        (event,) = read_events(event_types=[OrchestratorEventType.TICKET_REQUEUED])
+        assert event.payload["attempts_reset"] is True
+        assert event.payload["prior_unproductive_attempts"] == unproductive_attempts
+
+    def test_event_carries_the_reset_keys_only(self) -> None:
+        seed_queue(
+            [make_blocked(disposition="attempt_cap_blocked", unproductive_attempts=10)]
+        )
+        result = invoke_dev_queue(
+            "requeue", ACME_TICKET, "-c", ACME, "--reset-attempts"
+        )
+        assert result.exit_code == 0, result.output
+        events = read_events(event_types=[OrchestratorEventType.TICKET_REQUEUED])
+        payload = events[-1].payload
+        assert payload["attempts_reset"] is True
+        assert payload["prior_unproductive_attempts"] == 10
+        assert "attempts_reset_was_capped" not in payload
+
+    def test_without_the_flag_the_keys_are_absent(self) -> None:
+        seed_queue(
+            [make_blocked(disposition="attempt_cap_blocked", unproductive_attempts=10)]
+        )
+        result = invoke_dev_queue("requeue", ACME_TICKET, "-c", ACME)
+        assert result.exit_code == 0, result.output
+        assert (
+            stdout_lines(result)[0] == "Requeued ACM-1 (acme): plan -> plan (PENDING)"
+        )
+        events = read_events(event_types=[OrchestratorEventType.TICKET_REQUEUED])
+        payload = events[-1].payload
+        assert "attempts_reset" not in payload
+        assert "prior_unproductive_attempts" not in payload
+        assert load_dev_queue().tasks[0].unproductive_attempts == 10
+
+    def test_pending_row_notes_the_flag_was_not_applied(self) -> None:
+        seed_queue([make_task(status=QueueItemStatus.PENDING, unproductive_attempts=4)])
+        before = load_dev_queue().model_dump()
+        result = invoke_dev_queue(
+            "requeue", ACME_TICKET, "-c", ACME, "--reset-attempts"
+        )
+        assert result.exit_code == 0, result.output
+        assert stdout_lines(result)[0] == _NOOP_LINE.format(stage="plan")
+        assert _RESET_NOTE in result.stderr.splitlines()
+        assert _requeued_events() == []
+        assert load_dev_queue().model_dump() == before
+
+    def test_race_produced_already_pending_notes_the_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        task = make_task(status=QueueItemStatus.PENDING)
+        seed_queue([task])
+        stale = task.model_copy(update={"status": QueueItemStatus.BLOCKED_ON_USER})
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.crud.settle_lagging_row",
+            lambda *_a: SettleOutcome(row=stale, routed=False),
+        )
+        result = invoke_dev_queue(
+            "requeue", ACME_TICKET, "-c", ACME, "--reset-attempts"
+        )
+        assert result.exit_code == 0, result.output
+        assert stdout_lines(result)[0] == _NOOP_LINE.format(stage="plan")
+        assert _RESET_NOTE in result.stderr.splitlines()
+
+    def test_help_carries_the_verbatim_text(self) -> None:
+        result = invoke_dev_queue("requeue", "--help")
+        assert result.exit_code == 0, result.output
+        assert _RESET_HELP in " ".join(result.output.split())
 
 
 class TestUnblockAndMoveRefusals:

@@ -679,7 +679,7 @@ CLI commands emit thin audit events; payloads carry the obvious fields:
 | `plan.approval_revoked` | `cw dev-queue revoke-plan-approval` | `{ticket_id, client, previous_fingerprint, revoked_at, initiating_service, resolutions_source, reason}` |
 | `plan.approval_body_drift_warned` | `cw dev-queue approve` (advisory-only; never blocks or mutates the approval) | `{ticket_id, client, persisted_body_sha, live_body_sha, plan_approved_fingerprint, actor}` |
 | `ticket.approval_failed` | scope-drift approval compensation | `{ticket_id, client, approval_event, approval_payload, error, rolled_back, recovery_required}` |
-| `ticket.requeued` | `cw dev-queue requeue`, `cw dev-queue drain --held` (RFC 0011 A4, #1161), and dispatch's automatic FINALIZE→IMPL regress path (#770) | `{ticket_id, client, from_stage, to_stage, reason, regressed}` |
+| `ticket.requeued` | `cw dev-queue requeue`, `cw dev-queue drain --held` (RFC 0011 A4, #1161), and dispatch's automatic FINALIZE→IMPL regress path (#770) | `{ticket_id, client, from_stage, to_stage, reason, regressed}`; `cw dev-queue requeue --reset-attempts` adds `attempts_reset: true` and `prior_unproductive_attempts` (the counter before it was zeroed, #2695), present only when the flag was passed |
 | `ticket.unblocked` | `cw dev-queue unblock` | `{ticket_id, client}` |
 
 See the "Known legacy gap" note under `task.deleted`: the `ticket.*` family

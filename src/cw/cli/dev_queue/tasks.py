@@ -28,6 +28,7 @@ from cw.dev_queue.next_commands import (
 )
 from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
 from cw.models import QueueItemStatus, Session, TicketTask
+from cw.reconcile._shared import resolve_attempt_ceiling
 from cw.ticket_view import ViewSources, resolve_human_opt_in
 from cw.worktree import fast_forward_main
 
@@ -112,6 +113,18 @@ def _human_opt_in(task: TicketTask, sources: ViewSources) -> bool:
         return True
 
 
+def _unproductive_cell(task: TicketTask, sources: ViewSources) -> str:
+    """``unproductive/ceiling`` (#2695): ``none`` when disabled, ``?`` unreadable."""
+    try:
+        ceiling = resolve_attempt_ceiling(
+            sources.effective_client(task.client), task, sources.orchestrator_config
+        )
+    except (CwError, OSError, ValueError, yaml.YAMLError):
+        return f"{task.unproductive_attempts}/?"
+    shown = "none" if ceiling is None else str(ceiling)
+    return f"{task.unproductive_attempts}/{shown}"
+
+
 def _next_cell(
     task: TicketTask, sessions_by_id: dict[str, Session], sources: ViewSources
 ) -> str:
@@ -160,7 +173,7 @@ def _print_tasks_human(
             t.status.value[:16],
             (t.session_id or "-")[:12],
             str(t.attempts)[:8],
-            str(t.unproductive_attempts)[:12],
+            _unproductive_cell(t, sources)[:12],
             t.lane[:12],
             (t.scope_hint or "—")[:12],
             (t.computed_scope_tier or "—")[:20],
@@ -215,6 +228,11 @@ def dev_queue_tasks(
     declare itself freeform with an ``x_`` prefix (#2097) — the value is still
     shown verbatim, the flag just says cw does not recognise it as a documented
     routing code.
+
+    UNPRODUCTIVE is ``unproductive_attempts/ceiling`` (#2695): the counter the
+    attempt ceiling compares, ``none`` when the lane disables the ceiling and
+    ``?`` when it cannot be resolved. ATTEMPTS is the raw count, which the
+    ceiling never reads.
 
     NEXT is the row's first legal command (``cw dev-queue show`` lists them
     all), without the ``cw dev-queue`` prefix and the row's own ticket and

@@ -1693,19 +1693,54 @@ payload field. A lane whose operator answers every park can set
 `attempt_ceiling: false` to opt out of the cap entirely — see
 `config/CONFIG_REFERENCE.md`.
 
-Reset recipe — the file-edit steps are only safe with ZERO loops alive:
+Reset recipe (#2695) — one command, safe with the loop running, because it
+takes the dev-queue lock like every other verb:
 
 ```bash
-pkill -f "cw dev-queue run"        # TaskStop on a wrapper does NOT reliably
-pgrep -f "cw dev-queue run"        # kill the python child — verify EMPTY
-# edit ~/.local/share/cw/dev_queue.json: attempts=0, disposition=null
-# re-read the file to verify the write landed
-cw dev-queue requeue <T> -c <CLIENT>
-cw dev-queue run &                  # restart, verify fresh tick (no [STALE])
+cw dev-queue show <T> -c <CLIENT>                    # unproductive_attempts vs attempt_ceiling
+cw dev-queue requeue <T> -c <CLIENT> --reset-attempts
 ```
 
-Editing that file with a loop alive silently loses the edit to a tick's
-read-modify-write (observed twice, 2026-07-04).
+`--reset-attempts` zeroes only `unproductive_attempts`; raw `attempts`, lane,
+priority, stage and `scope_hint` are kept (zeroing `attempts` would skip the
+`attempts <= 1` stale-`context.json` invalidation, #1030). The confirmation
+line reads `...; unproductive attempts reset (was N)` and `ticket.requeued`
+carries `attempts_reset: true` plus `prior_unproductive_attempts`. On a row
+that is already PENDING the flag is not applied (the requeue is a no-op, and
+stderr says so). `show`'s `next:` suggests the flag on any
+`attempt_cap_blocked` row, and the `cw dev-queue tasks` UNPRODUCTIVE cell
+reads `u/ceiling` (`3/10`; `3/none` when the lane disables the ceiling).
+
+The old recipe (stop every loop, hand-edit `~/.local/share/cw/dev_queue.json`,
+then requeue) is unsafe and no longer needed: editing that file with a loop
+alive silently loses the edit to a tick's read-modify-write (observed twice,
+2026-07-04).
+
+What does not charge the counter (#2695): `ambiguities_pending_resolution`,
+`premises_pending_verification` and `review_pending_approval` parks; a
+`blocked` result whose `blocker.reason` is `push_auth_failed`,
+`operator_unavailable`, `dependency_unmerged` or
+`impl_comments_unreadable_after_regress`; and a no-worker spawn failure that is
+a raw `OSError`. Residuals the ceiling still owns or no longer bounds:
+
+- `plan_pending_approval` still charges, deliberately: `auto_adopt_clean_plan`
+  (on by default; `gate_recipes_enabled`, or the lane's recipe switch, turns it
+  off) can re-claim that park without a human, and the ceiling bounds an
+  adopt -> re-run -> re-park cycle. A long plan tail costs one unit per
+  `plan_pending_approval` park; `--reset-attempts` clears it.
+- Plain `CwError` wraps from `claude --bg` (SSH or 1Password walls, adapter
+  failures, CLI flag breaks, a missing binary) and `WorktreeError` (including
+  a git or SSH failure inside `create_worktree`) still charge until those
+  failures are typed (#2722).
+- A raw-`OSError` spawn failure that is in fact deterministic per ticket is
+  bounded only by the 300 s spawn-error backoff cap and the lane circuit
+  breaker; no separate spawn-error ceiling exists.
+- An orchestrator looping `cw dev-queue drain` or `requeue` against a standing
+  `push_auth_failed` wall is unbounded, since that park no longer charges. The
+  audit trail is the `ticket.requeued` and `task.transition` events (the
+  latter carries `unproductive_attempts`).
+- A worker that hits an auth wall at runtime and dies with no sentinel (a
+  phantom or stalled revert) still charges.
 
 **`[BLOCKED — codex review, ticket <T>, <N>s]` is not `[STALE]` (#1742).**
 When a client's tick line carries that annotation instead, the dispatch loop
