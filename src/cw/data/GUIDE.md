@@ -128,7 +128,9 @@ a sentinel carries one — and they never share values, so always say which.
   same stage or `--stage`; a backward `--stage` on a parked row is an inferred
   regress (announced; `--regress` optional). Requeueing a row that is already
   `pending` is an exit-0 no-op. `--from-cancelled`, `--from-failed`,
-  `--from-completed` recover terminal rows.
+  `--from-completed` recover terminal rows. `--reset-attempts` also zeroes
+  `unproductive_attempts` (only the ceiling counter), for an
+  `attempt_cap_blocked` row.
 - **Unblock** (`cw dev-queue unblock`) — requeue plus clearing the session's
   salvage-park markers (`last_result`, `reap_reason`). Salvage parks only.
 - **MUST_FIX park (codex)** — `approve --override-must-fix --reason "<why>"`
@@ -142,10 +144,19 @@ a sentinel carries one — and they never share values, so always say which.
 
 - `attempts` (ATTEMPTS column) — claims, one per stage entry. A healthy
   ticket accrues them as it advances. **Gates nothing.**
-- `unproductive_attempts` (UNPRODUCTIVE column) — claims that left `running`
+- `unproductive_attempts` (UNPRODUCTIVE column, shown as `u/ceiling`, e.g.
+  `3/10`, `3/none` with the ceiling disabled) — claims that left `running`
   with no evidence of progress. The attempt ceiling (`global_attempt_ceiling`,
   overridden per lane by `attempt_ceiling`) compares *this* counter and parks
-  the row `attempt_cap_blocked`.
+  the row `attempt_cap_blocked`; clear it with `requeue --reset-attempts`.
+- Not charged: `ambiguities_pending_resolution`,
+  `premises_pending_verification` and `review_pending_approval` parks, a
+  `blocked` result whose reason is operator-unavailable (`push_auth_failed`,
+  `operator_unavailable`, `dependency_unmerged`,
+  `impl_comments_unreadable_after_regress`), and raw-`OSError` spawn failures.
+  `plan_pending_approval` still charges (`auto_adopt_clean_plan` can re-claim
+  it without a human), and SSH/adapter/CLI-flag failures that surface through
+  `claude --bg` still charge.
 
 **Reconcile** (what the sweeps are called)
 
@@ -244,7 +255,8 @@ cw dev-queue run --once                          # one dispatch tick (drop --onc
 cw dev-queue serve                               # dispatch loop with auto-restart on crash
 cw dev-queue approve <ticket> -c <client>        # clear a plan/review/signoff gate
 cw dev-queue requeue <ticket> -c <client>        # BLOCKED_ON_USER → PENDING (--stage/--regress;
-                                                 #   --from-cancelled / --from-failed to recover)
+                                                 #   --from-cancelled / --from-failed to recover;
+                                                 #   --reset-attempts for attempt_cap_blocked)
 cw dev-queue unblock <ticket> -c <client>        # clear salvage-park markers and requeue
 cw dev-queue move <ticket> -c <client> --to|--lane <lane>   # re-lane
 cw dev-queue cancel|remove -c <client>           # queue hygiene, one ticket at a time
