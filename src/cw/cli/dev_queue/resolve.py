@@ -299,6 +299,11 @@ def dev_queue_resolve(
     the revised draft's fingerprint is unchanged.
 
     Refused inside a dispatch worker (the check `cw review settle` applies).
+
+    Restart `cw dev-queue serve` before using this command: a dispatch loop
+    older than the release that ships `resolve` rewrites the queue without
+    the ledger and erases recorded resolutions. Detection of a stale loop is
+    tracked in #2729.
     """
     refuse_inside_dispatch_worker(_RESOLVE_IN_WORKER_MSG)
     resolved = resolve_client(ticket_id, load_orchestrator_config(), client)
