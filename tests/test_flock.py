@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import logging
+import os
 import threading
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -42,7 +45,8 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
+    from typing import IO
 
     from tests.conftest import _RecordingLockPath
 
@@ -623,3 +627,357 @@ class TestBoundedStateLocks:
 
         assert [h.closed for h in recorder.handles] == [True]
         assert held_locks() == ()
+
+
+# ---------------------------------------------------------------------------
+# #2694: operator-command waits and the sessions-lock holder record
+# ---------------------------------------------------------------------------
+
+
+def _set_env(monkeypatch: pytest.MonkeyPatch, raw: str | None) -> None:
+    if raw is None:
+        monkeypatch.delenv(SESSIONS_LOCK_TIMEOUT_ENV, raising=False)
+    else:
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, raw)
+
+
+class TestOperatorLockWaits:
+    """``cw list``/``cw status`` vs ``cw spawn close``/cancel waits."""
+
+    @pytest.mark.parametrize(
+        ("raw", "read_wait", "close_wait"),
+        [
+            (None, 5.0, 5.0),
+            ("  ", 5.0, 5.0),
+            ("abc", 5.0, 5.0),  # invalid never restores the 60 s default
+            ("0", 0.0, 0.0),
+            ("0.2", 0.2, 0.2),
+            ("300", 300.0, 5.0),  # explicit wins for reads, capped for closes
+        ],
+    )
+    def test_waits(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        raw: str | None,
+        read_wait: float,
+        close_wait: float,
+    ) -> None:
+        _set_env(monkeypatch, raw)
+
+        assert _flock.operator_read_lock_wait_seconds() == read_wait
+        assert _flock.operator_close_lock_wait_seconds() == close_wait
+        assert sessions_lock_timeout_seconds() == (
+            DEFAULT_SESSIONS_LOCK_TIMEOUT_S if raw in {None, "  ", "abc"} else read_wait
+        )
+
+
+def _record_json(pid: int, *, cmd: str = "cw list", acquired_at: object = None) -> str:
+    if acquired_at is None:
+        acquired_at = (datetime.now(UTC) - timedelta(seconds=12)).isoformat()
+    return json.dumps({"pid": pid, "cmd": cmd, "acquired_at": acquired_at})
+
+
+@contextlib.contextmanager
+def _hold_flock_append(path: Path) -> Iterator[None]:
+    """Hold *path* on a second fd opened ``"a+"`` so its content survives."""
+    with path.open("a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+class _UnexpectedError(Exception):
+    """Neither I/O nor value: the fail-open guard must still swallow it."""
+
+
+class TestHolderRecord:
+    def test_record_then_read_round_trips_and_clear_empties(
+        self, tmp_path: Path
+    ) -> None:
+        lock = tmp_path / "lock"
+
+        with lock.open("a+") as fd:
+            _flock.record_lock_holder(fd, cmd="cw spawn close")
+            holder = _flock.read_lock_holder(fd)
+            _flock.clear_lock_holder(fd)
+
+        assert holder is not None
+        assert (holder.pid, holder.cmd) == (os.getpid(), "cw spawn close")
+        assert holder.acquired_at.utcoffset() is not None
+        assert lock.read_text() == ""
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "",
+            "{not json",
+            "[1, 2]",
+            "[" * 100_000 + "]" * 100_000,  # nested past the recursion limit
+            _record_json(os.getpid(), acquired_at="yesterday"),
+            _record_json(os.getpid(), acquired_at="2026-10-01T12:00:00"),  # naive
+            _record_json(os.getpid(), acquired_at=7),
+            json.dumps({"pid": "12", "cmd": "cw", "acquired_at": "x"}),
+            _record_json(True),  # a bool is not an int pid
+            _record_json(0),
+            _record_json(-5),
+            _record_json(2**70),  # too large for os.kill
+            json.dumps({"pid": os.getpid(), "cmd": 3}),
+        ],
+        # Stable ids: the contents embed a pid and a timestamp, and xdist needs
+        # every worker to collect identical test ids.
+        ids=[
+            "empty",
+            "not-json",
+            "list",
+            "deeply-nested",
+            "acquired-at-text",
+            "acquired-at-naive",
+            "acquired-at-int",
+            "pid-text",
+            "pid-bool",
+            "pid-zero",
+            "pid-negative",
+            "pid-too-large",
+            "cmd-int",
+        ],
+    )
+    def test_unusable_record_reads_as_no_holder(
+        self, tmp_path: Path, content: str
+    ) -> None:
+        lock = tmp_path / "lock"
+        lock.write_text(content)
+
+        with lock.open("a+") as fd:
+            assert _flock.read_lock_holder(fd) is None
+
+    @pytest.mark.parametrize(
+        ("kill_error", "alive"),
+        [(ProcessLookupError, False), (PermissionError, True)],
+        ids=["dead", "other-user"],
+    )
+    def test_pid_liveness(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        kill_error: type[OSError],
+        alive: bool,
+    ) -> None:
+        def _kill(_pid: int, _sig: int) -> None:
+            raise kill_error
+
+        monkeypatch.setattr(_flock.os, "kill", _kill)
+        lock = tmp_path / "lock"
+        lock.write_text(_record_json(424242))
+
+        with lock.open("a+") as fd:
+            assert (_flock.read_lock_holder(fd) is not None) is alive
+
+    def test_write_only_fd_reads_as_no_holder(self, tmp_path: Path) -> None:
+        with (tmp_path / "lock").open("w") as fd:
+            assert _flock.read_lock_holder(fd) is None
+
+
+class TestFailOpenHolderBookkeeping:
+    """Holder bookkeeping never raises and never logs above WARNING."""
+
+    def test_returns_the_action_result(self) -> None:
+        assert _flock.fail_open_holder_bookkeeping("read", lambda: 7) == 7
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            OSError(5, "Input/output error"),
+            ValueError("I/O operation on closed file"),
+            RuntimeError("bookkeeping bug"),
+            _UnexpectedError("not an I/O error at all"),
+        ],
+        ids=lambda e: type(e).__name__,
+    )
+    def test_any_exception_is_logged_at_warning_and_ignored(
+        self, caplog: pytest.LogCaptureFixture, error: Exception
+    ) -> None:
+        def _fail() -> None:
+            raise error
+
+        caplog.set_level(logging.DEBUG, logger="cw._flock")
+
+        assert _flock.fail_open_holder_bookkeeping("record", _fail) is None
+
+        (record,) = caplog.records
+        assert record.levelno == logging.WARNING
+        assert record.exc_info is not None
+        assert record.getMessage() == (
+            f"sessions_lock_holder_record_failed: error={type(error).__name__}"
+            " action=ignored"
+        )
+
+    def test_keyboard_interrupt_still_propagates(self) -> None:
+        def _interrupt() -> None:
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            _flock.fail_open_holder_bookkeeping("record", _interrupt)
+
+
+class TestOpenHolderLockFd:
+    def test_opens_append_so_a_contender_keeps_the_record(self, tmp_path: Path) -> None:
+        lock = tmp_path / "lock"
+        lock.write_text("kept")
+
+        with _flock.open_holder_lock_fd(lock) as fd:
+            assert fd.mode == "a+"
+
+        assert lock.read_text() == "kept"
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+    def test_unwritable_lock_file_falls_back_to_read_only(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        lock = tmp_path / "lock"
+        lock.write_text("")
+        lock.chmod(0o444)
+        caplog.set_level(logging.DEBUG, logger="cw._flock")
+        try:
+            with _flock.open_holder_lock_fd(lock) as fd:
+                assert fd.mode == "r"
+                fcntl.flock(fd, fcntl.LOCK_EX)  # flock works on a read-only fd
+        finally:
+            lock.chmod(0o644)
+
+        assert [r.levelno for r in caplog.records] == [logging.WARNING]
+
+    def test_any_open_failure_falls_back_to_nontruncating_open(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """``"a+"`` raising and ``"r"`` failing still use writable ``"a"``."""
+        lock = tmp_path / "absent.lock"
+        real_open = Path.open
+
+        def _open(self: Path, mode: str = "r") -> IO[str]:
+            if mode == "a+":
+                msg = "unexpected open failure"
+                raise _UnexpectedError(msg)
+            return real_open(self, mode)
+
+        monkeypatch.setattr(Path, "open", _open)
+        caplog.set_level(logging.DEBUG, logger="cw._flock")
+
+        with _flock.open_holder_lock_fd(lock) as fd:
+            assert fd.mode == "a"
+
+        assert [(r.levelno, r.getMessage().split(":")[0]) for r in caplog.records] == [
+            (logging.WARNING, "sessions_lock_holder_open_failed")
+        ] * 2
+
+    def test_all_holder_open_modes_fail_before_ordinary_fallback(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        lock = tmp_path / "lock"
+        real_open = Path.open
+
+        def _open(self: Path, mode: str = "r") -> IO[str]:
+            if mode in {"a+", "r", "a"}:
+                message = "holder open failed"
+                raise _UnexpectedError(message)
+            return real_open(self, mode)
+
+        monkeypatch.setattr(Path, "open", _open)
+        caplog.set_level(logging.DEBUG, logger="cw._flock")
+
+        with _flock.open_holder_lock_fd(lock) as fd:
+            assert fd.mode == "w"
+
+        assert lock.exists()
+        assert len(caplog.records) == 3
+
+        def _all_open_fail(self: Path, mode: str = "r") -> IO[str]:
+            message = f"open failed: {mode}"
+            raise _UnexpectedError(message)
+
+        monkeypatch.setattr(Path, "open", _all_open_fail)
+        with pytest.raises(OSError, match="sessions lock unavailable"):
+            _flock.open_holder_lock_fd(lock)
+
+
+class TestHolderInTimeoutMessage:
+    def test_message_names_the_recorded_holder(self) -> None:
+        holder = _flock.LockHolder(
+            pid=4242,
+            cmd="cw dev-queue serve",
+            acquired_at=datetime.now(UTC) - timedelta(seconds=30),
+        )
+
+        message = lock_timeout_message(
+            "sessions", Path("P"), waited_s=5.0, timeout_s=5.0, holder=holder
+        )
+
+        assert "Recorded holder: pid 4242 (`cw dev-queue serve`), held for" in message
+        assert "confirm with `lsof P`" in message
+        assert "records no PID" not in message
+        assert SESSIONS_LOCK_TIMEOUT_ENV in message
+
+    def test_sessions_timeout_reads_the_holder_through_the_contender_fd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_clock(monkeypatch, _FakeClock())
+        lock = tmp_path / ".sessions.lock"
+        lock.write_text(_record_json(os.getpid(), cmd="cw status"))
+
+        with (
+            _hold_flock_append(lock),
+            lock.open("a+") as fd,
+            pytest.raises(SessionsLockTimeoutError) as exc_info,
+        ):
+            acquire_sessions_flock(fd, lock, bounded=True, timeout_s=0)
+
+        assert f"pid {os.getpid()} (`cw status`)" in str(exc_info.value)
+
+    @pytest.mark.parametrize("failure", ["naive-timestamp", "reader-raises"])
+    def test_unusable_holder_never_breaks_the_timeout_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+    ) -> None:
+        _install_clock(monkeypatch, _FakeClock())
+        lock = tmp_path / ".sessions.lock"
+        naive = datetime.now(UTC).replace(tzinfo=None).isoformat()
+        lock.write_text(_record_json(os.getpid(), acquired_at=naive))
+        if failure == "reader-raises":
+
+            def _bug(_fd: IO[str]) -> None:
+                msg = "reader exploded"
+                raise _UnexpectedError(msg)
+
+            monkeypatch.setattr(_flock, "read_lock_holder", _bug)
+
+        with (
+            _hold_flock_append(lock),
+            lock.open("a+") as fd,
+            pytest.raises(SessionsLockTimeoutError) as exc_info,
+        ):
+            acquire_sessions_flock(fd, lock, bounded=True, timeout_s=0)
+
+        assert "the lock file records no PID" in str(exc_info.value)
+
+    def test_other_locks_never_read_a_holder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_clock(monkeypatch, _FakeClock())
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0")
+        lock = tmp_path / ".dev_queue.lock"
+        lock.write_text(_record_json(os.getpid()))
+
+        with (
+            _hold_flock_append(lock),
+            lock.open("a+") as fd,
+            pytest.raises(LockTimeoutError) as exc_info,
+        ):
+            acquire_flock(fd, lock, lock_name="dev_queue", bounded=True)
+
+        assert "Recorded holder" not in str(exc_info.value)

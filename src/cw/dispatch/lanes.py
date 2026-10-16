@@ -63,6 +63,7 @@ from cw.dispatch.claim import (
     resolve_occupied_ticket_ids,
 )
 from cw.dispatch.pr_gate import resolve_stale_pr_ticket_ids
+from cw.dispatch.stale_breadcrumbs import build_stale_breadcrumbs
 from cw.dispatch.tracker_mcp_gate import (
     TrackerMcpGateHit,
     resolve_tracker_mcp_gate_hits,
@@ -324,8 +325,10 @@ def _notify_stale_clients_with_pending(
     for the same reason :func:`_maybe_notify_lane_starved` does: with a
     stable id, ``_terminal_dedup_key`` (``(event_type, session_id,
     paused_status)``) would collapse every recurrence for a client into one
-    shown event under ``cw event tail --dedup-terminal``. ``pending`` and the
-    tick age ride in ``breadcrumbs`` rather than as extra top-level keys --
+    shown event under ``cw event tail --dedup-terminal``. ``pending``, the
+    tick age and (#2694) the last tick's skip/occupancy plus any orphaned
+    ceiling sessions (``cw.dispatch.stale_breadcrumbs``) ride in
+    ``breadcrumbs`` rather than as extra top-level keys --
     unlike the lane signal's ``lane``, this condition is client-scoped and
     ``client`` is already canonical, so there is no analogous identifier to
     add.
@@ -347,7 +350,6 @@ def _notify_stale_clients_with_pending(
     )
     for client in due:
         tick = stale[client]
-        age_s = int((now - tick.tick_at).total_seconds())
         record_event(
             OrchestratorEventType.SESSION_NEEDS_ATTENTION,
             {
@@ -357,7 +359,7 @@ def _notify_stale_clients_with_pending(
                 "ticket_id": None,
                 "claude_session_id": None,
                 "paused_status": _DISPATCH_LOOP_STALE_REASON,
-                "breadcrumbs": f"pending={tick.pending} age_s={age_s}",
+                "breadcrumbs": build_stale_breadcrumbs(client, tick, now),
                 "crashed": False,
             },
             correlation_id=None,

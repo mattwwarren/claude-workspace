@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A sessions-lock timeout names its holder (#2694).** While a cw process holds `.sessions.lock` it records `{pid, cmd, acquired_at}` in it (the Click command path, never option values; best effort, cleared before release), and the lock is opened `"a+"` so a waiting contender no longer erases the record. The timeout message then reads `Recorded holder: pid <pid> (`<cmd>`), held for <n>s; confirm with `lsof <path>`.` instead of "the lock file records no PID". The bookkeeping fails open: any exception opening, reading, writing or clearing the record (a lock file this process cannot write is locked read-only) is logged at WARNING and ignored and never stops the lock being taken or released, and a naive or unparseable `acquired_at` reads as no recorded holder. The other state locks are unchanged.
+
+### Changed
+
+- **`cw list`, `cw status` and `cw spawn close` wait 5 s, not 60 s, for the sessions lock (#2694), then fail with exit 1 naming the holder.** `cw list`/`cw status` honour an explicit `CW_SESSIONS_LOCK_TIMEOUT_S` and otherwise fail after 5 s (no stale-state output); a legitimate hold longer than that now fails them unless the env var is raised. `cw spawn close` uses `min(CW_SESSIONS_LOCK_TIMEOUT_S, 5 s)`; nothing is queued, so re-run the command once the holder is gone. Every other bounded caller (`cw start`, `cw spawn complete`, `cw done`, `cw doctor --reap`, the serve tick) keeps the 60 s default. The bound covers the lock wait only, not reconcile's lockless pre-passes.
+- **The `dispatch_loop_stale` page names why the loop is stuck (#2694).** Its `breadcrumbs` gain the last tick's `skip=` reason, `occupied=` and `running=<n>/<cap>`, and `orphan_sessions=` naming the ceiling-counted sessions no occupied row owns (at most 5, then `(+K more)`), so a lane-cap stall reads off the page. `cw dev-queue status`'s `[ORPHAN?]` annotation shares the same helper.
+
+### Fixed
+
+- **An invalid `CW_SESSIONS_LOCK_TIMEOUT_S` no longer silently restores the 60 s wait for these three commands (#2694)**; it yields their 5 s wait (other callers still fall back to 60 s).
+
 ## [1.73.0] - 2026-10-16
 
 ### Added

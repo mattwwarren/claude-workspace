@@ -13,6 +13,7 @@ from pathlib import Path
 
 import click
 
+from cw._flock import operator_read_lock_wait_seconds
 from cw._util import _iter_assistant_text_blocks, claude_project_dir
 from cw.cli._base import (
     _complete_client,
@@ -211,14 +212,17 @@ def _display_sessions() -> None:
 def _check_and_mark_dead_sessions() -> list[str]:
     """Reconcile state with the native daemon and return reaped session names.
 
-    Cheap passive reconciliation: called from every read path (``cw status``,
-    ``cw list``, ``cw start``). The reconciler is idempotent and returns an
-    empty list when nothing changed. :func:`cw.reconcile.reconcile` refuses
-    to mass-reap when the daemon is unreachable or the roster is empty while
-    active sessions still have surface refs (outage guard), so this helper
-    is safe to run on every read path.
+    Cheap passive reconciliation: called from ``cw status`` and ``cw list``
+    (``cw start`` calls ``reconcile()`` itself, with the default wait). The
+    reconciler is idempotent and returns an empty list when nothing changed.
+    :func:`cw.reconcile.reconcile` refuses to mass-reap when the daemon is
+    unreachable or the roster is empty while active sessions still have
+    surface refs (outage guard), so this helper is safe to run on every read
+    path. It waits 5 s for the sessions lock unless
+    ``CW_SESSIONS_LOCK_TIMEOUT_S`` is set (#2694); a timeout exits 1 naming
+    the recorded holder.
     """
-    report = reconcile()
+    report = reconcile(lock_timeout_s=operator_read_lock_wait_seconds())
     return list(report.phantom_session_names)
 
 

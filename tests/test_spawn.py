@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any, cast, get_args
 import pytest
 from click.testing import CliRunner
 
+from cw import _flock
+from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
 from cw._lock_guard import held_locks
 from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION, Status
 from cw.cli import main
@@ -19,6 +21,7 @@ from cw.codex_review import CODEX_REVIEW_UNPARSEABLE
 from cw.config import load_state, orchestrator_config_file, save_state
 from cw.dev_queue import load_dev_queue
 from cw.exceptions import CwError, SpawnUnregisteredError, WorkerLaunchedError
+from cw.history import EventType, HistoryEvent, load_history
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     MUST_FIX_OVERRIDE_KEY,
@@ -47,6 +50,7 @@ from cw.spawn import (
 from tests._reconcile_helpers import LockProbeDaemon
 from tests.conftest import (
     _SRC_ROOT,
+    _FakeClock,
     _make_daemon_session,
     _make_ticket_task,
     _seed_completed_session,
@@ -3188,6 +3192,87 @@ class TestSpawnCLI:
         assert post_launch_attention_payload(events)["session_id"] in result.output
         assert "00000001" in result.output
         assert mock_native_daemon.stop_calls == []
+
+
+# ---------------------------------------------------------------------------
+# #2694: operator closes -- `cw spawn close` and the `cw dev-queue cancel`
+# session step
+# ---------------------------------------------------------------------------
+
+
+def _status_of(session_id: str) -> SessionStatus:
+    sess = load_state().find_by_name_or_id(session_id)
+    assert sess is not None
+    return sess.status
+
+
+def _operator_close_events(client: str) -> list[HistoryEvent]:
+    return [
+        event
+        for event in load_history(client, event_types=[EventType.SESSION_COMPLETED])
+        if event.detail == "operator_close"
+    ]
+
+
+class TestSpawnCloseOperatorClose:
+    def test_inline_close_records_one_audit_event_with_identity(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        sess = _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            surface_ref="ref-audit",
+            claude_session_id="csid-audit",
+        )
+        result = CliRunner().invoke(main, ["spawn", "close", sess.id])
+
+        assert result.exit_code == 0, result.output
+        (event,) = _operator_close_events("test-client")
+        assert event.session_id == sess.id
+        assert event.metadata["command"] == "cw spawn close"
+        assert event.metadata["prior_status"] == "active"
+        assert event.metadata["resulting_status"] == "completed"
+        assert event.metadata["surface_ref"] == "ref-audit"
+        assert event.metadata["claude_session_id"] == "csid-audit"
+
+    def test_audit_failure_is_reported_after_the_close(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir, surface_ref="ref-audit")
+
+        def _fail(*_args: object) -> None:
+            message = "disk full"
+            raise OSError(message)
+
+        monkeypatch.setattr("cw.cli.spawn.record_history_event", _fail)
+        result = CliRunner().invoke(main, ["spawn", "close", sess.id])
+
+        assert result.exit_code == 1
+        assert "audit record could not be written" in result.output
+        assert _status_of(sess.id) is SessionStatus.COMPLETED
+
+    def test_held_lock_fails_after_five_seconds_whatever_the_env(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        held_sessions_lock: Path,
+    ) -> None:
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.spawn.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "300")
+        clock = _FakeClock()
+        monkeypatch.setattr(_flock, "time", clock)
+
+        result = CliRunner().invoke(main, ["spawn", "close", sess.id])
+
+        assert result.exit_code == 1
+        assert clock.now == pytest.approx(5.0)
+        assert result.output.count("Timed out") == 1
+        assert _status_of(sess.id) is SessionStatus.ACTIVE
+        assert daemon.stop_calls == []
+        assert _operator_close_events("test-client") == []
 
 
 class TestSpawnCloseRequeue:

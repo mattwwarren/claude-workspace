@@ -22,7 +22,14 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
 from cw import _config_migrate, _lock_hold
-from cw._flock import acquire_flock, acquire_sessions_flock
+from cw._flock import (
+    acquire_flock,
+    acquire_sessions_flock,
+    clear_lock_holder,
+    fail_open_holder_bookkeeping,
+    open_holder_lock_fd,
+    record_lock_holder,
+)
 from cw._git import run_git
 from cw._lock_guard import LockRank, lock_guard
 from cw.atomic import atomic_write_text
@@ -60,12 +67,28 @@ _SAFE_BRANCH_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$")
 _EMPTY_CLIENTS_DOC = "clients:\n"
 
 
+def _lock_holder_command() -> str:
+    """The holder's self-reported command for the sessions-lock record (#2694).
+
+    The Click command path (``cw spawn close``) when a Click context is
+    active, else the basename of ``argv[0]``. Never the full argv: free-text
+    options (``cw session send --message ...``) must not be persisted into
+    the lock file or echoed in another process's timeout message.
+    """
+    ctx = click.get_current_context(silent=True)
+    if ctx is not None:
+        return ctx.command_path
+    return Path(sys.argv[0] if sys.argv else "cw").name
+
+
 @contextlib.contextmanager
 def _guarded_state_lock(
     lock_name: str,
     lock_path: Path,
     rank: LockRank,
     acquire: Callable[[Any], None],
+    *,
+    record_holder: bool = False,
 ) -> Iterator[None]:
     """Guard and hold a state-lock fd using the lock-specific *acquire*.
 
@@ -74,10 +97,20 @@ def _guarded_state_lock(
     taken after unlock is in-memory; the sidecar write runs in the outer
     ``finally``, after ``lock_guard`` has popped, and only once this thread
     holds no guarded lock.
+
+    *record_holder* (#2694, the sessions lock only) opens the file with
+    :func:`cw._flock.open_holder_lock_fd` (``"a+"``, so a losing contender
+    never erases the record; read-only if the file cannot be written) and
+    writes/clears the holder record. Holder bookkeeping fails open: every
+    exception it raises (the command lookup included) is logged and ignored
+    by :func:`cw._flock.fail_open_holder_bookkeeping`, so it never stops the
+    body running or the lock being released.
     """
     try:
         with lock_guard(lock_name, lock_path, rank):
-            fd = lock_path.open("w")
+            fd = (
+                open_holder_lock_fd(lock_path) if record_holder else lock_path.open("w")
+            )
             requested = time.monotonic()
             try:
                 acquire(fd)
@@ -86,14 +119,27 @@ def _guarded_state_lock(
                 raise
             acquired = time.monotonic()
             try:
+                if record_holder:
+                    fail_open_holder_bookkeeping(
+                        "record",
+                        lambda: record_lock_holder(fd, cmd=_lock_holder_command()),
+                    )
                 yield
             finally:
                 released = time.monotonic()
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                fd.close()
-                _lock_hold.note_hold(
-                    lock_name, held_s=released - acquired, waited_s=acquired - requested
-                )
+                try:
+                    if record_holder:
+                        fail_open_holder_bookkeeping(
+                            "clear", lambda: clear_lock_holder(fd)
+                        )
+                finally:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    fd.close()
+                    _lock_hold.note_hold(
+                        lock_name,
+                        held_s=released - acquired,
+                        waited_s=acquired - requested,
+                    )
     finally:
         _lock_hold.flush_pending(state_dir, state_file)
 
@@ -340,7 +386,9 @@ def concurrency_override_lock(*, bounded: bool = False) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def sessions_lock(*, bounded: bool = False) -> Iterator[None]:
+def sessions_lock(
+    *, bounded: bool = False, timeout_s: float | None = None
+) -> Iterator[None]:
     """Acquire an exclusive file lock over the sessions.json write window.
 
     Hold this across every load_state → mutate → save_state sequence so
@@ -362,8 +410,14 @@ def sessions_lock(*, bounded: bool = False) -> Iterator[None]:
     :func:`~cw._flock.sessions_lock_timeout_seconds` (default 60s,
     ``CW_SESSIONS_LOCK_TIMEOUT_S``) and then raises the timeout error rather
     than hanging behind a wedged ``cw dev-queue serve``. The env var applies to
-    ``bounded=True`` callers only. Which files may opt in is pinned by an
-    allowlist test (``tests/test_config.py``).
+    ``bounded=True`` callers only. An explicit *timeout_s* replaces that wait
+    for this acquisition: the operator commands pass 5 s (``cw list``/``cw
+    status``, ``cw spawn close``, #2694). Which files may opt in is pinned by
+    an allowlist test (``tests/test_config.py``).
+
+    The holder records ``{"pid", "cmd", "acquired_at"}`` in the lock file
+    while it holds it (#2694, best effort), so a contender's timeout can name
+    it; the file is opened ``"a+"`` so a losing contender never erases it.
     """
     lock_path = sessions_lock_file()
     state_dir().mkdir(parents=True, exist_ok=True)
@@ -371,17 +425,25 @@ def sessions_lock(*, bounded: bool = False) -> Iterator[None]:
         SESSIONS_LOCK_NAME,
         lock_path,
         LockRank.SESSIONS,
-        lambda fd: acquire_sessions_flock(fd, lock_path, bounded=bounded),
+        lambda fd: acquire_sessions_flock(
+            fd, lock_path, bounded=bounded, timeout_s=timeout_s
+        ),
+        record_holder=True,
     ):
         yield
 
 
-def mutate_state(fn: Callable[[CwState], None], *, bounded: bool = False) -> CwState:
+def mutate_state(
+    fn: Callable[[CwState], None],
+    *,
+    bounded: bool = False,
+    timeout_s: float | None = None,
+) -> CwState:
     """Load state, apply fn in place under sessions_lock, save and return.
 
-    *bounded* is forwarded to :func:`sessions_lock`: leave it ``False`` (the
-    default) unless the caller has no irreversible side effect before this
-    call.
+    *bounded* and *timeout_s* are forwarded to :func:`sessions_lock`: leave
+    *bounded* ``False`` (the default) unless the caller has no irreversible
+    side effect before this call.
 
     Not reentrant (ADR-0019): code already inside a ``with sessions_lock():``
     block (e.g. ``reconcile._reconcile_locked``) gets
@@ -396,7 +458,7 @@ def mutate_state(fn: Callable[[CwState], None], *, bounded: bool = False) -> CwS
     the disqualifying condition (subprocess inside lock, dual-lock, or
     network call).
     """
-    with sessions_lock(bounded=bounded):
+    with sessions_lock(bounded=bounded, timeout_s=timeout_s):
         state = load_state()
         fn(state)
         save_state(state)

@@ -1121,7 +1121,13 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `session_id` for the same reason `lane_circuit_paused` does it:
   `_terminal_dedup_key` is `(event_type, session_id, paused_status)`, so a
   stable id would collapse every recurrence under `cw event tail
-  --dedup-terminal`. `breadcrumbs` carries `"pending=<int> age_s=<int>"`.
+  --dedup-terminal`. `breadcrumbs` carries `"pending=<int> age_s=<int>
+  skip=<skip_reason> occupied=<int> running=<int>/<cap>
+  orphan_sessions=<none | <id> (<ticket>), ...>"` (#2694): `skip=`,
+  `occupied=` and `running=` come from the last tick (a `cap_full` or
+  `lane_cap_blocked` stall names itself there); `orphan_sessions=` names the
+  ceiling-counted sessions no occupied row owns (at most 5, then `(+K
+  more)`). Unreadable state degrades to the first two fields.
   Recurs every `dispatch_stale_notify_interval_minutes` (default 15) while
   the condition persists, gated by
   `ClientConcurrencyOverride.dispatch_stale_notify_next_eligible_at`; the
