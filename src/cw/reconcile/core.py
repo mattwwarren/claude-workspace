@@ -105,6 +105,7 @@ from cw.reconcile.review_recipes import (
 )
 from cw.reconcile.review_recipes.core import capture_review_repo_slugs
 from cw.reconcile.routed_result_sessions import sweep_routed_result_sessions
+from cw.reconcile.session_close import apply_queued_closes
 from cw.reconcile.stalled import (
     _act_on_stalled_candidates,
     _detect_stalled_candidates,
@@ -411,7 +412,9 @@ def _capture_harvest_facts() -> HarvestFacts:
     return facts
 
 
-def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
+def reconcile(
+    *, dispatch_review_jobs: bool = False, lock_timeout_s: float | None = None
+) -> ReconcileReport:
     """Apply drift reconciliation against the persisted state.
 
     Flips phantom ACTIVE/IDLE sessions to COMPLETED with
@@ -473,6 +476,11 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     harvest pass's own span (at most 100 s) counts against its 180 s age
     limit. The dirty checks expire ``DIRTY_CHECK_MAX_AGE_SECONDS`` after
     capture; one aged out by a slow harvest pass or lock wait only defers.
+
+    *lock_timeout_s* (#2694) bounds the sessions-lock wait for this call:
+    ``cw list``/``cw status`` pass the 5 s operator wait, every other caller
+    keeps the env-or-60 s default (``None``). It bounds the lock wait only,
+    not the lockless pre-passes above.
     """
     # Pre-pass: check PR merge state for ACTIVE/IDLE DAEMON sessions before
     # acquiring sessions_lock. gh subprocess must NOT run under the lock
@@ -568,7 +576,7 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
         # lets dispatch_tick skip the tick (_reconcile_usage_limited re-raises
         # it). A timeout means the lock was never acquired, so `jobs` is still
         # empty and the drain in the `finally` below is a no-op.
-        with sessions_lock(bounded=True):
+        with sessions_lock(bounded=True, timeout_s=lock_timeout_s):
             locked_report = _reconcile_locked(
                 merged_ticket_ids=merged_ticket_ids,
                 gh_blocked_ticket_ids=gh_blocked_ticket_ids,
@@ -726,6 +734,9 @@ def _reconcile_locked(
         clients = load_clients()
     state = load_state()
     now = datetime.now(UTC)
+    # Recorded operator closes (#2694) apply first: a `spawn_close` entry may
+    # cancel its RUNNING row, which every sweep below must then see.
+    apply_queued_closes(state, deferred=deferred)
 
     # Foreign-result sweep: completes headless DAEMON sessions whose
     # last_result already carries a terminal sentinel recorded by another
