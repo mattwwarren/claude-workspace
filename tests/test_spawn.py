@@ -12,9 +12,14 @@ from typing import TYPE_CHECKING, Any, cast, get_args
 import pytest
 from click.testing import CliRunner
 
+import cw.cli.spawn as spawn_cli
+from cw import _flock
+from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
 from cw._lock_guard import held_locks
 from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION, Status
 from cw.cli import main
+from cw.cli.routed_orphan_close import stop_and_confirm_gone
+from cw.cli.spawn import CancelSessionCloser
 from cw.codex_review import CODEX_REVIEW_UNPARSEABLE
 from cw.config import load_state, orchestrator_config_file, save_state
 from cw.dev_queue import load_dev_queue
@@ -48,10 +53,13 @@ from cw.spawn import (
 from tests._reconcile_helpers import LockProbeDaemon
 from tests.conftest import (
     _SRC_ROOT,
+    _FakeClock,
     _make_daemon_session,
     _make_ticket_task,
     _seed_completed_session,
     _seed_daemon_session,
+    _stop_leaves_worker_listed,
+    _stop_makes_roster_unreadable,
     post_launch_attention_payload,
 )
 
@@ -3191,80 +3199,10 @@ class TestSpawnCLI:
         assert mock_native_daemon.stop_calls == []
 
 
-class TestSpawnCloseLockWait:
-    """`cw spawn close` waits 5 s for a held sessions lock (#2694)."""
-
-    def test_held_lock_fails_after_five_seconds_naming_the_holder(
-        self,
-        tmp_config_dir: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        held_sessions_lock_recorded: Path,
-    ) -> None:
-        import os
-
-        from cw import _flock
-        from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
-        from tests.conftest import _FakeClock
-
-        sess = _seed_daemon_session(tmp_path, tmp_config_dir)
-        daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.cli.spawn.get_native_daemon_client", lambda: daemon)
-        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "300")
-        clock = _FakeClock()
-        monkeypatch.setattr(_flock, "time", clock)
-        before = sorted(p.name for p in held_sessions_lock_recorded.parent.iterdir())
-
-        result = CliRunner().invoke(main, ["spawn", "close", sess.id])
-
-        assert result.exit_code == 1
-        assert clock.now == pytest.approx(5.0)
-        assert result.output.count("Timed out") == 1
-        assert f"Recorded holder: pid {os.getpid()}" in result.output
-        assert "retry" in result.output
-        assert _status_of(sess.id) is SessionStatus.ACTIVE
-        assert daemon.stop_calls == []
-        after = sorted(p.name for p in held_sessions_lock_recorded.parent.iterdir())
-        assert after == before  # no queued-close entry, no intent file
-
-    def test_unknown_session_under_a_held_lock_reports_the_timeout(
-        self,
-        tmp_config_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        held_sessions_lock: Path,
-    ) -> None:
-        from cw import _flock
-        from tests.conftest import _FakeClock
-
-        monkeypatch.setattr(_flock, "time", _FakeClock())
-
-        result = CliRunner().invoke(main, ["spawn", "close", "nope0000"])
-
-        assert result.exit_code == 1
-        assert "Timed out" in result.output
-        assert str(held_sessions_lock) in result.output
-
-
-class TestCancelCloseOutcome:
-    """The cancel session steps' accumulated outcome (#2694)."""
-
-    def test_reports_to_stderr_and_raises_naming_every_problem(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        from cw.cli.spawn import CancelCloseOutcome
-
-        outcome = CancelCloseOutcome(problems=("first", "second"))
-
-        outcome.report()
-
-        assert capsys.readouterr().err == "first\nsecond\n"
-        with pytest.raises(CwError, match="first\nsecond"):
-            outcome.raise_if_unfinished()
-
-    def test_nothing_unfinished_does_not_raise(self) -> None:
-        from cw.cli.spawn import CancelCloseOutcome
-
-        CancelCloseOutcome().raise_if_unfinished()
+# ---------------------------------------------------------------------------
+# #2694: operator closes -- `cw spawn close` and the `cw dev-queue cancel`
+# session step
+# ---------------------------------------------------------------------------
 
 
 def _status_of(session_id: str) -> SessionStatus:
@@ -3273,7 +3211,7 @@ def _status_of(session_id: str) -> SessionStatus:
     return sess.status
 
 
-def _operator_close_events(client: str = "test-client") -> list[HistoryEvent]:
+def _operator_close_events(client: str) -> list[HistoryEvent]:
     return [
         event
         for event in load_history(client, event_types=[EventType.SESSION_COMPLETED])
@@ -3281,8 +3219,8 @@ def _operator_close_events(client: str = "test-client") -> list[HistoryEvent]:
     ]
 
 
-class TestSpawnCloseAudit:
-    def test_inline_close_records_identity_and_status(
+class TestSpawnCloseOperatorClose:
+    def test_inline_close_records_one_audit_event_with_identity(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         sess = _seed_daemon_session(
@@ -3294,7 +3232,7 @@ class TestSpawnCloseAudit:
         result = CliRunner().invoke(main, ["spawn", "close", sess.id])
 
         assert result.exit_code == 0, result.output
-        (event,) = _operator_close_events()
+        (event,) = _operator_close_events("test-client")
         assert event.session_id == sess.id
         assert event.metadata["command"] == "cw spawn close"
         assert event.metadata["prior_status"] == "active"
@@ -3302,11 +3240,8 @@ class TestSpawnCloseAudit:
         assert event.metadata["surface_ref"] == "ref-audit"
         assert event.metadata["claude_session_id"] == "csid-audit"
 
-    def test_audit_failure_is_reported_after_close(
-        self,
-        tmp_config_dir: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_audit_failure_is_reported_after_the_close(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         sess = _seed_daemon_session(tmp_path, tmp_config_dir, surface_ref="ref-audit")
 
@@ -3320,6 +3255,192 @@ class TestSpawnCloseAudit:
         assert result.exit_code == 1
         assert "audit record could not be written" in result.output
         assert _status_of(sess.id) is SessionStatus.COMPLETED
+
+    def test_held_lock_fails_after_five_seconds_whatever_the_env(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        held_sessions_lock: Path,
+    ) -> None:
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.spawn.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "300")
+        clock = _FakeClock()
+        monkeypatch.setattr(_flock, "time", clock)
+
+        result = CliRunner().invoke(main, ["spawn", "close", sess.id])
+
+        assert result.exit_code == 1
+        assert clock.now == pytest.approx(5.0)
+        assert result.output.count("Timed out") == 1
+        assert _status_of(sess.id) is SessionStatus.ACTIVE
+        assert daemon.stop_calls == []
+        assert _operator_close_events("test-client") == []
+
+
+_CANCEL_CLIENT = "client-a"
+
+
+def _seed_cancel_sessions(
+    fake: FakeNativeDaemonClient, *ids: str, **overrides: object
+) -> dict[str, Session]:
+    """Save live DAEMON sessions *ids* (one live worker each); return them by id."""
+    sessions = [
+        _make_daemon_session(
+            id=sid,
+            name=f"{_CANCEL_CLIENT}/auto-dev/T-{sid}",
+            surface_ref=fake.seed_live_worker(Path("/tmp/wt")),
+            **overrides,
+        )
+        for sid in ids
+    ]
+    save_state(CwState(sessions=sessions))
+    return {s.id: s for s in sessions}
+
+
+def _closer(fake: FakeNativeDaemonClient) -> CancelSessionCloser:
+    """The closer as ``cw dev-queue cancel`` wires it: the shared stop helper."""
+    return CancelSessionCloser(fake, stop_and_confirm_gone)
+
+
+class TestCancelSessionCloser:
+    """The `cw dev-queue cancel` session step: stop, confirm, then flip."""
+
+    def test_stops_confirms_then_flips_and_audits(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeNativeDaemonClient()
+        read = _seed_cancel_sessions(fake, "sess-1")
+        status_at_stop: list[SessionStatus] = []
+        real_stop = fake.stop
+
+        def _stop(short_id: str) -> None:
+            status_at_stop.append(_status_of("sess-1"))
+            real_stop(short_id)
+
+        monkeypatch.setattr(fake, "stop", _stop)
+        closer = _closer(fake)
+
+        closer.close(read)
+        closer.finish()
+
+        assert fake.stop_calls == [read["sess-1"].surface_ref]
+        assert status_at_stop == [SessionStatus.ACTIVE]  # flipped only after
+        sess = load_state().find_by_name_or_id("sess-1")
+        assert sess is not None
+        assert sess.status is SessionStatus.COMPLETED
+        assert sess.completed_reason is CompletionReason.USER
+        (event,) = _operator_close_events(_CANCEL_CLIENT)
+        assert event.metadata["command"] == "cw dev-queue cancel"
+        assert event.metadata["prior_status"] == "active"
+
+    @pytest.mark.parametrize(
+        "make_unconfirmable",
+        [_stop_leaves_worker_listed, _stop_makes_roster_unreadable],
+        ids=["still-listed", "roster-unreadable"],
+    )
+    def test_unconfirmed_stop_does_not_flip(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_unconfirmable: Callable[
+            [pytest.MonkeyPatch, FakeNativeDaemonClient], None
+        ],
+    ) -> None:
+        fake = FakeNativeDaemonClient()
+        read = _seed_cancel_sessions(fake, "sess-1")
+        make_unconfirmable(monkeypatch, fake)
+        monkeypatch.setattr(
+            "cw.cli.routed_orphan_close._ROUTED_STOP_CONFIRM_TIMEOUT_SECS", 0.0
+        )
+        closer = _closer(fake)
+
+        closer.close(read)
+
+        with pytest.raises(CwError, match="cw spawn close sess-1"):
+            closer.finish()
+        assert fake.stop_calls == [read["sess-1"].surface_ref]
+        assert _status_of("sess-1") is SessionStatus.ACTIVE
+        assert _operator_close_events(_CANCEL_CLIENT) == []
+
+    @pytest.mark.parametrize("change", ["resumed", "bound-after-the-read"])
+    def test_other_incarnation_is_neither_stopped_nor_flipped(
+        self, tmp_config_dir: Path, change: str
+    ) -> None:
+        fake = FakeNativeDaemonClient()
+        live = _seed_cancel_sessions(fake, "sess-1")["sess-1"]
+        read = (
+            live.model_copy(update={"surface_ref": "old-ref"})
+            if change == "resumed"
+            else None
+        )
+        closer = _closer(fake)
+
+        closer.close({"sess-1": read})
+
+        with pytest.raises(CwError, match=r"sess-1 .*left running"):
+            closer.finish()
+        assert fake.stop_calls == []
+        assert _status_of("sess-1") is SessionStatus.ACTIVE
+
+    def test_terminal_session_is_stopped_but_others_are_left_alone(
+        self, tmp_config_dir: Path
+    ) -> None:
+        fake = FakeNativeDaemonClient()
+        done = _seed_cancel_sessions(fake, "sess-done", status=SessionStatus.TIMED_OUT)[
+            "sess-done"
+        ]
+        user = _make_daemon_session(id="sess-user", origin=SessionOrigin.USER)
+        save_state(CwState(sessions=[done, user]))
+        closer = _closer(fake)
+
+        closer.close({"sess-done": done, "sess-user": user, "gone": None})
+        closer.finish()
+
+        assert fake.stop_calls == [done.surface_ref]
+        assert _status_of("sess-done") is SessionStatus.TIMED_OUT
+        assert _status_of("sess-user") is SessionStatus.ACTIVE
+
+    def test_after_a_lock_timeout_later_tickets_skip_the_lock_and_report_once(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        held_sessions_lock: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.delenv(SESSIONS_LOCK_TIMEOUT_ENV, raising=False)
+        clock = _FakeClock()
+        monkeypatch.setattr(_flock, "time", clock)
+        flips: list[object] = []
+        real_mutate = spawn_cli.mutate_state
+
+        def _counting_mutate(*args: Any, **kwargs: Any) -> CwState:
+            flips.append(args)
+            return real_mutate(*args, **kwargs)
+
+        monkeypatch.setattr("cw.cli.spawn.mutate_state", _counting_mutate)
+        fake = FakeNativeDaemonClient()
+        read = _seed_cancel_sessions(fake, "sess-a", "sess-b")
+        closer = _closer(fake)
+
+        closer.close({"sess-a": read["sess-a"]})  # ticket A: the lock times out
+        closer.close({"sess-b": read["sess-b"]})  # ticket B: never tries it
+        closer.report()
+
+        assert len(flips) == 1
+        assert clock.now == pytest.approx(5.0)
+        assert fake.stop_calls == [s.surface_ref for s in read.values()]
+        assert {s.status for s in load_state().sessions} == {SessionStatus.ACTIVE}
+        reported = capsys.readouterr().err
+        with pytest.raises(CwError) as exc_info:
+            closer.finish()
+        for text in (reported, str(exc_info.value)):
+            assert text.count("Timed out") == 1
+            assert text.count("the worker was stopped") == 1
+            assert "`cw spawn close sess-a`" in text
+            assert "`cw spawn close sess-b`" in text
 
 
 class TestSpawnCloseRequeue:

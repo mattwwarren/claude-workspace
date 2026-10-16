@@ -22,7 +22,7 @@ from cw import _flock
 from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
 from cw._lock_hold import LockHoldRecord, read_window
 from cw.cli import main
-from cw.config import load_state, save_state, sessions_lock, state_dir
+from cw.config import save_state, sessions_lock, state_dir
 from cw.dev_queue import (
     add_ticket,
     approve_must_fix_override_ticket,
@@ -43,7 +43,7 @@ from cw.dev_queue import (
 from cw.dev_queue import storage as dev_queue_storage
 from cw.dev_queue.crud import register_or_adopt_watched_pr
 from cw.exceptions import CwError, LockTimeoutError
-from cw.models import CwState, DevQueueStore, QueueItemStatus, SessionStatus
+from cw.models import CwState, DevQueueStore, QueueItemStatus
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import (
     _FakeClock,
@@ -416,13 +416,6 @@ class TestMultiTicketContention:
             " idempotent: re-running the full command is safe."
         ) in result.stderr
         assert _dev_queue_timeout_message(cw.config.dev_queue_lock()) in result.stderr
-        # #2694: A's session was stopped and flipped before B's row timed out;
-        # the flip took no dev-queue lock, so the 2nd acquisition was B's.
-        statuses = {s.id: s.status for s in load_state().sessions}
-        assert statuses == {
-            "sess-a": SessionStatus.COMPLETED,
-            "sess-b": SessionStatus.ACTIVE,
-        }
 
     def test_timeout_at_the_first_ticket_reports_none_done(
         self, monkeypatch: pytest.MonkeyPatch
@@ -458,83 +451,6 @@ class TestMultiTicketContention:
         assert result.exit_code != 0
         assert "Not removed (lock timed out)" not in result.stderr
         assert "dev_queue lock" in result.stderr
-
-
-# ---------------------------------------------------------------------------
-# cancel's session step behind a held sessions lock (#2694)
-# ---------------------------------------------------------------------------
-
-
-def _seed_two_running_tickets(fake: FakeNativeDaemonClient) -> list[str]:
-    """RUNNING rows A and B bound to live DAEMON sessions; returns the surfaces."""
-    surfaces = [fake.seed_live_worker(state_dir()) for _ in range(2)]
-    save_state(
-        CwState(
-            sessions=[
-                _make_daemon_session(
-                    id=f"sess-{t.lower()}",
-                    name=f"{_CLIENT}/auto-dev/{t}",
-                    surface_ref=ref,
-                )
-                for t, ref in zip("AB", surfaces, strict=True)
-            ]
-        )
-    )
-    save_dev_queue(
-        DevQueueStore(
-            tasks=[
-                _make_ticket_task(
-                    ticket_id=t,
-                    client=_CLIENT,
-                    status=QueueItemStatus.RUNNING,
-                    session_id=f"sess-{t.lower()}",
-                )
-                for t in "AB"
-            ]
-        )
-    )
-    return surfaces
-
-
-@pytest.mark.usefixtures("acme")
-class TestCancelSessionsLockTimeout:
-    def test_stops_the_workers_then_fails_with_the_flip_pending(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        mock_native_daemon: FakeNativeDaemonClient,
-        held_sessions_lock_recorded: Path,
-    ) -> None:
-        import os
-
-        monkeypatch.delenv(SESSIONS_LOCK_TIMEOUT_ENV, raising=False)
-        clock = _FakeClock()
-        monkeypatch.setattr(_flock, "time", clock)
-        surfaces = _seed_two_running_tickets(mock_native_daemon)
-        monkeypatch.setattr(
-            "cw.cli.dev_queue.crud.get_native_daemon_client", lambda: mock_native_daemon
-        )
-        result = CliRunner().invoke(
-            main, ["dev-queue", "cancel", "A", "B", "-c", _CLIENT]
-        )
-
-        assert result.exit_code == 1
-        assert _queue_by_ticket() == {
-            "A": QueueItemStatus.CANCELLED,
-            "B": QueueItemStatus.CANCELLED,
-        }
-        # Both workers were stopped from the lock-free read ...
-        assert mock_native_daemon.stop_calls == surfaces
-        # ... but no record flipped, and nothing was queued for later.
-        assert {s.status for s in load_state().sessions} == {SessionStatus.ACTIVE}
-        assert not any("close" in p.name for p in state_dir().iterdir())
-        for sid in ("sess-a", "sess-b"):
-            assert f"cw spawn close {sid}" in result.output
-        assert "worker was stopped" in result.output
-        assert "record flip is pending" in result.output
-        assert "cw doctor" in result.output
-        assert f"pid {os.getpid()}" in result.output
-        # One bounded 5 s wait; after it B's attempt does not wait again.
-        assert clock.now == pytest.approx(5.0)
 
 
 # ---------------------------------------------------------------------------

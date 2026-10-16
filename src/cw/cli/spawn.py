@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple, cast, get_args
+from typing import TYPE_CHECKING, cast, get_args
 
 import click
 
@@ -43,11 +44,7 @@ from cw.models import (
     SessionOrigin,
     SessionStatus,
 )
-from cw.native_daemon import (
-    NativeDaemonClient,
-    get_native_daemon_client,
-    wait_for_roster_presence,
-)
+from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.reconcile import (
     _apply_sentinel_to_task,
     holds_staged_emit_result,
@@ -57,7 +54,7 @@ from cw.result import reconstruct_staged_sentinel
 from cw.spawn import spawn_create_impl
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
 
     from cw.models import CwState, Session
 
@@ -68,11 +65,6 @@ logger = logging.getLogger(__name__)
 OPERATOR_CLOSE_DETAIL = "operator_close"
 _SPAWN_CLOSE_COMMAND = "cw spawn close"
 _CANCEL_COMMAND = "cw dev-queue cancel"
-# How long the cancel session step polls the daemon roster for a stopped
-# worker to leave before it refuses to mark the session completed (#2694);
-# the routed-orphan close's confirmation window.
-_CANCEL_STOP_CONFIRM_TIMEOUT_S = 5.0
-_CANCEL_STOP_CONFIRM_INTERVAL_S = 0.5
 
 
 def _spawn_create_impl(
@@ -261,51 +253,9 @@ def _spawn_close_impl(
             (native_daemon or get_native_daemon_client()).stop(surface_to_stop)
 
 
-class CancelCloseOutcome(NamedTuple):
-    """What the ``cw dev-queue cancel`` session steps left unfinished (#2694).
-
-    Accumulated across one command's tickets: *problems* holds one
-    operator-facing line per session not marked completed; *lock_timed_out*
-    means a later ticket tries the sessions lock once without waiting.
-    """
-
-    problems: tuple[str, ...] = ()
-    lock_timed_out: bool = False
-
-    def report(self) -> None:
-        """Echo every problem to stderr (before another error ends the command)."""
-        for problem in self.problems:
-            click.echo(problem, err=True)
-
-    def raise_if_unfinished(self) -> None:
-        """Fail the command (exit 1) naming every unfinished session."""
-        if self.problems:
-            raise CwError("\n".join(self.problems))
-
-
 def _incarnation(sess: Session) -> tuple[object, ...]:
     """What identifies one run of *sess*; a resume changes it (#2694)."""
     return (sess.started_at, sess.resumed_at, sess.surface_ref)
-
-
-def _stop_until_gone(sess: Session, daemon: NativeDaemonClient) -> str | None:
-    """Stop *sess*'s worker and confirm it left the roster."""
-    if sess.surface_ref is None:
-        return None
-    daemon.stop(sess.surface_ref)
-    if sess.status in TERMINAL_SESSION_STATUSES or wait_for_roster_presence(
-        daemon,
-        sess.surface_ref,
-        present=False,
-        timeout=_CANCEL_STOP_CONFIRM_TIMEOUT_S,
-        interval=_CANCEL_STOP_CONFIRM_INTERVAL_S,
-    ):
-        return None
-    return (
-        f"Session {sess.id}: its worker {sess.surface_ref} is still in the daemon"
-        " roster (or the roster is unreadable) after the stop, so the session was"
-        f" not marked completed; run `cw spawn close {sess.id}` once it is gone."
-    )
 
 
 def _flip_cancelled(
@@ -341,51 +291,13 @@ def _flip_cancelled(
     return flipped, resumed
 
 
-def _resumed_message(sid: str) -> str:
-    """The line for a session whose incarnation changed since the cancel read it."""
+def _other_incarnation_message(sid: str) -> str:
+    """The line for a session that is not the incarnation the cancel read."""
     return (
-        f"Session {sid} was resumed into a new incarnation after the cancel read"
-        " it, so it was left as is (not marked completed); run"
-        f" `cw spawn close {sid}` if it should not run."
+        f"Session {sid} is not the incarnation the cancel read before cancelling"
+        " its row (resumed or rebound since), so it was left running and not"
+        f" marked completed; run `cw spawn close {sid}` if it should not run."
     )
-
-
-def _bound_daemon_sessions(
-    wanted: set[str], bound_sessions: Mapping[str, Session] | None
-) -> tuple[dict[str, Session], list[str]]:
-    """The cancelled row's DAEMON sessions to stop, plus one line per skip.
-
-    A session whose current incarnation differs from the *bound_sessions*
-    capture (or, without one, from itself) is reported, never returned.
-    """
-    read: dict[str, Session] = {}
-    skipped: list[str] = []
-    for sess in load_state().sessions if wanted else ():
-        if sess.id not in wanted or sess.origin is not SessionOrigin.DAEMON:
-            continue
-        bound = sess if bound_sessions is None else bound_sessions.get(sess.id)
-        if bound is None:
-            continue
-        if _incarnation(sess) != _incarnation(bound):
-            skipped.append(_resumed_message(sess.id))
-        else:
-            read[sess.id] = bound
-    return read, skipped
-
-
-def _stop_to_flip(
-    read: Mapping[str, Session], daemon: NativeDaemonClient
-) -> tuple[dict[str, Session], list[str]]:
-    """Stop each *read* worker; return those confirmed gone and still to flip."""
-    to_flip: dict[str, Session] = {}
-    problems: list[str] = []
-    for sess in read.values():
-        problem = _stop_until_gone(sess, daemon)
-        if problem is not None:
-            problems.append(problem)
-        elif sess.status not in TERMINAL_SESSION_STATUSES:
-            to_flip[sess.id] = sess
-    return to_flip, problems
 
 
 def _audit_flipped(flipped: Iterable[tuple[Session, SessionStatus]]) -> list[str]:
@@ -401,50 +313,113 @@ def _audit_flipped(flipped: Iterable[tuple[Session, SessionStatus]]) -> list[str
     return problems
 
 
-def close_cancelled_sessions(
-    session_ids: Iterable[str | None],
-    daemon: NativeDaemonClient,
-    prior: CancelCloseOutcome,
-    *,
-    bound_sessions: Mapping[str, Session] | None = None,
-) -> CancelCloseOutcome:
-    """Stop, then mark completed each session a cancel unbound.
+@dataclass
+class CancelSessionCloser:
+    """Stop, confirm and flip the sessions one ``cw dev-queue cancel`` unbinds.
 
-    *session_ids* are the ids ``cancel_ticket`` cleared from the cancelled
-    row: the sessions bound to it at cancel time (#2694). The optional
-    *bound_sessions* mapping is captured before the row cancellation; a
-    changed incarnation is never stopped. Each matching DAEMON session is
-    stopped lock-free, confirmed gone from the daemon roster, and only then
-    flipped COMPLETED(USER) under one sessions-lock wait of
-    :func:`~cw._flock.operator_close_lock_wait_seconds` (none once *prior*
-    timed out), re-checked against the incarnation that was read. USER-origin
-    and unknown ids are untouched. A sessions-lock timeout leaves the stopped
-    sessions unflipped and reports the pending flip; nothing is queued. Each
-    flip records one operator-close audit event. Returns *prior* extended with
-    this ticket's problems.
+    One per command (#2694). :meth:`close` handles one cancelled row: each
+    DAEMON session bound to it is stopped lock-free and confirmed gone from
+    the roster by *stop_and_confirm* (the routed-orphan close's
+    :func:`cw.cli.routed_orphan_close.stop_and_confirm_gone`, passed in
+    because that module imports this one), then flipped COMPLETED(USER)
+    under one bounded sessions-lock wait
+    (:func:`~cw._flock.operator_close_lock_wait_seconds`) with one
+    operator-close audit event each. A session that is not the incarnation
+    read before the row was cancelled is skipped and named. After the first
+    sessions-lock timeout no later ticket touches the lock: its workers are
+    still stopped and confirmed, and every pending flip is reported once.
+    Nothing is queued.
     """
-    read, skipped = _bound_daemon_sessions(
-        {sid for sid in session_ids if sid is not None}, bound_sessions
-    )
-    to_flip, stop_problems = _stop_to_flip(read, daemon)
-    problems = [*prior.problems, *skipped, *stop_problems]
-    if not to_flip:
-        return prior._replace(problems=tuple(problems))
-    wait_s = 0.0 if prior.lock_timed_out else operator_close_lock_wait_seconds()
-    try:
-        flipped, resumed = _flip_cancelled(to_flip, wait_s)
-    except SessionsLockTimeoutError as exc:
-        problems.extend(
-            f"Session {sid}: the worker was stopped, but the record flip is"
-            " pending (the sessions lock is busy, so it is not marked completed"
-            f" yet); run `cw spawn close {sid}` or `cw doctor` once it frees."
-            for sid in to_flip
-        )
-        problems.append(str(exc))
-        return CancelCloseOutcome(tuple(problems), lock_timed_out=True)
-    problems.extend(_resumed_message(sid) for sid in resumed)
-    problems.extend(_audit_flipped(flipped))
-    return prior._replace(problems=tuple(problems))
+
+    daemon: NativeDaemonClient
+    stop_and_confirm: Callable[..., tuple[str | None, OSError | ValueError | None]]
+    problems: list[str] = field(default_factory=list)
+    pending: list[str] = field(default_factory=list)
+    lock_timeout: str | None = None
+
+    def close(self, bound: Mapping[str, Session | None]) -> None:
+        """Close one row's sessions: cleared id -> the session read before cancel."""
+        to_flip = self._stop_confirmed(self._targets(bound))
+        if not to_flip:
+            return
+        if self.lock_timeout is not None:
+            self.pending.extend(to_flip)
+            return
+        try:
+            flipped, resumed = _flip_cancelled(
+                to_flip, operator_close_lock_wait_seconds()
+            )
+        except SessionsLockTimeoutError as exc:
+            self.lock_timeout = str(exc)
+            self.pending.extend(to_flip)
+            return
+        self.problems.extend(_other_incarnation_message(sid) for sid in resumed)
+        self.problems.extend(_audit_flipped(flipped))
+
+    def _targets(self, bound: Mapping[str, Session | None]) -> list[Session]:
+        """The bound DAEMON sessions still the incarnation that was read."""
+        current = {s.id: s for s in load_state().sessions} if bound else {}
+        targets: list[Session] = []
+        for sid, read in bound.items():
+            sess = current.get(sid)
+            if sess is None or sess.origin is not SessionOrigin.DAEMON:
+                continue
+            if read is None or _incarnation(sess) != _incarnation(read):
+                self.problems.append(_other_incarnation_message(sid))
+            elif sess.surface_ref is not None:
+                targets.append(sess)
+        return targets
+
+    def _stop_confirmed(self, targets: list[Session]) -> dict[str, Session]:
+        """Stop each target; return the non-terminal ones confirmed gone."""
+        ids = frozenset(s.id for s in targets)
+        surfaces = frozenset(cast("str", s.surface_ref) for s in targets)
+        to_flip: dict[str, Session] = {}
+        for sess in targets:
+            surface_ref = cast("str", sess.surface_ref)
+            if sess.status in TERMINAL_SESSION_STATUSES:
+                # Nothing to flip; stop a leaked worker as cancel always has.
+                self.daemon.stop(surface_ref)
+                continue
+            reason, _ = self.stop_and_confirm(
+                self.daemon,
+                surface_ref,
+                candidate_ids=ids,
+                candidate_surfaces=surfaces,
+            )
+            if reason is None:
+                to_flip[sess.id] = sess
+            else:
+                self.problems.append(
+                    f"Session {sess.id}: the stop of worker {surface_ref} is not"
+                    f" confirmed ({reason}), so it was not marked completed; run"
+                    f" `cw spawn close {sess.id}` once the worker is gone."
+                )
+        return to_flip
+
+    def _lines(self) -> list[str]:
+        lines = list(self.problems)
+        if self.pending and self.lock_timeout is not None:
+            commands = ", ".join(f"`cw spawn close {sid}`" for sid in self.pending)
+            lines.append(
+                f"Session(s) {', '.join(self.pending)}: the worker was stopped, but"
+                " the record flip is pending because the sessions lock is busy;"
+                f" once it frees, run {commands} (or `cw doctor`)."
+            )
+            lines.append(self.lock_timeout)
+        return lines
+
+    def report(self) -> None:
+        """Echo what is unfinished to stderr, before another error ends the command."""
+        for line in self._lines():
+            click.echo(line, err=True)
+
+    def finish(self) -> None:
+        """Fail the command (exit 1) naming every unfinished session, once."""
+        lines = self._lines()
+        if lines:
+            message = "\n".join(lines)
+            raise CwError(message)
 
 
 def _spawn_close_requeue_impl(

@@ -14,7 +14,6 @@ import re
 import shutil
 import subprocess
 import sys
-import threading
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,13 +32,7 @@ import tests._session_home
 from cw import _lock_hold as lock_hold_module
 from cw._lock_hold import LockHoldRecord
 from cw._lock_hold import day_path as lock_hold_day_path
-from cw.config import (
-    load_state,
-    save_state,
-    sessions_lock,
-    sessions_lock_file,
-    state_dir,
-)
+from cw.config import load_state, save_state, sessions_lock_file, state_dir
 from cw.disk import DiskUsage, InodeUsage
 from cw.models import (
     AGENT_SPAWN_STAMP_KEY,
@@ -1506,46 +1499,6 @@ def _hold_sessions_lock() -> Iterator[Path]:
 def held_sessions_lock() -> Iterator[Path]:
     """Fixture form of :func:`_hold_sessions_lock` for whole-test contention."""
     with _hold_sessions_lock() as lock_path:
-        yield lock_path
-
-
-# Generous: the helper thread only has to enter an uncontended lock.
-_RECORDED_HOLDER_READY_S = 10.0
-
-
-@contextlib.contextmanager
-def _hold_sessions_lock_recorded() -> Iterator[Path]:
-    """Hold the REAL ``sessions_lock()`` from a helper thread; yield its path (#2694).
-
-    Unlike :func:`_hold_sessions_lock` (a bare second fd opened ``"w"``, which
-    records no holder), the lock is entered through ``cw.config.sessions_lock``
-    so its holder record (``pid``/``cmd``/``acquired_at``) is written, and a
-    contender's timeout names it. A thread, because the lock guard is
-    per-thread: the test's own thread can then contend for the lock as another
-    cw process would. The record's ``pid`` is ``os.getpid()``.
-    """
-    entered = threading.Event()
-    release = threading.Event()
-
-    def _hold() -> None:
-        with sessions_lock():
-            entered.set()
-            release.wait()
-
-    thread = threading.Thread(target=_hold, name="recorded-sessions-holder")
-    thread.start()
-    try:
-        assert entered.wait(_RECORDED_HOLDER_READY_S), "holder never took the lock"
-        yield sessions_lock_file()
-    finally:
-        release.set()
-        thread.join(_RECORDED_HOLDER_READY_S)
-
-
-@pytest.fixture
-def held_sessions_lock_recorded() -> Iterator[Path]:
-    """Fixture form of :func:`_hold_sessions_lock_recorded`."""
-    with _hold_sessions_lock_recorded() as lock_path:
         yield lock_path
 
 
