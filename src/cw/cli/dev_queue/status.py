@@ -28,11 +28,12 @@ from cw.models import (
     OrchestratorConfig,
     QueueItemStatus,
     TicketTask,
-    counts_toward_client_ceiling,
 )
 from cw.orchestrate import latest_tick_summary_by_client
-from cw.reconcile import ticket_id_for_session
-from cw.reconcile.routed_result_sessions import session_pins_occupied_row
+from cw.reconcile.routed_result_sessions import (
+    format_orphan_sessions,
+    unowned_ceiling_sessions,
+)
 
 from ._group import _ACTIVE_STATUSES, _PAUSED_LANE_MARKER, dev_queue
 from .tasks import _count_needs_attn, _needs_attn_by_client
@@ -41,10 +42,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from cw.models import Session
-
-# How many unowned session ids the [ORPHAN?] annotation names before it
-# collapses the rest into a "(+K more)" suffix (#2524).
-_ORPHAN_SESSION_ID_CAP = 5
 
 
 def _lane_caps_for_client(
@@ -170,24 +167,18 @@ def _unowned_ceiling_sessions(
 ) -> tuple[Session, ...]:
     """Sessions counted against *client_name*'s ceiling that no occupied row owns.
 
-    Read-only (#2524): one plain ``load_state()`` read, filtered with the same
-    predicate dispatch counts the ceiling by (``counts_toward_client_ceiling``)
-    and the reconcile detector's "an occupied row binds it" test
-    (``session_pins_occupied_row``), oldest first. An unreadable state file
-    yields ``()``, so the annotation falls back to its generic text instead
-    of failing ``cw dev-queue status``.
+    Read-only (#2524): one plain ``load_state()`` read, filtered by the shared
+    :func:`~cw.reconcile.routed_result_sessions.unowned_ceiling_sessions`
+    (the dispatch ceiling predicate minus every session an occupied row
+    binds), oldest first. An unreadable state file yields ``()``, so the
+    annotation falls back to its generic text instead of failing ``cw
+    dev-queue status``.
     """
     try:
         state = load_state()
     except (OSError, ValueError, CwError):
         return ()
-    unowned = [
-        s
-        for s in state.sessions
-        if counts_toward_client_ceiling(s, client_name)
-        and not session_pins_occupied_row(tasks, s.id)
-    ]
-    return tuple(sorted(unowned, key=lambda s: s.started_at))
+    return unowned_ceiling_sessions(state.sessions, tasks, client_name)
 
 
 def _running_row_divergence_annotation(
@@ -211,8 +202,9 @@ def _running_row_divergence_annotation(
 
     *unowned_sessions* (#2524) names the ceiling-counted sessions no occupied
     row owns -- e.g. one stranded after its result was already routed -- as
-    ``<id> (<ticket>)``, capped at ``_ORPHAN_SESSION_ID_CAP``. Empty keeps the
-    original generic text.
+    ``<id> (<ticket>)``, capped at ``ORPHAN_SESSION_ID_CAP``
+    (:func:`~cw.reconcile.routed_result_sessions.format_orphan_sessions`).
+    Empty keeps the original generic text.
     """
     counts = (
         f" [ORPHAN? — {tick_running} session(s) counted against the ceiling"
@@ -220,13 +212,8 @@ def _running_row_divergence_annotation(
     )
     if not unowned_sessions:
         return f"{counts}; run cw doctor]"
-    shown = ", ".join(
-        f"{s.id} ({ticket_id_for_session(s.name) or s.name})"
-        for s in unowned_sessions[:_ORPHAN_SESSION_ID_CAP]
-    )
-    hidden = len(unowned_sessions) - _ORPHAN_SESSION_ID_CAP
-    more = f" (+{hidden} more)" if hidden > 0 else ""
-    return f"{counts}; no occupied row owns: {shown}{more}; run cw doctor]"
+    named = format_orphan_sessions(unowned_sessions)
+    return f"{counts}; no occupied row owns: {named}; run cw doctor]"
 
 
 def _echo_client_rows(
