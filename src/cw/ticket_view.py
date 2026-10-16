@@ -32,7 +32,7 @@ from cw.config import (
 )
 from cw.dev_queue import _find_ticket, load_dev_queue, session_attention_state
 from cw.dev_queue.next_commands import next_commands
-from cw.dispatch import TICK_STALE_SECONDS
+from cw.dispatch import TICK_STALE_SECONDS, resolve_hold_finalize, resolve_signoff
 from cw.events import read_events
 from cw.exceptions import CwError
 from cw.models import DispatchSkipReason, OrchestratorEventType, QueueItemStatus
@@ -153,6 +153,26 @@ def resolve_view_client(
     return clients[0]
 
 
+def resolve_human_opt_in(
+    task: TicketTask, client_cfg: ClientConfig | None, config: OrchestratorConfig
+) -> bool:
+    """True iff the ticket, its lane or the global default arms a human gate.
+
+    A finalize hold (``hold_finalize`` / lane ``finalize_gate`` /
+    ``default_finalize_gate``) or operator signoff (``signoff`` / lane
+    ``signoff`` / ``default_signoff``), resolved exactly as dispatch resolves
+    them. ``next_commands`` passes it as ``operator_opt_in`` so rules 6/6a do
+    not advertise the ``requeue --stage finalize`` jump past REVIEW, where
+    those gates are evaluated (#2692 R5). An unconfigured client falls
+    through to the global default, as in dispatch.
+    """
+    clients = {} if client_cfg is None else {task.client: client_cfg}
+    return (
+        resolve_hold_finalize(task, clients, config) is not None
+        or resolve_signoff(task, clients, config) is not None
+    )
+
+
 def build_ticket_view(
     ticket_id: str, client: str, *, now: datetime, sources: ViewSources
 ) -> TicketView:
@@ -171,6 +191,7 @@ def build_ticket_view(
     session = resolve_session_for_task(task, load_state())
     client_cfg = sources.effective_client(client)
     ceiling = resolve_attempt_ceiling(client_cfg, task, sources.orchestrator_config)
+    opt_in = resolve_human_opt_in(task, client_cfg, sources.orchestrator_config)
     return TicketView(
         ticket_id=task.ticket_id,
         client=task.client,
@@ -198,7 +219,7 @@ def build_ticket_view(
         - 1,
         created_at=task.created_at,
         completed_at=task.completed_at,
-        next=next_commands(task, session=session),
+        next=next_commands(task, session=session, operator_opt_in=opt_in),
     )
 
 

@@ -11563,6 +11563,126 @@ class TestDevQueueTasksPrState:
 # ---------------------------------------------------------------------------
 
 
+_NEXT_WIDTH = 44
+_HUMAN = "HUMAN GATE: approve"
+_OVERRIDE_CELL = 'approve --override-must-fix --reason "<why>"'
+
+
+def _next_cells(output: str) -> list[str]:
+    """The NEXT column of a ``dev-queue tasks`` table, by header offset."""
+    lines = [line for line in output.splitlines() if line.strip()]
+    header, *rest = [line for line in lines if not line.startswith("-")]
+    start = header.index("NEXT")
+    return [line[start:].strip() for line in rest]
+
+
+class TestDevQueueTasksNextColumn:
+    """#2692: ``tasks`` shows each row's first legal command (NEXT column)."""
+
+    @pytest.mark.parametrize(
+        ("case_id", "cell"),
+        [
+            ("rule0_signoff", _HUMAN),
+            ("rule0_finalize_gate_held", _HUMAN),
+            ("rule0_finalize_held_no_session", _HUMAN),
+            ("rule0_scope_hint_large_approval_gate", _HUMAN),
+            ("rule9_review_gate", "approve"),
+            ("rule9_approval_gate_disposition", "approve"),
+            ("rule2_pending", "wait"),
+            ("rule3_running", "wait"),
+            ("rule7_salvage_parked", "unblock"),
+            ("rule10_plain_blocked_no_session", "requeue"),
+            ("rule4_completed", "requeue --from-completed"),
+            ("rule6a_must_fix_override_recorded", "requeue --stage finalize"),
+            ("rule5_scope_drift_no_session", "approve --scope-drift <paths>"),
+            ("rule6_must_fix_no_session", _OVERRIDE_CELL),
+            ("rule6a_scope_hint_large_ship_dropped", _OVERRIDE_CELL),
+        ],
+    )
+    def test_cell(self, tmp_config_dir: Path, case_id: str, cell: str) -> None:
+        from tests._ticket_view_helpers import CASES, seed_queue
+
+        case = CASES[case_id]
+        session = case.session()
+        seed_queue([case.task], [session] if session is not None else [])
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        assert _next_cells(result.output) == [cell]
+
+    @pytest.mark.parametrize(
+        "arm",
+        ["lane_finalize_gate", "lane_signoff", "global", "unparseable", "invalid"],
+    )
+    def test_resolved_opt_in_drops_the_finalize_jump(
+        self, tmp_config_dir: Path, tmp_path: Path, arm: str
+    ) -> None:
+        from tests._ticket_view_helpers import CASES, seed_queue, write_lane_client
+
+        if arm == "lane_finalize_gate":
+            write_lane_client("acme", tmp_path / "ws", finalize_gate="manual")
+        elif arm == "lane_signoff":
+            write_lane_client("acme", tmp_path / "ws", signoff="operator")
+        else:
+            orchestrator_config_file().parent.mkdir(parents=True, exist_ok=True)
+            orchestrator_config_file().write_text(
+                {
+                    "global": "default_finalize_gate: manual\n",
+                    "unparseable": "default_finalize_gate: [not, valid\n",
+                    "invalid": "default_finalize_gate: sometimes\n",
+                }[arm]
+            )
+        seed_queue([CASES["rule6a_must_fix_override_recorded"].task])
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        assert _next_cells(result.output) == [_OVERRIDE_CELL]
+
+    def test_nothing_armed_keeps_the_finalize_jump(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from tests._ticket_view_helpers import CASES, seed_queue, write_lane_client
+
+        write_lane_client("acme", tmp_path / "ws")
+        seed_queue([CASES["rule6a_must_fix_override_recorded"].task])
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert _next_cells(result.output) == ["requeue --stage finalize"]
+
+    def test_every_first_command_fits_the_column(self) -> None:
+        from cw.dev_queue.next_commands import (
+            HUMAN_GATE_CELL_LABEL,
+            compact_command,
+            is_human_kept_gate,
+            next_commands,
+        )
+        from tests._ticket_view_helpers import CASES
+
+        for case in CASES.values():
+            first = next_commands(case.task, session=case.session())[0]
+            cell = compact_command(case.task, first.command)
+            if is_human_kept_gate(case.task):
+                cell = f"{HUMAN_GATE_CELL_LABEL}{cell}"
+                assert cell == _HUMAN
+            assert not cell.startswith("requeue") or not is_human_kept_gate(case.task)
+            assert len(cell) <= _NEXT_WIDTH
+
+    def test_json_is_unchanged_and_reads_no_config(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json as _json
+
+        from tests._ticket_view_helpers import CASES, seed_queue
+
+        def _boom(*_a: object, **_kw: object) -> object:
+            msg = "tasks --json must not read orchestrator config"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.ticket_view.load_orchestrator_config", _boom)
+        task = CASES["rule6a_must_fix_override_recorded"].task
+        seed_queue([task])
+        result = CliRunner().invoke(main, ["dev-queue", "tasks", "--json"])
+        assert result.exit_code == 0, result.output
+        assert _json.loads(result.output) == [task.model_dump(mode="json")]
+
+
 class TestDevQueueWait:
     """Tests for ``cw dev-queue wait``."""
 

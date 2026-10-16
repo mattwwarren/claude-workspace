@@ -13,7 +13,11 @@ from click.testing import Result
 import cw.cli.dev_queue.show as show_mod
 from cw.cli import main
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS
-from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.dev_queue import (
+    FINALIZE_GATE_HELD_DISPOSITION,
+    load_dev_queue,
+    save_dev_queue,
+)
 from cw.events import read_events
 from cw.exceptions import CwError
 from cw.models import (
@@ -299,6 +303,10 @@ class TestApproveEcho:
         assert result.exit_code == 0, result.output
         lines = stdout_lines(result)
         assert lines[0].startswith(f"Recorded MUST_FIX override for {_T} ({_C})")
+        assert lines[0].endswith(
+            " If the ticket or lane has a finalize hold, operator signoff or"
+            " scope_hint: large, this step is the human's."
+        )
         assert (
             "approval: must-fix override by alice at 2026-10-15T17:45:00Z: fp" in lines
         )
@@ -319,6 +327,27 @@ class TestApproveEcho:
         assert result.exit_code == 1
         assert f"ticket: {_T}" in stdout_lines(result)
         assert "close failed" in result.stderr
+
+
+class TestHumanGateShow:
+    def test_human_gate_row_lists_only_the_labelled_approve(self) -> None:
+        task = make_task(
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            stage=Stage.REVIEW,
+            session_id="sess-1",
+            disposition=FINALIZE_GATE_HELD_DISPOSITION,
+        )
+        seed_queue([task], [bound_session_for(task)])
+        result = invoke_dev_queue("show", _T, "-c", _C)
+        assert result.exit_code == 0, result.output
+        lines = stdout_lines(result)
+        start = lines.index("next:")
+        assert lines[start + 1 :] == [
+            "  cw dev-queue approve ACM-1 -c acme   # operator-only human gate;"
+            " not for an agent to run: release the operator-set finalize hold so"
+            " the ticket finalizes"
+        ]
+        assert not [ln for ln in lines if "requeue" in ln]
 
 
 class TestCancelEcho:

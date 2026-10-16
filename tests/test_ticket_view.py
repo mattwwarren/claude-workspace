@@ -14,7 +14,12 @@ import pytest
 from freezegun import freeze_time
 
 import cw.ticket_view
-from cw.config import load_orchestrator_config
+from cw.codex_review import CODEX_MUST_FIX_FINDINGS
+from cw.config import (
+    get_effective_client,
+    load_orchestrator_config,
+    orchestrator_config_file,
+)
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import (
@@ -23,6 +28,7 @@ from cw.models import (
     LastResultSource,
     LivenessBucket,
     MustFixOverride,
+    OrchestratorConfig,
     OrchestratorEvent,
     OrchestratorEventType,
     PrState,
@@ -37,8 +43,10 @@ from cw.ticket_view import (
     build_ticket_view,
     find_ticket_clients,
     render_ticket_view,
+    resolve_human_opt_in,
     resolve_view_client,
 )
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -53,6 +61,8 @@ from tests._ticket_view_helpers import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from cw.models import TicketTask
 
 
 _C = ACME
@@ -772,3 +782,132 @@ class TestJsonContract:
         payload["surprise"] = 1
         with pytest.raises(ValueError, match="surprise"):
             TicketView.model_validate(payload)
+
+
+_OVERRIDE_CMD = (
+    'cw dev-queue approve ACM-1 -c acme --override-must-fix --reason "<why>"'
+)
+_SHIP_CMD = "cw dev-queue requeue ACM-1 -c acme --stage finalize"
+_SHIP_CAVEAT = (
+    "if the ticket or lane has a finalize hold, operator signoff or"
+    " scope_hint: large, this step is the human's."
+)
+
+
+def _must_fix_row(*, overridden: bool) -> TicketTask:
+    return make_task(
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        stage=Stage.REVIEW,
+        session_id="sess-1",
+        blocked_reason=CODEX_MUST_FIX_FINDINGS,
+        must_fix_override=(
+            MustFixOverride(
+                actor="alice",
+                reason="fp",
+                reviewed_sha="a" * 40,
+                finding_ids=[],
+                recorded_at=_NOW,
+            )
+            if overridden
+            else None
+        ),
+    )
+
+
+def _write_orchestrator_config(text: str) -> None:
+    path = orchestrator_config_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+class TestResolveHumanOptIn:
+    """R5 (a''): the config-resolved human opt-in ``show``/``tasks`` pass in."""
+
+    @pytest.mark.parametrize(
+        ("task_overrides", "lane_kwargs", "config", "expected"),
+        [
+            ({"hold_finalize": "manual"}, {}, OrchestratorConfig(), True),
+            ({"signoff": "operator"}, {}, OrchestratorConfig(), True),
+            ({}, {"finalize_gate": "manual"}, OrchestratorConfig(), True),
+            ({}, {"signoff": "operator"}, OrchestratorConfig(), True),
+            ({}, {}, OrchestratorConfig(default_finalize_gate="manual"), True),
+            ({}, {}, OrchestratorConfig(default_signoff="operator"), True),
+            ({}, {}, OrchestratorConfig(), False),
+        ],
+        ids=[
+            "ticket_hold",
+            "ticket_signoff",
+            "lane_finalize_gate",
+            "lane_signoff",
+            "global_finalize_gate",
+            "global_signoff",
+            "nothing_armed",
+        ],
+    )
+    def test_resolution(
+        self,
+        tmp_path: Path,
+        task_overrides: dict[str, object],
+        lane_kwargs: dict[str, str],
+        config: OrchestratorConfig,
+        expected: bool,
+    ) -> None:
+        write_lane_client(_C, tmp_path / "ws", **lane_kwargs)
+        task = make_task(**task_overrides)
+        client_cfg = get_effective_client(_C)
+        assert resolve_human_opt_in(task, client_cfg, config) is expected
+
+    def test_unconfigured_client_falls_through_to_the_global_default(self) -> None:
+        task = make_task()
+        armed = OrchestratorConfig(default_finalize_gate="manual")
+        assert resolve_human_opt_in(task, None, armed) is True
+        assert resolve_human_opt_in(task, None, OrchestratorConfig()) is False
+
+    def test_another_lanes_gate_does_not_apply(self, tmp_path: Path) -> None:
+        write_clients_yaml(
+            ClientSpec(
+                _C,
+                tmp_path / "ws",
+                lanes=[
+                    {"name": DEFAULT_LANE},
+                    {"name": "fast", "finalize_gate": "manual"},
+                ],
+            ),
+            ensure_workspaces=True,
+        )
+        task = make_task(lane=DEFAULT_LANE)
+        client_cfg = get_effective_client(_C)
+        assert resolve_human_opt_in(task, client_cfg, OrchestratorConfig()) is False
+
+
+class TestNextCommandsOptIn:
+    @pytest.mark.parametrize("overridden", [False, True], ids=["rule6", "rule6a"])
+    @pytest.mark.parametrize(
+        "arm",
+        ["lane_finalize_gate", "lane_signoff", "global_finalize_gate"],
+    )
+    def test_armed_opt_in_drops_the_finalize_jump(
+        self, tmp_path: Path, overridden: bool, arm: str
+    ) -> None:
+        if arm == "lane_finalize_gate":
+            write_lane_client(_C, tmp_path / "ws", finalize_gate="manual")
+        elif arm == "lane_signoff":
+            write_lane_client(_C, tmp_path / "ws", signoff="operator")
+        else:
+            _write_orchestrator_config("default_finalize_gate: manual\n")
+        seed_queue([_must_fix_row(overridden=overridden)])
+        view = _build()
+        assert [c.command for c in view.next] == [_OVERRIDE_CMD]
+        assert not [c for c in view.next if "--stage finalize" in c.command]
+        assert _SHIP_CMD not in _text(view)
+
+    @pytest.mark.parametrize("overridden", [False, True], ids=["rule6", "rule6a"])
+    def test_nothing_armed_keeps_the_ship_step_with_its_caveat(
+        self, overridden: bool
+    ) -> None:
+        seed_queue([_must_fix_row(overridden=overridden)])
+        view = _build()
+        ship = [c for c in view.next if c.command == _SHIP_CMD]
+        assert len(ship) == 1
+        assert ship[0].purpose.endswith(_SHIP_CAVEAT)
+        assert f"  {_SHIP_CMD}   # {ship[0].purpose}" in _text(view)
