@@ -6260,6 +6260,29 @@ class TestSpawnCloseQueued:
                 native_daemon=FakeNativeDaemonClient(),
             )
 
+    def test_requeue_while_queued_without_a_ticket_says_so(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        held_sessions_lock: Path,
+    ) -> None:
+        _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id=_QUEUED_SID,
+            name="test-client/interactive-session",
+            surface_ref=_QUEUED_SURFACE,
+        )
+        _virtual_clock(monkeypatch)
+
+        result = CliRunner().invoke(main, ["spawn", "close", "--requeue", _QUEUED_SID])
+
+        assert result.exit_code == 1
+        flat = " ".join(result.output.split())
+        assert "--requeue was not run, and no ticket_id resolves" in flat
+        assert "cw dev-queue requeue" not in flat
+
     def test_unknown_id_under_a_held_lock_is_not_found(
         self,
         tmp_config_dir: Path,

@@ -260,6 +260,33 @@ class TestStore:
                     "surface_ref": 7,
                 }
             ),
+            json.dumps(
+                {
+                    "session_id": "../escape",
+                    "queued_at": _NOW.isoformat(),
+                    "origin": "cancel",
+                    "resumed_at": None,
+                    "surface_ref": None,
+                }
+            ),
+            json.dumps(
+                {
+                    "session_id": "sess-9",
+                    "queued_at": "2026-10-01T12:00:00",
+                    "origin": "cancel",
+                    "resumed_at": None,
+                    "surface_ref": None,
+                }
+            ),
+            json.dumps(
+                {
+                    "session_id": "sess-9",
+                    "queued_at": _NOW.isoformat(),
+                    "origin": "cancel",
+                    "resumed_at": 12,
+                    "surface_ref": None,
+                }
+            ),
         ],
         ids=[
             "zero-length",
@@ -269,6 +296,9 @@ class TestStore:
             "unknown-origin",
             "bad-queued-at",
             "surface-wrong-type",
+            "unsafe-session-id",
+            "naive-queued-at",
+            "resumed-at-wrong-type",
         ],
     )
     def test_corrupt_entries_are_removed_with_a_warning(
@@ -302,6 +332,12 @@ class TestStore:
 
     def test_missing_dir_lists_nothing(self, tmp_config_dir: Path) -> None:
         assert pending_queued_closes() == []
+
+    def test_an_entry_removed_mid_listing_is_skipped(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A concurrent clear between the listing and the read is not corrupt."""
+        assert session_close._read_entry(queued_closes_dir() / "gone.json") is None
 
     def test_clear_of_a_missing_entry_is_a_no_op(self, tmp_config_dir: Path) -> None:
         clear_queued_close("never-queued")

@@ -557,6 +557,30 @@ class TestCancelSessionsLockContention:
         assert clock.now == 5.0
         assert {s.status for s in load_state().sessions} == {SessionStatus.ACTIVE}
 
+    def test_unrecorded_close_names_the_manual_recovery(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_native_daemon: FakeNativeDaemonClient,
+        held_sessions_lock_recorded: Path,
+    ) -> None:
+        monkeypatch.setattr(_flock, "time", _FakeClock())
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.crud.get_native_daemon_client", lambda: mock_native_daemon
+        )
+
+        def _disk_full(_path: Path, _text: str) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr("cw.reconcile.session_close.atomic_write_text", _disk_full)
+        _seed_two_running_with_sessions()
+
+        result = CliRunner().invoke(main, ["dev-queue", "cancel", "A", "-c", _CLIENT])
+
+        assert result.exit_code == 0, result.output
+        assert mock_native_daemon.stop_calls == ["ref-a"]
+        assert "run `cw spawn close sess-a`" in result.stderr
+        assert "QUEUED" not in result.output
+
     def test_entries_are_written_before_the_stops(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -584,9 +608,8 @@ class TestCancelSessionsLockContention:
         monkeypatch: pytest.MonkeyPatch,
         mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
-        from cw.reconcile.session_close import pending_queued_closes
-
         from cw.reconcile import reconcile
+        from cw.reconcile.session_close import pending_queued_closes
 
         monkeypatch.setattr(_flock, "time", _FakeClock())
         monkeypatch.setattr(

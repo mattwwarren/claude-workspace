@@ -831,9 +831,8 @@ def test_timed_out_flip_is_refused_and_not_audited_as_completed(
     RAISES on a held sessions lock (it never queues), so the orphan close is
     refused, the session stays ACTIVE, nothing is audited as completed and no
     queued-close entry is written on this path."""
-    from cw.reconcile.session_close import pending_queued_closes
-
     from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
+    from cw.reconcile.session_close import pending_queued_closes
 
     monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.05")
     daemon = FakeNativeDaemonClient()
