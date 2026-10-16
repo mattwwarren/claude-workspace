@@ -5,10 +5,15 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, cast, get_args
+from typing import TYPE_CHECKING, NoReturn, cast, get_args
 
 import click
 
+from cw._flock import (
+    OPERATOR_COMMAND_LOCK_WAIT_S,
+    SESSIONS_LOCK_TIMEOUT_ENV,
+    operator_close_lock_wait_seconds,
+)
 from cw.auto_dev_result import Status
 from cw.cli._base import handle_errors, main
 from cw.config import (
@@ -20,15 +25,13 @@ from cw.config import (
 )
 from cw.dev_queue import (
     _find_ticket,
-    cancel_task_for_session,
     dev_queue_lock,
     load_dev_queue,
     requeue_ticket,
-    running_task_for_session,
 )
 from cw.dispatch import _DISPATCH_CONSUMER, _apply_events_to_store
 from cw.events import advance_cursor, record_event
-from cw.exceptions import CwError, RequeueStateError
+from cw.exceptions import CwError, RequeueStateError, SessionsLockTimeoutError
 from cw.models import (
     ClientConfig,
     CompletionReason,
@@ -39,12 +42,8 @@ from cw.models import (
     SessionStatus,
 )
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
-from cw.reconcile import (
-    _apply_sentinel_to_task,
-    holds_staged_emit_result,
-    ticket_id_for_session,
-)
-from cw.result import reconstruct_staged_sentinel
+from cw.reconcile import ticket_id_for_session
+from cw.reconcile.session_close import close_session_in_state, queue_close
 from cw.spawn import spawn_create_impl
 
 if TYPE_CHECKING:
@@ -81,40 +80,12 @@ def _spawn_create_impl(
     )
 
 
-def _route_staged_emit_result(sess: Session) -> bool:
-    """Route *sess*'s staged ``cw result emit`` result to its RUNNING row (#2458).
-
-    Returns True when the row is now dispositioned by that result -- routed,
-    or already landed terminal by a concurrent caller -- so the caller must
-    NOT also cancel it. Returns False (cancel as before) when nothing is
-    staged, the staged dict reconstructs into neither sentinel arm, the
-    session owns no RUNNING row, or the shared authority refuses the route
-    (a #1031 stage mismatch, or a BlockedResult landing the row FAILED).
-
-    The row is found by :func:`~cw.dev_queue.running_task_for_session` --
-    the lookup ``cancel_task_for_session`` itself uses -- via a lock-free
-    read; ``_apply_sentinel_to_task`` re-resolves it under
-    ``dev_queue_lock``. Called under ``sessions_lock``, the same
-    ``sessions_lock`` -> ``dev_queue_lock`` nesting ``signal_stop`` already
-    uses.
-    """
-    if not holds_staged_emit_result(sess):
-        return False
-    staged = reconstruct_staged_sentinel(sess.last_result)
-    if staged is None:
-        return False
-    task = running_task_for_session(load_dev_queue(), sess.id)
-    if task is None:
-        return False
-    outcome = _apply_sentinel_to_task(task.ticket_id, sess, staged)
-    return outcome.routed or outcome.task_already_terminal
-
-
 def _spawn_close_impl(
     *,
     session_id: str,
     native_daemon: NativeDaemonClient | None = None,
     surface_already_stopped: bool = False,
+    lock_timeout_s: float | None = None,
 ) -> None:
     """Close a daemon-spawned session.
 
@@ -127,56 +98,31 @@ def _spawn_close_impl(
     worker and confirmed it left the roster (or proved there is none), so the
     post-lock stop is skipped -- no second stop, no client resolved. The
     cancel/route step and the COMPLETED stamp are unchanged.
+
+    Raise-or-flip (#2694): a held sessions lock raises
+    :class:`~cw.exceptions.SessionsLockTimeoutError` after *lock_timeout_s*
+    (``None``: the env-or-60 s default) and records nothing. Only the
+    ``spawn close`` command queues the close; ``routed_orphan_close`` relies
+    on this raising.
     """
     surface_to_stop: str | None = None
-    # Why not mutate_state: cancel_task_for_session / _route_staged_emit_result
+    # Why not mutate_state: cancel_task_for_session / route_staged_emit_result
     # take dev_queue_lock inside the sessions_lock window (criterion 2: no
     # dual-lock).
     # bounded=True (#2491): operator recovery command with no side effect
     # before the lock, so a held lock must fail fast, not hang the recovery.
-    with sessions_lock(bounded=True):
+    with sessions_lock(bounded=True, timeout_s=lock_timeout_s):
         state = load_state()
         sess = state.find_by_name_or_id(session_id)
         if sess is None:
             msg = f"Session '{session_id}' not found."
             raise CwError(msg)
-        if sess.status == SessionStatus.COMPLETED:
-            # #2480: an already-completed session's daemon surface may still be
-            # sitting live in the roster (the Stop hook's rescued=None bail, or
-            # any other completion path that never called daemon.stop()) --
-            # occupying the ticket's worktree forever and blocking
-            # re-dispatch. Stop it (idempotent: NativeDaemonClient.stop()
-            # swallows a missing/already-gone surface) instead of refusing the
-            # close outright, so a second `cw spawn close` genuinely clears the
-            # leak rather than erroring on the very case it exists to fix.
-            if sess.surface_ref is not None and sess.origin is SessionOrigin.DAEMON:
-                surface_to_stop = sess.surface_ref
-        else:
-            if sess.surface_ref is not None:
-                if sess.origin is SessionOrigin.DAEMON:
-                    surface_to_stop = sess.surface_ref
-                else:
-                    logging.getLogger(__name__).warning(
-                        "Session %s has legacy surface_ref %r; skipping surface close",
-                        sess.id,
-                        sess.surface_ref,
-                    )
-
-            # For DAEMON sessions, atomically cancel any RUNNING TicketTask that
-            # owns this session so revert_completed_silent_tasks cannot revert it
-            # to PENDING and the dispatcher cannot re-spawn the same ticket in
-            # the same tick. (See GitHub issue #317.) A worker that already
-            # emitted its result has that result routed first instead (#2458) --
-            # cancelling would throw away validated work and force a manual
-            # `requeue --from-cancelled`.
-            if sess.origin is SessionOrigin.DAEMON and not _route_staged_emit_result(
-                sess
-            ):
-                cancel_task_for_session(sess.id)
-
-            sess.status = SessionStatus.COMPLETED
-            sess.completed_at = datetime.now(UTC)
-            sess.completed_reason = CompletionReason.USER
+        prior_status = sess.status
+        # The close body (#2480 leaked-surface stop, #317 row cancel, #2458
+        # staged-result routing) lives in cw.reconcile.session_close so a
+        # queued close applied by reconcile runs the same code.
+        surface_to_stop = close_session_in_state(sess)
+        if sess.status != prior_status:
             save_state(state)
 
     # daemon.stop is best-effort and slow (up to 10s), so it runs after the lock
@@ -373,6 +319,12 @@ def spawn_close(session_id: str, confirmed_dead: bool, requeue: bool) -> None:
 
     Stops the session via the native daemon and marks it as COMPLETED.
 
+    Waits at most 5s for the sessions lock (less if CW_SESSIONS_LOCK_TIMEOUT_S
+    is lower). If another cw process still holds it, the close is QUEUED
+    instead: it is recorded, applied by the next reconcile pass (the serve
+    tick, or any cw list/status), and the command exits 1 with
+    "QUEUED, NOT YET CLOSED" and the entry path to delete to withdraw it.
+
     \b
     Example:
       cw spawn close abc12345
@@ -381,21 +333,30 @@ def spawn_close(session_id: str, confirmed_dead: bool, requeue: bool) -> None:
     """
     del confirmed_dead  # permission-prefix token only; not forwarded to impl
 
-    # Read-only per ADR-0005: resolve ticket_id/client from state *before*
-    # _spawn_close_impl runs, so the requeue orchestration below has what it
-    # needs without re-deriving it from a session that's already COMPLETED.
+    # Read-only per ADR-0005, lock-free: resolve the session once *before*
+    # _spawn_close_impl runs, so the requeue orchestration below has
+    # ticket_id/client without re-deriving them from a session that's already
+    # COMPLETED, and a lock timeout can queue the close against it (#2694).
+    sess = load_state().find_by_name_or_id(session_id)
     ticket_id: str | None = None
     client: str | None = None
     closed_session_id: str | None = None
-    if requeue:
-        state = load_state()
-        sess = state.find_by_name_or_id(session_id)
-        if sess is not None:
-            ticket_id = ticket_id_for_session(sess.name)
-            client = sess.client
-            closed_session_id = sess.id
+    if requeue and sess is not None:
+        ticket_id = ticket_id_for_session(sess.name)
+        client = sess.client
+        closed_session_id = sess.id
 
-    _spawn_close_impl(session_id=session_id)
+    try:
+        _spawn_close_impl(
+            session_id=session_id, lock_timeout_s=operator_close_lock_wait_seconds()
+        )
+    except SessionsLockTimeoutError as exc:
+        _queue_close_or_reraise(
+            exc,
+            session_id=session_id,
+            sess=sess,
+            requeue_hint=_requeue_hint(requeue, ticket_id, client),
+        )
     click.echo(f"Closed session: {session_id}")
 
     if requeue:
@@ -405,6 +366,54 @@ def spawn_close(session_id: str, confirmed_dead: bool, requeue: bool) -> None:
             client=client,
             closed_session_id=closed_session_id,
         )
+
+
+def _requeue_hint(requeue: bool, ticket_id: str | None, client: str | None) -> str:
+    """The ``--requeue`` follow-up for a queued close (the row is still RUNNING)."""
+    if not requeue:
+        return ""
+    if ticket_id is None or client is None:
+        return " --requeue was not run, and no ticket_id resolves from this session."
+    return (
+        " --requeue was not run (the ticket's row is still RUNNING); once the"
+        f" close has applied, run: cw dev-queue requeue {ticket_id} -c {client}"
+        " --from-cancelled."
+    )
+
+
+def _queue_close_or_reraise(
+    exc: SessionsLockTimeoutError,
+    *,
+    session_id: str,
+    sess: Session | None,
+    requeue_hint: str,
+) -> NoReturn:
+    """Record the close for the next reconcile pass, then fail with exit 1 (#2694).
+
+    An unknown id is reported as not found (nothing to queue). If the entry
+    cannot be written the original timeout error propagates unchanged. The
+    raised message leads with ``QUEUED, NOT YET CLOSED`` and carries the
+    timeout text once, so ``cw spawn close X && <next step>`` stops here.
+    """
+    if sess is None:
+        msg = f"Session '{session_id}' not found."
+        raise CwError(msg) from exc
+    try:
+        entry_path = queue_close(sess, origin="spawn_close", now=datetime.now(UTC))
+    except (OSError, ValueError):
+        logger.warning("spawn_close_queue_failed: session=%s", sess.id, exc_info=True)
+        raise exc from None
+    lead = (
+        f"QUEUED, NOT YET CLOSED: session {sess.id} is still {sess.status.value}."
+        " The close is recorded and the next reconcile pass (the serve tick, or"
+        " any cw list/status) applies it; that is not confirmed while serve"
+        " itself is the wedged holder, so restart serve if dispatch.tick has"
+        f" stopped. cw spawn close waits at most {OPERATOR_COMMAND_LOCK_WAIT_S:g}s"
+        f" whatever {SESSIONS_LOCK_TIMEOUT_ENV} says; re-running it is safe. To"
+        f" withdraw, delete {entry_path}.{requeue_hint}"
+    )
+    msg = f"{lead}\n{exc}"
+    raise CwError(msg) from exc
 
 
 def _spawn_complete_impl(
