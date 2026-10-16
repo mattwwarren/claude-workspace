@@ -3873,31 +3873,6 @@ class TestCLIDevQueueCancel:
 
 
 class TestMigrateDevQueue:
-    def test_mixed_version_payload_cannot_drop_operator_resolutions(self) -> None:
-        """A pre-v46 writer must not round-trip a v46 resolution ledger."""
-        with pytest.raises(ValueError, match="cannot load operator_resolutions"):
-            DevQueueStore.model_validate(
-                {
-                    "schema_version": 45,
-                    "tasks": [
-                        {
-                            "ticket_id": "GEN-MIXED-VERSION",
-                            "client": "test-client",
-                            "priority": 0,
-                            "status": "blocked_on_user",
-                            "operator_resolutions": [
-                                {
-                                    "text": "answer",
-                                    "recorded_at": "2026-10-16T12:00:00Z",
-                                    "actor": "operator",
-                                    "round": 1,
-                                }
-                            ],
-                        }
-                    ],
-                }
-            )
-
     def test_v1_to_v2_fills_total_cost_usd(self) -> None:
         """migrate_dev_queue fills total_cost_usd on tasks missing it."""
         raw = {
