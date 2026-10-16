@@ -50,6 +50,7 @@ import math
 import os
 import time
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.exceptions import (
@@ -274,10 +275,12 @@ def open_holder_lock_fd(lock_path: Path) -> IO[str]:
     log a WARNING; if all non-truncating modes fail, the ordinary ``"w"``
     acquisition path is retained.
     """
+
+    def open_in_mode(mode: str) -> IO[str]:
+        return lock_path.open(mode)
+
     for mode in _HOLDER_OPEN_MODES:
-        fd = fail_open_holder_bookkeeping(
-            "open", lambda mode=mode: lock_path.open(mode)
-        )
+        fd = fail_open_holder_bookkeeping("open", partial(open_in_mode, mode))
         if fd is not None:
             return fd
 
