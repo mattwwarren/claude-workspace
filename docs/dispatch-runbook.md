@@ -706,20 +706,36 @@ bounded caller keeps the 60 s default. A timeout names the recorded holder
   wait for the worker to leave the roster before `requeue --from-cancelled`
   into the same worktree. If cancel was killed after the row was cancelled
   but before the session close was recorded, a repeat cancel is a no-op;
-  run `cw spawn close <session-id>` instead.
-- Every close that flips a session, inline or queued, records a
-  `session_completed` event in the client's history
-  (`~/.local/share/cw/history/<client>.jsonl`) with `detail:
-  operator_close` and the session id, name and purpose; its metadata names
-  the command, `origin`, `applied_by` (`inline` or `reconcile`),
-  `queued_at`, the prior and resulting status and the fenced incarnation. A
-  row the close settles records its own `task.transition`. A history write
-  failure is logged (`operator_close_audit_failed`, ERROR) and does not undo
-  the close. Applied, void and failed queued closes are also logged at
-  WARNING (`queued_close_applied` / `queued_close_void` /
-  `queued_close_failed`); a failing entry is kept and retried every pass
-  until fixed or deleted, and an unreadable one (`queued_close_unreadable`)
-  is skipped and kept.
+  run `cw spawn close <session-id>` instead. Only a busy sessions lock is
+  `QUEUED` / exit 0: if the session close fails for any other reason (a
+  state read or write error, a close that raised), cancel still stops the
+  worker and keeps the row cancelled, but names the session and the error
+  ("not a sessions-lock timeout") and **exits 1**; the recorded close is
+  retried by the next reconcile pass, or run `cw spawn close <session-id>`.
+- Every operator close (inline or queued `cw spawn close`, `cw dev-queue
+  cancel`, and the routed-result orphan close of `approve` / `requeue`)
+  shares one durable audit (`cw.reconcile.close_audit`, ADR-0006 inv 3).
+  Before anything is mutated, an intent is written to the audit outbox
+  (`~/.local/share/cw/events/routed_result_reap_audit.json`); no intent, no
+  close (the command fails with "Could not prepare the durable audit
+  record"). After the close is saved it records a `session_completed` event
+  in the client's history (`~/.local/share/cw/history/<client>.jsonl`; for
+  `spawn close` / `cancel`, `detail: operator_close` and metadata naming the
+  command, ticket, `origin`, `applied_by` (`inline` or `reconcile`),
+  `queued_at`, the prior status and the fenced incarnation), then finalizes
+  the intent into a `session.reap_authorized` event (`proposed_action:
+  operator_close`). A queued entry is removed only once the close and that
+  finalize have both committed: after a crash in between, the next pass
+  finalizes the pending intent without writing a second history event, and
+  `cw doctor --reap` delivers any intent left in the outbox. A row the
+  close settles records its own `task.transition`. A history write failure
+  is logged (`close_audit_failed`, ERROR) and does not undo the close.
+  Applied, void and failed queued closes are also logged at WARNING
+  (`queued_close_applied` / `queued_close_void` / `queued_close_failed`, and
+  `queued_close_audit_pending` for an entry kept until its audit
+  finalizes); a failing entry is kept and retried every pass until fixed or
+  deleted, and an unreadable one (`queued_close_unreadable`) is skipped and
+  kept.
 
 If the task is already in a terminal queue status but wedged (e.g.,
 `RUNNING` with no live session), `cw doctor --reap` detects and repairs
