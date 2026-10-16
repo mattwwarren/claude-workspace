@@ -278,13 +278,18 @@ def apply_pending_completions(events: list[OrchestratorEvent]) -> int:
     # gap this replaces (a door write landing but the task mutation below not
     # yet persisted) now sits at each producer's door-write-vs-task-routing
     # boundary rather than inside this consumer; still tracked by #867.
-    store = load_dev_queue()
-    clients = load_effective_clients()
-    completed = _apply_events_to_store(store, events, clients=clients)
+    completed = _apply_pending_completion_events(events)
     # Advance cursor inside the dev-queue lock so the cursor never
     # moves past events whose queue mutations haven't been persisted yet.
     advance_cursor(_DISPATCH_CONSUMER, events[-1].id)
     return completed
+
+
+def _apply_pending_completion_events(events: list[OrchestratorEvent]) -> int:
+    """Load routing state and apply pending completion *events*."""
+    store = load_dev_queue()
+    clients = load_effective_clients()
+    return _apply_events_to_store(store, events, clients=clients)
 
 
 def apply_pending_completion(event: OrchestratorEvent) -> int:
@@ -296,9 +301,7 @@ def apply_pending_completion(event: OrchestratorEvent) -> int:
     the unrelated prefix merely because one operator asked about this row.
     Caller must hold ``dev_queue_lock``.
     """
-    store = load_dev_queue()
-    clients = load_effective_clients()
-    return _apply_events_to_store(store, [event], clients=clients)
+    return _apply_pending_completion_events([event])
 
 
 TICK_STALE_SECONDS = 90  # 3x default tick_interval_seconds=30
