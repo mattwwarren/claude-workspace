@@ -32,6 +32,7 @@ from cw.dev_queue import (
     load_dev_queue,
     save_dev_queue,
     save_plan,
+    transition_task_status,
 )
 from cw.dispatch import (
     _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD,
@@ -19736,6 +19737,9 @@ class TestUnproductiveAttemptRouting:
     # -- Rule 1: scope-gated approval park ----------------------------------
 
     def test_scope_gated_park_with_no_evidence_is_charged(self, tmp_path: Path) -> None:
+        # #2695 R5: pins the deliberately partial intent -- plan_pending_approval
+        # still charges, because auto_adopt_clean_plan can re-claim it with no
+        # human and the ceiling is the bound on that cycle.
         from cw.dispatch import apply_staged_decision
 
         task = self._make_running_task("UP-7", stage=Stage.PLAN, scope_hint="large")
@@ -19883,7 +19887,8 @@ class TestUnproductiveAttemptRouting:
 
         Four sequential plan-stage `ambiguities_pending_resolution` parks, three
         of which carry a genuine consumed-resolution claim and one of which
-        (the crashloop-shaped park) does not — only the fourth should charge.
+        does not. #2695: the fourth is a human-input park, so it no longer
+        charges either.
         """
         from cw.dispatch import apply_staged_decision
 
@@ -19909,7 +19914,7 @@ class TestUnproductiveAttemptRouting:
             )
 
         # Fourth round: no resolution evidence at all -- the baseline-omission
-        # shape, chargeable.
+        # shape. #2695: a human-input park, so still uncharged.
         task.status = QueueItemStatus.RUNNING
         apply_staged_decision(
             task,
@@ -19922,19 +19927,18 @@ class TestUnproductiveAttemptRouting:
             clients,
         )
 
-        assert task.unproductive_attempts == 1
-        assert task.unproductive_attempts < 10  # ceiling
+        assert task.unproductive_attempts == 0
 
-    def test_1896_plan_stage_pause_without_resolution_evidence_is_charged(
+    def test_1896_plan_stage_pause_without_resolution_evidence_is_not_charged(
         self, tmp_path: Path
     ) -> None:
         """Baseline-omission coverage only -- NOT a reclaim/staleness test.
 
-        Mirrors ``test_same_stage_block_with_no_evidence_is_charged`` (see
-        above), generalized to the plan stage: a plan-stage pause whose
-        payload omits ``resolution_consumed`` entirely is charged exactly
-        like any other evidence-free park. This test proves only that the
-        baseline (no keys present) is chargeable -- it says nothing about
+        Before #2695 a plan-stage pause whose payload omits
+        ``resolution_consumed`` entirely was charged like any other
+        evidence-free park. It is a human-input park, so it no longer charges:
+        the person answering it is the rate limiter. This test proves only the
+        baseline (no keys present) -- it says nothing about
         resolution *reuse* or *staleness* across rounds, which is stateless
         by design at this layer (the extractor reads a single payload in
         isolation) and untestable here; see
@@ -19959,7 +19963,160 @@ class TestUnproductiveAttemptRouting:
         )
 
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.unproductive_attempts == 0
+
+    # -- #2695: human-input parks ------------------------------------------
+
+    def test_premises_pending_verification_is_not_charged(self, tmp_path: Path) -> None:
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("UP-2695-P", stage=Stage.PLAN)
+        last_result: dict[str, object] = {
+            "status": "premises_pending_verification",
+            "commits": [],
+        }
+        apply_staged_decision(
+            task,
+            "premises_pending_verification",
+            last_result,
+            self._clients(tmp_path),
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.unproductive_attempts == 0
+
+    def test_review_pending_approval_is_not_charged(self, tmp_path: Path) -> None:
+        # auto_approve_clean_review advances the stage rather than re-queuing
+        # it, so no unattended re-park cycle needs the ceiling's bound.
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task(
+            "UP-2695-R", stage=Stage.PLAN, scope_hint="large"
+        )
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "large"},
+            "commits": [],
+        }
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.unproductive_attempts == 0
+
+    def test_push_auth_failed_block_is_not_charged(self, tmp_path: Path) -> None:
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("UP-2695-A", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "stage4_finalize", "reason": "push_auth_failed"},
+            "commits": [],
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.unproductive_attempts == 0
+
+    def test_plan_pending_approval_parks_still_charge_and_reach_the_ceiling(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """R5 pin: the bound on the auto_adopt_clean_plan re-park cycle."""
+        from cw.dispatch import apply_staged_decision
+        from cw.dispatch.claim import _claim_next_pending
+
+        write_clients_yaml(sample_client_config)
+        clients = {"test-client": sample_client_config}
+        task = self._make_running_task(
+            "UP-2695-CAP", stage=Stage.PLAN, scope_hint="large"
+        )
+        ceiling = DEFAULT_GLOBAL_ATTEMPT_CEILING
+
+        for _ in range(ceiling):
+            task.status = QueueItemStatus.RUNNING
+            apply_staged_decision(
+                task,
+                "plan_pending_approval",
+                {"status": "plan_pending_approval", "commits": []},
+                clients,
+            )
+
+        assert task.unproductive_attempts == ceiling
+        transition_task_status(task, QueueItemStatus.PENDING)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        claimed, _skipped = _claim_next_pending(
+            "test-client",
+            lane="default",
+            client=sample_client_config,
+            config=simple_config,
+        )
+
+        assert claimed is None
+        parked = load_dev_queue().tasks[0]
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value
+
+    def test_2695_ambiguity_rounds_past_the_default_ceiling_still_claim(
+        self, sample_client_config: ClientConfig
+    ) -> None:
+        """Acceptance: 12 ambiguity rounds charge 0; one plan park charges 1."""
+        from cw.dispatch import apply_staged_decision
+        from cw.dispatch.claim import _claim_next_pending
+        from cw.reconcile._shared import resolve_attempt_ceiling
+
+        write_clients_yaml(sample_client_config)
+        config = OrchestratorConfig(
+            tick_interval_seconds=30, per_client_max_parallel={"test-client": 1}
+        )
+        clients = {"test-client": sample_client_config}
+        task = self._make_running_task(
+            "UP-2695-ACC", stage=Stage.PLAN, scope_hint="large"
+        )
+        assert config.global_attempt_ceiling == DEFAULT_GLOBAL_ATTEMPT_CEILING == 10
+        ceiling = resolve_attempt_ceiling(sample_client_config, task, config)
+        assert ceiling == 10
+
+        for round_n in range(12):
+            task.status = QueueItemStatus.RUNNING
+            apply_staged_decision(
+                task,
+                "ambiguities_pending_resolution",
+                {
+                    "status": "ambiguities_pending_resolution",
+                    "ambiguities": [{"question": f"round {round_n}?"}],
+                    "next_actions": ["user_resolve"],
+                },
+                clients,
+            )
+        assert task.unproductive_attempts == 0
+
+        task.status = QueueItemStatus.RUNNING
+        apply_staged_decision(
+            task,
+            "plan_pending_approval",
+            {"status": "plan_pending_approval", "commits": []},
+            clients,
+        )
         assert task.unproductive_attempts == 1
+
+        # The approve-equivalent move: _reset_for_same_stage_requeue ends here.
+        transition_task_status(task, QueueItemStatus.PENDING)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        claimed, _skipped = _claim_next_pending(
+            "test-client", lane="default", client=sample_client_config, config=config
+        )
+
+        assert claimed is not None
+        assert claimed.ticket_id == "UP-2695-ACC"
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.disposition != DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value
+        assert claimed.unproductive_attempts == 1
+        assert claimed.unproductive_attempts < ceiling
 
 
 # ---------------------------------------------------------------------------

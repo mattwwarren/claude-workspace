@@ -4642,6 +4642,59 @@ def test_salvaged_completion_with_no_evidence_is_unproductive(
     assert t.unproductive_attempts == 1
 
 
+def _salvage_unproductive_attempts(tid: str, payload: dict[str, object]) -> int:
+    """Salvage *payload* for a RUNNING row and return its charged counter."""
+    from cw.auto_dev_result import AutoDevResult
+    from cw.reconcile.phantom import _apply_phantom_queue_mutations
+
+    result = AutoDevResult.model_validate(payload)
+    task = TicketTask(
+        ticket_id=tid,
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id=tid,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    _apply_phantom_queue_mutations({}, [], [], [], [tid], {tid: result}, set(), [], [])
+
+    row = next(t for t in load_dev_queue().tasks if t.ticket_id == tid)
+    return row.unproductive_attempts
+
+
+def test_salvaged_ambiguity_park_is_not_charged(tmp_config_dir: Path) -> None:
+    """#2695: a human-input park salvaged on the phantom path does not charge."""
+    tid = "ph-2695-amb"
+    payload = _make_terminal_payload("ambiguities_pending_resolution", tid)
+
+    assert _salvage_unproductive_attempts(tid, payload) == 0
+
+
+def test_salvaged_operator_unavailable_block_is_not_charged(
+    tmp_config_dir: Path,
+) -> None:
+    """#2695: the blocker-reason arm of the shared classifier, phantom path."""
+    tid = "ph-2695-opu"
+    payload = _make_terminal_payload("merge_gate_blocked", tid)
+    payload["blocker"] = {
+        "stage": "stage4a_merge_gate",
+        "reason": "operator_unavailable",
+    }
+    # The builder seeds ["sha1"]; empty it so the claim carries no progress
+    # evidence and only the blocker reason can exempt it.
+    payload["commits"] = []
+
+    assert _salvage_unproductive_attempts(tid, payload) == 0
+
+
+def test_salvaged_plan_pending_approval_still_charges(tmp_config_dir: Path) -> None:
+    """#2695 R5: plan_pending_approval still charges through the shared extractor."""
+    tid = "ph-2695-plan"
+    payload = _make_terminal_payload("plan_pending_approval", tid)
+
+    assert _salvage_unproductive_attempts(tid, payload) == 1
+
+
 # --- GitHub #1762: staged-terminal-sentinel phantom gap -----------------------
 #
 # Issue #536 left ``_detect_phantom_candidates`` with an unconditional
