@@ -412,9 +412,8 @@ def sessions_lock(
     than hanging behind a wedged ``cw dev-queue serve``. The env var applies to
     ``bounded=True`` callers only. An explicit *timeout_s* replaces that wait
     for this acquisition: the operator commands pass 5 s (``cw list``/``cw
-    status``, ``cw spawn close``, the ``cw dev-queue cancel`` session step,
-    #2694). Which files may opt in is pinned by an allowlist test
-    (``tests/test_config.py``).
+    status``, ``cw spawn close``, #2694). Which files may opt in is pinned by
+    an allowlist test (``tests/test_config.py``).
 
     The holder records ``{"pid", "cmd", "acquired_at"}`` in the lock file
     while it holds it (#2694, best effort), so a contender's timeout can name

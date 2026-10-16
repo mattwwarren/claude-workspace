@@ -29,8 +29,7 @@ The bounded-acquisition rule (#2501):
 - ``CW_SESSIONS_LOCK_TIMEOUT_S`` (historic name) governs EVERY bounded lock,
   except where an operator command passes its own ``timeout_s`` (#2694):
   ``cw list``/``cw status`` wait :func:`operator_read_lock_wait_seconds` (the
-  env value when set and valid, else 5 s) and ``cw spawn close`` plus the
-  ``cw dev-queue cancel`` session step wait
+  env value when set and valid, else 5 s) and ``cw spawn close`` waits
   :func:`operator_close_lock_wait_seconds` (``min(env, 5 s)``, else 5 s).
 - Each bounded acquisition waits up to that timeout on its own, never one
   bound per command. A command that nests two bounded locks (``cw spawn
@@ -84,10 +83,9 @@ SESSIONS_LOCK_TIMEOUT_ENV = "CW_SESSIONS_LOCK_TIMEOUT_S"
 DEFAULT_SESSIONS_LOCK_TIMEOUT_S = 60.0
 
 # The operator commands' sessions-lock wait (#2694): ``cw list``/``cw status``
-# (unless the env var is set) and, as a ceiling, ``cw spawn close`` and the
-# ``cw dev-queue cancel`` session step. Long enough to ride out an ordinary
-# reconcile pass, short enough that an operator learns of a wedged holder
-# before reaching for a second terminal.
+# (unless the env var is set) and, as a ceiling, ``cw spawn close``. Long
+# enough to ride out an ordinary reconcile pass, short enough that an operator
+# learns of a wedged holder before reaching for a second terminal.
 OPERATOR_COMMAND_LOCK_WAIT_S = 5.0
 
 # Poll cadence for the bounded retry loop. Short enough that a promptly
@@ -203,7 +201,7 @@ def operator_read_lock_wait_seconds() -> float:
 
 
 def operator_close_lock_wait_seconds() -> float:
-    """The sessions-lock wait for ``cw spawn close`` and the cancel session step.
+    """The sessions-lock wait for ``cw spawn close``.
 
     ``min(CW_SESSIONS_LOCK_TIMEOUT_S, OPERATOR_COMMAND_LOCK_WAIT_S)``: a held
     lock fails the close after the wait, naming the holder (#2694), so a larger

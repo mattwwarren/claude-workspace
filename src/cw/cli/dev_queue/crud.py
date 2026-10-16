@@ -10,6 +10,7 @@ import click
 from pydantic import ValidationError
 
 from cw.cli._base import handle_errors
+from cw.cli.routed_orphan_close import close_routed_result_sessions_for_ticket
 from cw.config import load_orchestrator_config, load_state
 from cw.dev_queue import (
     DEFAULT_PRUNE_OLDER_THAN_DAYS,
@@ -38,6 +39,7 @@ from cw.models import (
     DEFAULT_STAGE,
     OrchestratorEventType,
     QueueItemStatus,
+    SessionOrigin,
     Stage,
     TicketTask,
 )
@@ -463,12 +465,6 @@ def dev_queue_requeue(
         )
 
     try:
-        # Deferred: routed_orphan_close imports spawn, while this command
-        # module is imported by the CLI command graph during startup.
-        from cw.cli.routed_orphan_close import (  # noqa: PLC0415
-            close_routed_result_sessions_for_ticket,
-        )
-
         closed = close_routed_result_sessions_for_ticket(
             ticket_id,
             resolved,
@@ -687,31 +683,17 @@ def dev_queue_remove(
 @click.option("--client", "-c", "client", required=True, help="Client name")
 @handle_errors
 def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
-    """Cancel dev-queue task(s), stop any running session and mark it completed.
-
-    A session left unfinished exits 1, naming it and the next step (#2694).
-    """
-    # Deferred: spawn and routed_orphan_close both participate in the CLI
-    # command graph, so neither belongs in this module's import-time graph.
-    from cw.cli.spawn import (  # noqa: PLC0415
-        CancelSessionCloser,
-        stop_and_confirm_gone,
-    )
-
-    closer = CancelSessionCloser(get_native_daemon_client(), stop_and_confirm_gone)
+    """Cancel dev-queue task(s) and stop any running session."""
+    state = load_state()
+    daemon = get_native_daemon_client()
     sources = ViewSources()
     for index, ticket in enumerate(tickets):
-        # Snapshot before the row is cancelled. The closer compares this
-        # incarnation with fresh state and refuses a changed binding.
-        state = load_state()
-        bound_before = {sess.id: sess for sess in state.sessions}
         try:
             # bounded=True (#2501): operator command; only read-only state and
             # daemon-client setup precede the lock, and each earlier ticket is
-            # fully committed (queue write, session stop and flip) first.
+            # fully committed (queue write + daemon.stop) before the next one.
             cleared_session_ids = cancel_ticket(ticket, client, bounded=True)
         except LockTimeoutError:
-            closer.report()
             _report_partial_progress(
                 list(tickets[:index]),
                 list(tickets[index:]),
@@ -722,16 +704,17 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
                 ),
             )
             raise
-        closer.close(
-            {
-                sid: bound_before.get(sid)
-                for sid in cleared_session_ids
-                if sid is not None
-            }
-        )
+        for old_session_id in cleared_session_ids:
+            if old_session_id is not None:
+                sess = state.find_by_name_or_id(old_session_id)
+                if (
+                    sess is not None
+                    and sess.surface_ref is not None
+                    and sess.origin is SessionOrigin.DAEMON
+                ):
+                    daemon.stop(sess.surface_ref)
         click.echo(f"Cancelled {ticket} in {client} dev-queue.")
         echo_resulting_row(ticket, client, sources=sources)
-    closer.finish()
 
 
 @dev_queue.command(name="clear")

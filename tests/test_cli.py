@@ -8832,7 +8832,6 @@ _LOCK_WAIT_COMMANDS: dict[str, list[str]] = {
     "list": ["list"],
     "status": ["status"],
     "spawn-close": ["spawn", "close", _LOCK_WAIT_SID],
-    "dev-queue-cancel": ["dev-queue", "cancel", "WAIT-1", "-c", "test-client"],
 }
 
 
@@ -8874,7 +8873,7 @@ def _seed_lock_wait_world(tmp_path: Path, fake: FakeNativeDaemonClient) -> None:
 
 
 class TestOperatorCommandLockWait:
-    """list/status/spawn close/cancel wait 5 s, not 60 s, on a held lock (#2694)."""
+    """list/status/spawn close wait 5 s, not 60 s, on a held lock (#2694)."""
 
     @pytest.fixture(autouse=True)
     def _fake_daemon(
@@ -8950,27 +8949,6 @@ class TestOperatorCommandLockWait:
             result.output
         )
         assert "CLIENT" not in result.output  # no stale-state table
-
-
-@pytest.mark.parametrize(
-    "first",
-    ["cw.cli", "cw.cli.spawn", "cw.cli.routed_orphan_close", "cw.cli.dev_queue.crud"],
-)
-def test_cli_imports_from_a_cold_interpreter(first: str) -> None:
-    """No import cycle among the operator-close modules, whichever loads first.
-
-    ``cw.cli.routed_orphan_close`` imports ``cw.cli.spawn`` and
-    ``cw.cli.dev_queue.crud`` imports both (#2694). Same interpreter, fresh
-    process (no foreign python: compiled deps are ABI-bound).
-    """
-    proc = subprocess.run(
-        [sys.executable, "-c", f"import {first}; import cw.cli"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert proc.returncode == 0, proc.stderr
 
 
 class TestPeek:

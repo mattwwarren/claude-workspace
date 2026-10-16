@@ -139,6 +139,8 @@ _FIND_BY_NAME_OR_ID_ALLOWLIST: dict[tuple[str, str], _Classification] = {
     ("cw/spawn.py", "_write_hook_context"): ("id-only", ()),
     # parent_session.id, already resolved by start_session's own lookup.
     ("cw/session.py", "start_session.<locals>._append"): ("id-only", ()),
+    # task.session_id values cleared by cancel_ticket.
+    ("cw/cli/dev_queue/crud.py", "dev_queue_cancel"): ("id-only", ()),
     ("cw/dev_queue/requeue.py", "unblock_ticket"): ("id-only", ()),
     # Called with session.id.
     (_RESUME_TRIGGER, "NativeDaemonResumeTriggerAdapter._recheck_gate"): (

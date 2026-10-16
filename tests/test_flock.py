@@ -725,6 +725,23 @@ class TestHolderRecord:
             _record_json(2**70),  # too large for os.kill
             json.dumps({"pid": os.getpid(), "cmd": 3}),
         ],
+        # Stable ids: the contents embed a pid and a timestamp, and xdist needs
+        # every worker to collect identical test ids.
+        ids=[
+            "empty",
+            "not-json",
+            "list",
+            "deeply-nested",
+            "acquired-at-text",
+            "acquired-at-naive",
+            "acquired-at-int",
+            "pid-text",
+            "pid-bool",
+            "pid-zero",
+            "pid-negative",
+            "pid-too-large",
+            "cmd-int",
+        ],
     )
     def test_unusable_record_reads_as_no_holder(
         self, tmp_path: Path, content: str
