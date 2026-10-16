@@ -28,6 +28,7 @@ from cw.config import (
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.exceptions import CwError
+from cw.history import EventType, HistoryEvent, load_history
 from cw.models import (
     CompletionReason,
     CwState,
@@ -44,6 +45,7 @@ from cw.reconcile import session_close
 from cw.reconcile.deferred import DeferredReconcileJobs, is_surface_stop_queued
 from cw.reconcile.session_close import (
     CancelCloseOutcome,
+    QueuedCloseOrigin,
     apply_queued_closes,
     clear_queued_close,
     close_session_in_state,
@@ -180,6 +182,36 @@ def _cancel_close(
         timeout_s=5.0,
         skip_lock=skip_lock,
     )
+
+
+def _audit_events() -> list[HistoryEvent]:
+    return load_history(_CLIENT, event_types=[EventType.SESSION_COMPLETED])
+
+
+def _expected_audit(
+    sess: Session,
+    *,
+    origin: str,
+    applied_by: str,
+    queued_at: datetime,
+) -> dict[str, str]:
+    return {
+        "actor": "operator",
+        "command": "cw spawn close"
+        if origin == "spawn_close"
+        else "cw dev-queue cancel",
+        "origin": origin,
+        "applied_by": applied_by,
+        "queued_at": queued_at.isoformat(),
+        "prior_status": "active",
+        "resulting_status": "completed",
+        "completed_reason": "user",
+        "settle_row": "true" if origin == "spawn_close" else "false",
+        "started_at": sess.started_at.isoformat(),
+        "resumed_at": "",
+        "surface_ref": "ref-sess-1",
+        "reason": "operator_close",
+    }
 
 
 def _messages(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:
@@ -895,6 +927,72 @@ class TestApplyQueuedCloses:
         )
         assert record.getMessage().endswith("action=entry_kept")
 
+    @pytest.mark.parametrize("origin", ["spawn_close", "cancel"])
+    def test_an_applied_close_records_a_session_completed_history_event(
+        self, tmp_config_dir: Path, origin: QueuedCloseOrigin
+    ) -> None:
+        sess = _session()
+        _seed(sess)
+        queue_close(sess, origin=origin, now=_NOW)
+
+        assert _apply() == 1
+
+        (event,) = _audit_events()
+        assert event.client == _CLIENT
+        assert event.session_id == "sess-1"
+        assert event.session_name == sess.name
+        assert event.purpose == sess.purpose
+        assert event.detail == "operator_close"
+        assert event.metadata == _expected_audit(
+            sess, origin=origin, applied_by="reconcile", queued_at=_NOW
+        )
+
+    def test_void_unknown_and_already_closed_entries_record_no_history_event(
+        self, tmp_config_dir: Path
+    ) -> None:
+        voided = _session("sess-v")
+        closed = _session("sess-c")
+        queue_close(voided, origin="cancel", now=_NOW)
+        queue_close(closed, origin="spawn_close", now=_NOW)
+        queue_close(_session("sess-gone"), origin="cancel", now=_NOW)
+        _seed(
+            voided.model_copy(update={"surface_ref": "ref-new"}),
+            closed.model_copy(update={"status": SessionStatus.COMPLETED}),
+        )
+
+        _apply()
+
+        assert pending_queued_closes() == []
+        assert _audit_events() == []
+
+    def test_an_audit_write_failure_is_logged_and_the_close_stands(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        sess = _session()
+        _seed(sess)
+        queue_close(sess, origin="spawn_close", now=_NOW)
+
+        def _history_down(_client: str, _event: HistoryEvent) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr("cw.reconcile.session_close.record_event", _history_down)
+        caplog.set_level(logging.WARNING, logger=_LOGGER)
+
+        assert _apply() == 1
+
+        assert _stored("sess-1").status == SessionStatus.COMPLETED
+        assert pending_queued_closes() == []
+        (record,) = _messages(caplog, "operator_close_audit_failed")
+        assert record.levelno == logging.ERROR
+        assert record.exc_info is not None
+        assert record.getMessage() == (
+            "operator_close_audit_failed: session=sess-1 origin=spawn_close"
+            " applied_by=reconcile"
+        )
+
     def test_emits_no_orchestrator_event(self, tmp_config_dir: Path) -> None:
         sess = _session()
         _seed(sess)
@@ -939,6 +1037,37 @@ class TestCloseSessionsForCancel:
         assert closed.status == SessionStatus.COMPLETED
         assert closed.completed_reason == CompletionReason.USER
         assert pending_queued_closes() == []
+
+    def test_an_inline_flip_records_a_session_completed_history_event(
+        self, tmp_config_dir: Path
+    ) -> None:
+        sess = _session()
+        _seed(sess)
+
+        _cancel_close(["sess-1"])
+
+        (event,) = _audit_events()
+        assert event.session_id == "sess-1"
+        assert event.session_name == sess.name
+        queued_at = datetime.fromisoformat(event.metadata["queued_at"])
+        assert event.metadata == _expected_audit(
+            sess, origin="cancel", applied_by="inline", queued_at=queued_at
+        )
+
+    def test_a_queued_cancel_is_audited_once_when_reconcile_applies_it(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed(_session())
+        monkeypatch.setattr(_flock, "time", _FakeClock())
+        with _hold_sessions_lock():
+            _cancel_close(["sess-1"])
+        assert _audit_events() == []
+
+        _apply()
+
+        (event,) = _audit_events()
+        assert event.metadata["applied_by"] == "reconcile"
+        assert event.metadata["origin"] == "cancel"
 
     def test_user_origin_session_is_untouched(self, tmp_config_dir: Path) -> None:
         _seed(_session(origin=SessionOrigin.USER))

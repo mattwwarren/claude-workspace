@@ -707,9 +707,19 @@ bounded caller keeps the 60 s default. A timeout names the recorded holder
   into the same worktree. If cancel was killed after the row was cancelled
   but before the session close was recorded, a repeat cancel is a no-op;
   run `cw spawn close <session-id>` instead.
-- Applied, void and failed queued closes are logged at WARNING
-  (`queued_close_applied` / `queued_close_void` / `queued_close_failed`); a
-  failing entry is kept and retried every pass until fixed or deleted.
+- Every close that flips a session, inline or queued, records a
+  `session_completed` event in the client's history
+  (`~/.local/share/cw/history/<client>.jsonl`) with `detail:
+  operator_close` and the session id, name and purpose; its metadata names
+  the command, `origin`, `applied_by` (`inline` or `reconcile`),
+  `queued_at`, the prior and resulting status and the fenced incarnation. A
+  row the close settles records its own `task.transition`. A history write
+  failure is logged (`operator_close_audit_failed`, ERROR) and does not undo
+  the close. Applied, void and failed queued closes are also logged at
+  WARNING (`queued_close_applied` / `queued_close_void` /
+  `queued_close_failed`); a failing entry is kept and retried every pass
+  until fixed or deleted, and an unreadable one (`queued_close_unreadable`)
+  is skipped and kept.
 
 If the task is already in a terminal queue status but wedged (e.g.,
 `RUNNING` with no live session), `cw doctor --reap` detects and repairs
