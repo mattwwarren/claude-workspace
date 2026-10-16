@@ -2833,16 +2833,38 @@ finding and one event, the same arithmetic the marker uses. Two summaries that
 merely normalize alike are two findings (the key binds the verbatim text) and
 two events.
 
-**Emitted before the marker is written** (ADR-0016 invariant 10). Every event
-for the settle records first; only then does the command render the marker to
-stdout and `--out`. If any emit fails the whole settle is refused — no marker,
-no `--out` file, non-zero exit, a message naming the finding and the failure —
-so a durable suppression can never exist without its audit record. The
-converse can: if the third of five events fails, the first two are recorded
-with no marker written, which is accepted noise. This is deliberately the
-opposite ordering to #1617's save-then-emit rule, which governs a *state
+**Emitted before the row write and the marker** (ADR-0016 invariant 10). Every
+event for the settle records first; only then does the command merge the
+ledger onto the ticket's cw dev-queue row (#2701, the durable suppression the
+next review pass reads first on every tracker) and render the marker to stdout
+and `--out`. If any emit fails the whole settle is refused — no row write, no
+marker, no `--out` file, non-zero exit, a message naming the finding and the
+failure — so a durable suppression can never exist without its audit record.
+The converse can: if the third of five events fails, the first two are
+recorded with nothing written, which is accepted noise. This is deliberately
+the opposite ordering to #1617's save-then-emit rule, which governs a *state
 mutation* whose event must not claim something that did not land; here the
 event **is** the safety mechanism.
+
+**The row write can fail after the events, and what follows depends on the
+client's tracker** (#2701). Before any event, a lock-free pre-flight checks the
+row exists:
+
+- **No row, any tracker other than `github-issues`** (or an unresolvable one):
+  refused in the pre-flight, so nothing is recorded — no event, no marker, no
+  `--out`.
+- **The row write fails after the events** (bounded dev-queue lock timeout,
+  `OSError`, a row that vanished since the pre-flight), on any tracker other
+  than `github-issues`: the events already exist with no effect (the accepted
+  noise above), and the settle exits non-zero with no marker and no `--out`, its
+  message saying the events were recorded and the row write failed.
+- **GitHub degraded mode.** On a client whose `tracking.primary.system` is
+  exactly `github-issues`, a missing row or a failed row write degrades to
+  mirror-only instead: the events are recorded, the marker prints with a stderr
+  WARNING that the row was NOT recorded, and the GitHub review pass reads the
+  marker back off the thread and folds it into the row on its next pass. The
+  event therefore records a settle whose durable effect, until that pass, is the
+  posted marker.
 
 `cw review settle` refuses to run inside a dispatch worker — only on positive
 evidence of one: the nearest `.claude/cw-context.json` reports
@@ -2866,11 +2888,11 @@ Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`: the operator
 running the command already knows it happened; this is an audit record read
 after the fact, not an interrupt.
 
-`correlation_id` is the `ticket_id` when `cw review settle --ticket <id>` names
-one, and `null` otherwise. The payload the blocking comment renders carries no
-ticket id — `ReviewVerdict` has no such field and the comment renderer is not
-given one — so the command cannot infer it, and inventing a correlation id
-would be worse than an honest null. Pass `--ticket` to get grouping.
+`correlation_id` is always the `ticket_id`: `cw review settle --ticket <id>` is
+required as of #2701, because the settle is recorded on that ticket's dev-queue
+row. (Before #2701 `--ticket` was optional and the event carried a `null`
+correlation id without it: the payload the blocking comment renders carries no
+ticket id, so the command could not infer one.)
 
 An entry whose `outcome` is `REVERSED` emits
 `review.finding_disposition_reverted` below **instead of** this event, so a
@@ -2922,9 +2944,9 @@ Same archive caveat as `review.finding_claim_shadowed` above.
 Deliberately **not** in `_DEFAULT_OPERATOR_EVENT_TYPES`, for the same reason
 `review.finding_settled` is not: the operator who ran the command already knows.
 
-`correlation_id` follows `review.finding_settled`'s rule exactly — the
-`ticket_id` when `--ticket` names one, else `null`. From the review-pass
-emitter it is always the ticket id, which that path always has.
+`correlation_id` follows `review.finding_settled`'s rule exactly — always the
+`ticket_id`, since `--ticket` is required (#2701). From the review-pass emitter
+it is always the ticket id too, which that path always has.
 
 **The review-pass emitter fires only on a state change** — a `REVERSED` record
 absent from the durable ledger before the merge, or replacing a different
