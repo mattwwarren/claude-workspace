@@ -672,70 +672,32 @@ close.
 5 s for the sessions lock (`min(CW_SESSIONS_LOCK_TIMEOUT_S, 5)`; an unset or
 invalid value means 5 s). `cw list` / `cw status` also wait 5 s, unless
 `CW_SESSIONS_LOCK_TIMEOUT_S` is set, which they honour as-is; every other
-bounded caller keeps the 60 s default. A timeout names the recorded holder
-(pid, command, held-for); confirm it with `lsof`.
+bounded caller keeps the 60 s default. A timeout exits 1 and names the
+recorded holder (pid, command, held-for); confirm it with `lsof`. Nothing is
+queued: once the holder is gone (or, if it is a wedged `cw dev-queue serve`,
+after restarting it), re-run the command.
 
-- A timed-out `cw spawn close` records the close in
-  `~/.local/share/cw/queued_closes/<session-id>.json` and **exits 1** with
-  `QUEUED, NOT YET CLOSED`: the session is still live, so a `cw spawn close X
-  && ...` chain stops. The next reconcile pass (the serve tick, or any `cw
-  list` / `cw status`) applies it, exactly as an inline close would (staged
-  result routed, else the RUNNING row cancelled). It is not applied while
-  serve itself is the wedged holder — restart serve if `dispatch.tick` has
-  stopped. Re-running the close is safe. With `--requeue` the requeue is not
-  run; the message prints the `cw dev-queue requeue <T> -c <C>
-  --from-cancelled` to run once the close has applied.
-- To withdraw a queued close, delete its file. An entry is fenced to the
-  session incarnation it was issued against (`started_at`, `resumed_at`,
-  `surface_ref`): if the session is resumed first, the entry is voided
-  (logged `queued_close_void`) instead of closing the new incarnation. An
-  entry with no `started_at` (written by a pre-release build) cannot prove
-  its incarnation and is voided the same way; re-run the close.
-- `cw dev-queue cancel` reads each session's incarnation before it cancels
-  the row. A session resumed after that read is a new incarnation the
-  cancelled row never ran: it is left running and not stopped (logged
-  `cancel_close_refused`; stderr names it), so run `cw spawn close <id>` if
-  it should stop.
-- `cw dev-queue cancel` now also marks the stopped session COMPLETED(USER)
-  (flip-only: its row was already cancelled, so nothing is routed or
-  re-cancelled; a TIMED_OUT session is left as is). If the sessions lock is
-  busy it still stops the worker, prints one `QUEUED, session(s) ... not yet
-  marked completed` line and **exits 0**; the closes apply on the next
-  reconcile pass. Like `cw spawn close`, the flip follows an unconfirmed
-  `daemon.stop`, and a completed session no longer protects its worktree, so
-  wait for the worker to leave the roster before `requeue --from-cancelled`
-  into the same worktree. If cancel was killed after the row was cancelled
-  but before the session close was recorded, a repeat cancel is a no-op;
-  run `cw spawn close <session-id>` instead. Only a busy sessions lock is
-  `QUEUED` / exit 0: if the session close fails for any other reason (a
-  state read or write error, a close that raised), cancel still stops the
-  worker and keeps the row cancelled, but names the session and the error
-  ("not a sessions-lock timeout") and **exits 1**; the recorded close is
-  retried by the next reconcile pass, or run `cw spawn close <session-id>`.
-- Every operator close (inline or queued `cw spawn close`, `cw dev-queue
-  cancel`, and the routed-result orphan close of `approve` / `requeue`)
-  shares one durable audit (`cw.reconcile.close_audit`, ADR-0006 inv 3).
-  Before anything is mutated, an intent is written to the audit outbox
-  (`~/.local/share/cw/events/routed_result_reap_audit.json`); no intent, no
-  close (the command fails with "Could not prepare the durable audit
-  record"). After the close is saved it records a `session_completed` event
-  in the client's history (`~/.local/share/cw/history/<client>.jsonl`; for
-  `spawn close` / `cancel`, `detail: operator_close` and metadata naming the
-  command, ticket, `origin`, `applied_by` (`inline` or `reconcile`),
-  `queued_at`, the prior status and the fenced incarnation), then finalizes
-  the intent into a `session.reap_authorized` event (`proposed_action:
-  operator_close`). A queued entry is removed only once the close and that
-  finalize have both committed: after a crash in between, the next pass
-  finalizes the pending intent without writing a second history event, and
-  `cw doctor --reap` delivers any intent left in the outbox. A row the
-  close settles records its own `task.transition`. A history write failure
-  is logged (`close_audit_failed`, ERROR) and does not undo the close.
-  Applied, void and failed queued closes are also logged at WARNING
-  (`queued_close_applied` / `queued_close_void` / `queued_close_failed`, and
-  `queued_close_audit_pending` for an entry kept until its audit
-  finalizes); a failing entry is kept and retried every pass until fixed or
-  deleted, and an unreadable one (`queued_close_unreadable`) is skipped and
-  kept.
+- `cw dev-queue cancel` now also closes the session it cancels. For each
+  DAEMON session the row was bound to, it stops the worker, confirms the
+  worker left the daemon roster (an unreadable roster never confirms), and
+  only then marks the session COMPLETED(USER). The flip is re-checked under
+  the lock against the session incarnation cancel read (`started_at`,
+  `resumed_at`, `surface_ref`): a session resumed in between is left as is
+  and named on stderr. The step is flip-only (the row was already
+  cancelled, so nothing is routed or re-cancelled); a terminal session is
+  stopped but not flipped.
+- Cancel exits 1, naming the session and the next step, when the stop is
+  not confirmed, the session was resumed, or the sessions lock stays busy
+  for 5 s. On a busy lock the worker is already stopped and only the record
+  flip is pending: run `cw spawn close <session-id>` (or `cw doctor`) once
+  the lock frees. If cancel was killed after the row was cancelled but
+  before the session flip, a repeat cancel is a no-op; run `cw spawn close
+  <session-id>` instead.
+- Each close that `cw spawn close` or cancel performs writes one
+  `session_completed` record to the client's history
+  (`~/.local/share/cw/history/<client>.jsonl`, `detail: operator_close`)
+  with the session's identity, the command and the prior status. A failed
+  write exits 1; the close stands.
 
 If the task is already in a terminal queue status but wedged (e.g.,
 `RUNNING` with no live session), `cw doctor --reap` detects and repairs
