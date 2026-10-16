@@ -933,6 +933,42 @@ class TestHolderRecord:
         with lock.open("w") as fd:
             assert _flock.read_lock_holder(fd) is None
 
+    def test_a_read_io_error_fails_open_with_a_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        class _BrokenFd:
+            def readable(self) -> bool:
+                return True
+
+            def seek(self, _offset: int) -> int:
+                return 0
+
+            def read(self) -> str:
+                raise OSError(5, "Input/output error")
+
+        caplog.set_level(logging.WARNING, logger="cw._flock")
+        broken = cast("IO[str]", _BrokenFd())
+
+        holder = _flock.fail_open_holder_bookkeeping(
+            "read", lambda: _flock.read_lock_holder(broken)
+        )
+
+        assert holder is None
+        (record,) = caplog.records
+        assert record.levelno == logging.WARNING
+        assert record.getMessage() == (
+            "sessions_lock_holder_read_failed: error=OSError action=ignored"
+        )
+
+    def test_read_returns_none_for_a_record_nested_past_the_recursion_limit(
+        self, tmp_path: Path
+    ) -> None:
+        lock = tmp_path / "lock"
+        lock.write_text("[" * 100_000 + "]" * 100_000)
+
+        with lock.open("a+") as fd:
+            assert _flock.read_lock_holder(fd) is None
+
     def test_read_returns_none_for_a_dead_pid(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -967,22 +1003,117 @@ class TestHolderRecord:
         [OSError(5, "disk on fire"), ValueError("I/O operation on closed file")],
         ids=["oserror", "closed-fd-valueerror"],
     )
-    def test_record_and_clear_swallow_io_errors_with_a_debug_log(
+    def test_an_io_error_on_write_is_warned_and_ignored(
         self, caplog: pytest.LogCaptureFixture, error: Exception
     ) -> None:
         class _BrokenFd:
             def seek(self, _offset: int) -> int:
+                return 0
+
+            def truncate(self, _size: int) -> int:
+                return 0
+
+            def write(self, _text: str) -> int:
+                raise error
+
+            def flush(self) -> None:
                 raise error
 
         caplog.set_level(logging.DEBUG, logger="cw._flock")
         broken = cast("IO[str]", _BrokenFd())
 
-        _flock.record_lock_holder(broken, cmd="cw list")
-        _flock.clear_lock_holder(broken)
+        _flock.fail_open_holder_bookkeeping(
+            "record", lambda: _flock.record_lock_holder(broken, cmd="cw list")
+        )
+        _flock.fail_open_holder_bookkeeping(
+            "clear", lambda: _flock.clear_lock_holder(broken)
+        )
 
-        debug = [r for r in caplog.records if r.levelno == logging.DEBUG]
-        assert len(debug) == 2
-        assert all(r.exc_info is not None for r in debug)
+        name = type(error).__name__
+        assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+            (
+                logging.WARNING,
+                f"sessions_lock_holder_record_failed: error={name} action=ignored",
+            ),
+            (
+                logging.WARNING,
+                f"sessions_lock_holder_clear_failed: error={name} action=ignored",
+            ),
+        ]
+        assert all(r.exc_info is not None for r in caplog.records)
+
+    def test_any_other_exception_is_logged_with_its_traceback_and_ignored(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        def _bug() -> None:
+            msg = "holder bookkeeping exploded"
+            raise RuntimeError(msg)
+
+        caplog.set_level(logging.WARNING, logger="cw._flock")
+
+        assert _flock.fail_open_holder_bookkeeping("record", _bug) is None
+
+        (record,) = caplog.records
+        assert record.levelno == logging.ERROR
+        assert record.exc_info is not None
+        assert record.getMessage() == (
+            "sessions_lock_holder_record_failed: error=RuntimeError action=ignored"
+        )
+
+    def test_fail_open_returns_the_action_result(self) -> None:
+        assert _flock.fail_open_holder_bookkeeping("read", lambda: 7) == 7
+
+    def test_an_unreadable_holder_never_breaks_the_timeout_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_clock(monkeypatch, _FakeClock())
+        lock = tmp_path / ".sessions.lock"
+
+        def _bug(_fd: IO[str]) -> None:
+            msg = "reader exploded"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(_flock, "read_lock_holder", _bug)
+
+        with (
+            _hold_flock_append(lock),
+            lock.open("a+") as fd,
+            pytest.raises(SessionsLockTimeoutError) as exc_info,
+        ):
+            acquire_sessions_flock(fd, lock, bounded=True, timeout_s=0)
+
+        assert "the lock file records no PID" in str(exc_info.value)
+
+    def test_the_lock_fd_opens_append_so_a_contender_keeps_the_record(
+        self, tmp_path: Path
+    ) -> None:
+        lock = tmp_path / "lock"
+        lock.write_text("kept")
+
+        with _flock.open_holder_lock_fd(lock) as fd:
+            assert fd.mode == "a+"
+
+        assert lock.read_text() == "kept"
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+    def test_an_unwritable_lock_file_opens_read_only_with_a_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        lock = tmp_path / "lock"
+        lock.write_text("")
+        lock.chmod(0o444)
+        caplog.set_level(logging.WARNING, logger="cw._flock")
+        try:
+            with _flock.open_holder_lock_fd(lock) as fd:
+                assert fd.mode == "r"
+        finally:
+            lock.chmod(0o644)
+
+        (record,) = caplog.records
+        assert record.levelno == logging.WARNING
+        assert record.getMessage().startswith(
+            f"sessions_lock_holder_record_unavailable: path={lock}"
+        )
 
 
 class TestHolderInTimeoutMessage:

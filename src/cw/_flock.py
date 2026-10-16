@@ -61,10 +61,11 @@ from cw.exceptions import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
     from typing import IO
 
-_log = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 # Env var bounding how long a ``bounded=True`` state-lock acquisition (the
 # sessions, dev_queue, clients and concurrency_override locks) waits for
@@ -168,7 +169,7 @@ def _read_env_lock_timeout() -> float | None:
         return value
     if raw not in _warned_invalid_raw:
         _warned_invalid_raw.add(raw)
-        _log.warning(
+        _logger.warning(
             "ignoring invalid %s=%r (expected a non-negative number of seconds);"
             " using the caller's default wait",
             SESSIONS_LOCK_TIMEOUT_ENV,
@@ -213,37 +214,84 @@ def operator_close_lock_wait_seconds() -> float:
     return min(env, OPERATOR_COMMAND_LOCK_WAIT_S)
 
 
+def fail_open_holder_bookkeeping[T](what: str, action: Callable[[], T]) -> T | None:
+    """Run one sessions-lock holder bookkeeping *action*; never raise (#2694).
+
+    Holder bookkeeping must never prevent acquiring or releasing the sessions
+    lock, so every exception *action* raises is caught, logged and ignored
+    (``None`` is returned). The expected failures -- I/O (``OSError``), a
+    closed fd or undecodable record (``ValueError``), a record nested past
+    the recursion limit -- log at WARNING; anything else is a bug and logs
+    at ERROR with its traceback (``logger.exception``, the one broad-except
+    form ruff's BLE001 accepts without a suppression).
+    """
+    try:
+        return action()
+    except (OSError, ValueError, RecursionError) as exc:
+        _logger.warning(
+            "sessions_lock_holder_%s_failed: error=%s action=ignored",
+            what,
+            type(exc).__name__,
+            exc_info=True,
+        )
+    except Exception as exc:
+        _logger.exception(
+            "sessions_lock_holder_%s_failed: error=%s action=ignored",
+            what,
+            type(exc).__name__,
+        )
+    return None
+
+
+def open_holder_lock_fd(lock_path: Path) -> IO[str]:
+    """Open the sessions lock file for a holder-recording acquisition (#2694).
+
+    ``"a+"``, never ``"w"``: ``"w"`` truncates on open, so a losing contender
+    would erase the holder's record. A lock file this process cannot write
+    (an unwritable lock directory or file) opens read-only instead, with a
+    WARNING: ``flock`` works on any fd, so the lock is still taken and only
+    the record is skipped (its write then fails open).
+    """
+    try:
+        return lock_path.open("a+")
+    except PermissionError:
+        _logger.warning(
+            "sessions_lock_holder_record_unavailable: path=%s"
+            " reason=lock_file_not_writable action=lock_without_record",
+            lock_path,
+            exc_info=True,
+        )
+        return lock_path.open("r")
+
+
 def record_lock_holder(fd: IO[str], *, cmd: str) -> None:
     """Write this process's holder record into the held lock file *fd* (#2694).
 
-    ``{"pid", "cmd", "acquired_at"}``, replacing any earlier content. Best
-    effort: an I/O failure (``OSError``, or the ``ValueError`` a closed fd
-    raises) is logged at DEBUG and swallowed, because holder bookkeeping must
-    never fail an acquisition. ``acquired_at`` comes from ``datetime.now``,
-    not this module's ``time`` (which tests replace).
+    ``{"pid", "cmd", "acquired_at"}``, replacing any earlier content. Raises
+    on an I/O failure; callers run it through
+    :func:`fail_open_holder_bookkeeping`. ``acquired_at`` comes from
+    ``datetime.now``, not this module's ``time`` (which tests replace).
     """
     record = {
         "pid": os.getpid(),
         "cmd": cmd,
         "acquired_at": datetime.now(UTC).isoformat(),
     }
-    try:
-        fd.seek(0)
-        fd.truncate(0)
-        fd.write(json.dumps(record))
-        fd.flush()
-    except (OSError, ValueError):
-        _log.debug("lock_holder_record_failed", exc_info=True)
+    fd.seek(0)
+    fd.truncate(0)
+    fd.write(json.dumps(record))
+    fd.flush()
 
 
 def clear_lock_holder(fd: IO[str]) -> None:
-    """Empty the holder record before the lock is released (best effort)."""
-    try:
-        fd.seek(0)
-        fd.truncate(0)
-        fd.flush()
-    except (OSError, ValueError):
-        _log.debug("lock_holder_clear_failed", exc_info=True)
+    """Empty the holder record before the lock is released.
+
+    Raises on an I/O failure; callers run it through
+    :func:`fail_open_holder_bookkeeping`.
+    """
+    fd.seek(0)
+    fd.truncate(0)
+    fd.flush()
 
 
 def _parse_aware_time(raw: object) -> datetime | None:
@@ -262,13 +310,14 @@ def _parse_aware_time(raw: object) -> datetime | None:
 def _parse_lock_holder(raw: str) -> LockHolder | None:
     """Parse a holder record, or ``None`` when it is empty or unusable.
 
-    Unusable: malformed JSON, a wrong-typed field, a pid that is not a
-    positive int (``os.kill`` reads 0 and negatives as process groups), or an
-    ``acquired_at`` that is not a timezone-aware ISO-8601 timestamp.
+    Unusable: malformed JSON (or JSON nested past the recursion limit), a
+    wrong-typed field, a pid that is not a positive int (``os.kill`` reads 0
+    and negatives as process groups), or an ``acquired_at`` that is not a
+    timezone-aware ISO-8601 timestamp.
     """
     try:
         data = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     if not isinstance(data, dict):
         return None
@@ -300,15 +349,16 @@ def _pid_alive(pid: int) -> bool:
 def read_lock_holder(fd: IO[str]) -> LockHolder | None:
     """Read the holder record through a contender's own *fd* (#2694).
 
-    The fd must be readable (the sessions lock opens ``"a+"``); a write-only
-    fd, an empty or malformed record, or a record whose pid is no longer
-    alive all yield ``None``, and the caller falls back to the ``lsof`` text.
+    A write-only fd (the other state locks open ``"w"`` and record nothing),
+    an empty or malformed record, or one whose pid is no longer alive yields
+    ``None``, and the caller falls back to the ``lsof`` text. A read failure
+    raises; the timeout path runs this through
+    :func:`fail_open_holder_bookkeeping`.
     """
-    try:
-        fd.seek(0)
-        raw = fd.read()
-    except (OSError, ValueError):
+    if not fd.readable():
         return None
+    fd.seek(0)
+    raw = fd.read()
     holder = _parse_lock_holder(raw)
     if holder is None or not _pid_alive(holder.pid):
         return None
@@ -379,7 +429,11 @@ def _poll_for_lock(
     ):
         return None
     waited_s = time.monotonic() - started
-    holder = read_lock_holder(fd) if lock_name == SESSIONS_LOCK_NAME else None
+    holder = (
+        fail_open_holder_bookkeeping("read", lambda: read_lock_holder(fd))
+        if lock_name == SESSIONS_LOCK_NAME
+        else None
+    )
     message = lock_timeout_message(
         lock_name, lock_path, waited_s=waited_s, timeout_s=timeout_s, holder=holder
     )

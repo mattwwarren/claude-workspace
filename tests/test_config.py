@@ -2617,28 +2617,101 @@ class TestSessionsLockHolderRecord:
         with sessions_lock(bounded=True, timeout_s=0):
             pass
 
-    def test_unexpected_record_failure_propagates_but_never_leaks_the_lock(
-        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    def test_an_unexpected_record_failure_is_logged_and_the_body_still_runs(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A bug in the bookkeeping is loud, and ``try``/``finally`` still unlocks."""
+        """Fail open: any bookkeeping exception is logged, never raised."""
         ran: list[bool] = []
+        caplog.set_level(logging.WARNING, logger="cw._flock")
 
         with monkeypatch.context() as patched:
             patched.setattr("cw.config.record_lock_holder", _raise_runtime)
-            with pytest.raises(RuntimeError, match="holder bookkeeping exploded"):
-                _enter_and_exit_sessions_lock(ran)
+            _enter_and_exit_sessions_lock(ran)
 
-        assert ran == []
+        assert ran == [True]
+        (record,) = [
+            r
+            for r in caplog.records
+            if r.getMessage().startswith("sessions_lock_holder_record_failed:")
+        ]
+        assert record.levelno >= logging.WARNING
+        assert record.exc_info is not None
         with sessions_lock(bounded=True, timeout_s=0):
             pass
 
-    def test_unexpected_clear_failure_still_unlocks_closes_and_notes_the_hold(
+    def test_an_oserror_on_the_holder_write_is_warned_and_ignored(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        ran: list[bool] = []
+        caplog.set_level(logging.WARNING, logger="cw._flock")
+
+        def _disk_full(*_args: object, **_kwargs: object) -> None:
+            raise OSError(28, "No space left on device")
+
+        with monkeypatch.context() as patched:
+            patched.setattr("cw.config.record_lock_holder", _disk_full)
+            _enter_and_exit_sessions_lock(ran)
+
+        assert ran == [True]
+        (record,) = [
+            r
+            for r in caplog.records
+            if r.getMessage().startswith("sessions_lock_holder_record_failed:")
+        ]
+        assert record.levelno == logging.WARNING
+        assert record.exc_info is not None
+        with sessions_lock(bounded=True, timeout_s=0):
+            pass
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+    def test_an_unwritable_lock_directory_never_blocks_the_lock(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A lock file nobody can write still locks; only the record is skipped."""
+        lock_dir = tmp_path / "ro-locks"
+        lock_dir.mkdir()
+        lock = lock_dir / ".sessions.lock"
+        lock.write_text("")
+        monkeypatch.setattr("cw.config.SESSIONS_LOCK", lock)
+        caplog.set_level(logging.WARNING, logger="cw._flock")
+        ran: list[bool] = []
+        lock.chmod(0o444)
+        lock_dir.chmod(0o555)
+        try:
+            _enter_and_exit_sessions_lock(ran)
+            with sessions_lock(bounded=True, timeout_s=0):
+                pass
+        finally:
+            lock_dir.chmod(0o755)
+            lock.chmod(0o644)
+
+        assert ran == [True]
+        assert lock.read_text() == ""
+        warned = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(
+            r.getMessage().startswith("sessions_lock_holder_record_unavailable:")
+            for r in warned
+        )
+
+    def test_an_unexpected_clear_failure_still_unlocks_closes_and_notes_the_hold(
         self,
         recording_lock_path: _RecordingLockPath,
         monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         notes: list[str] = []
         real_note = cw.config._lock_hold.note_hold
+        caplog.set_level(logging.WARNING, logger="cw._flock")
 
         def _note(lock_name: str, **kwargs: float) -> None:
             notes.append(lock_name)
@@ -2648,11 +2721,14 @@ class TestSessionsLockHolderRecord:
 
         with monkeypatch.context() as patched:
             patched.setattr("cw.config.clear_lock_holder", _raise_runtime)
-            with pytest.raises(RuntimeError, match="holder bookkeeping exploded"):
-                _enter_and_exit_sessions_lock()
+            _enter_and_exit_sessions_lock()
 
         assert [h.closed for h in recording_lock_path.handles] == [True]
         assert notes == ["sessions"]
+        assert any(
+            r.getMessage().startswith("sessions_lock_holder_clear_failed:")
+            for r in caplog.records
+        )
         with sessions_lock(bounded=True, timeout_s=0):
             pass
 

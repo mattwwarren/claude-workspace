@@ -26,6 +26,8 @@ from cw._flock import (
     acquire_flock,
     acquire_sessions_flock,
     clear_lock_holder,
+    fail_open_holder_bookkeeping,
+    open_holder_lock_fd,
     record_lock_holder,
 )
 from cw._git import run_git
@@ -96,17 +98,19 @@ def _guarded_state_lock(
     ``finally``, after ``lock_guard`` has popped, and only once this thread
     holds no guarded lock.
 
-    *record_holder* (#2694, the sessions lock only) opens the file ``"a+"``
-    instead of ``"w"`` -- ``"w"`` truncates on open, so a losing contender
-    would erase the holder's record -- and writes/clears the holder record
-    (:func:`cw._flock.record_lock_holder`). Both calls swallow I/O failures
-    themselves; anything else they raise is a bug and propagates, but the
-    record sits inside the ``try`` and the clear inside its own
-    ``try``/``finally``, so neither can ever skip ``LOCK_UN``/``close``.
+    *record_holder* (#2694, the sessions lock only) opens the file with
+    :func:`cw._flock.open_holder_lock_fd` (``"a+"``, so a losing contender
+    never erases the record; read-only if the file cannot be written) and
+    writes/clears the holder record. Holder bookkeeping fails open: every
+    exception it raises (the command lookup included) is logged and ignored
+    by :func:`cw._flock.fail_open_holder_bookkeeping`, so it never stops the
+    body running or the lock being released.
     """
     try:
         with lock_guard(lock_name, lock_path, rank):
-            fd = lock_path.open("a+" if record_holder else "w")
+            fd = (
+                open_holder_lock_fd(lock_path) if record_holder else lock_path.open("w")
+            )
             requested = time.monotonic()
             try:
                 acquire(fd)
@@ -116,13 +120,18 @@ def _guarded_state_lock(
             acquired = time.monotonic()
             try:
                 if record_holder:
-                    record_lock_holder(fd, cmd=_lock_holder_command())
+                    fail_open_holder_bookkeeping(
+                        "record",
+                        lambda: record_lock_holder(fd, cmd=_lock_holder_command()),
+                    )
                 yield
             finally:
                 released = time.monotonic()
                 try:
                     if record_holder:
-                        clear_lock_holder(fd)
+                        fail_open_holder_bookkeeping(
+                            "clear", lambda: clear_lock_holder(fd)
+                        )
                 finally:
                     fcntl.flock(fd, fcntl.LOCK_UN)
                     fd.close()
