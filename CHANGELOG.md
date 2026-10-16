@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.74.0] - 2026-10-16
+
 ### Added
 
 - **A sessions-lock timeout names its holder (#2694).** While a cw process holds `.sessions.lock` it records `{pid, cmd, acquired_at}` in it (the Click command path, never option values; best effort, cleared before release), and the lock is opened `"a+"` so a waiting contender no longer erases the record. The timeout message then reads `Recorded holder: pid <pid> (`<cmd>`), held for <n>s; confirm with `lsof <path>`.` instead of "the lock file records no PID". The bookkeeping fails open: any exception opening, reading, writing or clearing the record (a lock file this process cannot write is locked read-only) is logged at WARNING and ignored and never stops the lock being taken or released, and a naive or unparseable `acquired_at` reads as no recorded holder. The other state locks are unchanged.
