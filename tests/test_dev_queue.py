@@ -10546,6 +10546,8 @@ class TestRequeueTicket:
             f" ('{_PLAN_SPEC_MARKER}' + '{_PLAN_SOUNDNESS_MARKER}')"
             " was found on the tracker. Let Stage 1 (plan) run and post its"
             " approved plan first, or requeue at --stage plan instead."
+            " To re-run planning:"
+            " `cw dev-queue requeue GEN-500 -c genhealth --stage plan`."
         )
         assert str(exc_info.value) == expected
 
@@ -16877,3 +16879,337 @@ class TestMoveAndFindRefusalsNameNextCommand:
             " Enqueue it with `cw dev-queue add ACM-9 -c acme`, or list rows with"
             " `cw dev-queue tasks -c acme`."
         )
+
+
+_REMOVE_ADD_SENTENCE = (
+    " To change the stage of a PENDING row, remove it and re-add it with"
+    " --stage: `cw dev-queue remove ACM-1 -c acme`, then"
+    " `cw dev-queue add ACM-1 -c acme --stage {stage}`."
+)
+
+
+class TestRequeueRefusalsNameNextCommand:
+    """#2692: requeue's refusals, idempotent PENDING no-op, inferred regress."""
+
+    @pytest.fixture(autouse=True)
+    def _acme(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.fake = install_acme_client(tmp_path, monkeypatch)
+
+    @pytest.mark.parametrize(
+        ("status", "command"),
+        [
+            (QueueItemStatus.PENDING, "cw dev-queue wait ACM-1 -c acme"),
+            (QueueItemStatus.RUNNING, "cw dev-queue wait ACM-1 -c acme"),
+            (
+                QueueItemStatus.COMPLETED,
+                "cw dev-queue requeue ACM-1 -c acme --from-completed",
+            ),
+        ],
+    )
+    def test_state_error_names_the_table_command(
+        self, status: QueueItemStatus, command: str
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStateError
+
+        seed_queue([make_task(status=status)])
+        with pytest.raises(RequeueStateError, match="expected BLOCKED_ON_USER") as exc:
+            requeue_ticket("ACM-1", "acme", native_daemon=self.fake)
+        assert f"Run: `{command}`" in str(exc.value)
+
+    def test_pending_noop_is_opt_in(self) -> None:
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStateError
+
+        seed_queue([make_task(status=QueueItemStatus.PENDING)])
+        with pytest.raises(RequeueStateError):
+            requeue_ticket("ACM-1", "acme", native_daemon=self.fake)
+        before = load_dev_queue().model_dump()
+        result = requeue_ticket(
+            "ACM-1", "acme", native_daemon=self.fake, idempotent_pending=True
+        )
+        assert result["already_pending"] is True
+        assert result["from_stage"] == result["to_stage"] == "plan"
+        assert result["regressed"] is False
+        assert result["regress_attempts"] == 0
+        assert load_dev_queue().model_dump() == before
+
+    def test_pending_noop_with_the_current_stage(self) -> None:
+        from cw.dev_queue import precheck_requeue, requeue_ticket
+
+        seed_queue([make_task(status=QueueItemStatus.PENDING, stage=Stage.REVIEW)])
+        precheck_requeue(
+            "ACM-1", "acme", "review", native_daemon=self.fake, idempotent_pending=True
+        )
+        result = requeue_ticket(
+            "ACM-1", "acme", "review", native_daemon=self.fake, idempotent_pending=True
+        )
+        assert result["already_pending"] is True
+
+    def test_parked_requeue_reports_not_already_pending(self) -> None:
+        from cw.dev_queue import requeue_ticket
+
+        seed_queue([make_blocked(stage=Stage.PLAN)])
+        result = requeue_ticket(
+            "ACM-1", "acme", native_daemon=self.fake, idempotent_pending=True
+        )
+        assert result["already_pending"] is False
+        assert result["regress_inferred"] is False
+
+    def test_precheck_noop_returns_before_the_live_session_guard(self) -> None:
+        from cw.dev_queue import precheck_requeue, requeue_ticket
+        from cw.exceptions import RequeueLiveSessionError
+
+        task = make_task(status=QueueItemStatus.PENDING, session_id="sess-live")
+        seed_queue([task], [bound_session_for(task, surface_ref="abcd1234")])
+        self.fake._live.add("abcd1234")
+        precheck_requeue(
+            "ACM-1", "acme", native_daemon=self.fake, idempotent_pending=True
+        )
+        with pytest.raises(RequeueLiveSessionError):
+            precheck_requeue("ACM-1", "acme", native_daemon=self.fake)
+        # Library semantics: requeue_ticket keeps its guard first.
+        with pytest.raises(RequeueLiveSessionError):
+            requeue_ticket(
+                "ACM-1", "acme", native_daemon=self.fake, idempotent_pending=True
+            )
+
+    @pytest.mark.parametrize(
+        ("row_stage", "target", "error_name"),
+        [
+            (Stage.PLAN, "review", "RequeueStateError"),
+            (Stage.REVIEW, "plan", "RequeueStageError"),
+        ],
+        ids=["forward", "backward"],
+    )
+    def test_pending_with_another_stage_names_remove_and_add(
+        self, row_stage: Stage, target: str, error_name: str
+    ) -> None:
+        import cw.exceptions
+        from cw.dev_queue import precheck_requeue, requeue_ticket
+
+        error = getattr(cw.exceptions, error_name)
+        seed_queue([make_task(status=QueueItemStatus.PENDING, stage=row_stage)])
+        sentence = _REMOVE_ADD_SENTENCE.format(stage=target)
+        kwargs = {"idempotent_pending": True, "infer_regress": True}
+        with pytest.raises(error) as excinfo:
+            requeue_ticket("ACM-1", "acme", target, native_daemon=self.fake, **kwargs)
+        assert str(excinfo.value).endswith(sentence)
+        assert "Run: `cw dev-queue wait ACM-1 -c acme`" in str(excinfo.value)
+        with pytest.raises(error) as excinfo:
+            precheck_requeue("ACM-1", "acme", target, native_daemon=self.fake, **kwargs)
+        assert str(excinfo.value).endswith(sentence)
+
+    def test_pending_regress_at_the_same_stage_has_no_remove_add_sentence(self) -> None:
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStateError
+
+        seed_queue([make_task(status=QueueItemStatus.PENDING, stage=Stage.REVIEW)])
+        with pytest.raises(RequeueStateError) as excinfo:
+            requeue_ticket(
+                "ACM-1",
+                "acme",
+                "review",
+                allow_regress=True,
+                native_daemon=self.fake,
+                idempotent_pending=True,
+            )
+        assert "remove it and re-add" not in str(excinfo.value)
+
+    def test_backward_stage_without_inference_names_regress(self) -> None:
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        seed_queue([make_blocked(stage=Stage.REVIEW)])
+        with pytest.raises(RequeueStageError, match="Use --regress") as excinfo:
+            requeue_ticket("ACM-1", "acme", "impl", native_daemon=self.fake)
+        assert "Run: `cw dev-queue requeue ACM-1 -c acme`" in str(excinfo.value)
+
+    @pytest.mark.parametrize("target", ["plan", "impl"])
+    def test_inferred_regress(self, target: str) -> None:
+        from cw.dev_queue import requeue_ticket
+
+        seed_queue([make_blocked(stage=Stage.REVIEW)])
+        result = requeue_ticket(
+            "ACM-1", "acme", target, native_daemon=self.fake, infer_regress=True
+        )
+        assert result["regressed"] is True
+        assert result["regress_inferred"] is True
+        assert result["regress_attempts"] == 1
+        task = load_dev_queue().tasks[0]
+        assert task.stage.value == target
+        assert task.status == QueueItemStatus.PENDING
+
+    def test_explicit_regress_is_not_inferred(self) -> None:
+        from cw.dev_queue import requeue_ticket
+
+        seed_queue([make_blocked(stage=Stage.REVIEW)])
+        result = requeue_ticket(
+            "ACM-1",
+            "acme",
+            "impl",
+            allow_regress=True,
+            native_daemon=self.fake,
+            infer_regress=True,
+        )
+        assert result["regressed"] is True
+        assert result["regress_inferred"] is False
+
+    def test_regress_of_non_parked_row_names_the_table_command(self) -> None:
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        seed_queue([make_task(status=QueueItemStatus.COMPLETED, stage=Stage.REVIEW)])
+        with pytest.raises(RequeueStageError, match="Cannot regress") as excinfo:
+            requeue_ticket(
+                "ACM-1", "acme", "plan", allow_regress=True, native_daemon=self.fake
+            )
+        assert "Run: `cw dev-queue requeue ACM-1 -c acme --from-completed`" in str(
+            excinfo.value
+        )
+
+    @pytest.mark.parametrize(
+        ("stage", "tail"),
+        [
+            (
+                Stage.REVIEW,
+                " Name the earlier stage, e.g."
+                " `cw dev-queue requeue ACM-1 -c acme --stage impl --regress`"
+                " (current stage: 'review').",
+            ),
+            (Stage.PLAN, " there is no earlier stage than 'plan' to regress to."),
+        ],
+    )
+    def test_regress_without_stage_names_an_example(
+        self, stage: Stage, tail: str
+    ) -> None:
+        from cw.dev_queue import precheck_requeue, requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        seed_queue([make_blocked(stage=stage)])
+        prefix = "--regress requires a backward --stage target on a blocked task."
+        for call in (requeue_ticket, precheck_requeue):
+            with pytest.raises(RequeueStageError) as excinfo:
+                call("ACM-1", "acme", allow_regress=True, native_daemon=self.fake)
+            assert str(excinfo.value).startswith(prefix)
+            assert str(excinfo.value).endswith(tail)
+
+    def test_current_stage_not_in_pipeline(self) -> None:
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        seed_queue([make_blocked(stage=Stage.HARDEN)])
+        with pytest.raises(RequeueStageError, match="is not in the pipeline") as exc:
+            requeue_ticket("ACM-1", "acme", "review", native_daemon=self.fake)
+        assert str(exc.value).endswith(
+            " No requeue can act on a row whose stage is not in its lane pipeline;"
+            " fix the lane's pipeline.stages, or run"
+            " `cw dev-queue remove ACM-1 -c acme` and re-add the ticket."
+        )
+
+    def test_target_stage_not_in_pipeline(self, tmp_path: Path) -> None:
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        _write_acme_lane_pipeline(tmp_path, ["impl", "review", "finalize"])
+        seed_queue([make_blocked(stage=Stage.REVIEW)])
+        with pytest.raises(RequeueStageError, match="is not in the pipeline") as exc:
+            requeue_ticket("ACM-1", "acme", "plan", native_daemon=self.fake)
+        assert str(exc.value).endswith(
+            " Legal stages for this row: impl, review, finalize. Re-run the current"
+            " stage with `cw dev-queue requeue ACM-1 -c acme`, or name one of those"
+            " stages with `--stage`."
+        )
+
+    def test_add_ticket_stage_refusal_is_unchanged(self, tmp_path: Path) -> None:
+        from cw.exceptions import RequeueStageError
+
+        _write_acme_lane_pipeline(tmp_path, ["impl", "review", "finalize"])
+        with pytest.raises(RequeueStageError) as excinfo:
+            add_ticket(make_task(stage=Stage.PLAN))
+        assert "Legal stages" not in str(excinfo.value)
+        assert "No requeue" not in str(excinfo.value)
+
+
+def _write_acme_lane_pipeline(tmp_path: Path, stages: list[str]) -> None:
+    from tests._clients_yaml import ClientSpec, write_clients_yaml
+
+    write_clients_yaml(
+        ClientSpec(
+            "acme",
+            tmp_path / "ws",
+            lanes=[{"name": DEFAULT_LANE, "pipeline": {"stages": stages}}],
+        ),
+        ensure_workspaces=True,
+    )
+
+
+class TestUnblockRefusalsNameNextCommand:
+    @pytest.fixture(autouse=True)
+    def _acme(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        install_acme_client(tmp_path, monkeypatch)
+
+    _SALVAGE_ONLY = (
+        " unblock applies to salvage parks only (the bound session's reap_reason"
+        " must be SALVAGE_PARKED)."
+    )
+
+    def test_not_blocked(self) -> None:
+        from cw.dev_queue import unblock_ticket
+        from cw.exceptions import UnblockStateError
+
+        seed_queue([make_task(status=QueueItemStatus.PENDING)])
+        with pytest.raises(UnblockStateError, match="expected BLOCKED_ON_USER") as exc:
+            unblock_ticket("ACM-1", "acme")
+        assert self._SALVAGE_ONLY in str(exc.value)
+        assert "Run: `cw dev-queue wait ACM-1 -c acme`" in str(exc.value)
+
+    def test_session_not_found(self) -> None:
+        from cw.dev_queue import unblock_ticket
+        from cw.exceptions import UnblockStateError
+
+        seed_queue([make_blocked(stage=Stage.PLAN)])
+        with pytest.raises(UnblockStateError, match="session not found") as exc:
+            unblock_ticket("ACM-1", "acme")
+        assert self._SALVAGE_ONLY in str(exc.value)
+        assert "Run: `cw dev-queue requeue ACM-1 -c acme`" in str(exc.value)
+
+    def test_not_salvage_parked_names_approve_for_a_gate(self) -> None:
+        from cw.dev_queue import unblock_ticket
+        from cw.exceptions import UnblockStateError
+
+        case = CASES["rule9_review_gate"]
+        seed_queue(
+            [case.task],
+            [bound_session_for(case.task, last_result=case.session_last_result)],
+        )
+        with pytest.raises(UnblockStateError, match="not park-marked") as exc:
+            unblock_ticket("ACM-1", "acme")
+        assert self._SALVAGE_ONLY in str(exc.value)
+        assert f"Run: `{_ACME_APPROVE}`" in str(exc.value)
+
+    def test_concurrent_change(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import cw.dev_queue.requeue as requeue_mod
+        from cw.dev_queue import unblock_ticket
+        from cw.exceptions import UnblockStateError
+        from cw.models import ReapReason
+
+        task = make_blocked(stage=Stage.IMPL)
+        seed_queue(
+            [task], [bound_session_for(task, reap_reason=ReapReason.SALVAGE_PARKED)]
+        )
+        real_load = requeue_mod.load_dev_queue
+        calls = 0
+
+        def _flip_on_second_read() -> DevQueueStore:
+            nonlocal calls
+            calls += 1
+            store = real_load()
+            if calls > 1:
+                store.tasks[0].status = QueueItemStatus.PENDING
+            return store
+
+        monkeypatch.setattr(requeue_mod, "load_dev_queue", _flip_on_second_read)
+        with pytest.raises(UnblockStateError, match="concurrently") as exc:
+            unblock_ticket("ACM-1", "acme")
+        assert "Run: `cw dev-queue wait ACM-1 -c acme`" in str(exc.value)
