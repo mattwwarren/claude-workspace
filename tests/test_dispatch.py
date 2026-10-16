@@ -18900,9 +18900,7 @@ class TestNotifyStaleClientsWithPending:
         assert payload["ticket_id"] is None
         assert payload["claude_session_id"] is None
         assert payload["paused_status"] == "dispatch_loop_stale"
-        assert payload["breadcrumbs"] == (
-            "pending=2 age_s=200 skip=none occupied=0 running=0/3 orphan_sessions=none"
-        )
+        assert payload["breadcrumbs"] == "pending=2 age_s=200"
         assert payload["crashed"] is False
         assert set(payload) == {
             "session_id",

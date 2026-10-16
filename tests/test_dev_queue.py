@@ -54,7 +54,6 @@ from cw.dispatch import (
 )
 from cw.dispatch.claim.screening import resolve_occupied_ticket_ids
 from cw.exceptions import CwError
-from cw.history import EventType, load_history
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
@@ -105,7 +104,6 @@ if TYPE_CHECKING:
 
     from click.testing import Result
 
-    from cw.history import HistoryEvent
     from cw.models import ReapReason, Session
     from tests.conftest import CapturedEvent
 
@@ -3918,19 +3916,11 @@ def _session(session_id: str = "sess-1") -> Session:
     return sess
 
 
-def _cancel_close_events() -> list[HistoryEvent]:
-    return [
-        e
-        for e in load_history(_CANCEL_CLIENT, event_types=[EventType.SESSION_COMPLETED])
-        if e.detail == "operator_close"
-    ]
-
-
 @pytest.mark.usefixtures("tmp_config_dir")
 class TestCLIDevQueueCancelClosesSession:
-    """`cancel` stops the session, confirms it is gone, then flips it (#2694)."""
+    """`cancel` stops the session, then flips it (#2694)."""
 
-    def test_stops_confirms_then_marks_completed_and_audits_once(
+    def test_stops_then_marks_completed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from cw.models import CompletionReason, counts_toward_client_ceiling
@@ -3958,37 +3948,6 @@ class TestCLIDevQueueCancelClosesSession:
         assert sess.completed_reason is CompletionReason.USER
         assert sess.completed_at is not None
         assert not counts_toward_client_ceiling(sess, _CANCEL_CLIENT)
-        (event,) = _cancel_close_events()
-        assert event.metadata["command"] == "cw dev-queue cancel"
-        assert event.metadata["session_id"] == "sess-1"
-        assert event.metadata["ticket_id"] == "T-1"
-        assert event.metadata["surface_ref"] == surface
-        assert event.metadata["prior_status"] == "active"
-
-    @pytest.mark.parametrize(
-        "make_unconfirmable",
-        [_stop_leaves_worker_listed, _stop_makes_roster_unreadable],
-        ids=["still-listed", "roster-unreadable"],
-    )
-    def test_an_unconfirmed_stop_leaves_the_session_and_exits_one(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        make_unconfirmable: Callable[
-            [pytest.MonkeyPatch, FakeNativeDaemonClient], None
-        ],
-    ) -> None:
-        fake = _seed_cancel_world()
-        make_unconfirmable(monkeypatch, fake)
-        monkeypatch.setattr("cw.cli.spawn._CANCEL_STOP_CONFIRM_TIMEOUT_S", 0.0)
-
-        result = _cancel(monkeypatch, fake)
-
-        assert result.exit_code == 1
-        assert "still in the daemon roster" in result.output
-        assert "cw spawn close sess-1" in result.output
-        assert _session().status is SessionStatus.ACTIVE
-        assert _cancel_close_events() == []
-        assert load_dev_queue().tasks[0].status is QueueItemStatus.CANCELLED
 
     def test_a_resumed_incarnation_is_left_running_and_reported(
         self, monkeypatch: pytest.MonkeyPatch
@@ -4015,7 +3974,6 @@ class TestCLIDevQueueCancelClosesSession:
         sess = _session()
         assert sess.status is SessionStatus.ACTIVE
         assert sess.surface_ref == "new-incarnation"
-        assert _cancel_close_events() == []
 
     def test_a_terminal_session_is_stopped_but_not_flipped(
         self, monkeypatch: pytest.MonkeyPatch
@@ -4032,7 +3990,6 @@ class TestCLIDevQueueCancelClosesSession:
         assert result.exit_code == 0, result.output
         assert len(fake.stop_calls) == 1
         assert _session().completed_reason is CompletionReason.CRASHED
-        assert _cancel_close_events() == []
 
     def test_a_user_origin_session_is_untouched(
         self, monkeypatch: pytest.MonkeyPatch
@@ -4061,23 +4018,6 @@ class TestCLIDevQueueCancelClosesSession:
 
         assert result.exit_code == 0, result.output
         assert fake.stop_calls == []
-        assert _session().status is SessionStatus.COMPLETED
-
-    def test_an_audit_write_failure_is_reported_and_the_close_stands(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        fake = _seed_cancel_world()
-
-        def _fail(*_args: object) -> None:
-            msg = "disk full"
-            raise OSError(msg)
-
-        monkeypatch.setattr("cw.cli.spawn.record_history_event", _fail)
-
-        result = _cancel(monkeypatch, fake)
-
-        assert result.exit_code == 1
-        assert "audit record could not be written" in result.output
         assert _session().status is SessionStatus.COMPLETED
 
     def test_the_session_step_takes_no_dev_queue_lock(

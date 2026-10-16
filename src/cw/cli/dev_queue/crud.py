@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from cw.cli._base import handle_errors
 from cw.cli.routed_orphan_close import close_routed_result_sessions_for_ticket
 from cw.cli.spawn import CancelCloseOutcome, close_cancelled_sessions
-from cw.config import load_orchestrator_config
+from cw.config import load_orchestrator_config, load_state
 from cw.dev_queue import (
     DEFAULT_PRUNE_OLDER_THAN_DAYS,
     _prune_age_basis,
@@ -22,6 +22,7 @@ from cw.dev_queue import (
     clear_tickets,
     drain_held_tickets,
     is_pending_requeue_noop,
+    load_dev_queue,
     move_ticket,
     precheck_requeue,
     prune_tickets,
@@ -662,6 +663,21 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
     sources = ViewSources()
     outcome = CancelCloseOutcome()
     for index, ticket in enumerate(tickets):
+        # Capture the row's bound session before cancel_ticket commits the
+        # cancellation. A later read must not accidentally stop a resumed
+        # incarnation under the same session id.
+        before_state = load_state()
+        before_tasks = load_dev_queue().tasks
+        bound_sessions = {
+            task.session_id: session
+            for task in before_tasks
+            if task.ticket_id == ticket
+            and task.client == client
+            and task.status != QueueItemStatus.CANCELLED
+            and task.session_id is not None
+            for session in before_state.sessions
+            if session.id == task.session_id
+        }
         try:
             # bounded=True (#2501): operator command; only daemon-client setup
             # precedes the lock, and each earlier ticket is fully committed
@@ -679,8 +695,13 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
                 ),
             )
             raise
-        # #2694: stop, confirm gone, then flip the sessions the row was bound to.
-        outcome = close_cancelled_sessions(cleared_session_ids, daemon, outcome)
+        # #2694: stop, then flip the sessions the row was bound to.
+        outcome = close_cancelled_sessions(
+            cleared_session_ids,
+            daemon,
+            outcome,
+            bound_sessions=bound_sessions,
+        )
         click.echo(f"Cancelled {ticket} in {client} dev-queue.")
         echo_resulting_row(ticket, client, sources=sources)
     outcome.raise_if_unfinished()

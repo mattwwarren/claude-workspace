@@ -39,18 +39,15 @@ from cw.models import (
 )
 from cw.reconcile import routed_result_sessions
 from cw.reconcile.routed_result_sessions import (
-    ORPHAN_SESSION_ID_CAP,
     ROUTED_RESULT_STRANDED_REASON,
     RoutedOrphanSplit,
     StrandedRoutedSession,
     find_stranded_routed_sessions,
-    format_orphan_sessions,
     rollback_routed_result_latches,
     routed_marker_candidates,
     session_pins_occupied_row,
     split_resolvable_routed_sessions,
     sweep_routed_result_sessions,
-    unowned_ceiling_sessions,
 )
 from tests._reconcile_helpers import (
     _auto_config,
@@ -62,7 +59,6 @@ from tests._reconcile_helpers import (
     _state_queue_snapshot,
     _write_agent_spawn_stamp,
 )
-from tests.conftest import _make_daemon_session, _make_ticket_task
 
 _LIVE = {"fake-short-id"}
 _SID = "2524"
@@ -1001,80 +997,3 @@ class TestSweepRoutedResultSessions:
 
         assert names & forbidden == set()
         assert stop_calls == []
-
-
-# ---------------------------------------------------------------------------
-# Shared orphan-naming helpers (#2694, moved from cw dev-queue status)
-# ---------------------------------------------------------------------------
-
-
-def _ceiling_session(sid: str, *, minutes: int, **overrides: object) -> Session:
-    fields: dict[str, object] = {
-        "id": sid,
-        "name": f"client-a/auto-dev/T-{sid}",
-        "client": "client-a",
-        "started_at": datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=minutes),
-    }
-    fields.update(overrides)
-    return _make_daemon_session(**fields)
-
-
-class TestUnownedCeilingSessions:
-    def test_names_unowned_ceiling_sessions_oldest_first(self) -> None:
-        newer = _ceiling_session("s-new", minutes=5)
-        older = _ceiling_session("s-old", minutes=1)
-
-        found = unowned_ceiling_sessions([newer, older], [], "client-a")
-
-        assert [s.id for s in found] == ["s-old", "s-new"]
-
-    @pytest.mark.parametrize(
-        "status",
-        [
-            QueueItemStatus.RUNNING,
-            QueueItemStatus.BLOCKED_ON_USER,
-            QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
-        ],
-    )
-    def test_a_session_an_occupied_row_binds_is_excluded(
-        self, status: QueueItemStatus
-    ) -> None:
-        sess = _ceiling_session("s-1", minutes=1)
-        row = _make_ticket_task(
-            ticket_id="T-s-1", client="client-a", status=status, session_id="s-1"
-        )
-
-        assert unowned_ceiling_sessions([sess], [row], "client-a") == ()
-
-    def test_other_client_user_origin_and_terminal_are_excluded(self) -> None:
-        sessions = [
-            _ceiling_session("other", minutes=1, client="client-b"),
-            _ceiling_session("user", minutes=2, origin=SessionOrigin.USER),
-            _ceiling_session("done", minutes=3, status=SessionStatus.COMPLETED),
-        ]
-
-        assert unowned_ceiling_sessions(sessions, [], "client-a") == ()
-
-
-class TestFormatOrphanSessions:
-    def test_names_id_and_ticket_or_name(self) -> None:
-        sessions = [
-            _ceiling_session("s-1", minutes=1),
-            _ceiling_session("s-2", minutes=2, name="client-a/interactive"),
-        ]
-
-        assert format_orphan_sessions(sessions) == (
-            "s-1 (T-s-1), s-2 (client-a/interactive)"
-        )
-
-    def test_caps_at_five_with_a_more_suffix(self) -> None:
-        sessions = [_ceiling_session(f"s-{n}", minutes=n) for n in range(7)]
-
-        text = format_orphan_sessions(sessions)
-
-        assert ORPHAN_SESSION_ID_CAP == 5
-        assert text.count("(T-") == ORPHAN_SESSION_ID_CAP
-        assert text.endswith(" (+2 more)")
-
-    def test_empty_is_empty(self) -> None:
-        assert format_orphan_sessions([]) == ""

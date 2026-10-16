@@ -736,26 +736,15 @@ queued: once the holder is gone (or, if it is a wedged `cw dev-queue serve`,
 after restarting it), re-run the command.
 
 - `cw dev-queue cancel` now also closes the session it cancels. For each
-  DAEMON session the row was bound to, it stops the worker, confirms the
-  worker left the daemon roster (an unreadable roster never confirms), and
-  only then marks the session COMPLETED(USER). The flip is re-checked under
-  the lock against the session incarnation cancel read (`started_at`,
-  `resumed_at`, `surface_ref`): a session resumed in between is left as is
-  and named on stderr. The step is flip-only (the row was already
+  DAEMON session the row was bound to, it stops the worker and marks the
+  session COMPLETED(USER). The step is flip-only (the row was already
   cancelled, so nothing is routed or re-cancelled); a terminal session is
   stopped but not flipped.
-- Cancel exits 1, naming the session and the next step, when the stop is
-  not confirmed, the session was resumed, or the sessions lock stays busy
-  for 5 s. On a busy lock the worker is already stopped and only the record
-  flip is pending: run `cw spawn close <session-id>` (or `cw doctor`) once
-  the lock frees. If cancel was killed after the row was cancelled but
-  before the session flip, a repeat cancel is a no-op; run `cw spawn close
-  <session-id>` instead.
-- Each close that `cw spawn close` or cancel performs writes one
-  `session_completed` record to the client's history
-  (`~/.local/share/cw/history/<client>.jsonl`, `detail: operator_close`)
-  with the session's identity, the command and the prior status. A failed
-  write exits 1; the close stands.
+- Cancel exits 1 only when the sessions lock stays busy for 5 s. On a busy
+  lock the worker is already stopped and only the record flip is pending:
+  run `cw spawn close <session-id>` (or `cw doctor`) once the lock frees. If
+  cancel was killed after the row was cancelled but before the session flip,
+  a repeat cancel is a no-op; run `cw spawn close <session-id>` instead.
 
 If the task is already in a terminal queue status but wedged (e.g.,
 `RUNNING` with no live session), `cw doctor --reap` detects and repairs
@@ -1815,16 +1804,9 @@ A `session.needs_attention` with `paused_status=dispatch_loop_stale` (#1875)
 says: **this client has pending work, its last `dispatch.tick` is older than
 90s, and it is not sitting behind a live executor-blocked marker.** It recurs
 every `dispatch_stale_notify_interval_minutes` (default 15) until the
-condition clears. `breadcrumbs` carries `pending=<n> age_s=<n> skip=<reason>
-occupied=<n> running=<r>/<cap> orphan_sessions=<none | <id> (<ticket>), ...>`
-(#2694); the client is in the `client` field (`ticket_id` is null — this
-signal is client-scoped, not ticket-scoped). The `skip=`, `occupied=` and
-`running=` fields are the **last** tick's (`age_s` ago), so `skip=cap_full`
-or `skip=lane_cap_blocked` says the loop was ticking but full; the
-`orphan_sessions=` list is read **now** and names ceiling-counted sessions
-no occupied row owns — the usual reason a client sits at `cap_full` with
-nothing RUNNING (close each with `cw spawn close <id>`). A degraded page
-(state unreadable) carries only the old `pending=<n> age_s=<n>`.
+condition clears. `breadcrumbs` carries `pending=<n> age_s=<n>`; the client is
+in the `client` field (`ticket_id` is null — this signal is client-scoped,
+not ticket-scoped).
 
 Triage in this order — the page does *not* tell you which of these it is:
 

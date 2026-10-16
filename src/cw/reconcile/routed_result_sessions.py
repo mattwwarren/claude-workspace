@@ -56,7 +56,6 @@ from cw.models import (
     ReapReason,
     SessionOrigin,
     SessionPurpose,
-    counts_toward_client_ceiling,
 )
 from cw.reconcile._shared import (
     _LIVE_STATUSES,
@@ -74,7 +73,7 @@ from cw.reconcile.liveness import _classify_liveness_bucket
 from cw.reconcile.liveness_page import close_command
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable
     from datetime import datetime
 
     from cw.models import (
@@ -86,11 +85,6 @@ if TYPE_CHECKING:
     )
 
 _log = logging.getLogger(__name__)
-
-# How many unowned session ids the orphan text names before it collapses the
-# rest into a "(+K more)" suffix (#2524; shared by `cw dev-queue status` and
-# the dispatch_loop_stale page, #2694).
-ORPHAN_SESSION_ID_CAP = 5
 
 # The ``paused_status`` of the once-only ``session.needs_attention`` page.
 ROUTED_RESULT_STRANDED_REASON = "routed_result_session_stranded"
@@ -138,41 +132,6 @@ def session_pins_occupied_row(tasks: Iterable[TicketTask], session_id: str) -> b
     erring toward protecting the session.
     """
     return _first_pinning_row(tasks, session_id) is not None
-
-
-def unowned_ceiling_sessions(
-    sessions: Iterable[Session], tasks: Sequence[TicketTask], client_name: str
-) -> tuple[Session, ...]:
-    """Sessions counted against *client_name*'s ceiling that no occupied row owns.
-
-    Pure (#2694, moved from ``cw dev-queue status``, #2524): the predicate
-    dispatch counts the ceiling by (``counts_toward_client_ceiling``: that
-    client's ACTIVE/IDLE DAEMON sessions) minus every session an occupied row
-    binds (:func:`session_pins_occupied_row`), oldest first.
-    """
-    unowned = [
-        s
-        for s in sessions
-        if counts_toward_client_ceiling(s, client_name)
-        and not session_pins_occupied_row(tasks, s.id)
-    ]
-    return tuple(sorted(unowned, key=lambda s: s.started_at))
-
-
-def format_orphan_sessions(
-    sessions: Sequence[Session], *, cap: int = ORPHAN_SESSION_ID_CAP
-) -> str:
-    """Render *sessions* as ``<id> (<ticket or name>), ...`` with a ``(+K more)``.
-
-    At most *cap* are named. Empty input renders as ``""`` so each caller
-    picks its own empty text.
-    """
-    shown = ", ".join(
-        f"{s.id} ({ticket_id_for_session(s.name) or s.name})" for s in sessions[:cap]
-    )
-    hidden = len(sessions) - cap
-    more = f" (+{hidden} more)" if hidden > 0 else ""
-    return f"{shown}{more}"
 
 
 def _first_pinning_row(
