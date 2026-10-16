@@ -709,7 +709,7 @@ def _park_branch_staleness_gate(task: TicketTask) -> None:
     sentinel's five clean-review fields -- so without a divergent
     ``task.disposition`` for those two to exclude on, a staleness park would be
     released by either one and ship the stale tree anyway. See
-    ``dev_queue.approval._not_at_approval_gate`` and
+    ``dev_queue.gates._not_at_approval_gate`` and
     ``reconcile.gate_recipes._detect_auto_approve_review``.
 
     ``breadcrumbs`` is hardcoded ``""``, following the same #1729 convention
@@ -795,7 +795,7 @@ def _park_review_staleness_gate(task: TicketTask) -> None:
     sentinel's five clean-review fields, every one of which reads clean because
     they describe the tree the reviewers *did* see. Without a disposition for
     those two to exclude on, either would release the row and ship a tree
-    nobody reviewed. See ``dev_queue.approval._not_at_approval_gate`` and
+    nobody reviewed. See ``dev_queue.gates._not_at_approval_gate`` and
     ``reconcile.gate_recipes._detect_auto_approve_review``.
 
     ``breadcrumbs`` is hardcoded ``""``, following the same #1729 convention

@@ -19,10 +19,16 @@ module is now a package of focused submodules:
   ``.cw/plan.md`` on the approve gate's plan->impl advance.
 * ``requeue`` — re-run a stage, regress, or clear a salvage park.
 * ``drain`` — batch-resume every Rule-5 availability park (RFC 0011 A4).
+* ``gates`` — the leaf approval-gate predicate, ``DRAIN_DISPOSITIONS`` and
+  the single ``APPROVAL_GATE_REASON`` definition (#2692), shared by
+  ``approval``, ``drain`` and ``next_commands`` without an import cycle.
+* ``refusal`` — loads a refused row's bound session for the
+  ``next_commands`` refusal hint (#2692).
 * ``next_commands`` — the pure state -> legal-next-command table behind
-  ``cw dev-queue show`` (#2691). Deliberately NOT re-exported here: a
-  function named like its submodule would rebind ``cw.dev_queue.next_commands``
-  from the module to the function. Import it from the submodule.
+  ``cw dev-queue show`` (#2691) and every refusal's hint (#2692).
+  Deliberately NOT re-exported here: a function named like its submodule
+  would rebind ``cw.dev_queue.next_commands`` from the module to the
+  function. Import it from the submodule.
 
 This ``__init__`` re-exports the full historical public + private surface so
 every ``from cw.dev_queue import X`` import site and downstream call path keeps
@@ -63,10 +69,10 @@ from cw.dev_queue.crud import (
     select_prunable_tickets,
 )
 from cw.dev_queue.drain import (
-    DRAIN_DISPOSITIONS,
     drain_held_tickets,
     select_held_tickets,
 )
+from cw.dev_queue.gates import APPROVAL_GATE_REASON, DRAIN_DISPOSITIONS
 from cw.dev_queue.lifecycle import (
     _PLAN_SOUNDNESS_MARKER,
     _PLAN_SPEC_MARKER,
@@ -124,6 +130,7 @@ from cw.dev_queue.storage import (
 from cw.exceptions import LaneNotFoundError
 
 __all__ = [
+    "APPROVAL_GATE_REASON",
     "AWAITING_OPERATOR_DISPOSITION",
     "BODY_DRIFT_WARNING_KEY",
     "BRANCH_STALENESS_GATE_DISPOSITION",

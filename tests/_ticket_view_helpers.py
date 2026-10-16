@@ -24,6 +24,7 @@ from cw.dev_queue import (
     AWAITING_OPERATOR_DISPOSITION,
     BRANCH_STALENESS_GATE_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
+    REVIEW_HEALTH_GATE_DISPOSITION,
     REVIEW_STALENESS_GATE_DISPOSITION,
     save_dev_queue,
 )
@@ -217,14 +218,50 @@ class Case:
         )
 
 
+def _must_fix(**overrides: object) -> TicketTask:
+    """A REVIEW-stage codex MUST_FIX park with *overrides* applied."""
+    return make_blocked(
+        stage=Stage.REVIEW, blocked_reason=CODEX_MUST_FIX_FINDINGS, **overrides
+    )
+
+
 _OVERRIDE_CMD = cmd("approve", '--override-must-fix --reason "<why>"')
 _SHIP_CMD = cmd("requeue", "--stage finalize")
 
 CASES: dict[str, Case] = {
-    "rule1_signoff": Case(
+    "rule0_signoff": Case(
         make_task(status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF, stage=Stage.REVIEW),
         with_session=False,
-        expected=[cmd("approve"), cmd("requeue")],
+        expected=[cmd("approve")],
+    ),
+    "rule0_finalize_gate_held": Case(
+        make_blocked(stage=Stage.REVIEW, disposition=FINALIZE_GATE_HELD_DISPOSITION),
+        expected=[cmd("approve")],
+    ),
+    "rule0_finalize_held_no_session": Case(
+        make_blocked(stage=Stage.REVIEW, disposition=FINALIZE_GATE_HELD_DISPOSITION),
+        with_session=False,
+        expected=[cmd("approve")],
+    ),
+    "rule0_scope_hint_large_approval_gate": Case(
+        make_blocked(
+            stage=Stage.REVIEW, scope_hint="large", disposition="approval_gate"
+        ),
+        expected=[cmd("approve")],
+    ),
+    "rule0_scope_hint_large_plan_pending": Case(
+        make_blocked(
+            stage=Stage.PLAN, scope_hint="large", disposition="plan_pending_approval"
+        ),
+        session_last_result=PLAN_PENDING,
+        expected=[cmd("approve")],
+    ),
+    "rule0_scope_hint_large_no_session": Case(
+        make_blocked(
+            stage=Stage.REVIEW, scope_hint="large", disposition="approval_gate"
+        ),
+        with_session=False,
+        expected=[cmd("approve")],
     ),
     "rule2_pending": Case(
         make_task(status=QueueItemStatus.PENDING),
@@ -265,6 +302,31 @@ CASES: dict[str, Case] = {
         with_session=False,
         expected=[_OVERRIDE_CMD, _SHIP_CMD],
     ),
+    "rule6a_scope_hint_large_ship_dropped": Case(
+        _must_fix(must_fix_override=make_override(), scope_hint="large"),
+        with_session=False,
+        expected=[_OVERRIDE_CMD],
+    ),
+    "rule6_scope_hint_large_ship_dropped": Case(
+        _must_fix(scope_hint="large"),
+        with_session=False,
+        expected=[_OVERRIDE_CMD],
+    ),
+    "rule6_hold_finalize_ship_dropped": Case(
+        _must_fix(hold_finalize="manual"),
+        with_session=False,
+        expected=[_OVERRIDE_CMD],
+    ),
+    "rule6a_signoff_operator_ship_dropped": Case(
+        _must_fix(must_fix_override=make_override(), signoff="operator"),
+        with_session=False,
+        expected=[_OVERRIDE_CMD],
+    ),
+    "rule6_scope_hint_small_keeps_ship": Case(
+        _must_fix(scope_hint="small"),
+        with_session=False,
+        expected=[_OVERRIDE_CMD, _SHIP_CMD],
+    ),
     "rule7_salvage_parked": Case(
         make_blocked(stage=Stage.IMPL),
         reap_reason=ReapReason.SALVAGE_PARKED,
@@ -272,6 +334,15 @@ CASES: dict[str, Case] = {
     ),
     "rule8_awaiting_operator": Case(
         make_blocked(stage=Stage.IMPL, disposition=AWAITING_OPERATOR_DISPOSITION),
+        with_session=False,
+        expected=[cmd("requeue"), f"cw dev-queue drain --held -c {ACME}"],
+    ),
+    "rule8_scope_hint_large_review_health_park": Case(
+        make_blocked(
+            stage=Stage.REVIEW,
+            scope_hint="large",
+            disposition=REVIEW_HEALTH_GATE_DISPOSITION,
+        ),
         with_session=False,
         expected=[cmd("requeue"), f"cw dev-queue drain --held -c {ACME}"],
     ),
@@ -294,8 +365,11 @@ CASES: dict[str, Case] = {
         make_blocked(stage=Stage.PLAN, disposition="approval_gate"),
         expected=[cmd("approve"), cmd("requeue", "--stage plan")],
     ),
-    "rule9_finalize_gate_held": Case(
-        make_blocked(stage=Stage.REVIEW, disposition=FINALIZE_GATE_HELD_DISPOSITION),
+    "rule9_scope_hint_small_approval_gate": Case(
+        # Large-by-size (no scope_hint: large) is not a human-kept gate.
+        make_blocked(
+            stage=Stage.REVIEW, scope_hint="small", disposition="approval_gate"
+        ),
         expected=[cmd("approve"), cmd("requeue", "--stage review")],
     ),
     "rule9_harden_gate_has_no_stage_flag": Case(

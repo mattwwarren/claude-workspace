@@ -12,9 +12,12 @@ Layering: imports ``crud`` (``_find_ticket`` / ``_APPROVABLE_STATUSES``) and
 ``dev_queue ↔ dispatch`` cycle break — ``_should_gate_for_signoff``,
 ``_should_force_hold_finalize``, and (#1617) ``_resolve_scope_tier`` /
 ``_extract_scope_tier`` — stays a function-level deferred import inside
-``_approve_ticket_locked``. (#1640) ``_APPROVAL_GATE_REASON`` and
-``SCOPE_GATED_APPROVAL_STATUSES`` are deferred imports inside
-``_not_at_approval_gate`` instead, the sole site that now consumes them.
+``_approve_ticket_locked``. ``_not_at_approval_gate`` lives in the leaf
+``gates`` module (#2692), which also holds the single definition of the
+``"approval_gate"`` string, so no deferred ``cw.dispatch`` import is needed
+for it. Refusals name the row's legal next command through ``next_commands``
+(``refusal_suffix``) and ``refusal`` (``refusal_hint``), imported at module
+level: neither imports ``approval`` back.
 """
 
 from __future__ import annotations
@@ -29,10 +32,8 @@ from cw.atomic import atomic_write_text
 from cw.auto_dev_result import PLAN_SCOPE_DRIFT_BLOCKER_REASON
 from cw.config import dev_queue_file, get_client
 from cw.dev_queue.crud import _APPROVABLE_STATUSES, _find_ticket
+from cw.dev_queue.gates import _not_at_approval_gate
 from cw.dev_queue.lifecycle import (
-    BRANCH_STALENESS_GATE_DISPOSITION,
-    FINALIZE_GATE_HELD_DISPOSITION,
-    REVIEW_STALENESS_GATE_DISPOSITION,
     _advance_task_pointer,
     _clear_signoff_gate,
     _plan_is_reviewed,
@@ -519,61 +520,6 @@ def _record_body_drift(
         )
         raise ApproveGateError(msg) from exc
     return persisted_body_sha, live_body_sha
-
-
-def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
-    """True iff neither release condition for the approval gate is met.
-
-    Extracted from ``_approve_ticket_locked`` to keep that function under the
-    PLR0915 statement ceiling (#1640), following the same extraction pattern
-    as ``_record_approve_scope_routing_decision`` above. Two independent
-    conditions can satisfy the gate: the session's ``last_result`` status is
-    one of ``SCOPE_GATED_APPROVAL_STATUSES`` (the ``plan_pending_approval`` /
-    ``review_pending_approval`` release path), or the task's ``disposition``
-    records a park this entry point is authorised to release --
-    ``_APPROVAL_GATE_REASON`` (the ``scope_hint`` escalation gate, GitHub
-    #1640) or ``FINALIZE_GATE_HELD_DISPOSITION`` (the RFC 0011 A3 force hold,
-    GitHub #2410 -- a plain ``stage_complete`` completion never satisfies the
-    status condition, so without this the operator-initiated bypass inside
-    ``_approve_ticket_locked`` is never reached). ``approve`` proceeds if
-    either condition holds -- unless the #1823 branch-staleness override below
-    fires first, which vetoes both.
-    """
-    from cw.auto_dev_result import SCOPE_GATED_APPROVAL_STATUSES
-    from cw.dispatch import _APPROVAL_GATE_REASON
-
-    # #1823: ahead of both conditions below, and returning True unconditionally
-    # rather than joining the `and`. A branch-staleness park leaves the
-    # *sentinel* untouched -- session.last_result.status is still
-    # "review_pending_approval" -- and only diverges task.disposition. So
-    # not_at_status_gate is False and not_at_disposition_gate is True, the
-    # `and` yields False, and the row would read as "at the approval gate":
-    # `approve` would release a ticket whose reviewed tree no longer matches
-    # origin/<default_branch>. The gate must fail closed until the branch is
-    # rebased; recovery is `cw dev-queue requeue`/`drain`, not `approve`.
-    if task.disposition == BRANCH_STALENESS_GATE_DISPOSITION:
-        return True
-
-    # #2123: chained immediately after #1823's override, on identical
-    # reasoning. A review-staleness park likewise leaves the sentinel reading
-    # "review_pending_approval" and diverges only task.disposition, so without
-    # this the row reads as "at the approval gate" and `approve` would release
-    # a tree that no reviewer ran against. That is the exact incident: a
-    # review-stage park released via `requeue` can return to this status with
-    # stale artifacts. Recovery is `cw dev-queue requeue`/`drain` (which
-    # re-runs review), not `approve`.
-    if task.disposition == REVIEW_STALENESS_GATE_DISPOSITION:
-        return True
-
-    not_at_status_gate = (
-        session.last_result is None
-        or session.last_result.get("status") not in SCOPE_GATED_APPROVAL_STATUSES
-    )
-    not_at_disposition_gate = task.disposition not in (
-        _APPROVAL_GATE_REASON,
-        FINALIZE_GATE_HELD_DISPOSITION,
-    )
-    return not_at_status_gate and not_at_disposition_gate
 
 
 def _raise_stage_not_in_pipeline(
