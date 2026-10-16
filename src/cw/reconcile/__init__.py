@@ -74,6 +74,11 @@ re-exports. Submodules:
   ``PostLockJob``, ``defer_surface_stop``, ``run_post_lock_jobs``) that
   carries the act phases' daemon stops and the recipes' gh calls out of
   ``sessions_lock`` (#1232).
+- ``session_close`` — the operator close body ``cw spawn close`` shares with
+  reconcile, its flip-only variant for ``cw dev-queue cancel``, and the
+  queued-close store that ``_reconcile_locked`` applies first when an
+  operator close met a held sessions lock (#2694; explicit operator authority,
+  ADR-0006 invariant 2).
 - ``core`` — ``reconcile`` / ``_reconcile_locked`` orchestration.
 """
 

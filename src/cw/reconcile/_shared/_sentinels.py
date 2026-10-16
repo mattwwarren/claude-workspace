@@ -348,8 +348,8 @@ def holds_staged_emit_result(session: Session) -> bool:
     re-derived four times across three files (``cw.cli.stop_hook``'s
     ``_peek_staged_emit_result`` and ``_sentinel_unroutable``,
     ``cw.reconcile.idle._detect``'s ``_holds_staged_emit_result``, and
-    ``cw.cli.spawn``'s ``_route_staged_emit_result``): this predicate is the
-    load-bearing gate for the exact defect class #2458 exists to fix, so a
+    ``cw.reconcile.session_close.route_staged_emit_result``): this predicate
+    is the load-bearing gate for the exact defect class #2458 exists to fix, so a
     future change to what counts as "staged and routable" now has one site to
     update instead of four. Each caller ANDs its own extra context-specific
     condition (DAEMON origin, no route refusal yet, etc.) on top of this base

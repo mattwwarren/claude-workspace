@@ -12,11 +12,11 @@ on every tick.
 completion paths both end in.
 
 It routes through ``_apply_sentinel_to_task`` like ``cw spawn close``
-(``cw.cli.spawn._route_staged_emit_result``, #2458), but is not a copy of it:
-this path also completes on an already-consumed result and on a blocked result
-that landed the row FAILED, because a dead worker will never produce another
-leg, and it pages a permanent stage mismatch. Unifying the two is tracked in
-#2704.
+(``cw.reconcile.session_close.route_staged_emit_result``, #2458), but is not
+a copy of it: this path also completes on an already-consumed result and on a
+blocked result that landed the row FAILED, because a dead worker will never
+produce another leg, and it pages a permanent stage mismatch. Unifying the two
+is tracked in #2704.
 
 Write ordering: the queue row is persisted inside ``_apply_sentinel_to_task``,
 while the session's COMPLETED stamp only reaches disk with the caller's single
