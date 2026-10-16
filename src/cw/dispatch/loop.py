@@ -287,6 +287,20 @@ def apply_pending_completions(events: list[OrchestratorEvent]) -> int:
     return completed
 
 
+def apply_pending_completion(event: OrchestratorEvent) -> int:
+    """Route one pending completion without moving the shared cursor.
+
+    The CLI row-lag settle uses this when the requested event is behind other
+    tenants' events in the dispatch inbox.  The normal consumer still drains
+    the cursor in order later; this targeted path must not consume or route
+    the unrelated prefix merely because one operator asked about this row.
+    Caller must hold ``dev_queue_lock``.
+    """
+    store = load_dev_queue()
+    clients = load_effective_clients()
+    return _apply_events_to_store(store, [event], clients=clients)
+
+
 TICK_STALE_SECONDS = 90  # 3x default tick_interval_seconds=30
 
 

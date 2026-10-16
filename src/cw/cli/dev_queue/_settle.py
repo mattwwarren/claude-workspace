@@ -13,8 +13,10 @@ Lock rules (ADR-0019): settle holds no lock itself; the one lock is the
 STATE-rank ``dev_queue_lock(bounded=True)`` in :func:`_consume_pending_bounded`,
 preceded only by a lock-free event read, never nested under
 ``sessions_lock``, and its :class:`~cw.exceptions.LockTimeoutError` is caught
-so the verb proceeds. Settlement consumes the pending completion prefix through
-this row's event, so unrelated earlier events are routed in cursor order too.
+so the verb proceeds. Settlement routes only this row's pending completion. If
+unrelated earlier events are present in the shared prefix, it reports that
+prefix, leaves it untouched, and leaves the dispatch cursor unchanged for the
+normal consumer.
 
 Also holds :func:`live_session_notes`, the read-only diagnostic the
 idempotent PENDING ``requeue`` no-op prints instead of the live-session guard
@@ -32,7 +34,7 @@ from cw.auto_dev_result import INTERMEDIATE_ADVANCE_STATUSES
 from cw.config import load_state
 from cw.dev_queue import _find_ticket, dev_queue_lock, load_dev_queue
 from cw.dev_queue.next_commands import dev_queue_command
-from cw.dispatch.loop import apply_pending_completions, read_pending_completions
+from cw.dispatch.loop import apply_pending_completion, read_pending_completions
 from cw.exceptions import CwError, LockTimeoutError
 from cw.models import QueueItemStatus
 from cw.reconcile._shared import (
@@ -108,10 +110,28 @@ def _consume_pending_bounded(session_id: str) -> bool:
     )
     if target_index is None:
         return False
+    if target_index:
+        prefix = ", ".join(
+            (
+                "event {event_id} ticket={ticket!r} client={client!r} "
+                "session={session!r}"
+            ).format(
+                event_id=event.id,
+                ticket=event.payload.get("ticket_id", "?"),
+                client=event.payload.get("client", "?"),
+                session=event.payload.get("session_id", "?"),
+            )
+            for event in events[:target_index]
+        )
+        _note(
+            f"pending dispatch prefix before session {session_id} was left"
+            f" untouched ({target_index} event(s)): {prefix}; routing only the"
+            " requested completion and leaving the dispatch cursor unchanged"
+        )
     with dev_queue_lock(bounded=True):
-        # The dispatch cursor is ordered. Apply the complete prefix through
-        # this row's event so earlier unrelated events are not skipped.
-        apply_pending_completions(events[: target_index + 1])
+        # Do not consume the shared cursor: an operator action for one row
+        # must not route or acknowledge unrelated tenants' earlier events.
+        apply_pending_completion(events[target_index])
     return True
 
 

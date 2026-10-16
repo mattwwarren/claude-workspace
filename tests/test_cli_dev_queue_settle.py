@@ -284,10 +284,10 @@ class TestSettleLaggingRow:
 
 
 class TestRealSeam:
-    def test_routes_pending_prefix_through_requested_completion(
+    def test_routes_requested_completion_without_consuming_pending_prefix(
         self, tmp_path: Path
     ) -> None:
-        """No patching: settle routes earlier unrelated events in order."""
+        """No patching: settle does not consume unrelated earlier events."""
         mine = make_task(
             status=QueueItemStatus.RUNNING, stage=Stage.REVIEW, session_id=_SID
         )
@@ -320,10 +320,9 @@ class TestRealSeam:
         statuses = {t.ticket_id: t.status for t in load_dev_queue().tasks}
         assert statuses == {
             "ACM-1": QueueItemStatus.BLOCKED_ON_USER,
-            "ACM-2": QueueItemStatus.BLOCKED_ON_USER,
+            "ACM-2": QueueItemStatus.RUNNING,
         }
-        events = read_events(event_types=[OrchestratorEventType.SESSION_COMPLETED])
-        assert load_cursor("dispatch") == events[1].id
+        assert load_cursor("dispatch") is None
 
     def test_no_pending_event_for_this_session_takes_no_lock(
         self, monkeypatch: pytest.MonkeyPatch
