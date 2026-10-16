@@ -15,6 +15,8 @@ module is now a package of focused submodules:
   prune) and the ticket-resolution helpers (resolve/list/find).
 * ``approval`` — the plan/review approval + operator-signoff-clearing gates.
 * ``must_fix_override`` — the operator's override of a codex MUST_FIX park.
+* ``operator_resolutions`` — the operator's answers to a plan park, recorded
+  on the row by ``cw dev-queue resolve`` (#2702).
 * ``review_records`` — operator review decisions recorded on the row
   (``cw review settle``'s disposition ledger, #2701).
 * ``plan_promotion`` — promote an approved ``.cw/plan-draft.md`` to
@@ -111,6 +113,7 @@ from cw.dev_queue.lifecycle import (
 )
 from cw.dev_queue.migrate import migrate_dev_queue
 from cw.dev_queue.must_fix_override import approve_must_fix_override_ticket
+from cw.dev_queue.operator_resolutions import record_operator_resolution
 from cw.dev_queue.plan_promotion import promote_plan_draft
 from cw.dev_queue.requeue import (
     _apply_requeue_stage,
@@ -206,6 +209,7 @@ __all__ = [
     "promote_plan_draft",
     "prune_tickets",
     "record_finding_dispositions",
+    "record_operator_resolution",
     "register_watched_pr",
     "remove_ticket",
     "requeue_ticket",

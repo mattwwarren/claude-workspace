@@ -2124,6 +2124,10 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/cli/dev_queue/approve.py", "_approve_scope_drift"): 1,
     ("cw/cli/dev_queue/approve.py", "_approve_must_fix_override"): 1,
     ("cw/cli/dev_queue/approve.py", "dev_queue_approve"): 1,
+    # `cw dev-queue resolve` (#2702): only the worker guard and the row-lag
+    # settle precede the lock, so a timeout records nothing; the composed
+    # requeue then takes its own bounded lock in dev_queue_requeue.
+    ("cw/cli/dev_queue/resolve.py", "dev_queue_resolve"): 1,
     # row-lag settle before approve/requeue (#2692): read-only precheck, no
     # side effect before the lock; LockTimeoutError caught, verb proceeds
     ("cw/cli/dev_queue/_settle.py", "_consume_pending_bounded"): 1,
@@ -2180,6 +2184,7 @@ _BOUNDED_FORWARDERS_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/dev_queue/approval.py", "revoke_plan_approval"): 1,
     ("cw/dev_queue/approval.py", "approve_scope_drift_ticket"): 1,
     ("cw/dev_queue/must_fix_override.py", "approve_must_fix_override_ticket"): 1,
+    ("cw/dev_queue/operator_resolutions.py", "record_operator_resolution"): 1,
     ("cw/dev_queue/requeue.py", "requeue_ticket"): 1,
     ("cw/dev_queue/review_records.py", "record_finding_dispositions"): 1,
     # cw/_flock.py has NO entry by design: acquire_flock and

@@ -574,6 +574,16 @@ def classify_requeue_live_session_error(
     return _REASON_SKIPPED_LIVE_SESSION, str(exc)
 
 
+def pipeline_stages(task: TicketTask, client_cfg: ClientConfig) -> list[Stage]:
+    """*task*'s resolved pipeline stages, for a caller outside this module (#2702).
+
+    Deferred for the same dev_queue -> executor cycle as ``requeue_ticket``.
+    """
+    from cw.executor import resolve_pipeline_stages
+
+    return resolve_pipeline_stages(task, client_cfg)
+
+
 def precheck_requeue(
     ticket_id: str,
     client_name: str,

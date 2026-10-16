@@ -134,7 +134,7 @@ _FIND_BY_NAME_OR_ID_ALLOWLIST: dict[tuple[str, str], _Classification] = {
         "user-name-reachable:handle_errors",
         ((_CODEX_CLI, "codex_run"),),
     ),
-    # --- id-only (12) ---
+    # --- id-only (13) ---
     # prior_session_id is read back from cw-context.json, which cw writes.
     ("cw/spawn.py", "_write_hook_context"): ("id-only", ()),
     # parent_session.id, already resolved by start_session's own lookup.
@@ -152,6 +152,8 @@ _FIND_BY_NAME_OR_ID_ALLOWLIST: dict[tuple[str, str], _Classification] = {
         "NativeDaemonResumeTriggerAdapter._commit_resume.<locals>._update",
     ): ("id-only", ()),
     ("cw/dev_queue/approval.py", "_approve_ticket_locked"): ("id-only", ()),
+    # task.session_id, for `cw dev-queue resolve --approve` (#2702).
+    ("cw/dev_queue/operator_resolutions.py", "_require_session"): ("id-only", ()),
     # task.fix_dispatch_session_id.
     ("cw/reconcile/fix_dispatch.py", "_act_on_fix_dispatch_completions"): (
         "id-only",

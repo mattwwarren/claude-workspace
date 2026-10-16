@@ -34,6 +34,7 @@ from cw.dev_queue import (
     load_dev_queue,
     move_ticket,
     prune_tickets,
+    record_operator_resolution,
     register_watched_pr,
     remove_ticket,
     requeue_ticket,
@@ -44,6 +45,7 @@ from cw.dev_queue import storage as dev_queue_storage
 from cw.dev_queue.crud import register_or_adopt_watched_pr
 from cw.exceptions import CwError, LockTimeoutError
 from cw.models import CwState, DevQueueStore, QueueItemStatus
+from tests._cli_review_helpers import _enter_operator_machine
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import (
     _FakeClock,
@@ -99,6 +101,7 @@ _LOCK_MODULE = {
     "crud": "cw.dev_queue.crud._lock",
     "approval": "cw.dev_queue.approval._lock",
     "must_fix_override": "cw.dev_queue.must_fix_override._lock",
+    "operator_resolutions": "cw.dev_queue.operator_resolutions._lock",
     "requeue": "cw.dev_queue.requeue._lock",
 }
 
@@ -141,6 +144,12 @@ def _forwarding_cases(
                 "T-1", _CLIENT, "operator reason", **kw
             ),
         ),
+        "record_operator_resolution": (
+            "operator_resolutions",
+            lambda **kw: record_operator_resolution(
+                "T-1", _CLIENT, "operator decisions", **kw
+            ),
+        ),
         "requeue_ticket": (
             "requeue",
             lambda **kw: requeue_ticket("T-1", _CLIENT, native_daemon=daemon, **kw),
@@ -159,6 +168,7 @@ _FORWARDING_NAMES = [
     "revoke_plan_approval",
     "approve_scope_drift_ticket",
     "approve_must_fix_override_ticket",
+    "record_operator_resolution",
     "requeue_ticket",
 ]
 
@@ -240,6 +250,8 @@ _SINGLE_COMMANDS: dict[str, list[str]] = {
         "operator reason",
     ],
     "revoke-plan-approval": ["dev-queue", "revoke-plan-approval", "T-1", "-c", _CLIENT],
+    # #2702: `{decisions}` is replaced by a real decisions file per test.
+    "resolve": ["dev-queue", "resolve", "T-1", "-c", _CLIENT, "--file", "{decisions}"],
 }
 
 
@@ -250,6 +262,7 @@ class TestSingleCommandContention:
         self,
         monkeypatch: pytest.MonkeyPatch,
         mock_native_daemon: FakeNativeDaemonClient,
+        tmp_path: Path,
         command: str,
     ) -> None:
         monkeypatch.setattr(
@@ -258,6 +271,15 @@ class TestSingleCommandContention:
         monkeypatch.setattr(
             "cw.cli.dev_queue.crud.get_native_daemon_client", lambda: mock_native_daemon
         )
+        # `resolve` refuses inside a headless worker, and this suite may run
+        # in one: run every command from an interactive session.
+        _enter_operator_machine(monkeypatch, tmp_path)
+        decisions = tmp_path / "decisions.md"
+        decisions.write_text("1. operator decision\n", encoding="utf-8")
+        argv = [
+            str(decisions) if arg == "{decisions}" else arg
+            for arg in _SINGLE_COMMANDS[command]
+        ]
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -273,7 +295,7 @@ class TestSingleCommandContention:
         lock_path = cw.config.dev_queue_lock()
 
         with _hold_flock(lock_path):
-            result = CliRunner().invoke(main, _SINGLE_COMMANDS[command])
+            result = CliRunner().invoke(main, argv)
 
         assert result.exit_code != 0
         assert _dev_queue_timeout_message(lock_path) in result.output
