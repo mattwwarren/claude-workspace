@@ -442,3 +442,28 @@ class TestSettleThenApproveStop:
         assert calls == [_SID]
         assert "just routed" not in result.stderr
         assert "Cannot" in result.stderr
+
+
+class TestLiveSessionNotes:
+    def test_roster_read_error_yields_no_note(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        fake = FakeNativeDaemonClient()
+
+        def _fail() -> set[str] | None:
+            msg = "roster gone"
+            raise OSError(msg)
+
+        monkeypatch.setattr(fake, "list_live_session_short_ids_fail_closed", _fail)
+        assert settle_mod.live_session_notes(ACME_TICKET, ACME, fake) == []
+
+    def test_no_live_session_yields_no_note(self) -> None:
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        seed_queue([make_task(status=QueueItemStatus.PENDING)])
+        assert (
+            settle_mod.live_session_notes(ACME_TICKET, ACME, FakeNativeDaemonClient())
+            == []
+        )
