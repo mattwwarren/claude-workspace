@@ -914,9 +914,8 @@ class SessionsLockTimeoutError(LockTimeoutError):
     Before the bound existed the blocked caller hung indefinitely, which also
     blocked the documented recovery commands (``cw list``, ``cw spawn close``).
     The message is operator-facing: it names the lock path and the wait, says
-    how to find the holder (the holder is recorded when a cw process holds it,
-    #2694; otherwise use ``lsof``), and what to do if the holder is wedged or
-    merely slow. Carries ``lock_path`` and
+    how to find the holder (``lsof``; the lock file records no PID), and what
+    to do if the holder is wedged or merely slow. Carries ``lock_path`` and
     ``waited_s`` for callers that log structured fields; ``lock_name`` is
     always ``"sessions"``.
     """

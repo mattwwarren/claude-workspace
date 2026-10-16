@@ -726,26 +726,6 @@ exited cleanly), skip straight to `cw dev-queue remove`; use `cw done
 <session-name>` only for a session that never had a live daemon surface to
 close.
 
-**When the sessions lock is busy (#2694).** `cw spawn close` waits at most
-5 s for the sessions lock (`min(CW_SESSIONS_LOCK_TIMEOUT_S, 5)`; an unset or
-invalid value means 5 s). `cw list` / `cw status` also wait 5 s, unless
-`CW_SESSIONS_LOCK_TIMEOUT_S` is set, which they honour as-is; every other
-bounded caller keeps the 60 s default. A timeout exits 1 and names the
-recorded holder (pid, command, held-for); confirm it with `lsof`. Nothing is
-queued: once the holder is gone (or, if it is a wedged `cw dev-queue serve`,
-after restarting it), re-run the command.
-
-- `cw dev-queue cancel` now also closes the session it cancels. For each
-  DAEMON session the row was bound to, it stops the worker and marks the
-  session COMPLETED(USER). The step is flip-only (the row was already
-  cancelled, so nothing is routed or re-cancelled); a terminal session is
-  stopped but not flipped.
-- Cancel exits 1 only when the sessions lock stays busy for 5 s. On a busy
-  lock the worker is already stopped and only the record flip is pending:
-  run `cw spawn close <session-id>` (or `cw doctor`) once the lock frees. If
-  cancel was killed after the row was cancelled but before the session flip,
-  a repeat cancel is a no-op; run `cw spawn close <session-id>` instead.
-
 If the task is already in a terminal queue status but wedged (e.g.,
 `RUNNING` with no live session), `cw doctor --reap` detects and repairs
 common wedge conditions:
@@ -1839,15 +1819,9 @@ A `session.needs_attention` with `paused_status=dispatch_loop_stale` (#1875)
 says: **this client has pending work, its last `dispatch.tick` is older than
 90s, and it is not sitting behind a live executor-blocked marker.** It recurs
 every `dispatch_stale_notify_interval_minutes` (default 15) until the
-condition clears. `breadcrumbs` carries `pending=<n> age_s=<n> skip=<reason>
-occupied=<n> running=<r>/<cap> orphan_sessions=<none | <id> (<ticket>), ...>`
-(#2694); the client is in the `client` field (`ticket_id` is null — this
-signal is client-scoped, not ticket-scoped). The `skip=`, `occupied=` and
-`running=` fields are the last tick's (`age_s` ago), so `skip=cap_full` or
-`skip=lane_cap_blocked` says the loop was ticking but full; the
-`orphan_sessions=` list is read now and names ceiling-counted sessions no
-occupied row owns. If state is unreadable, the breadcrumb degrades to the old
-`pending=<n> age_s=<n>` text and logs one WARNING.
+condition clears. `breadcrumbs` carries `pending=<n> age_s=<n>`; the client
+is in the `client` field (`ticket_id` is null — this signal is client-scoped,
+not ticket-scoped).
 
 Triage in this order — the page does *not* tell you which of these it is:
 
@@ -1909,10 +1883,6 @@ A hold is recorded when it was **held or waited for at least 0.25 s**.
 - *Completed holds only.* A hold still in progress, or a process killed
   mid-hold, leaves no record. For a lock that is held right now, find the
   holder with `lsof ~/.local/share/cw/.sessions.lock` (or `.dev_queue.lock`).
-  The sessions lock also records its cw holder (`pid`, command path,
-  acquired-at) while held, and a bounded sessions-lock timeout names it
-  (#2694); `lsof` stays the confirmation, since a record proves liveness, not
-  identity.
   A bounded acquisition that timed out was never held and leaves no record
   either.
 - *Counts are lower bounds.* Records are capped at 1 MiB per UTC day. Past
