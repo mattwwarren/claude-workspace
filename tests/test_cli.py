@@ -46,6 +46,7 @@ from cw.config import (
     load_state,
     orchestrator_config_file,
     save_state,
+    state_dir,
 )
 from cw.events import read_events
 from cw.exceptions import CwError, SprintApplyError
@@ -8833,7 +8834,6 @@ _LOCK_WAIT_COMMANDS: dict[str, list[str]] = {
     "spawn-close": ["spawn", "close", _LOCK_WAIT_SID],
     "dev-queue-cancel": ["dev-queue", "cancel", "WAIT-1", "-c", "test-client"],
 }
-_LOCK_WAIT_EXIT = {"list": 1, "status": 1, "spawn-close": 1, "dev-queue-cancel": 0}
 
 
 def _seed_lock_wait_fixtures(tmp_path: Path) -> None:
@@ -8870,6 +8870,11 @@ def _seed_lock_wait_fixtures(tmp_path: Path) -> None:
             ]
         )
     )
+
+
+# What the state dir holds after a failed operator command: the seeded state,
+# its lock and the dev queue -- no queued-close or intent file (#2694).
+_STATE_DIR_FILES = [".sessions.lock", "dev_queue.json", "sessions.json"]
 
 
 class TestOperatorCommandLockWait:
@@ -8922,12 +8927,14 @@ class TestOperatorCommandLockWait:
 
         result = CliRunner().invoke(main, _LOCK_WAIT_COMMANDS[command])
 
-        assert result.exit_code == _LOCK_WAIT_EXIT[command], result.output
+        # Every one fails non-zero on the held lock: nothing is queued (#2694).
+        assert result.exit_code == 1, result.output
         expected = read_wait if command in {"list", "status"} else close_wait
         assert clock.now == pytest.approx(expected)
+        assert sorted(p.name for p in state_dir().iterdir()) == _STATE_DIR_FILES
 
-    @pytest.mark.parametrize("command", ["list", "status"])
-    def test_list_and_status_name_the_recorded_holder(
+    @pytest.mark.parametrize("command", list(_LOCK_WAIT_COMMANDS))
+    def test_timeout_names_the_recorded_holder(
         self,
         held_sessions_lock_recorded: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -8943,9 +8950,10 @@ class TestOperatorCommandLockWait:
         _seed_lock_wait_fixtures(tmp_path)
         monkeypatch.setattr(_flock, "time", _FakeClock())
 
-        result = CliRunner().invoke(main, [command])
+        result = CliRunner().invoke(main, _LOCK_WAIT_COMMANDS[command])
 
         assert result.exit_code == 1
+        assert result.output.count("Timed out") == 1
         assert f"pid {os.getpid()}" in result.output
         assert str(held_sessions_lock_recorded) in result.output
         assert "Recorded holder" in result.output

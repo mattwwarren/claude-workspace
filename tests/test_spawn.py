@@ -19,6 +19,7 @@ from cw.codex_review import CODEX_REVIEW_UNPARSEABLE
 from cw.config import load_state, orchestrator_config_file, save_state
 from cw.dev_queue import load_dev_queue
 from cw.exceptions import CwError, SpawnUnregisteredError, WorkerLaunchedError
+from cw.history import EventType, HistoryEvent, load_history
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     MUST_FIX_OVERRIDE_KEY,
@@ -3188,6 +3189,171 @@ class TestSpawnCLI:
         assert post_launch_attention_payload(events)["session_id"] in result.output
         assert "00000001" in result.output
         assert mock_native_daemon.stop_calls == []
+
+
+def _operator_close_events(client: str = "test-client") -> list[HistoryEvent]:
+    """The ``session_completed`` history records operator closes left (#2694)."""
+    return [
+        e
+        for e in load_history(client, event_types=[EventType.SESSION_COMPLETED])
+        if e.detail == "operator_close"
+    ]
+
+
+class TestSpawnCloseLockWaitAndAudit:
+    """`cw spawn close`: 5 s lock wait, no queue, one audit event (#2694)."""
+
+    def test_inline_close_records_one_operator_close_event(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        sess = _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            surface_ref="ref-audit",
+            claude_session_id="csid-audit",
+        )
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.spawn.get_native_daemon_client", lambda: daemon)
+
+        result = CliRunner().invoke(main, ["spawn", "close", sess.id])
+
+        assert result.exit_code == 0, result.output
+        (event,) = _operator_close_events()
+        assert event.session_id == sess.id
+        assert event.session_name == sess.name
+        assert event.metadata == {
+            "actor": "operator",
+            "command": "cw spawn close",
+            "session_id": sess.id,
+            "ticket_id": "GEN-42",
+            "surface_ref": "ref-audit",
+            "claude_session_id": "csid-audit",
+            "started_at": sess.started_at.isoformat(),
+            "prior_status": "active",
+            "resulting_status": "completed",
+        }
+        assert daemon.stop_calls == ["ref-audit"]
+
+    def test_already_completed_close_records_no_event(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        sess = _seed_daemon_session(
+            tmp_path, tmp_config_dir, status=SessionStatus.COMPLETED
+        )
+        monkeypatch.setattr(
+            "cw.cli.spawn.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        result = CliRunner().invoke(main, ["spawn", "close", sess.id])
+
+        assert result.exit_code == 0, result.output
+        assert _operator_close_events() == []
+
+    def test_close_without_an_audit_command_records_nothing(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """The routed-orphan close calls the impl bare and audits itself."""
+        from cw.cli import _spawn_close_impl
+
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir)
+
+        _spawn_close_impl(
+            session_id=sess.id,
+            native_daemon=FakeNativeDaemonClient(),
+            surface_already_stopped=True,
+        )
+
+        assert _status_of(sess.id) is SessionStatus.COMPLETED
+        assert _operator_close_events() == []
+
+    def test_audit_write_failure_still_stops_and_exits_one(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir, surface_ref="ref-x")
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.spawn.get_native_daemon_client", lambda: daemon)
+
+        def _fail(*_args: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.cli.spawn.record_history_event", _fail)
+
+        result = CliRunner().invoke(main, ["spawn", "close", sess.id])
+
+        assert result.exit_code == 1
+        assert "was closed, but its audit record could not be written" in (
+            result.output
+        )
+        assert "disk full" in result.output
+        assert _status_of(sess.id) is SessionStatus.COMPLETED
+        assert daemon.stop_calls == ["ref-x"]
+
+    def test_held_lock_fails_after_five_seconds_naming_the_holder(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        held_sessions_lock_recorded: Path,
+    ) -> None:
+        import os
+
+        from cw import _flock
+        from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
+        from tests.conftest import _FakeClock
+
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.spawn.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "300")
+        clock = _FakeClock()
+        monkeypatch.setattr(_flock, "time", clock)
+        before = sorted(p.name for p in held_sessions_lock_recorded.parent.iterdir())
+
+        result = CliRunner().invoke(main, ["spawn", "close", sess.id])
+
+        assert result.exit_code == 1
+        assert clock.now == pytest.approx(5.0)
+        assert result.output.count("Timed out") == 1
+        assert f"Recorded holder: pid {os.getpid()}" in result.output
+        assert "retry" in result.output
+        assert _status_of(sess.id) is SessionStatus.ACTIVE
+        assert daemon.stop_calls == []
+        assert _operator_close_events() == []
+        after = sorted(p.name for p in held_sessions_lock_recorded.parent.iterdir())
+        assert after == before  # no queued-close entry, no intent file
+
+    def test_unknown_session_under_a_held_lock_reports_the_timeout(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        held_sessions_lock: Path,
+    ) -> None:
+        from cw import _flock
+        from tests.conftest import _FakeClock
+
+        monkeypatch.setattr(_flock, "time", _FakeClock())
+
+        result = CliRunner().invoke(main, ["spawn", "close", "nope0000"])
+
+        assert result.exit_code == 1
+        assert "Timed out" in result.output
+        assert str(held_sessions_lock) in result.output
+
+
+def _status_of(session_id: str) -> SessionStatus:
+    sess = load_state().find_by_name_or_id(session_id)
+    assert sess is not None
+    return sess.status
 
 
 class TestSpawnCloseRequeue:

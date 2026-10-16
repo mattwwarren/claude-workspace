@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast, get_args
 
 import click
 
+from cw._flock import operator_close_lock_wait_seconds
 from cw.auto_dev_result import Status
 from cw.cli._base import handle_errors, main
 from cw.config import (
@@ -29,6 +30,8 @@ from cw.dev_queue import (
 from cw.dispatch import _DISPATCH_CONSUMER, _apply_events_to_store
 from cw.events import advance_cursor, record_event
 from cw.exceptions import CwError, RequeueStateError
+from cw.history import EventType, HistoryEvent
+from cw.history import record_event as record_history_event
 from cw.models import (
     ClientConfig,
     CompletionReason,
@@ -51,6 +54,11 @@ if TYPE_CHECKING:
     from cw.models import Session
 
 logger = logging.getLogger(__name__)
+
+# ``detail`` of the one history record every operator session close leaves
+# (#2694): ``cw spawn close`` and the ``cw dev-queue cancel`` session step.
+OPERATOR_CLOSE_DETAIL = "operator_close"
+_SPAWN_CLOSE_COMMAND = "cw spawn close"
 
 
 def _spawn_create_impl(
@@ -110,11 +118,56 @@ def _route_staged_emit_result(sess: Session) -> bool:
     return outcome.routed or outcome.task_already_terminal
 
 
+def record_operator_close(
+    sess: Session, *, command: str, prior_status: SessionStatus
+) -> None:
+    """Record the one durable history event of an operator close (#2694).
+
+    ADR-0006 invariant 3: a ``session_completed`` record (``detail`` is
+    :data:`OPERATOR_CLOSE_DETAIL`) with the session's identity, the operator
+    *command* and *prior_status*, written right after the close is saved. A
+    write failure raises :class:`~cw.exceptions.CwError`; the close stands.
+    """
+    metadata = {
+        "actor": "operator",
+        "command": command,
+        "session_id": sess.id,
+        "ticket_id": ticket_id_for_session(sess.name) or "",
+        "surface_ref": sess.surface_ref or "",
+        "claude_session_id": sess.claude_session_id or "",
+        "started_at": sess.started_at.isoformat(),
+        "prior_status": prior_status.value,
+        "resulting_status": sess.status.value,
+    }
+    event = HistoryEvent(
+        event_type=EventType.SESSION_COMPLETED,
+        client=sess.client,
+        session_id=sess.id,
+        session_name=sess.name,
+        purpose=sess.purpose,
+        detail=OPERATOR_CLOSE_DETAIL,
+        metadata=metadata,
+    )
+    try:
+        record_history_event(sess.client, event)
+    except (OSError, ValueError) as exc:
+        logger.exception(
+            "operator_close_audit_failed: session_id=%s command=%s", sess.id, command
+        )
+        msg = (
+            f"Session {sess.id} was closed, but its audit record could not be"
+            f" written: {exc}"
+        )
+        raise CwError(msg) from exc
+
+
 def _spawn_close_impl(
     *,
     session_id: str,
     native_daemon: NativeDaemonClient | None = None,
     surface_already_stopped: bool = False,
+    lock_timeout_s: float | None = None,
+    audit_command: str | None = None,
 ) -> None:
     """Close a daemon-spawned session.
 
@@ -127,14 +180,22 @@ def _spawn_close_impl(
     worker and confirmed it left the roster (or proved there is none), so the
     post-lock stop is skipped -- no second stop, no client resolved. The
     cancel/route step and the COMPLETED stamp are unchanged.
+
+    *lock_timeout_s* (#2694) bounds the sessions-lock wait (``None``: the
+    env-or-60 s default); a held lock raises
+    :class:`~cw.exceptions.SessionsLockTimeoutError` naming the recorded
+    holder and nothing is closed. *audit_command* names the operator command
+    whose close is audited by :func:`record_operator_close` after the save;
+    ``None`` records nothing (the routed-orphan close audits itself).
     """
     surface_to_stop: str | None = None
+    closed: tuple[Session, SessionStatus] | None = None
     # Why not mutate_state: cancel_task_for_session / _route_staged_emit_result
     # take dev_queue_lock inside the sessions_lock window (criterion 2: no
     # dual-lock).
     # bounded=True (#2491): operator recovery command with no side effect
     # before the lock, so a held lock must fail fast, not hang the recovery.
-    with sessions_lock(bounded=True):
+    with sessions_lock(bounded=True, timeout_s=lock_timeout_s):
         state = load_state()
         sess = state.find_by_name_or_id(session_id)
         if sess is None:
@@ -174,6 +235,7 @@ def _spawn_close_impl(
             ):
                 cancel_task_for_session(sess.id)
 
+            closed = (sess, sess.status)
             sess.status = SessionStatus.COMPLETED
             sess.completed_at = datetime.now(UTC)
             sess.completed_reason = CompletionReason.USER
@@ -181,9 +243,16 @@ def _spawn_close_impl(
 
     # daemon.stop is best-effort and slow (up to 10s), so it runs after the lock
     # releases (#2547, mirrors signal_stop / done_session). A raise leaves the
-    # state already stamped; a repeat close retries just the stop (#2480).
-    if surface_to_stop is not None and not surface_already_stopped:
-        (native_daemon or get_native_daemon_client()).stop(surface_to_stop)
+    # state already stamped; a repeat close retries just the stop (#2480). The
+    # audit record is written first; a failed one still lets the stop run.
+    try:
+        if closed is not None and audit_command is not None:
+            record_operator_close(
+                closed[0], command=audit_command, prior_status=closed[1]
+            )
+    finally:
+        if surface_to_stop is not None and not surface_already_stopped:
+            (native_daemon or get_native_daemon_client()).stop(surface_to_stop)
 
 
 def _spawn_close_requeue_impl(
@@ -373,6 +442,10 @@ def spawn_close(session_id: str, confirmed_dead: bool, requeue: bool) -> None:
 
     Stops the session via the native daemon and marks it as COMPLETED.
 
+    Waits at most 5s for the sessions lock (less if CW_SESSIONS_LOCK_TIMEOUT_S
+    is lower); if another cw process still holds it, exits 1 naming the
+    recorded holder and closes nothing. Re-run it once the holder is gone.
+
     \b
     Example:
       cw spawn close abc12345
@@ -395,7 +468,11 @@ def spawn_close(session_id: str, confirmed_dead: bool, requeue: bool) -> None:
             client = sess.client
             closed_session_id = sess.id
 
-    _spawn_close_impl(session_id=session_id)
+    _spawn_close_impl(
+        session_id=session_id,
+        lock_timeout_s=operator_close_lock_wait_seconds(),
+        audit_command=_SPAWN_CLOSE_COMMAND,
+    )
     click.echo(f"Closed session: {session_id}")
 
     if requeue:
