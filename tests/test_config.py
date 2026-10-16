@@ -2560,6 +2560,13 @@ def _raise_runtime(*_args: object, **_kwargs: object) -> None:
     raise RuntimeError(msg)
 
 
+def _enter_and_exit_sessions_lock(ran: list[bool] | None = None) -> None:
+    """Run an (optionally marking) ``sessions_lock()`` body, for ``pytest.raises``."""
+    with sessions_lock():
+        if ran is not None:
+            ran.append(True)
+
+
 class TestSessionsLockHolderRecord:
     """``sessions_lock()`` records who holds it (#2694), best effort only."""
 
@@ -2610,25 +2617,26 @@ class TestSessionsLockHolderRecord:
         with sessions_lock(bounded=True, timeout_s=0):
             pass
 
-    def test_record_failure_never_leaks_the_lock(
+    def test_unexpected_record_failure_propagates_but_never_leaks_the_lock(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr("cw.config.record_lock_holder", _raise_runtime)
-        ran = False
+        """A bug in the bookkeeping is loud, and ``try``/``finally`` still unlocks."""
+        ran: list[bool] = []
 
-        with sessions_lock():
-            ran = True
+        with monkeypatch.context() as patched:
+            patched.setattr("cw.config.record_lock_holder", _raise_runtime)
+            with pytest.raises(RuntimeError, match="holder bookkeeping exploded"):
+                _enter_and_exit_sessions_lock(ran)
 
-        assert ran
+        assert ran == []
         with sessions_lock(bounded=True, timeout_s=0):
             pass
 
-    def test_clear_failure_still_unlocks_closes_and_notes_the_hold(
+    def test_unexpected_clear_failure_still_unlocks_closes_and_notes_the_hold(
         self,
         recording_lock_path: _RecordingLockPath,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr("cw.config.clear_lock_holder", _raise_runtime)
         notes: list[str] = []
         real_note = cw.config._lock_hold.note_hold
 
@@ -2638,8 +2646,10 @@ class TestSessionsLockHolderRecord:
 
         monkeypatch.setattr("cw.config._lock_hold.note_hold", _note)
 
-        with sessions_lock():
-            pass
+        with monkeypatch.context() as patched:
+            patched.setattr("cw.config.clear_lock_holder", _raise_runtime)
+            with pytest.raises(RuntimeError, match="holder bookkeeping exploded"):
+                _enter_and_exit_sessions_lock()
 
         assert [h.closed for h in recording_lock_path.handles] == [True]
         assert notes == ["sessions"]

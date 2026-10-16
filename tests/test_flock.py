@@ -920,12 +920,17 @@ class TestHolderRecord:
         assert holder is not None
         assert holder.pid == 1
 
-    def test_record_and_clear_swallow_oserror_with_a_debug_log(
-        self, caplog: pytest.LogCaptureFixture
+    @pytest.mark.parametrize(
+        "error",
+        [OSError(5, "disk on fire"), ValueError("I/O operation on closed file")],
+        ids=["oserror", "closed-fd-valueerror"],
+    )
+    def test_record_and_clear_swallow_io_errors_with_a_debug_log(
+        self, caplog: pytest.LogCaptureFixture, error: Exception
     ) -> None:
         class _BrokenFd:
             def seek(self, _offset: int) -> int:
-                raise OSError(5, "disk on fire")
+                raise error
 
         caplog.set_level(logging.DEBUG, logger="cw._flock")
         broken = cast("IO[str]", _BrokenFd())

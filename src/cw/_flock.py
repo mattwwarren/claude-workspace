@@ -217,9 +217,10 @@ def record_lock_holder(fd: IO[str], *, cmd: str) -> None:
     """Write this process's holder record into the held lock file *fd* (#2694).
 
     ``{"pid", "cmd", "acquired_at"}``, replacing any earlier content. Best
-    effort: an ``OSError`` is logged at DEBUG and swallowed, because holder
-    bookkeeping must never fail an acquisition. ``acquired_at`` comes from
-    ``datetime.now``, not this module's ``time`` (which tests replace).
+    effort: an I/O failure (``OSError``, or the ``ValueError`` a closed fd
+    raises) is logged at DEBUG and swallowed, because holder bookkeeping must
+    never fail an acquisition. ``acquired_at`` comes from ``datetime.now``,
+    not this module's ``time`` (which tests replace).
     """
     record = {
         "pid": os.getpid(),
@@ -231,7 +232,7 @@ def record_lock_holder(fd: IO[str], *, cmd: str) -> None:
         fd.truncate(0)
         fd.write(json.dumps(record))
         fd.flush()
-    except OSError:
+    except (OSError, ValueError):
         _log.debug("lock_holder_record_failed", exc_info=True)
 
 
@@ -241,7 +242,7 @@ def clear_lock_holder(fd: IO[str]) -> None:
         fd.seek(0)
         fd.truncate(0)
         fd.flush()
-    except OSError:
+    except (OSError, ValueError):
         _log.debug("lock_holder_clear_failed", exc_info=True)
 
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
-import logging
 import os
 import re
 import shlex
@@ -65,8 +64,6 @@ _SAFE_BRANCH_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$")
 
 _EMPTY_CLIENTS_DOC = "clients:\n"
 
-_log = logging.getLogger(__name__)
-
 
 def _lock_holder_command() -> str:
     """The holder's self-reported command for the sessions-lock record (#2694).
@@ -80,22 +77,6 @@ def _lock_holder_command() -> str:
     if ctx is not None:
         return ctx.command_path
     return Path(sys.argv[0] if sys.argv else "cw").name
-
-
-def _record_holder_best_effort(fd: Any) -> None:
-    """Record the holder; never raise (bookkeeping must not leak the lock)."""
-    try:
-        record_lock_holder(fd, cmd=_lock_holder_command())
-    except Exception:  # noqa: BLE001 - bookkeeping must never fail or leak the lock
-        _log.debug("sessions_lock_holder_record_failed", exc_info=True)
-
-
-def _clear_holder_best_effort(fd: Any) -> None:
-    """Clear the holder record; never raise, so ``LOCK_UN``/``close`` still run."""
-    try:
-        clear_lock_holder(fd)
-    except Exception:  # noqa: BLE001 - bookkeeping must never fail or leak the lock
-        _log.debug("sessions_lock_holder_clear_failed", exc_info=True)
 
 
 @contextlib.contextmanager
@@ -118,8 +99,10 @@ def _guarded_state_lock(
     *record_holder* (#2694, the sessions lock only) opens the file ``"a+"``
     instead of ``"w"`` -- ``"w"`` truncates on open, so a losing contender
     would erase the holder's record -- and writes/clears the holder record
-    (:func:`cw._flock.record_lock_holder`) inside the ``try``/``finally``,
-    best effort, so a bookkeeping failure can never skip ``LOCK_UN``.
+    (:func:`cw._flock.record_lock_holder`). Both calls swallow I/O failures
+    themselves; anything else they raise is a bug and propagates, but the
+    record sits inside the ``try`` and the clear inside its own
+    ``try``/``finally``, so neither can ever skip ``LOCK_UN``/``close``.
     """
     try:
         with lock_guard(lock_name, lock_path, rank):
@@ -133,17 +116,21 @@ def _guarded_state_lock(
             acquired = time.monotonic()
             try:
                 if record_holder:
-                    _record_holder_best_effort(fd)
+                    record_lock_holder(fd, cmd=_lock_holder_command())
                 yield
             finally:
                 released = time.monotonic()
-                if record_holder:
-                    _clear_holder_best_effort(fd)
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                fd.close()
-                _lock_hold.note_hold(
-                    lock_name, held_s=released - acquired, waited_s=acquired - requested
-                )
+                try:
+                    if record_holder:
+                        clear_lock_holder(fd)
+                finally:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    fd.close()
+                    _lock_hold.note_hold(
+                        lock_name,
+                        held_s=released - acquired,
+                        waited_s=acquired - requested,
+                    )
     finally:
         _lock_hold.flush_pending(state_dir, state_file)
 
