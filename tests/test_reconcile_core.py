@@ -3770,3 +3770,30 @@ class TestDirtyChecksPrePass:
         assert isinstance(push, MagicMock)
         push.assert_not_called()
         assert len(unavailable_records(caplog, "race-1")) == 1
+
+
+class TestReconcileLockTimeout:
+    """``reconcile(lock_timeout_s=...)`` bounds the sessions-lock wait (#2694)."""
+
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"), [({"lock_timeout_s": 0.3}, 0.3), ({}, None)]
+    )
+    def test_lock_timeout_is_forwarded_to_the_sessions_lock(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        kwargs: dict[str, float],
+        expected: float | None,
+    ) -> None:
+        seen: list[tuple[bool, float | None]] = []
+        real_lock = reconcile_core.sessions_lock
+
+        def _spy(*, bounded: bool = False, timeout_s: float | None = None) -> Any:
+            seen.append((bounded, timeout_s))
+            return real_lock(bounded=bounded, timeout_s=timeout_s)
+
+        monkeypatch.setattr("cw.reconcile.core.sessions_lock", _spy)
+
+        reconcile(**kwargs)
+
+        assert seen == [(True, expected)]
