@@ -124,6 +124,7 @@ def _revert_claimed_task_to_pending(
     defer_for: timedelta | None = None,
     expected_session_id: str | None = None,
     created_at: datetime | None = None,
+    unproductive: bool = True,
 ) -> bool:
     """Revert a still-RUNNING claimed task back to PENDING, clearing session_id.
 
@@ -183,13 +184,21 @@ def _revert_claimed_task_to_pending(
     identities route through :func:`_find_running_row`; in every real call
     exactly one of them is supplied.
 
+    ``unproductive`` (#2695) mirrors :func:`_park_running_task_blocked_on_user`'s
+    keyword: the generic spawn-failure path passes ``False`` for a raw
+    ``OSError`` (the only typed infra signal the tree has), so a host-level
+    fault does not ratchet the row toward ``attempt_cap_blocked``. *defer_for*
+    never charges whatever this says.
+
     # Why: task.attempts is NOT decremented on the FAILURE paths (no
     # *defer_for*). The increment-at-claim contract is intentional —
     # usage_limit deaths and spawn errors consume real dispatch budget and must
     # count toward task.attempts (#786). Those reverts leave task.status
     # RUNNING -> PENDING, which also charges task.unproductive_attempts by
     # default (#1750) since a spawn that never succeeded produced no evidence
-    # of progress. The global_attempt_ceiling (this module) reads
+    # of progress. Only a raw-OSError spawn failure opts out (#2695); every
+    # other spawn exception, including a plain CwError wrap from
+    # `claude --bg`, still charges. The global_attempt_ceiling (this module) reads
     # unproductive_attempts; the corollary #756 stalled-stage cap deliberately
     # still reads raw task.attempts — as of #1750 these are two separate
     # counters, not one shared counter.
@@ -208,7 +217,7 @@ def _revert_claimed_task_to_pending(
             transition_task_status(
                 stored_task,
                 QueueItemStatus.PENDING,
-                unproductive=defer_for is None,
+                unproductive=unproductive and defer_for is None,
             )
             reverted = True
             stored_task.session_id = None

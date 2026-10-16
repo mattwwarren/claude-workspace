@@ -66,6 +66,7 @@ from cw.dispatch_state import (
 from cw.events import load_cursor, read_events, record_event
 from cw.exceptions import (
     ConfigValidationError,
+    CwError,
     DispatchLoopLockedError,
     StaleWorktreeError,
     VersionDriftError,
@@ -2429,6 +2430,8 @@ class TestDispatchTickSpawnErrors:
         task = queue.tasks[0]
         assert task.status == QueueItemStatus.PENDING
         assert task.session_id is None
+        # #2695: a CalledProcessError is not a typed infra signal; it charges.
+        assert task.unproductive_attempts == 1
 
         assert any(
             "spawn failed" in record.getMessage().lower()
@@ -2465,6 +2468,9 @@ class TestDispatchTickSpawnErrors:
         task = queue.tasks[0]
         assert task.status == QueueItemStatus.PENDING
         assert task.session_id is None
+        # #2695: WorktreeError (incl. a git/SSH failure in create_worktree)
+        # stays charged.
+        assert task.unproductive_attempts == 1
 
         assert any(
             "spawn failed" in record.getMessage().lower()
@@ -2793,6 +2799,9 @@ class TestDispatchTickSpawnErrors:
         assert task.spawn_error_count == 1
         assert task.next_eligible_at is not None
         assert task.hook_context_conflict_session_id == self._CONFLICT_SESSION_ID
+        # #2695: a non-live conflict is deterministic until an operator acts,
+        # so it still charges; the ceiling is its real bound.
+        assert task.unproductive_attempts == 1
 
     def test_repeat_hook_context_conflict_does_not_re_stamp_backoff_differently(
         self,
@@ -6446,6 +6455,11 @@ class TestDispatchUsageLimitBackoff:
         assert isinstance(result, DispatchTickResult)
         assert result.usage_limit_detected is True
         assert result.spawned == 0
+        # #2695: usage-limit churn is the original #786 reason for the
+        # ceiling, so the revert still charges.
+        row = load_dev_queue().tasks[0]
+        assert row.status == QueueItemStatus.PENDING
+        assert row.unproductive_attempts == 1
 
     def test_usage_limit_skip_reason_in_event(
         self,
@@ -9503,6 +9517,95 @@ class TestRevertClaimedTaskExpectedSessionId:
 
         with pytest.raises(ValueError, match="2219"):
             _revert_claimed_task_to_pending("test-client", "REV-4")
+
+
+class TestRevertClaimedTaskUnproductive:
+    """#2695: the ``unproductive`` keyword on ``_revert_claimed_task_to_pending``.
+
+    The raw-``OSError`` spawn-failure path passes ``False`` so a host-level
+    fault does not ratchet the row toward ``attempt_cap_blocked``.
+    """
+
+    @staticmethod
+    def _seed_running(ticket_id: str, session_id: str) -> None:
+        add_ticket(
+            TicketTask(
+                ticket_id=ticket_id,
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+                session_id=session_id,
+                unproductive_attempts=2,
+                attempts=3,
+            )
+        )
+
+    def test_unproductive_false_reverts_without_charging(self) -> None:
+        self._seed_running("REVU-1", "sess-u1")
+
+        assert (
+            _revert_claimed_task_to_pending(
+                "test-client",
+                "REVU-1",
+                stamp_backoff=True,
+                unproductive=False,
+                expected_session_id="sess-u1",
+            )
+            is True
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.PENDING
+        assert task.unproductive_attempts == 2
+        assert task.attempts == 3
+        assert task.spawn_error_count == 1
+        assert task.next_eligible_at is not None
+
+    def test_default_charges(self) -> None:
+        self._seed_running("REVU-2", "sess-u2")
+
+        _revert_claimed_task_to_pending(
+            "test-client", "REVU-2", expected_session_id="sess-u2"
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.PENDING
+        assert task.unproductive_attempts == 3
+
+    def test_defer_for_never_charges_even_when_unproductive_is_true(self) -> None:
+        self._seed_running("REVU-3", "sess-u3")
+
+        _revert_claimed_task_to_pending(
+            "test-client",
+            "REVU-3",
+            defer_for=timedelta(seconds=30),
+            unproductive=True,
+            expected_session_id="sess-u3",
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.PENDING
+        assert task.unproductive_attempts == 2
+        assert task.attempts == 2
+
+    def test_unproductive_false_touches_only_the_created_at_matched_row(
+        self, sample_client_config: ClientConfig
+    ) -> None:
+        _worktree, row_a, row_b = _seed_duplicate_running_rows(sample_client_config)
+        row_a_before = _rows_by_created_at()[row_a.created_at].model_dump()
+
+        reverted = _revert_claimed_task_to_pending(
+            "test-client",
+            "GEN-DUP",
+            stamp_backoff=True,
+            unproductive=False,
+            created_at=row_b.created_at,
+        )
+
+        assert reverted is True
+        stored = _rows_by_created_at()
+        assert stored[row_a.created_at].model_dump() == row_a_before
+        assert stored[row_b.created_at].status is QueueItemStatus.PENDING
+        assert stored[row_b.created_at].unproductive_attempts == 0
 
 
 class TestFindRunningRowRequiresIdentity:
@@ -17443,17 +17546,114 @@ class TestSpawnFailureClassification:
     """#2502 (a): a failure before any worker exists keeps today's handling.
 
     Pins the unchanged pre-launch path: the row reverts to PENDING with the
-    spawn-error backoff, and the lane breaker counts it.
+    spawn-error backoff, and the lane breaker counts it. #2695: only a raw
+    ``OSError`` skips the unproductive-attempt charge; every other exception
+    type (including the plain ``CwError`` the real client raises) charges.
     """
 
     @staticmethod
-    def _assert_backend_failure(outcomes: list[_SpawnOutcome]) -> None:
+    def _assert_backend_failure(
+        outcomes: list[_SpawnOutcome], *, unproductive_attempts: int = 1
+    ) -> None:
         assert [o.spawn_error for o in outcomes] == [True]
         row = load_dev_queue().tasks[0]
         assert row.status == QueueItemStatus.PENDING
         assert row.session_id is None
         assert row.spawn_error_count == 1
+        assert row.unproductive_attempts == unproductive_attempts
         assert _lane_override().consecutive_spawn_errors == 1
+
+    def _tick_with_raising_daemon(
+        self,
+        ticket_id: str,
+        exc: BaseException,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> list[_SpawnOutcome]:
+        write_clients_yaml(sample_client_config)
+        _seed_lane_override(0)
+        add_ticket(TicketTask(ticket_id=ticket_id, client="test-client"))
+        outcomes = _spy_spawn_outcomes(monkeypatch)
+        dispatch_tick(breaker_config, native_daemon=_RaisingNativeDaemon(exc))
+        return outcomes
+
+    def test_worktree_error_is_a_charged_backend_failure(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        write_clients_yaml(sample_client_config)
+        _seed_lane_override(0)
+        add_ticket(TicketTask(ticket_id="GEN-2695W", client="test-client"))
+        outcomes = _spy_spawn_outcomes(monkeypatch)
+
+        def _boom(*_args: object, **_kwargs: object) -> Path:
+            msg = "git worktree add failed: ssh: permission denied"
+            raise WorktreeError(msg)
+
+        monkeypatch.setattr("cw.dispatch.claim.spawn.create_worktree", _boom)
+
+        dispatch_tick(breaker_config, native_daemon=FakeNativeDaemonClient())
+
+        self._assert_backend_failure(outcomes)
+        assert load_dev_queue().tasks[0].attempts == 1
+
+    def test_called_process_error_is_a_charged_backend_failure(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        outcomes = self._tick_with_raising_daemon(
+            "GEN-2695C",
+            subprocess.CalledProcessError(1, ["claude", "--bg"]),
+            sample_client_config,
+            breaker_config,
+            monkeypatch,
+        )
+
+        self._assert_backend_failure(outcomes)
+
+    def test_cwerror_from_the_real_client_shape_is_a_charged_backend_failure(
+        self,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """R4 residual: plain CwError wraps from `claude --bg` stay charged."""
+        outcomes = self._tick_with_raising_daemon(
+            "GEN-2695E",
+            CwError("claude --bg exited 1: ssh: permission denied"),
+            sample_client_config,
+            breaker_config,
+            monkeypatch,
+        )
+
+        self._assert_backend_failure(outcomes)
+
+    @pytest.mark.parametrize("exc_type", [OSError, FileNotFoundError, PermissionError])
+    def test_oserror_is_an_uncharged_backend_failure(
+        self,
+        exc_type: type[OSError],
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Backoff, spawn_error_count and the breaker still count it."""
+        outcomes = self._tick_with_raising_daemon(
+            "GEN-2695O",
+            exc_type("adapter unreachable"),
+            sample_client_config,
+            breaker_config,
+            monkeypatch,
+        )
+
+        self._assert_backend_failure(outcomes, unproductive_attempts=0)
+        row = load_dev_queue().tasks[0]
+        assert row.attempts == 1
+        assert row.next_eligible_at is not None
 
     def test_launch_raise_is_a_backend_failure(
         self,
