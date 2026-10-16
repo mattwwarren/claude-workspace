@@ -3350,6 +3350,28 @@ class TestSpawnCloseLockWaitAndAudit:
         assert str(held_sessions_lock) in result.output
 
 
+class TestCancelCloseOutcome:
+    """The cancel session steps' accumulated outcome (#2694)."""
+
+    def test_reports_to_stderr_and_raises_naming_every_problem(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from cw.cli.spawn import CancelCloseOutcome
+
+        outcome = CancelCloseOutcome(problems=("first", "second"))
+
+        outcome.report()
+
+        assert capsys.readouterr().err == "first\nsecond\n"
+        with pytest.raises(CwError, match="first\nsecond"):
+            outcome.raise_if_unfinished()
+
+    def test_nothing_unfinished_does_not_raise(self) -> None:
+        from cw.cli.spawn import CancelCloseOutcome
+
+        CancelCloseOutcome().raise_if_unfinished()
+
+
 def _status_of(session_id: str) -> SessionStatus:
     sess = load_state().find_by_name_or_id(session_id)
     assert sess is not None
