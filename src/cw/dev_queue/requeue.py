@@ -57,7 +57,7 @@ from cw.exceptions import (
     RequeueStateError,
     UnblockStateError,
 )
-from cw.gh import fetch_approved_plan_comment, post_issue_comment
+from cw.gh import fetch_approved_plan_comment
 from cw.models import (
     DispatchSkipReason,
     OrchestratorEventType,
@@ -68,45 +68,12 @@ from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import (
     _checked_out_branch,
-    _git_dir,
     resolve_task_worktree,
     worktree_path_for,
 )
 
-
-def post_tracker_comment(
-    ticket_id: str,
-    client_name: str,
-    body: str,
-    *,
-    operator_authored: bool = False,
-    post: Callable[..., CompletedProcess[bytes] | None] = post_issue_comment,
-) -> tuple[str | None, CompletedProcess[bytes] | None]:
-    """Post a comment when the client's tracker is GitHub or unresolved.
-
-    The tracker eligibility rule and the client-scoped ``gh`` call are shared
-    by operator queue commands.  A known non-GitHub tracker returns its name
-    with no subprocess result; an unresolved tracker fails open to GitHub.
-    """
-    client_cfg = get_client(client_name)
-    tracker = resolve_tracker(client_cfg.workspace_path)
-    if tracker is not None and tracker != TRACKER_GITHUB_ISSUES:
-        return tracker, None
-    return (
-        tracker,
-        post(
-            ticket_id,
-            body,
-            cwd=_git_dir(client_cfg),
-            operator_authored=operator_authored,
-        ),
-    )
-
-
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
-    from subprocess import CompletedProcess
 
     from cw.models import ClientConfig, TicketTask
 
@@ -605,16 +572,6 @@ def classify_requeue_live_session_error(
     if isinstance(exc, RequeueRosterUnreadableError):
         return _REASON_SKIPPED_ROSTER_UNREADABLE, str(exc)
     return _REASON_SKIPPED_LIVE_SESSION, str(exc)
-
-
-def pipeline_stages(task: TicketTask, client_cfg: ClientConfig) -> list[Stage]:
-    """*task*'s resolved pipeline stages, for a caller outside this module (#2702).
-
-    Deferred for the same dev_queue -> executor cycle as ``requeue_ticket``.
-    """
-    from cw.executor import resolve_pipeline_stages
-
-    return resolve_pipeline_stages(task, client_cfg)
 
 
 def precheck_requeue(

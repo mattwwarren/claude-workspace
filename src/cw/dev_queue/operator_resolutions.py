@@ -39,7 +39,6 @@ from cw.dev_queue.crud import _find_ticket
 from cw.dev_queue.lifecycle import _plan_is_reviewed
 from cw.dev_queue.next_commands import dev_queue_command, refusal_suffix
 from cw.dev_queue.refusal import refusal_hint
-from cw.dev_queue.requeue import pipeline_stages
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
@@ -290,7 +289,9 @@ def _stamp_at_gate(
             " operator-initiated. Nothing was recorded."
         )
         raise ApproveGateError(msg)
-    stages = pipeline_stages(task, client_cfg)
+    from cw.executor import resolve_pipeline_stages  # noqa: PLC0415
+
+    stages = resolve_pipeline_stages(task, client_cfg)
     if task.stage not in stages:
         _raise_stage_not_in_pipeline(ticket_id, task, stages, client_name)
     session = _require_session(task, ticket_id)

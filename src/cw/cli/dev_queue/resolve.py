@@ -23,11 +23,12 @@ import click
 from cw.cli._base import handle_errors
 from cw.cli._worker_guard import refuse_inside_dispatch_worker
 from cw.codex_fix_loop.constraints import RESOLUTIONS_MARKER
-from cw.config import load_orchestrator_config
+from cw.config import get_client, load_orchestrator_config
 from cw.dev_queue import record_operator_resolution, resolve_client
-from cw.dev_queue.requeue import post_tracker_comment
 from cw.exceptions import CwError
 from cw.gh import AGENT_COMMENT_MARKER, post_issue_comment
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
+from cw.worktree import _git_dir
 
 from ._group import dev_queue
 from ._settle import settle_lagging_row
@@ -197,19 +198,18 @@ def _post_relay_block(record: OperatorResolutionRecord, text: str) -> None:
             " mirrored or not needed)."
         )
         return
-    tracker, result = post_tracker_comment(
-        ticket,
-        client,
-        _relay_body(record, text),
-        post=post_issue_comment,
-    )
-    if tracker is not None:
+    client_cfg = get_client(client)
+    tracker = resolve_tracker(client_cfg.workspace_path)
+    if tracker is not None and tracker != TRACKER_GITHUB_ISSUES:
         click.echo(
             f"--post: tracker is {tracker!r}, not GitHub — the relay block is"
             f" not posted to {ticket} ({client}). The resolutions are recorded"
             " on the dev-queue row, which the plan stage reads."
         )
         return
+    result = post_issue_comment(
+        ticket, _relay_body(record, text), cwd=_git_dir(client_cfg)
+    )
     if result is not None and result.returncode == 0:
         click.echo(f"--post: posted the relay block to {ticket} ({client}).")
         return
