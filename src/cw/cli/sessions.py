@@ -212,16 +212,15 @@ def _display_sessions() -> None:
 def _check_and_mark_dead_sessions() -> list[str]:
     """Reconcile state with the native daemon and return reaped session names.
 
-    Cheap passive reconciliation for the two display paths, ``cw status`` and
-    ``cw list`` (``cw start`` calls ``reconcile()`` itself). The reconciler is
-    idempotent and returns an empty list when nothing changed.
+    Cheap passive reconciliation: called from ``cw status`` and ``cw list``
+    (``cw start`` calls ``reconcile()`` itself, with the default wait). The
+    reconciler is idempotent and returns an empty list when nothing changed.
     :func:`cw.reconcile.reconcile` refuses to mass-reap when the daemon is
     unreachable or the roster is empty while active sessions still have
-    surface refs (outage guard), so this helper is safe to run on every read.
-
-    The sessions-lock wait is the operator read wait (#2694): 5 s unless
-    ``CW_SESSIONS_LOCK_TIMEOUT_S`` is set. A timeout is not caught: it exits 1
-    naming the recorded holder, with no stale-state fallback.
+    surface refs (outage guard), so this helper is safe to run on every read
+    path. It waits 5 s for the sessions lock unless
+    ``CW_SESSIONS_LOCK_TIMEOUT_S`` is set (#2694); a timeout exits 1 naming
+    the recorded holder.
     """
     report = reconcile(lock_timeout_s=operator_read_lock_wait_seconds())
     return list(report.phantom_session_names)
