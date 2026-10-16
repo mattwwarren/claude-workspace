@@ -47,6 +47,8 @@ from cw.spawn import (
 from tests._reconcile_helpers import LockProbeDaemon
 from tests.conftest import (
     _SRC_ROOT,
+    _FakeClock,
+    _hold_sessions_lock_recorded,
     _make_daemon_session,
     _make_ticket_task,
     _seed_completed_session,
@@ -6023,3 +6025,292 @@ def test_spawn_cli_never_stops_a_daemon_under_sessions_lock() -> None:
         f"{finder.stop_lines}: capture the surface_ref under the lock and stop "
         "after it releases (ADR-0019, #2547)"
     )
+
+
+# ---------------------------------------------------------------------------
+# #2694: a held sessions lock queues the close instead of waiting 60 s
+# ---------------------------------------------------------------------------
+
+_QUEUED_SID = "qclose01"
+_QUEUED_SURFACE = "qref0001"
+_QUEUED_TICKET = "GEN-1234"
+
+
+def _seed_queued_close_target(tmp_path: Path, tmp_config_dir: Path) -> Session:
+    return _seed_daemon_session(
+        tmp_path,
+        tmp_config_dir,
+        session_id=_QUEUED_SID,
+        name=f"test-client/auto-dev/{_QUEUED_TICKET}",
+        surface_ref=_QUEUED_SURFACE,
+    )
+
+
+def _queued_entry_path() -> Path:
+    from cw.reconcile.session_close import queued_closes_dir
+
+    return queued_closes_dir() / f"{_QUEUED_SID}.json"
+
+
+def _install_spawn_close_daemons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> FakeNativeDaemonClient:
+    """One fake for both the inline close and reconcile's post-lock stop."""
+    daemon = FakeNativeDaemonClient()
+    monkeypatch.setattr("cw.cli.spawn.get_native_daemon_client", lambda: daemon)
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+    return daemon
+
+
+def _virtual_clock(monkeypatch: pytest.MonkeyPatch) -> _FakeClock:
+    from cw import _flock
+
+    clock = _FakeClock()
+    monkeypatch.setattr(_flock, "time", clock)
+    return clock
+
+
+class TestSpawnCloseQueued:
+    """`cw spawn close` behind a held sessions lock (#2694, Acceptance 3)."""
+
+    def test_queues_exits_one_and_reconcile_applies_it(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import os
+
+        from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
+        from cw.reconcile import reconcile
+
+        monkeypatch.delenv(SESSIONS_LOCK_TIMEOUT_ENV, raising=False)
+        daemon = _install_spawn_close_daemons(monkeypatch)
+        _seed_queued_close_target(tmp_path, tmp_config_dir)
+        clock = _virtual_clock(monkeypatch)
+
+        with _hold_sessions_lock_recorded() as lock_path:
+            result = CliRunner().invoke(main, ["spawn", "close", _QUEUED_SID])
+
+        assert result.exit_code == 1
+        assert result.output.startswith("Error: QUEUED, NOT YET CLOSED")
+        assert result.output.count("Timed out") == 1
+        assert str(lock_path) in result.output
+        assert f"pid {os.getpid()}" in result.output
+        assert "spawn close" in result.output
+        entry_path = _queued_entry_path()
+        assert str(entry_path) in " ".join(result.output.split())
+        assert "To withdraw, delete" in result.output
+        assert clock.now == 5.0
+        entry = json.loads(entry_path.read_text())
+        assert entry["origin"] == "spawn_close"
+        assert entry["surface_ref"] == _QUEUED_SURFACE
+        assert entry["resumed_at"] is None
+        stored = load_state().find_by_name_or_id(_QUEUED_SID)
+        assert stored is not None
+        assert stored.status == SessionStatus.ACTIVE
+        assert daemon.stop_calls == []
+
+        reconcile()
+
+        closed = load_state().find_by_name_or_id(_QUEUED_SID)
+        assert closed is not None
+        assert closed.status == SessionStatus.COMPLETED
+        assert closed.completed_reason == CompletionReason.USER
+        assert daemon.stop_calls == [_QUEUED_SURFACE]
+        assert not entry_path.exists()
+
+    def test_staged_result_still_routes_when_the_queued_close_applies(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2458 survives the queue: the row is routed, not cancelled."""
+        from cw.models import LastResultSource
+        from cw.reconcile import reconcile
+        from tests.test_result import _valid_payload
+
+        _install_spawn_close_daemons(monkeypatch)
+        _seed_queued_close_target(tmp_path, tmp_config_dir)
+        state = load_state()
+        stored = state.find_by_name_or_id(_QUEUED_SID)
+        assert stored is not None
+        stored.last_result = _valid_payload()
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+        TestSpawnClose._write_staged_client()
+        _seed_running_task(ticket_id=_QUEUED_TICKET, session_id=_QUEUED_SID)
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+
+        store = load_dev_queue()
+        store.tasks[0].stage = Stage.FINALIZE
+        store.tasks[0].attempts = 1
+        save_dev_queue(DevQueueStore(tasks=store.tasks))
+        _virtual_clock(monkeypatch)
+
+        with _hold_sessions_lock_recorded():
+            result = CliRunner().invoke(main, ["spawn", "close", _QUEUED_SID])
+
+        assert result.exit_code == 1
+        reconcile()
+
+        row = load_dev_queue().tasks[0]
+        assert row.status == QueueItemStatus.COMPLETED
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"), [("300", 5.0), ("0.2", 0.2), ("abc", 5.0)]
+    )
+    def test_wait_is_min_of_env_and_five_seconds(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        held_sessions_lock: Path,
+        raw: str,
+        expected: float,
+    ) -> None:
+        from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
+
+        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, raw)
+        _install_spawn_close_daemons(monkeypatch)
+        _seed_queued_close_target(tmp_path, tmp_config_dir)
+        clock = _virtual_clock(monkeypatch)
+
+        result = CliRunner().invoke(main, ["spawn", "close", _QUEUED_SID])
+
+        assert result.exit_code == 1
+        assert clock.now == pytest.approx(expected)
+
+    def test_impl_still_raises_and_queues_nothing(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        held_sessions_lock: Path,
+    ) -> None:
+        from cw.cli.spawn import _spawn_close_impl
+        from cw.exceptions import SessionsLockTimeoutError
+
+        _seed_queued_close_target(tmp_path, tmp_config_dir)
+        clock = _virtual_clock(monkeypatch)
+
+        with pytest.raises(SessionsLockTimeoutError):
+            _spawn_close_impl(
+                session_id=_QUEUED_SID,
+                native_daemon=FakeNativeDaemonClient(),
+                lock_timeout_s=0.05,
+            )
+
+        assert clock.now == pytest.approx(0.05)
+        assert not _queued_entry_path().exists()
+
+    def test_free_lock_closes_inline_without_an_entry(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        daemon = _install_spawn_close_daemons(monkeypatch)
+        _seed_queued_close_target(tmp_path, tmp_config_dir)
+
+        result = CliRunner().invoke(main, ["spawn", "close", _QUEUED_SID])
+
+        assert result.exit_code == 0, result.output
+        assert f"Closed session: {_QUEUED_SID}" in result.output
+        assert daemon.stop_calls == [_QUEUED_SURFACE]
+        assert not _queued_entry_path().exists()
+
+    def test_requeue_while_queued_prints_the_follow_up_and_does_not_requeue(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        held_sessions_lock: Path,
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+
+        _write_test_client_yaml(tmp_config_dir, tmp_path)
+        _install_spawn_close_daemons(monkeypatch)
+        _seed_queued_close_target(tmp_path, tmp_config_dir)
+        _seed_running_task(ticket_id=_QUEUED_TICKET, session_id=_QUEUED_SID)
+        _virtual_clock(monkeypatch)
+        requeued: list[str] = []
+        monkeypatch.setattr(
+            "cw.cli.spawn._spawn_close_requeue_impl",
+            lambda **kwargs: requeued.append(str(kwargs)),
+        )
+
+        result = CliRunner().invoke(main, ["spawn", "close", "--requeue", _QUEUED_SID])
+
+        assert result.exit_code == 1
+        assert requeued == []
+        flat = " ".join(result.output.split())
+        assert (
+            f"cw dev-queue requeue {_QUEUED_TICKET} -c test-client --from-cancelled"
+        ) in flat
+        assert load_dev_queue().tasks[0].status == QueueItemStatus.RUNNING
+        with pytest.raises(CwError):
+            requeue_ticket(
+                _QUEUED_TICKET,
+                "test-client",
+                from_cancelled=True,
+                native_daemon=FakeNativeDaemonClient(),
+            )
+
+    def test_unknown_id_under_a_held_lock_is_not_found(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        held_sessions_lock: Path,
+    ) -> None:
+        _virtual_clock(monkeypatch)
+        save_state(CwState(sessions=[]))
+
+        result = CliRunner().invoke(main, ["spawn", "close", "nobody01"])
+
+        assert result.exit_code == 1
+        assert "Session 'nobody01' not found." in result.output
+        assert "QUEUED" not in result.output
+        assert not _queued_entry_path().parent.exists()
+
+    def test_ambiguous_name_renders_as_before(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        save_state(
+            CwState(
+                sessions=[
+                    _make_daemon_session(id="amb-1", name="test-client/dup"),
+                    _make_daemon_session(id="amb-2", name="test-client/dup"),
+                ]
+            )
+        )
+
+        result = CliRunner().invoke(main, ["spawn", "close", "test-client/dup"])
+
+        assert result.exit_code == 1
+        assert "matches 2 sessions" in result.output
+        assert "pass an id to choose" in result.output
+
+    def test_entry_write_failure_reraises_the_original_timeout(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        held_sessions_lock: Path,
+    ) -> None:
+        _seed_queued_close_target(tmp_path, tmp_config_dir)
+        _virtual_clock(monkeypatch)
+
+        def _disk_full(_path: Path, _text: str) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr("cw.reconcile.session_close.atomic_write_text", _disk_full)
+
+        result = CliRunner().invoke(main, ["spawn", "close", _QUEUED_SID])
+
+        assert result.exit_code == 1
+        assert result.output.startswith("Error: Timed out")
+        assert "QUEUED" not in result.output

@@ -819,6 +819,38 @@ def test_flip_error_after_confirmed_stop_refuses_then_retry_flips(
     assert _status_of(orphan.id) == SessionStatus.COMPLETED
 
 
+@_AFTER_TRANSITION
+def test_timed_out_flip_is_refused_and_not_audited_as_completed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    held_sessions_lock: Path,
+    orphan_logs: pytest.LogCaptureFixture,
+    after_transition: bool,
+) -> None:
+    """#2694 guard: ``_flip_closed`` reaches ``_spawn_close_impl``, which still
+    RAISES on a held sessions lock (it never queues), so the orphan close is
+    refused, the session stays ACTIVE, nothing is audited as completed and no
+    queued-close entry is written on this path."""
+    from cw.reconcile.session_close import pending_queued_closes
+
+    from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
+
+    monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "0.05")
+    daemon = FakeNativeDaemonClient()
+    (orphan,) = _seed_orphans(tmp_path, daemon)
+
+    with pytest.raises(CwError) as excinfo:
+        _close(daemon, after_transition=after_transition)
+
+    assert close_command(orphan.id) in _flat(str(excinfo.value))
+    assert _status_of(orphan.id) == SessionStatus.ACTIVE
+    assert [
+        e for e in load_history(_CLIENT) if e.event_type is EventType.SESSION_COMPLETED
+    ] == []
+    assert pending_queued_closes() == []
+    assert _records(orphan_logs, "routed_orphan_close_failed")
+
+
 def test_stop_that_makes_roster_unreadable_refuses(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
