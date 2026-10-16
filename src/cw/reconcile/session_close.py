@@ -26,15 +26,18 @@ operator command, never a policy reap. Nothing here calls a daemon ``stop``
 (``tests/test_reconcile_stop_call_sites_guard.py``): the reconcile applier
 queues stops with :func:`~cw.reconcile.deferred.defer_surface_stop`, and the
 cancel applier returns its stop targets to the CLI, which stops them after
-the lock. Every close that flips a session leaves its durable audit record
-(ADR-0006 invariant 3) as a ``SESSION_COMPLETED`` history event carrying the
-session's identity fields, the operator command and the prior status
-(``detail``/``reason`` :data:`OPERATOR_CLOSE_AUDIT_REASON`), written after the
-flip is saved; a row the close settles records its own ``task.transition``.
-The WARNING logs (``queued_close_*``; cw's default logging drops INFO)
-accompany it. No orchestrator ``session.completed`` event is emitted: the
-dispatch loop consumes that one to settle rows, which these closes do
-themselves.
+the lock. Every close that flips a session is audited (ADR-0006 invariant 3)
+through the one shared mechanism, :mod:`cw.reconcile.close_audit`: the
+durable intent is written before any mutation (inside
+:func:`close_session_in_state`), and after the save the close records its
+``SESSION_COMPLETED`` history event and finalizes the intent into a
+``session.reap_authorized`` event. A queued entry is cleared only once both
+the close and that finalize have committed, so a crash between steps leaves
+a replayable entry, never a committed close without a record; a replay
+finalizes the pending intent without a second history event. The WARNING
+logs (``queued_close_*``; cw's default logging drops INFO) accompany it. No
+orchestrator ``session.completed`` event is emitted: the dispatch loop
+consumes that one to settle rows, which these closes do themselves.
 """
 
 from __future__ import annotations
@@ -62,14 +65,25 @@ from cw.dev_queue import (
     running_task_for_session,
 )
 from cw.exceptions import CwError, SessionsLockTimeoutError
-from cw.history import EventType, HistoryEvent, record_event
 from cw.models import (
     TERMINAL_SESSION_STATUSES,
     CompletionReason,
     SessionOrigin,
     SessionStatus,
 )
-from cw.reconcile._shared import _apply_sentinel_to_task, holds_staged_emit_result
+from cw.reconcile._shared import (
+    _apply_sentinel_to_task,
+    holds_staged_emit_result,
+    ticket_id_for_session,
+)
+from cw.reconcile.close_audit import (
+    OPERATOR_CLOSE_REASON,
+    CloseAudit,
+    CloseAuditError,
+    finalize_close_audit_intent,
+    queue_close_audit_intent,
+    record_close_audit,
+)
 from cw.reconcile.deferred import defer_surface_stop
 from cw.result import reconstruct_staged_sentinel
 
@@ -93,9 +107,6 @@ _ORIGIN_COMMANDS: dict[str, str] = {
     "spawn_close": "cw spawn close",
     "cancel": "cw dev-queue cancel",
 }
-# ``detail``/``reason`` of the SESSION_COMPLETED history event every
-# operator close here records (cf. ``routed_result_orphan_resolved``).
-OPERATOR_CLOSE_AUDIT_REASON = "operator_close"
 # Who applied the close: reconcile (a queued entry) or the command inline.
 _APPLIED_BY_RECONCILE = "reconcile"
 _APPLIED_BY_INLINE = "inline"
@@ -136,19 +147,23 @@ class CancelCloseOutcome:
     closed nor recorded (the entry write failed and the lock was busy), which
     need a manual ``cw spawn close``. *refused_ids*: sessions resumed into a
     new incarnation since the cancel's snapshot; they are neither closed nor
-    stopped.
+    stopped. *failed*: ``(session_id, error)`` for sessions whose close failed
+    for a reason other than a busy sessions lock; their entry is kept for the
+    next reconcile pass.
     """
 
     surfaces_to_stop: tuple[str, ...] = ()
     pending_ids: tuple[str, ...] = ()
     unrecorded_ids: tuple[str, ...] = ()
     refused_ids: tuple[str, ...] = ()
+    failed: tuple[tuple[str, str], ...] = ()
 
 
 class _Outcome(StrEnum):
     APPLIED = "applied"
     VOID = "void"
     UNKNOWN = "unknown"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,9 +171,14 @@ class _EntryResult:
     outcome: _Outcome
     surface: str | None = None
     prior_status: SessionStatus | None = None
-    # The closed session, set only when this apply changed its status (the
-    # mutation the audit event records).
-    flipped: Session | None = None
+    # The session and audit context of an APPLIED entry; *flipped* is True
+    # only when this apply changed its status (else it is a replay or a
+    # repeat close of an already closed session).
+    session: Session | None = None
+    audit: CloseAudit | None = None
+    flipped: bool = False
+    # ``<ExcType>: <message>`` of a FAILED entry.
+    error: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -202,10 +222,45 @@ def _daemon_surface_or_none(sess: Session) -> str | None:
     return None
 
 
-def close_session_in_state(sess: Session, *, settle_row: bool = True) -> str | None:
+def operator_close_audit(
+    sess: Session,
+    *,
+    origin: QueuedCloseOrigin,
+    applied_by: str,
+    queued_at: datetime | None,
+) -> CloseAudit:
+    """The audit context of a ``cw spawn close`` / ``cw dev-queue cancel`` close.
+
+    *applied_by* is ``inline`` (the command itself) or ``reconcile`` (a
+    queued entry); *queued_at* is the entry's, ``None`` inline. The fields
+    extend the shared ``SESSION_COMPLETED`` history metadata.
+    """
+    return CloseAudit(
+        command=_ORIGIN_COMMANDS[origin],
+        reason=OPERATOR_CLOSE_REASON,
+        ticket_id=ticket_id_for_session(sess.name),
+        details={
+            "origin": origin,
+            "applied_by": applied_by,
+            "queued_at": _iso(queued_at) or "",
+            "settle_row": str(origin == _FULL_CLOSE_ORIGIN).lower(),
+            "started_at": sess.started_at.isoformat(),
+            "resumed_at": _iso(sess.resumed_at) or "",
+        },
+    )
+
+
+def close_session_in_state(
+    sess: Session, *, audit: CloseAudit, settle_row: bool = True
+) -> str | None:
     """Close *sess* in memory; return the DAEMON surface to stop after the lock.
 
-    The caller holds ``sessions_lock`` and saves the state *sess* belongs to.
+    The caller holds ``sessions_lock`` and saves the state *sess* belongs to,
+    then records and finalizes *audit* (:mod:`cw.reconcile.close_audit`).
+    A close that will change *sess* first writes *audit*'s durable intent,
+    before any mutation (the row step included); a
+    :class:`~cw.reconcile.close_audit.CloseAuditError` there means nothing
+    was closed.
 
     ``settle_row=True`` (``cw spawn close`` and queued ``spawn_close``
     entries): an already-COMPLETED session mutates nothing (#2480: its
@@ -235,6 +290,7 @@ def close_session_in_state(sess: Session, *, settle_row: bool = True) -> str | N
             sess.id,
             sess.surface_ref,
         )
+    queue_close_audit_intent(sess, audit)
     if (
         settle_row
         and sess.origin is SessionOrigin.DAEMON
@@ -441,7 +497,9 @@ def _fence_mismatch(sess: Session, entry: QueuedClose) -> list[str]:
     return mismatched
 
 
-def _apply_entry(state: CwState, entry: QueuedClose) -> _EntryResult:
+def _apply_entry(
+    state: CwState, entry: QueuedClose, *, applied_by: str
+) -> _EntryResult:
     """Apply one entry to *state* in memory (caller holds the lock and saves).
 
     A session that no longer exists, or that was resumed into a new
@@ -478,70 +536,33 @@ def _apply_entry(state: CwState, entry: QueuedClose) -> _EntryResult:
         )
         return _EntryResult(_Outcome.VOID)
     prior_status = sess.status
+    audit = operator_close_audit(
+        sess, origin=entry.origin, applied_by=applied_by, queued_at=entry.queued_at
+    )
     surface = close_session_in_state(
-        sess, settle_row=entry.origin == _FULL_CLOSE_ORIGIN
+        sess, audit=audit, settle_row=entry.origin == _FULL_CLOSE_ORIGIN
     )
-    flipped = sess if sess.status != prior_status else None
-    return _EntryResult(_Outcome.APPLIED, surface, prior_status, flipped)
-
-
-def _record_close_audit(
-    entry: QueuedClose, result: _EntryResult, *, applied_by: str
-) -> None:
-    """Record the durable audit of a close that flipped a session (ADR-0006).
-
-    A ``SESSION_COMPLETED`` history event with the session's identity fields
-    and the operator command, written after the flip is saved; the row side
-    already has its ``task.transition`` event. A write failure is logged
-    (ERROR, with traceback) and never undoes or fails the close.
-    """
-    sess = result.flipped
-    if sess is None or result.prior_status is None:
-        return
-    metadata = {
-        "actor": "operator",
-        "command": _ORIGIN_COMMANDS[entry.origin],
-        "origin": entry.origin,
-        "applied_by": applied_by,
-        "queued_at": entry.queued_at.isoformat(),
-        "prior_status": result.prior_status.value,
-        "resulting_status": sess.status.value,
-        "completed_reason": str(sess.completed_reason or ""),
-        "settle_row": str(entry.origin == _FULL_CLOSE_ORIGIN).lower(),
-        "started_at": sess.started_at.isoformat(),
-        "resumed_at": _iso(sess.resumed_at) or "",
-        "surface_ref": sess.surface_ref or "",
-        "reason": OPERATOR_CLOSE_AUDIT_REASON,
-    }
-    event = HistoryEvent(
-        event_type=EventType.SESSION_COMPLETED,
-        client=sess.client,
-        session_id=sess.id,
-        session_name=sess.name,
-        purpose=sess.purpose,
-        detail=OPERATOR_CLOSE_AUDIT_REASON,
-        metadata=metadata,
+    return _EntryResult(
+        _Outcome.APPLIED,
+        surface,
+        prior_status,
+        session=sess,
+        audit=audit,
+        flipped=sess.status != prior_status,
     )
-    try:
-        record_event(sess.client, event)
-    except (OSError, ValueError):
-        _log.exception(
-            "operator_close_audit_failed: session=%s origin=%s applied_by=%s",
-            sess.id,
-            entry.origin,
-            applied_by,
-        )
 
 
-def _apply_entry_isolated(state: CwState, entry: QueuedClose) -> _EntryResult | None:
-    """:func:`_apply_entry`, or ``None`` (entry kept) when its close fails.
+def _apply_entry_isolated(
+    state: CwState, entry: QueuedClose, *, applied_by: str
+) -> _EntryResult:
+    """:func:`_apply_entry`, or a FAILED result (entry kept) when its close fails.
 
     One poison entry must not wedge every reconcile pass: it is logged and
     left for the operator, and the next entry still applies.
     """
     try:
-        return _apply_entry(state, entry)
-    except (CwError, OSError, ValueError):
+        return _apply_entry(state, entry, applied_by=applied_by)
+    except (CwError, OSError, ValueError) as exc:
         _log.warning(
             "queued_close_failed: session=%s origin=%s queued_at=%s action=entry_kept",
             entry.session_id,
@@ -549,30 +570,62 @@ def _apply_entry_isolated(state: CwState, entry: QueuedClose) -> _EntryResult | 
             entry.queued_at.isoformat(),
             exc_info=True,
         )
-        return None
+        return _EntryResult(_Outcome.FAILED, error=f"{type(exc).__name__}: {exc}")
+
+
+def _settle(results: Iterable[tuple[QueuedClose, _EntryResult]]) -> list[str]:
+    """Audit each committed close; return the entries now safe to clear.
+
+    Call it only after the closes are saved. An APPLIED close records its
+    history event (when this pass flipped it) and finalizes its intent; a
+    replay of an already-closed session only finalizes the intent its crashed
+    pass left (no second history event). The entry is cleared only once the
+    finalize committed. Void and unknown entries clear; failed ones stay.
+    """
+    settled: list[str] = []
+    for entry, result in results:
+        if result.outcome is _Outcome.FAILED:
+            continue
+        sess, audit, prior = result.session, result.audit, result.prior_status
+        if sess is None or audit is None or prior is None:
+            settled.append(entry.session_id)
+            continue
+        if result.flipped:
+            # Logged with its traceback by record_close_audit; the close
+            # stands and its intent is still delivered below.
+            with contextlib.suppress(CloseAuditError):
+                record_close_audit(sess, audit, prior_status=prior)
+        if finalize_close_audit_intent(sess, audit, replay=not result.flipped):
+            settled.append(entry.session_id)
+            continue
+        _log.warning(
+            "queued_close_audit_pending: session=%s origin=%s action=entry_kept",
+            entry.session_id,
+            entry.origin,
+        )
+    return settled
 
 
 def apply_queued_closes(state: CwState, *, deferred: DeferredReconcileJobs) -> int:
     """Apply every queued close to *state*; return how many applied.
 
     Called from ``reconcile``'s locked body, which holds ``sessions_lock``:
-    the session flips are saved once here, each surface stop is queued on
-    *deferred* (run after the lock releases), and applied, void and unknown
-    entries are removed after the save. A ``spawn_close`` entry's row step
-    may take ``dev_queue_lock`` (SESSIONS before STATE, as the inline close).
+    each close writes its audit intent before mutating, the session flips
+    are saved once here, each surface stop is queued on *deferred* (run
+    after the lock releases), and an entry is removed only after the save
+    and its audit finalize (:func:`_settle`). A ``spawn_close`` entry's row
+    step may take ``dev_queue_lock`` (SESSIONS before STATE, as the inline
+    close).
     """
     entries = pending_queued_closes()
     if not entries:
         return 0
-    settled: list[str] = []
-    audits: list[tuple[QueuedClose, _EntryResult]] = []
+    results = [
+        (entry, _apply_entry_isolated(state, entry, applied_by=_APPLIED_BY_RECONCILE))
+        for entry in entries
+    ]
     applied = 0
-    for entry in entries:
-        result = _apply_entry_isolated(state, entry)
-        if result is None:
-            continue
-        settled.append(entry.session_id)
-        audits.append((entry, result))
+    for entry, result in results:
         if result.surface is not None:
             defer_surface_stop(deferred, result.surface)
         if result.outcome is _Outcome.APPLIED:
@@ -589,9 +642,7 @@ def apply_queued_closes(state: CwState, *, deferred: DeferredReconcileJobs) -> i
             )
     if applied:
         save_state(state)
-    for entry, result in audits:
-        _record_close_audit(entry, result, applied_by=_APPLIED_BY_RECONCILE)
-    _clear_settled(settled)
+    _clear_settled(_settle(results))
     return applied
 
 
@@ -676,9 +727,13 @@ def close_sessions_for_cancel(
     *timeout_s* that applies the entries flip-only (re-checking the fence
     under the lock) and clears them. On a timeout -- or with *skip_lock*,
     after an earlier ticket's attempt already timed out -- the entries stay
-    for the next reconcile pass. USER-origin and unknown ids are skipped;
-    TERMINAL sessions are not flipped but their surfaces are still returned,
-    as cancel always stopped every DAEMON session it cleared.
+    for the next reconcile pass. Any other failure of the attempt (a close
+    that raised, or a state load/save error) is reported in ``failed``, not
+    as a busy lock; those entries stay for the next pass too. Each close is
+    audited (intent first, record and finalize after the save) and its entry
+    cleared once the finalize committed. USER-origin and unknown ids are
+    skipped; TERMINAL sessions are not flipped but their surfaces are still
+    returned, as cancel always stopped every DAEMON session it cleared.
     """
     wanted = {sid for sid in session_ids if sid is not None}
     if not wanted:
@@ -695,19 +750,23 @@ def close_sessions_for_cancel(
 
     def _flip(state: CwState) -> None:
         for entry in entries:
-            result = _apply_entry_isolated(state, entry)
-            if result is not None:
-                results[entry.session_id] = result
+            results[entry.session_id] = _apply_entry_isolated(
+                state, entry, applied_by=_APPLIED_BY_INLINE
+            )
 
     if entries and not skip_lock:
-        with contextlib.suppress(SessionsLockTimeoutError):
+        try:
             mutate_state(_flip, bounded=True, timeout_s=timeout_s)
-    for entry in entries:
-        if entry.session_id in results:
-            _record_close_audit(
-                entry, results[entry.session_id], applied_by=_APPLIED_BY_INLINE
-            )
-    _clear_settled(set(results) - unrecorded)
+        except SessionsLockTimeoutError:
+            pass  # Busy lock: the recorded entries are the retry path.
+        except (CwError, OSError, ValueError) as exc:
+            # Not a lock timeout, and nothing was saved: every entry failed.
+            failed = _EntryResult(_Outcome.FAILED, error=f"{type(exc).__name__}: {exc}")
+            results.update((entry.session_id, failed) for entry in entries)
+    settled = _settle(
+        (e, results[e.session_id]) for e in entries if e.session_id in results
+    )
+    _clear_settled(set(settled) - unrecorded)
     voided = {sid for sid, r in results.items() if r.outcome is _Outcome.VOID}
     return CancelCloseOutcome(
         surfaces_to_stop=tuple(
@@ -728,5 +787,11 @@ def close_sessions_for_cancel(
         refused_ids=(
             *refused,
             *(e.session_id for e in entries if e.session_id in voided),
+        ),
+        failed=tuple(
+            (e.session_id, results[e.session_id].error)
+            for e in entries
+            if e.session_id in results
+            and results[e.session_id].outcome is _Outcome.FAILED
         ),
     )

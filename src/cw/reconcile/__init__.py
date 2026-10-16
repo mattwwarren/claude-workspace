@@ -79,6 +79,9 @@ re-exports. Submodules:
   queued-close store that ``_reconcile_locked`` applies first when an
   operator close met a held sessions lock (#2694; explicit operator authority,
   ADR-0006 invariant 2).
+- ``close_audit`` — the one durable audit every operator session close shares
+  (intent before the close, history record and ``session.reap_authorized``
+  after it; ADR-0006 invariant 3, #2694), with the audit outbox it owns.
 - ``core`` — ``reconcile`` / ``_reconcile_locked`` orchestration.
 """
 

@@ -43,11 +43,20 @@ from cw.models import (
 )
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.reconcile import ticket_id_for_session
-from cw.reconcile.session_close import close_session_in_state, queue_close
+from cw.reconcile.close_audit import (
+    finalize_close_audit_intent,
+    record_close_audit,
+)
+from cw.reconcile.session_close import (
+    close_session_in_state,
+    operator_close_audit,
+    queue_close,
+)
 from cw.spawn import spawn_create_impl
 
 if TYPE_CHECKING:
     from cw.models import Session
+    from cw.reconcile.close_audit import CloseAudit
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +95,7 @@ def _spawn_close_impl(
     native_daemon: NativeDaemonClient | None = None,
     surface_already_stopped: bool = False,
     lock_timeout_s: float | None = None,
+    audit: CloseAudit | None = None,
 ) -> None:
     """Close a daemon-spawned session.
 
@@ -104,8 +114,18 @@ def _spawn_close_impl(
     (``None``: the env-or-60 s default) and records nothing. Only the
     ``spawn close`` command queues the close; ``routed_orphan_close`` relies
     on this raising.
+
+    Audited (ADR-0006 inv 3, #2694) through :mod:`cw.reconcile.close_audit`:
+    *audit* is the caller's close context (``routed_orphan_close`` passes
+    its own); ``None`` is the inline ``cw spawn close`` context. The durable
+    intent precedes any mutation; after the save the history record and the
+    intent finalize follow, before the stop. A
+    :class:`~cw.reconcile.close_audit.CloseAuditError` before the save means
+    nothing was closed; after it, the close stands and the error reports the
+    missing record.
     """
     surface_to_stop: str | None = None
+    flipped: Session | None = None
     # Why not mutate_state: cancel_task_for_session / route_staged_emit_result
     # take dev_queue_lock inside the sessions_lock window (criterion 2: no
     # dual-lock).
@@ -118,18 +138,29 @@ def _spawn_close_impl(
             msg = f"Session '{session_id}' not found."
             raise CwError(msg)
         prior_status = sess.status
+        close_audit = audit or operator_close_audit(
+            sess, origin="spawn_close", applied_by="inline", queued_at=None
+        )
         # The close body (#2480 leaked-surface stop, #317 row cancel, #2458
         # staged-result routing) lives in cw.reconcile.session_close so a
         # queued close applied by reconcile runs the same code.
-        surface_to_stop = close_session_in_state(sess)
+        surface_to_stop = close_session_in_state(sess, audit=close_audit)
         if sess.status != prior_status:
             save_state(state)
+            flipped = sess
 
     # daemon.stop is best-effort and slow (up to 10s), so it runs after the lock
     # releases (#2547, mirrors signal_stop / done_session). A raise leaves the
     # state already stamped; a repeat close retries just the stop (#2480).
-    if surface_to_stop is not None and not surface_already_stopped:
-        (native_daemon or get_native_daemon_client()).stop(surface_to_stop)
+    try:
+        if flipped is not None:
+            try:
+                record_close_audit(flipped, close_audit, prior_status=prior_status)
+            finally:
+                finalize_close_audit_intent(flipped, close_audit)
+    finally:
+        if surface_to_stop is not None and not surface_already_stopped:
+            (native_daemon or get_native_daemon_client()).stop(surface_to_stop)
 
 
 def _spawn_close_requeue_impl(

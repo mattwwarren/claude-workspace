@@ -108,7 +108,7 @@ keeps that order and extends it to every other state-file lock.
     `LOCK_NB`; it fails fast with `DispatchLoopLockedError` and cannot hang.
   - `_hook_context._context_lock`: per-worktree, bounded `try_flock_until`,
     fails open.
-  - `doctor.routed_result_wedge._audit_outbox_lock`: deliberately reentrant
+  - `reconcile.close_audit._audit_outbox_lock`: deliberately reentrant
     through a contextvar depth permit.
   - `codex_legacy_recovery.codex_legacy_marker_lock`: a single-use marker
     lock.

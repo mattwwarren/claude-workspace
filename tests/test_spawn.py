@@ -6337,3 +6337,122 @@ class TestSpawnCloseQueued:
         assert result.exit_code == 1
         assert result.output.startswith("Error: Timed out")
         assert "QUEUED" not in result.output
+
+
+class TestSpawnCloseAudit:
+    """Inline `cw spawn close` is audited through cw.reconcile.close_audit (#2694)."""
+
+    @staticmethod
+    def _authorized() -> list[dict[str, object]]:
+        from cw.events import read_events
+
+        return [
+            dict(e.payload)
+            for e in read_events(
+                event_types=[OrchestratorEventType.SESSION_REAP_AUTHORIZED]
+            )
+        ]
+
+    @staticmethod
+    def _history() -> list[Any]:
+        from cw.history import EventType, load_history
+
+        return load_history("test-client", event_types=[EventType.SESSION_COMPLETED])
+
+    def test_an_inline_close_records_the_shared_durable_audit(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.reconcile.close_audit import OPERATOR_CLOSE_REASON, read_audit_outbox
+
+        daemon = _install_spawn_close_daemons(monkeypatch)
+        sess = _seed_queued_close_target(tmp_path, tmp_config_dir)
+
+        result = CliRunner().invoke(main, ["spawn", "close", _QUEUED_SID])
+
+        assert result.exit_code == 0, result.output
+        assert daemon.stop_calls == [_QUEUED_SURFACE]
+        (event,) = self._history()
+        assert event.detail == OPERATOR_CLOSE_REASON
+        assert event.metadata == {
+            "actor": "operator",
+            "command": "cw spawn close",
+            "ticket_id": _QUEUED_TICKET,
+            "client": "test-client",
+            "session_id": _QUEUED_SID,
+            "surface_ref": _QUEUED_SURFACE,
+            "prior_status": "active",
+            "resulting_status": "completed",
+            "reason": OPERATOR_CLOSE_REASON,
+            "origin": "spawn_close",
+            "applied_by": "inline",
+            "queued_at": "",
+            "settle_row": "true",
+            "started_at": sess.started_at.isoformat(),
+            "resumed_at": "",
+        }
+        (payload,) = self._authorized()
+        assert payload["session_id"] == _QUEUED_SID
+        assert payload["proposed_action"] == OPERATOR_CLOSE_REASON
+        assert payload["ticket_id"] == _QUEUED_TICKET
+        assert read_audit_outbox() == []
+
+    def test_a_repeat_close_of_a_completed_session_audits_nothing(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_spawn_close_daemons(monkeypatch)
+        _seed_queued_close_target(tmp_path, tmp_config_dir)
+        CliRunner().invoke(main, ["spawn", "close", _QUEUED_SID])
+
+        result = CliRunner().invoke(main, ["spawn", "close", _QUEUED_SID])
+
+        assert result.exit_code == 0, result.output
+        assert len(self._history()) == 1
+        assert len(self._authorized()) == 1
+
+    def test_no_intent_means_no_close(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        daemon = _install_spawn_close_daemons(monkeypatch)
+        _seed_queued_close_target(tmp_path, tmp_config_dir)
+        _seed_running_task(ticket_id=_QUEUED_TICKET, session_id=_QUEUED_SID)
+
+        def _outbox_down(_records: object) -> None:
+            raise OSError(5, "Input/output error")
+
+        monkeypatch.setattr(
+            "cw.reconcile.close_audit._write_audit_outbox", _outbox_down
+        )
+
+        result = CliRunner().invoke(main, ["spawn", "close", _QUEUED_SID])
+
+        assert result.exit_code == 1
+        assert "Could not prepare the durable audit record" in result.output
+        stored = load_state().find_by_name_or_id(_QUEUED_SID)
+        assert stored is not None
+        assert stored.status == SessionStatus.ACTIVE
+        (row,) = load_dev_queue().tasks
+        assert row.status == QueueItemStatus.RUNNING
+        assert daemon.stop_calls == []
+
+    def test_a_history_failure_fails_the_command_but_still_stops_and_delivers(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        daemon = _install_spawn_close_daemons(monkeypatch)
+        _seed_queued_close_target(tmp_path, tmp_config_dir)
+
+        def _history_down(*_args: object, **_kwargs: object) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(
+            "cw.reconcile.close_audit.record_history_event", _history_down
+        )
+
+        result = CliRunner().invoke(main, ["spawn", "close", _QUEUED_SID])
+
+        assert result.exit_code == 1
+        assert "durable audit record could not be written" in result.output
+        stored = load_state().find_by_name_or_id(_QUEUED_SID)
+        assert stored is not None
+        assert stored.status == SessionStatus.COMPLETED
+        assert daemon.stop_calls == [_QUEUED_SURFACE]
+        assert len(self._authorized()) == 1

@@ -4,7 +4,9 @@ The module owns three things: the in-lock close body shared by ``cw spawn
 close`` and reconcile (``close_session_in_state``, with the flip-only
 ``settle_row=False`` variant the cancel path uses), the lock-free queued-close
 file store, and the two appliers (``apply_queued_closes`` from reconcile,
-``close_sessions_for_cancel`` from ``cw dev-queue cancel``).
+``close_sessions_for_cancel`` from ``cw dev-queue cancel``). Every close is
+audited through ``cw.reconcile.close_audit``: intent before the close, record
+and finalize after it, and a queued entry cleared only once both committed.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from cw.models import (
     CwState,
     DevQueueStore,
     LastResultSource,
+    OrchestratorEventType,
     QueueItemStatus,
     Session,
     SessionOrigin,
@@ -42,6 +45,11 @@ from cw.models import (
     TicketTask,
 )
 from cw.reconcile import session_close
+from cw.reconcile.close_audit import (
+    OPERATOR_CLOSE_REASON,
+    CloseAudit,
+    read_audit_outbox,
+)
 from cw.reconcile.deferred import DeferredReconcileJobs, is_surface_stop_queued
 from cw.reconcile.session_close import (
     CancelCloseOutcome,
@@ -50,6 +58,7 @@ from cw.reconcile.session_close import (
     clear_queued_close,
     close_session_in_state,
     close_sessions_for_cancel,
+    operator_close_audit,
     pending_queued_closes,
     queue_close,
     queued_closes_dir,
@@ -157,7 +166,13 @@ def _close_in_lock(sid: str, *, settle_row: bool = True) -> str | None:
         state = load_state()
         sess = state.find_by_name_or_id(sid)
         assert sess is not None
-        surface = close_session_in_state(sess, settle_row=settle_row)
+        audit = operator_close_audit(
+            sess,
+            origin="spawn_close" if settle_row else "cancel",
+            applied_by="inline",
+            queued_at=None,
+        )
+        surface = close_session_in_state(sess, audit=audit, settle_row=settle_row)
         save_state(state)
     return surface
 
@@ -188,6 +203,16 @@ def _audit_events() -> list[HistoryEvent]:
     return load_history(_CLIENT, event_types=[EventType.SESSION_COMPLETED])
 
 
+def _authorized() -> list[dict[str, object]]:
+    """``session.reap_authorized`` payloads: the delivered audit intents."""
+    return [
+        dict(e.payload)
+        for e in read_events(
+            event_types=[OrchestratorEventType.SESSION_REAP_AUTHORIZED]
+        )
+    ]
+
+
 def _expected_audit(
     sess: Session,
     *,
@@ -200,12 +225,14 @@ def _expected_audit(
         "command": "cw spawn close"
         if origin == "spawn_close"
         else "cw dev-queue cancel",
+        "ticket_id": "",
+        "client": _CLIENT,
+        "session_id": sess.id,
         "origin": origin,
         "applied_by": applied_by,
         "queued_at": queued_at.isoformat(),
         "prior_status": "active",
         "resulting_status": "completed",
-        "completed_reason": "user",
         "settle_row": "true" if origin == "spawn_close" else "false",
         "started_at": sess.started_at.isoformat(),
         "resumed_at": "",
@@ -872,11 +899,13 @@ class TestApplyQueuedCloses:
         queue_close(second, origin="spawn_close", now=_NOW)
         real_close = session_close.close_session_in_state
 
-        def _poison(sess: Session, *, settle_row: bool = True) -> str | None:
+        def _poison(
+            sess: Session, *, audit: CloseAudit, settle_row: bool = True
+        ) -> str | None:
             if sess.id == "sess-a":
                 msg = "poison entry"
                 raise CwError(msg)
-            return real_close(sess, settle_row=settle_row)
+            return real_close(sess, audit=audit, settle_row=settle_row)
 
         monkeypatch.setattr(
             "cw.reconcile.session_close.close_session_in_state", _poison
@@ -964,8 +993,10 @@ class TestApplyQueuedCloses:
 
         assert pending_queued_closes() == []
         assert _audit_events() == []
+        assert _authorized() == []
+        assert read_audit_outbox() == []
 
-    def test_an_audit_write_failure_is_logged_and_the_close_stands(
+    def test_a_history_write_failure_is_logged_and_the_intent_still_delivered(
         self,
         tmp_config_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -978,29 +1009,131 @@ class TestApplyQueuedCloses:
         def _history_down(_client: str, _event: HistoryEvent) -> None:
             raise OSError(28, "No space left on device")
 
-        monkeypatch.setattr("cw.reconcile.session_close.record_event", _history_down)
-        caplog.set_level(logging.WARNING, logger=_LOGGER)
+        monkeypatch.setattr(
+            "cw.reconcile.close_audit.record_history_event", _history_down
+        )
+        caplog.set_level(logging.WARNING)
 
         assert _apply() == 1
 
         assert _stored("sess-1").status == SessionStatus.COMPLETED
         assert pending_queued_closes() == []
-        (record,) = _messages(caplog, "operator_close_audit_failed")
+        (record,) = _messages(caplog, "close_audit_failed")
         assert record.levelno == logging.ERROR
         assert record.exc_info is not None
-        assert record.getMessage() == (
-            "operator_close_audit_failed: session=sess-1 origin=spawn_close"
-            " applied_by=reconcile"
-        )
+        (payload,) = _authorized()
+        assert payload["session_id"] == "sess-1"
 
-    def test_emits_no_orchestrator_event(self, tmp_config_dir: Path) -> None:
+    def test_emits_one_reap_authorized_audit_event_and_nothing_else(
+        self, tmp_config_dir: Path
+    ) -> None:
         sess = _session()
         _seed(sess)
         queue_close(sess, origin="spawn_close", now=_NOW)
 
         _apply()
 
-        assert read_events(consumer="test-2694-fresh-consumer") == []
+        (event,) = read_events(consumer="test-2694-fresh-consumer")
+        assert event.type is OrchestratorEventType.SESSION_REAP_AUTHORIZED
+        assert event.payload["proposed_action"] == OPERATOR_CLOSE_REASON
+        assert event.payload["authority"] == "operator"
+        assert read_audit_outbox() == []
+
+    def test_the_intent_is_persisted_before_the_close_commits(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A crash before the save leaves the intent and the entry: replayable."""
+        sess = _session()
+        _seed(sess)
+        queue_close(sess, origin="spawn_close", now=_NOW)
+
+        def _crash(_state: CwState) -> None:
+            raise OSError(28, "No space left on device")
+
+        with monkeypatch.context() as patched:
+            patched.setattr("cw.reconcile.session_close.save_state", _crash)
+            with pytest.raises(OSError, match="No space left"):
+                _apply()
+
+        assert _stored("sess-1").status == SessionStatus.ACTIVE
+        (intent,) = read_audit_outbox()
+        assert intent["session_id"] == "sess-1"
+        assert intent["status"] == "pending_stop"
+        assert [e.session_id for e in pending_queued_closes()] == ["sess-1"]
+
+        assert _apply() == 1
+
+        assert _stored("sess-1").status == SessionStatus.COMPLETED
+        assert len(_audit_events()) == 1
+        assert len(_authorized()) == 1
+        assert read_audit_outbox() == []
+        assert pending_queued_closes() == []
+
+    def test_a_crash_after_the_commit_replays_without_duplicates(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Committed close, unfinalized intent: the entry stays; replay finalizes."""
+        sess = _session()
+        _seed(sess)
+        queue_close(sess, origin="cancel", now=_NOW)
+        caplog.set_level(logging.WARNING, logger=_LOGGER)
+
+        def _outbox_down(*_args: object, **_kwargs: object) -> None:
+            raise OSError(5, "Input/output error")
+
+        with monkeypatch.context() as patched:
+            patched.setattr(
+                "cw.reconcile.close_audit.finalize_audit_intent", _outbox_down
+            )
+            assert _apply() == 1
+
+        assert _stored("sess-1").status == SessionStatus.COMPLETED
+        assert [e.session_id for e in pending_queued_closes()] == ["sess-1"]
+        (intent,) = read_audit_outbox()
+        assert intent["status"] == "pending_stop"
+        (kept,) = _messages(caplog, "queued_close_audit_pending")
+        assert kept.getMessage() == (
+            "queued_close_audit_pending: session=sess-1 origin=cancel action=entry_kept"
+        )
+
+        _apply()
+
+        assert len(_audit_events()) == 1
+        assert len(_authorized()) == 1
+        assert read_audit_outbox() == []
+        assert pending_queued_closes() == []
+
+    def test_a_spawn_close_entry_settles_no_row_without_its_intent(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The intent precedes every mutation, the row cancel included."""
+        sess = _session()
+        _seed(sess)
+        _seed_row(_row())
+        queue_close(sess, origin="spawn_close", now=_NOW)
+
+        def _outbox_down(_records: object) -> None:
+            raise OSError(5, "Input/output error")
+
+        monkeypatch.setattr(
+            "cw.reconcile.close_audit._write_audit_outbox", _outbox_down
+        )
+        caplog.set_level(logging.WARNING, logger=_LOGGER)
+
+        assert _apply() == 0
+
+        assert _only_row().status == QueueItemStatus.RUNNING
+        assert _stored("sess-1").status == SessionStatus.ACTIVE
+        assert [e.session_id for e in pending_queued_closes()] == ["sess-1"]
+        assert _messages(caplog, "queued_close_failed")
 
     def test_nothing_queued_returns_zero_without_saving(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -1249,3 +1382,63 @@ class TestCloseSessionsForCancel:
 
         assert outcome.unrecorded_ids == ()
         assert _stored("sess-1").status == SessionStatus.COMPLETED
+
+    def test_a_failed_close_is_reported_as_failed_not_as_a_lock_timeout(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed(_session())
+
+        def _poison(
+            _sess: Session, *, audit: CloseAudit, settle_row: bool = True
+        ) -> str | None:
+            del audit, settle_row
+            msg = "poison close"
+            raise CwError(msg)
+
+        monkeypatch.setattr(
+            "cw.reconcile.session_close.close_session_in_state", _poison
+        )
+
+        outcome = _cancel_close(["sess-1"])
+
+        assert outcome.failed == (("sess-1", "CwError: poison close"),)
+        assert outcome.pending_ids == ()
+        assert outcome.unrecorded_ids == ()
+        assert outcome.surfaces_to_stop == ("ref-sess-1",)
+        assert _stored("sess-1").status == SessionStatus.ACTIVE
+        assert [e.session_id for e in pending_queued_closes()] == ["sess-1"]
+
+    def test_a_failed_save_fails_every_entry_and_audits_nothing(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed(_session("sess-a"), _session("sess-b"))
+
+        def _save_fails(*_args: object, **_kwargs: object) -> CwState:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr("cw.reconcile.session_close.mutate_state", _save_fails)
+
+        outcome = _cancel_close(["sess-a", "sess-b"])
+
+        reason = "OSError: [Errno 28] No space left on device"
+        assert outcome.failed == (("sess-a", reason), ("sess-b", reason))
+        assert outcome.pending_ids == ()
+        assert _audit_events() == []
+        assert _authorized() == []
+        assert sorted(e.session_id for e in pending_queued_closes()) == [
+            "sess-a",
+            "sess-b",
+        ]
+
+    def test_an_inline_close_finalizes_its_intent_before_clearing_the_entry(
+        self, tmp_config_dir: Path
+    ) -> None:
+        _seed(_session())
+
+        _cancel_close(["sess-1"])
+
+        (payload,) = _authorized()
+        assert payload["session_id"] == "sess-1"
+        assert payload["proposed_action"] == OPERATOR_CLOSE_REASON
+        assert read_audit_outbox() == []
+        assert pending_queued_closes() == []
