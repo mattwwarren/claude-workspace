@@ -63,9 +63,10 @@ from cw.exceptions import (
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+    from types import TracebackType
     from typing import IO
 
-_logger = logging.getLogger(__name__)
+_log = logging.getLogger(__name__)
 
 # Env var bounding how long a ``bounded=True`` state-lock acquisition (the
 # sessions, dev_queue, clients and concurrency_override locks) waits for
@@ -169,7 +170,7 @@ def _read_env_lock_timeout() -> float | None:
         return value
     if raw not in _warned_invalid_raw:
         _warned_invalid_raw.add(raw)
-        _logger.warning(
+        _log.warning(
             "ignoring invalid %s=%r (expected a non-negative number of seconds);"
             " using the caller's default wait",
             SESSIONS_LOCK_TIMEOUT_ENV,
@@ -214,54 +215,69 @@ def operator_close_lock_wait_seconds() -> float:
     return min(env, OPERATOR_COMMAND_LOCK_WAIT_S)
 
 
+class _FailOpen:
+    """Log any ``Exception`` from one holder-bookkeeping step at WARNING; swallow it.
+
+    Holder bookkeeping must never prevent acquiring or releasing the sessions
+    lock (#2694), and its failures are never worth more than a WARNING. A
+    context manager (the mechanism of :func:`contextlib.suppress`, plus the
+    traceback) rather than ``except Exception``, which ruff's BLE001 accepts
+    only with ERROR-level logging. ``KeyboardInterrupt``/``SystemExit`` are
+    not ``Exception`` subclasses and propagate.
+    """
+
+    def __init__(self, what: str) -> None:
+        self._what = what
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool:
+        if not isinstance(exc, Exception):
+            return False
+        _log.warning(
+            "sessions_lock_holder_%s_failed: error=%s action=ignored",
+            self._what,
+            type(exc).__name__,
+            exc_info=exc,
+        )
+        return True
+
+
 def fail_open_holder_bookkeeping[T](what: str, action: Callable[[], T]) -> T | None:
     """Run one sessions-lock holder bookkeeping *action*; never raise (#2694).
 
-    Holder bookkeeping must never prevent acquiring or releasing the sessions
-    lock, so every exception *action* raises is caught, logged and ignored
-    (``None`` is returned). The expected failures -- I/O (``OSError``), a
-    closed fd or undecodable record (``ValueError``), a record nested past
-    the recursion limit -- log at WARNING; anything else is a bug and logs
-    at ERROR with its traceback (``logger.exception``, the one broad-except
-    form ruff's BLE001 accepts without a suppression).
+    Any exception *action* raises is logged at WARNING with its traceback and
+    ignored (``None`` is returned).
     """
-    try:
+    with _FailOpen(what):
         return action()
-    except (OSError, ValueError, RecursionError) as exc:
-        _logger.warning(
-            "sessions_lock_holder_%s_failed: error=%s action=ignored",
-            what,
-            type(exc).__name__,
-            exc_info=True,
-        )
-    except Exception as exc:
-        _logger.exception(
-            "sessions_lock_holder_%s_failed: error=%s action=ignored",
-            what,
-            type(exc).__name__,
-        )
     return None
+
+
+# The holder-recording opens tried before the plain ``"w"`` open, in order.
+_HOLDER_OPEN_MODES = ("a+", "r")
 
 
 def open_holder_lock_fd(lock_path: Path) -> IO[str]:
     """Open the sessions lock file for a holder-recording acquisition (#2694).
 
-    ``"a+"``, never ``"w"``: ``"w"`` truncates on open, so a losing contender
-    would erase the holder's record. A lock file this process cannot write
-    (an unwritable lock directory or file) opens read-only instead, with a
-    WARNING: ``flock`` works on any fd, so the lock is still taken and only
-    the record is skipped (its write then fails open).
+    ``"a+"`` first: ``"w"`` truncates on open, so a losing contender would
+    erase the holder's record. Then ``"r"`` (a lock file this process cannot
+    write: ``flock`` works on any fd, so the lock is still taken and only the
+    record write fails open). Each failed attempt, whatever it raises, logs a
+    WARNING. Last comes the plain ``"w"`` open every other state lock uses; only
+    its failure propagates, as it did before the holder record existed.
     """
-    try:
-        return lock_path.open("a+")
-    except PermissionError:
-        _logger.warning(
-            "sessions_lock_holder_record_unavailable: path=%s"
-            " reason=lock_file_not_writable action=lock_without_record",
-            lock_path,
-            exc_info=True,
-        )
-        return lock_path.open("r")
+    for mode in _HOLDER_OPEN_MODES:
+        with _FailOpen("open"):
+            return lock_path.open(mode)
+    return lock_path.open("w")
 
 
 def record_lock_holder(fd: IO[str], *, cmd: str) -> None:

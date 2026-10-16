@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import errno
 import fcntl
 import inspect
 import json
@@ -16,6 +17,7 @@ import textwrap
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 from unittest.mock import MagicMock
@@ -74,7 +76,6 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from datetime import datetime
 
     from cw.dispatch_state import ExecutorBlockedMarker
 
@@ -2555,36 +2556,68 @@ class TestSessionsLockBounded:
             pass
 
 
+# ---------------------------------------------------------------------------
+# #2694: the sessions-lock holder record (best effort, fails open)
+# ---------------------------------------------------------------------------
+
+
 def _read_holder_file() -> dict[str, object]:
     raw = sessions_lock_file().read_text()
     return json.loads(raw) if raw else {}
 
 
-def _raise_runtime(*_args: object, **_kwargs: object) -> None:
+class _UnexpectedBookkeepingError(Exception):
+    """Neither I/O nor value: holder bookkeeping must still fail open on it."""
+
+
+def _raise_unexpected(*_args: object, **_kwargs: object) -> None:
     msg = "holder bookkeeping exploded"
-    raise RuntimeError(msg)
+    raise _UnexpectedBookkeepingError(msg)
 
 
-def _enter_and_exit_sessions_lock(ran: list[bool] | None = None) -> None:
-    """Run an (optionally marking) ``sessions_lock()`` body, for ``pytest.raises``."""
+def _assert_lock_fails_open(caplog: pytest.LogCaptureFixture, step: str) -> None:
+    """The body runs, the lock is released, and *step*'s failure is a WARNING."""
+    ran: list[bool] = []
     with sessions_lock():
-        if ran is not None:
-            ran.append(True)
+        ran.append(True)
+    # Released and the fd closed: an immediate bounded attempt succeeds.
+    with sessions_lock(bounded=True, timeout_s=0):
+        pass
+
+    assert ran == [True]
+    records = [r for r in caplog.records if r.name == "cw._flock"]
+    assert any(
+        r.getMessage().startswith(f"sessions_lock_holder_{step}_failed:")
+        for r in records
+    )
+    assert {r.levelno for r in records} == {logging.WARNING}
+    assert all(r.exc_info is not None for r in records)
+
+
+def _enter_sessions_lock_bounded(timeout_s: float) -> None:
+    with sessions_lock(bounded=True, timeout_s=timeout_s):
+        pytest.fail("must not reach body")
+
+
+def _mutate_state_bounded(timeout_s: float) -> None:
+    mutate_state(lambda _state: None, bounded=True, timeout_s=timeout_s)
 
 
 class TestSessionsLockHolderRecord:
     """``sessions_lock()`` records who holds it (#2694), best effort only."""
 
+    @pytest.mark.parametrize(
+        "argv", [["/venv/bin/cw", "session", "--message", "x"], []]
+    )
     def test_records_pid_and_argv0_outside_click_and_clears_on_exit(
-        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str]
     ) -> None:
-        monkeypatch.setattr(sys, "argv", ["/venv/bin/cw", "session", "--message", "x"])
+        monkeypatch.setattr(sys, "argv", argv)
 
         with sessions_lock():
             inside = _read_holder_file()
 
-        assert inside["pid"] == os.getpid()
-        assert inside["cmd"] == "cw"
+        assert (inside["pid"], inside["cmd"]) == (os.getpid(), "cw")
         assert isinstance(inside["acquired_at"], str)
         assert sessions_lock_file().read_text() == ""
 
@@ -2611,149 +2644,87 @@ class TestSessionsLockHolderRecord:
         assert record["cmd"] == "cw send"
         assert "secret-text" not in json.dumps(record)
 
-    def test_empty_argv_outside_click_still_acquires_and_releases(
+    def test_contender_timeout_names_the_holder_and_keeps_its_record(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(sys, "argv", [])
+        monkeypatch.setattr(_flock, "time", _FakeClock())
+        lock = sessions_lock_file()
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        record = json.dumps(
+            {
+                "pid": os.getpid(),
+                "cmd": "cw dev-queue serve",
+                "acquired_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        lock.write_text(record)
 
-        with sessions_lock():
-            assert _read_holder_file()["cmd"] == "cw"
+        with lock.open("a+") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            with (
+                pytest.raises(SessionsLockTimeoutError) as exc_info,
+                sessions_lock(bounded=True, timeout_s=0),
+            ):
+                pytest.fail("must not reach body")
 
-        with sessions_lock(bounded=True, timeout_s=0):
-            pass
-
-    def test_an_unexpected_record_failure_is_logged_and_the_body_still_runs(
-        self,
-        tmp_config_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """Fail open: any bookkeeping exception is logged, never raised."""
-        ran: list[bool] = []
-        caplog.set_level(logging.WARNING, logger="cw._flock")
-
-        with monkeypatch.context() as patched:
-            patched.setattr("cw.config.record_lock_holder", _raise_runtime)
-            _enter_and_exit_sessions_lock(ran)
-
-        assert ran == [True]
-        (record,) = [
-            r
-            for r in caplog.records
-            if r.getMessage().startswith("sessions_lock_holder_record_failed:")
-        ]
-        assert record.levelno >= logging.WARNING
-        assert record.exc_info is not None
-        with sessions_lock(bounded=True, timeout_s=0):
-            pass
-
-    def test_an_oserror_on_the_holder_write_is_warned_and_ignored(
-        self,
-        tmp_config_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        ran: list[bool] = []
-        caplog.set_level(logging.WARNING, logger="cw._flock")
-
-        def _disk_full(*_args: object, **_kwargs: object) -> None:
-            raise OSError(28, "No space left on device")
-
-        with monkeypatch.context() as patched:
-            patched.setattr("cw.config.record_lock_holder", _disk_full)
-            _enter_and_exit_sessions_lock(ran)
-
-        assert ran == [True]
-        (record,) = [
-            r
-            for r in caplog.records
-            if r.getMessage().startswith("sessions_lock_holder_record_failed:")
-        ]
-        assert record.levelno == logging.WARNING
-        assert record.exc_info is not None
-        with sessions_lock(bounded=True, timeout_s=0):
-            pass
+        assert f"pid {os.getpid()} (`cw dev-queue serve`)" in str(exc_info.value)
+        # The loser opened "a+": the holder's record survives its attempt.
+        assert lock.read_text() == record
 
     @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
-    def test_an_unwritable_lock_directory_never_blocks_the_lock(
+    def test_unwritable_lock_directory_fails_open(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A lock file nobody can write still locks; only the record is skipped."""
         lock_dir = tmp_path / "ro-locks"
         lock_dir.mkdir()
         lock = lock_dir / ".sessions.lock"
         lock.write_text("")
         monkeypatch.setattr("cw.config.SESSIONS_LOCK", lock)
-        caplog.set_level(logging.WARNING, logger="cw._flock")
-        ran: list[bool] = []
+        caplog.set_level(logging.DEBUG, logger="cw._flock")
         lock.chmod(0o444)
         lock_dir.chmod(0o555)
         try:
-            _enter_and_exit_sessions_lock(ran)
-            with sessions_lock(bounded=True, timeout_s=0):
-                pass
+            _assert_lock_fails_open(caplog, "open")
         finally:
             lock_dir.chmod(0o755)
             lock.chmod(0o644)
 
-        assert ran == [True]
         assert lock.read_text() == ""
-        warned = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert any(
-            r.getMessage().startswith("sessions_lock_holder_record_unavailable:")
-            for r in warned
-        )
 
-    def test_an_unexpected_clear_failure_still_unlocks_closes_and_notes_the_hold(
+    def test_failing_open_fails_open(
         self,
-        recording_lock_path: _RecordingLockPath,
+        tmp_config_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        notes: list[str] = []
-        real_note = cw.config._lock_hold.note_hold
-        caplog.set_level(logging.WARNING, logger="cw._flock")
+        real_open = Path.open
 
-        def _note(lock_name: str, **kwargs: float) -> None:
-            notes.append(lock_name)
-            real_note(lock_name, **kwargs)
+        def _open(self: Path, mode: str = "r") -> object:
+            if mode == "a+":
+                raise OSError(errno.EIO, "Input/output error", str(self))
+            return real_open(self, mode)
 
-        monkeypatch.setattr("cw.config._lock_hold.note_hold", _note)
+        monkeypatch.setattr(Path, "open", _open)
+        caplog.set_level(logging.DEBUG, logger="cw._flock")
 
-        with monkeypatch.context() as patched:
-            patched.setattr("cw.config.clear_lock_holder", _raise_runtime)
-            _enter_and_exit_sessions_lock()
+        _assert_lock_fails_open(caplog, "open")
 
-        assert [h.closed for h in recording_lock_path.handles] == [True]
-        assert notes == ["sessions"]
-        assert any(
-            r.getMessage().startswith("sessions_lock_holder_clear_failed:")
-            for r in caplog.records
-        )
-        with sessions_lock(bounded=True, timeout_s=0):
-            pass
-
-    def test_contender_timeout_names_the_holder_and_keeps_its_record(
+    @pytest.mark.parametrize("step", ["record", "clear"])
+    def test_unexpected_exception_type_fails_open(
         self,
-        held_sessions_lock_recorded: Path,
+        tmp_config_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        step: str,
     ) -> None:
-        monkeypatch.setattr(_flock, "time", _FakeClock())
+        monkeypatch.setattr(f"cw.config.{step}_lock_holder", _raise_unexpected)
+        caplog.set_level(logging.DEBUG, logger="cw._flock")
 
-        with (
-            pytest.raises(SessionsLockTimeoutError) as exc_info,
-            sessions_lock(bounded=True, timeout_s=0),
-        ):
-            pytest.fail("must not reach body")
-
-        assert f"pid {os.getpid()}" in str(exc_info.value)
-        assert "records no PID" not in str(exc_info.value)
-        # The loser opened "a+": the holder's record survives its attempt.
-        assert _read_holder_file()["pid"] == os.getpid()
+        _assert_lock_fails_open(caplog, step)
 
     @pytest.mark.parametrize(
         ("acquire", "path"),
@@ -2776,30 +2747,21 @@ class TestSessionsLockHolderRecord:
         with acquire():
             assert path().read_text() == ""
 
-    def test_explicit_timeout_is_honoured(
-        self, held_sessions_lock: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "60")
-        clock = _FakeClock()
-        monkeypatch.setattr(_flock, "time", clock)
-
-        with (
-            pytest.raises(SessionsLockTimeoutError),
-            sessions_lock(bounded=True, timeout_s=5.0),
-        ):
-            pytest.fail("must not reach body")
-
-        assert clock.now == 5.0
-
-    def test_mutate_state_forwards_timeout(
-        self, held_sessions_lock: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "acquire", [_enter_sessions_lock_bounded, _mutate_state_bounded]
+    )
+    def test_explicit_timeout_replaces_the_env_wait(
+        self,
+        held_sessions_lock: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        acquire: Callable[[float], None],
     ) -> None:
         monkeypatch.setenv(SESSIONS_LOCK_TIMEOUT_ENV, "60")
         clock = _FakeClock()
         monkeypatch.setattr(_flock, "time", clock)
 
         with pytest.raises(SessionsLockTimeoutError):
-            mutate_state(lambda _state: None, bounded=True, timeout_s=0.5)
+            acquire(0.5)
 
         assert clock.now == 0.5
 
