@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from io import StringIO
+from typing import TYPE_CHECKING, TypedDict
 
 import click
 from ruamel.yaml import YAML
@@ -26,7 +28,12 @@ from cw.config import (
 from cw.dev_queue import dev_queue_lock, load_dev_queue
 from cw.events import record_event
 from cw.exceptions import CwError
-from cw.lane_pause import LanePauseSource, utc_now_seconds
+from cw.lane_pause import (
+    LanePauseSource,
+    build_lane_pause_view,
+    render_lane_pause_lines,
+    utc_now_seconds,
+)
 from cw.models import (
     OCCUPIED_LANE_STATUSES,
     ConcurrencyOverrides,
@@ -35,6 +42,10 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
 )
+
+if TYPE_CHECKING:
+    from cw.lane_pause import LanePauseView
+    from cw.models import LaneConfig
 
 # ``source`` field on LANE_PAUSED / LANE_RESUMED events emitted by an operator
 # via ``cw lane pause/resume`` (vs. the circuit breaker in dispatch), and the
@@ -68,12 +79,23 @@ def config_concurrency() -> None:
     """Manage concurrency overrides (max_parallel_clients, per-client ceilings)."""
 
 
+class _ClientCeiling(TypedDict):
+    """One client's configured ceiling and the layer it came from."""
+
+    name: str
+    ceiling: int
+    source: str
+
+
 def _client_ceiling(
     name: str,
     overrides: ConcurrencyOverrides,
     effective: OrchestratorConfig,
-) -> dict[str, object]:
+) -> _ClientCeiling:
     """One client's configured ceiling and the layer it came from.
+
+    Shared by ``cw config concurrency get -c`` and ``cw dev-queue status``'s
+    effective-config line (#2696).
 
     ``load_effective_config`` owns the per-client merge.  The override model
     is only needed here to identify the source of the already-merged value.
@@ -289,21 +311,68 @@ def lane() -> None:
 @click.option("--json", "as_json", is_flag=True, default=False)
 @handle_errors
 def lane_ls(client: str | None, client_option: str | None, as_json: bool) -> None:
-    """List declared lanes for CLIENT (positional or -c/--client)."""
+    """List declared lanes for CLIENT (positional or -c/--client).
+
+    A paused lane also shows why it is paused and how to resume it (#2696):
+    its cause, recent spawn errors and auto-resume time under the row, and a
+    ``pause`` object in ``--json`` (null for an unpaused lane).
+    """
     resolved_client = _resolve_lane_client(
         client_positional=client, client_option=client_option
     )
     client_cfg = get_effective_client(resolved_client)
     lanes = client_cfg.effective_lanes
+    pauses = _lane_pause_views(resolved_client, lanes)
     if as_json:
-        click.echo(json.dumps([ln.model_dump() for ln in lanes], indent=2))
+        click.echo(
+            json.dumps(
+                [
+                    {
+                        **ln.model_dump(),
+                        "pause": (
+                            pauses[ln.name].model_dump(mode="json")
+                            if ln.name in pauses
+                            else None
+                        ),
+                    }
+                    for ln in lanes
+                ],
+                indent=2,
+            )
+        )
     else:
         click.echo(f"{'NAME':<20} {'MAX_PARALLEL':>12} {'PRIORITY':>8} {'PAUSED'}")
         click.echo("-" * 55)
+        now = datetime.now(UTC)
         for ln in lanes:
             click.echo(
                 f"{ln.name:<20} {ln.max_parallel:>12} {ln.priority:>8} {ln.paused!s}"
             )
+            if ln.name in pauses:
+                for line in render_lane_pause_lines(pauses[ln.name], now=now):
+                    click.echo(f"  {line}")
+
+
+def _lane_pause_views(client: str, lanes: list[LaneConfig]) -> dict[str, LanePauseView]:
+    """The pause view of each paused lane in *lanes*, keyed by lane name.
+
+    Reads the override file and, only when a lane is paused, the declared
+    orchestrator config (the auto-resume knob has no runtime override).
+    """
+    paused = [ln for ln in lanes if ln.paused]
+    if not paused:
+        return {}
+    overrides = _load_concurrency_overrides()
+    enabled = load_orchestrator_config().lane_circuit_auto_resume_minutes > 0
+    return {
+        ln.name: build_lane_pause_view(
+            client,
+            ln.name,
+            overrides.lanes.get(f"{client}/{ln.name}"),
+            auto_resume_enabled=enabled,
+        )
+        for ln in paused
+    }
 
 
 @lane.command("add", help="Add a lane to a client.")

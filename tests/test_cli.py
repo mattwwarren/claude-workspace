@@ -10937,8 +10937,12 @@ class TestDevQueueStatusRunningRowDivergence:
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status"])
         assert result.exit_code == 0, result.output
+        # The tick line, not the #2696 "effective:" line that also names the
+        # client and now prints before the tick section.
         return next(
-            line for line in result.output.splitlines() if "orphan-client:" in line
+            line
+            for line in result.output.splitlines()
+            if "orphan-client: claimed=" in line
         )
 
     def test_status_orphan_annotation_names_session_ids_without_occupied_row(

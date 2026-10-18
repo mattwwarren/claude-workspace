@@ -8,9 +8,12 @@ and never persisted, so unlike the runtime models it is ``extra="forbid"``.
 Compatibility: adding a field is allowed; renaming or removing one bumps
 ``schema_version``.
 
-Depends only on ``cw.models.enums``; a leaf of the ``cw.models`` DAG, imported
-by submodule path (``from cw.models.ticket_view import TicketView``) and not
-re-exported from ``cw.models``.
+Depends on ``cw.models.enums`` and, at runtime, on ``cw.lane_pause`` (a
+pydantic/stdlib/``cw._util`` leaf that imports ``cw.models`` only under
+``TYPE_CHECKING``, the same shape as ``cw.models.tasks``' runtime
+``cw.review_finding_dispositions`` import). Imported by submodule path
+(``from cw.models.ticket_view import TicketView``) and not re-exported from
+``cw.models``.
 """
 
 from __future__ import annotations
@@ -20,6 +23,12 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Runtime (not TYPE_CHECKING) because ``DispatchView.lane_pause``'s annotation
+# resolves at class-build time under ``from __future__ import annotations``.
+# Safe against an import cycle only because ``cw.lane_pause`` imports nothing
+# from ``cw.models`` at module scope -- see its module docstring. Precedent:
+# ``cw.models.tasks``' ``FindingDisposition`` import.
+from cw.lane_pause import LanePauseView
 from cw.models.enums import QueueItemStatus, Stage
 
 TICKET_VIEW_SCHEMA_VERSION = 1
@@ -110,6 +119,13 @@ class DispatchView(BaseModel):
     backoff_until: datetime | None
     lane_paused: bool | None = Field(
         description="Effective lane pause; null when the client is not configured."
+    )
+    lane_pause: LanePauseView | None = Field(
+        default=None,
+        description=(
+            "Why the lane is paused and how to resume it; null unless"
+            " lane_paused is true."
+        ),
     )
     lane_stats: dict[str, int] | None
     lane_occupants: list[dict[str, str]] | None
