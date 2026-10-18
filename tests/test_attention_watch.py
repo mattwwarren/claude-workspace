@@ -1,805 +1,616 @@
-"""Tests for ``attention_watch.py``, the orchestrator's wake-on-event watch (#2250).
+"""Tests for ``cw.attention_watch``: scope, dedupe latch and line rendering (#2693).
 
-``.claude/skills/orchestrate-sprint/scripts/attention_watch.py`` replaces the
-old Monitor-armed ``attention_monitor.sh``. It follows ``cw event tail`` for
-one client, prints the first attention-worthy event plus whatever lands in a
-short burst window, then exits -- so a backgrounded ``Bash`` completion is the
-wake signal. A per-client resume stamp makes each re-arm lossless.
-
-Two tiers, mirroring the script's own split:
-
-- **Unit tier** loads the script by path (same pattern as
-  ``tests/test_preflight.py``) and calls its pure pieces directly: stamp I/O
-  (always with an explicit ``stamp_path``), resume dedup, burst draining, and
-  rendering. The liveness-bucket and breadcrumb scenarios are ported forward
-  from the retired ``test_attention_monitor_sh.py`` (#2004, #1597).
-- **Subprocess tier** runs the script for real against the ``_stub_cw`` fake
-  from ``tests/conftest.py``, with ``HOME`` redirected into ``tmp_path`` so no
-  test can touch the operator's real ``~/.claude-workspace/``.
+The pure half of ``cw orchestrate watch``. The stateful loop (cursor, pid
+advisory, stuck scan) is ``tests/test_attention_stream.py``. The rendering,
+liveness and breadcrumb cases are ported from the retired skill script
+``attention_watch.py`` (#2250, #2004, #1597), now against the real ``cw``
+constants instead of hand-copies.
 """
 
 from __future__ import annotations
 
-import importlib.util
-import json
-import os
-import queue
-import subprocess
-import sys
-import threading
-import time
 from datetime import UTC, datetime
-from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.attention_watch import (
+    BREADCRUMB_PAUSED_STATUSES,
+    CLEAR_TYPES,
+    LATCH_MAX_KEYS,
+    SURFACED_LIVENESS,
+    WATCHED_TYPES,
+    Latch,
+    RowIndex,
+    ScopeSource,
+    WatchScope,
+    exit_line,
+    first_next_command,
+    in_scope,
+    refused_reason,
+    render_event,
+    render_scope_line,
+    render_stuck,
+    resolve_scope,
+)
+from cw.dev_queue import load_dev_queue
 from cw.dispatch import BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
 from cw.dispatch.regress_repeat import _FINALIZE_REGRESS_REPEAT_REASON
-from cw.models import LivenessBucket, OrchestratorEventType
+from cw.exceptions import CwError
+from cw.focus import set_focus
+from cw.models import (
+    DEFAULT_LANE,
+    LivenessBucket,
+    OrchestratorEvent,
+    OrchestratorEventType,
+    QueueItemStatus,
+)
 from cw.reconcile._shared import (
     SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON,
     SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON,
 )
-from tests.conftest import _stub_cw
-
-_SCRIPT = (
-    Path(__file__).resolve().parents[1]
-    / ".claude"
-    / "skills"
-    / "orchestrate-sprint"
-    / "scripts"
-    / "attention_watch.py"
+from cw.stuck_pending import PendingBlock
+from tests._ticket_view_helpers import (
+    ACME,
+    ACME_TICKET,
+    bound_session_for,
+    install_acme_client,
+    make_task,
+    seed_queue,
 )
 
-_SUBPROCESS_TIMEOUT_S = 30
-# Seeded stamp + event timestamps for the subprocess tier: fixed and in the
-# past, so a test never depends on when the script happens to start.
-_SEED_STAMP = "2026-01-01T00:00:00Z"
+if TYPE_CHECKING:
+    from pathlib import Path
+
+_CREATED = datetime(2026, 1, 1, 0, 0, 5, 500000, tzinfo=UTC)
+_NA = OrchestratorEventType.SESSION_NEEDS_ATTENTION
+_LIVENESS = OrchestratorEventType.SESSION_LIVENESS_CHANGED
+_FAST = "fast"
 
 
-def _load() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("attention_watch_under_test", _SCRIPT)
-    assert spec is not None
-    assert spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    # @dataclass resolves its module through sys.modules at class creation.
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    return mod
+@pytest.fixture(autouse=True)
+def _acme(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_acme_client(tmp_path, monkeypatch, lanes=(DEFAULT_LANE, _FAST))
 
 
-@pytest.fixture
-def aw() -> ModuleType:
-    return _load()
+def _event(etype: OrchestratorEventType = _NA, **payload: object) -> OrchestratorEvent:
+    return OrchestratorEvent(type=etype, payload=payload, created_at=_CREATED)
 
 
-def _event(
-    event_id: str = "ev1",
-    created_at: str = "2026-01-01T00:00:05.500000Z",
-    event_type: str = "session.needs_attention",
-    **payload: object,
-) -> dict[str, object]:
-    return {
-        "id": event_id,
-        "type": event_type,
-        "created_at": created_at,
-        "payload": {"ticket_id": "T-1", "paused_status": "blocked", **payload},
+def _page(**payload: object) -> OrchestratorEvent:
+    base: dict[str, object] = {
+        "client": ACME,
+        "ticket_id": ACME_TICKET,
+        "paused_status": "blocked",
     }
+    return _event(_NA, **{**base, **payload})
 
 
-def _liveness_event(
-    session_id: str = "sess-abcdef1234567890",
+def _liveness(
+    *,
     ticket_id: str = "T-123",
-    stage: str = "impl",
-    old_bucket: str = "stale_15m",
     new_bucket: str = "stale_30m",
     stale_minutes: float = 32.4,
-) -> dict[str, object]:
-    return {
-        "id": f"lv-{session_id}-{new_bucket}",
-        "type": "session.liveness_changed",
-        "created_at": "2026-01-01T00:00:05.000000Z",
-        "payload": {
-            "session_id": session_id,
-            "ticket_id": ticket_id,
-            "client": "claude-workspace",
-            "stage": stage,
-            "old_bucket": old_bucket,
-            "new_bucket": new_bucket,
-            "stale_minutes": stale_minutes,
-        },
-    }
-
-
-def _render(aw: ModuleType, events: list[dict[str, object]]) -> list[str]:
-    latch: dict[str, str] = {}
-    rendered = [aw.fmt(e, latch) for e in events]
-    return [line for line in rendered if line is not None]
-
-
-def _filled_queue(
-    events: list[dict[str, object]], *, upstream_exit: bool = False
-) -> queue.Queue[str | None]:
-    q: queue.Queue[str | None] = queue.Queue()
-    for e in events:
-        q.put(json.dumps(e) + "\n")
-    if upstream_exit:
-        q.put(None)
-    return q
-
-
-# ---------------------------------------------------------------------------
-# Unit tier: import + constants
-# ---------------------------------------------------------------------------
-
-
-def test_module_imports_cleanly(aw: ModuleType) -> None:
-    assert callable(aw.main)
-
-
-def test_subscribed_types_are_valid_event_types(aw: ModuleType) -> None:
-    valid = {t.value for t in OrchestratorEventType}
-    assert set(aw.TYPES) <= valid
-    assert "session.liveness_changed" in aw.TYPES
-
-
-def test_blocker_reason_allowlist_matches_routing_constant(aw: ModuleType) -> None:
-    """The script cannot import cw, so its hand-copy is pinned here (#1597)."""
-    assert aw.BLOCKER_REASON_PAUSED_STATUSES == BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
-
-
-def test_surfaced_liveness_buckets_are_canonical_bucket_values(aw: ModuleType) -> None:
-    """Hand-copied bucket names are pinned to LivenessBucket (#2004, #2250)."""
-    assert (
-        frozenset({LivenessBucket.STALE_30M.value, LivenessBucket.STALE_45M.value})
-        == aw.SURFACED_LIVENESS
+    session_id: str = "sess-abcdef1234567890",
+) -> OrchestratorEvent:
+    return _event(
+        _LIVENESS,
+        client=ACME,
+        session_id=session_id,
+        ticket_id=ticket_id,
+        stage="impl",
+        old_bucket="stale_15m",
+        new_bucket=new_bucket,
+        stale_minutes=stale_minutes,
     )
 
 
-def test_finalize_regress_status_matches_canonical_reason(aw: ModuleType) -> None:
-    """Hand-copy of the #1717 finalize_regress_repeat reason, pinned (#2250)."""
-    assert aw.FINALIZE_REGRESS_REPEAT_PAUSED_STATUS == _FINALIZE_REGRESS_REPEAT_REASON
-
-
-def test_stage_mismatch_dead_session_status_matches_canonical_reason(
-    aw: ModuleType,
-) -> None:
-    """Hand-copy of the #2490 dead-session stage-mismatch reason, pinned."""
-    assert (
-        aw.SENTINEL_STAGE_MISMATCH_DEAD_SESSION_PAUSED_STATUS
-        == SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON
-    )
-    assert (
-        aw.SENTINEL_STAGE_MISMATCH_DEAD_SESSION_PAUSED_STATUS
-        in aw.DIAGNOSTIC_BREADCRUMB_PAUSED_STATUSES
+def _scope(
+    *,
+    lanes: frozenset[str] = frozenset(),
+    tickets: frozenset[str] = frozenset(),
+    all_lanes: bool = False,
+    client: str = ACME,
+) -> WatchScope:
+    return WatchScope(
+        client=client,
+        lanes=lanes,
+        tickets=tickets,
+        all_lanes=all_lanes,
+        source=ScopeSource.FLAGS,
     )
 
 
-def test_stage_mismatch_live_session_status_matches_canonical_reason(
-    aw: ModuleType,
-) -> None:
-    """Hand-copy of the #2513 live-session stage-mismatch reason, pinned."""
-    assert (
-        aw.SENTINEL_STAGE_MISMATCH_LIVE_SESSION_PAUSED_STATUS
-        == SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON
+def _rows() -> RowIndex:
+    return RowIndex(load_dev_queue(), ACME)
+
+
+def _render_all(events: list[OrchestratorEvent]) -> list[str]:
+    """Run *events* through clear, latch and render like the stream does."""
+    latch = Latch()
+    lines: list[str] = []
+    for event in events:
+        if latch.clear(event) or not latch.admit(event):
+            continue
+        lines.append(render_event(event, None))
+    return lines
+
+
+# --- constants ---------------------------------------------------------------
+
+
+class TestConstants:
+    def test_watched_types_are_the_seven_attention_types(self) -> None:
+        assert {t.value for t in WATCHED_TYPES} == {
+            "session.needs_attention",
+            "operator.escalation",
+            "session.timed_out",
+            "session.reap_proposed",
+            "session.stage_timed_out_retried",
+            "session.phantom_reverted",
+            "session.liveness_changed",
+        }
+
+    def test_clear_types(self) -> None:
+        assert {t.value for t in CLEAR_TYPES} == {
+            "task.transition",
+            "ticket.requeued",
+            "lane.resumed",
+            "dispatch.tick",
+        }
+
+    def test_surfaced_liveness_is_derived_from_the_bucket_enum(self) -> None:
+        assert frozenset(
+            {LivenessBucket.STALE_30M.value, LivenessBucket.STALE_45M.value}
+        ) == (SURFACED_LIVENESS)
+
+    def test_breadcrumb_allowlist_uses_the_routing_constants(self) -> None:
+        assert BREADCRUMB_ELIGIBLE_PAUSED_STATUSES <= BREADCRUMB_PAUSED_STATUSES
+        assert {
+            _FINALIZE_REGRESS_REPEAT_REASON,
+            SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON,
+            SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON,
+        } <= BREADCRUMB_PAUSED_STATUSES
+
+
+# --- scope resolution ---------------------------------------------------------
+
+
+class TestResolveScope:
+    def test_focus_lane_is_the_default(self) -> None:
+        set_focus("sess-1", ACME, _FAST)
+        scope = resolve_scope(ACME, (), (), all_lanes=False, session_id="sess-1")
+        assert scope.lanes == frozenset({_FAST})
+        assert scope.source == ScopeSource.FOCUS
+
+    def test_focus_supplies_the_client(self) -> None:
+        set_focus("sess-1", ACME, _FAST)
+        scope = resolve_scope(None, (), (), all_lanes=False, session_id="sess-1")
+        assert scope.client == ACME
+
+    def test_focus_for_another_client_is_ignored(self) -> None:
+        set_focus("sess-1", "other", _FAST)
+        scope = resolve_scope(ACME, (), (), all_lanes=False, session_id="sess-1")
+        assert scope.everything
+        assert scope.source == ScopeSource.CLIENT
+
+    def test_client_only_focus_watches_the_whole_client(self) -> None:
+        set_focus("sess-1", ACME, None)
+        scope = resolve_scope(ACME, (), (), all_lanes=False, session_id="sess-1")
+        assert scope.everything
+        assert scope.source == ScopeSource.CLIENT
+
+    def test_all_lanes_ignores_focus(self) -> None:
+        set_focus("sess-1", ACME, _FAST)
+        scope = resolve_scope(ACME, (), (), all_lanes=True, session_id="sess-1")
+        assert scope.everything
+        assert scope.source == ScopeSource.ALL_LANES
+
+    def test_ticket_only_scope_does_not_add_focus_lane(self) -> None:
+        set_focus("sess-1", ACME, _FAST)
+        scope = resolve_scope(ACME, (), ("T-9",), all_lanes=False, session_id="sess-1")
+        assert scope.lanes == frozenset()
+        assert scope.tickets == frozenset({"T-9"})
+        assert scope.source == ScopeSource.FLAGS
+
+    def test_no_client_and_no_focus_raises(self) -> None:
+        with pytest.raises(CwError, match="--client"):
+            resolve_scope(None, (), (), all_lanes=False, session_id=None)
+
+    def test_consumer_names_differ_by_scope(self) -> None:
+        a = _scope(lanes=frozenset({_FAST})).consumer
+        b = _scope(lanes=frozenset({DEFAULT_LANE})).consumer
+        c = _scope().consumer
+        assert len({a, b, c}) == 3
+        assert a.startswith(f"attention-{ACME}-")
+        assert len(a.rsplit("-", 1)[1]) == 8
+
+    def test_consumer_name_replaces_slashes_and_is_stable(self) -> None:
+        scope = _scope(client="org/acme", tickets=frozenset({"B", "A"}))
+        again = _scope(client="org/acme", tickets=frozenset({"A", "B"}))
+        assert scope.consumer.startswith("attention-org-acme-")
+        assert scope.consumer == again.consumer
+
+
+class TestScopeLine:
+    def test_focus_scope_line(self) -> None:
+        scope = WatchScope(
+            client=ACME,
+            lanes=frozenset({_FAST}),
+            tickets=frozenset(),
+            all_lanes=False,
+            source=ScopeSource.FOCUS,
+        )
+        assert render_scope_line(scope, "resume") == (
+            f"WATCH | scope | client={ACME} | lanes=fast | tickets=- | source=focus"
+            f" | start=resume | cursor={scope.consumer}"
+        )
+
+    def test_ticket_only_and_everything_markers(self) -> None:
+        ticket_only = _scope(tickets=frozenset({"T-2", "T-1"}))
+        assert "| lanes=- | tickets=T-1,T-2 |" in render_scope_line(ticket_only, "now")
+        everything = _scope(lanes=frozenset({"b", "a"}), all_lanes=True)
+        assert "| lanes=* |" in render_scope_line(everything, "since")
+
+
+# --- in_scope -----------------------------------------------------------------
+
+
+class TestInScope:
+    def test_other_client_dropped(self) -> None:
+        assert not in_scope(_page(client="other"), _scope(), _rows())
+
+    def test_event_without_client_dropped(self) -> None:
+        assert not in_scope(_event(_NA, ticket_id="T"), _scope(), _rows())
+
+    def test_whole_client_keeps_everything(self) -> None:
+        assert in_scope(_page(lane="anything"), _scope(), _rows())
+
+    def test_sibling_lane_event_dropped(self) -> None:
+        scope = _scope(lanes=frozenset({_FAST}))
+        assert not in_scope(_page(lane=DEFAULT_LANE), scope, _rows())
+        assert in_scope(_page(lane=_FAST), scope, _rows())
+
+    def test_laneless_liveness_resolves_through_the_row_lane(self) -> None:
+        seed_queue([make_task(ticket_id="T-123", lane=_FAST)])
+        assert in_scope(_liveness(), _scope(lanes=frozenset({_FAST})), _rows())
+        assert not in_scope(_liveness(), _scope(lanes=frozenset({"x"})), _rows())
+
+    def test_unknown_ticket_with_lane_set_fails_open(self) -> None:
+        assert in_scope(
+            _liveness(ticket_id="GONE"), _scope(lanes=frozenset({_FAST})), _rows()
+        )
+
+    def test_client_level_page_kept_under_every_scope(self) -> None:
+        stale = _event(
+            _NA, client=ACME, ticket_id=None, paused_status="dispatch_loop_stale"
+        )
+        assert in_scope(stale, _scope(lanes=frozenset({_FAST})), _rows())
+        assert in_scope(stale, _scope(tickets=frozenset({"T-1"})), _rows())
+
+    def test_ticket_union_with_lanes(self) -> None:
+        seed_queue([make_task(ticket_id="T-7", lane=DEFAULT_LANE)])
+        scope = _scope(lanes=frozenset({_FAST}), tickets=frozenset({"T-7"}))
+        assert in_scope(_page(ticket_id="T-7", lane=DEFAULT_LANE), scope, _rows())
+        assert in_scope(_page(ticket_id="T-8", lane=_FAST), scope, _rows())
+
+    def test_ticket_only_scope_drops_other_tickets(self) -> None:
+        seed_queue([make_task(ticket_id="T-8", lane=_FAST)])
+        scope = _scope(tickets=frozenset({"T-7"}))
+        assert not in_scope(_page(ticket_id="T-8"), scope, _rows())
+        assert not in_scope(_liveness(ticket_id="GONE"), scope, _rows())
+        assert in_scope(_page(ticket_id="T-7"), scope, _rows())
+
+
+def _starved(lane: str) -> OrchestratorEvent:
+    return _event(
+        _NA,
+        client=ACME,
+        ticket_id=None,
+        paused_status="lane_circuit_paused",
+        breadcrumbs="pending=2",
+        lane=lane,
+        session_id=f"lane:{ACME}/{lane}@2026-01-01T00:00:05+00:00",
     )
-    assert (
-        aw.SENTINEL_STAGE_MISMATCH_LIVE_SESSION_PAUSED_STATUS
-        in aw.DIAGNOSTIC_BREADCRUMB_PAUSED_STATUSES
-    )
 
 
-# ---------------------------------------------------------------------------
-# Unit tier: stamp round-trip
-# ---------------------------------------------------------------------------
+class TestStarvedLanePage:
+    def test_kept_for_lane_in_scope(self) -> None:
+        assert in_scope(_starved(_FAST), _scope(lanes=frozenset({_FAST})), _rows())
+
+    def test_dropped_for_another_lane(self) -> None:
+        scope = _scope(lanes=frozenset({_FAST}))
+        assert not in_scope(_starved(DEFAULT_LANE), scope, _rows())
+
+    def test_ticket_only_scope_keeps_it_only_for_the_tickets_lane(self) -> None:
+        seed_queue([make_task(ticket_id="T-7", lane=_FAST)])
+        scope = _scope(tickets=frozenset({"T-7"}))
+        assert in_scope(_starved(_FAST), scope, _rows())
+        assert not in_scope(_starved(DEFAULT_LANE), scope, _rows())
+
+    def test_renders_unknown_ticket_and_no_command(self) -> None:
+        line = render_event(_starved(_FAST), None)
+        assert "| #? | lane_circuit_paused |" in line
+        assert line.endswith("| next: -")
 
 
-def test_load_stamp_missing_file_defaults_to_now(
-    aw: ModuleType, tmp_path: Path
-) -> None:
-    before = datetime.now(UTC).replace(microsecond=0)
-    created_at, ids = aw.load_stamp(stamp_path=tmp_path / "missing.json")
-    after = datetime.now(UTC)
-    parsed = datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
-    assert before <= parsed <= after
-    assert ids == set()
+# --- latch --------------------------------------------------------------------
 
 
-def test_load_stamp_corrupt_json_defaults_to_now(
-    aw: ModuleType, tmp_path: Path
-) -> None:
-    stamp = tmp_path / "corrupt.json"
-    stamp.write_text("{not json")
-    created_at, ids = aw.load_stamp(stamp_path=stamp)
-    assert created_at.endswith("Z")
-    assert len(created_at) == len("2026-01-01T00:00:00Z")
-    assert ids == set()
+class TestLatch:
+    def test_repeat_suppressed(self) -> None:
+        latch = Latch()
+        assert latch.admit(_page(session_id="s-1"))
+        assert not latch.admit(_page(session_id="s-2"))
+
+    def test_starved_lane_repeat_suppressed_despite_new_session_id(self) -> None:
+        latch = Latch()
+        assert latch.admit(_starved(_FAST))
+        later = _starved(_FAST).model_copy(
+            update={"payload": {**_starved(_FAST).payload, "session_id": "lane:x@2"}}
+        )
+        assert not latch.admit(later)
+
+    def test_renotify_marker_change_re_pages(self) -> None:
+        latch = Latch()
+        assert latch.admit(_page(renotify_marker="m1"))
+        assert not latch.admit(_page(renotify_marker="m1"))
+        assert latch.admit(_page(renotify_marker="m2"))
+
+    def test_different_status_is_a_different_key(self) -> None:
+        latch = Latch()
+        assert latch.admit(_page(paused_status="blocked"))
+        assert latch.admit(_page(paused_status="merge_gate_blocked"))
+
+    def test_task_transition_clears_only_its_ticket(self) -> None:
+        latch = Latch()
+        latch.admit(_page(ticket_id="T-1"))
+        latch.admit(_page(ticket_id="T-2"))
+        transition = _event(
+            OrchestratorEventType.TASK_TRANSITION,
+            client=ACME,
+            ticket_id="T-1",
+            lane=DEFAULT_LANE,
+        )
+        assert latch.clear(transition)
+        assert latch.admit(_page(ticket_id="T-1"))
+        assert not latch.admit(_page(ticket_id="T-2"))
+
+    def test_ticket_requeued_clears_its_ticket(self) -> None:
+        latch = Latch()
+        latch.admit(_page())
+        requeued = _event(
+            OrchestratorEventType.TICKET_REQUEUED, client=ACME, ticket_id=ACME_TICKET
+        )
+        assert latch.clear(requeued)
+        assert latch.admit(_page())
+
+    def test_clear_for_another_client_clears_nothing(self) -> None:
+        latch = Latch()
+        latch.admit(_page())
+        requeued = _event(
+            OrchestratorEventType.TICKET_REQUEUED, client="other", ticket_id=ACME_TICKET
+        )
+        assert latch.clear(requeued)
+        assert not latch.admit(_page())
+
+    def test_lane_resumed_clears_lane_keys_only(self) -> None:
+        latch = Latch()
+        latch.admit(_starved(_FAST))
+        latch.admit(_starved(DEFAULT_LANE))
+        latch.admit(_page())
+        resumed = _event(OrchestratorEventType.LANE_RESUMED, client=ACME, lane=_FAST)
+        assert latch.clear(resumed)
+        assert latch.admit(_starved(_FAST))
+        assert not latch.admit(_starved(DEFAULT_LANE))
+        assert not latch.admit(_page())
+
+    def test_client_wide_tick_clears_dispatch_loop_stale(self) -> None:
+        stale = _event(
+            _NA, client=ACME, ticket_id=None, paused_status="dispatch_loop_stale"
+        )
+        latch = Latch()
+        latch.admit(stale)
+        latch.admit(_page())
+        tick = _event(
+            OrchestratorEventType.DISPATCH_TICK, client=ACME, claimed=0, cap=2
+        )
+        assert latch.clear(tick)
+        assert latch.admit(stale)
+        assert not latch.admit(_page())
+
+    def test_per_ticket_tick_clears_nothing(self) -> None:
+        stale = _event(
+            _NA, client=ACME, ticket_id=None, paused_status="dispatch_loop_stale"
+        )
+        latch = Latch()
+        latch.admit(stale)
+        latch.admit(_page())
+        tick = _event(
+            OrchestratorEventType.DISPATCH_TICK,
+            client=ACME,
+            ticket_id=ACME_TICKET,
+            skip_reason="attempt_cap_blocked",
+        )
+        assert latch.clear(tick)
+        assert not latch.admit(stale)
+        assert not latch.admit(_page())
+
+    def test_watched_event_is_not_a_clear(self) -> None:
+        assert not Latch().clear(_page())
+
+    def test_round_trip(self) -> None:
+        latch = Latch()
+        latch.admit(_page(renotify_marker="m"))
+        restored = Latch.from_dict(latch.to_dict())
+        assert not restored.admit(_page(renotify_marker="m"))
+        assert restored.to_dict() == latch.to_dict()
+
+    @pytest.mark.parametrize("raw", [None, [], {"k": 1}, "x"])
+    def test_from_dict_tolerates_garbage(self, raw: object) -> None:
+        assert Latch.from_dict(raw).to_dict() == {}
+
+    def test_size_cap_evicts_oldest(self) -> None:
+        latch = Latch()
+        for n in range(LATCH_MAX_KEYS + 1):
+            latch.admit(_page(ticket_id=f"T-{n}"))
+        assert len(latch.to_dict()) == LATCH_MAX_KEYS
+        assert latch.admit(_page(ticket_id="T-0"))
+        assert not latch.admit(_page(ticket_id=f"T-{LATCH_MAX_KEYS}"))
 
 
-def test_save_stamp_then_load_round_trips(aw: ModuleType, tmp_path: Path) -> None:
-    stamp = tmp_path / "stamp.json"
-    aw.save_stamp(stamp_path=stamp, created_at="2026-09-22T01:12:30Z", ids={"b", "a"})
-    assert aw.load_stamp(stamp_path=stamp) == ("2026-09-22T01:12:30Z", {"a", "b"})
-    assert json.loads(stamp.read_text()) == {
-        "created_at": "2026-09-22T01:12:30Z",
-        "ids": ["a", "b"],
-    }
+# --- liveness (ported from the script's latch) --------------------------------
 
 
-def test_save_stamp_creates_parent_dir(aw: ModuleType, tmp_path: Path) -> None:
-    stamp = tmp_path / "nested" / "dir" / "stamp.json"
-    aw.save_stamp(stamp_path=stamp, created_at="2026-09-22T01:12:30Z", ids=set())
-    assert stamp.is_file()
+class TestLiveness:
+    def test_live_and_stale_15m_suppressed(self) -> None:
+        assert _render_all([_liveness(new_bucket="live")]) == []
+        assert _render_all([_liveness(new_bucket="stale_15m")]) == []
+
+    def test_stale_30m_and_45m_surfaced(self) -> None:
+        out30 = _render_all([_liveness(new_bucket="stale_30m", stale_minutes=32.4)])
+        out45 = _render_all([_liveness(new_bucket="stale_45m", stale_minutes=47.1)])
+        assert len(out30) == 1
+        assert "#T-123" in out30[0]
+        assert "stage=impl" in out30[0]
+        assert "stale_30m" in out30[0]
+        assert "stale_m=32.4" in out30[0]
+        assert len(out45) == 1
+        assert "stale_45m" in out45[0]
+
+    def test_per_stage_duration_not_implied(self) -> None:
+        out = _render_all([_liveness(stale_minutes=34.9)])
+        assert len(out) == 1
+        assert "34.9" in out[0]
+        assert "35" not in out[0].replace("34.9", "")
+
+    def test_repeat_same_bucket_suppressed(self) -> None:
+        assert len(_render_all([_liveness(), _liveness()])) == 1
+
+    def test_escalation_always_surfaced(self) -> None:
+        out = _render_all([_liveness(), _liveness(new_bucket="stale_45m")])
+        assert len(out) == 2
+        assert "stale_30m" in out[0]
+        assert "stale_45m" in out[1]
+
+    def test_recovery_then_restall_same_bucket_both_surfaced(self) -> None:
+        out = _render_all([_liveness(), _liveness(new_bucket="live"), _liveness()])
+        assert len(out) == 2
+
+    def test_distinct_tickets_not_cross_suppressed(self) -> None:
+        out = _render_all([_liveness(ticket_id="T-1"), _liveness(ticket_id="T-2")])
+        assert len(out) == 2
+
+    def test_malformed_bucket_value_not_crashing(self) -> None:
+        missing = _event(_LIVENESS, client=ACME, session_id="sess-x", ticket_id="T-1")
+        assert _render_all([missing]) == []
+        assert _render_all([_liveness(new_bucket="stale_99m")]) == []
 
 
-def test_save_stamp_failed_replace_keeps_previous_stamp(
-    aw: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A write that dies before the rename leaves the old stamp readable, so a
-    re-arm resumes from it instead of falling back to "now" (#2250)."""
-    stamp = tmp_path / "stamp.json"
-    aw.save_stamp(stamp_path=stamp, created_at="2026-09-22T01:12:30Z", ids={"a"})
-
-    msg = "disk full"
-
-    def _boom(*_args: object) -> None:
-        raise OSError(msg)
-
-    monkeypatch.setattr(Path, "replace", _boom)
-    with pytest.raises(OSError, match="disk full"):
-        aw.save_stamp(stamp_path=stamp, created_at="2026-09-22T09:00:00Z", ids={"b"})
-
-    assert aw.load_stamp(stamp_path=stamp) == ("2026-09-22T01:12:30Z", {"a"})
+# --- rendering ----------------------------------------------------------------
 
 
-def test_default_stamp_path_uses_client_name(aw: ModuleType) -> None:
-    base = Path.home() / ".claude-workspace"
-    assert aw.default_stamp_path("acme") == base / "attention-stamp-acme.json"
-    assert (
-        aw.default_stamp_path("acme", "debt") == base / "attention-stamp-acme-debt.json"
-    )
+class TestRenderEvent:
+    def test_needs_attention_rendering(self) -> None:
+        event = _page(
+            ticket_id="T-999",
+            breadcrumbs="some breadcrumb text",
+            stage="review",
+            attempts=3,
+            lane="debt",
+            session_id="sess-needsattn00000",
+        )
+        line = render_event(event, "cw dev-queue requeue T-999 -c acme")
+        assert line == (
+            "ATTENTION | 2026-01-01T00:00:05 | session.needs_attention | #T-999"
+            " | blocked | stage=review att=3 lane=debt reason=some breadcrumb text"
+            " | sess-nee | next: cw dev-queue requeue T-999 -c acme"
+        )
 
+    def test_breadcrumbs_hidden_for_non_allowlisted_status(self) -> None:
+        line = render_event(
+            _page(paused_status="finalize_hold", breadcrumbs="/some/worktree"), None
+        )
+        assert "reason=" not in line
 
-# ---------------------------------------------------------------------------
-# Unit tier: resume dedup (the literal #2250 bug)
-# ---------------------------------------------------------------------------
+    def test_finalize_regress_repeat_breadcrumbs_surfaced(self) -> None:
+        event = _page(paused_status="finalize_regress_repeat", breadcrumbs="attempts=3")
+        assert "reason=attempts=3" in render_event(event, None)
 
-
-def test_same_second_microsecond_event_not_dropped_by_naive_string_compare(
-    aw: ModuleType,
-) -> None:
-    since = "2026-09-22T01:12:30Z"
-    created = "2026-09-22T01:12:30.955Z"
-    # The pitfall: a naive full-string compare says the event predates since.
-    assert created < since
-    state = aw.ResumeState(since, set())
-    assert state.accept(_event("e1", created)) is True
-
-
-def test_event_before_since_second_skipped(aw: ModuleType) -> None:
-    state = aw.ResumeState("2026-09-22T01:12:30Z", set())
-    assert state.accept(_event("e0", "2026-09-22T01:12:29.999Z")) is False
-
-
-def test_dedup_by_second_and_id(aw: ModuleType) -> None:
-    second = "2026-09-22T01:12:30"
-    state = aw.ResumeState(second + "Z", {"id1"})
-    assert state.accept(_event("id1", second + ".100Z")) is False
-    assert state.accept(_event("id2", second + ".200Z")) is True
-    assert state.last_created == second + "Z"
-    assert state.sec_ids == {"id1", "id2"}
-
-
-def test_resume_advances_past_delivered_second(aw: ModuleType, tmp_path: Path) -> None:
-    stamp = tmp_path / "stamp.json"
-    first = aw.ResumeState("2026-09-22T01:12:00Z", set())
-    assert first.accept(_event("e1", "2026-09-22T01:12:30.100Z")) is True
-    aw.save_stamp(stamp_path=stamp, created_at=first.last_created, ids=first.sec_ids)
-
-    since, seen = aw.load_stamp(stamp_path=stamp)
-    assert (since, seen) == ("2026-09-22T01:12:30Z", {"e1"})
-    second = aw.ResumeState(since, seen)
-    assert second.accept(_event("e1", "2026-09-22T01:12:30.100Z")) is False
-    assert second.accept(_event("e2", "2026-09-22T01:12:31.050Z")) is True
-    assert second.last_created == "2026-09-22T01:12:31Z"
-    assert second.sec_ids == {"e2"}
-
-
-# ---------------------------------------------------------------------------
-# Unit tier: burst-window coalescing and wake reasons
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def fast_burst(aw: ModuleType, monkeypatch: pytest.MonkeyPatch) -> float:
-    burst = 0.05
-    monkeypatch.setattr(aw, "BURST_S", burst)
-    return burst
-
-
-@pytest.mark.usefixtures("fast_burst")
-def test_single_event_no_burst_exits_promptly(aw: ModuleType) -> None:
-    state = aw.ResumeState(_SEED_STAMP, set())
-    started = time.monotonic()
-    wake = aw.drain(_filled_queue([_event()]), state, max_idle_s=60.0)
-    assert time.monotonic() - started < 2.0
-    assert len(wake.lines) == 1
-    assert wake.lines[0].startswith("ATTENTION | 2026-01-01T00:00:05 |")
-    assert not wake.upstream_exited
-    assert not wake.idle_backstop
-
-
-@pytest.mark.usefixtures("fast_burst")
-def test_cluster_within_burst_window_coalesces_to_one_wake(aw: ModuleType) -> None:
-    events = [_event(f"e{i}", f"2026-01-01T00:00:0{i}.1Z") for i in range(1, 4)]
-    state = aw.ResumeState(_SEED_STAMP, set())
-    wake = aw.drain(_filled_queue(events), state, max_idle_s=60.0)
-    assert len(wake.lines) == 3
-    assert state.last_created == "2026-01-01T00:00:03Z"
-    assert state.sec_ids == {"e3"}
-
-
-def test_event_after_burst_window_not_included(
-    aw: ModuleType, fast_burst: float
-) -> None:
-    q = _filled_queue([_event("early", "2026-01-01T00:00:01.1Z")])
-    late = json.dumps(_event("late", "2026-01-01T00:00:02.1Z")) + "\n"
-    timer = threading.Timer(fast_burst * 20, q.put, args=(late,))
-    timer.start()
-    try:
-        state = aw.ResumeState(_SEED_STAMP, set())
-        wake = aw.drain(q, state, max_idle_s=60.0)
-    finally:
-        timer.join()
-    assert len(wake.lines) == 1
-    assert "late" not in state.seen
-    # Unconsumed, so the stamp stays behind it and the next arm replays it.
-    assert state.last_created == "2026-01-01T00:00:01Z"
-
-
-def test_steady_stream_still_ends_burst_on_time(
-    aw: ModuleType, fast_burst: float, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A queue that never goes empty must not keep the burst open past its
-    deadline (#2250 review). A fake clock that advances on every read makes
-    the deadline pass mid-backlog, deterministically."""
-    ticks = iter(float(i) * fast_burst for i in range(10_000))
-    monkeypatch.setattr(aw, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
-    backlog = 100
-    events = [_event(f"s{i}", "2026-01-01T00:00:05.1Z") for i in range(backlog)]
-    state = aw.ResumeState(_SEED_STAMP, set())
-    wake = aw.drain(_filled_queue(events), state, max_idle_s=60.0)
-    assert 0 < len(wake.lines) < backlog
-
-
-def test_non_qualifying_stream_still_hits_idle_backstop(
-    aw: ModuleType, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Filtered-out events (liveness flaps) that never let the queue drain
-    must not hold the idle backstop open (#2250 review)."""
-    ticks = iter(float(i) for i in range(10_000))
-    monkeypatch.setattr(aw, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
-    backlog = 100
-    flaps = [
-        _liveness_event(session_id=f"s{i}", new_bucket="live") for i in range(backlog)
-    ]
-    state = aw.ResumeState(_SEED_STAMP, set())
-    wake = aw.drain(_filled_queue(flaps), state, max_idle_s=10.0)
-    assert wake.idle_backstop
-    assert wake.lines == ["WATCHER | idle backstop after 10s, no events, re-arm"]
-    # It fired mid-stream, not merely after the backlog happened to drain.
-    assert len(state.seen) < backlog
-
-
-@pytest.mark.usefixtures("fast_burst")
-def test_upstream_exit_ends_drain(aw: ModuleType) -> None:
-    state = aw.ResumeState(_SEED_STAMP, set())
-    wake = aw.drain(_filled_queue([], upstream_exit=True), state, max_idle_s=60.0)
-    assert wake.upstream_exited
-    assert wake.lines == []
-
-
-@pytest.mark.usefixtures("fast_burst")
-def test_idle_backstop_fires_with_no_events(aw: ModuleType) -> None:
-    state = aw.ResumeState(_SEED_STAMP, set())
-    wake = aw.drain(_filled_queue([]), state, max_idle_s=0.05)
-    assert wake.idle_backstop
-    assert wake.lines == ["WATCHER | idle backstop after 0.05s, no events, re-arm"]
-
-
-@pytest.mark.usefixtures("fast_burst")
-def test_suppressed_event_advances_stamp_without_waking(aw: ModuleType) -> None:
-    quiet = _liveness_event(new_bucket="live")
-    state = aw.ResumeState(_SEED_STAMP, set())
-    wake = aw.drain(_filled_queue([quiet]), state, max_idle_s=0.05)
-    assert wake.idle_backstop
-    assert state.last_created == "2026-01-01T00:00:05Z"
-    assert state.sec_ids == {quiet["id"]}
-
-
-@pytest.mark.usefixtures("fast_burst")
-def test_malformed_line_skipped(aw: ModuleType) -> None:
-    q: queue.Queue[str | None] = queue.Queue()
-    q.put("not json\n")
-    q.put(json.dumps(_event()) + "\n")
-    wake = aw.drain(q, aw.ResumeState(_SEED_STAMP, set()), max_idle_s=60.0)
-    assert len(wake.lines) == 1
-
-
-# ---------------------------------------------------------------------------
-# Unit tier: rendering / filtering (ported from test_attention_monitor_sh.py)
-# ---------------------------------------------------------------------------
-
-
-def test_liveness_live_and_stale_15m_suppressed(aw: ModuleType) -> None:
-    assert _render(aw, [_liveness_event(new_bucket="live")]) == []
-    assert _render(aw, [_liveness_event(new_bucket="stale_15m")]) == []
-
-
-def test_liveness_stale_30m_and_45m_surfaced(aw: ModuleType) -> None:
-    out30 = _render(aw, [_liveness_event(new_bucket="stale_30m", stale_minutes=32.4)])
-    out45 = _render(
-        aw,
+    @pytest.mark.parametrize(
+        "status",
         [
-            _liveness_event(
-                session_id="sess-other000000000",
-                new_bucket="stale_45m",
-                stale_minutes=47.1,
-            )
+            SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON,
+            SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON,
         ],
     )
-    assert len(out30) == 1
-    assert "#T-123" in out30[0]
-    assert "stage=impl" in out30[0]
-    assert "stale_30m" in out30[0]
-    assert "stale_m=32.4" in out30[0]
-    assert len(out45) == 1
-    assert "stale_45m" in out45[0]
+    def test_stage_mismatch_breadcrumbs_surfaced(self, status: str) -> None:
+        crumbs = "worker reported blocked; cw spawn close --requeue sess-1"
+        line = render_event(_page(paused_status=status, breadcrumbs=crumbs), None)
+        assert f"reason={crumbs}" in line
+
+    def test_other_type_uses_reason_as_why(self) -> None:
+        event = _event(
+            OrchestratorEventType.OPERATOR_ESCALATION,
+            client=ACME,
+            ticket_id="T-77",
+            reason="escalated",
+        )
+        line = render_event(event, None)
+        assert "| #T-77 | escalated |" in line
+        assert line.endswith("| next: -")
 
 
-def test_liveness_per_stage_duration_not_implied(aw: ModuleType) -> None:
-    out = _render(aw, [_liveness_event(new_bucket="stale_30m", stale_minutes=34.9)])
-    assert len(out) == 1
-    assert "34.9" in out[0]
-    assert "35" not in out[0].replace("34.9", "")
+class TestFirstNextCommand:
+    def test_no_row_is_none(self) -> None:
+        assert first_next_command(None, None) is None
+
+    def test_running_row_leads_with_wait(self) -> None:
+        task = make_task(status=QueueItemStatus.RUNNING, session_id="sess-1")
+        session = bound_session_for(task)
+        assert first_next_command(task, session) == (
+            f"cw dev-queue wait {ACME_TICKET} -c {ACME}"
+        )
 
 
-def test_liveness_repeat_same_bucket_suppressed(aw: ModuleType) -> None:
-    sid = "sess-same0000000000"
-    out = _render(
-        aw,
-        [
-            _liveness_event(session_id=sid, new_bucket="stale_30m"),
-            _liveness_event(session_id=sid, new_bucket="stale_30m"),
-        ],
-    )
-    assert len(out) == 1
+class TestRenderStuck:
+    def test_template(self) -> None:
+        block = PendingBlock(
+            code="lane_circuit_paused",
+            detail=(
+                "lane default circuit breaker tripped (spawn_errors);"
+                " no auto-resume is scheduled"
+            ),
+            command="cw lane resume acme default",
+        )
+        line = render_stuck(
+            datetime(2026, 10, 18, 14, 3, 0, 750, tzinfo=UTC),
+            ticket_id="ACM-7",
+            lane=DEFAULT_LANE,
+            block=block,
+            age_seconds=15 * 60 + 59,
+        )
+        assert line == (
+            "STUCK | 2026-10-18T14:03:00 | #ACM-7 | lane_circuit_paused | pending 15m"
+            " | lane default circuit breaker tripped (spawn_errors); no auto-resume"
+            " is scheduled | lane=default | next: cw lane resume acme default"
+        )
+
+    def test_no_command_renders_dash(self) -> None:
+        block = PendingBlock(code="ssh_key_gate", detail="d", command=None)
+        line = render_stuck(
+            datetime(2026, 10, 18, tzinfo=UTC),
+            ticket_id="T",
+            lane="x",
+            block=block,
+            age_seconds=60.0,
+        )
+        assert line.endswith("| pending 1m | d | lane=x | next: -")
 
 
-def test_liveness_escalation_always_surfaced(aw: ModuleType) -> None:
-    sid = "sess-esc00000000000"
-    out = _render(
-        aw,
-        [
-            _liveness_event(session_id=sid, new_bucket="stale_30m"),
-            _liveness_event(session_id=sid, new_bucket="stale_45m"),
-        ],
-    )
-    assert len(out) == 2
-    assert "stale_30m" in out[0]
-    assert "stale_45m" in out[1]
-
-
-def test_liveness_recovery_then_restall_same_bucket_both_surfaced(
-    aw: ModuleType,
-) -> None:
-    sid = "sess-recover0000000"
-    out = _render(
-        aw,
-        [
-            _liveness_event(session_id=sid, new_bucket="stale_30m"),
-            _liveness_event(session_id=sid, new_bucket="live"),
-            _liveness_event(session_id=sid, new_bucket="stale_30m"),
-        ],
-    )
-    assert len(out) == 2
-
-
-def test_liveness_distinct_sessions_not_cross_suppressed(aw: ModuleType) -> None:
-    out = _render(
-        aw,
-        [
-            _liveness_event(session_id="sess-aaaa00000000000"),
-            _liveness_event(session_id="sess-bbbb00000000000"),
-        ],
-    )
-    assert len(out) == 2
-
-
-def test_liveness_malformed_bucket_value_not_crashing(aw: ModuleType) -> None:
-    missing: dict[str, object] = {
-        "type": "session.liveness_changed",
-        "payload": {"session_id": "sess-x", "ticket_id": "T-1"},
-    }
-    assert _render(aw, [missing]) == []
-    assert _render(aw, [_liveness_event(new_bucket="stale_99m")]) == []
-
-
-def test_needs_attention_rendering_includes_ticket_and_reason(aw: ModuleType) -> None:
-    event = _event(
-        ticket_id="T-999",
-        paused_status="blocked",
-        breadcrumbs="some breadcrumb text",
-        stage="review",
-        attempts=3,
-        lane="debt",
-        session_id="sess-needsattn00000",
-    )
-    out = _render(aw, [event])
-    assert len(out) == 1
-    line = out[0]
-    assert line.startswith(
-        "ATTENTION | 2026-01-01T00:00:05 | session.needs_attention | #T-999 | blocked |"
-    )
-    assert "stage=review" in line
-    assert "att=3" in line
-    assert "lane=debt" in line
-    assert "reason=some breadcrumb text" in line
-    assert line.endswith("| sess-nee")
-
-
-def test_breadcrumbs_hidden_for_non_allowlisted_paused_status(aw: ModuleType) -> None:
-    event = _event(paused_status="finalize_hold", breadcrumbs="/some/worktree/path")
-    out = _render(aw, [event])
-    assert len(out) == 1
-    assert "reason=" not in out[0]
-
-
-def test_finalize_regress_repeat_breadcrumbs_surfaced(aw: ModuleType) -> None:
-    event = _event(paused_status="finalize_regress_repeat", breadcrumbs="attempts=3")
-    assert "reason=attempts=3" in _render(aw, [event])[0]
-
-
-def test_stage_mismatch_dead_session_breadcrumbs_surfaced(aw: ModuleType) -> None:
-    """The page carries what the worker reported and the recovery command (#2490)."""
-    breadcrumbs = (
-        "dead opencode process reported blocked at stage4a_merge_gate"
-        " (prior_pipeline_pr_open); the row is at stage finalize."
-        " cw spawn close --confirmed-dead --requeue sess-1"
-    )
-    event = _event(
-        paused_status=SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON,
-        breadcrumbs=breadcrumbs,
-    )
-
-    line = _render(aw, [event])[0]
-
-    assert f"reason={breadcrumbs}" in line
-    assert "prior_pipeline_pr_open" in line
-    assert "cw spawn close --confirmed-dead --requeue sess-1" in line
-
-
-def test_stage_mismatch_live_session_breadcrumbs_surfaced(aw: ModuleType) -> None:
-    """A live worker's refusal page shows its recovery command too (#2513)."""
-    breadcrumbs = (
-        "live worker reported stage_complete at stage2_impl, refused by the"
-        " staged-advance guard: the row is at stage review."
-        " cw spawn close --requeue sess-1"
-    )
-    event = _event(
-        paused_status=SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON,
-        breadcrumbs=breadcrumbs,
-    )
-
-    line = _render(aw, [event])[0]
-
-    assert f"reason={breadcrumbs}" in line
-    assert "cw spawn close --requeue sess-1" in line
-
-
-def test_unknown_type_passthrough(aw: ModuleType) -> None:
-    event: dict[str, object] = {
-        "type": "operator.escalation",
-        "payload": {"ticket_id": "T-77", "reason": "escalated"},
-    }
-    out = _render(aw, [event])
-    assert len(out) == 1
-    assert "#T-77" in out[0]
-    assert "escalated" in out[0]
-
-
-# ---------------------------------------------------------------------------
-# Subprocess tier: real process against the _stub_cw fake
-# ---------------------------------------------------------------------------
-
-
-def _home(tmp_path: Path) -> Path:
-    home = tmp_path / "home"
-    home.mkdir(exist_ok=True)
-    return home
-
-
-def _run_watch(
-    tmp_path: Path,
-    *args: str,
-    cw_bin: Path | None = None,
-    extra_env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, "HOME": str(_home(tmp_path))}
-    env.pop("CW_BIN", None)
-    env.update(extra_env or {})
-    argv = [sys.executable, str(_SCRIPT), *args]
-    if cw_bin is not None:
-        argv += ["--cw-bin", str(cw_bin)]
-    return subprocess.run(
-        argv,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=_SUBPROCESS_TIMEOUT_S,
-        check=False,
-    )
-
-
-def _seed_stamp(
-    path: Path, created_at: str = _SEED_STAMP, ids: tuple[str, ...] = ()
-) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"created_at": created_at, "ids": list(ids)}))
-    return path
-
-
-def _invoked_args(bin_dir: Path) -> list[str]:
-    return (bin_dir / "cw.args").read_text().splitlines()
-
-
-def _flag_value(args: list[str], flag: str) -> str:
-    return args[args.index(flag) + 1]
-
-
-def _assert_process_gone(pid: int) -> None:
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
-
-
-def test_watcher_line_on_upstream_exit(tmp_path: Path) -> None:
-    bin_dir = _stub_cw(tmp_path, exit_code=3)
-    stamp = _seed_stamp(tmp_path / "stamp.json")
-    result = _run_watch(
-        tmp_path, "acme", "--stamp-path", str(stamp), cw_bin=bin_dir / "cw"
-    )
-    assert result.returncode == 0, result.stderr
-    assert "WATCHER | cw event tail exited rc=3" in result.stdout.splitlines()
-
-
-def test_terminates_upstream_process_on_exit(tmp_path: Path) -> None:
-    bin_dir = _stub_cw(tmp_path, events=[json.dumps(_event())], block=True)
-    stamp = _seed_stamp(tmp_path / "stamp.json")
-    result = _run_watch(
-        tmp_path, "acme", "--stamp-path", str(stamp), cw_bin=bin_dir / "cw"
-    )
-    assert result.returncode == 0, result.stderr
-    lines = result.stdout.splitlines()
-    assert len(lines) == 1
-    assert lines[0].startswith("ATTENTION | 2026-01-01T00:00:05 |")
-    _assert_process_gone(int((bin_dir / "cw.pid").read_text()))
-    assert json.loads(stamp.read_text()) == {
-        "created_at": "2026-01-01T00:00:05Z",
-        "ids": ["ev1"],
-    }
-
-
-def test_idle_backstop_exits_and_reports_after_max_idle_seconds(
-    tmp_path: Path,
-) -> None:
-    bin_dir = _stub_cw(tmp_path, block=True)
-    stamp = tmp_path / "stamp.json"
-    result = _run_watch(
-        tmp_path,
-        "acme",
-        "--stamp-path",
-        str(stamp),
-        "--max-idle-seconds",
-        "0.2",
-        cw_bin=bin_dir / "cw",
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == [
-        "WATCHER | idle backstop after 0.2s, no events, re-arm"
-    ]
-    _assert_process_gone(int((bin_dir / "cw.pid").read_text()))
-    # Same lossless contract as an event wake: the stamp is written, so the
-    # next arm resumes from here rather than from a fresh "now".
-    saved = json.loads(stamp.read_text())
-    assert saved["created_at"] == _flag_value(_invoked_args(bin_dir), "--since")
-
-
-def test_cli_resumes_from_stamp(tmp_path: Path) -> None:
-    bin_dir = _stub_cw(tmp_path)
-    stamp = _seed_stamp(tmp_path / "stamp.json", "2026-03-04T05:06:07Z", ("a",))
-    _run_watch(tmp_path, "acme", "--stamp-path", str(stamp), cw_bin=bin_dir / "cw")
-    args = _invoked_args(bin_dir)
-    assert _flag_value(args, "--since") == "2026-03-04T05:06:07Z"
-    assert _flag_value(args, "--client") == "acme"
-    for flag in ("event", "tail", "--follow", "--dedup-terminal", "--json"):
-        assert flag in args
-    subscribed = {args[i + 1] for i, a in enumerate(args) if a == "--type"}
-    assert "session.needs_attention" in subscribed
-    assert "session.liveness_changed" in subscribed
-    assert "--lane" not in args
-
-
-def test_cli_default_client_is_claude_workspace(tmp_path: Path) -> None:
-    bin_dir = _stub_cw(tmp_path)
-    result = _run_watch(tmp_path, cw_bin=bin_dir / "cw")
-    assert result.returncode == 0, result.stderr
-    assert _flag_value(_invoked_args(bin_dir), "--client") == "claude-workspace"
-    default_stamp = (
-        _home(tmp_path) / ".claude-workspace" / "attention-stamp-claude-workspace.json"
-    )
-    assert default_stamp.is_file()
-
-
-def test_cli_since_override_bypasses_stamp(tmp_path: Path) -> None:
-    replayed = _event("x", "2026-02-01T00:00:00.5Z")
-    bin_dir = _stub_cw(tmp_path, events=[json.dumps(replayed)])
-    stamp = _seed_stamp(tmp_path / "stamp.json", "2026-06-01T00:00:00Z", ("x",))
-    result = _run_watch(
-        tmp_path,
-        "acme",
-        "--stamp-path",
-        str(stamp),
-        "--since",
-        "2026-01-01T00:00:00Z",
-        cw_bin=bin_dir / "cw",
-    )
-    assert result.returncode == 0, result.stderr
-    assert _flag_value(_invoked_args(bin_dir), "--since") == "2026-01-01T00:00:00Z"
-    assert result.stdout.splitlines()[0].startswith("ATTENTION | 2026-02-01T00:00:00 |")
-
-
-def test_cli_lane_scopes_event_tail_invocation(tmp_path: Path) -> None:
-    bin_dir = _stub_cw(tmp_path)
-    result = _run_watch(tmp_path, "acme", "debt", cw_bin=bin_dir / "cw")
-    assert result.returncode == 0, result.stderr
-    assert _flag_value(_invoked_args(bin_dir), "--lane") == "debt"
-    lane_stamp = (
-        _home(tmp_path) / ".claude-workspace" / "attention-stamp-acme-debt.json"
-    )
-    assert lane_stamp.is_file()
-
-
-def test_cli_stamp_path_override_writes_to_given_path(tmp_path: Path) -> None:
-    bin_dir = _stub_cw(tmp_path)
-    custom = tmp_path / "custom-stamp.json"
-    result = _run_watch(
-        tmp_path, "acme", "--stamp-path", str(custom), cw_bin=bin_dir / "cw"
-    )
-    assert result.returncode == 0, result.stderr
-    assert custom.is_file()
-    assert not (_home(tmp_path) / ".claude-workspace").exists()
-
-
-def test_cli_cw_bin_override_invokes_given_executable(tmp_path: Path) -> None:
-    bin_dir = _stub_cw(tmp_path)
-    stamp = tmp_path / "stamp.json"
-    result = _run_watch(
-        tmp_path, "acme", "--stamp-path", str(stamp), cw_bin=bin_dir / "cw"
-    )
-    assert result.returncode == 0, result.stderr
-    assert (bin_dir / "cw.args").is_file()
-
-
-def test_cli_cw_bin_env_var_invokes_given_executable(tmp_path: Path) -> None:
-    bin_dir = _stub_cw(tmp_path)
-    stamp = tmp_path / "stamp.json"
-    result = _run_watch(
-        tmp_path,
-        "acme",
-        "--stamp-path",
-        str(stamp),
-        extra_env={"CW_BIN": str(bin_dir / "cw")},
-    )
-    assert result.returncode == 0, result.stderr
-    assert (bin_dir / "cw.args").is_file()
+class TestExitLine:
+    def test_refused_reason(self) -> None:
+        assert exit_line(refused_reason(42, "attention-acme-1")) == (
+            "WATCH | exited: another watcher (pid 42) owns cursor attention-acme-1;"
+            " pass --force if it is stale (a recycled pid cannot be detected)"
+        )
