@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.77.0] - 2026-10-18
+
 ### Added
 
 - **`cw preflight TICKET -c CLIENT` runs the dispatch pre-flight checks (#2697).** It replaces the `cw-smoke-test` skill's preflight script with a built-in command: the same checks and the same JSON object on stdout (`ok`, `ticket_id`, `client`, `repo`, `repo_root`, `tracker`, `checks`), exit 1 when a hard check failed. `--repo OWNER/NAME` overrides the slug derived from the client's `origin` remote, and a leading `#` on the ticket is stripped. With no `clients.yaml` the repo root is the nearest ancestor of the current directory holding `.git`, so it works from a linked worktree.
