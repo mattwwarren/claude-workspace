@@ -80,8 +80,9 @@ A dev-queue worker session was spawned for a claimed ticket.
 An orchestrator-managed session completed.
 
 **Emitters:** the Stop-hook consumer (`cw signal-stop`, the canonical path),
-the executor's synchronous completion path, and reconcile's salvage/routed
-paths. Payload keys vary slightly by emitter; the Stop-hook shape is:
+the executor's synchronous completion path, reconcile's salvage/routed
+paths, and reconcile's shipped release (`cw.reconcile.shipped_release`,
+#2715). Payload keys vary slightly by emitter; the Stop-hook shape is:
 
 ```json
 {
@@ -98,6 +99,11 @@ paths. Payload keys vary slightly by emitter; the Stop-hook shape is:
 Optional keys: `rescued: true` + `rescue_reason: "late_sentinel"` when a late
 Stop-hook sentinel salvaged an idle-parked task (#918); `salvaged: true` +
 `status: "<sentinel status>"` on reconcile's routed-sentinel backstop paths;
+`pr_url` (string) only from the shipped release (#2715), beside
+`salvaged: true` and `status: "shipped"`: the URL of the sentinel's own PR,
+which gh reported OPEN or MERGED when the release closed a stranded session
+(its `merged_at` goes to the INFO log only). The dispatch consumer completes
+no row for it, since no lane-occupying row is bound to that session;
 `reason: "usage_limited_mid_turn"` (with `crashed: false`) plus
 `act_started_at` (the ISO 8601 `started_at` of the act's write-ahead intent)
 when reconcile's mid-turn usage-limit sweep closes the session (#2324). The
@@ -884,10 +890,45 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `cw doctor --reap`). Emitted **once per session**: the paired
   `session.reap_proposed` stamps `reap_proposed_at`, and a session already
   stamped is not paged again; a failed page write leaves it unstamped, so it
-  is paged on the next tick. No desktop push notification is fired (the
-  sweep runs under `sessions_lock`, which must not start a thread or
-  subprocess). Signal-only under every `reap_policy` (ADR-0014): it mutates
-  nothing but that latch.
+  is paged on the next tick. No desktop push notification is fired: an
+  operator decision (other in-lock reconcile pages do push), not a lock
+  constraint. Signal-only under every `reap_policy` (ADR-0014): it mutates
+  nothing but that latch. Since #2715 the shipped release runs just before
+  this sweep and closes the subset whose emitted `shipped` result has its own
+  OPEN or MERGED PR and a readable, session-bound, old drain stamp, so such a
+  session is closed (`session.completed` with `pr_url`) instead of paged.
+  The release stamps `reap_reason: routed_result_stranded`, so the
+  queue-events poller broadcasts `queue.session_reaped` for it as for the
+  doctor close; it fires no push either.
+- `"running_row_session_lost"` — reconcile's lost-session sweep (#2715,
+  `cw.reconcile.lost_session_rows`) parked a RUNNING row bound to a
+  `session_id` that resolves to no Session record (the `sessions.json` write
+  failed after launch, see `spawn_post_launch_failed`). The row is now
+  BLOCKED_ON_USER with this disposition, keeps its `session_id` and `pr_url`,
+  and is not charged an unproductive attempt; a `task.transition` precedes
+  this page. Exactly the canonical nine keys: `session_id` is the row's
+  dangling id, `session_name` is `""`, `claude_session_id` is `null`, `lane`
+  is the row's lane, `crashed` is `false`. `breadcrumbs` says nothing was
+  deleted, names the missing id, notes that the leaked-worker sweep stops any
+  live unrecorded worker, and names the release (verify the worktree holds
+  no unsaved work, then `cw dev-queue requeue`). Escalation-eligible (fires
+  after 45 minutes) and never auto-requeued. No push notification (parity
+  with `routed_result_session_stranded`). At most three rows park per tick;
+  when `sessions.json` holds no session and more than three bound rows would
+  park, none park and a WARNING is logged.
+- `"running_row_no_session"` — the same sweep found a RUNNING row with no
+  `session_id` at least `SPAWN_GRACE_SECONDS` (30 s) after its claim (or a
+  claim of unknown age). Page only: nothing about the row changes, and it is
+  latched once in `advisory_note` as `?no_session` (a fresh claim pages
+  again). Canonical nine keys; `session_id` is the synthetic
+  `no-session:<client>/<ticket>#<attempts>`, unique per claim episode so
+  `--dedup-terminal` keeps each one; `session_name` is `""` and
+  `claude_session_id` `null`. `breadcrumbs` gives the attempt, the claim age
+  and any live same-ticket sessions, and suggests `cw list` and
+  `cw dev-queue tasks`; it names `cw doctor --reap` (class 2) only when no
+  same-ticket session is live. A slow worktree phase or an unstamped worker
+  can look like this (reconcile adopts the row once the evidence ties,
+  #2591), so a rare false page is possible. No push notification.
 - `"silently_idle"` — *historical (ADR-0014)*: the idle watchdog's park.
   No longer produced; may exist on old rows/logs.
 - `"needs_salvage"` — *historical (ADR-0014)*: the git-state salvage LOW
@@ -969,8 +1010,9 @@ open enum; consumers MUST tolerate unknown values. Known values:
   the row with `cw dev-queue cancel <ticket> -c <client>` followed by
   `cw dev-queue requeue <ticket> -c <client> --from-cancelled` (plain
   `cw dev-queue requeue` refuses a RUNNING row). When the `sessions.json`
-  write failed on a dispatch claim, the same orchestrator release applies;
-  nothing yet recovers that case automatically (#2591 follow-up). No push
+  write failed on a dispatch claim, the next reconcile tick parks the row
+  BLOCKED_ON_USER as `running_row_session_lost` (#2715), keeping its
+  `session_id`, and a plain requeue then releases it. No push
   notification is fired (`fire_push_notification` is not called).
   A fire-and-forget launch (#2592) does NOT stop the process. The session
   stays ACTIVE (no `surface_ref`, no liveness handle) and bound to the RUNNING
@@ -1123,7 +1165,8 @@ open enum; consumers MUST tolerate unknown values. Known values:
   and `session_id` is the synthetic
   `dispatch-loop-stale:<client>@<iso8601>`. The firing instant is folded into
   `session_id` for the same reason `lane_circuit_paused` does it:
-  `_terminal_dedup_key` is `(event_type, session_id, paused_status)`, so a
+  `_terminal_dedup_key` is `(event_type, session_id, paused_status,
+  renotify_marker)` and this page carries no `renotify_marker`, so a
   stable id would collapse every recurrence under `cw event tail
   --dedup-terminal`. `breadcrumbs` carries `"pending=<int> age_s=<int>
   skip=<skip_reason> occupied=<int> running=<int>/<cap>

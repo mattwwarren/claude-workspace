@@ -50,6 +50,7 @@ from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.reconcile._shared import (
     _FIX_DISPATCH_REF_UNRESOLVED_REASON,
     _REAP_ELIGIBLE_DISPOSITIONS_BASE,
+    _SESSION_LOST_REASON,
     _UNRESOLVED_SUBAGENT_SPAWN_REASON,
 )
 
@@ -143,6 +144,13 @@ ESCALATION_TRIGGER_TIMER = "timer"
 # starts immediately. Kept out of _REAP_ELIGIBLE_DISPOSITIONS_BASE because
 # auto-requeueing a branch cw cannot locate would re-run the same failing
 # resolution rather than fix anything.
+#
+# GitHub #2715 joins as a NINTH union term on the same reasoning: the
+# lost-session park (a RUNNING row bound to a session with no record) is
+# unresolved and non-operator-initiated, so its escalation clock starts
+# immediately. Kept out of _REAP_ELIGIBLE_DISPOSITIONS_BASE because an
+# auto-requeue could re-run the ticket over a possibly-live unrecorded worker.
+# Escalate, never requeue.
 _ELIGIBLE_DISPOSITIONS: frozenset[str | None] = frozenset(
     (PAUSED_FOR_USER_INPUT_STATUSES - {"premises_pending_verification"})
     | _REAP_ELIGIBLE_DISPOSITIONS_BASE
@@ -152,6 +160,7 @@ _ELIGIBLE_DISPOSITIONS: frozenset[str | None] = frozenset(
         REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
         REVIEW_STALENESS_GATE_DISPOSITION,
         _FIX_DISPATCH_REF_UNRESOLVED_REASON,
+        _SESSION_LOST_REASON,
         _UNRESOLVED_SUBAGENT_SPAWN_REASON,
     }
 )

@@ -157,6 +157,102 @@ supersedes their worktree clause.
   a classification pass with no fresh re-check (#2669); the reconcile
   dirty helper reads helper errors as clean, fail-open (#2662).
 
+## Amendment (#2715)
+
+Two ungated evidence acts, plus one page, release slots that nothing else
+released. The authority for acting on recorded evidence is the operator's
+Option B decision on #2715 (`#issuecomment-6215180981`), the round-2
+resolutions (`#issuecomment-6249899648`) and the plan-approval note
+(`#issuecomment-6250291426`). Neither act is gated by `reap_policy`, and
+there is no kill switch, lane switch or sweep registry: Option B settled that
+these acts run on every lane.
+
+- **The shipped release (`cw.reconcile.shipped_release`).** A live ACTIVE or
+  IDLE DAEMON session in the #2524 stranded population (consumed
+  `cw result emit` result, roster-live, no lane-occupying row bound to it) is
+  closed when its recorded result is `shipped` and that result's own PR is
+  OPEN or MERGED (a lockless `gh pr list` pre-pass, at most three lookups per
+  tick). The session flips COMPLETED/NORMAL with
+  `reap_reason = routed_result_stranded` (the value `cw doctor --reap`
+  stamps for the same class), one `session.completed` carries the additive
+  `pr_url`, `merged_at` goes to the INFO log, and the daemon stop is deferred
+  past `sessions_lock`. **This stops a roster-live worker**, which amends
+  the "act on workers whose owning session is terminal or absent" wording
+  of the #2630 amendment for this one sweep: its target session was live at
+  detect time.
+- **It departs from the literal Option B words.** It completes no queue row:
+  the route already advanced the row, and the stalled and idle sweeps own the
+  RUNNING-row case. The acceptance is the freed client-ceiling slot.
+- **AC1, as relaxed.** A shipped session with a PR does not hold a slot past
+  one tick once a route has recorded the result, except where a
+  lane-occupying row pins it by design: a `signoff` or `hold_finalize` row
+  (ADR-0001) is a human-kept gate, and such a session is left untouched. The
+  tick counts from the one on which the evidence is complete.
+- **It fails closed.** The worktree's `agent_spawn_stamp` must be readable,
+  carry an outstanding count, be at least `fix_loop_await_deadline_minutes`
+  old, and carry a `session_id` equal to the session being stopped. The
+  Stop hook's snapshot writes that id: it names the context owner when the
+  snapshot was written, not necessarily the session that fired the Stop. An
+  absent or unreadable stamp, a stamp with another session's id or none
+  (every stamp written before this change), or a young stamp means no act
+  that tick. The pin is re-checked on a fresh queue read under
+  `dev_queue_lock`, held across the check and the state write.
+- **The age checks only delay; the evidence triggers.** The draining veto
+  (`_background_work_still_draining` compares an unresolved subagent-spawn
+  stamp's age with `fix_loop_await_deadline_minutes`), the added stamp-age
+  and session-id checks, and the #2524 transcript bucket are each necessary
+  but never sufficient: the draining veto only delays the act, and so do the
+  others. Absent the recorded shipped result plus its own OPEN/MERGED PR, no
+  elapsed time acts. ADR-0014 invariant 1 and ARCHITECTURE §7.13 ("thresholds
+  may only debounce or delay signals and re-checks") hold.
+- **The lost-session park (`cw.reconcile.lost_session_rows`).** A RUNNING,
+  non-exempt, in-scope row bound to a `session_id` that resolves to no
+  Session (the #2502 failed `sessions.json` write) is parked BLOCKED_ON_USER
+  with disposition `running_row_session_lost`, keeping `session_id` and
+  `pr_url`, with no unproductive charge. ADR-0001's "session resolves"
+  invariant cannot hold for such a row (the record was never written); the
+  park keeps the dangling id as evidence and deletes nothing. It can never
+  produce a parked row with `session_id = None`, and the leaked-worker sweep
+  stops any live unrecorded worker. The disposition escalates after 45
+  minutes and is never auto-requeued; `cw dev-queue requeue` releases it.
+- **Mass-park guards.** When `sessions.json` holds no session at all and
+  more than three bound rows would park, nothing parks (one WARNING). Otherwise
+  at most three rows park per tick, in queue order; the rest wait.
+- **The sessionless page.** A RUNNING row with no `session_id` past
+  `SPAWN_GRACE_SECONDS` since its claim is paged once (latched in
+  `advisory_note` as `?no_session`) and never parked. The grace is a delay on
+  a signal (ADR-0014); the claim-to-bind window can exceed it, so a rare false,
+  non-destructive page is accepted.
+- **Audit.** The park emits `task.transition` (inline, under the queue lock),
+  one `session.needs_attention` and an INFO log; the release emits
+  `session.completed` with `pr_url` and an INFO log. No new event type. Neither
+  fires a push notification (parity with the #2524 page), but the release's
+  `reap_reason` makes the queue-events poller broadcast `queue.session_reaped`
+  exactly as for the doctor close.
+- **Slot accounting.** The lane slot follows `OCCUPIED_LANE_STATUSES`, which
+  includes BLOCKED_ON_USER: a park makes the row requeue-able and the
+  operator's `requeue` frees the slot. The ceiling slot is session-status
+  based: the release frees it by flipping the session; a record-missing row
+  had no Session and never counted.
+- **Park scope, in words.** The park covers only a bound row whose Session
+  record is missing. A roster-absent live session stays with the phantom
+  sweep (after its 30 s grace); a terminal session stays with the backstops
+  (60 s completion grace, 30 s spawn grace, dirty-check deferral). Also
+  outside both sweeps: the daemon-outage early return, backstop-exempt rows
+  (`usage_limit_act`, fix-dispatch hold), live bound sessions with
+  `surface_ref = None` (`compute_drift` skips them), and park overflow beyond
+  the cap.
+- **Accepted residuals.** A stamp written before this change carries no
+  session id, so an already-stranded session holding one stays page-only
+  until an operator closes it or a later Stop rewrites the stamp. Background
+  work that prints nothing for longer than the deadline is indistinguishable
+  from drained work. The release's three-lookup cap can be starved by three
+  permanently ineligible sessions ahead of an eligible one (the #2524 page
+  still fires for it).
+- **Tracked, not fixed here.** The leaked-worker sweep runs before the outage
+  guard and has the same blind spot on a wiped `sessions.json`; the park cap
+  is per tick, not cumulative.
+
 ## Alternatives considered
 
 - **Rely on ADR-0005 alone.** Rejected. The state lock stops *lost* writes

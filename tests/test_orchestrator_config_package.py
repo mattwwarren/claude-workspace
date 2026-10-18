@@ -65,13 +65,14 @@ _SET_PATHS = (
     ("operator_channel_forward", "task_transition_statuses"),
 )
 
-# The 31 names ``cw.models`` imports from ``cw.models.orchestrator_config``.
+# The 32 names ``cw.models`` imports from ``cw.models.orchestrator_config``.
 _CW_MODELS_REEXPORTS = frozenset(
     {
         "_DEFAULT_OPERATOR_EVENT_TYPES",
         "_DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES",
         "_USAGE_LIMIT_BACKOFF_SECONDS",
         "AGENT_SPAWN_LAST_STAMPED_AT_KEY",
+        "AGENT_SPAWN_SESSION_ID_KEY",
         "AGENT_SPAWN_STAMP_KEY",
         "AGENT_SPAWN_UNRESOLVED_COUNT_KEY",
         "BASH_TOOL_NAME",
@@ -102,7 +103,7 @@ _CW_MODELS_REEXPORTS = frozenset(
     }
 )
 
-# The complete import surface of ``cw.models.orchestrator_config``: the 31
+# The complete import surface of ``cw.models.orchestrator_config``: the 32
 # ``cw.models`` re-exports plus ``CODEX_TIER_CLAIM_SUPPRESSION``, which
 # ``cw.codex_background`` imports from the package directly.
 EXPECTED_EXPORTS = _CW_MODELS_REEXPORTS | {"CODEX_TIER_CLAIM_SUPPRESSION"}
@@ -177,8 +178,8 @@ class TestImportSurface:
     """``from cw.models.orchestrator_config import X`` keeps working for every X."""
 
     def test_expected_exports_size(self) -> None:
-        assert len(_CW_MODELS_REEXPORTS) == 31
-        assert len(EXPECTED_EXPORTS) == 32
+        assert len(_CW_MODELS_REEXPORTS) == 32
+        assert len(EXPECTED_EXPORTS) == 33
 
     def test_all_matches_full_surface(self) -> None:
         assert set(pkg.__all__) == EXPECTED_EXPORTS
@@ -192,7 +193,7 @@ class TestImportSurface:
     def test_cw_models_reexport_is_the_same_object(self, name: str) -> None:
         assert getattr(cw.models, name) is getattr(pkg, name)
 
-    def test_cw_models_still_reexports_the_31_names(self) -> None:
+    def test_cw_models_still_reexports_the_32_names(self) -> None:
         assert set(cw.models.__all__) >= _CW_MODELS_REEXPORTS
 
     @pytest.mark.parametrize("name", sorted(EXPECTED_EXPORTS))

@@ -78,6 +78,7 @@ from cw.reconcile._shared._constants import (
     _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY,
     _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     _SESSION_ID_MISMATCH_ADVISORY_NOTE,
+    _SESSION_LOST_REASON,
     _SESSION_UNRESPONSIVE_REASON,
     _SILENTLY_IDLE_REASON,
     _STAGE_REVIEW_COMPLETE,
@@ -200,6 +201,7 @@ from cw.reconcile._shared._types import (
     _resolve_routed_sentinel,
 )
 from cw.reconcile._shared._worktree_evidence import (
+    _agent_spawn_stamp_session_id,
     _is_headless,
     _read_agent_spawn_stamp_context,
     _read_unresolved_subagent_spawn,
@@ -267,6 +269,7 @@ __all__ = [
     "_SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY",
     "_SENTINEL_STAGE_MISMATCH_REFUSED_REASON",
     "_SESSION_ID_MISMATCH_ADVISORY_NOTE",
+    "_SESSION_LOST_REASON",
     "_SESSION_UNRESPONSIVE_REASON",
     "_SILENTLY_IDLE_REASON",
     "_STAGE_REVIEW_COMPLETE",
@@ -292,6 +295,7 @@ __all__ = [
     "UsageLimitDetection",
     "_TaskLookupResult",
     "_TranscriptRecordIterator",
+    "_agent_spawn_stamp_session_id",
     "_apply_correction_signal_fields",
     "_apply_queue_mutations",
     "_apply_salvaged_completion",

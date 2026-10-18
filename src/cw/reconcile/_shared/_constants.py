@@ -164,6 +164,18 @@ _UNRESOLVED_SUBAGENT_SPAWN_REASON = "unresolved_subagent_spawn"
 # #2142 stale-handoff sweep, and the ticket is claimed into a fresh REVIEW
 # session (#2265 decides whether requeue should resume it instead).
 _FIX_DISPATCH_REF_UNRESOLVED_REASON = "fix_dispatch_ref_unresolved"
+# Disposition stamped (and paused_status written to the SESSION_NEEDS_ATTENTION
+# page) when cw.reconcile.lost_session_rows parks a RUNNING row whose bound
+# session_id resolves to no Session record -- the #2502 shape, where the
+# sessions.json write failed after the worker launched (GitHub #2715).
+#
+# Same treatment as _UNRESOLVED_SUBAGENT_SPAWN_REASON above: escalation-
+# eligible via its own union term in escalation.py, but deliberately NOT in
+# _REAP_ELIGIBLE_DISPOSITIONS_BASE below. An unrecorded worker may still be
+# live (the leaked-worker sweep stops it, but not before this tick's park), so
+# concierge's false-park requeue could re-run the ticket over it. Escalate,
+# never requeue.
+_SESSION_LOST_REASON = "running_row_session_lost"
 # paused_status written to SESSION_NEEDS_ATTENTION events when
 # complete_timed_out_merged_tasks refuses a COMPLETED transition for a
 # PENDING row with no claim history (attempts == spawn_error_count,

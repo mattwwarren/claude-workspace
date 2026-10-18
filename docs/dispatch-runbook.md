@@ -773,8 +773,15 @@ common wedge conditions:
   `AWAITING_OPERATOR_SIGNOFF` row bound to it, its worker still in the daemon
   roster, and a transcript in the 30m/45m liveness bucket. It holds a ceiling
   slot and its worktree. Reconcile has already paged it once
-  (`session.needs_attention`, `paused_status=routed_result_session_stranded`);
-  nothing closes it automatically under any `reap_policy`. A plain
+  (`session.needs_attention`, `paused_status=routed_result_session_stranded`).
+  One case closes automatically (#2715): when the routed result is `shipped`,
+  its own PR is OPEN or MERGED, and the worktree's drain stamp is readable,
+  carries this session's id and is past `fix_loop_await_deadline_minutes`,
+  reconcile's shipped release closes it on the next tick (same
+  `reap_reason`, no queue row touched) before it is ever paged. A stamp
+  written before #2715 carries no session id, so such a session stays here
+  for you. Everything else is closed only by an operator, under any
+  `reap_policy`. A plain
   `cw doctor` reports it; `cw doctor --reap` closes **every** session of this
   class (marks it `COMPLETED` with `reap_reason=routed_result_stranded` and
   stops its worker) and never touches a queue row. To close just one, run
@@ -1903,6 +1910,31 @@ reason. Wait for the annotation to clear; only a tick line still reading
   auto-requeue (§11.1), on the same reasoning as `unresolved_subagent_spawn`
   above: an agent-authored branch name is not automatically safe to keep
   retrying against.
+- `disposition: running_row_session_lost` (#2715) means the row was RUNNING
+  and bound to a session that has **no record in `sessions.json`**, usually
+  because the state write failed after the worker launched
+  (`spawn_post_launch_failed`). Reconcile parked it, keeping the dangling
+  `session_id` as evidence, and charged no unproductive attempt. The
+  leaked-worker sweep stops any live worker with no cw session, so by the
+  time you look the worker is normally gone. **Check before requeueing:** the
+  ticket's worktree for unsaved work (commit and push it, or confirm it is
+  junk), then run `cw dev-queue requeue <ticket> -c <client>`. Doctor class 5
+  also lists this park as `wedge/blocked-on-user-dead-session` (a session
+  absent from state counts as dead); its `--reap` release is the same as the
+  requeue. Escalation-eligible (§11.2) and excluded from concierge's
+  auto-requeue (§11.1). At most three rows park per tick; if `sessions.json`
+  is empty or missing and more than three bound rows would park, reconcile
+  parks none and logs a WARNING (inspect `sessions.json` before acting).
+- A `session.needs_attention` with `paused_status=running_row_no_session`
+  (#2715) is page-only: a RUNNING row has had **no session bound** for at
+  least 30 seconds after its claim. Nothing was changed. Read the breadcrumbs
+  for live same-ticket sessions, then check `cw list` and
+  `cw dev-queue tasks`. A slow worktree phase or an unstamped worker looks
+  like this and reconcile adopts the row once the evidence ties (#2591). Only
+  when no worker is live for the ticket, release it with `cw doctor --reap`
+  (class 2) or `cw dev-queue cancel` followed by
+  `cw dev-queue requeue --from-cancelled`. The row's `advisory_note` reads
+  `?no_session` until it is bound or claimed again.
 
 ### Dispatch-loop staleness page (`dispatch_loop_stale`)
 
@@ -2497,7 +2529,7 @@ Runs **unconditionally** every reconcile tick (not gated by
 (disposition ∈ `ambiguities_pending_resolution` / `plan_pending_approval` /
 `review_pending_approval` / `stalled_retry_cap_parked` / `silently_idle` /
 `idle_stall` / `wall_clock_budget` / `phantom_surface` /
-`unresolved_subagent_spawn` / `None` while
+`unresolved_subagent_spawn` / `running_row_session_lost` / `None` while
 `BLOCKED_ON_USER`, or any `AWAITING_OPERATOR_SIGNOFF`/`FAILED` row) for more
 than 45 minutes fires one `operator.escalation` event — a single page per
 parked episode, not a repeat-every-tick alarm. See `docs/events.md` for the

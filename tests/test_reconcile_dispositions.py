@@ -202,3 +202,83 @@ def test_emit_routed_sentinel_completion_queues_nothing_without_surface_ref() ->
     )
 
     assert sink.post_lock == []
+
+
+_OWN_PR_URL = "https://github.com/foo/bar/pull/99"
+
+
+def test_build_salvage_completion_payload_adds_exactly_pr_url() -> None:
+    """#2715: a supplied ``pr_url`` adds one key to the 8-field payload."""
+    session = _make_daemon_session(claude_session_id="csid-8")
+    base = build_salvage_completion_payload(session, ticket_id="T-8", status="shipped")
+
+    payload = build_salvage_completion_payload(
+        session, ticket_id="T-8", status="shipped", pr_url=_OWN_PR_URL
+    )
+
+    assert payload == {**base, "pr_url": _OWN_PR_URL}
+    assert len(payload) == len(base) + 1
+
+
+def test_build_salvage_completion_payload_none_pr_url_omits_the_key() -> None:
+    session = _make_daemon_session()
+
+    payload = build_salvage_completion_payload(
+        session, ticket_id="T-9", status="shipped", pr_url=None
+    )
+
+    assert "pr_url" not in payload
+    assert payload == build_salvage_completion_payload(
+        session, ticket_id="T-9", status="shipped"
+    )
+
+
+def test_build_salvage_completion_payload_with_pr_url_stays_pure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        msg = "build_salvage_completion_payload must stay pure"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("cw.reconcile.dispositions.record_event", _boom)
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", _boom)
+
+    payload = build_salvage_completion_payload(
+        _make_daemon_session(), ticket_id="T-10", status="shipped", pr_url=_OWN_PR_URL
+    )
+
+    assert payload["pr_url"] == _OWN_PR_URL
+
+
+def test_emit_routed_sentinel_completion_carries_pr_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daemon = FakeNativeDaemonClient()
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
+    session = _make_daemon_session(claude_session_id="csid-11", surface_ref="ref-11")
+
+    call_and_drain(
+        emit_routed_sentinel_completion,
+        session,
+        ticket_id="T-11",
+        status="shipped",
+        pr_url=_OWN_PR_URL,
+    )
+
+    events = read_events(
+        consumer="test-emit-routed-sentinel-completion-pr-url",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert len(events) == 1
+    assert events[0].payload == {
+        "session_id": session.id,
+        "session_name": session.name,
+        "client": session.client,
+        "ticket_id": "T-11",
+        "claude_session_id": "csid-11",
+        "crashed": False,
+        "salvaged": True,
+        "status": "shipped",
+        "pr_url": _OWN_PR_URL,
+    }
+    assert daemon.stop_calls == ["ref-11"]

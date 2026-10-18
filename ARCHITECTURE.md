@@ -50,7 +50,7 @@ not.
 
 **ADR-0011 — ticket-status transition seam.** Every dev-queue `TicketTask`
 status change goes through one function — `transition_task_status(task,
-new_status, ...)` in `src/cw/dev_queue.py`. Code does not assign
+new_status, ...)` in `src/cw/dev_queue/lifecycle.py`. Code does not assign
 `task.status = ...` directly. The seam is both the single authority for
 status and the one hook point for any logic that must fire on a transition
 (e.g. disposition stamping/clearing), so a cross-cutting behavior change is a
@@ -84,7 +84,10 @@ an explicit operator command (`cw doctor --reap`, `cw reconcile --apply`; per
 ADR-0020 the orchestrator session counts as the operator) — authorizes it. Automatic reaping (`reap_policy: auto`) is opt-in per lane, not
 the default. The daemon stops that are not gated (including the merged-PR,
 routed-sentinel and foreign-result completions and the leaked-worker sweep) act
-on workers whose owning session is terminal or absent. Callers must count `BLOCKED_ON_USER`/`REAP_PROPOSED` sessions as
+on workers whose owning session is terminal or absent. The one exception is the
+shipped release (#2715, ADR-0006 amendment): its target session was live at
+detect time, it acts only on a recorded `shipped` result whose own PR is OPEN
+or MERGED, and it fails closed on an absent, unreadable or foreign drain stamp. Callers must count `BLOCKED_ON_USER`/`REAP_PROPOSED` sessions as
 occupying capacity — a stalled, signal-only session does not free its slot
 just because it stopped making progress.
 

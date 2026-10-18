@@ -624,6 +624,192 @@ class TestPrExistsForBranch:
         assert captured == [want_cwd]
 
 
+# Observed ``gh pr list --head <b> --state all --json number,url,state,mergedAt
+# --limit 5`` output, captured read-only and kept verbatim (#2715). The MERGED
+# capture is a single-PR branch; the multi-PR capture is a branch with a
+# CLOSED-unmerged PR between two MERGED ones (``"mergedAt":null``).
+_GH_PRS_MERGED = (
+    '[{"mergedAt":"2026-10-18T03:33:58Z","number":2741,"state":"MERGED",'
+    '"url":"https://github.com/mattwwarren/claude-workspace/pull/2741"}]'
+)
+_GH_PRS_MIXED = (
+    '[{"mergedAt":"2026-08-07T00:08:41Z","number":1688,"state":"MERGED",'
+    '"url":"https://github.com/mattwwarren/claude-workspace/pull/1688"},'
+    '{"mergedAt":null,"number":1666,"state":"CLOSED",'
+    '"url":"https://github.com/mattwwarren/claude-workspace/pull/1666"},'
+    '{"mergedAt":"2026-08-06T14:16:36Z","number":1662,"state":"MERGED",'
+    '"url":"https://github.com/mattwwarren/claude-workspace/pull/1662"}]'
+)
+# No OPEN PR existed at capture time: the CLOSED capture above with only its
+# ``state`` value changed (gh renders an unmerged PR's mergedAt as null).
+_GH_PRS_OPEN = (
+    '[{"mergedAt":null,"number":1666,"state":"OPEN",'
+    '"url":"https://github.com/mattwwarren/claude-workspace/pull/1666"}]'
+)
+
+
+class TestFetchBranchPrs:
+    """fetch_branch_prs (#2715): every PR for a head branch, with its state."""
+
+    def test_argv_cwd_and_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: list[tuple[list[str], dict[str, object]]] = []
+
+        def _fake_run(cmd: list[str], **kwargs: object) -> Any:
+            seen.append((cmd, kwargs))
+            return _make_run_result(0, "[]")
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        want_cwd = Path("/some/client-a/repo")
+
+        gh.fetch_branch_prs("dev/2715", 7, cwd=want_cwd)
+
+        assert [cmd for cmd, _ in seen] == [
+            [
+                "gh",
+                "pr",
+                "list",
+                "--head",
+                "dev/2715",
+                "--state",
+                "all",
+                "--json",
+                "number,url,state,mergedAt",
+                "--limit",
+                "5",
+            ]
+        ]
+        kwargs = seen[0][1]
+        assert kwargs["cwd"] == want_cwd
+        assert kwargs["timeout"] == 7
+
+    def test_merged_capture(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, _GH_PRS_MERGED)
+        )
+
+        prs, available = gh.fetch_branch_prs("dev/2719")
+
+        assert available is True
+        assert prs == [
+            gh.BranchPr(
+                number=2741,
+                url="https://github.com/mattwwarren/claude-workspace/pull/2741",
+                state="MERGED",
+                merged_at="2026-10-18T03:33:58Z",
+            )
+        ]
+
+    def test_mixed_capture_keeps_order_and_null_merged_at(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, _GH_PRS_MIXED)
+        )
+
+        prs, available = gh.fetch_branch_prs("claude/some-branch")
+
+        assert available is True
+        assert prs is not None
+        assert [(p.number, p.state, p.merged_at) for p in prs] == [
+            (1688, "MERGED", "2026-08-07T00:08:41Z"),
+            (1666, "CLOSED", None),
+            (1662, "MERGED", "2026-08-06T14:16:36Z"),
+        ]
+
+    def test_open_pr_has_no_merged_at(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, _GH_PRS_OPEN)
+        )
+
+        prs, available = gh.fetch_branch_prs("dev/1")
+
+        assert available is True
+        assert prs is not None
+        assert prs[0].state == "OPEN"
+        assert prs[0].merged_at is None
+
+    def test_absent_merged_at_key_reads_as_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        payload = '[{"number":1666,"state":"OPEN","url":"https://x/pull/1666"}]'
+        monkeypatch.setattr(
+            "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, payload)
+        )
+
+        prs, available = gh.fetch_branch_prs("dev/1")
+
+        assert available is True
+        assert prs is not None
+        assert prs[0].merged_at is None
+
+    def test_no_prs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, "[]")
+        )
+
+        assert gh.fetch_branch_prs("dev/2715") == ([], True)
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "{ truncated",
+            '{"number": 1}',
+            '[{"number":1,"state":"OPEN"}]',
+            '[{"number":"1","state":"OPEN","url":"u","mergedAt":null}]',
+            '[{"number":true,"state":"OPEN","url":"u","mergedAt":null}]',
+            '[{"number":1,"state":"OPEN","url":"u","mergedAt":7}]',
+            '["not-an-object"]',
+        ],
+        ids=[
+            "malformed-json",
+            "non-list",
+            "missing-url",
+            "str-number",
+            "bool-number",
+            "int-merged-at",
+            "non-object-item",
+        ],
+    )
+    def test_unusable_payload_is_transient(
+        self, monkeypatch: pytest.MonkeyPatch, stdout: str
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, stdout)
+        )
+
+        assert gh.fetch_branch_prs("dev/1") == (None, True)
+
+    def test_nonzero_exit_is_transient(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(1, ""))
+
+        assert gh.fetch_branch_prs("dev/1") == (None, True)
+
+    @pytest.mark.parametrize(
+        "error",
+        [subprocess.TimeoutExpired(["gh"], 15), OSError("boom")],
+        ids=["timeout", "oserror"],
+    )
+    def test_transient_errors(
+        self, monkeypatch: pytest.MonkeyPatch, error: Exception
+    ) -> None:
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise error
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+
+        assert gh.fetch_branch_prs("dev/1") == (None, True)
+
+    def test_gh_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        missing = FileNotFoundError("gh")
+
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise missing
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+
+        assert gh.fetch_branch_prs("dev/1") == (None, False)
+
+
 class TestBranchExistsOnOrigin:
     """Tests for branch_exists_on_origin / _fetch_branch_exists_on_origin."""
 

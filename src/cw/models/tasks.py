@@ -892,11 +892,16 @@ class TicketTask(BaseModel):
     # carry a signal about an ordinary RUNNING row; this field is the non-
     # terminal counterpart, rendered in the same `cw dev-queue tasks` REASON
     # column when `blocked_reason` is unset (blocked_reason always wins).
-    # Written by cw.reconcile._shared._stamp_session_id_mismatch_advisories,
-    # which overwrites it every tick and clears it the moment the condition
-    # lifts — a live re-derivation, not a latch, so no history is kept. Cleared
-    # unconditionally by transition_task_status alongside the durable-escalation
-    # latches. None on every pre-v37 row (migrate.py backfills it).
+    # Two writers. cw.reconcile._shared._stamp_session_id_mismatch_advisories
+    # visits only RUNNING rows WITH a session_id; it overwrites the note every
+    # tick and clears it the moment the condition lifts — a live
+    # re-derivation, not a latch. cw.reconcile.lost_session_rows (#2715) writes
+    # "?no_session" on a RUNNING row with NO session_id after paging it once —
+    # a page-once latch the mismatch stamper never visits, which it clears once
+    # the row is bound. Cleared unconditionally by transition_task_status
+    # alongside the durable-escalation latches, so a fresh claim pages again.
+    # Readers (cw dev-queue tasks, ticket_view, queue_peek) show it as an
+    # advisory. None on every pre-v37 row (migrate.py backfills it).
     advisory_note: str | None = None
     # GitHub #1198 — operator escape hatch for the cross-repo dispatch guard.
     # When True, the address_review / auto_fix_ci recipes log a WARNING and
