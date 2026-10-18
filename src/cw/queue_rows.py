@@ -53,7 +53,7 @@ _SPAWN_ERROR_BACKOFF_CAP_SECONDS: int = 300
 # a sentinel the parser itself could not extract), a different producer/
 # context from the routing table's read of a well-formed AutoDevResult's
 # blocker.reason -- textually identical value, deliberately separate constant,
-# same precedent as dev_queue.lifecycle._SALVAGE_NO_SENTINEL_DISPOSITION vs.
+# same precedent as dev_queue.dispositions._SALVAGE_NO_SENTINEL_DISPOSITION vs.
 # reconcile._shared._NEEDS_SALVAGE_REASON.
 _AUTOMERGE_NOT_ARMED_REASON = "automerge_not_armed"
 _PRIOR_PIPELINE_PR_OPEN_REASON = "prior_pipeline_pr_open"

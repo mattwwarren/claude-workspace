@@ -38,6 +38,14 @@ from cw.auto_dev_result import (
     SCOPE_TIER_LARGE,
 )
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS
+from cw.dev_queue.dispositions import (
+    AWAITING_OPERATOR_DISPOSITION,
+    BRANCH_STALENESS_GATE_DISPOSITION,
+    FINALIZE_GATE_HELD_DISPOSITION,
+    REVIEW_HEALTH_GATE_DISPOSITION,
+    REVIEW_STALENESS_GATE_DISPOSITION,
+    STALE_DISPATCH_DISPOSITION,
+)
 from cw.dev_queue.gates import (
     AMBIGUITIES_PENDING_RESOLUTION_STATUS,
     APPROVAL_GATE_REASON,
@@ -45,14 +53,6 @@ from cw.dev_queue.gates import (
     MERGE_GATE_BLOCKED_STATUS,
     PREMISES_PENDING_VERIFICATION_STATUS,
     _not_at_approval_gate,
-)
-from cw.dev_queue.lifecycle import (
-    AWAITING_OPERATOR_DISPOSITION,
-    BRANCH_STALENESS_GATE_DISPOSITION,
-    FINALIZE_GATE_HELD_DISPOSITION,
-    REVIEW_HEALTH_GATE_DISPOSITION,
-    REVIEW_STALENESS_GATE_DISPOSITION,
-    STALE_DISPATCH_DISPOSITION,
 )
 from cw.models import DispatchSkipReason, QueueItemStatus, ReapReason, Stage
 from cw.models.ticket_view import NextCommand
@@ -87,7 +87,7 @@ RESOLVE_COMMAND = "cw dev-queue resolve --file <decisions.md>"
 
 # A scope_hint: large gate is recorded as one of these dispositions: the
 # REVIEW->FINALIZE scope-hint park stamps APPROVAL_GATE_REASON, a Rule 1 park
-# stamps the verbatim sentinel status (lifecycle._derive_disposition).
+# stamps the verbatim sentinel status (dispositions._derive_disposition).
 _SCOPE_HINT_GATE_DISPOSITIONS: frozenset[str] = SCOPE_GATED_APPROVAL_STATUSES | {
     APPROVAL_GATE_REASON
 }

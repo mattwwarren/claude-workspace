@@ -228,7 +228,7 @@ class TestStateLegality:
         session = case.session()
         seed_queue([case.task], [session] if session is not None else [])
         monkeypatch.setattr(
-            "cw.dev_queue.approval.branch_head_sha_on_origin",
+            "cw.dev_queue.scope_drift.branch_head_sha_on_origin",
             lambda *_a, **_kw: (_SCOPE_DRIFT_HEAD, True),
         )
         task = case.task
@@ -629,6 +629,8 @@ _IMPORT_FIRST = (
     "cw.dev_queue.requeue",
     "cw.dev_queue.approval",
     "cw.dev_queue.drain",
+    "cw.dev_queue.scope_drift",
+    "cw.dev_queue.dispositions",
 )
 
 

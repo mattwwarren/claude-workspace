@@ -2699,8 +2699,8 @@ def capture_events(
 
     Call it once per module you want to observe; a test that spans two producer
     modules (e.g. the dispatch finalize-regress path, which emits from both
-    ``cw.dispatch.routing`` and ``cw.dev_queue``) calls it twice with distinct
-    lists.
+    ``cw.dispatch.routing.stage_failure`` and ``cw.dev_queue``) calls it twice
+    with distinct lists.
     """
 
     def _factory(

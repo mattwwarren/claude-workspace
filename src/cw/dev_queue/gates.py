@@ -1,6 +1,6 @@
 """Approval-gate and drain-set predicates shared across ``cw.dev_queue`` (#2692).
 
-A leaf module: it imports only ``lifecycle`` constants and
+A leaf module: it imports only ``dispositions`` constants and
 ``cw.auto_dev_result``, never ``approval``, ``drain``, ``requeue`` or
 ``cw.dispatch``. That is what lets ``next_commands`` (and, through it, every
 refusal site in ``approval``, ``requeue``, ``crud`` and ``must_fix_override``)
@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final
 
 from cw.auto_dev_result import SCOPE_GATED_APPROVAL_STATUSES
-from cw.dev_queue.lifecycle import (
+from cw.dev_queue.dispositions import (
     BRANCH_STALENESS_GATE_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
     HOLD_DISPOSITIONS,

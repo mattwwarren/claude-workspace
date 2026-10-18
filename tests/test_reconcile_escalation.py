@@ -451,7 +451,7 @@ class TestSignoffParkAttentionVsEscalation:
         duplicating or suppressing each other -- different event types,
         no dedup-key collision (cli/queues.py keys on
         (type, session_id, paused_status))."""
-        from cw.dev_queue.lifecycle import SIGNOFF_GATE_DISPOSITION
+        from cw.dev_queue.dispositions import SIGNOFF_GATE_DISPOSITION
         from cw.dispatch import _park_signoff_gate
 
         task = _make_task(

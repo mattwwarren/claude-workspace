@@ -248,7 +248,7 @@ class TestApproveEcho:
             ]
         )
         monkeypatch.setattr(
-            "cw.dev_queue.approval.branch_head_sha_on_origin",
+            "cw.dev_queue.scope_drift.branch_head_sha_on_origin",
             lambda *_a, **_kw: (_HEAD, True),
         )
         result = invoke_dev_queue("approve", _T, "-c", _C, "--scope-drift", "b.py,a.py")

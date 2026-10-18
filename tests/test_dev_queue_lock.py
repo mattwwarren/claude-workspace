@@ -100,6 +100,7 @@ def fake_lock_clock(monkeypatch: pytest.MonkeyPatch) -> _FakeClock:
 _LOCK_MODULE = {
     "crud": "cw.dev_queue.crud._lock",
     "approval": "cw.dev_queue.approval._lock",
+    "scope_drift": "cw.dev_queue.scope_drift._lock",
     "must_fix_override": "cw.dev_queue.must_fix_override._lock",
     "operator_resolutions": "cw.dev_queue.operator_resolutions._lock",
     "requeue": "cw.dev_queue.requeue._lock",
@@ -135,7 +136,7 @@ def _forwarding_cases(
             lambda **kw: revoke_plan_approval("T-1", _CLIENT, **kw),
         ),
         "approve_scope_drift_ticket": (
-            "approval",
+            "scope_drift",
             lambda **kw: approve_scope_drift_ticket("T-1", _CLIENT, ["a.py"], **kw),
         ),
         "approve_must_fix_override_ticket": (

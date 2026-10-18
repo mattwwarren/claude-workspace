@@ -11141,7 +11141,9 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch.routing.record_event", capture_event)
+        monkeypatch.setattr(
+            "cw.dispatch.routing.stage_failure.record_event", capture_event
+        )
 
         task = self._make_running_task("EVT-1", stage=Stage.FINALIZE)
         last_result: dict[str, object] = {
@@ -11174,7 +11176,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         requeued = capture_events(
-            "cw.dispatch.routing", OrchestratorEventType.TICKET_REQUEUED
+            "cw.dispatch.routing.stage_failure", OrchestratorEventType.TICKET_REQUEUED
         )
         stage_changed = capture_events(
             "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
@@ -11341,7 +11343,9 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch.routing.record_event", capture_event)
+        monkeypatch.setattr(
+            "cw.dispatch.routing.stage_failure.record_event", capture_event
+        )
 
         task = self._make_running_task("SF-1", stage=Stage.IMPL)
         task.session_id = "sess-sf1"
@@ -11473,7 +11477,9 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch.routing.record_event", capture_event)
+        monkeypatch.setattr(
+            "cw.dispatch.routing.stage_failure.record_event", capture_event
+        )
 
         task = self._make_running_task("SF-BC-1", stage=Stage.IMPL)
         last_result: dict[str, object] = {"status": status, "blocker": blocker}
@@ -11503,7 +11509,8 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         attention = capture_events(
-            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dispatch.routing.stage_failure",
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
         )
 
         task = self._make_running_task("REGRESS-ATTN-1", stage=Stage.FINALIZE)
@@ -13044,7 +13051,8 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         attention = capture_events(
-            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dispatch.routing.stage_failure",
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
         )
         stage_changed = capture_events(
             "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
@@ -13215,6 +13223,7 @@ class TestApplyStagedDecision:
 
         task = self._make_running_task("EARLIER-BLK-1", stage=Stage.IMPL)
         events = capture_events("cw.dispatch.routing")
+        failure_events = capture_events("cw.dispatch.routing.stage_failure")
         last_result: dict[str, object] = {
             "status": "blocked",
             "stage_reached": "stage1_plan",
@@ -13235,7 +13244,9 @@ class TestApplyStagedDecision:
         ]
         assert mismatch_events == []
         attention_events = [
-            e for e in events if e[0] == OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            e
+            for e in failure_events
+            if e[0] == OrchestratorEventType.SESSION_NEEDS_ATTENTION
         ]
         assert len(attention_events) == 1
         _, payload, _ = attention_events[0]
@@ -13495,7 +13506,7 @@ class TestApplyStagedDecision:
         )
 
         captured_session_id: list[str | None] = []
-        real_stage_regress = cw.dispatch.routing._stage_regress
+        real_stage_regress = cw.dispatch.routing.stage_failure._stage_regress
 
         def _spy_stage_regress(
             task: TicketTask, target_stage: Stage, *, merge_conflict_detected: bool
@@ -13505,7 +13516,9 @@ class TestApplyStagedDecision:
                 task, target_stage, merge_conflict_detected=merge_conflict_detected
             )
 
-        monkeypatch.setattr("cw.dispatch.routing._stage_regress", _spy_stage_regress)
+        monkeypatch.setattr(
+            "cw.dispatch.routing.stage_failure._stage_regress", _spy_stage_regress
+        )
 
         task = self._make_running_task("WALK-REGRESS-1", stage=Stage.IMPL)
         task.session_id = "sess-walk-regress-1"
@@ -13616,7 +13629,9 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch.routing.record_event", capture_event)
+        monkeypatch.setattr(
+            "cw.dispatch.routing.stage_failure.record_event", capture_event
+        )
 
         task = self._make_running_task("AO-1", stage=Stage.IMPL)
         last_result: dict[str, object] = {
@@ -13979,7 +13994,8 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         attention = capture_events(
-            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dispatch.routing.stage_failure",
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
         )
 
         task = self._make_running_task("MFR-1", stage=Stage.REVIEW)
@@ -14055,7 +14071,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         requeued = capture_events(
-            "cw.dispatch.routing", OrchestratorEventType.TICKET_REQUEUED
+            "cw.dispatch.routing.stage_failure", OrchestratorEventType.TICKET_REQUEUED
         )
 
         task = self._make_running_task("MFR-4", stage=Stage.FINALIZE)
@@ -15890,7 +15906,7 @@ class TestUnconcludedFinalizeRegressMergeGate:
         """Rule 5a measures MERGE_HEAD at regress time; only a positive
         measurement stamps True (unmeasurable is not evidence of a merge)."""
         from cw.dispatch import apply_staged_decision
-        from cw.dispatch import routing as routing_mod
+        from cw.dispatch.routing import stage_failure as stage_failure_mod
 
         seen: list[Path | None] = []
 
@@ -15899,9 +15915,9 @@ class TestUnconcludedFinalizeRegressMergeGate:
             return measured
 
         monkeypatch.setattr(
-            routing_mod, "resolve_task_worktree", lambda _t, _c: _STUB_WORKTREE
+            stage_failure_mod, "resolve_task_worktree", lambda _t, _c: _STUB_WORKTREE
         )
-        monkeypatch.setattr(routing_mod, "merge_in_progress", _probe)
+        monkeypatch.setattr(stage_failure_mod, "merge_in_progress", _probe)
         task = self._make_task("UFM-S1", stage=Stage.FINALIZE, marker=None)
         task.stage_base_ref = self._MARKER
         last_result: dict[str, object] = {
@@ -20753,7 +20769,7 @@ class TestClaimNextPendingTrackerMcpGate:
         """R6 case 3: parked BLOCKED_ON_USER, nothing charged, nothing spawned,
         and the attention event carries the R1 additive detail fields."""
         from cw.dev_queue import TRACKER_MCP_GATE_DISPOSITION
-        from cw.dev_queue.lifecycle import _PRE_DISPATCH_TRACKER_MCP_REASON
+        from cw.dev_queue.dispositions import _PRE_DISPATCH_TRACKER_MCP_REASON
 
         write_clients_yaml(self._gated_client(sample_client_config))
         self._stub_resolver(monkeypatch, "GEN-2442")

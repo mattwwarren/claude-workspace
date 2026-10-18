@@ -17,18 +17,19 @@ unchanged.
 #2421 added ``impl_gates``, the IMPL-scoped sibling to ``review_gates`` (the
 unconcluded FINALIZE-regress merge gate), re-exported the same way.
 
-#1728 finished the job: ``routing`` is itself a package now, with four
+#1728 finished the job: ``routing`` is itself a package now, with five
 concern submodules -- ``scope_tier`` (effective scope-tier resolution and
 carried-context persistence), ``stage_walk`` (``stage_reached`` classification
 and the forward stage-pointer walk), ``pr_refs`` (the #1713 blocker-``details``
-PR cross-references), and ``cost`` (per-session cost accumulation). Its
-``__init__`` is deliberately NOT a pure re-export shim: the Rule 1-6 decision
-table stays defined there because ``tests/test_dispatch.py`` monkeypatches
-``cw.dispatch.routing.record_event``/``._stage_regress``/
-``._stage_advance_unchecked`` by dotted path, and a function resolves its free
-names against the module it was defined in. See that package's docstring. The
-``from cw.dispatch.routing import (...)`` block below is unaffected -- every
-name is still a package-level attribute.
+PR cross-references), ``cost`` (per-session cost accumulation) and, since
+#2719, ``stage_failure`` (Rule 5, the stage-failure routing). Its ``__init__``
+is deliberately NOT a pure re-export shim: Rules 1, 3 and 6 stay defined there
+because ``tests/test_dispatch.py`` monkeypatches
+``cw.dispatch.routing.record_event``/``._stage_advance_unchecked`` by dotted
+path, and a function resolves its free names against the module it was defined
+in (Rule 5 patches target ``cw.dispatch.routing.stage_failure``). See that
+package's docstring. The ``from cw.dispatch.routing import (...)`` block below
+is unaffected -- every name is still a package-level attribute.
 
 #2503 split ``gating`` into a package too, one submodule per gate family --
 ``usage_limit``, ``availability``, ``freshness``, ``ssh_key``,

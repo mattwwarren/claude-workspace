@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
-from cw.dev_queue.lifecycle import HOLD_DISPOSITIONS
+from cw.dev_queue.dispositions import HOLD_DISPOSITIONS
 from cw.event_bus import EventBus
 from cw.models import (
     LivenessBucket,

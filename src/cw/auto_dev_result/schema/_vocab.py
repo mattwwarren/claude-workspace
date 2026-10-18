@@ -114,7 +114,7 @@ EMPTY_DIFF_BLOCKER_REASON: Literal["empty_diff_no_commits"] = "empty_diff_no_com
 # it (the auto-dev-intake Stage 0 self-check and the auto-dev-plan Stage 1
 # resume-path check), and a typo in either would be invisible to the
 # closed-enum status check. Deliberately distinct from
-# cw.dev_queue.lifecycle._PRE_DISPATCH_STALE_PR_REASON, which names the
+# cw.dev_queue.dispositions._PRE_DISPATCH_STALE_PR_REASON, which names the
 # *code-side* gate's park -- that one is never emitted by an agent. See #1862.
 STALE_DISPATCH_BLOCKER_REASON: Literal["pr_already_open"] = "pr_already_open"
 # Blocker reasons at Stage.FINALIZE eligible for automatic regress to IMPL.
@@ -221,8 +221,8 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
     )
     # cw-side synthetic reasons. The literals are owned by
     # cw.auto_dev_result.parse (BLOCKER_REASON_*), cw.codex_review._const, and
-    # cw.dev_queue.lifecycle -- restated rather than imported because parse and
-    # lifecycle both import THIS module, so importing back would cycle.
+    # cw.dev_queue.dispositions -- restated rather than imported because parse
+    # and dispositions both import THIS module, so importing back would cycle.
     # tests/test_auto_dev_result.py pins the parse-side copies in lockstep.
     | frozenset(
         {

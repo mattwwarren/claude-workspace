@@ -9,11 +9,17 @@ module is now a package of focused submodules:
 * ``migrate`` — the pure dict-in / dict-out schema-normalisation layer.
 * ``storage`` — the on-disk persistence layer (file locks + plan/queue
   load & save).
-* ``lifecycle`` — task status transitions, disposition/terminal-status
-  constants, stage-pointer helpers, and the terminal-wait poll loop.
+* ``dispositions`` — the leaf ``TicketTask.disposition`` vocabulary
+  (``HOLD_DISPOSITIONS`` & co.) and the sentinel-derivation helpers
+  (``_derive_disposition``, ``_extract_pr_url`` & co.), split out of
+  ``lifecycle`` (#2719).
+* ``lifecycle`` — task status transitions, terminal-status constants,
+  stage-pointer helpers, and the terminal-wait poll loop.
 * ``crud`` — operator-facing queue mutations (add/remove/cancel/move/clear/
   prune) and the ticket-resolution helpers (resolve/list/find).
 * ``approval`` — the plan/review approval + operator-signoff-clearing gates.
+* ``scope_drift`` — the operator's grant of a ``plan_scope_drift`` park
+  (``approve_scope_drift_ticket``), split out of ``approval`` (#2719).
 * ``must_fix_override`` — the operator's override of a codex MUST_FIX park.
 * ``operator_resolutions`` — the operator's answers to a plan park, recorded
   on the row by ``cw dev-queue resolve`` (#2702).
@@ -44,7 +50,6 @@ from __future__ import annotations
 from cw.dev_queue.approval import (
     BODY_DRIFT_WARNING_KEY,
     _approve_ticket_locked,
-    approve_scope_drift_ticket,
     approve_ticket,
     revoke_plan_approval,
 )
@@ -72,14 +77,7 @@ from cw.dev_queue.crud import (
     select_clearable_tickets,
     select_prunable_tickets,
 )
-from cw.dev_queue.drain import (
-    drain_held_tickets,
-    select_held_tickets,
-)
-from cw.dev_queue.gates import APPROVAL_GATE_REASON, DRAIN_DISPOSITIONS
-from cw.dev_queue.lifecycle import (
-    _PLAN_SOUNDNESS_MARKER,
-    _PLAN_SPEC_MARKER,
+from cw.dev_queue.dispositions import (
     _PRE_DISPATCH_STALE_PR_REASON,
     _PRE_DISPATCH_TRACKER_MCP_REASON,
     AWAITING_OPERATOR_DISPOSITION,
@@ -95,15 +93,24 @@ from cw.dev_queue.lifecycle import (
     STALE_DISPATCH_GATE_DISPOSITION,
     TRACKER_MCP_GATE_DISPOSITION,
     UNCONCLUDED_FINALIZE_REGRESS_MERGE_GATE_DISPOSITION,
-    _advance_task_pointer,
     _derive_disposition,
     _extract_pr_url,
     _extract_pr_url_or_info,
     _hold_aware_disposition,
+    _result_blocker_reason,
+)
+from cw.dev_queue.drain import (
+    drain_held_tickets,
+    select_held_tickets,
+)
+from cw.dev_queue.gates import APPROVAL_GATE_REASON, DRAIN_DISPOSITIONS
+from cw.dev_queue.lifecycle import (
+    _PLAN_SOUNDNESS_MARKER,
+    _PLAN_SPEC_MARKER,
+    _advance_task_pointer,
     _local_plan_body,
     _marker_version,
     _plan_body_signoff_ok,
-    _result_blocker_reason,
     _stage_regress,
     _stamp_salvage_stage,
     _tracker_allows_github_fetch,
@@ -130,6 +137,7 @@ from cw.dev_queue.review_records import (
     find_ticket_row,
     record_finding_dispositions,
 )
+from cw.dev_queue.scope_drift import approve_scope_drift_ticket
 from cw.dev_queue.storage import (
     _lock,
     dev_queue_lock,
