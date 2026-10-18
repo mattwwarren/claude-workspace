@@ -85,6 +85,20 @@ _SHIP_STEP_IS_HUMANS = (
 _SHOW_PURPOSE = "inspect the row and its legal next commands"
 RESOLVE_COMMAND = "cw dev-queue resolve --file <decisions.md>"
 
+# Synthetic skip code for a PENDING row whose lane is held paused by an
+# operator, a legacy pause or ``clients.yaml`` -- not a ``DispatchSkipReason``
+# (dispatch reports no reason for it), but the ``cw dev-queue wait`` /
+# ``cw orchestrate watch`` stuck-pending vocabulary names it (#2693).
+LANE_PAUSED_SKIP_CODE = "lane_paused"
+LANE_RESUME_PURPOSE = "resume the paused lane so dispatch can claim the ticket"
+# PENDING skip codes whose remedy is the lane's ``cw lane resume`` (#2693).
+# Every other skip code has no ``cw`` remedy on a PENDING row:
+# ``requeue --reset-attempts`` is a no-op there, and the ssh-key, disk and
+# screening gates are fixed outside cw.
+_LANE_RESUME_SKIP_CODES: frozenset[str] = frozenset(
+    {DispatchSkipReason.LANE_CIRCUIT_PAUSED.value, LANE_PAUSED_SKIP_CODE}
+)
+
 # A scope_hint: large gate is recorded as one of these dispositions: the
 # REVIEW->FINALIZE scope-hint park stamps APPROVAL_GATE_REASON, a Rule 1 park
 # stamps the verbatim sentinel status (dispositions._derive_disposition).
@@ -518,7 +532,12 @@ _RULES: tuple[_Rule, ...] = (
 
 
 def next_commands(
-    task: TicketTask, *, session: Session | None, operator_opt_in: bool = False
+    task: TicketTask,
+    *,
+    session: Session | None,
+    operator_opt_in: bool = False,
+    skip_reason: str | None = None,
+    lane_resume_command: str | None = None,
 ) -> list[NextCommand]:
     """The legal next commands for *task*, most useful first.
 
@@ -526,13 +545,30 @@ def next_commands(
     none or it is gone; see the module docstring for how to resolve it.
     *operator_opt_in* is the config-resolved human opt-in (lane or global
     finalize hold / signoff) the row cannot show; it only affects rules 6/6a.
+
+    *skip_reason* is why a PENDING row is not dispatching (a
+    ``DispatchSkipReason`` value or :data:`LANE_PAUSED_SKIP_CODE`) and
+    *lane_resume_command* the row's lane ``LanePauseView.resume_command``.
+    For a PENDING row paused by its lane (``lane_circuit_paused`` or
+    ``lane_paused``) with a resume command supplied, that command leads the
+    list (#2693). No other skip code prepends anything, and every other row
+    ignores both arguments, so the output is unchanged when *skip_reason* is
+    None.
     """
     rule = next(r for r in _RULES if r.matches(task, session))
     if rule.opted_in_commands is not None and (
         operator_opt_in or row_carries_human_opt_in(task)
     ):
         return rule.opted_in_commands(task)
-    return rule.commands(task)
+    commands = rule.commands(task)
+    if (
+        task.status == QueueItemStatus.PENDING
+        and skip_reason in _LANE_RESUME_SKIP_CODES
+        and lane_resume_command is not None
+    ):
+        resume = NextCommand(command=lane_resume_command, purpose=LANE_RESUME_PURPOSE)
+        return [resume, *commands]
+    return commands
 
 
 def _skipped(command: str, skip: str | None) -> bool:

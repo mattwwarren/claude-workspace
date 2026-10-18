@@ -38,6 +38,8 @@ from cw.dev_queue.must_fix_override import _require_codex_must_fix_park
 from cw.dev_queue.next_commands import (
     HUMAN_GATE_LABEL,
     HUMAN_GATE_PURPOSE_LABEL,
+    LANE_PAUSED_SKIP_CODE,
+    LANE_RESUME_PURPOSE,
     compact_command,
     dev_queue_command,
     human_gate_settled_notice,
@@ -77,6 +79,7 @@ if TYPE_CHECKING:
 _T = ACME_TICKET
 _C = ACME
 _SCOPE_DRIFT_HEAD = "0123456789abcdef0123456789abcdef01234567"
+LANE_CIRCUIT_PAUSED = "lane_circuit_paused"
 
 
 def _commands(case: Case) -> list[str]:
@@ -648,3 +651,64 @@ class TestImportOrder:
     @pytest.mark.parametrize("module", _IMPORT_FIRST)
     def test_imports_first_without_a_cycle(self, module: str) -> None:
         _import_in_fresh_interpreter(module)
+
+
+_RESUME = f"cw lane resume {ACME} default"
+_PENDING_CMDS = [cmd("wait"), cmd("cancel")]
+
+
+class TestSkipReasonRemedy:
+    """``skip_reason`` / ``lane_resume_command`` (#2693): PENDING lane pauses only."""
+
+    @pytest.mark.parametrize("case_id", sorted(CASES))
+    def test_no_skip_reason_is_unchanged(self, case_id: str) -> None:
+        case = CASES[case_id]
+        cmds = next_commands(
+            case.task,
+            session=case.session(),
+            skip_reason=None,
+            lane_resume_command=_RESUME,
+        )
+        assert [c.command for c in cmds] == case.expected
+
+    @pytest.mark.parametrize("code", [LANE_CIRCUIT_PAUSED, LANE_PAUSED_SKIP_CODE])
+    def test_pending_lane_pause_leads_with_resume(self, code: str) -> None:
+        task = _make_ticket_task(ticket_id=_T, client=_C)
+        cmds = next_commands(
+            task, session=None, skip_reason=code, lane_resume_command=_RESUME
+        )
+        assert [c.command for c in cmds] == [_RESUME, *_PENDING_CMDS]
+        assert cmds[0].purpose == LANE_RESUME_PURPOSE
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "attempt_cap_blocked",
+            "ssh_key_gate",
+            "disk_pressure_gate",
+            "tracker_mcp_gate_blocked",
+            "stale_pr_blocked",
+            "lane_cap_blocked",
+        ],
+    )
+    def test_other_codes_gain_no_remedy(self, code: str) -> None:
+        task = _make_ticket_task(ticket_id=_T, client=_C)
+        cmds = next_commands(
+            task, session=None, skip_reason=code, lane_resume_command=_RESUME
+        )
+        assert [c.command for c in cmds] == _PENDING_CMDS
+
+    def test_lane_pause_without_resume_command_is_unchanged(self) -> None:
+        task = _make_ticket_task(ticket_id=_T, client=_C)
+        cmds = next_commands(task, session=None, skip_reason=LANE_CIRCUIT_PAUSED)
+        assert [c.command for c in cmds] == _PENDING_CMDS
+
+    def test_non_pending_rows_ignore_skip_reason(self) -> None:
+        case = CASES["rule3_running"]
+        cmds = next_commands(
+            case.task,
+            session=case.session(),
+            skip_reason=LANE_CIRCUIT_PAUSED,
+            lane_resume_command=_RESUME,
+        )
+        assert [c.command for c in cmds] == case.expected
