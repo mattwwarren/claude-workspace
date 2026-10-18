@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`cw orchestrate watch` is a persistent, scoped attention stream for the Monitor tool (#2693).** One long-lived, silent process prints one line per event that needs the orchestrator, each ending in `| next: <command>` from the row's legal next commands, and nothing while everything is healthy. Its first stdout line is the resolved scope (`WATCH | scope | client=… | lanes=… | tickets=… | source=… | start=… | cursor=…`): by default the caller's focus-pointer lane, else the whole client; `--lane`, `--ticket`, `--all-lanes` and `--since EVENT_ID` override it. The position (and a dedupe latch) is saved in the event-bus cursor store after each printed line, so a restart or Monitor re-arm resumes losslessly. A repeated page, including the starved-lane and `dispatch_loop_stale` pages, is suppressed until a transition, requeue, lane resume or dispatch tick resolves it. A second watcher on a live scope is refused unless `--force` (a recycled pid cannot be detected). It exits 0 on SIGTERM, 130 on SIGINT and 1 on a fatal error, a refused start or a stdout write failure, always after a `WATCH | exited: <reason>` line.
+- **STUCK lines for PENDING tickets that will not clear on their own (#2693).** The stream reports a PENDING ticket held by a tripped lane breaker with no auto-resume, a paused lane, or the ssh-key or disk-pressure gate once, after `--stuck-after-minutes` (default 15), with the `cw lane resume` remedy where one exists.
+- **`cw dev-queue wait` takes several tickets with `--any`, gains `--stuck-after-minutes` and exit 5 (#2693).** Exit 5 (`state: stuck` in `--json`, with `reason`, `detail`, `age_seconds` and `next_command`) means a PENDING ticket's blocker will not clear on its own, or a plan/review approval result dispatch has not routed for 300 s (`handoff_unrouted`). A PENDING ticket prints throttled `WAITING | …` progress lines to stderr.
+
+### Changed
+
+- **`cw dev-queue wait` defaults to a 6-hour `--timeout`; `--timeout 0` means no limit (#2693).** It was 300 s. Run a long wait as a background task.
+- **`cw dev-queue wait` exit 4 covers every human-kept gate (#2693):** a finalize hold and a `scope_hint: large` approval gate, as well as operator signoff. `_WAIT_EXIT_SIGNOFF` is renamed `_WAIT_EXIT_HUMAN_GATE`.
+- **`cw dev-queue wait` no longer exits 2 on dispatch's own hand-offs (#2693).** A `blocked` result with `blocker.reason: fix_loop_pending_dispatch`, or a `plan_pending_approval` / `review_pending_approval` result on a row still RUNNING, keeps the wait polling until dispatch routes the row; it then exits 2 or 4 (or 5 after 300 s unrouted).
+- **`cw orchestrate watch` no longer redirects to `cw board` (#2693).** The deprecated board shim is removed and the name reused for the attention stream; use `cw board` for the live dashboard.
+- **The orchestrate-sprint skill's `scripts/attention_watch.py` and its `--max-idle-seconds` backstop are removed (#2693);** Phase 4 arms one Monitor on `cw orchestrate watch`, re-armed only on the Monitor's 30-minute expiry. Leftover `~/.claude-workspace/attention-stamp-*` files are no longer read and can be deleted.
+
+### Fixed
+
+- **The attention stream no longer wakes the orchestrator for sibling lanes, replays events, or stays silent on a stuck lane (#2693).** A lane-scoped watch resolves lane-less events through the ticket's row lane instead of dropping them, the starved-lane page no longer repeats for every sibling-lane wake, a re-arm never re-delivers what a previous run printed, and a lane whose breaker will not auto-resume now produces a STUCK line.
+
 ## [1.75.0] - 2026-10-18
 
 ### Added
