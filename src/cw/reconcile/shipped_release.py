@@ -49,18 +49,24 @@ from cw.auto_dev_result import AutoDevResult
 from cw.config import load_state, save_state
 from cw.dev_queue import dev_queue_lock, load_dev_queue
 from cw.exceptions import CwError
+from cw.gh import _GH_PR_STATE_MERGED, _GH_PR_STATE_OPEN
 from cw.models import (
+    AGENT_SPAWN_LAST_STAMPED_AT_KEY,
+    AGENT_SPAWN_SESSION_ID_KEY,
+    AGENT_SPAWN_STAMP_KEY,
+    DEFAULT_LANE,
+    DEFAULT_STAGE,
     CompletionReason,
     LastResultSource,
     ReapReason,
     SessionStatus,
+    extract_unresolved_spawn_count,
 )
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
-    _agent_spawn_stamp_session_id,
-    _unresolved_subagent_spawn_age_seconds,
     feature_branch_key,
 )
+from cw.reconcile._shared._worktree_evidence import _read_agent_spawn_stamp_context
 from cw.reconcile.dispositions import emit_routed_sentinel_completion
 from cw.reconcile.probe_store import BoundedProbeStore, ProbeStoreUnavailableError
 from cw.reconcile.routed_result_sessions import (
@@ -94,9 +100,11 @@ SHIPPED_PR_BUDGET_SECONDS: float = 20.0
 # How old a captured probe may be when the in-lock detect consumes it. Strict
 # ``<``; a stale probe only defers its session a tick (ADR-0014).
 SHIPPED_PR_PROBE_MAX_AGE_SECONDS: float = 120.0
-# The PR states that count as the sentinel's own shipped PR. CLOSED-unmerged
-# does not.
-_OWN_PR_STATES: frozenset[str] = frozenset({"OPEN", "MERGED"})
+# Security rollout boundary: no client is enabled until an operator explicitly
+# adds it to this allowlist. Shadow mode remains available while validating a
+# rollout and is deliberately on by default.
+SHIPPED_RELEASE_ROLLOUT_CLIENTS: frozenset[str] = frozenset()
+SHIPPED_RELEASE_SHADOW_MODE = True
 _SECONDS_PER_MINUTE = 60
 
 
@@ -137,6 +145,17 @@ type _ProbePayload = tuple[BranchPr, ...] | None
 
 def _probe_key(hit: StrandedRoutedSession) -> _ProbeKey:
     return hit.session.client, hit.ticket_id, hit.session.id
+
+
+def _rollout_clients(
+    clients: dict[str, ClientConfig],
+) -> dict[str, ClientConfig]:
+    """Restrict the sweep to the explicitly enabled client rollout set."""
+    return {
+        name: client
+        for name, client in clients.items()
+        if name in SHIPPED_RELEASE_ROLLOUT_CLIENTS
+    }
 
 
 class ShippedPrProbes:
@@ -220,11 +239,30 @@ def _drain_quiesced(
     a stamp ``session_id`` equal to *session*'s id (a re-used worktree shows
     the newest session's stamp). Anything else holds the act this tick.
     """
-    age = _unresolved_subagent_spawn_age_seconds(session.worktree_path, now)
-    deadline = config.fix_loop_await_deadline_minutes * _SECONDS_PER_MINUTE
-    if age is None or age < deadline:
+    # Read the context once.  The count, timestamp and owner must describe the
+    # same on-disk snapshot; two independent readers could otherwise authorize
+    # a stop across a concurrent Stop-hook rewrite.
+    context = _read_agent_spawn_stamp_context(session.worktree_path)
+    stamp = context.get(AGENT_SPAWN_STAMP_KEY) if context is not None else None
+    if context is None or extract_unresolved_spawn_count(context) <= 0:
         return False
-    return _agent_spawn_stamp_session_id(session.worktree_path) == session.id
+    if not isinstance(stamp, dict):
+        return False
+    raw = stamp.get(AGENT_SPAWN_LAST_STAMPED_AT_KEY)
+    owner = stamp.get(AGENT_SPAWN_SESSION_ID_KEY)
+    if not isinstance(raw, str) or not isinstance(owner, str) or not owner:
+        return False
+    try:
+        stamped_at = datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    if stamped_at.tzinfo is None:
+        stamped_at = stamped_at.replace(tzinfo=UTC)
+    age = (now - stamped_at).total_seconds()
+    deadline = config.fix_loop_await_deadline_minutes * _SECONDS_PER_MINUTE
+    if age < deadline:
+        return False
+    return owner == session.id
 
 
 def _candidates(
@@ -267,7 +305,10 @@ def select_own_pr(
     it, and a CLOSED-unmerged own PR is no evidence.
     """
     for pr in prs:
-        if pr.url == sentinel_pr_url and pr.state in _OWN_PR_STATES:
+        if pr.url == sentinel_pr_url and pr.state in {
+            _GH_PR_STATE_OPEN,
+            _GH_PR_STATE_MERGED,
+        }:
             return ShippedPrEvidence(
                 number=pr.number, url=pr.url, state=pr.state, merged_at=pr.merged_at
             )
@@ -295,6 +336,7 @@ def capture_shipped_pr_probes(
         budget_seconds=SHIPPED_PR_BUDGET_SECONDS,
         max_captures=SHIPPED_PR_MAX_PER_TICK,
     )
+    clients = _rollout_clients(clients)
     if not clients:
         return probes
     try:
@@ -414,7 +456,33 @@ def _close_unpinned(
             session.reap_reason = ReapReason.ROUTED_RESULT_STRANDED
             closing.append((session, candidate))
         if closing:
-            save_state(state)
+            try:
+                from cw.doctor.routed_result_wedge import (  # noqa: PLC0415
+                    _queue_audit_intents,
+                )
+
+                _queue_audit_intents(
+                    [
+                        StrandedRoutedSession(
+                            session=session,
+                            ticket_id=candidate.ticket_id,
+                            lane=DEFAULT_LANE,
+                            stage=DEFAULT_STAGE,
+                            row_status=None,
+                            stale_minutes=0.0,
+                            surface_ref=session.surface_ref or "",
+                        )
+                        for session, candidate in closing
+                    ]
+                )
+                save_state(state)
+            except (OSError, ValueError):
+                _log.warning(
+                    "shipped_release: durable close audit could not be queued;"
+                    " closing nothing this tick",
+                    exc_info=True,
+                )
+                return []
     return closing
 
 
@@ -432,6 +500,32 @@ def _emit_release(
     """
     evidence = candidate.evidence
     try:
+        from cw.doctor.routed_result_wedge import (  # noqa: PLC0415
+            _finalize_audit_intent,
+        )
+
+        audit = _finalize_audit_intent(
+            session.id,
+            mutations=["session_status_completed"],
+            stop_succeeded=False,
+            stop_error=None,
+        )
+    except (OSError, ValueError):
+        _log.warning(
+            "shipped_release: durable close audit could not be finalized for"
+            " session %s; no completion event or stop queued",
+            session.id,
+            exc_info=True,
+        )
+        return
+    if audit is None:
+        _log.error(
+            "shipped_release: durable close audit missing for session %s;"
+            " no completion event or stop queued",
+            session.id,
+        )
+        return
+    try:
         emit_routed_sentinel_completion(
             session,
             ticket_id=candidate.ticket_id,
@@ -440,6 +534,9 @@ def _emit_release(
             pr_url=evidence.url,
         )
     except (CwError, OSError):
+        from cw.doctor.routed_result_wedge import _emit_audit_record  # noqa: PLC0415
+
+        _emit_audit_record(audit)
         _log.exception(
             "shipped_release: closed session %s for %s/%s, but its"
             " session.completed event was not recorded",
@@ -448,6 +545,30 @@ def _emit_release(
             candidate.ticket_id,
         )
         return
+    # The normal session.completed event is the completion audit. Remove the
+    # pending intent only after that append succeeds; a crash or write failure
+    # leaves the durable outbox record for the existing idempotent retry path.
+    try:
+        from cw.doctor.routed_result_wedge import (  # noqa: PLC0415
+            _audit_outbox_lock,
+            _read_audit_outbox,
+            _write_audit_outbox,
+        )
+
+        with _audit_outbox_lock():
+            records = [
+                item
+                for item in _read_audit_outbox()
+                if item.get("session_id") != session.id
+            ]
+            _write_audit_outbox(records)
+    except (OSError, ValueError):
+        _log.warning(
+            "shipped_release: completion audit delivered but outbox cleanup"
+            " failed for session %s",
+            session.id,
+            exc_info=True,
+        )
     _log.info(
         "shipped_release: closed stranded session %s for %s/%s: own PR %s is %s"
         " (merged_at=%s); reap_reason=%s",
@@ -479,6 +600,7 @@ def run_shipped_release(
     decision is made on a fresh in-lock queue read. Returns the closed session
     ids. A no-op when *probes* is None or *clients* is empty.
     """
+    clients = _rollout_clients(clients)
     if probes is None or not clients:
         return []
     candidates = detect_shipped_release(
@@ -491,6 +613,15 @@ def run_shipped_release(
         config=config,
     )
     if not candidates:
+        return []
+    if SHIPPED_RELEASE_SHADOW_MODE:
+        for candidate in candidates:
+            _log.info(
+                "shipped_release: shadow candidate %s for %s/%s; no close attempted",
+                candidate.session_id,
+                candidate.client,
+                candidate.ticket_id,
+            )
         return []
     closed = _close_unpinned(state, candidates, now=now)
     for session, candidate in closed:

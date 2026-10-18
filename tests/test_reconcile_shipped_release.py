@@ -89,6 +89,17 @@ _ADR = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _enable_shipped_release_rollout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The production default is fail-closed shadow mode."""
+    monkeypatch.setattr(
+        shipped_release, "SHIPPED_RELEASE_ROLLOUT_CLIENTS", frozenset({_CLIENT})
+    )
+    monkeypatch.setattr(shipped_release, "SHIPPED_RELEASE_SHADOW_MODE", False)
+
+
 @pytest.fixture
 def clients(tmp_path: Path) -> dict[str, ClientConfig]:
     return {
