@@ -1256,7 +1256,7 @@
      "type": "integer"
     },
     "lane_circuit_auto_resume_minutes": {
-     "default": 15,
+     "default": 0,
      "title": "Lane Circuit Auto Resume Minutes",
      "type": "integer"
     },
@@ -2480,7 +2480,7 @@
      "type": "integer"
     },
     "lane_circuit_auto_resume_minutes": {
-     "default": 15,
+     "default": 0,
      "title": "Lane Circuit Auto Resume Minutes",
      "type": "integer"
     },
@@ -3211,7 +3211,7 @@
    "global_attempt_ceiling": 10,
    "lane_circuit_breaker_threshold": 3,
    "lane_starved_notify_interval_minutes": 15,
-   "lane_circuit_auto_resume_minutes": 15,
+   "lane_circuit_auto_resume_minutes": 0,
    "lane_circuit_auto_resume_max_minutes": 240,
    "dispatch_stale_notify_interval_minutes": 15,
    "diagnostics_retention_hours": 24,
