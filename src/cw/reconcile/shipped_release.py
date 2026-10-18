@@ -61,10 +61,9 @@ from cw.models import (
 )
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
-    _agent_spawn_stamp_session_id,
-    _unresolved_subagent_spawn_age_seconds,
     feature_branch_key,
 )
+from cw.reconcile._shared._worktree_evidence import _agent_spawn_stamp_snapshot
 from cw.reconcile.deferred import PostLockJob
 from cw.reconcile.dispositions import emit_routed_sentinel_completion
 from cw.reconcile.probe_store import BoundedProbeStore, ProbeStoreUnavailableError
@@ -225,12 +224,10 @@ def _drain_quiesced(
     a stamp ``session_id`` equal to *session*'s id (a re-used worktree shows
     the newest session's stamp). Anything else holds the act this tick.
     """
-    age = _unresolved_subagent_spawn_age_seconds(session.worktree_path, now)
+    snapshot = _agent_spawn_stamp_snapshot(session.worktree_path, now)
     deadline = config.fix_loop_await_deadline_minutes * _SECONDS_PER_MINUTE
     return (
-        age is not None
-        and age >= deadline
-        and _agent_spawn_stamp_session_id(session.worktree_path) == session.id
+        snapshot is not None and snapshot[0] >= deadline and snapshot[1] == session.id
     )
 
 

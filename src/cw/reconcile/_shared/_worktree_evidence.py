@@ -125,6 +125,19 @@ def _unresolved_subagent_spawn_age_seconds(
     future relative to *now*; callers compare against a positive deadline, for
     which a negative age correctly reads as "not yet exceeded".
     """
+    snapshot = _agent_spawn_stamp_snapshot(worktree_path, now)
+    return snapshot[0] if snapshot is not None else None
+
+
+def _agent_spawn_stamp_snapshot(
+    worktree_path: Path | None, now: datetime
+) -> tuple[float, str | None] | None:
+    """Return the validated stamp age and session id from one context read.
+
+    The shipped-release sweep needs both values for one stop decision. Keeping
+    them in one snapshot prevents the age and ownership checks from observing
+    different generations of a reused worktree's context file.
+    """
     context = _read_agent_spawn_stamp_context(worktree_path)
     if context is None or extract_unresolved_spawn_count(context) <= 0:
         return None
@@ -140,7 +153,12 @@ def _unresolved_subagent_spawn_age_seconds(
         return None
     if stamped_at.tzinfo is None:
         stamped_at = stamped_at.replace(tzinfo=UTC)
-    return (now - stamped_at).total_seconds()
+    session_id = (
+        stamp.get(AGENT_SPAWN_SESSION_ID_KEY) if isinstance(stamp, dict) else None
+    )
+    if not isinstance(session_id, str) or not session_id:
+        session_id = None
+    return (now - stamped_at).total_seconds(), session_id
 
 
 def _agent_spawn_stamp_session_id(worktree_path: Path | None) -> str | None:
