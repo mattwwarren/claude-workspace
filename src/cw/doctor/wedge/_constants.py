@@ -10,7 +10,7 @@ the package's layering. Split out of the flat ``doctor/wedge.py`` (#2164).
 from __future__ import annotations
 
 from cw.auto_dev_result import PAUSED_FOR_USER_INPUT_STATUSES
-from cw.dev_queue.lifecycle import (
+from cw.dev_queue.dispositions import (
     FINALIZE_GATE_HELD_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
 )
