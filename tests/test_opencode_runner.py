@@ -13,12 +13,15 @@ import pytest
 
 from cw.auto_dev_result import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
+    BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
     BLOCKER_REASON_STATUS_UNKNOWN,
+    BLOCKER_REASON_VALIDATION_FAILED,
     AutoDevResult,
     BlockedResult,
     StageReached,
     parse_stdout,
 )
+from cw.executor_diagnostics import diagnostics_bundle_dir, render_bundle_path
 from cw.models import Stage
 from cw.opencode_runner import (
     OPENCODE_LOG_RELATIVE_PATH,
@@ -43,6 +46,7 @@ from cw.worktree import resolve_worker_tmpdir
 from tests._opencode_helpers import (
     earlier_stage_then_final_log,
     framed,
+    invalid_merge_gate_frame,
     log_content,
     text_event,
     write_opencode_log,
@@ -574,10 +578,10 @@ def test_parse_last_sentinel_unusable_last_block_is_not_replaced_by_earlier(
     _assert_reason(result, BLOCKER_REASON_NO_RESULT_EMITTED)
 
 
-def test_synthesize_unusable_last_block_is_opencode_no_output(
+def test_synthesize_malformed_last_block_propagates_no_result_emitted(
     tmp_path: Path,
 ) -> None:
-    """The harvest of that log is the retry-eligible ``opencode_no_output``."""
+    """The parser's ``no_result_emitted`` reason reaches the harvest (#2629)."""
     earlier = make_blocked(ticket_id="T-1", worktree=tmp_path, reason="impl_failed")
     broken = "<<<AUTO_DEV_RESULT\n{not json\nAUTO_DEV_RESULT>>>"
     write_opencode_log(tmp_path, [text_event(framed(earlier)), text_event(broken)])
@@ -586,9 +590,192 @@ def test_synthesize_unusable_last_block_is_opencode_no_output(
         task=_make_task(), worktree=tmp_path, session_id=None
     )
 
-    _assert_reason(result, OPENCODE_NO_OUTPUT)
+    _assert_reason(result, BLOCKER_REASON_NO_RESULT_EMITTED)
     assert result.blocker is not None
+    assert "JSON parse failed" in result.blocker.details
     assert result.blocker.retry_eligible is True
+    assert result.blocker.stage == "stage4a_merge_gate"
+
+
+def _validation_failed_events(worktree: Path) -> list[LogLine]:
+    """A log whose final block is a ``merge_gate_blocked`` frame with ``pr`` set."""
+    earlier = make_blocked(ticket_id="T-1", worktree=worktree, reason="impl_failed")
+    return [
+        text_event(framed(earlier)),
+        text_event(invalid_merge_gate_frame(worktree)),
+        {"type": "step_finish", "part": {"reason": "stop"}},
+    ]
+
+
+def test_synthesize_validation_failed_sentinel_propagates_reason_and_details(
+    tmp_path: Path,
+) -> None:
+    """The ticket's case: ``validation_failed`` replaces ``opencode_no_output``."""
+    write_opencode_log(tmp_path, _validation_failed_events(tmp_path))
+
+    result = synthesize_opencode_result(
+        task=_make_task(), worktree=tmp_path, session_id=None
+    )
+
+    _assert_reason(result, BLOCKER_REASON_VALIDATION_FAILED)
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert "pr must be null" in result.blocker.details
+    assert "merge_gate_blocked" in result.blocker.details
+    assert result.blocker.retry_eligible is True
+    assert result.blocker.retry_delay_seconds == 0
+    assert result.stage_reached == "stage4a_merge_gate"
+    assert result.blocker.stage == "stage4a_merge_gate"
+
+
+@pytest.mark.parametrize(
+    ("stage", "expected_marker"),
+    [
+        (Stage.PLAN, "stage1_plan"),
+        (Stage.IMPL, "stage2_impl"),
+        (Stage.REVIEW, "stage3_review"),
+        (Stage.FINALIZE, "stage4a_merge_gate"),
+    ],
+)
+def test_synthesize_propagated_blocker_carries_task_stage(
+    tmp_path: Path,
+    stage: Stage,
+    expected_marker: str,
+) -> None:
+    """A propagated blocker is pinned to the dispatched stage, not ``unknown``."""
+    write_opencode_log(tmp_path, _validation_failed_events(tmp_path))
+
+    result = synthesize_opencode_result(
+        task=_make_task(stage=stage), worktree=tmp_path, session_id=None
+    )
+
+    _assert_reason(result, BLOCKER_REASON_VALIDATION_FAILED)
+    assert result.blocker is not None
+    assert result.stage_reached == expected_marker
+    assert result.blocker.stage == expected_marker
+    assert result.blocker.stage != "unknown"
+    if stage is Stage.PLAN:
+        assert result.scope.lines_actual is None
+
+
+def test_synthesize_truncated_final_frame_propagates_no_result_emitted(
+    tmp_path: Path,
+) -> None:
+    """An unclosed final frame surfaces as ``no_result_emitted``."""
+    truncated = '<<<AUTO_DEV_RESULT\n{"schema_version": 8'
+    write_opencode_log(tmp_path, [text_event(truncated)])
+
+    result = synthesize_opencode_result(
+        task=_make_task(), worktree=tmp_path, session_id=None
+    )
+
+    _assert_reason(result, BLOCKER_REASON_NO_RESULT_EMITTED)
+    assert result.blocker is not None
+    assert result.blocker.details.startswith(
+        "worker emitted an unusable AUTO_DEV_RESULT sentinel: "
+    )
+    assert "opening sentinel present, close missing" in result.blocker.details
+
+
+@pytest.mark.parametrize(
+    ("override", "reason"),
+    [
+        ({"status": "bogus"}, BLOCKER_REASON_STATUS_UNKNOWN),
+        ({"schema_version": 99}, BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED),
+    ],
+)
+def test_synthesize_unsupported_parse_failure_reasons_propagate(
+    tmp_path: Path,
+    override: dict[str, object],
+    reason: str,
+) -> None:
+    """``status_unknown`` and ``schema_version_unsupported`` propagate too."""
+    payload = make_blocked(
+        ticket_id="T-1", worktree=tmp_path, reason="agent_block"
+    ).model_dump(mode="json")
+    payload.update(override)
+    frame = f"<<<AUTO_DEV_RESULT\n{json.dumps(payload)}\nAUTO_DEV_RESULT>>>"
+    write_opencode_log(tmp_path, [text_event(frame)])
+
+    result = synthesize_opencode_result(
+        task=_make_task(), worktree=tmp_path, session_id=None
+    )
+
+    _assert_reason(result, reason)
+
+
+def test_synthesize_propagated_blocker_persists_diagnostics_with_session_id(
+    tmp_path: Path,
+) -> None:
+    """With a session id, the propagated path writes a bundle and a pointer (#2629)."""
+    write_opencode_log(tmp_path, _validation_failed_events(tmp_path))
+
+    result = synthesize_opencode_result(
+        task=_make_task(), worktree=tmp_path, session_id="s-2629"
+    )
+
+    _assert_reason(result, BLOCKER_REASON_VALIDATION_FAILED)
+    assert result.blocker is not None
+    pointer = f"[diagnostics: {render_bundle_path('s-2629')}]"
+    assert result.blocker.details.endswith(pointer)
+    bundles = list(
+        diagnostics_bundle_dir("s-2629").glob("opencode-schema_mismatch-*.json")
+    )
+    assert len(bundles) == 1
+    bundle = json.loads(bundles[0].read_text(encoding="utf-8"))
+    assert "merge_gate_blocked" in bundle["stdout_excerpt"]
+
+
+def test_synthesize_no_result_emitted_persists_missing_output_bundle(
+    tmp_path: Path,
+) -> None:
+    """``no_result_emitted`` takes the ``missing_output`` category."""
+    broken = "<<<AUTO_DEV_RESULT\n{not json\nAUTO_DEV_RESULT>>>"
+    write_opencode_log(tmp_path, [text_event(broken)])
+
+    result = synthesize_opencode_result(
+        task=_make_task(), worktree=tmp_path, session_id="s-missing"
+    )
+
+    _assert_reason(result, BLOCKER_REASON_NO_RESULT_EMITTED)
+    bundles = list(
+        diagnostics_bundle_dir("s-missing").glob("opencode-missing_output-*.json")
+    )
+    assert len(bundles) == 1
+
+
+def test_synthesize_propagated_blocker_without_session_id_has_no_pointer(
+    tmp_path: Path,
+) -> None:
+    """No session id means no bundle and no ``[diagnostics:`` pointer."""
+    write_opencode_log(tmp_path, _validation_failed_events(tmp_path))
+
+    result = synthesize_opencode_result(
+        task=_make_task(), worktree=tmp_path, session_id=None
+    )
+
+    _assert_reason(result, BLOCKER_REASON_VALIDATION_FAILED)
+    assert result.blocker is not None
+    assert "[diagnostics:" not in result.blocker.details
+
+
+def test_synthesize_propagated_details_are_bounded(tmp_path: Path) -> None:
+    """A huge malformed payload is head-truncated, and the pointer is still appended."""
+    payload = "{" + "x" * 20_000
+    broken = f"<<<AUTO_DEV_RESULT\n{payload}\nAUTO_DEV_RESULT>>>"
+    write_opencode_log(tmp_path, [text_event(broken)])
+
+    result = synthesize_opencode_result(
+        task=_make_task(), worktree=tmp_path, session_id="s-bounded"
+    )
+
+    _assert_reason(result, BLOCKER_REASON_NO_RESULT_EMITTED)
+    assert result.blocker is not None
+    details = result.blocker.details
+    pointer = f"[diagnostics: {render_bundle_path('s-bounded')}]"
+    assert len(details) <= 4000 + 1 + len(pointer)
+    assert details.endswith(pointer)
+    assert details.startswith("worker emitted an unusable AUTO_DEV_RESULT sentinel: ")
 
 
 def test_parse_last_sentinel_joins_a_block_split_across_events(

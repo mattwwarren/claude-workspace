@@ -23,6 +23,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **The attention stream no longer wakes the orchestrator for sibling lanes, replays events, or stays silent on a stuck lane (#2693).** A lane-scoped watch resolves lane-less events through the ticket's row lane instead of dropping them, the starved-lane page no longer repeats for every sibling-lane wake, a re-arm never re-delivers what a previous run printed, and a lane whose breaker will not auto-resume now produces a STUCK line.
+### Fixed
+
+- **An opencode harvest keeps the parser's blocker reason instead of `opencode_no_output` (#2629).** When the final `AUTO_DEV_RESULT` block was real but unusable (`validation_failed`, `no_result_emitted` including a truncated frame, `status_unknown`, `schema_version_unsupported`), the harvest discarded the parser's reason and details and reported `opencode_no_output` with the log tail. The reason and details now propagate, the details prefixed `worker emitted an unusable AUTO_DEV_RESULT sentinel: `. The blocker stays pinned to the dispatched stage's entry marker and retry-eligible. When a session id is known, a diagnostics bundle holds the log tail and the details end with its `[diagnostics: <path>]` pointer. Routing is unchanged: the row still parks `BLOCKED_ON_USER`, and the `validation_failed` attempt cap still applies only to a `BlockedResult` sentinel. A log with no usable block still reports `opencode_no_output`.
+- **A fix cycle no longer parks `codex_fix_dirty_start` because the review rewrote a review artifact the repo tracks (#2689).** A modified or staged tracked `.claude/review-verdict.md`, `.claude/review-verdict.json` or `.claude/review-verdict-unparseable.md` is now cw-owned: exempt from the clean-start probe, unstaged before the cycle's staged-set check and commit, and left modified in the worktree. Any other tracked modification still parks, as does a deleted, renamed or staged-new artifact. New worktrees now exclude the three artifacts via `info/exclude`. Internal: `CycleBaseline.untracked_review_artifacts` is now `review_artifacts`.
 
 ## [1.75.0] - 2026-10-18
 
@@ -35,7 +39,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **A fix cycle no longer parks `codex_fix_dirty_start` because the review rewrote a review artifact the repo tracks (#2689).** A modified or staged tracked `.claude/review-verdict.md`, `.claude/review-verdict.json` or `.claude/review-verdict-unparseable.md` is now cw-owned: exempt from the clean-start probe, unstaged before the cycle's staged-set check and commit, and left modified in the worktree. Any other tracked modification still parks, as does a deleted, renamed or staged-new artifact. New worktrees now exclude the three artifacts via `info/exclude`. Internal: `CycleBaseline.untracked_review_artifacts` is now `review_artifacts`.
 - **`cw config concurrency get --json` no longer crashes on a lane override holding a timestamp (#2696).** It exited 1 with `Object of type datetime is not JSON serializable` once a starved-lane page had stamped its debounce; the override is now dumped JSON-safe.
 
 ## [1.74.1] - 2026-10-16
