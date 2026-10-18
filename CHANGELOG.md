@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A fix cycle no longer parks `codex_fix_dirty_start` because the review rewrote a review artifact the repo tracks (#2689).** A modified or staged tracked `.claude/review-verdict.md`, `.claude/review-verdict.json` or `.claude/review-verdict-unparseable.md` is now cw-owned: exempt from the clean-start probe, unstaged before the cycle's staged-set check and commit, and left modified in the worktree. Any other tracked modification still parks, as does a deleted, renamed or staged-new artifact. New worktrees now exclude the three artifacts via `info/exclude`. Internal: `CycleBaseline.untracked_review_artifacts` is now `review_artifacts`.
+
 ## [1.75.0] - 2026-10-18
 
 ### Added
@@ -17,7 +21,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **A fix cycle no longer parks `codex_fix_dirty_start` because the review rewrote a review artifact the repo tracks (#2689).** A modified or staged tracked `.claude/review-verdict.md`, `.claude/review-verdict.json` or `.claude/review-verdict-unparseable.md` is now cw-owned: exempt from the clean-start probe, unstaged before the cycle's staged-set check and commit, and left modified in the worktree. Any other tracked modification still parks, as does a deleted, renamed or staged-new artifact. New worktrees now exclude the three artifacts via `info/exclude`. Internal: `CycleBaseline.untracked_review_artifacts` is now `review_artifacts`.
 - **`cw config concurrency get --json` no longer crashes on a lane override holding a timestamp (#2696).** It exited 1 with `Object of type datetime is not JSON serializable` once a starved-lane page had stamped its debounce; the override is now dumped JSON-safe.
 
 ## [1.74.1] - 2026-10-16
