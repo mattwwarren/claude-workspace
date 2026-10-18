@@ -2,12 +2,15 @@
 
 Extracted from ``cw.spawn`` (#2702) so the block can grow without pushing that
 module past the size ceiling. The schema history of each key lives beside
-``cw.spawn.CW_CONTEXT_SCHEMA_VERSION``. Imports only ``cw.models``, so it
-carries no import-cycle risk.
+``cw.spawn.CW_CONTEXT_SCHEMA_VERSION``. Imports only the stdlib and
+``cw.models``, so it carries no import-cycle risk. Also owns the
+``operator_resolutions_source`` identity (#2728) computed from the list.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import TYPE_CHECKING
 
 from cw.models import (
@@ -19,7 +22,44 @@ from cw.models import (
 from cw.models.operator_resolution import OPERATOR_RESOLUTIONS_KEY
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from cw.models import TicketTask
+    from cw.models.operator_resolution import OperatorResolution
+
+OPERATOR_RESOLUTIONS_SOURCE_KEY = "operator_resolutions_source"
+"""The ``queue_metadata`` wire key carrying the list's ``row:<N>:<sha>`` identity."""
+
+_ROW_SOURCE_PREFIX = "row"
+_ROW_SOURCE_SEPARATOR = ":"
+_JSON_COMPACT_SEPARATORS = (",", ":")
+_DIGEST_ENCODING = "ascii"
+
+
+def operator_resolutions_source(
+    resolutions: Sequence[OperatorResolution],
+) -> str | None:
+    """The content-bound identity ``row:<N>:<sha256>`` of a row's resolutions (#2728).
+
+    ``N`` is the highest ``round``; the digest covers every entry text in round
+    order, so a re-enqueued row whose earlier rounds differ never reuses a
+    surviving draft's identity. ``None`` for an empty list.
+
+    The digest input is the compact JSON array of the texts with the default
+    ``ensure_ascii``: pure ASCII bytes, unambiguous across entry boundaries,
+    and a lone surrogate cannot raise at encode time.
+    """
+    if not resolutions:
+        return None
+    ordered = sorted(resolutions, key=lambda resolution: resolution.round)
+    payload = json.dumps(
+        [resolution.text for resolution in ordered],
+        separators=_JSON_COMPACT_SEPARATORS,
+    ).encode(_DIGEST_ENCODING)
+    digest = hashlib.sha256(payload).hexdigest()
+    return _ROW_SOURCE_SEPARATOR.join(
+        (_ROW_SOURCE_PREFIX, str(ordered[-1].round), digest)
+    )
 
 
 def build_queue_metadata(task: TicketTask) -> dict[str, object]:
@@ -66,4 +106,9 @@ def build_queue_metadata(task: TicketTask) -> dict[str, object]:
             resolution.model_dump(mode="json")
             for resolution in task.operator_resolutions
         ],
+        # v13 (#2728): `row:<N>:<sha256>` over the whole list, computed here so
+        # the worker never hashes; null when the list is empty.
+        OPERATOR_RESOLUTIONS_SOURCE_KEY: operator_resolutions_source(
+            task.operator_resolutions
+        ),
     }
