@@ -3553,6 +3553,142 @@ class TestUnownedRunningSweepWiring:
         assert adopted == []
 
 
+def _spy_core(
+    monkeypatch: pytest.MonkeyPatch, order: list[str], name: str, label: str
+) -> None:
+    """Wrap ``cw.reconcile.core.<name>`` so each call appends *label*."""
+    real = getattr(reconcile_core, name)
+
+    def _wrapped(*args: Any, **kwargs: Any) -> Any:
+        order.append(label)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(reconcile_core, name, _wrapped)
+
+
+class TestSlotReleaseSweepWiring:
+    """#2715: the lost-session sweep runs in both terminal tails after the
+    backstops; the shipped release runs once, before the #2524 page sweep; its
+    gh pre-pass is lockless and precedes the harvest capture; neither runs on
+    the daemon-outage early return."""
+
+    _TAIL = (
+        ("run_unowned_running_recovery", "unowned_running"),
+        ("revert_timed_out_tasks", "revert_timed_out"),
+        ("revert_completed_silent_tasks", "revert_completed_silent"),
+        ("park_terminal_sibling_tasks", "terminal_sibling"),
+        ("run_lost_session_recovery", "lost_session"),
+        ("run_concierge_recoveries", "concierge"),
+        ("run_escalation_sweep", "escalation"),
+    )
+    _LOCKED = (
+        ("record_session_liveness_changes", "liveness"),
+        ("run_shipped_release", "shipped_release"),
+        ("sweep_routed_result_sessions", "routed_page"),
+    )
+
+    def _spy(
+        self, monkeypatch: pytest.MonkeyPatch, names: tuple[tuple[str, str], ...]
+    ) -> list[str]:
+        order: list[str] = []
+        for name, label in names:
+            _spy_core(monkeypatch, order, name, label)
+        return order
+
+    def test_tail_order_without_phantoms(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        order = self._spy(monkeypatch, self._TAIL)
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+
+        reconcile()
+
+        assert order == [label for _name, label in self._TAIL]
+
+    def test_tail_order_with_phantoms(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+        save_state(CwState(sessions=[_mk_session("s1", "missing-ref")]))
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "decoy000"}],
+        )
+        order = self._spy(monkeypatch, self._TAIL)
+
+        report = reconcile()
+
+        assert report.phantom_session_ids == ["s1"]
+        assert order == [label for _name, label in self._TAIL]
+
+    def test_shipped_release_runs_once_before_the_page_sweep(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        order = self._spy(monkeypatch, self._LOCKED)
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+
+        reconcile()
+
+        assert order == ["liveness", "shipped_release", "routed_page"]
+
+    def test_neither_runs_on_the_daemon_outage_early_return(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(CwState(sessions=[_mk_session("s1", "live-ref")]))
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+        order = self._spy(
+            monkeypatch,
+            (
+                ("run_lost_session_recovery", "lost_session"),
+                ("run_shipped_release", "shipped_release"),
+            ),
+        )
+
+        reconcile()
+
+        assert order == []
+
+    def test_locked_body_without_probes_passes_none(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[object] = []
+
+        def _record(*_args: object, **kwargs: object) -> list[str]:
+            seen.append(kwargs["probes"])
+            return []
+
+        monkeypatch.setattr(reconcile_core, "run_shipped_release", _record)
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+
+        with sessions_lock():
+            reconcile_core._reconcile_locked(deferred=DeferredReconcileJobs())
+
+        assert seen == [None]
+
+    def test_shipped_capture_is_lockless_and_precedes_harvest(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        order: list[tuple[str, bool]] = []
+        real_capture = reconcile_core.capture_shipped_pr_probes
+        real_harvest = reconcile_core._capture_harvest_facts
+
+        def _capture(**kwargs: Any) -> Any:
+            order.append(("shipped", is_rank_held(LockRank.SESSIONS)))
+            return real_capture(**kwargs)
+
+        def _harvest() -> HarvestFacts:
+            order.append(("harvest", is_rank_held(LockRank.SESSIONS)))
+            return real_harvest()
+
+        monkeypatch.setattr(reconcile_core, "capture_shipped_pr_probes", _capture)
+        monkeypatch.setattr(reconcile_core, "_capture_harvest_facts", _harvest)
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+
+        reconcile()
+
+        assert order == [("shipped", False), ("harvest", False)]
+
+
 class TestDirtyChecksPrePass:
     """#2548: the worktree dirty checks are captured in a lockless pre-pass and
     the in-lock phantom detect and terminal backstops only look them up."""
