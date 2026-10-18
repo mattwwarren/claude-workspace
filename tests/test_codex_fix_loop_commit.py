@@ -35,6 +35,7 @@ from tests._codex_review_helpers import (
 from tests.conftest import _make_finding, git_in
 from tests.test_codex_fix_loop import (
     _CLEAN_DOC,
+    _CONTENT,
     _MANIFEST,
     _MF_DOC,
     _PYPROJECT_CONTENT,
@@ -185,6 +186,137 @@ class TestCleanStartInvariant:
         assert changed.split() == ["fix.py"]
         assert isinstance(seen[0], CycleBaseline)
         assert seen[0].tree_sha == git_in(worktree, "rev-parse", f"{sha}~1^{{tree}}")
+
+
+_REVIEW_ARTIFACTS = (
+    ".claude/review-verdict.md",
+    ".claude/review-verdict.json",
+    ".claude/review-verdict-unparseable.md",
+)
+
+
+def _writes_nothing(_worktree: Path, _argv: list[str]) -> CodexRunResult:
+    return CodexRunResult(returncode=0, stdout="", stderr="")
+
+
+class TestTrackedReviewArtifacts:
+    """#2689: a tracked review artifact the review rewrote is cw-owned."""
+
+    @staticmethod
+    def _tracked(make_git_repo: Callable[..., Path], name: str, artifact: str) -> Path:
+        """A worktree whose pushed feature history tracks *artifact*."""
+        return _worktree(
+            make_git_repo, name, feature_files={"new.py": _CONTENT, artifact: "old\n"}
+        )
+
+    @pytest.mark.parametrize("artifact", _REVIEW_ARTIFACTS)
+    def test_rewritten_artifact_is_not_dirty_and_not_committed(
+        self, make_git_repo: Callable[..., Path], artifact: str
+    ) -> None:
+        worktree = self._tracked(make_git_repo, "wt-tracked-art", artifact)
+        _write(worktree / artifact, "rewritten by review\n")
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()])
+
+        out, _ = _run_loop(runner, worktree, session_id="s-tracked-art")
+
+        assert out.status != "blocked"
+        assert runner.fix_calls == 1
+        head, _count, origin_tip = _heads(worktree)
+        changed = git_in(
+            worktree, "diff-tree", "--no-commit-id", "--name-only", "-r", head
+        )
+        assert changed.split() == ["fix.py"]
+        assert origin_tip == head
+        assert artifact in git_in(worktree, "diff", "--name-only").split()
+
+    def test_tracked_artifact_plus_other_edit_still_parks_naming_the_other(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        artifact = _REVIEW_ARTIFACTS[0]
+        worktree = self._tracked(make_git_repo, "wt-tracked-other", artifact)
+        _write(worktree / artifact, "rewritten by review\n")
+        _write(worktree / "new.py", "edited by hand\n")
+        runner = _FixLoopRunner([_MF_DOC], fix_behaviors=[_editor()])
+
+        out, _ = _run_loop(runner, worktree, session_id="s-tracked-other")
+
+        assert _blocker_reason(out) == CODEX_FIX_DIRTY_START
+        assert out.blocker is not None
+        assert "new.py" in out.blocker.details
+        assert artifact not in out.blocker.details
+        assert runner.fix_calls == 0
+
+    @pytest.mark.parametrize("artifact", _REVIEW_ARTIFACTS)
+    def test_artifact_staged_at_start_is_left_out_of_the_cycle_commit(
+        self, make_git_repo: Callable[..., Path], artifact: str
+    ) -> None:
+        worktree = self._tracked(make_git_repo, "wt-tracked-staged", artifact)
+        _write(worktree / artifact, "rewritten by review\n")
+        git_in(worktree, "add", artifact)
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()])
+
+        out, _ = _run_loop(runner, worktree, session_id="s-tracked-staged")
+
+        assert out.status != "blocked"
+        head = git_in(worktree, "rev-parse", "HEAD")
+        changed = git_in(
+            worktree, "diff-tree", "--no-commit-id", "--name-only", "-r", head
+        )
+        assert changed.split() == ["fix.py"]
+        assert artifact not in git_in(worktree, "diff", "--cached", "--name-only")
+
+    def test_no_op_fix_with_modified_artifact_is_a_tolerated_no_op(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        artifact = _REVIEW_ARTIFACTS[1]
+        worktree = self._tracked(make_git_repo, "wt-tracked-noop", artifact)
+        _write(worktree / artifact, "rewritten by review\n")
+        before = _heads(worktree)
+
+        sha = _commit_fix_cycle(
+            worktree,
+            cycle=1,
+            findings=[_make_finding()],
+            measured_paths=frozenset(),
+            review_artifacts=frozenset({artifact}),
+        )
+
+        assert sha is None
+        assert _heads(worktree) == before
+        assert artifact not in git_in(worktree, "diff", "--cached", "--name-only")
+        assert artifact in git_in(worktree, "diff", "--name-only").split()
+
+    def test_loop_with_no_op_fix_and_modified_artifact_counts_the_cycle(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        artifact = _REVIEW_ARTIFACTS[2]
+        worktree = self._tracked(make_git_repo, "wt-tracked-noop-loop", artifact)
+        _write(worktree / artifact, "rewritten by review\n")
+        before = _heads(worktree)
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_writes_nothing])
+
+        out, _ = _run_loop(runner, worktree, session_id="s-tracked-noop-loop")
+
+        assert out.status != "blocked"
+        assert runner.fix_calls == 1
+        assert _heads(worktree) == before
+
+    def test_artifact_stays_modified_across_two_cycles(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        artifact = _REVIEW_ARTIFACTS[0]
+        worktree = self._tracked(make_git_repo, "wt-tracked-two", artifact)
+        _write(worktree / artifact, "rewritten by review\n")
+        runner = _FixLoopRunner(
+            [_MF_DOC, _MF_DOC, _CLEAN_DOC],
+            fix_behaviors=[_editor("fix.py"), _editor("fix2.py")],
+        )
+
+        out, _ = _run_loop(runner, worktree, session_id="s-tracked-two")
+
+        assert out.status != "blocked"
+        assert runner.fix_calls == 2
+        assert artifact in git_in(worktree, "diff", "--name-only").split()
 
 
 class TestStagedSetGuard:

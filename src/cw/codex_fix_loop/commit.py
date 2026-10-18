@@ -212,7 +212,7 @@ def _commit_fix_cycle(
     findings: list[Finding],
     *,
     measured_paths: frozenset[str],
-    untracked_review_artifacts: frozenset[str] = frozenset(),
+    review_artifacts: frozenset[str] = frozenset(),
 ) -> str | None:
     """Commit the worktree changes a fix cycle produced; return the new sha.
 
@@ -248,7 +248,7 @@ def _commit_fix_cycle(
         )
         return None
     git_output(["add", "-A"], cwd=worktree)
-    unstage_review_artifacts(worktree, untracked_review_artifacts)
+    unstage_review_artifacts(worktree, review_artifacts)
     staged = _staged_paths(worktree)
     if staged != measured_paths:
         raise StagedSetMismatchError(measured_paths, staged)
@@ -277,7 +277,7 @@ def _commit_fix_cycle(
             cycle,
         )
         git_output(["add", "-A"], cwd=worktree)
-        unstage_review_artifacts(worktree, untracked_review_artifacts)
+        unstage_review_artifacts(worktree, review_artifacts)
         try:
             _git_commit(worktree, message)
         except subprocess.CalledProcessError as exc:
@@ -604,7 +604,7 @@ def _run_fix_and_commit(
             cycle,
             findings,
             measured_paths=touched,
-            untracked_review_artifacts=baseline.untracked_review_artifacts,
+            review_artifacts=baseline.review_artifacts,
         )
     except (subprocess.CalledProcessError, StagedSetMismatchError) as exc:
         return _park_commit_failure(ctx, exc, baseline), None

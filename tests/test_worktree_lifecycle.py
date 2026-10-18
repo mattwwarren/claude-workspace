@@ -10,21 +10,30 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from cw.codex_fix_loop.baseline import _CW_REVIEW_ARTIFACTS
 from cw.exceptions import StaleWorktreeError, WorktreeError
 from cw.models import (
     ClientConfig,
 )
 from cw.worktree import (
+    _CW_EXCLUDE_PATTERNS,
     _register_cw_exclude,
     _run_git,
     create_worktree,
     remove_worktree,
 )
 from tests._worktree_helpers import patch_worktree
-from tests.conftest import git_in
+from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+_REVIEW_ARTIFACT_PREFIX = ".claude/review-verdict"
+_REVIEW_ARTIFACTS = (
+    ".claude/review-verdict.md",
+    ".claude/review-verdict.json",
+    ".claude/review-verdict-unparseable.md",
+)
 
 
 class TestRegisterCwExclude:
@@ -87,13 +96,13 @@ class TestRegisterCwExclude:
     def test_registers_every_pattern_once_across_repeat_calls(
         self, make_git_repo: Callable[[str], Path]
     ) -> None:
-        """Both cw patterns land exactly once however often it is called (#2447)."""
+        """Every cw pattern lands exactly once however often it is called (#2447)."""
         repo = make_git_repo("test-repo")
         for _ in range(3):
             _register_cw_exclude(repo)
         lines = (repo / ".git" / "info" / "exclude").read_text().splitlines()
-        assert lines.count(".cw/") == 1
-        assert lines.count(".claude/cw-context.json*") == 1
+        for pattern in _CW_EXCLUDE_PATTERNS:
+            assert lines.count(pattern) == 1
 
     def test_tops_up_exclude_that_predates_the_context_pattern(
         self, make_git_repo: Callable[[str], Path]
@@ -109,6 +118,9 @@ class TestRegisterCwExclude:
             "# keep me",
             ".cw/",
             ".claude/cw-context.json*",
+            ".claude/review-verdict.md",
+            ".claude/review-verdict.json",
+            ".claude/review-verdict-unparseable.md",
         ]
 
     def _write_context_files(self, root: Path) -> None:
@@ -116,6 +128,48 @@ class TestRegisterCwExclude:
         (root / ".claude" / "cw-context.json").write_text("{}")
         (root / ".claude" / "cw-context.json.lock").write_text("")
         (root / "real.txt").write_text("keep")
+
+    def _write_review_artifacts(self, root: Path) -> None:
+        (root / ".claude").mkdir(exist_ok=True)
+        for artifact in _REVIEW_ARTIFACTS:
+            (root / artifact).write_text("verdict\n")
+        (root / "real.txt").write_text("keep")
+
+    def test_review_artifacts_are_ignored_when_untracked(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """Untracked review artifacts match info/exclude and ``git add -A``
+        stages none of them (#2689)."""
+        repo = make_git_repo("test-repo")
+        _register_cw_exclude(repo)
+        self._write_review_artifacts(repo)
+        for artifact in _REVIEW_ARTIFACTS:
+            assert "info/exclude" in git_in(repo, "check-ignore", "-v", artifact)
+        git_in(repo, "add", "-A")
+        staged = git_in(repo, "diff", "--cached", "--name-only").splitlines()
+        assert staged == ["real.txt"]
+
+    @pytest.mark.parametrize("artifact", _REVIEW_ARTIFACTS)
+    def test_exclude_does_not_hide_a_tracked_artifact_modification(
+        self, make_git_repo: Callable[[str], Path], artifact: str
+    ) -> None:
+        """An exclude never untracks: a tracked artifact still shows as
+        modified, which is why the fix-loop baseline exempts it (#2689)."""
+        repo = make_git_repo("test-repo")
+        commit_tracked_file(repo, artifact, "old\n")
+        _register_cw_exclude(repo)
+        (repo / artifact).write_text("rewritten by review\n")
+        assert artifact in git_in(repo, "status", "--porcelain")
+
+    def test_review_artifact_patterns_match_the_fix_loop_baseline(self) -> None:
+        """The exclude literals stay in lockstep with baseline's set (#2689)."""
+        review_patterns = {
+            pattern
+            for pattern in _CW_EXCLUDE_PATTERNS
+            if pattern.startswith(_REVIEW_ARTIFACT_PREFIX)
+        }
+        assert review_patterns == _CW_REVIEW_ARTIFACTS
+        assert review_patterns == set(_REVIEW_ARTIFACTS)
 
     def test_plain_checkout_ignores_context_files_and_add_all_skips_them(
         self, make_git_repo: Callable[[str], Path]

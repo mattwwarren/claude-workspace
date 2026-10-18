@@ -29,7 +29,7 @@ from tests._codex_review_helpers import (
     _stage_merge_from_other_branch,
     _write,
 )
-from tests.conftest import git_in
+from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -180,27 +180,66 @@ class TestCaptureCycleBaseline:
         assert isinstance(_capture_unchanged(repo), CycleBaseline)
 
     @pytest.mark.parametrize("artifact", _ARTIFACTS)
-    def test_untracked_review_verdict_artifacts_do_not_make_the_tree_dirty(
-        self, make_git_repo: Callable[..., Path], artifact: str
+    @pytest.mark.parametrize("state", ["untracked", "modified", "staged", "both"])
+    def test_review_verdict_artifacts_do_not_make_the_tree_dirty(
+        self, make_git_repo: Callable[..., Path], artifact: str, state: str
     ) -> None:
         repo = _repo(make_git_repo)
-        _write(repo / artifact, "verdict\n")
+        if state == "untracked":
+            _write(repo / artifact, "verdict\n")
+        else:
+            commit_tracked_file(repo, artifact, "old\n")
+            _write(repo / artifact, "rewritten by review\n")
+            if state in {"staged", "both"}:
+                git_in(repo, "add", artifact)
+            if state == "both":
+                _write(repo / artifact, "rewritten again\n")
 
-        assert isinstance(_capture_unchanged(repo), CycleBaseline)
+        result = _capture_unchanged(repo)
+
+        assert isinstance(result, CycleBaseline)
+        assert result.review_artifacts == frozenset({artifact})
 
     @pytest.mark.parametrize("artifact", _ARTIFACTS)
-    def test_modified_tracked_review_verdict_artifact_is_still_dirty(
+    def test_staged_new_review_artifact_is_still_dirty(
         self, make_git_repo: Callable[..., Path], artifact: str
     ) -> None:
         repo = _repo(make_git_repo)
         _write(repo / artifact, "verdict\n")
         git_in(repo, "add", "-f", artifact)
-        # A staged-new artifact (`A `) is dirty: the allowlist is untracked-only.
-        assert f"A  {artifact}" in _dirty(repo).dirty
-        git_in(repo, "commit", "-m", "track the artifact")
-        _write(repo / artifact, "edited\n")
 
-        assert any(line.endswith(artifact) for line in _dirty(repo).dirty)
+        # A staged-new artifact (`A `) is not in HEAD, so it is real work.
+        assert f"A  {artifact}" in _dirty(repo).dirty
+
+    @pytest.mark.parametrize("artifact", _ARTIFACTS)
+    @pytest.mark.parametrize("change", ["delete", "git-rm", "git-mv"])
+    def test_deleted_or_renamed_tracked_review_artifact_is_still_dirty(
+        self, make_git_repo: Callable[..., Path], artifact: str, change: str
+    ) -> None:
+        repo = _repo(make_git_repo)
+        commit_tracked_file(repo, artifact, "old\n")
+        if change == "delete":
+            (repo / artifact).unlink()
+        elif change == "git-rm":
+            git_in(repo, "rm", artifact)
+        else:
+            git_in(repo, "mv", artifact, ".claude/moved.md")
+
+        dirty = _dirty(repo).dirty
+
+        assert dirty
+        assert any(artifact in line for line in dirty)
+
+    @pytest.mark.parametrize("artifact", _ARTIFACTS)
+    def test_tracked_artifact_plus_other_modified_file_names_only_the_other(
+        self, make_git_repo: Callable[..., Path], artifact: str
+    ) -> None:
+        repo = _repo(make_git_repo)
+        commit_tracked_file(repo, artifact, "old\n")
+        _write(repo / artifact, "rewritten by review\n")
+        _write(repo / "a.py", "a = 2\n")
+
+        assert _dirty(repo).dirty == (" M a.py",)
 
     def test_artifact_allowlist_does_not_hide_other_untracked_files(
         self, make_git_repo: Callable[..., Path]
@@ -285,6 +324,37 @@ class TestCycleTouchedPaths:
         assert ".claude/review-verdict-unparseable.md" in git_in(
             repo, "diff", "--cached", "--name-only"
         )
+
+    @pytest.mark.parametrize("artifact", _ARTIFACTS)
+    @pytest.mark.parametrize("state", ["modified", "staged", "both"])
+    def test_tracked_artifact_at_start_is_unstaged_and_left_modified(
+        self, make_git_repo: Callable[..., Path], artifact: str, state: str
+    ) -> None:
+        repo = _repo(make_git_repo)
+        commit_tracked_file(repo, artifact, "old\n")
+        _write(repo / artifact, "rewritten by review\n")
+        if state in {"staged", "both"}:
+            git_in(repo, "add", artifact)
+        if state == "both":
+            _write(repo / artifact, "rewritten again\n")
+        baseline = capture_cycle_baseline(repo)
+        assert isinstance(baseline, CycleBaseline)
+        _write(repo / "a.py", "a = 2\n")
+
+        assert cycle_touched_paths(repo, baseline) == {"a.py"}
+        assert git_in(repo, "diff", "--cached", "--name-only") == "a.py"
+        assert artifact in git_in(repo, "diff", "--name-only").split()
+
+    def test_cycle_that_writes_nothing_with_tracked_artifact_is_empty(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        commit_tracked_file(repo, _ARTIFACTS[0], "old\n")
+        _write(repo / _ARTIFACTS[0], "rewritten by review\n")
+        baseline = capture_cycle_baseline(repo)
+        assert isinstance(baseline, CycleBaseline)
+
+        assert cycle_touched_paths(repo, baseline) == set()
 
     def test_paths_are_relative_to_the_baseline_tree_not_head(
         self, make_git_repo: Callable[..., Path]
