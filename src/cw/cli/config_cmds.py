@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from io import StringIO
 from typing import TYPE_CHECKING, TypedDict
 
 import click
-from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
-from cw.atomic import atomic_write_text
 from cw.cli._base import handle_errors, main
+from cw.cli._clients_doc import dump_clients_doc, load_clients_doc
 from cw.config import (
     _load_concurrency_overrides,
     _save_concurrency_overrides,
@@ -396,14 +394,8 @@ def lane_add(
 
     # bounded=True (#2501): operator command; nothing precedes the lock.
     with clients_lock(bounded=True):
-        rt = YAML(typ="rt")
-        rt.default_flow_style = False
         clients_path = clients_file()
-        content = clients_path.read_text() if clients_path.exists() else "clients:\n"
-        doc = rt.load(content)
-        if not isinstance(doc, dict) or "clients" not in doc:
-            msg = f"{clients_path} has no 'clients:' key."
-            raise CwError(msg)
+        rt, doc = load_clients_doc(clients_path)
         clients_map = doc["clients"]
         if client not in clients_map:
             msg = f"Client '{client}' not found in {clients_path}"
@@ -427,9 +419,7 @@ def lane_add(
         new_lane["max_parallel"] = effective_max_parallel
         new_lane["priority"] = effective_priority
         lanes_list.append(new_lane)
-        buf = StringIO()
-        rt.dump(doc, buf)
-        atomic_write_text(clients_path, buf.getvalue())
+        dump_clients_doc(rt, doc, clients_path)
 
     record_event(
         OrchestratorEventType.LANE_CREATED,
@@ -480,16 +470,8 @@ def lane_rm(positional: tuple[str, ...], client_option: str | None) -> None:
             raise CwError(msg)
 
         with clients_lock(bounded=True):
-            rt = YAML(typ="rt")
-            rt.default_flow_style = False
             clients_path = clients_file()
-            content = (
-                clients_path.read_text() if clients_path.exists() else "clients:\n"
-            )
-            doc = rt.load(content)
-            if not isinstance(doc, dict) or "clients" not in doc:
-                msg = f"{clients_path} has no 'clients:' key."
-                raise CwError(msg)
+            rt, doc = load_clients_doc(clients_path)
             clients_map = doc["clients"]
             if client not in clients_map:
                 msg = f"Client '{client}' not found."
@@ -510,9 +492,7 @@ def lane_rm(positional: tuple[str, ...], client_option: str | None) -> None:
                 msg = f"Lane '{name}' not found for client '{client}'."
                 raise CwError(msg)
             client_entry["lanes"] = new_lanes
-            buf = StringIO()
-            rt.dump(doc, buf)
-            atomic_write_text(clients_path, buf.getvalue())
+            dump_clients_doc(rt, doc, clients_path)
 
     click.echo(f"Lane '{name}' removed from client '{client}'.")
 
