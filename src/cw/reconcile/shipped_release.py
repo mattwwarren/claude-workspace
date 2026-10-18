@@ -51,9 +51,6 @@ from cw.dev_queue import dev_queue_lock, load_dev_queue
 from cw.exceptions import CwError
 from cw.gh import _GH_PR_STATE_MERGED, _GH_PR_STATE_OPEN
 from cw.models import (
-    AGENT_SPAWN_LAST_STAMPED_AT_KEY,
-    AGENT_SPAWN_SESSION_ID_KEY,
-    AGENT_SPAWN_STAMP_KEY,
     DEFAULT_LANE,
     DEFAULT_STAGE,
     CompletionReason,
@@ -61,13 +58,13 @@ from cw.models import (
     ReapReason,
     SessionStatus,
     Stage,
-    extract_unresolved_spawn_count,
 )
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
+    _agent_spawn_stamp_session_id,
+    _unresolved_subagent_spawn_age_seconds,
     feature_branch_key,
 )
-from cw.reconcile._shared._worktree_evidence import _read_agent_spawn_stamp_context
 from cw.reconcile.deferred import PostLockJob
 from cw.reconcile.dispositions import emit_routed_sentinel_completion
 from cw.reconcile.probe_store import BoundedProbeStore, ProbeStoreUnavailableError
@@ -228,30 +225,13 @@ def _drain_quiesced(
     a stamp ``session_id`` equal to *session*'s id (a re-used worktree shows
     the newest session's stamp). Anything else holds the act this tick.
     """
-    # Read the context once.  The count, timestamp and owner must describe the
-    # same on-disk snapshot; two independent readers could otherwise authorize
-    # a stop across a concurrent Stop-hook rewrite.
-    context = _read_agent_spawn_stamp_context(session.worktree_path)
-    stamp = context.get(AGENT_SPAWN_STAMP_KEY) if context is not None else None
-    if context is None or extract_unresolved_spawn_count(context) <= 0:
-        return False
-    if not isinstance(stamp, dict):
-        return False
-    raw = stamp.get(AGENT_SPAWN_LAST_STAMPED_AT_KEY)
-    owner = stamp.get(AGENT_SPAWN_SESSION_ID_KEY)
-    if not isinstance(raw, str) or not isinstance(owner, str) or not owner:
-        return False
-    try:
-        stamped_at = datetime.fromisoformat(raw)
-    except ValueError:
-        return False
-    if stamped_at.tzinfo is None:
-        stamped_at = stamped_at.replace(tzinfo=UTC)
-    age = (now - stamped_at).total_seconds()
+    age = _unresolved_subagent_spawn_age_seconds(session.worktree_path, now)
     deadline = config.fix_loop_await_deadline_minutes * _SECONDS_PER_MINUTE
-    if age < deadline:
-        return False
-    return owner == session.id
+    return (
+        age is not None
+        and age >= deadline
+        and _agent_spawn_stamp_session_id(session.worktree_path) == session.id
+    )
 
 
 def _candidates(
