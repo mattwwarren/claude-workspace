@@ -1068,8 +1068,28 @@ operator_github_login_by_repo: {}
 global_attempt_ceiling: 10
 
 # Consecutive spawn errors at which a lane's circuit breaker trips and
-# pauses the lane (resume via `cw lane resume`). See #875.
+# pauses the lane. See #875. Worktree setup errors (WorktreeError) count on a
+# separate counter that trips at 3x this value (derived, no knob), so a flaky
+# worktree does not pause the lane as fast as a broken spawn backend (#2696).
+# A tripped lane resumes via `cw lane resume`, or on its own once the
+# auto-resume cool-down below elapses. `cw dev-queue status`, `cw lane ls` and
+# `cw dev-queue show` print the trip's cause, recent errors and resume hint.
 lane_circuit_breaker_threshold: 3
+
+# Auto-resume for circuit-breaker lane pauses (#2696). After this many minutes
+# the dispatch loop lifts the pause half-open: the next spawn is a probe, and
+# one more failure of the kind that tripped it re-trips at once with a doubled
+# cool-down (15, 30, 60, 120, then capped at the max below). That first probe
+# spawn is not charged to the ticket's unproductive_attempts, so a lane-level
+# fault never pushes a ticket toward attempt_cap_blocked. A spawn success
+# resets the streak. The starved-lane page (lane_starved_notify_interval_minutes)
+# is held for the first two trips of a streak and resumes at the third.
+# Operator pauses (`cw lane pause`), pauses recorded before #2696 (shown as
+# "legacy") and `paused: true` in clients.yaml are never auto-resumed; a
+# clients.yaml pause still holds the lane after a circuit pause is lifted.
+# Auto-resume is enabled by default; 0 disables it.
+lane_circuit_auto_resume_minutes: 15
+lane_circuit_auto_resume_max_minutes: 240
 
 # Fallback window after a usage-limit cutoff, used when the reset time is
 # absent or unparseable. When the spawn-time message names a reset time cw can

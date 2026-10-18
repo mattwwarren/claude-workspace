@@ -67,8 +67,10 @@ class OrchestratorConfig(BaseModel):
     # Consecutive spawn_error count at which a lane's circuit breaker trips and
     # pauses the lane, halting the retry churn a persistent backend outage would
     # otherwise drive. Complements the per-task exponential backoff (#868) and
-    # the global attempt ceiling (#786); a paused lane resumes only via
-    # ``cw lane resume``. See GitHub issue #875.
+    # the global attempt ceiling (#786). Worktree setup errors count separately
+    # and trip at 3x this value. A tripped lane resumes via ``cw lane resume``
+    # or, after lane_circuit_auto_resume_minutes, automatically (#2696). See
+    # GitHub issue #875.
     lane_circuit_breaker_threshold: int = 3
     # Fixed re-notify interval (minutes) for the recurring lane-starved
     # session.needs_attention signal (#1630). Scope is LANE_CIRCUIT_PAUSED
@@ -82,6 +84,18 @@ class OrchestratorConfig(BaseModel):
     # starved lane's operator page should recur at a steady cadence until the
     # operator acts, not decay into silence.
     lane_starved_notify_interval_minutes: int = 15
+    # Base cool-down (minutes) before the dispatch loop lifts a
+    # circuit-breaker lane pause on its own (#2696). It doubles per
+    # consecutive trip with no spawn success in between, capped by
+    # lane_circuit_auto_resume_max_minutes. The resume is half-open: one more
+    # failure of the tripping kind re-trips at once, and that first probe
+    # spawn does not charge the ticket's unproductive_attempts. 0 disables
+    # auto-resume (a tripped lane then waits for ``cw lane resume``).
+    # Operator and legacy pauses are never auto-resumed. Auto-resume is on by
+    # default; set this to 0 to disable the bounded cooldown/probe.
+    lane_circuit_auto_resume_minutes: int = 15
+    # Cap (minutes) on the doubling auto-resume cool-down above (#2696).
+    lane_circuit_auto_resume_max_minutes: int = 240
     # Fixed interval (minutes) for the dispatch loop's proactive staleness
     # watchdog (#1875). Serves TWO purposes on purpose, not two knobs:
     #

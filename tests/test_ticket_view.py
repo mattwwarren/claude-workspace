@@ -25,6 +25,7 @@ from cw.exceptions import CwError
 from cw.models import (
     DEFAULT_LANE,
     DevQueueStore,
+    LaneConcurrencyOverride,
     LastResultSource,
     LivenessBucket,
     MustFixOverride,
@@ -416,6 +417,14 @@ class TestSkipReasonPrecedence:
         assert view.dispatch is not None
         assert view.dispatch.skip_reason is None
         assert view.dispatch.lane_paused is False
+
+    def test_row_lane_circuit_paused_carries_a_legacy_lane_pause(self) -> None:
+        write_lane_override(_C, "default", paused=True, consecutive_spawn_errors=3)
+        seed_queue([make_task()])
+        view = _build()
+        assert view.dispatch is not None
+        assert view.dispatch.lane_pause is not None
+        assert view.dispatch.lane_pause.source == "legacy"
 
     def test_per_ticket_event_beats_client_snapshot(self) -> None:
         seed_queue([make_task()])
@@ -911,3 +920,138 @@ class TestNextCommandsOptIn:
         assert len(ship) == 1
         assert ship[0].purpose.endswith(_SHIP_CAVEAT)
         assert f"  {_SHIP_CMD}   # {ship[0].purpose}" in _text(view)
+
+
+# --- #2696: the lane pause cause and resume hint ------------------------------
+
+_PAUSED_AT = _NOW - timedelta(minutes=5)
+
+
+def _breaker_override(**updates: object) -> LaneConcurrencyOverride:
+    base = LaneConcurrencyOverride(
+        paused=True,
+        paused_at=_PAUSED_AT,
+        pause_source="circuit_breaker",
+        pause_trigger="spawn_errors",
+        consecutive_spawn_errors=3,
+        recent_spawn_errors=["boom"],
+        circuit_trip_streak=1,
+        circuit_auto_resume_at=_PAUSED_AT + timedelta(minutes=15),
+    )
+    return base.model_copy(update=updates)
+
+
+def _skip_reason_block(view: TicketView) -> list[str]:
+    lines = _text(view).splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("skip_reason:"))
+    end = next(i for i in range(start + 1, len(lines)) if not lines[i].startswith(" "))
+    return lines[start:end]
+
+
+class TestLanePause:
+    @pytest.mark.parametrize(
+        ("trigger", "wording"),
+        [
+            ("spawn_errors", "spawn errors"),
+            ("worktree_errors", "worktree setup errors"),
+        ],
+    )
+    def test_circuit_breaker_pause_lines_follow_the_skip_reason(
+        self, trigger: str, wording: str
+    ) -> None:
+        write_lane_override(
+            _C, "default", override=_breaker_override(pause_trigger=trigger)
+        )
+        seed_queue([make_task()])
+
+        view = _build()
+
+        assert view.dispatch is not None
+        assert view.dispatch.lane_pause is not None
+        assert view.dispatch.lane_pause.source == "circuit_breaker"
+        assert view.dispatch.lane_pause.trigger == trigger
+        assert _skip_reason_block(view) == [
+            "skip_reason: lane_circuit_paused"
+            " (source=row, lane paused by its circuit breaker)",
+            "  paused since 2026-10-15T17:55:00Z (5m ago) by circuit_breaker"
+            f" ({wording}, trip #1)",
+            "    last spawn errors (oldest first):",
+            "      - boom",
+            "    auto-resume: 2026-10-15T18:10:00Z (in 10m)",
+            "    resume: cw lane resume acme default",
+        ]
+
+    def test_operator_pause_without_tick_data(self) -> None:
+        write_lane_override(
+            _C,
+            "default",
+            override=LaneConcurrencyOverride(
+                paused=True, paused_at=_PAUSED_AT, pause_source="operator"
+            ),
+        )
+        seed_queue([make_task()])
+
+        view = _build()
+
+        assert _skip_reason_block(view) == [
+            "skip_reason: - [lane paused]",
+            "  paused since 2026-10-15T17:55:00Z (5m ago) by operator",
+            "    auto-resume: no (operator-held)",
+            "    resume: cw lane resume acme default",
+        ]
+
+    def test_declared_pause(self, tmp_path: Path) -> None:
+        write_lane_client(_C, tmp_path / "ws", paused=True)
+        seed_queue([make_task()])
+
+        view = _build()
+
+        assert view.dispatch is not None
+        assert view.dispatch.lane_pause is not None
+        assert view.dispatch.lane_pause.source == "declared"
+        assert _skip_reason_block(view)[1] == "  paused: declared in clients.yaml"
+
+    def test_unpaused_lane_has_no_lane_pause(self) -> None:
+        seed_queue([make_task()])
+
+        view = _build()
+
+        assert view.dispatch is not None
+        assert view.dispatch.lane_pause is None
+        assert _skip_reason_block(view) == ["skip_reason: -"]
+
+    def test_non_pending_row_has_no_dispatch(self) -> None:
+        write_lane_override(_C, "default", override=_breaker_override())
+        seed_queue([make_task(status=QueueItemStatus.RUNNING)])
+
+        assert _build().dispatch is None
+
+    def test_worktree_tripped_lane_reports_lane_circuit_paused(self) -> None:
+        write_lane_override(
+            _C,
+            "default",
+            override=LaneConcurrencyOverride(
+                paused=True, consecutive_worktree_errors=9
+            ),
+        )
+        seed_queue([make_task()])
+
+        view = _build()
+
+        assert view.dispatch is not None
+        assert view.dispatch.skip_reason == "lane_circuit_paused"
+
+    def test_disabled_auto_resume_is_reported(self) -> None:
+        _write_orchestrator_config("lane_circuit_auto_resume_minutes: 0\n")
+        write_lane_override(_C, "default", override=_breaker_override())
+        seed_queue([make_task()])
+
+        view = _build()
+
+        assert view.dispatch is not None
+        assert view.dispatch.lane_pause is not None
+        assert view.dispatch.lane_pause.auto_resume_enabled is False
+        assert (
+            "    auto-resume: off (lane_circuit_auto_resume_minutes=0)"
+            in _skip_reason_block(view)
+        )

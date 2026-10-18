@@ -103,6 +103,13 @@ from cw.models import (
 from cw.native_daemon import FakeNativeDaemonClient
 from tests._clients_yaml import ClientSpec, executor_backend_extra, write_clients_yaml
 from tests._dispatch_gating_helpers import _force_gh_unavailable
+from tests._dispatch_lane_helpers import (
+    _BREAKER_LANE_KEY,
+    _lane_override,
+    _RaisingNativeDaemon,
+    _save_lane_override,
+    _seed_lane_override,
+)
 from tests.conftest import (
     _make_daemon_session,
     _make_tick_summary,
@@ -235,16 +242,6 @@ def cap2_config() -> OrchestratorConfig:
     return OrchestratorConfig(
         tick_interval_seconds=30,
         per_client_max_parallel={"test-client": 2},
-    )
-
-
-@pytest.fixture
-def breaker_config() -> OrchestratorConfig:
-    """OrchestratorConfig with a low lane circuit-breaker threshold for tests."""
-    return OrchestratorConfig(
-        tick_interval_seconds=30,
-        per_client_max_parallel={"test-client": 1},
-        lane_circuit_breaker_threshold=2,
     )
 
 
@@ -2369,29 +2366,6 @@ def test_crash_revert_respawn_rejects_old_event_completes_new(
 # ---------------------------------------------------------------------------
 # TestDispatchTickSpawnErrors
 # ---------------------------------------------------------------------------
-
-
-class _RaisingNativeDaemon(FakeNativeDaemonClient):
-    """Native daemon whose ``spawn_bg`` always raises the configured exception.
-
-    Used to exercise the spawn-failure containment added for issue #149:
-    a single failure must not crash dispatch_tick.
-    """
-
-    def __init__(self, exc: Exception) -> None:
-        super().__init__()
-        self._exc = exc
-
-    def spawn_bg(
-        self,
-        *,
-        cwd: Path,
-        prompt: str,
-        extra_args: list[str] | None = None,
-        permission_mode: str | None = None,
-    ) -> str:
-        self.spawn_calls.append((cwd, prompt))
-        raise self._exc
 
 
 class TestDispatchTickSpawnErrors:
@@ -17078,28 +17052,6 @@ class TestSpawnErrorBackoff:
 # ---------------------------------------------------------------------------
 
 
-_BREAKER_LANE_KEY = "test-client/default"
-
-
-def _seed_lane_override(count: int, *, paused: bool | None = None) -> None:
-    """Persist a LaneConcurrencyOverride for the default test-client lane."""
-    _save_concurrency_overrides(
-        ConcurrencyOverrides(
-            lanes={
-                _BREAKER_LANE_KEY: LaneConcurrencyOverride(
-                    consecutive_spawn_errors=count,
-                    paused=paused,
-                )
-            }
-        )
-    )
-
-
-def _lane_override() -> LaneConcurrencyOverride:
-    """Read back the persisted default test-client lane override."""
-    return _load_concurrency_overrides().lanes[_BREAKER_LANE_KEY]
-
-
 class TestLaneCircuitBreaker:
     """Per-lane circuit breaker trips after N consecutive spawn errors (#875).
 
@@ -17163,13 +17115,20 @@ class TestLaneCircuitBreaker:
         sample_client_config: ClientConfig,
         breaker_config: OrchestratorConfig,
     ) -> None:
-        """The tripping tick emits a circuit-breaker-sourced LANE_PAUSED event."""
+        """The tripping tick emits a circuit-breaker-sourced LANE_PAUSED event.
+
+        #2696 added ``trigger``, ``trip_streak``, ``recent_errors`` and
+        ``auto_resume_at``; the frozen clock pins the 15-minute default.
+        """
+        from freezegun import freeze_time
+
         write_clients_yaml(sample_client_config)
         _seed_lane_override(1)
         add_ticket(TicketTask(ticket_id="GEN-875D", client="test-client"))
 
         daemon = _RaisingNativeDaemon(RuntimeError("boom"))
-        dispatch_tick(breaker_config, native_daemon=daemon)
+        with freeze_time("2026-10-18T12:00:00Z"):
+            dispatch_tick(breaker_config, native_daemon=daemon)
 
         events = read_events(
             consumer="test-875-trip",
@@ -17182,6 +17141,10 @@ class TestLaneCircuitBreaker:
             "source": "circuit_breaker",
             "consecutive_count": 2,
             "last_error": "boom",
+            "trigger": "spawn_errors",
+            "trip_streak": 1,
+            "recent_errors": ["boom"],
+            "auto_resume_at": "2026-10-18T12:15:00Z",
         }
 
     def test_last_error_empty_string_when_exception_blank(
@@ -17213,9 +17176,12 @@ class TestLaneCircuitBreaker:
         which embeds git's stderr verbatim) must be collapsed to one line
         before it lands in the LANE_PAUSED payload — _format_event_line
         renders one event per terminal line, and an embedded newline breaks
-        that contract. Nothing is lost, just joined onto one line."""
+        that contract. Nothing is lost, just joined onto one line.
+
+        #2696: a WorktreeError counts on the separate worktree counter (3x the
+        threshold of 2), so the lane is seeded one error short of 6."""
         write_clients_yaml(sample_client_config)
-        _seed_lane_override(1)
+        _save_lane_override(LaneConcurrencyOverride(consecutive_worktree_errors=5))
         add_ticket(TicketTask(ticket_id="GEN-2034A", client="test-client"))
 
         daemon = _RaisingNativeDaemon(
@@ -17272,7 +17238,7 @@ class TestLaneCircuitBreaker:
             real_save(overrides)  # type: ignore[arg-type]
 
         monkeypatch.setattr(
-            "cw.dispatch.lanes._save_concurrency_overrides", _counting_save
+            "cw.dispatch.lane_circuit._save_concurrency_overrides", _counting_save
         )
 
         daemon = FakeNativeDaemonClient()
@@ -17570,15 +17536,22 @@ class TestSpawnFailureClassification:
 
     @staticmethod
     def _assert_backend_failure(
-        outcomes: list[_SpawnOutcome], *, unproductive_attempts: int = 1
+        outcomes: list[_SpawnOutcome],
+        *,
+        unproductive_attempts: int = 1,
+        worktree_failure: bool = False,
     ) -> None:
         assert [o.spawn_error for o in outcomes] == [True]
+        assert [o.worktree_failure for o in outcomes] == [worktree_failure]
         row = load_dev_queue().tasks[0]
         assert row.status == QueueItemStatus.PENDING
         assert row.session_id is None
         assert row.spawn_error_count == 1
         assert row.unproductive_attempts == unproductive_attempts
-        assert _lane_override().consecutive_spawn_errors == 1
+        override = _lane_override()
+        # #2696 (R3): a WorktreeError counts on its own, higher-threshold counter.
+        assert override.consecutive_spawn_errors == (0 if worktree_failure else 1)
+        assert override.consecutive_worktree_errors == (1 if worktree_failure else 0)
 
     def _tick_with_raising_daemon(
         self,
@@ -17614,8 +17587,66 @@ class TestSpawnFailureClassification:
 
         dispatch_tick(breaker_config, native_daemon=FakeNativeDaemonClient())
 
-        self._assert_backend_failure(outcomes)
+        self._assert_backend_failure(outcomes, worktree_failure=True)
         assert load_dev_queue().tasks[0].attempts == 1
+
+    @pytest.mark.parametrize(
+        ("exc", "worktree_failure"),
+        [
+            (WorktreeError("wt"), True),
+            (StaleWorktreeError("stale"), True),
+            (RuntimeError("boom"), False),
+            (CwError("claude --bg exited 1"), False),
+        ],
+    )
+    def test_outcome_marks_worktree_failures(
+        self,
+        exc: Exception,
+        worktree_failure: bool,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2696 (R3): only WorktreeError and its subclasses set the flag."""
+        outcomes = self._tick_with_raising_daemon(
+            "GEN-2696C", exc, sample_client_config, breaker_config, monkeypatch
+        )
+
+        assert [o.worktree_failure for o in outcomes] == [worktree_failure]
+
+    @pytest.mark.parametrize(
+        ("exc", "flagged_lane", "charged"),
+        [
+            (OSError("adapter"), None, False),
+            (RuntimeError("boom"), "default", False),
+            (RuntimeError("boom"), None, True),
+            (RuntimeError("boom"), "fast", True),
+        ],
+    )
+    def test_charges_unproductive_attempt(
+        self, exc: Exception, flagged_lane: str | None, charged: bool
+    ) -> None:
+        """#2696 (R16): a half-open lane's probe failure is not charged."""
+        from cw.dispatch.claim.spawn import _charges_unproductive_attempt
+
+        lanes = {
+            "test-client/default": LaneConcurrencyOverride(),
+            "test-client/fast": LaneConcurrencyOverride(),
+        }
+        if flagged_lane is not None:
+            lanes[f"test-client/{flagged_lane}"] = LaneConcurrencyOverride(
+                circuit_half_open=True
+            )
+        _save_concurrency_overrides(ConcurrencyOverrides(lanes=lanes))
+
+        assert _charges_unproductive_attempt(exc, "test-client", "default") is charged
+
+    def test_charges_unproductive_attempt_with_no_override(self) -> None:
+        from cw.dispatch.claim.spawn import _charges_unproductive_attempt
+
+        assert _charges_unproductive_attempt(
+            RuntimeError("x"), "test-client", "default"
+        )
 
     def test_called_process_error_is_a_charged_backend_failure(
         self,

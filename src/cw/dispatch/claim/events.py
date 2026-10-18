@@ -28,6 +28,21 @@ if TYPE_CHECKING:
 _SPAWN_ERROR_TEXT_MAX_CHARS = 500
 
 
+def _sanitize_spawn_error_text(error: str) -> str:
+    """Collapse *error* to one line, redact it, then cap it (#1679, #2696).
+
+    Collapsed first (same idiom as ``lane.paused``'s ``last_error``, #2034),
+    redacted, and only then truncated to :data:`_SPAWN_ERROR_TEXT_MAX_CHARS`
+    plus a trailing ``…`` -- redact first so a secret straddling the cap cannot
+    be cut into an unmatchable fragment. Shared by the ``dispatch.tick``
+    ``last_error`` and the lane override's persisted ``recent_spawn_errors``.
+    """
+    text = redact(" ".join(error.split()))
+    if len(text) > _SPAWN_ERROR_TEXT_MAX_CHARS:
+        text = text[:_SPAWN_ERROR_TEXT_MAX_CHARS] + "…"
+    return text
+
+
 def _spawn_error_tick_fields(outcome: _SpawnOutcome | None) -> dict[str, str]:
     """Return the ``dispatch.tick`` payload fragment for a spawn failure (#1679).
 
@@ -35,18 +50,12 @@ def _spawn_error_tick_fields(outcome: _SpawnOutcome | None) -> dict[str, str]:
     client's lane walk, or ``None`` when no spawn failure occurred -- in which
     case the fragment is empty and the ``last_error`` key stays absent.
 
-    The text is collapsed to one line (same idiom as ``lane.paused``'s
-    ``last_error``, #2034), redacted, and only then truncated to
-    :data:`_SPAWN_ERROR_TEXT_MAX_CHARS` plus a trailing ``…`` -- redact first so
-    a secret straddling the cap cannot be cut into an unmatchable fragment.
-    An empty exception message yields ``""``, never a missing key.
+    The text goes through :func:`_sanitize_spawn_error_text`. An empty
+    exception message yields ``""``, never a missing key.
     """
     if outcome is None:
         return {}
-    text = redact(" ".join(outcome.error.split()))
-    if len(text) > _SPAWN_ERROR_TEXT_MAX_CHARS:
-        text = text[:_SPAWN_ERROR_TEXT_MAX_CHARS] + "…"
-    return {"last_error": text}
+    return {"last_error": _sanitize_spawn_error_text(outcome.error)}
 
 
 def _emit_attempt_cap_blocked_event(

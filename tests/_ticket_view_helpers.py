@@ -139,16 +139,27 @@ def install_acme_client(
 
 
 def write_lane_override(
-    client: str, lane: str, *, paused: bool | None, consecutive_spawn_errors: int
+    client: str,
+    lane: str,
+    *,
+    paused: bool | None = None,
+    consecutive_spawn_errors: int = 0,
+    override: LaneConcurrencyOverride | None = None,
 ) -> None:
-    """Write ``concurrency_overrides.json`` with one lane override."""
-    overrides = ConcurrencyOverrides(
-        lanes={
-            f"{client}/{lane}": LaneConcurrencyOverride(
-                paused=paused, consecutive_spawn_errors=consecutive_spawn_errors
-            )
-        }
+    """Write ``concurrency_overrides.json`` with one lane override.
+
+    *override*, when given, is written verbatim and *paused* /
+    *consecutive_spawn_errors* are ignored, so a test can seed the #2696
+    pause metadata.
+    """
+    lane_override = (
+        override
+        if override is not None
+        else LaneConcurrencyOverride(
+            paused=paused, consecutive_spawn_errors=consecutive_spawn_errors
+        )
     )
+    overrides = ConcurrencyOverrides(lanes={f"{client}/{lane}": lane_override})
     path = concurrency_override_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(overrides.model_dump_json())

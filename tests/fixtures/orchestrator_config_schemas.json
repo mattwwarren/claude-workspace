@@ -44,6 +44,78 @@
      ],
      "default": null,
      "title": "Lane Starved Notify Next Eligible At"
+    },
+    "consecutive_worktree_errors": {
+     "default": 0,
+     "title": "Consecutive Worktree Errors",
+     "type": "integer"
+    },
+    "paused_at": {
+     "anyOf": [
+      {
+       "format": "date-time",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Paused At"
+    },
+    "pause_source": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Pause Source"
+    },
+    "pause_trigger": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Pause Trigger"
+    },
+    "recent_spawn_errors": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Recent Spawn Errors",
+     "type": "array"
+    },
+    "circuit_trip_streak": {
+     "default": 0,
+     "title": "Circuit Trip Streak",
+     "type": "integer"
+    },
+    "circuit_auto_resume_at": {
+     "anyOf": [
+      {
+       "format": "date-time",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Circuit Auto Resume At"
+    },
+    "circuit_half_open": {
+     "default": false,
+     "title": "Circuit Half Open",
+     "type": "boolean"
     }
    },
    "title": "LaneConcurrencyOverride",
@@ -169,6 +241,78 @@
        ],
        "default": null,
        "title": "Lane Starved Notify Next Eligible At"
+      },
+      "consecutive_worktree_errors": {
+       "default": 0,
+       "title": "Consecutive Worktree Errors",
+       "type": "integer"
+      },
+      "paused_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Paused At"
+      },
+      "pause_source": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Pause Source"
+      },
+      "pause_trigger": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Pause Trigger"
+      },
+      "recent_spawn_errors": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Recent Spawn Errors",
+       "type": "array"
+      },
+      "circuit_trip_streak": {
+       "default": 0,
+       "title": "Circuit Trip Streak",
+       "type": "integer"
+      },
+      "circuit_auto_resume_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Circuit Auto Resume At"
+      },
+      "circuit_half_open": {
+       "default": false,
+       "title": "Circuit Half Open",
+       "type": "boolean"
       }
      },
      "title": "LaneConcurrencyOverride",
@@ -1109,6 +1253,16 @@
     "lane_starved_notify_interval_minutes": {
      "default": 15,
      "title": "Lane Starved Notify Interval Minutes",
+     "type": "integer"
+    },
+    "lane_circuit_auto_resume_minutes": {
+     "default": 15,
+     "title": "Lane Circuit Auto Resume Minutes",
+     "type": "integer"
+    },
+    "lane_circuit_auto_resume_max_minutes": {
+     "default": 240,
+     "title": "Lane Circuit Auto Resume Max Minutes",
      "type": "integer"
     },
     "dispatch_stale_notify_interval_minutes": {
@@ -2325,6 +2479,16 @@
      "title": "Lane Starved Notify Interval Minutes",
      "type": "integer"
     },
+    "lane_circuit_auto_resume_minutes": {
+     "default": 15,
+     "title": "Lane Circuit Auto Resume Minutes",
+     "type": "integer"
+    },
+    "lane_circuit_auto_resume_max_minutes": {
+     "default": 240,
+     "title": "Lane Circuit Auto Resume Max Minutes",
+     "type": "integer"
+    },
     "dispatch_stale_notify_interval_minutes": {
      "default": 15,
      "title": "Dispatch Stale Notify Interval Minutes",
@@ -3047,6 +3211,8 @@
    "global_attempt_ceiling": 10,
    "lane_circuit_breaker_threshold": 3,
    "lane_starved_notify_interval_minutes": 15,
+   "lane_circuit_auto_resume_minutes": 15,
+   "lane_circuit_auto_resume_max_minutes": 240,
    "dispatch_stale_notify_interval_minutes": 15,
    "diagnostics_retention_hours": 24,
    "freshness_block_attention_threshold": 5,

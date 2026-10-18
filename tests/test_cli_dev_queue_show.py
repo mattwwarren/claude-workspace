@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import click
 import pytest
 from click.testing import Result
+from freezegun import freeze_time
 
 import cw.cli.dev_queue.show as show_mod
 from cw.cli import main
@@ -21,6 +22,7 @@ from cw.dev_queue import (
 from cw.events import read_events
 from cw.exceptions import CwError
 from cw.models import (
+    LaneConcurrencyOverride,
     MustFixOverride,
     QueueItemStatus,
     Stage,
@@ -35,6 +37,7 @@ from tests._ticket_view_helpers import (
     make_task,
     seed_queue,
     stdout_lines,
+    write_lane_override,
 )
 
 if TYPE_CHECKING:
@@ -122,6 +125,67 @@ class TestShow:
         result = invoke_dev_queue("show", _T, "-c", "wrongclient")
         assert result.exit_code == 1
         assert "No dev-queue task found" in result.output
+
+
+_PAUSED_AT = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+
+
+def _seed_breaker_pause() -> None:
+    write_lane_override(
+        _C,
+        "default",
+        override=LaneConcurrencyOverride(
+            paused=True,
+            paused_at=_PAUSED_AT,
+            pause_source="circuit_breaker",
+            pause_trigger="spawn_errors",
+            consecutive_spawn_errors=3,
+            recent_spawn_errors=["boom"],
+            circuit_trip_streak=1,
+            circuit_auto_resume_at=_PAUSED_AT + timedelta(minutes=15),
+        ),
+    )
+    seed_queue([make_task()])
+
+
+class TestShowLanePause:
+    """#2696: ``show`` names the pause cause and the resume command."""
+
+    def test_text(self) -> None:
+        _seed_breaker_pause()
+
+        with freeze_time(_PAUSED_AT + timedelta(minutes=5)):
+            result = invoke_dev_queue("show", _T, "-c", _C)
+
+        assert result.exit_code == 0, result.output
+        lines = stdout_lines(result)
+        start = lines.index(
+            "skip_reason: lane_circuit_paused"
+            " (source=row, lane paused by its circuit breaker)"
+        )
+        assert lines[start + 1 : start + 6] == [
+            "  paused since 2026-10-18T12:00:00Z (5m ago) by circuit_breaker"
+            " (spawn errors, trip #1)",
+            "    last spawn errors (oldest first):",
+            "      - boom",
+            "    auto-resume: 2026-10-18T12:15:00Z (in 10m)",
+            "    resume: cw lane resume acme default",
+        ]
+
+    def test_json(self) -> None:
+        _seed_breaker_pause()
+
+        result = invoke_dev_queue("show", _T, "-c", _C, "--json")
+
+        assert result.exit_code == 0, result.output
+        view = TicketView.model_validate_json(result.stdout)
+        assert view.dispatch is not None
+        pause = view.dispatch.lane_pause
+        assert pause is not None
+        assert pause.source == "circuit_breaker"
+        assert pause.since == _PAUSED_AT
+        assert pause.recent_errors == ["boom"]
+        assert pause.resume_command == "cw lane resume acme default"
 
 
 class TestAddEcho:

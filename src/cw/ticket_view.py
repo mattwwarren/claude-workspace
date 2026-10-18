@@ -35,6 +35,11 @@ from cw.dev_queue.next_commands import next_commands
 from cw.dispatch import TICK_STALE_SECONDS, resolve_hold_finalize, resolve_signoff
 from cw.events import read_events
 from cw.exceptions import CwError
+from cw.lane_pause import (
+    breaker_tripped,
+    build_lane_pause_view,
+    render_lane_pause_lines,
+)
 from cw.models import DispatchSkipReason, OrchestratorEventType, QueueItemStatus
 from cw.models.ticket_view import (
     ApprovalView,
@@ -56,6 +61,7 @@ from cw.reconcile._shared import (
 )
 
 if TYPE_CHECKING:
+    from cw.lane_pause import LanePauseView
     from cw.models import (
         ClientConfig,
         ConcurrencyOverrides,
@@ -343,15 +349,27 @@ def _lane_paused(task: TicketTask, client_cfg: ClientConfig | None) -> bool | No
 
 
 def _breaker_tripped(task: TicketTask, sources: ViewSources) -> bool:
-    """The lane's spawn-error counter is at the circuit-breaker threshold.
+    """Either of the lane's breaker counters is at its trip point.
 
-    Mirrors ``cw.dispatch.lanes._check_lane_circuit_paused``. Its third
-    condition, pending work in the lane, always holds: this row is PENDING in
-    that lane.
+    Mirrors ``cw.dispatch.lane_circuit._check_lane_circuit_paused`` through the
+    shared :func:`cw.lane_pause.breaker_tripped`. Its third condition, pending
+    work in the lane, always holds: this row is PENDING in that lane.
     """
     override = sources.concurrency_overrides.lanes.get(f"{task.client}/{task.lane}")
     threshold = sources.orchestrator_config.lane_circuit_breaker_threshold
-    return override is not None and override.consecutive_spawn_errors >= threshold
+    return override is not None and breaker_tripped(override, threshold=threshold)
+
+
+def _lane_pause_view(task: TicketTask, sources: ViewSources) -> LanePauseView:
+    """The pause cause and resume hint of the row's (paused) lane (#2696)."""
+    return build_lane_pause_view(
+        task.client,
+        task.lane,
+        sources.concurrency_overrides.lanes.get(f"{task.client}/{task.lane}"),
+        auto_resume_enabled=(
+            sources.orchestrator_config.lane_circuit_auto_resume_minutes > 0
+        ),
+    )
 
 
 def _row_skip_reason(
@@ -413,6 +431,7 @@ def _dispatch_view(
         stale=False,
         backoff_until=task.next_eligible_at,
         lane_paused=lane_paused,
+        lane_pause=_lane_pause_view(task, sources) if lane_paused else None,
         lane_stats=None,
         lane_occupants=None,
     )
@@ -556,6 +575,17 @@ def _skip_detail(lane: str, dispatch: DispatchView, now: datetime) -> str:
     return head
 
 
+def _pause_continuation(dispatch: DispatchView, now: datetime) -> str:
+    """The lane pause block as continuation lines; empty when not paused (#2696).
+
+    ``_kv`` indents each continuation line by 2 more.
+    """
+    if dispatch.lane_pause is None:
+        return ""
+    lines = render_lane_pause_lines(dispatch.lane_pause, now=now)
+    return "".join(f"\n{line}" for line in lines)
+
+
 def _skip_reason_text(view: TicketView, now: datetime) -> str:
     dispatch = view.dispatch
     if dispatch is None:
@@ -567,9 +597,11 @@ def _skip_reason_text(view: TicketView, now: datetime) -> str:
         else ""
     )
     if dispatch.skip_reason is None:
-        return f"{_ABSENT}{paused}"
-    detail = _skip_detail(view.lane, dispatch, now)
-    return f"{dispatch.skip_reason} ({detail}){paused}"
+        head = f"{_ABSENT}{paused}"
+    else:
+        detail = _skip_detail(view.lane, dispatch, now)
+        head = f"{dispatch.skip_reason} ({detail}){paused}"
+    return head + _pause_continuation(dispatch, now)
 
 
 def _approval_text(approval: ApprovalView | None) -> str:

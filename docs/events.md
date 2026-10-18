@@ -396,7 +396,10 @@ present when a higher-precedence reason (`cap_full`, `lane_cap_blocked`)
 masks `spawn_error`. It is absent on every other tick, including the per-task
 ticks (`worktree_occupied` deferrals carry none) and `usage_limited`. It is
 the same text `lane.paused` reports as `last_error` when the lane circuit
-breaker trips (`lane.paused.last_error` is collapsed but not redacted).
+breaker trips (`lane.paused.last_error` is collapsed but not redacted). The
+lane override's persisted `recent_spawn_errors`, which `lane.paused` reports
+as `recent_errors` (#2696), go through the same collapse, redaction and cap as
+this field, unlike `lane.paused.last_error`.
 
 `correlation_id` is `None` (per-client aggregate, not per-ticket).
 Consumers MUST tolerate unknown `skip_reason` values.
@@ -676,8 +679,8 @@ CLI commands emit thin audit events; payloads carry the obvious fields:
 | Event | Emitted by | Payload |
 |---|---|---|
 | `lane.created` | `cw lane add` | `{client, lane, max_parallel, priority}` |
-| `lane.paused` | `cw lane pause`, or the per-lane circuit breaker after consecutive spawn errors (#875) | `{client, lane, source: "operator" \| "circuit_breaker"}`; circuit-breaker emissions add `consecutive_count` and `last_error` |
-| `lane.resumed` | `cw lane resume` (also resets the circuit-breaker counter) | `{client, lane, source: "operator"}` |
+| `lane.paused` | `cw lane pause`, or the per-lane circuit breaker after consecutive spawn errors (#875) or, at 3x the threshold, consecutive worktree setup errors (#2696) | `{client, lane, source: "operator" \| "circuit_breaker"}`; circuit-breaker emissions add `consecutive_count` (the tripping counter's value), `last_error` (collapsed, not redacted), `trigger` (`"spawn_errors"` \| `"worktree_errors"`), `trip_streak` (consecutive trips with no spawn success between), `recent_errors` (the last 5 recorded errors, oldest first, redacted and capped) and `auto_resume_at` (ISO-8601 `Z`, whole seconds; null when auto-resume is off) |
+| `lane.resumed` | `cw lane resume` (also resets the circuit-breaker counters), or the dispatch loop's auto-resume of a circuit-breaker pause once its cool-down elapsed (#2696) | `{client, lane, source: "operator"}`; an auto-resume emits `{client, lane, source: "auto_resume", trip_streak, paused_since}` (`paused_since` ISO-8601 `Z` or null). An `auto_resume` event means the circuit pause was lifted, not that the lane is dispatching: it can fire while a `paused: true` declared in `clients.yaml` keeps the lane paused, so a consumer must not read it as the lane being live. |
 | `ticket.enqueued` | `cw dev-queue add` | `{ticket_id, client, priority}` (see top of file) |
 | `ticket.moved` | `cw dev-queue move` | `{ticket_id, client, from_lane, to_lane}` |
 | `ticket.reprioritized` | `cw dev-queue move --priority` | `{ticket_id, client, from_priority, to_priority}` |
