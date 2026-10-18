@@ -3304,7 +3304,7 @@ class TestOrchestratorConfigLaneCircuitBreaker:
 
         config = OrchestratorConfig()
 
-        assert config.lane_circuit_auto_resume_minutes == 0
+        assert config.lane_circuit_auto_resume_minutes == 15
         assert config.lane_circuit_auto_resume_max_minutes == 240
 
     def test_auto_resume_can_be_disabled(self) -> None:
