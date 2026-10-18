@@ -408,7 +408,10 @@ no ceiling), `session` (null, or `id`/`status`/`liveness_bucket`/
 `last_result`, `pr` (`hydrated_at` null = never hydrated), `stage_base_ref`,
 `dispatch` (null unless PENDING: `skip_reason`, `source` of
 `row`/`event`/`last_tick`/`none`, `as_of`, `stale`, `backoff_until`,
-`lane_paused`, `lane_stats`, `lane_occupants`), `approval` (null = none on
+`lane_paused`, `lane_pause` (null unless `lane_paused`: the pause `source`,
+`trigger`, `since`, `trip_streak`, `recent_errors`, `auto_resume_at`,
+`auto_resume_enabled` and `resume_command`, #2696), `lane_stats`,
+`lane_occupants`), `approval` (null = none on
 the row; no approver field), `other_rows`, `created_at`, `completed_at`,
 `next` (`command`, `purpose`). Compatibility rule: fields may be added
 without a version change; renaming or removing one bumps `schema_version`.
@@ -1803,6 +1806,55 @@ reason. Wait for the annotation to clear; only a tick line still reading
   `session_id=lane:<client>/<lane>`) — immediately on first detection, then
   every `lane_starved_notify_interval_minutes` (default 15) while it stays
   starved, so `cw lane resume` is not the only way to find out.
+- **#2696: the cause is shown, not just the marker.** `cw dev-queue status`
+  prints a `Paused lanes:` block after the client table, even when the queue
+  is empty, no tick has run, or the paused lane has no tickets (`--client`
+  filters it). Each entry names who paused the lane and when (`by
+  circuit_breaker (spawn errors, trip #N)`, `worktree setup errors` for a
+  worktree trip, `by operator`, `declared in clients.yaml`, or `legacy, since
+  unknown` for a pause recorded before #2696 with no metadata), the last five
+  spawn errors (redacted and capped at 500 characters), the auto-resume time
+  and the exact `cw lane resume <client> <lane>` command. `cw lane ls` prints
+  the same lines under each paused row and a `pause` object in `--json`, and
+  `cw dev-queue show` appends them to `skip_reason`. `status --json` carries
+  them per client as `paused_lanes`, including a paused client with no tick.
+- **Auto-resume.** A circuit-breaker pause lifts on its own after
+  `lane_circuit_auto_resume_minutes` (default 15; `0` turns it off), doubling
+  per consecutive trip with no spawn success in between up to
+  `lane_circuit_auto_resume_max_minutes` (default 240). The resume is
+  half-open: the lane's counters drop to one below their trip point, so one
+  more failure of the kind that tripped it re-trips at once with the next,
+  longer cool-down, and the first spawn after a resume is a probe that does
+  not charge the ticket's `unproductive_attempts` (its spawn-error backoff is
+  still stamped). A spawn success resets the streak. The resume emits
+  `lane.resumed` with `source=auto_resume` and pages nobody; while a resume is
+  scheduled the #1630 starved page above is held for the first two trips of a
+  streak and resumes at the third. Operator pauses (`cw lane pause`), legacy
+  pauses and `paused: true` in `clients.yaml` are never auto-resumed, and a
+  breaker trip never takes over an operator pause. A lane that is also
+  declared paused in `clients.yaml` stays paused after its circuit pause
+  lifts; `status` then shows it as `declared in clients.yaml`.
+- **Worktree errors count apart.** A `WorktreeError` (including stale-tree
+  and branch-held refusals) counts on a separate per-lane counter that trips
+  at 3x `lane_circuit_breaker_threshold`. Outside a half-open probe it still
+  charges the claimed ticket's `unproductive_attempts`, which is the right
+  bound for a ticket-local fault such as a stale tree; the aggregate bound for
+  a lane-wide worktree fault is that per-lane counter, so a client-wide
+  failure charges at most 3x the threshold attempts per lane before the pause
+  (each client stops its lane walk after the first spawn error per tick).
+- **Effective config.** Under the paused-lanes block, `status` prints one
+  `effective:` line per client: the configured ceiling and where it came from
+  (`override`, `declared` or `default`), each lane's cap, the breaker and
+  worktree thresholds and the auto-resume knobs, as this command loaded them.
+  ` [CONFIG? last tick used cap=M, configured ceiling=N; ...]` means the
+  dispatch loop ran its last tick with a different ceiling: the loop keeps its
+  last-good config when a reload fails (only a log warning), and `serve
+  --max-parallel` replaces every ceiling. Right after an edit it can also
+  show for one tick (about 30 s) before the loop reloads. `status --json`
+  carries the same values as `effective`.
+- A tick line reading `skip=lane_circuit_paused [resumed since this tick]` is
+  a stale snapshot: no lane of that client is paused any more, and the next
+  tick will dispatch.
 - `BLOCKED_ON_USER` rows hold lane slots by design; a parked ticket can
   starve its lane. Requeue or remove to free the slot.
 - A session wedged in `needs_salvage` with a park marker poisons every
