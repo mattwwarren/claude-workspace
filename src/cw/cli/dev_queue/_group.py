@@ -29,8 +29,12 @@ _PAUSED_LANE_MARKER = " [PAUSED]"
 _WAIT_EXIT_FAILED: int = 1
 _WAIT_EXIT_BLOCKED: int = 2
 _WAIT_EXIT_ATTENTION: int = 3
-# Ticket parked AWAITING_OPERATOR_SIGNOFF (RFC 0007 Phase 3, #990).
-_WAIT_EXIT_SIGNOFF: int = 4
+# Ticket held at a human-kept gate: AWAITING_OPERATOR_SIGNOFF (RFC 0007 Phase
+# 3, #990), a finalize hold, or a scope_hint: large approval gate (#2693).
+_WAIT_EXIT_HUMAN_GATE: int = 4
+# PENDING ticket whose blocker will not clear on its own, or a recorded
+# plan/review approval result dispatch has not routed (#2693).
+_WAIT_EXIT_STUCK: int = 5
 _WAIT_EXIT_TIMEOUT: int = 124
 
 

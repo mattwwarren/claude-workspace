@@ -3,7 +3,9 @@
 A worker can record its terminal sentinel (``session.last_result``) before
 its SESSION_COMPLETED event is routed, so the dev-queue row still reads
 RUNNING and the verb would refuse a row ``cw dev-queue wait`` already reports
-as parked. :func:`settle_lagging_row` closes that gap through the canonical
+as parked. (Since #2693 ``wait`` no longer reports plan/review approval
+results the row has not been routed to; it waits until dispatch routes them.)
+:func:`settle_lagging_row` closes that gap through the canonical
 routing seam -- the same ``cw.dispatch.loop`` read/apply halves
 ``consume_completed_sessions`` composes -- never by acting on the sentinel
 directly, so every dispatch gate (scope tier, review health, staleness,

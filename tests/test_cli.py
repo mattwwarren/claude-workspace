@@ -9251,43 +9251,6 @@ class TestWatchCommand:
         assert result.exit_code == 0
         assert called
 
-    def test_orchestrate_watch_invokes_run_board(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from click.testing import CliRunner
-
-        from cw.cli import main
-        from cw.cli import orchestrate as cli
-
-        called: list[dict[str, object]] = []
-        monkeypatch.setattr(cli, "run_board", lambda **kwargs: called.append(kwargs))
-        runner = CliRunner()
-        result = runner.invoke(
-            main, ["orchestrate", "watch", "--interval", "3", "--client", "acme"]
-        )
-        assert result.exit_code == 0
-        assert called
-        assert called[0]["interval"] == 3
-        assert called[0]["client_filter"] == "acme"
-
-    def test_orchestrate_watch_emits_deprecation_notice(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from click.testing import CliRunner
-
-        from cw.cli import main
-        from cw.cli import orchestrate as cli
-
-        called: list[dict[str, object]] = []
-        monkeypatch.setattr(cli, "run_board", lambda **kwargs: called.append(kwargs))
-        runner = CliRunner()
-        result = runner.invoke(main, ["orchestrate", "watch"])
-        assert result.exit_code == 0
-        assert "deprecated" in result.stderr
-        assert "cw board" in result.stderr
-        assert "next release" in result.stderr
-        assert called
-
 
 # ---------------------------------------------------------------------------
 # TestDevQueueRunQuiet
@@ -12022,8 +11985,8 @@ class TestDevQueueWait:
     def test_wait_exits_4_on_awaiting_signoff(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """AWAITING_OPERATOR_SIGNOFF ticket -> exit _WAIT_EXIT_SIGNOFF (4, #990)."""
-        from cw.cli import _WAIT_EXIT_SIGNOFF
+        """AWAITING_OPERATOR_SIGNOFF ticket -> exit _WAIT_EXIT_HUMAN_GATE (4, #990)."""
+        from cw.cli import _WAIT_EXIT_HUMAN_GATE
         from cw.models import QueueItemStatus, TicketTask
 
         task = TicketTask(
@@ -12039,18 +12002,18 @@ class TestDevQueueWait:
         result = runner.invoke(
             main, ["dev-queue", "wait", "GEN-990", "--client", "genhealth"]
         )
-        assert result.exit_code == _WAIT_EXIT_SIGNOFF
-        assert _WAIT_EXIT_SIGNOFF == 4
+        assert result.exit_code == _WAIT_EXIT_HUMAN_GATE
+        assert _WAIT_EXIT_HUMAN_GATE == 4
 
     def test_wait_blocked_on_user_exit_unchanged_regression(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Regression: adding the signoff exit code leaves BLOCKED_ON_USER's
         exit (_WAIT_EXIT_BLOCKED, 2) unchanged."""
-        from cw.cli import _WAIT_EXIT_BLOCKED, _WAIT_EXIT_SIGNOFF
+        from cw.cli import _WAIT_EXIT_BLOCKED, _WAIT_EXIT_HUMAN_GATE
         from cw.models import QueueItemStatus, TicketTask
 
-        assert _WAIT_EXIT_BLOCKED != _WAIT_EXIT_SIGNOFF
+        assert _WAIT_EXIT_BLOCKED != _WAIT_EXIT_HUMAN_GATE
 
         task = TicketTask(
             ticket_id="GEN-14",
@@ -12258,13 +12221,15 @@ class TestDevQueueWait:
         from cw.cli import (
             _WAIT_EXIT_BLOCKED,
             _WAIT_EXIT_FAILED,
-            _WAIT_EXIT_SIGNOFF,
+            _WAIT_EXIT_HUMAN_GATE,
+            _WAIT_EXIT_STUCK,
             _WAIT_EXIT_TIMEOUT,
         )
 
         assert _WAIT_EXIT_FAILED == 1
         assert _WAIT_EXIT_BLOCKED == 2
-        assert _WAIT_EXIT_SIGNOFF == 4
+        assert _WAIT_EXIT_HUMAN_GATE == 4
+        assert _WAIT_EXIT_STUCK == 5
         assert _WAIT_EXIT_TIMEOUT == 124
 
 
@@ -13789,7 +13754,7 @@ class TestDevQueueWaitSentinelAware:
         monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
         # First monotonic() sets the deadline; the next poll's deadline check
         # is already past it, so a non-terminal first pass exits 124.
-        clock = iter([0.0, 1000.0, 2000.0])
+        clock = iter([0.0, 100000.0, 200000.0])
         monkeypatch.setattr("cw.cli.dev_queue.wait.time.monotonic", lambda: next(clock))
 
         runner = CliRunner()
@@ -13803,8 +13768,9 @@ class TestDevQueueWaitSentinelAware:
     def test_wait_status_exit_covers_status_vocabulary(self) -> None:
         """Drift guard: _WAIT_STATUS_EXIT tracks the schema Status vocabulary.
 
-        Every Status value must either have an explicit exit-code mapping or
-        be an intermediate advance status (handled by continuing to poll).
+        Every Status value must either have an explicit exit-code mapping, be
+        an intermediate advance status (handled by continuing to poll), or be
+        a dispatch hand-off status (waited out until dispatch routes it, #2693).
         A new Status value fails here until it is classified — preventing the
         silent fall-through-to-FAILED drift this table had for
         stage_complete/merge_pending (#1535 drift class).
@@ -13812,13 +13778,17 @@ class TestDevQueueWaitSentinelAware:
         from typing import get_args
 
         from cw.auto_dev_result import INTERMEDIATE_ADVANCE_STATUSES, Status
-        from cw.cli.dev_queue.wait import _WAIT_STATUS_EXIT
+        from cw.cli.dev_queue.wait import _WAIT_HANDOFF_STATUSES, _WAIT_STATUS_EXIT
 
         vocabulary = set(get_args(Status))
-        assert set(_WAIT_STATUS_EXIT) | set(INTERMEDIATE_ADVANCE_STATUSES) == (
-            vocabulary
+        classified = (
+            set(_WAIT_STATUS_EXIT)
+            | set(INTERMEDIATE_ADVANCE_STATUSES)
+            | set(_WAIT_HANDOFF_STATUSES)
         )
+        assert classified == vocabulary
         assert not set(_WAIT_STATUS_EXIT) & set(INTERMEDIATE_ADVANCE_STATUSES)
+        assert not set(_WAIT_STATUS_EXIT) & set(_WAIT_HANDOFF_STATUSES)
 
     def test_terminal_shipped_csid_none_resolved_via_glob(
         self,
@@ -13874,9 +13844,9 @@ class TestDevQueueWaitSentinelAware:
         # in, so a frozen clock would spin forever instead of hitting the
         # deadline -- this bounded clock keeps a pre-fix run fast (exit 124)
         # rather than hanging.
-        clock = iter([0.0, 1000.0])
+        clock = iter([0.0, 100000.0])
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(clock, 1000.0)
+            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(clock, 100000.0)
         )
 
         runner = CliRunner()
@@ -13980,7 +13950,7 @@ class TestDevQueueWaitSentinelAware:
         )
         monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
 
-        # monotonic: first poll returns 0.0 (under deadline=300).
+        # monotonic: first poll returns 0.0 (under the default 21600s deadline).
         # After first sleep, return 10.0 (still under deadline).
         monotonic_values = iter([0.0, 0.0, 10.0, 10.0])
         monkeypatch.setattr(
@@ -14202,11 +14172,11 @@ class TestDevQueueWaitSentinelAware:
 
         self._seed_running_task("GEN-535E", session_id=None)
 
-        # monotonic: first poll → 0.0; second call (deadline check) → 9999.0 (expired).
-        monotonic_calls = iter([0.0, 9999.0])
+        # monotonic: first poll → 0.0; second call (deadline check) → 99999.0 (expired).
+        monotonic_calls = iter([0.0, 99999.0])
         monkeypatch.setattr(
             "cw.cli.dev_queue.wait.time.monotonic",
-            lambda: next(monotonic_calls, 9999.0),
+            lambda: next(monotonic_calls, 99999.0),
         )
         monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
 
@@ -14297,15 +14267,15 @@ class TestDevQueueWaitSentinelAware:
 
         monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
         # Monotonic call sequence:
-        #   call 1 — deadline init (0.0 → deadline=300)
-        #   call 2 — first-poll _raise_if_deadline_exceeded (0.0 → not expired)
-        #   call 3 — second-poll spawn-window deadline check (9999 → expired,
+        #   call 1 — deadline init (0.0 → deadline=21600)
+        #   call 2 — first-poll deadline check (0.0 → not expired)
+        #   call 3 — second-poll spawn-window deadline check (99999 → expired,
         #             only reached when the fix is NOT applied; with the fix
         #             _handle_reaped_mid_wait raises before this is needed).
-        monotonic_calls = iter([0.0, 0.0, 9999.0])
+        monotonic_calls = iter([0.0, 0.0, 99999.0])
         monkeypatch.setattr(
             "cw.cli.dev_queue.wait.time.monotonic",
-            lambda: next(monotonic_calls, 9999.0),
+            lambda: next(monotonic_calls, 99999.0),
         )
 
         runner = CliRunner()
@@ -14390,10 +14360,10 @@ class TestDevQueueWaitSentinelAware:
         # deadline init, first-poll check (alive), second-poll spawn-window
         # check (expired) — same shape as test_reaped_mid_wait_exit_attention,
         # but reached here because there is no reap evidence to gate on.
-        monotonic_calls = iter([0.0, 0.0, 9999.0])
+        monotonic_calls = iter([0.0, 0.0, 99999.0])
         monkeypatch.setattr(
             "cw.cli.dev_queue.wait.time.monotonic",
-            lambda: next(monotonic_calls, 9999.0),
+            lambda: next(monotonic_calls, 99999.0),
         )
 
         runner = CliRunner()
@@ -14447,10 +14417,10 @@ class TestDevQueueWaitSentinelAware:
         monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
         # deadline init, first-poll "session not in state yet" grace check
         # (alive), second-poll spawn-window check (expired).
-        monotonic_calls = iter([0.0, 0.0, 9999.0])
+        monotonic_calls = iter([0.0, 0.0, 99999.0])
         monkeypatch.setattr(
             "cw.cli.dev_queue.wait.time.monotonic",
-            lambda: next(monotonic_calls, 9999.0),
+            lambda: next(monotonic_calls, 99999.0),
         )
 
         runner = CliRunner()
@@ -14642,9 +14612,9 @@ class TestDevQueueWaitSentinelAware:
         # First monotonic() call (deadline init): 0.0.
         # Subsequent calls (deadline checks): first returns 0.0 (alive),
         # then 9999.0 (deadline exceeded after heartbeat).
-        mono_values = iter([0.0, 0.0, 9999.0])
+        mono_values = iter([0.0, 0.0, 99999.0])
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(mono_values, 9999.0)
+            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(mono_values, 99999.0)
         )
 
         runner = CliRunner()
@@ -14815,9 +14785,9 @@ class TestDevQueueWaitSentinelAware:
 
         # First call for deadline init: 0.0; sleep→continue loop;
         # second deadline check (inside session-None branch): 9999.0 → timeout.
-        mono_values = iter([0.0, 9999.0])
+        mono_values = iter([0.0, 99999.0])
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(mono_values, 9999.0)
+            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(mono_values, 99999.0)
         )
         monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
 
@@ -14868,7 +14838,7 @@ class TestDevQueueWaitSentinelAware:
         monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
         # First monotonic() sets the deadline; the next poll's deadline check
         # is already past it, so a non-terminal first pass exits 124.
-        clock = iter([0.0, 1000.0, 2000.0])
+        clock = iter([0.0, 100000.0, 200000.0])
         monkeypatch.setattr("cw.cli.dev_queue.wait.time.monotonic", lambda: next(clock))
 
         runner = CliRunner()
@@ -14916,9 +14886,9 @@ class TestDevQueueWaitSentinelAware:
         # in, so a frozen clock would spin forever instead of hitting the
         # deadline -- this bounded clock keeps a pre-fix run fast (exit 124)
         # rather than hanging.
-        clock = iter([0.0, 1000.0])
+        clock = iter([0.0, 100000.0])
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(clock, 1000.0)
+            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(clock, 100000.0)
         )
 
         runner = CliRunner()
@@ -14963,9 +14933,9 @@ class TestDevQueueWaitSentinelAware:
         monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
         # See test_last_result_terminal_reported_with_source_stop_hook_harvest
         # for why this uses an advancing clock rather than a frozen one.
-        clock = iter([0.0, 1000.0])
+        clock = iter([0.0, 100000.0])
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(clock, 1000.0)
+            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(clock, 100000.0)
         )
 
         runner = CliRunner()
@@ -15025,7 +14995,7 @@ class TestDevQueueWaitSentinelAware:
         _save_state(CwState(sessions=[session]))
 
         monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
-        clock = iter([0.0, 1000.0, 2000.0])
+        clock = iter([0.0, 100000.0, 200000.0])
         monkeypatch.setattr("cw.cli.dev_queue.wait.time.monotonic", lambda: next(clock))
 
         runner = CliRunner()
@@ -15124,7 +15094,8 @@ class TestDevQueueWaitDuplicateResolution:
     ) -> None:
         """CANCELLED + RUNNING for same ticket — fast-path must not short-circuit.
 
-        With --timeout 0, a non-terminal task triggers exit 124 (timeout).
+        With a near-zero --timeout (0 now means no limit, #2693), a
+        non-terminal task triggers exit 124 (timeout).
         If the fast-path mistakenly binds to CANCELLED it would exit 1.
         """
         from datetime import UTC, datetime, timedelta
@@ -15171,7 +15142,7 @@ class TestDevQueueWaitDuplicateResolution:
                 "--client",
                 "genhealth",
                 "--timeout",
-                "0",
+                "0.01",
             ],
         )
         # exit 124 = timeout hit on non-terminal task (RUNNING was found)

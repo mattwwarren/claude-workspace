@@ -3,8 +3,10 @@
 **Status:** Accepted
 **Driven by:** #537 (epic "Live work dashboard"); split into #308, #834, #833, #310, #842
 
-> **Note:** `cw orchestrate watch` is deprecated (RFC 0007 Phase 4) and will
-> be removed in the release after v1.14.0. Use `cw board` instead.
+> **Note:** `cw orchestrate watch` was deprecated (RFC 0007 Phase 4) in favour
+> of `cw board`, which now owns the live dashboard. #2693 removed the
+> deprecated redirect and reused the name for an unrelated command, the
+> attention stream; this record describes the dashboard as it was.
 
 ## Decision
 

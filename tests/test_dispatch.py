@@ -10362,6 +10362,66 @@ class TestApplyStagedDecision:
             == []
         )
 
+    # -- #2693: `wait`'s hand-off predicate agrees with real routing --------
+
+    @staticmethod
+    def _parity_payloads() -> list[tuple[str, dict[str, object], Stage, bool]]:
+        """(label, payload, stage, expected handoff) for the parity test."""
+        from cw.auto_dev_result import SCOPE_GATED_APPROVAL_STATUSES
+        from tests._reconcile_helpers import (
+            _fix_loop_pending_payload,
+            _make_terminal_payload,
+        )
+
+        blocked = {
+            **_make_terminal_payload("blocked", "PAR-1"),
+            "blocker": {"stage": "stage1_plan", "reason": "impl_failed"},
+        }
+        shipped = {
+            **_make_terminal_payload("merge_pending", "PAR-1"),
+            "status": "shipped",
+            "next_actions": ["wait_for_ci"],
+        }
+        cases: list[tuple[str, dict[str, object], Stage, bool]] = [
+            ("fix_loop", _fix_loop_pending_payload("PAR-1"), Stage.REVIEW, True),
+            ("blocked", blocked, Stage.IMPL, False),
+            ("shipped", shipped, Stage.FINALIZE, False),
+        ]
+        for status in sorted(SCOPE_GATED_APPROVAL_STATUSES):
+            payload = _make_terminal_payload(status, "PAR-1")
+            payload["scope"] = {**payload["scope"], "tier": "large"}
+            stage = Stage.PLAN if status == "plan_pending_approval" else Stage.REVIEW
+            cases.append((status, payload, stage, True))
+        return cases
+
+    def test_is_internal_handoff_agrees_with_dispatch_routing(
+        self, tmp_path: Path
+    ) -> None:
+        """The `wait` hand-off window is exactly the window dispatch closes.
+
+        A predicate-True payload is either left RUNNING by routing (the
+        fix-loop hand-off: `wait` keeps waiting) or moved off RUNNING (a
+        scope-gated approval: `wait` waits until the row settles). A
+        predicate-False payload is always routed off RUNNING.
+        """
+        from cw.auto_dev_result import AutoDevResult
+        from cw.dispatch import apply_staged_decision
+        from cw.result import reconstruct_staged_sentinel
+        from cw.stuck_pending import is_internal_handoff
+
+        for label, payload, stage, expected in self._parity_payloads():
+            sentinel = reconstruct_staged_sentinel(payload)
+            assert isinstance(sentinel, AutoDevResult), label
+            assert is_internal_handoff(sentinel) is expected, label
+
+            task = self._make_running_task(f"PAR-{label}", stage=stage)
+            apply_staged_decision(
+                task, sentinel.status, payload, self._clients(tmp_path)
+            )
+
+            stays_running = label == "fix_loop"
+            assert (task.status == QueueItemStatus.RUNNING) is stays_running, label
+
     # -- Large park pages only when no gate recipe will release it ---------
 
     @staticmethod
@@ -13707,10 +13767,9 @@ class TestApplyStagedDecision:
 
     def test_breadcrumb_eligible_paused_statuses_composition(self) -> None:
         """#1597 Item A: BREADCRUMB_ELIGIBLE_PAUSED_STATUSES composition drift
-        guard. Anchors attention_watch.py's hand-transcribed
-        BLOCKER_REASON_PAUSED_STATUSES (outside src/cw, cannot import this
-        constant; pinned equal in test_attention_watch.py) against its
-        derivation: the STAGE_FAILURE_STATUSES members
+        guard. cw.attention_watch imports this constant directly (#2693) to
+        gate which pages render their breadcrumbs, so this anchors it against
+        its derivation: the STAGE_FAILURE_STATUSES members
         that can carry a non-null blocker (schema.py's #777 exception --
         'blocked'/'merge_gate_blocked' only) plus the _AWAITING_OPERATOR_REASON
         substitute Rule 5 writes when blocker_reason is in
@@ -13722,9 +13781,10 @@ class TestApplyStagedDecision:
 
         Membership in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES does not by itself
         cause a breadcrumb to be emitted: every producing _park_* helper must
-        independently stamp non-empty breadcrumbs content (the constant has no
-        runtime reader in src/ -- see the block comment above its definition
-        in routing.py). The exclusion assertions below prove the other
+        independently stamp non-empty breadcrumbs content (its one runtime
+        reader, cw.attention_watch, only renders breadcrumbs that are already
+        there -- see the block comment above its definition in
+        routing/stage_failure.py). The exclusion assertions below prove the other
         gate-class parks (review_health_gate, finalize_hold, signoff_gate,
         approval_gate -- the last also covering scope_hint_gate, which reuses
         approval_gate's paused_status literal) stay out of this set: they

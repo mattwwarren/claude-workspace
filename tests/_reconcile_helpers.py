@@ -50,6 +50,7 @@ from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile._shared import _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY, ReapCandidate
 from cw.reconcile.codex_boot import CleanProbes
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
+from cw.reconcile.fix_dispatch import FIX_LOOP_PENDING_DISPATCH
 from cw.reconcile.gate_plan_probes import PlanProbes
 from cw.reconcile.gate_recipes import (
     GateRecipeCandidate,
@@ -73,6 +74,7 @@ from cw.reconcile.review_recipes.auto_fix_ci import (
     _auto_fix_ci_guard_target,
 )
 from tests._clients_yaml import staged_client, write_clients_yaml
+from tests._ticket_view_helpers import ACME_TICKET
 from tests.conftest import (
     _make_daemon_session,
     _make_ticket_task,
@@ -897,6 +899,23 @@ def _make_terminal_payload(status: str, ticket_id: str) -> dict[str, Any]:
             "base": "main",
         }
     return base
+
+
+def _fix_loop_pending_payload(ticket_id: str = ACME_TICKET) -> dict[str, Any]:
+    """A valid ``blocked`` result whose blocker is the fix-loop hand-off (#2693).
+
+    Dispatch leaves the row RUNNING for this one (``stage_failure.py``), so
+    ``cw dev-queue wait`` must keep waiting. ``lines_actual`` is set because a
+    stage past ``stage1_*`` with a null ``lines_actual`` fails validation, and
+    ``reconstruct_staged_sentinel`` would then return None.
+    """
+    base = _make_terminal_payload("blocked", ticket_id)
+    return {
+        **base,
+        "stage_reached": "stage3_review",
+        "scope": {**base["scope"], "lines_actual": 8},
+        "blocker": {"stage": "stage3_review", "reason": FIX_LOOP_PENDING_DISPATCH},
+    }
 
 
 def _mk_daemon_session_with_worktree(

@@ -628,7 +628,9 @@ as `BLOCKED_ON_USER` (`OCCUPIED_LANE_STATUSES`) — it is not eligible for
 re-dispatch and must not be double-counted as free capacity.
 
 **`cw dev-queue wait` exit code:** `4` (distinct from `2` for an ordinary
-`BLOCKED_ON_USER` block) — see the exit-code table in `cw dev-queue wait --help`.
+`BLOCKED_ON_USER` block); since #2693 `4` covers every human-kept gate (a
+finalize hold and a `scope_hint: large` approval gate too) and `5` is a stuck
+PENDING ticket — see the exit-code table in `cw dev-queue wait --help`.
 
 ## The `finalize_gate_held` Hold Disposition (RFC 0011 A3, GitHub #1160)
 
@@ -744,7 +746,7 @@ never appear in an `AutoDevResult`.
 
 | Literal | Where it comes from | What it means |
 |---|---|---|
-| `stale_dispatch` | `Status` (§4.1), stamped verbatim as the disposition by `_derive_disposition` | A session **ran**, discovered the open PR itself, and refused. `blocked_reason` is the sentinel's `blocker.reason` (canonically `pr_already_open`), and it is breadcrumb-eligible — the reason travels verbatim to the attention watch (`attention_watch.py`). |
+| `stale_dispatch` | `Status` (§4.1), stamped verbatim as the disposition by `_derive_disposition` | A session **ran**, discovered the open PR itself, and refused. `blocked_reason` is the sentinel's `blocker.reason` (canonically `pr_already_open`), and it is breadcrumb-eligible — the reason travels verbatim to the attention stream (`cw orchestrate watch`). |
 | `stale_dispatch_gate` | `cw.dev_queue.STALE_DISPATCH_GATE_DISPOSITION` — **never** a `Status` member | The dispatch loop refused to spawn at all. **No session ever ran**, so `breadcrumbs` is hardcoded empty and the literal stays out of `BREADCRUMB_ELIGIBLE_PAUSED_STATUSES`. `blocked_reason` is `pr_already_open_pre_dispatch`. |
 
 **Where the gate fires:** `cw.dispatch.pr_gate.resolve_stale_pr_ticket_ids`,

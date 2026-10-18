@@ -714,7 +714,7 @@ def _write_bin_stub(tmp_path: Path, name: str, body: str) -> Path:
     """Write ``body`` as an executable ``name`` in ``tmp_path/bin``; return the dir.
 
     The shared mechanics behind every fake-external-CLI helper here
-    (``_stub_gh``, ``_stub_gh_recording``, ``_stub_cw``) so a new one differs
+    (``_stub_gh``, ``_stub_gh_recording``) so a new one differs
     only in its script body.
     """
     fake_bin = tmp_path / "bin"
@@ -849,42 +849,6 @@ def _stub_gh_arm(
         "esac",
     ]
     return _write_bin_stub(tmp_path, "gh", "\n".join(lines) + "\n")
-
-
-def _stub_cw(
-    tmp_path: Path,
-    *,
-    events: Sequence[str] = (),
-    delay_s: float = 0.0,
-    exit_code: int = 0,
-    block: bool = False,
-) -> Path:
-    """Write an executable fake ``cw`` into a fresh bin dir and return it (#2250).
-
-    Stands in for ``cw event tail --follow ... --json``: ignores its flags,
-    prints each pre-built JSON line in ``events`` to stdout (sleeping
-    ``delay_s`` between lines), then exits ``exit_code`` -- or, with
-    ``block=True``, ``exec``s a long ``sleep`` so only the caller's own timer or
-    an explicit terminate ends it. ``exec`` keeps the stub's PID, so
-    terminating that PID really stops it rather than orphaning a ``sleep``.
-
-    Side files next to the stub: ``cw.args`` (one invocation arg per line) and
-    ``cw.pid`` (the stub's PID), for tests asserting what was invoked and
-    whether it was terminated.
-    """
-    lines = [
-        "#!/bin/sh",
-        'DIR=$(dirname "$0")',
-        'printf \'%s\\n\' "$@" > "$DIR/cw.args"',
-        'echo $$ > "$DIR/cw.pid"',
-    ]
-    for i, event in enumerate(events):
-        if i and delay_s:
-            lines.append(f"sleep {delay_s}")
-        # Quoted heredoc -- the event JSON is opaque data, never interpolated.
-        lines.extend([f"cat <<'CW_EVENT_EOF'\n{event}", "CW_EVENT_EOF"])
-    lines.append("exec sleep 3600" if block else f"exit {exit_code}")
-    return _write_bin_stub(tmp_path, "cw", "\n".join(lines) + "\n")
 
 
 def _plan_pending_payload(**overrides: object) -> dict[str, Any]:

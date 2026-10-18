@@ -25,6 +25,9 @@ below is what registers those commands. Submodules:
 - ``status`` — aggregate status table + lane breakdown rendering.
 - ``run`` — dispatch-driving commands (run, serve, plan).
 - ``wait`` — the sentinel-aware ``dev-queue wait`` loop and its emit helpers.
+- ``_wait_state`` — clock-free per-ticket ``wait`` state (hand-off and probe
+  throttle bookkeeping) plus the ``WAITING`` progress line and exit-5 stuck
+  output (#2693), used by ``wait``.
 - ``tasks`` — task inspection (tasks) + repo refresh (refresh-all) + attention
   helpers shared with ``status``.
 - ``show`` — the one-ticket view (``show``) and the best-effort row echo the
@@ -47,7 +50,8 @@ from cw.cli.dev_queue._group import (
     _WAIT_EXIT_ATTENTION,
     _WAIT_EXIT_BLOCKED,
     _WAIT_EXIT_FAILED,
-    _WAIT_EXIT_SIGNOFF,
+    _WAIT_EXIT_HUMAN_GATE,
+    _WAIT_EXIT_STUCK,
     _WAIT_EXIT_TIMEOUT,
 )
 
@@ -55,6 +59,7 @@ __all__ = [
     "_WAIT_EXIT_ATTENTION",
     "_WAIT_EXIT_BLOCKED",
     "_WAIT_EXIT_FAILED",
-    "_WAIT_EXIT_SIGNOFF",
+    "_WAIT_EXIT_HUMAN_GATE",
+    "_WAIT_EXIT_STUCK",
     "_WAIT_EXIT_TIMEOUT",
 ]

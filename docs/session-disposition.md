@@ -176,7 +176,7 @@ A ticket parked in queue status `AWAITING_OPERATOR_SIGNOFF` (RFC 0007
 Phase 3) is not a sentinel outcome either — it is the operator ship gate at
 REVIEW→FINALIZE, a gate the human explicitly opted into (`signoff: operator`,
 ADR-0020), so clearing it stays theirs; clear it with `cw dev-queue approve` (`cw dev-queue wait`
-exits 4 for it).
+exits 4 for it, as for every human-kept gate).
 
 For the full status-enum semantics and `blocker` shape, see
 [`docs/headless-contract.md §4`](headless-contract.md).

@@ -46,7 +46,7 @@ cw dev-queue run --once
 
 # Monitor
 cw watch                                    # live TUI work board
-cw dev-queue wait PROJ-123 -c my-project   # block until terminal, JSON exit codes
+cw dev-queue wait PROJ-123 -c my-project   # block until terminal (6h ceiling), JSON exit codes
 
 # Clean up after terminal
 cw done <session-name>
@@ -151,7 +151,7 @@ Use the `/cw-session-watch` skill to read a session's exit status without hand-g
 | `cw dev-queue status` | Show queue state and last tick summary |
 | `cw dev-queue tasks` | List dev-queue tasks with typed field output |
 | `cw dev-queue show <ticket> [-c <client>] [--json]` | One ticket's full row (blocker details, attempts vs ceiling, session liveness, PR, skip reason, approvals) and the legal next commands |
-| `cw dev-queue wait <ticket>` | Block until terminal; structured JSON exit codes |
+| `cw dev-queue wait <ticket>... [--any]` | Block until terminal (6 h default, `--timeout 0` = no limit); several tickets with `--any`; structured JSON exit codes |
 | `cw dev-queue approve <ticket>` | Approve a plan/review gate, or clear an operator-signoff hold |
 | `cw dev-queue requeue <ticket>` | Requeue a `BLOCKED_ON_USER` ticket back to pending |
 | `cw dev-queue drain --held -c <client>` | Resume every held (Rule-5 availability-park) ticket back to PENDING at its own stage |
@@ -164,7 +164,7 @@ Use the `/cw-session-watch` skill to read a session's exit status without hand-g
 | `cw dev-queue refresh-all` | Fast-forward all client repos to origin/main |
 | `cw queue peek` | In-flight inspection of RUNNING dev-queue sessions (age, idle gap, sentinel, PR state) |
 
-`cw dev-queue wait` exit codes: `0`=shipped/no_op · `1`=failed/cancelled · `2`=blocked/pending-triage · `3`=attention (stale transcript, or a mid-wait reap confirmed by `reap_proposed_at`) · `4`=parked awaiting operator signoff · `124`=timeout
+`cw dev-queue wait` exit codes: `0`=shipped/no_op · `1`=failed/cancelled · `2`=blocked/pending-triage · `3`=attention (stale transcript, or a mid-wait reap confirmed by `reap_proposed_at`) · `4`=human gate (operator signoff, finalize hold, `scope_hint: large`) · `5`=stuck (a PENDING blocker that will not clear on its own, or an unrouted plan/review approval result) · `124`=timeout. Dispatch's own hand-offs (fix loop, unrouted approval results on a RUNNING row) keep waiting
 
 For a wave of tickets, the `/cw-fanout` skill wraps this whole table — pre-flight, enqueue, dispatch, and monitor — into one orchestrated motion, using the `/cw-queue-peek` skill's WAIT/PEEK/STOP ladder to decide whether to keep a long-running session alive.
 
@@ -177,7 +177,7 @@ For a wave of tickets, the `/cw-fanout` skill wraps this whole table — pre-fli
 | Command | Description |
 |---------|-------------|
 | `cw orchestrate status` | Snapshot of orchestrator pipeline state |
-| `cw orchestrate watch` | **Deprecated** — live orchestrator dashboard; use `cw board` |
+| `cw orchestrate watch [-c <client>] [--all-lanes] [--ticket <id>]` | Persistent, silent attention stream for the Monitor tool: one line per event that needs you (with its next command), `STUCK` lines for PENDING tickets that will not clear on their own; first line is the resolved scope (live dashboard: `cw board`) |
 | `cw orchestrate workers` | List active worker sessions |
 | `cw orchestrate run --lane <name>` | Run the reap-authority loop for a lane |
 | `cw orchestrate start --lane <name>` | Bind lane reap authority |
