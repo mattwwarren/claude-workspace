@@ -199,6 +199,7 @@ For a wave of tickets, the `/cw-fanout` skill wraps this whole table — pre-fli
 | `cw lane pause <name> -c <client>` | Pause a lane (stop new dispatch into it) |
 | `cw lane resume <name> -c <client>` | Resume a paused lane |
 | `cw lane rm <name> -c <client>` | Remove a lane from a client |
+| `cw lane set <name> max_parallel=N -c <client>` | Set a lane's `max_parallel` / `attempt_ceiling` (refused inside a dispatch worker; audited as `lane.config_changed`) |
 
 ### Sprint buildout
 
@@ -231,7 +232,8 @@ The `/sprint-buildout` skill wraps this pair end-to-end — presenting the one a
 
 | Command | Description |
 |---------|-------------|
-| `cw config show` / `cw config concurrency` | Show configuration / manage concurrency overrides |
+| `cw config show` / `cw config concurrency` | Show configuration / manage concurrency overrides (`set ceiling=N -c <client>` sets one client's dispatch ceiling) |
+| `cw preflight <ticket> -c <client>` | Pre-flight checks for one ticket before dispatch (one JSON object; exit 1 on a hard failure) |
 | `cw completion <shell>` | Print shell completion snippet |
 | `cw result validate -` / `cw result emit` | Validate, or record onto a session, an AUTO_DEV_RESULT sentinel |
 | `cw event record/tail/wait/prune` | Record, read, block-until, or prune events on the orchestrator bus |

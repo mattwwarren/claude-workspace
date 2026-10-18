@@ -2122,6 +2122,93 @@ answers, the wall is gone. During a genuine wall, STOP the dispatch loop
 
 ---
 
+## Orchestrator permission allowlist
+
+Docs only: cw does not write your permission settings beyond what `cw init`
+already adds. `cw init` puts one broad `Bash(cw:*)` entry in
+`~/.claude/settings.json` (see [`docs/INSTALL.md`](INSTALL.md)), and that entry
+covers every verb below. The per-verb list is for operators who want a
+narrower allowlist for the orchestrator session: these are the read-only verbs
+an orchestrator runs on every monitoring pass, so allowlisting them keeps the
+loop free of permission prompts without pre-approving anything that changes
+state.
+
+- `Bash(cw dev-queue tasks:*)`
+- `Bash(cw dev-queue status:*)`
+- `Bash(cw dev-queue show:*)`
+- `Bash(cw dev-queue wait:*)`
+- `Bash(cw queue peek:*)`
+- `Bash(cw session result:*)`
+- `Bash(cw session show:*)`
+- `Bash(cw session list:*)`
+- `Bash(cw event tail:*)`
+- `Bash(cw orchestrate watch:*)`
+- `Bash(cw review dispositions:*)`
+- `Bash(cw lane ls:*)`
+- `Bash(cw config show:*)`
+- `Bash(cw config concurrency get:*)`
+- `Bash(cw preflight:*)`
+
+State-changing verbs are intentionally not listed: `cw lane set`,
+`cw config concurrency set|clear`, `cw dev-queue approve|resolve` and
+`cw review settle`. Approve those per call, or add them yourself knowing each
+one mutates queue, review or lane state. The old script-based attention
+watcher was removed in #2693 in favor of `cw orchestrate watch`; drop any
+allowlist entry that still names it.
+
+**Command shapes.** Orchestrator-run skills (`.claude/skills/*` and
+`.claude/commands/queue-issues.md`) prescribe one plain command per Bash call:
+no command substitution, backtick substitution, shell loops or jq filter
+flags, because those shapes do not match a per-verb allowlist entry and are
+rejected by worktree-isolation hooks. Where one command's output feeds the
+next, the skill says to read the field from the printed JSON and substitute it
+literally. `tests/test_orchestrator_command_shapes.py` enforces this. One fence
+is exempt: the `cw-session-watch` arm-automerge recovery fence, a merge-safety
+control pinned by `tests/test_arm_automerge_markdown_sites.py`, tracked in
+#2753. Worker-run docs (`auto-dev*`, `prep-pr`, `ship-it`, `review-monitor`)
+are out of scope.
+
+### Orchestrator bootstrap
+
+An orchestrator started in a fresh Claude Code worktree needs no setup step:
+
+- **No context file.** With no `.claude/cw-context.json`, `cw review settle`,
+  `cw dev-queue resolve`, `cw preflight` and `cw orchestrate watch` all run.
+  Only a headless dispatch worker (`headless: true` in the nearest context
+  file, or a `$TMPDIR` inside such a worktree) is refused (ADR-0020
+  invariant 4). Do not hand-author a context file: hooks read it as a
+  cw-spawned session.
+- **Pre-flight.** `cw preflight <TICKET> -c <CLIENT>` runs the dispatch
+  readiness checks and prints one JSON object (`ok`, `ticket_id`, `client`,
+  `repo`, `repo_root`, `tracker`, `checks`); it exits 1 when a hard check
+  failed. `-c` is required. With no `clients.yaml` the repo root is the
+  nearest ancestor of the current directory holding `.git`, which in a linked
+  worktree is the worktree itself. `--repo OWNER/NAME` overrides the derived
+  slug.
+- **Lane limits.** `cw lane set <CLIENT> <LANE> KEY=VALUE...` (or
+  `<LANE> KEY=VALUE... -c <CLIENT>`; alias `cw config lane set`) sets only
+  `max_parallel` (a positive integer) and `attempt_ceiling` (a positive
+  integer, `false`, or `null`); `KEY=null` removes the key so the lane
+  inherits. Several assignments apply together or not at all. Everything else
+  is refused with the supported-key list: the gate keys `signoff` and
+  `finalize_gate` (human opt-in gates, ADR-0020: agents never touch gate
+  keys), `reap_policy`, the guard toggles, the codex fix-loop toggle,
+  `priority`, `description` and `paused` (use `cw lane pause` /
+  `cw lane resume`). Edit `clients.yaml` by hand for those.
+- **Client ceiling.** `cw config concurrency set ceiling=N -c <CLIENT>` and
+  `cw config concurrency clear ceiling -c <CLIENT>` set or clear one client's
+  dispatch ceiling override. Without `-c` both commands keep their existing
+  host-wide behavior (`max_parallel_clients`), which has no worker guard.
+- **Audit.** `cw lane set` and the `-c` ceiling setter refuse inside a
+  dispatch worker and print each change as `old -> new`. Each call that
+  changes something emits one `lane.config_changed` event,
+  `{client, lane, changes: {<key>: [<old>, <new>]}}` (`lane` is null for a
+  client ceiling), after the file is written; refusals, validation failures
+  and no-ops emit nothing. If the emit itself fails, the command reports that
+  the change WAS applied. See [`docs/events.md`](events.md).
+
+---
+
 ## 8. Related docs
 
 - [`docs/session-disposition.md`](session-disposition.md) — how to read a session's outcome from the transcript sentinel.

@@ -163,6 +163,10 @@ workspace:
   automatically.
 - **Bash allowlist** (`~/.claude/settings.json`) — adds `"Bash(cw:*)"` to
   `permissions.allow` so agents can call `cw` commands without prompting.
+  Operators who prefer a narrower allowlist for an orchestrator session can
+  list read-only verbs individually instead; the per-verb list (and the
+  state-changing verbs deliberately left off it) is in
+  [`docs/dispatch-runbook.md`](dispatch-runbook.md#orchestrator-permission-allowlist).
 - **SessionStart hook** (`<workspace>/.claude/settings.json`) — adds
   `cw orchestrate status --json || true` so each new Claude session sees the
   current dispatch state.
