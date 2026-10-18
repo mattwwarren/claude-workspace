@@ -116,7 +116,7 @@ small is what keeps trackers declarative.
   of a downstream silent stall.
 - **`.claude/commands/review-monitor.md`** (deferred-thread filing at ~:219,
   today a hardcoded `mcp__plugin_linear_linear__save_issue`) and
-  **`.claude/skills/cw-smoke-test/scripts/preflight.py`** (hardcoded
+  **`src/cw/preflight.py`** (`cw preflight`; hardcoded
   `gh issue`/`gh pr`) consume the active descriptor's realization for the
   operation instead of hardcoding one tracker — so neither hits the wrong
   tracker on a repo configured for the other.
