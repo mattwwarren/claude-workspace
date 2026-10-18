@@ -40,10 +40,19 @@ _log = logging.getLogger(__name__)
 # Patterns appended to $GIT_COMMON_DIR/info/exclude so cw runtime artifacts are
 # invisible to git status and to ``git add -A`` without touching .gitignore:
 # the ephemeral per-session ``.cw/`` directory and the dispatch-written
-# ``.claude/cw-context.json`` plus its ``.lock`` sibling (#2447). The embedded
-# slash anchors the second pattern to the worktree root, and the trailing ``*``
-# covers the lock file.
-_CW_EXCLUDE_PATTERNS = (".cw/", ".claude/cw-context.json*")
+# ``.claude/cw-context.json`` plus its ``.lock`` sibling (#2447), and the three
+# cw-written review artifacts (#2689; pinned to
+# ``codex_fix_loop.baseline._CW_REVIEW_ARTIFACTS`` by a lockstep test). The
+# embedded slash anchors a pattern to the worktree root, and the trailing ``*``
+# covers the lock file. An exclude hides only untracked files; a tracked review
+# artifact is handled by the fix-loop baseline.
+_CW_EXCLUDE_PATTERNS = (
+    ".cw/",
+    ".claude/cw-context.json*",
+    ".claude/review-verdict.md",
+    ".claude/review-verdict.json",
+    ".claude/review-verdict-unparseable.md",
+)
 # Matches git's "fatal: '<branch>' is already used by worktree at '<path>'"
 # line so create_worktree can name the colliding worktree in a targeted error
 # (#2034) instead of surfacing git's bare stderr.

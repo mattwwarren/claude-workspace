@@ -20,4 +20,5 @@ zellij-plugin/target/
 .claude/cw-context.json.lock
 .claude/review-verdict.md
 .claude/review-verdict.json
+.claude/review-verdict-unparseable.md
 docs/handoffs/
