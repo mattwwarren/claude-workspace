@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.76.0] - 2026-10-18
+
 ### Added
 
 - **`cw orchestrate watch` is a persistent, scoped attention stream for the Monitor tool (#2693).** One long-lived, silent process prints one line per event that needs the orchestrator, each ending in `| next: <command>` from the row's legal next commands, and nothing while everything is healthy. Its first stdout line is the resolved scope (`WATCH | scope | client=… | lanes=… | tickets=… | source=… | start=… | cursor=…`): by default the caller's focus-pointer lane, else the whole client; `--lane`, `--ticket`, `--all-lanes` and `--since EVENT_ID` override it. The position (and a dedupe latch) is saved in the event-bus cursor store after each printed line, so a restart or Monitor re-arm resumes losslessly. A repeated page, including the starved-lane and `dispatch_loop_stale` pages, is suppressed until a transition, requeue, lane resume or dispatch tick resolves it. A second watcher on a live scope is refused unless `--force` (a recycled pid cannot be detected). It exits 0 on SIGTERM, 130 on SIGINT and 1 on a fatal error, a refused start or a stdout write failure, always after a `WATCH | exited: <reason>` line.
