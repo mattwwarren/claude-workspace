@@ -268,6 +268,26 @@ class TestPending:
         assert clock.now - doc["age_seconds"] <= WAIT_PROBE_SECONDS
         assert _stderr_lines(result)[0].endswith(f"| {_BREAKER_DETAIL}")
 
+    def test_leaving_pending_restarts_the_stuck_clock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seed_queue([make_task(status=QueueItemStatus.PENDING)])
+        _stuck_lane()
+
+        def flip(n: int) -> None:
+            if n == 12:  # t=60: claimed
+                seed_queue([make_task(status=QueueItemStatus.RUNNING, session_id=None)])
+            if n == 18:  # t=90: back to PENDING
+                seed_queue([make_task(status=QueueItemStatus.PENDING)])
+
+        fake = _FakeClock(on_sleep=flip)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", fake.sleep)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.monotonic", fake.monotonic)
+
+        result = _wait(ACME_TICKET, "--stuck-after-minutes", "2", "--timeout", "200")
+
+        assert result.exit_code == 124
+
     def test_breaker_pause_text_mode(self, clock: _FakeClock) -> None:
         seed_queue([make_task(status=QueueItemStatus.PENDING)])
         _stuck_lane()

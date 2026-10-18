@@ -496,6 +496,9 @@ def _poll_ticket(wait: TicketWait, timeout_seconds: float, output_json: bool) ->
         return True
     if task.status == QueueItemStatus.PENDING:
         _probe_pending_row(wait, task, output_json)
+    else:
+        # A row that left PENDING restarts its stuck clock if it comes back.
+        wait.tracker.retain(set())
 
     # --- Step 2: resolve the session ---
     session_id = task.session_id

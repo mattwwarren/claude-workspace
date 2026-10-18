@@ -560,6 +560,12 @@ class TestRenderEvent:
         assert "| #T-77 | escalated |" in line
         assert line.endswith("| next: -")
 
+    def test_event_without_a_why_renders_an_empty_field(self) -> None:
+        event = _event(
+            OrchestratorEventType.SESSION_PHANTOM_REVERTED, client=ACME, ticket_id="T-5"
+        )
+        assert "| #T-5 |  |" in render_event(event, None)
+
 
 class TestFirstNextCommand:
     def test_no_row_is_none(self) -> None:
