@@ -1087,8 +1087,8 @@ lane_circuit_breaker_threshold: 3
 # Operator pauses (`cw lane pause`), pauses recorded before #2696 (shown as
 # "legacy") and `paused: true` in clients.yaml are never auto-resumed; a
 # clients.yaml pause still holds the lane after a circuit pause is lifted.
-# 0 disables auto-resume; set a positive value to opt in.
-lane_circuit_auto_resume_minutes: 0
+# Auto-resume is enabled by default; 0 disables it.
+lane_circuit_auto_resume_minutes: 15
 lane_circuit_auto_resume_max_minutes: 240
 
 # Fallback window after a usage-limit cutoff, used when the reset time is
