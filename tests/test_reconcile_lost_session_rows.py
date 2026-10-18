@@ -726,3 +726,43 @@ class TestThroughReconcile:
         reconcile()
 
         assert _by_ticket()["T-1"].advisory_note is None
+
+    def test_adoption_binds_first_so_nothing_pages(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The unowned-running sweep runs before this one in the tail: a row
+        its evidence ties to a recorded session is bound, never paged."""
+        from cw.worktree import worktree_path_for
+        from tests.conftest import _write_hook_context_file
+
+        client = ClientConfig(
+            name=_CLIENT,
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "worktrees",
+        )
+        live = _make_daemon_session(
+            id="sess-T-1", name=f"{_CLIENT}/auto-dev/T-1", surface_ref="abcd1234"
+        )
+        _world(
+            tmp_path,
+            monkeypatch,
+            state=CwState(sessions=[live]),
+            tasks=[_running("T-1", session_id=None)],
+            roster=["abcd1234"],
+        )
+        worktree = worktree_path_for(client, f"{client.feature_branch_prefix}/T-1")
+        worktree.mkdir(parents=True)
+        _write_hook_context_file(
+            worktree,
+            session_id="sess-T-1",
+            ticket_id="T-1",
+            client=_CLIENT,
+            task=_running("T-1", session_id=None),
+        )
+
+        reconcile()
+
+        row = _by_ticket()["T-1"]
+        assert row.session_id == "sess-T-1"
+        assert row.advisory_note is None
+        assert _pages(SESSIONLESS_PAGE_REASON) == []
