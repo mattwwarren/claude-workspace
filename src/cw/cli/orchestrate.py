@@ -1,15 +1,25 @@
-"""Orchestrator pipeline commands: status, retirement, dashboards, reap drain."""
+"""Orchestrator pipeline commands: status, retirement, the attention stream, reaps."""
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import sys
 import time
+from datetime import UTC, datetime
 
 import click
 
-from cw.board import run_board
-from cw.cli._base import _complete_client, _resolve_client, handle_errors, main
+from cw.attention_stream import AttentionStream
+from cw.attention_watch import resolve_scope
+from cw.cli._base import (
+    SESSION_ENV_VAR,
+    _complete_client,
+    _resolve_client,
+    handle_errors,
+    main,
+)
 from cw.config import load_state
 from cw.doctor import _reap_session_by_selector
 from cw.events import advance_cursor, read_events
@@ -33,6 +43,7 @@ from cw.orchestrate import (
 )
 from cw.reconcile import ProposedAction
 from cw.spawn import spawn_create_impl
+from cw.stuck_pending import STUCK_PENDING_MINUTES
 
 logger = logging.getLogger(__name__)
 
@@ -158,42 +169,127 @@ def orchestrate_retire() -> None:
         click.echo(f"  {sid}")
 
 
-_ORCHESTRATE_WATCH_DEPRECATION = (
-    "Note: `cw orchestrate watch` is deprecated and will be removed in the "
-    "next release. Use `cw board` instead."
-)
+_WATCH_ALL_LANES_WITH_LANE = "--all-lanes cannot be combined with --lane."
+
+
+def _validate_watch_lanes(client_name: str, lanes: tuple[str, ...]) -> None:
+    """Refuse an explicit ``--lane`` the client does not declare."""
+    if not lanes:
+        return
+    declared = [ln.name for ln in _resolve_client(client_name).effective_lanes]
+    for lane in lanes:
+        if lane not in declared:
+            msg = (
+                f"Lane '{lane}' is not declared for client '{client_name}'. "
+                f"Declared lanes: {', '.join(declared)}. "
+                f"Run: cw lane add {client_name} {lane}"
+            )
+            raise LaneNotFoundError(msg)
 
 
 @orchestrate.command(name="watch")
 @click.option(
-    "--interval",
-    type=int,
-    default=2,
-    show_default=True,
-    help="Seconds between refreshes (1-60).",
-)
-@click.option(
     "--client",
     "-c",
-    "client_filter",
+    "client_name",
     default=None,
     shell_complete=_complete_client,
-    help="Only render this client.",
+    help="Client to watch (default: the client in this session's focus pointer).",
+)
+@click.option(
+    "--lane",
+    "lanes",
+    multiple=True,
+    help=(
+        "Watch this lane (repeatable). Default: the focus-pointer lane, else"
+        " every lane."
+    ),
+)
+@click.option(
+    "--ticket",
+    "tickets",
+    multiple=True,
+    help="Also watch this ticket in any lane (repeatable).",
+)
+@click.option(
+    "--all-lanes",
+    is_flag=True,
+    default=False,
+    help="Watch every lane of the client, ignoring the focus-pointer lane.",
+)
+@click.option(
+    "--since",
+    metavar="EVENT_ID",
+    default=None,
+    help=(
+        "Start after this event id instead of the saved position (a first run"
+        " starts at the current end of the event log)."
+    ),
+)
+@click.option(
+    "--stuck-after-minutes",
+    type=click.IntRange(min=1),
+    default=STUCK_PENDING_MINUTES,
+    help=(
+        "Report a pending ticket as STUCK after this many minutes when its"
+        " blocker will not clear on its own (default: 15)."
+    ),
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help=(
+        "Start even if the saved position names a live watcher pid. A recycled"
+        " pid also looks alive, so a stale record needs this flag."
+    ),
 )
 @handle_errors
 def orchestrate_watch(
-    interval: int,
-    client_filter: str | None,
+    client_name: str | None,
+    lanes: tuple[str, ...],
+    tickets: tuple[str, ...],
+    all_lanes: bool,
+    since: str | None,
+    stuck_after_minutes: int,
+    force: bool,
 ) -> None:
-    """Render the lane x stage board live, refreshing on an interval.
+    """Stream actionable orchestrator events, one line each, until stopped.
 
-    Repointed to the `cw board` render surface (issue #986). Press Ctrl-C
-    to exit.
+    Built to run under the Monitor tool: arm it once per sprint. It prints one
+    line per event that needs you, with the command to run next, and nothing
+    while everything is healthy, so silence means healthy. A pending ticket
+    whose blocker will not clear on its own is reported as a STUCK line after
+    --stuck-after-minutes. The first line printed is the resolved scope
+    (client, lanes, tickets).
 
-    Deprecated: will be removed in the next release; use `cw board` directly.
+    The position is saved after each printed line, so a restart or a Monitor
+    re-arm resumes where the last run stopped: nothing replayed, nothing lost.
+    The default scope is your focus-pointer lane (cw focus set CLIENT/LANE),
+    else the whole client; --all-lanes ignores the focus lane. Exits only on a
+    fatal error or a signal.
     """
-    click.echo(_ORCHESTRATE_WATCH_DEPRECATION, err=True)
-    run_board(interval=interval, client_filter=client_filter)
+    if all_lanes and lanes:
+        raise click.UsageError(_WATCH_ALL_LANES_WITH_LANE)
+    scope = resolve_scope(
+        client_name,
+        lanes,
+        tickets,
+        all_lanes=all_lanes,
+        session_id=os.environ.get(SESSION_ENV_VAR),
+    )
+    _validate_watch_lanes(scope.client, lanes)
+    stream = AttentionStream(
+        scope, stuck_after_minutes=stuck_after_minutes, since=since, force=force
+    )
+    code = stream.run(
+        sys.stdout,
+        err=sys.stderr,
+        sleep=time.sleep,
+        clock=time.monotonic,
+        now_fn=lambda: datetime.now(UTC),
+    )
+    raise click.exceptions.Exit(code)
 
 
 def _format_workers_human(
