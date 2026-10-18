@@ -89,6 +89,7 @@ from cw.reconcile.local import (
     capture_codex_harvest_probes,
     capture_local_harvest_facts,
 )
+from cw.reconcile.lost_session_rows import run_lost_session_recovery
 from cw.reconcile.main_drift import (
     _act_on_main_drift_candidates,
     _detect_main_drift_candidates,
@@ -191,6 +192,9 @@ def _run_terminal_backstops_and_sweeps(
     timed_out_ticket_ids = revert_timed_out_tasks(dirty_checks)
     completed_silent_ticket_ids = revert_completed_silent_tasks(dirty_checks)
     park_terminal_sibling_tasks()
+    # #2715: park RUNNING rows bound to a session with no record; page
+    # sessionless ones. After adoption and the backstops have had their turn.
+    run_lost_session_recovery(now=now, clients=clients, native_live=native_live)
     run_concierge_recoveries(now=now, native_live=native_live, config=config)
     # #2307: re-evaluate codex-orphan parks the boot pass left with an ACTIVE
     # session (live or unprovable writer). Unconditional, like the boot pass,

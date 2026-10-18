@@ -1234,7 +1234,7 @@ class TestAcceptanceOwners:
 class TestBoundaryGuards:
     @pytest.mark.parametrize(
         "module_name",
-        ["cw.reconcile.shipped_release"],
+        ["cw.reconcile.shipped_release", "cw.reconcile.lost_session_rows"],
     )
     def test_no_gh_argv_subprocess_or_stop_call(self, module_name: str) -> None:
         source = inspect.getsource(importlib.import_module(module_name))
