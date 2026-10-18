@@ -147,11 +147,13 @@ own command. Keep Git output in those files; do not paste it into shell source
 or a shell assignment:
 
 ```bash
-git -C <WORKTREE> diff --name-only origin/main...HEAD | tee <CHANGED_FILES_FILE>
+CHANGED_FILES_FILE=/tmp/cw-followup-changed-files.txt
+git -C <WORKTREE> diff --name-only origin/main...HEAD | tee "$CHANGED_FILES_FILE"
 ```
 
 ```bash
-git -C <WORKTREE> log -1 --format=%s <BRANCH> | tee <SUBJECT_FILE>
+SUBJECT_FILE=/tmp/cw-followup-subject.txt
+git -C <WORKTREE> log -1 --format=%s <BRANCH> | tee "$SUBJECT_FILE"
 ```
 
 Then read the subject and changed-file list from those files. The gate consumes
@@ -159,8 +161,8 @@ the files directly, so Git output is never embedded in shell assignments:
 
 ```bash
 GATE_FIRES=false
-if grep -qE '^(feat|fix)\(' <SUBJECT_FILE>; then
-  if grep -q '^src/' <CHANGED_FILES_FILE>; then
+if grep -qE '^(feat|fix)\(' "$SUBJECT_FILE"; then
+  if grep -q '^src/' "$CHANGED_FILES_FILE"; then
     GATE_FIRES=true
   fi
 fi
@@ -176,7 +178,7 @@ re-derive the decision tree here; cross-reference `ship-it.md` Step 3a so the
 two copies can't drift.
 
 ```bash
-read -r TITLE < <SUBJECT_FILE>
+read -r TITLE < "$SUBJECT_FILE"
 gh pr create --base main --head <BRANCH> --title "$TITLE" ${EXTRA_LABEL_ARGS}  # body derived from the review summary
 ```
 
