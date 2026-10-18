@@ -6,10 +6,17 @@ ceiling. This module owns the breaker concern -- counting spawn errors per
 lane, tripping the pause, detecting a breaker pause with stranded work, and
 the recurring starved-lane page. :mod:`cw.dispatch.lanes` keeps the per-client
 lane walk that drives it.
+
+#2696 added the persisted pause cause, a separate worktree-error counter (R3),
+auto-resume after a doubling cool-down with a half-open probe (the probe's
+no-charge decision lives at the spawn path's charge site,
+``cw.dispatch.claim.spawn._charges_unproductive_attempt``, R16), and quiet
+paging while a resume is scheduled.
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -39,6 +46,8 @@ from cw.models import (
 if TYPE_CHECKING:
     from cw.models import DevQueueStore, LaneConfig, OrchestratorConfig
 
+_log = logging.getLogger("cw.dispatch")
+
 
 # ``source`` field on a LANE_PAUSED event emitted by the per-lane circuit breaker
 # (as opposed to an operator-initiated ``cw lane pause``), and the persisted
@@ -47,6 +56,13 @@ _LANE_PAUSE_SOURCE_CIRCUIT_BREAKER = LanePauseSource.CIRCUIT_BREAKER.value
 
 # How many recorded spawn errors a lane override keeps, oldest dropped (#2696).
 _RECENT_SPAWN_ERRORS_KEPT = 5
+
+# ``source`` of the LANE_RESUMED event an auto-resume emits (#2696).
+_AUTO_RESUME_SOURCE = "auto_resume"
+
+# Trip streak below which a scheduled auto-resume holds the #1630 starved page
+# (#2696 quiet paging): trips 1 and 2 resume on their own; trip 3 pages.
+_AUTO_RESUME_QUIET_TRIP_LIMIT = 3
 
 # Bound on the cool-down's doubling exponent (#2696): far past any useful
 # cool-down, it only keeps ``base << exponent`` from growing without limit.
@@ -371,6 +387,134 @@ def _reset_lane_spawn_errors(lane_cfg: LaneConfig, client_name: str) -> None:
         _save_concurrency_overrides(overrides)
 
 
+def _auto_resume_due(
+    override: LaneConcurrencyOverride | None,
+    *,
+    config: OrchestratorConfig,
+    now: datetime,
+) -> bool:
+    """Whether *override* is a circuit-breaker pause whose cool-down has elapsed.
+
+    Only a ``circuit_breaker`` pause with a schedule qualifies: a legacy pause
+    (no source), an operator pause and a declared-only pause (no override)
+    never auto-resume (R1, R9), and ``lane_circuit_auto_resume_minutes: 0``
+    switches the whole mechanism off even over a leftover schedule.
+    """
+    return (
+        config.lane_circuit_auto_resume_minutes > 0
+        and override is not None
+        and override.paused is True
+        and override.pause_source == _LANE_PAUSE_SOURCE_CIRCUIT_BREAKER
+        and override.circuit_auto_resume_at is not None
+        and now >= override.circuit_auto_resume_at
+    )
+
+
+def _half_open(
+    override: LaneConcurrencyOverride, *, config: OrchestratorConfig
+) -> LaneConcurrencyOverride:
+    """*override* lifted into its half-open probe state (#2696).
+
+    ``paused`` becomes None, never False (R9): an override's non-None
+    ``paused`` wins over ``clients.yaml`` in ``load_effective_clients``, so
+    None hands control back to the declared value and a declared pause
+    survives. Each counter drops to at most one below its trip point, so at
+    least one more failure of the tripping kind re-trips (with a doubled
+    cool-down, since the streak is kept); ``circuit_half_open`` marks the
+    first spawn as an uncharged probe (R16). The recorded errors and streak
+    are kept; the pause metadata and the starved-page debounce are cleared.
+    """
+    threshold = config.lane_circuit_breaker_threshold
+    worktree_threshold = worktree_breaker_threshold(threshold)
+    return override.model_copy(
+        update={
+            "paused": None,
+            "consecutive_spawn_errors": min(
+                override.consecutive_spawn_errors, max(0, threshold - 1)
+            ),
+            "consecutive_worktree_errors": min(
+                override.consecutive_worktree_errors, max(0, worktree_threshold - 1)
+            ),
+            "circuit_half_open": True,
+            "paused_at": None,
+            "pause_source": None,
+            "pause_trigger": None,
+            "circuit_auto_resume_at": None,
+            "lane_starved_notify_next_eligible_at": None,
+        }
+    )
+
+
+def _maybe_auto_resume_lane(
+    lane_cfg: LaneConfig,
+    client_name: str,
+    *,
+    overrides: ConcurrencyOverrides,
+    config: OrchestratorConfig,
+) -> bool:
+    """Lift a circuit-breaker pause whose cool-down elapsed; True if lifted (#2696).
+
+    The precheck is lock-free and reads only the caller's already-loaded
+    *overrides*, so a lane that is not due costs no file read (R7). A due lane
+    is re-checked under ``concurrency_override_lock()`` against a fresh load,
+    which catches a ``cw lane resume``/``cw lane pause`` that raced the
+    precheck, then written half-open (:func:`_half_open`). After the lock is
+    released it emits ``lane.resumed`` with ``source="auto_resume"`` and logs
+    one INFO line; it never pages. The event means the circuit pause was
+    lifted: a lane ``clients.yaml`` also declares paused stays paused.
+
+    The resumed lane dispatches on the next tick, since this tick's effective
+    lanes were already computed.
+    """
+    lane_key = f"{client_name}/{lane_cfg.name}"
+    now = datetime.now(UTC)
+    if not _auto_resume_due(overrides.lanes.get(lane_key), config=config, now=now):
+        return False
+    with concurrency_override_lock():
+        current = _load_concurrency_overrides()
+        override = current.lanes.get(lane_key)
+        if override is None or not _auto_resume_due(override, config=config, now=now):
+            return False
+        current.lanes[lane_key] = _half_open(override, config=config)
+        _save_concurrency_overrides(current)
+    record_event(
+        OrchestratorEventType.LANE_RESUMED,
+        {
+            "client": client_name,
+            "lane": lane_cfg.name,
+            "source": _AUTO_RESUME_SOURCE,
+            "trip_streak": override.circuit_trip_streak,
+            "paused_since": iso_z(override.paused_at) if override.paused_at else None,
+        },
+    )
+    _log.info(
+        "dispatch: auto-resumed lane %s/%s after circuit-breaker trip #%d;"
+        " the next spawn is an uncharged half-open probe",
+        client_name,
+        lane_cfg.name,
+        override.circuit_trip_streak,
+    )
+    return True
+
+
+def _quiet_paging(
+    override: LaneConcurrencyOverride | None, *, config: OrchestratorConfig
+) -> bool:
+    """Whether a tripped lane's starved page is held while auto-resume is due.
+
+    The first two trips of a streak resume on their own, so they give one
+    ``lane.paused`` and one ``lane.resumed`` instead of repeating #1630 pages;
+    from the third trip (or with auto-resume off, or for any pause with no
+    schedule) the page fires as before.
+    """
+    return (
+        override is not None
+        and config.lane_circuit_auto_resume_minutes > 0
+        and override.circuit_auto_resume_at is not None
+        and override.circuit_trip_streak < _AUTO_RESUME_QUIET_TRIP_LIMIT
+    )
+
+
 def _handle_paused_lane(
     lane_cfg: LaneConfig,
     queue_snapshot: DevQueueStore,
@@ -379,14 +523,21 @@ def _handle_paused_lane(
     overrides: ConcurrencyOverrides,
     config: OrchestratorConfig,
 ) -> bool:
-    """Circuit-check a paused lane and fire its starved-attention notify (#1630).
+    """Auto-resume, circuit-check and page for one paused lane (#1630, #2696).
 
     Extracted from :func:`_dispatch_client_lanes` to keep it within the
     PLR0912/PLR0915 ceilings (CLAUDE.md) -- mirrors
     :func:`_apply_host_capacity_budget`'s own extraction for the same reason.
-    Returns whether this lane is a breaker-tripped pause with pending work
-    (the caller ORs this into its running ``lane_circuit_paused`` flag).
+    A lane whose circuit-breaker cool-down has elapsed is lifted first
+    (:func:`_maybe_auto_resume_lane`) and reported as not paused. Otherwise
+    returns whether this lane is a breaker-tripped pause with pending work
+    (the caller ORs this into its running ``lane_circuit_paused`` flag), and
+    fires the starved-lane page unless :func:`_quiet_paging` holds it.
     """
+    if _maybe_auto_resume_lane(
+        lane_cfg, client_name, overrides=overrides, config=config
+    ):
+        return False
     lane_paused_here = _check_lane_circuit_paused(
         lane_cfg,
         queue_snapshot,
@@ -394,7 +545,8 @@ def _handle_paused_lane(
         overrides=overrides,
         config=config,
     )
-    if lane_paused_here:
+    override = overrides.lanes.get(f"{client_name}/{lane_cfg.name}")
+    if lane_paused_here and not _quiet_paging(override, config=config):
         _maybe_notify_lane_starved(
             client_name,
             lane_cfg.name,

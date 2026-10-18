@@ -14,14 +14,6 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from cw.dispatch.lane_circuit import (
-    _auto_resume_cooldown_minutes,
-    _check_lane_circuit_paused,
-    _handle_paused_lane,
-    _maybe_auto_resume_lane,
-    _record_lane_spawn_error,
-    _reset_lane_spawn_errors,
-)
 from freezegun import freeze_time
 
 from cw.config import (
@@ -31,6 +23,14 @@ from cw.config import (
 )
 from cw.dev_queue import add_ticket, load_dev_queue
 from cw.dispatch import dispatch_tick
+from cw.dispatch.lane_circuit import (
+    _auto_resume_cooldown_minutes,
+    _check_lane_circuit_paused,
+    _handle_paused_lane,
+    _maybe_auto_resume_lane,
+    _record_lane_spawn_error,
+    _reset_lane_spawn_errors,
+)
 from cw.events import read_events
 from cw.exceptions import HookContextConflictError, StaleWorktreeError, WorktreeError
 from cw.models import (

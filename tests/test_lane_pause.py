@@ -9,6 +9,9 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from freezegun import freeze_time
+from pydantic import ValidationError
+
 from cw.lane_pause import (
     WORKTREE_BREAKER_MULTIPLIER,
     LanePauseSource,
@@ -22,9 +25,6 @@ from cw.lane_pause import (
     utc_now_seconds,
     worktree_breaker_threshold,
 )
-from freezegun import freeze_time
-from pydantic import ValidationError
-
 from cw.models import (
     ClientConfig,
     ConcurrencyOverrides,
