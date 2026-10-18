@@ -90,6 +90,7 @@ EXPECTED_EXPORTS = {
     "_SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY",
     "_SENTINEL_STAGE_MISMATCH_REFUSED_REASON",
     "_SESSION_ID_MISMATCH_ADVISORY_NOTE",
+    "_SESSION_LOST_REASON",
     "_SESSION_UNRESPONSIVE_REASON",
     "_SILENTLY_IDLE_REASON",
     "_STAGE_REVIEW_COMPLETE",
@@ -220,7 +221,7 @@ class TestPackageExportCompleteness:
     """Guards that ``cw.reconcile._shared`` keeps its full pre-split surface."""
 
     def test_expected_surface_size(self) -> None:
-        assert len(EXPECTED_EXPORTS) == 148
+        assert len(EXPECTED_EXPORTS) == 149
 
     def test_all_matches_full_surface(self) -> None:
         assert set(_shared.__all__) == EXPECTED_EXPORTS
@@ -293,7 +294,7 @@ class TestPatchOwnership:
     def test_package_binds_no_patched_global(self) -> None:
         """A stale ``cw.reconcile._shared.<global>`` target fails loudly.
 
-        The package re-exports only its own 148 names, never a third-party
+        The package re-exports only its own 149 names, never a third-party
         global a submodule imports, so a patch left on the package raises
         instead of resolving and silently not intercepting.
         ``_locate_session_transcript`` is itself part of the surface, so the

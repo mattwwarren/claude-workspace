@@ -63,6 +63,9 @@ _ELIGIBLE_COMBOS: list[tuple[QueueItemStatus, str | None]] = [
     # non-operator-initiated quality signal whose escalation clock starts
     # immediately, not a deliberately-armed operator stop.
     (QueueItemStatus.BLOCKED_ON_USER, "branch_behind_main"),
+    # #2715: the lost-session park (a RUNNING row whose Session record is
+    # missing) escalates and is never auto-requeued.
+    (QueueItemStatus.BLOCKED_ON_USER, "running_row_session_lost"),
     (QueueItemStatus.AWAITING_OPERATOR_SIGNOFF, None),
     (QueueItemStatus.AWAITING_OPERATOR_SIGNOFF, "signoff_gate"),
     (QueueItemStatus.FAILED, None),
@@ -190,6 +193,28 @@ class TestEligibilityFormula:
         )
         assert _FIX_DISPATCH_REF_UNRESOLVED_REASON not in HOLD_DISPOSITIONS
         assert _FIX_DISPATCH_REF_UNRESOLVED_REASON not in DRAIN_DISPOSITIONS
+
+    def test_session_lost_park_is_escalation_eligible(self) -> None:
+        """#2715: escalate, never requeue.
+
+        The lost-session park is unresolved and non-operator-initiated, so it
+        pages. It stays out of concierge's false-park requeue set: an
+        auto-requeue could re-run over a possibly-live unrecorded worker.
+        """
+        from cw.dev_queue import DRAIN_DISPOSITIONS, HOLD_DISPOSITIONS
+        from cw.reconcile._shared import (
+            _REAP_ELIGIBLE_DISPOSITIONS_BASE,
+            _SESSION_LOST_REASON,
+        )
+        from cw.reconcile.concierge import _FALSE_PARK_ELIGIBLE_DISPOSITIONS
+        from cw.reconcile.escalation import _ELIGIBLE_DISPOSITIONS
+
+        assert _SESSION_LOST_REASON == "running_row_session_lost"
+        assert _SESSION_LOST_REASON in _ELIGIBLE_DISPOSITIONS
+        assert _SESSION_LOST_REASON not in _FALSE_PARK_ELIGIBLE_DISPOSITIONS
+        assert _SESSION_LOST_REASON not in _REAP_ELIGIBLE_DISPOSITIONS_BASE
+        assert _SESSION_LOST_REASON not in HOLD_DISPOSITIONS
+        assert _SESSION_LOST_REASON not in DRAIN_DISPOSITIONS
 
     def test_unresolved_subagent_spawn_not_false_park_requeueable(self) -> None:
         """#1646: concierge must NOT auto-requeue this class.
