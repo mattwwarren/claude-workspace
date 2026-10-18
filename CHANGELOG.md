@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.75.0] - 2026-10-18
+
 ### Added
 
 - **Reconcile closes a stranded shipped session once its own PR is open or merged (#2715).** A live DAEMON session whose consumed `cw result emit` result is `shipped`, with no lane-occupying row bound to it (the #2524 `routed_result_session_stranded` shape), is now closed instead of only paged when its own PR is OPEN or MERGED and its drain stamp is readable, carries the session's own id and is past `fix_loop_await_deadline_minutes`. The session is marked `COMPLETED` with `reap_reason=routed_result_stranded`, its worker is stopped after the sessions lock releases, and one `session.completed` carries a new optional `pr_url`. No queue row is touched; a `signoff` or `hold_finalize` row still pins its session. The PR lookup is a lockless `gh pr list` pre-pass, at most three per tick. It fails closed: a missing, unreadable or foreign drain stamp (including every stamp written before this release) leaves the session page-only. The Stop hook's drain-stamp snapshot now records the session id for this check.
