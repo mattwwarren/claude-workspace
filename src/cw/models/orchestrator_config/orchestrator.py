@@ -91,7 +91,9 @@ class OrchestratorConfig(BaseModel):
     # failure of the tripping kind re-trips at once, and that first probe
     # spawn does not charge the ticket's unproductive_attempts. 0 disables
     # auto-resume (a tripped lane then waits for ``cw lane resume``).
-    # Operator and legacy pauses are never auto-resumed.
+    # Operator and legacy pauses are never auto-resumed. This is deliberately
+    # default-on per the approved rollout; the bounded cooldown/probe and the
+    # global 0 escape hatch are the rollout controls, not a tenant opt-in gate.
     lane_circuit_auto_resume_minutes: int = 15
     # Cap (minutes) on the doubling auto-resume cool-down above (#2696).
     lane_circuit_auto_resume_max_minutes: int = 240
