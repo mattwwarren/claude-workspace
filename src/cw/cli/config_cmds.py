@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypedDict
 
@@ -50,6 +51,60 @@ if TYPE_CHECKING:
 # persisted ``LaneConcurrencyOverride.pause_source`` of ``cw lane pause``.
 # See #875, #2696.
 _LANE_PAUSE_SOURCE_OPERATOR = LanePauseSource.OPERATOR.value
+
+logger = logging.getLogger(__name__)
+
+
+def _render_config_value(value: object) -> str:
+    """One before/after value in setter output: ``(unset)`` or its JSON form."""
+    return "(unset)" if value is None else json.dumps(value)
+
+
+def _emit_lane_config_changed(
+    client: str, lane: str | None, changes: dict[str, list[object]]
+) -> None:
+    """Record one ``lane.config_changed`` audit event for an applied change.
+
+    Shared by ``cw lane set`` (``lane`` = the lane name) and the client-ceiling
+    branch of ``cw config concurrency set|clear`` (``lane`` = None), #2697.
+    *changes* maps each changed key to ``[old, new]``, None meaning unset.
+
+    Called after the config file was replaced and its lock released, as
+    ``cw lane add`` records ``lane.created``. A failed emit therefore must not
+    read as a failed change: the failure is logged at WARNING and re-raised as
+    a :class:`CwError` stating that the change WAS applied, so the operator
+    neither re-runs the command nor assumes nothing happened.
+    """
+    try:
+        record_event(
+            OrchestratorEventType.LANE_CONFIG_CHANGED,
+            {"client": client, "lane": lane, "changes": changes},
+        )
+    except Exception as exc:
+        logger.warning(
+            "lane.config_changed emit failed after the change was applied:"
+            " client=%s lane=%s changes=%s",
+            client,
+            lane,
+            changes,
+            exc_info=True,
+        )
+        target = (
+            f"the dispatch ceiling of client '{client}'"
+            if lane is None
+            else f"lane '{lane}' of client '{client}'"
+        )
+        summary = ", ".join(
+            f"{key}: {_render_config_value(old)} -> {_render_config_value(new)}"
+            for key, (old, new) in changes.items()
+        )
+        msg = (
+            f"The change to {target} WAS applied ({summary}), but recording its"
+            f" {OrchestratorEventType.LANE_CONFIG_CHANGED.value} audit event"
+            f" failed ({exc.__class__.__name__}: {exc}). Do not re-run the"
+            " command; only the audit record is missing."
+        )
+        raise CwError(msg) from exc
 
 
 @main.group("config", invoke_without_command=True, help="Show or manage configuration.")

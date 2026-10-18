@@ -25,12 +25,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 from click.testing import CliRunner
-from cw.cli._clients_doc import dump_clients_doc, load_clients_doc, to_plain
-from cw.cli.lane_set import _SETTABLE_KEYS
 from ruamel.yaml import YAML
 
 import cw.config
 from cw.cli import main
+from cw.cli._clients_doc import dump_clients_doc, load_clients_doc, to_plain
+from cw.cli.lane_set import _SETTABLE_KEYS
 from cw.cli.queues import _VALID_EVENT_TYPES
 from cw.config import load_clients
 from cw.events import read_events
@@ -45,11 +45,14 @@ if TYPE_CHECKING:
 
     from tests.conftest import CapturedEvent
 
+# Short literal workspace paths (never created; nothing here checks them): a
+# tmp_path-length value pushes a line past ruamel's 80-column default width,
+# which rewraps it and is exactly the style limit the docstring states.
 _CLIENTS_YAML = """\
 # top comment
 clients:
   acme:
-    workspace_path: {ws_acme}
+    workspace_path: /tmp/ws-acme
     lanes:
     - name: default
       max_parallel: 2
@@ -57,12 +60,12 @@ clients:
       max_parallel: 1  # keep me
       priority: 5
   other:
-    workspace_path: {ws_other}
+    workspace_path: /tmp/ws-other
     lanes:
     - name: fast
       max_parallel: 1
   bare:
-    workspace_path: {ws_bare}
+    workspace_path: /tmp/ws-bare
 """
 
 _SUPPORTED = "Supported: attempt_ceiling, max_parallel"
@@ -76,17 +79,10 @@ def _operator_machine(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 @pytest.fixture(autouse=True)
-def clients_yaml(tmp_config_dir: Path, tmp_path: Path) -> Path:
-    workspaces = {
-        "ws_acme": tmp_path / "ws-acme",
-        "ws_other": tmp_path / "ws-other",
-        "ws_bare": tmp_path / "ws-bare",
-    }
-    for ws in workspaces.values():
-        ws.mkdir(parents=True, exist_ok=True)
+def clients_yaml(tmp_config_dir: Path) -> Path:
     path = cw.config.clients_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_CLIENTS_YAML.format(**{k: str(v) for k, v in workspaces.items()}))
+    path.write_text(_CLIENTS_YAML)
     return path
 
 
@@ -674,3 +670,30 @@ class TestClientsDoc:
         buf = StringIO()
         rt.dump(doc, buf)
         assert buf.getvalue() == before
+
+    def test_non_default_style_is_rewritten_in_default_style(
+        self, clients_yaml: Path
+    ) -> None:
+        # The documented limit of the byte-for-byte guarantee: a 4-space,
+        # indented-dash layout keeps its comment (at its old column) and values
+        # but is re-emitted in ruamel's default style.
+        clients_yaml.write_text(
+            "clients:\n"
+            "    acme:\n"
+            "        workspace_path: /tmp/ws-acme\n"
+            "        lanes:\n"
+            "          - name: fast  # keep me\n"
+            "            max_parallel: 1\n"
+        )
+
+        result = _invoke("lane", "set", "acme", "fast", "max_parallel=3")
+
+        assert result.exit_code == 0, result.output
+        assert clients_yaml.read_text() == (
+            "clients:\n"
+            "  acme:\n"
+            "    workspace_path: /tmp/ws-acme\n"
+            "    lanes:\n"
+            "    - name: fast        # keep me\n"
+            "      max_parallel: 3\n"
+        )
