@@ -159,8 +159,8 @@ the files directly, so Git output is never embedded in shell assignments:
 
 ```bash
 GATE_FIRES=false
-if grep -qE '^(feat|fix)\(' <SUBJECT_FILE; then
-  if grep -q '^src/' <CHANGED_FILES_FILE; then
+if grep -qE '^(feat|fix)\(' <SUBJECT_FILE>; then
+  if grep -q '^src/' <CHANGED_FILES_FILE>; then
     GATE_FIRES=true
   fi
 fi
