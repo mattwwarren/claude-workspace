@@ -50,13 +50,12 @@ _REF_UNSET = 1
 # step rewrites them in place, so an untracked one or a tracked-modified one
 # (` M`, `M `, `MM`) is cw-owned and ignored — a deleted, renamed or
 # staged-new artifact is a real change and still makes the tree dirty.
-_CW_REVIEW_ARTIFACTS = frozenset(
-    {
-        ".claude/review-verdict.md",
-        ".claude/review-verdict.json",
-        ".claude/review-verdict-unparseable.md",
-    }
+_CW_REVIEW_ARTIFACT_PATHS = (
+    ".claude/review-verdict.md",
+    ".claude/review-verdict.json",
+    ".claude/review-verdict-unparseable.md",
 )
+_CW_REVIEW_ARTIFACTS = frozenset(_CW_REVIEW_ARTIFACT_PATHS)
 _UNTRACKED_PREFIX = "?? "
 # Porcelain v1: a two-character status code and one space precede the path.
 _PORCELAIN_PATH_OFFSET = 3
