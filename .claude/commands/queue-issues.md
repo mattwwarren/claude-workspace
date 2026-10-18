@@ -24,9 +24,11 @@ test -f .claude/project-config.yaml || {
   echo "No .claude/project-config.yaml — run /setup first."
   exit 1
 }
-SYSTEM=$(yq -r '.tracking.system // "local"' .claude/project-config.yaml)
-MCP=$(yq -r '.tracking.mcp_server // ""' .claude/project-config.yaml)
 ```
+
+Read `.claude/project-config.yaml` with the Read tool and take
+`tracking.system` (default `local` when absent) as `SYSTEM` and
+`tracking.mcp_server` (default empty) as `MCP`.
 
 Accepted values for `SYSTEM`: `github-issues`, `linear`, `notion`, `local`.
 Anything else → abort with: "Unknown tracking.system: `<value>`. Supported: github-issues, linear, notion, local."
@@ -37,13 +39,14 @@ Resolve the cw client name (which identifies the target dev-queue):
 
 1. If `--client <name>` arg provided → use it.
 2. Else if `$CW_CLIENT` env var set → use it.
-3. Else match the current working directory against `cw config` output:
+3. Else match the current working directory against the configured clients:
    ```bash
-   cw config 2>/dev/null | awk '/:$/{c=$1} /path:/{print c,$2}' \
-     | while read name path; do
-         case "$PWD" in "$path"*) echo "${name%:}"; break ;; esac
-       done
+   cw config show
    ```
+   It prints each client name followed by its `path:`. Match the current
+   working directory against the printed paths yourself (a client matches
+   when the cwd is its path or lies under it); `cw lane ls -c <client>` shows
+   one client's lanes if you need to confirm.
    If exactly one match → use it. If none or multiple → ask via AskUserQuestion.
 
 ## Step 3: Parse Filter Args

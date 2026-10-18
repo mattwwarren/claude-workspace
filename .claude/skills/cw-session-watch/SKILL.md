@@ -52,17 +52,19 @@ All five are read-only; none mutate cw state.
 
 `cw session list` **excludes terminal sessions by default** (completed /
 timed_out). A session you dispatched in the past may already be terminal, so a
-robust resolve tries the running set first, then each terminal status:
+robust resolve tries the running set first, then each terminal status. Run
+the lookups in order, each as its own Bash call, and stop at the first one that
+prints a non-empty JSON array; the session id is the `id` of its first
+element (call it `<SID>` below and substitute it literally):
 
-```bash
-resolve_sid() {  # $1=ticket  $2=client
-  for st in "" "--status completed" "--status timed_out"; do
-    sid=$(cw session list --ticket "$1" --client "$2" $st --json | jq -r '.[0].id // empty')
-    [ -n "$sid" ] && { echo "$sid"; return 0; }
-  done
-  return 1   # no session found for this ticket/client (typo, wrong client, never spawned)
-}
-```
+| Try | Command |
+|---|---|
+| 1. running set | `cw session list --ticket <T> --client <C> --json` |
+| 2. completed | `cw session list --ticket <T> --client <C> --status completed --json` |
+| 3. timed out | `cw session list --ticket <T> --client <C> --status timed_out --json` |
+
+All three empty means no session was found for this ticket/client (typo,
+wrong client, never spawned).
 
 `--client` is recommended when the same ticket id could exist for multiple
 clients. Omit it only if you're sure there's no collision.
@@ -74,10 +76,12 @@ clients. Omit it only if you're sure there's no collision.
 Use when the session was dispatched in the past and you want to know its
 current status (which may still be running if it hasn't terminated).
 
+Resolve `<SID>` with the lookup above; if all three lookups are empty, report
+"no session for <ID>" and stop. Otherwise:
+
 ```bash
-SID=$(resolve_sid <ID> <client>) || { echo "no session for <ID>"; exit 2; }
-cw session show "$SID" --json        # status + last_result (sentinel) + branch
-cw session result "$SID"             # sentinel JSON only (exit 1 if none yet)
+cw session show <SID> --json        # status + last_result (sentinel) + branch
+cw session result <SID>             # sentinel JSON only (exit 1 if none yet)
 cw dev-queue status --client <client> --json   # per-ticket routing decision
 ```
 
@@ -88,8 +92,8 @@ cw dev-queue status --client <client> --json   # per-ticket routing decision
 - `timed_out` — terminal; headless budget exceeded (see the timed-out salvage
   below before recommending re-dispatch).
 
-`cw session show` exits 1 if the ref doesn't resolve; `resolve_sid` returning
-non-zero means no spawn was ever recorded for that ticket/client.
+`cw session show` exits 1 if the ref doesn't resolve; all three lookups
+returning empty means no spawn was ever recorded for that ticket/client.
 
 ### Mode B — Wait until done
 
@@ -102,7 +106,7 @@ subscribe to `cw-operator` (see the
 react to the terminal `task.transition` push for this ticket — read
 `disposition` off its payload for the outcome (`shipped` / `blocked` /
 `no_op` / etc., see the Common Patterns table below), then confirm with `cw
-session show "$SID" --json` as usual. **Handle `cancelled` as its own case:**
+session show <SID> --json` as usual. **Handle `cancelled` as its own case:**
 a `cancelled` `task.transition` forwards through the channel but always
 carries `disposition: null` — that means the session was cancelled with
 nothing to report, not an error and not a value to silently coerce into some
@@ -121,13 +125,24 @@ seconds, so no manual `until` loop and no `Monitor` + `tail -F | awk` pipe.
 > 1-hour deadline). `cw session wait` is the blessed path — it reads cw state
 > directly and returns the moment the status flips.
 
-Run it via `Bash` with `run_in_background: true`; the harness notifies you
-when the process exits:
+Resolve the id first, then read `id` from the first element of the printed
+JSON and substitute it for `<SID>`:
 
 ```bash
-SID=$(cw session list --ticket <T> --client <C> --json | jq -r '.[0].id // empty')
-cw session wait "$SID" --timeout 3600     # exit 0 completed, 1 timed_out, 124 hard timeout
-cw session show "$SID" --json
+cw session list --ticket <T> --client <C> --json
+```
+
+Run the wait as its own call via `Bash` with `run_in_background: true`; the
+harness notifies you when the process exits:
+
+```bash
+cw session wait <SID> --timeout 3600     # exit 0 completed, 1 timed_out, 124 hard timeout
+```
+
+Then read the outcome:
+
+```bash
+cw session show <SID> --json
 ```
 
 Set `--timeout` to the headless budget (currently 3600s, see #265); the
@@ -139,20 +154,32 @@ When you've dispatched multiple tickets in parallel and need to wait on all of
 them, resolve each session id via `cw session list --ticket` per ticket —
 **never** parse `cw list` (see "DO NOT" below).
 
+Run one lookup per ticket (here 265 and 270; repeat for every ticket in the
+wave), each as its own Bash call, and note each printed `id` (`<SID1>`,
+`<SID2>`, ...):
+
 ```bash
-TICKETS=(265 270 246)
-CLIENT=claude-workspace
-SIDS=()
-for t in "${TICKETS[@]}"; do
-  SIDS+=("$(cw session list --ticket "$t" --client "$CLIENT" --json | jq -r '.[0].id // empty')")
-done
-for sid in "${SIDS[@]}"; do
-  cw session wait "$sid" --timeout 3600
-done
-# All sessions terminated; loop over SIDS again to surface each result.
-for sid in "${SIDS[@]}"; do
-  cw session show "$sid" --json
-done
+cw session list --ticket 265 --client claude-workspace --json
+```
+
+```bash
+cw session list --ticket 270 --client claude-workspace --json
+```
+
+Then start one wait per session, each as its own background call:
+
+```bash
+cw session wait <SID1> --timeout 3600
+```
+
+```bash
+cw session wait <SID2> --timeout 3600
+```
+
+When every wait has exited, surface each result with its own call:
+
+```bash
+cw session show <SID1> --json
 ```
 
 Why per-ticket lookup, not `cw list`: `cw session list --json` returns the
@@ -165,10 +192,8 @@ human-readable and unstable (see below).
 `cw session list --json` (or `cw session list --ticket ... --json`), which is
 the structured contract.
 
-```bash
-# WRONG — produces garbage that pollutes the polling loop
-SESSIONS=$(cw list | grep "claude-workspace.*active" | awk '{print $NF}')
-```
+**Wrong:** piping `cw list` through `grep` and `awk` to pull session ids out
+of the table. It produces garbage that pollutes the polling loop.
 
 Why this fails:
 
@@ -308,11 +333,18 @@ uv run pytest tests/ -q
 
 Before opening the PR, replicate `ship-it.md` Step 3a's gate check (this
 recovery path has no `$TITLE` of its own, so derive it from the commit
-subject about to be used below):
+subject about to be used below). Print the changed files first:
 
 ```bash
-CHANGED_FILES=$(git -C <impl-worktree> diff --name-only origin/main...HEAD)
-TITLE="<commit subject>"
+git -C <impl-worktree> diff --name-only origin/main...HEAD
+```
+
+Then substitute the commit subject for `<commit subject>` and the printed file
+list (one path per line) for `<changed files>`:
+
+```bash
+TITLE='<commit subject>'
+CHANGED_FILES='<changed files>'
 GATE_FIRES=false
 if printf '%s' "$TITLE" | grep -qE '^(feat|fix)\('; then
   if printf '%s\n' "$CHANGED_FILES" | grep -q '^src/'; then
@@ -322,7 +354,7 @@ fi
 EXTRA_LABEL_ARGS=""
 ```
 
-If `$GATE_FIRES` is `true` and `CHANGED_FILES` doesn't already include
+If `$GATE_FIRES` is `true` and the changed-file list doesn't already include
 `CHANGELOG.md`, apply the same decision tree as `.claude/commands/ship-it.md`
 Step 3a before opening the PR — add a real `[Unreleased]` entry by default,
 or, only as a deliberate escape hatch, `gh label create no-changelog ... ||
