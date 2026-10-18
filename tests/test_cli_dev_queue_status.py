@@ -198,6 +198,15 @@ class TestPausedLanesBlock:
             out.splitlines()
         )
 
+    def test_disabled_auto_resume_reads_off(self) -> None:
+        add_ticket(TicketTask(ticket_id="ACM-1", client="acme"))
+        _overrides({"acme/default": _breaker()})
+        _write_orchestrator("default_ceiling: 3\nlane_circuit_auto_resume_minutes: 0\n")
+
+        block = _block(_status().output, "Paused lanes:")
+
+        assert "    auto-resume: off (lane_circuit_auto_resume_minutes=0)" in block
+
     def test_invalid_clients_yaml_keeps_override_entries(self) -> None:
         add_ticket(TicketTask(ticket_id="ACM-1", client="acme"))
         _overrides({"acme/default": _breaker()})
@@ -272,6 +281,20 @@ class TestEffectiveConfig:
 
         assert line.startswith("  ghost: effective: ceiling=3 (default)")
         assert " lane_caps=default:3 " in line
+
+
+class TestTickSection:
+    def test_client_without_a_tick_gets_no_tick_line(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        add_ticket(TicketTask(ticket_id="ACM-1", client="acme"))
+        add_ticket(TicketTask(ticket_id="BET-1", client="beta"))
+        _patch_ticks(monkeypatch, {"beta": {"tick_at": _NOW}})
+
+        lines = _status().output.splitlines()
+
+        assert any(ln.startswith("  beta: claimed=") for ln in lines)
+        assert not any(ln.startswith("  acme: claimed=") for ln in lines)
 
 
 class TestStaleTickAnnotation:

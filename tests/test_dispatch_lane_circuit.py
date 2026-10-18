@@ -28,6 +28,7 @@ from cw.dispatch.lane_circuit import (
     _check_lane_circuit_paused,
     _handle_paused_lane,
     _maybe_auto_resume_lane,
+    _maybe_notify_lane_starved,
     _record_lane_spawn_error,
     _reset_lane_spawn_errors,
 )
@@ -824,6 +825,19 @@ def _handle(override: LaneConcurrencyOverride, config: OrchestratorConfig) -> No
             overrides=ConcurrencyOverrides(lanes={_BREAKER_LANE_KEY: override}),
             config=config,
         )
+
+
+def test_starved_notify_is_a_no_op_without_pending_work(
+    breaker_config: OrchestratorConfig,
+    capture_events: Callable[..., list[CapturedEvent]],
+) -> None:
+    """A genuinely idle paused lane stays silent (#1630)."""
+    pages = capture_events("cw.dispatch.lane_circuit")
+
+    _maybe_notify_lane_starved(_CLIENT, "default", 0, config=breaker_config)
+
+    assert pages == []
+    assert _load_concurrency_overrides().lanes == {}
 
 
 class TestQuietPaging:
