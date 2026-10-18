@@ -117,7 +117,13 @@ _log = logging.getLogger(__name__)
 #     round}]` list `cw dev-queue resolve` writes, [] when empty. Read by
 #     auto-dev-plan.md Step 1b as binding resolutions. The block is built by
 #     cw.context_queue_metadata.build_queue_metadata.)
-CW_CONTEXT_SCHEMA_VERSION = 12
+# v13: added `queue_metadata.operator_resolutions_source` (GitHub #2728 — the
+#     content-bound `row:<N>:<sha256>` identity of the list above, `N` the
+#     highest round and the digest covering every entry text in round order;
+#     null when the list is empty. cw computes it so the plan stage never
+#     hashes; auto-dev-plan-appendix.md Step 1a.0b reads it as the row's
+#     resolutions source identity.)
+CW_CONTEXT_SCHEMA_VERSION = 13
 
 
 def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:
