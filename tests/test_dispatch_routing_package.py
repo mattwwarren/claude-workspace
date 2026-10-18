@@ -1,21 +1,21 @@
-"""Seam assertions for the ``cw.dispatch.routing`` package split (#1728).
+"""Seam assertions for the ``cw.dispatch.routing`` package split (#1728, #2719).
 
 ``routing`` was a single 1345-line flat module. It is now a package whose
-``__init__`` retains the Rule 1-6 decision table and re-exports four
+``__init__`` retains the Rule 1, 3 and 6 decision table and re-exports five
 concern-scoped submodules. Two things have to stay true forever, and neither is
 covered by the behavioral suite:
 
-1. The four submodules genuinely own their concern (a silent re-merge back into
+1. The five submodules genuinely own their concern (a silent re-merge back into
    ``__init__`` would leave every behavioral test green).
 2. The decision-table core stays *defined in* the module object bound to
    ``cw.dispatch.routing``. ``tests/test_dispatch.py`` monkeypatches
-   ``cw.dispatch.routing.record_event`` / ``._stage_regress`` /
-   ``._stage_advance_unchecked`` by dotted path at 10 sites, and a function
-   resolves its globals against the module it was *defined* in (see
-   ``tests/conftest.py``'s ``capture_events`` docstring). Moving any of those
-   functions into a submodule would silently decouple the patches from the real
-   call sites — the tests would still pass their setattr and then observe
-   nothing.
+   ``cw.dispatch.routing.record_event`` / ``._stage_advance_unchecked`` by
+   dotted path, and a function resolves its globals against the module it was
+   *defined* in (see ``tests/conftest.py``'s ``capture_events`` docstring).
+   Moving any of those functions into a submodule would silently decouple the
+   patches from the real call sites — the tests would still pass their setattr
+   and then observe nothing. Rule 5 is the one exception (#2719): it lives in
+   ``stage_failure`` and its patches target ``cw.dispatch.routing.stage_failure``.
 """
 
 from __future__ import annotations
@@ -57,7 +57,6 @@ _MONKEYPATCH_COUPLED = (
     "_route_staged_decision",
     "_stage_advance_unchecked",
     "_record_scope_routing_decision",
-    "_park_must_fix_mechanically_rejected",
     "_route_scope_gated_approval",
     "_route_stage_success",
     "apply_staged_decision",
@@ -103,6 +102,42 @@ def test_cost_submodule_owns_accumulate_task_cost() -> None:
     assert hasattr(cost, "_accumulate_task_cost")
 
 
+def test_stage_failure_submodule_owns_rule_5() -> None:
+    """Rule 5 (stage-failure routing) and its constants live in ``stage_failure``.
+
+    Callables are asserted by ``__module__``; frozensets and strs carry none, so
+    constants are asserted by membership in the owner's namespace, plus an
+    identity/equality check that the ``routing`` re-export is the owner's object.
+    """
+    from cw.dispatch import routing
+    from cw.dispatch.routing import stage_failure
+
+    owner = "cw.dispatch.routing.stage_failure"
+    for name in (
+        "_route_stage_failure",
+        "_park_must_fix_mechanically_rejected",
+        "_breadcrumb_for_reason",
+    ):
+        fn = getattr(stage_failure, name)
+        assert fn.__module__ == owner, f"{name} is defined in {fn.__module__}"
+    for name in (
+        "BREADCRUMB_ELIGIBLE_PAUSED_STATUSES",
+        "_AWAITING_OPERATOR_REASON",
+        "_MUST_FIX_MECHANICALLY_REJECTED_REASON",
+        "_UNRECOGNIZED_REASON_SUFFIX",
+        "_UNRECOGNIZED_REASON_DETAILS_MAX_CHARS",
+    ):
+        assert name in vars(stage_failure), f"{name} not bound in stage_failure"
+    assert (
+        routing.BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+        is vars(stage_failure)["BREADCRUMB_ELIGIBLE_PAUSED_STATUSES"]
+    )
+    assert (
+        vars(stage_failure)["_AWAITING_OPERATOR_REASON"]
+        == routing._AWAITING_OPERATOR_REASON
+    )
+
+
 def test_routing_package_reexports_full_historical_surface() -> None:
     """Every name ``dispatch/__init__.py`` imports from routing stays reachable."""
     from cw.dispatch import routing
@@ -124,6 +159,6 @@ def test_decision_table_core_stays_in_routing_module_object() -> None:
         fn = getattr(routing, name)
         assert fn.__module__ == _ROUTING_MODULE, (
             f"{name} moved to {fn.__module__}; test_dispatch.py monkeypatches"
-            f" {_ROUTING_MODULE}.record_event/_stage_regress/"
-            "_stage_advance_unchecked and would no longer reach it"
+            f" {_ROUTING_MODULE}.record_event/_stage_advance_unchecked"
+            " and would no longer reach it"
         )
