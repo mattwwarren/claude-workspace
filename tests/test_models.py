@@ -3096,3 +3096,39 @@ class TestCodexLegacyRecoveryMarkerConsistency:
 
         with pytest.raises(ValueError, match=message):
             marker.validate_consistency()
+
+
+class TestLaneConcurrencyOverridePauseState:
+    """The #2696 breaker/pause fields on ``LaneConcurrencyOverride``."""
+
+    def test_new_field_defaults(self) -> None:
+        from cw.models import LaneConcurrencyOverride
+
+        override = LaneConcurrencyOverride()
+
+        assert override.consecutive_worktree_errors == 0
+        assert override.paused_at is None
+        assert override.pause_source is None
+        assert override.pause_trigger is None
+        assert override.recent_spawn_errors == []
+        assert override.circuit_trip_streak == 0
+        assert override.circuit_auto_resume_at is None
+        assert override.circuit_half_open is False
+
+    def test_legacy_file_without_the_fields_loads(self) -> None:
+        from cw.models import ConcurrencyOverrides
+
+        legacy = (
+            '{"lanes": {"acme/default": {"paused": true,'
+            ' "consecutive_spawn_errors": 4,'
+            ' "lane_starved_notify_next_eligible_at": null}}}'
+        )
+
+        override = ConcurrencyOverrides.model_validate_json(legacy).lanes[
+            "acme/default"
+        ]
+
+        assert override.paused is True
+        assert override.consecutive_spawn_errors == 4
+        assert override.pause_source is None
+        assert override.circuit_half_open is False

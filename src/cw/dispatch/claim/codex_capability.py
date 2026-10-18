@@ -69,7 +69,13 @@ class _SpawnOutcome:
     ``usage_limit_reset_at`` — the instant the limit lifts, when the spawn-time
     message named one that parsed (#1409); None when it did not, which the
     dispatch loop reads as "use the flat ``usage_limit_backoff_seconds``". Only
-    ever set alongside ``usage_limit_detected``. Declared last so the existing
+    ever set alongside ``usage_limit_detected``.
+    ``worktree_failure`` (#2696, R3) -- set alongside ``spawn_error`` when the
+    no-worker failure was a :class:`~cw.exceptions.WorktreeError` (or a
+    subclass): the lane breaker counts it on its separate, higher-threshold
+    worktree counter instead of ``consecutive_spawn_errors``. A bool while
+    there are two failure classes; it becomes a small enum when #2722 types
+    host/credential failures. Both are declared last so the existing
     positional-free call sites are unaffected.
     """
 
@@ -80,6 +86,7 @@ class _SpawnOutcome:
     capability_parked: bool = False
     occupied: bool = False
     usage_limit_reset_at: datetime | None = None
+    worktree_failure: bool = False
 
 
 # TTL (seconds) for the in-process codex-capability probe cache (#1238). Codex

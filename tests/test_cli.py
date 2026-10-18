@@ -56,6 +56,7 @@ from cw.models import (
     STAGED_EMIT_RESULT_KEY,
     ClientConfig,
     CwState,
+    LaneConcurrencyOverride,
     LaneConfig,
     LastResultSource,
     OrchestratorEventType,
@@ -82,7 +83,7 @@ from tests.conftest import (
     _audit_failure_logged,
     _fail_audit_append,
     _make_daemon_session,
-    _make_tick_summary,
+    _patch_ticks,
     _seed_daemon_session,
     _write_project_config_yaml,
     _write_stop_hook_transcript,
@@ -10293,13 +10294,14 @@ class TestDevQueueStatusWithTick:
         assert result.exit_code == 0, result.output
         assert "[PAUSED]" in result.output
 
-    def test_dev_queue_status_paused_lane_no_pending_stays_quiet(
+    def test_dev_queue_status_paused_lane_no_pending_still_shows_paused_lane(
         self, tmp_config_dir: Path
     ) -> None:
-        """A genuinely idle paused lane (no pending) stays suppressed.
+        """A paused lane with no pending work is still shown (#2696).
 
-        Regression guard: the paused_with_pending condition must not fire
-        when there is no pending work behind the pause.
+        Inverted from the #1630 "stays quiet" guard: a paused lane is now
+        noteworthy on its own, so its lane line prints, and the "Paused
+        lanes:" block names the cause (here a legacy pause with no metadata).
         """
         from cw.config import _save_concurrency_overrides
         from cw.dev_queue import add_ticket
@@ -10340,8 +10342,13 @@ class TestDevQueueStatusWithTick:
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status"])
         assert result.exit_code == 0, result.output
-        assert "[PAUSED]" not in result.output
-        assert "    lane default:" not in result.output
+        assert "[PAUSED]" in result.output
+        assert (
+            "    lane default: pending=0 running=0 blocked=0 signoff=0 [PAUSED]"
+            in result.output
+        )
+        assert "Paused lanes:" in result.output
+        assert "default-client/default: paused: legacy, since unknown" in result.output
 
     def test_dev_queue_status_blocked_on_user_shows_in_lane(
         self, tmp_config_dir: Path
@@ -10633,18 +10640,20 @@ def _patch_tick(
     (#2142 codex round-4). Defaults preserve each existing call's prior behavior:
     ``age_seconds=0`` gives a fresh ``tick_at`` (the divergence tests' prior
     default), ``cap=3`` matches the blocked-annotation tests' prior hardcoded
-    value, and the divergence tests pass ``cap=2`` explicitly.
+    value, and the divergence tests pass ``cap=2`` explicitly. A one-client
+    caller of the shared ``tests.conftest._patch_ticks`` (#2696).
     """
-    tick = _make_tick_summary(
-        pending=1,
-        running=running,
-        cap=cap,
-        skip_reason=skip_reason,
-        tick_at=datetime.now(UTC) - timedelta(seconds=age_seconds),
-    )
-    monkeypatch.setattr(
-        "cw.cli.dev_queue.status.latest_tick_summary_by_client",
-        lambda: {client_name: tick},
+    _patch_ticks(
+        monkeypatch,
+        {
+            client_name: {
+                "pending": 1,
+                "running": running,
+                "cap": cap,
+                "skip_reason": skip_reason,
+                "tick_at": datetime.now(UTC) - timedelta(seconds=age_seconds),
+            }
+        },
     )
 
 
@@ -10928,8 +10937,12 @@ class TestDevQueueStatusRunningRowDivergence:
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status"])
         assert result.exit_code == 0, result.output
+        # The tick line, not the #2696 "effective:" line that also names the
+        # client and now prints before the tick section.
         return next(
-            line for line in result.output.splitlines() if "orphan-client:" in line
+            line
+            for line in result.output.splitlines()
+            if "orphan-client: claimed=" in line
         )
 
     def test_status_orphan_annotation_names_session_ids_without_occupied_row(
@@ -15444,6 +15457,128 @@ class TestLaneLs:
         assert result.exit_code != 0
         assert "missing" in result.output.lower()
 
+    # --- #2696: pause cause and resume hint -------------------------------
+
+    _T0 = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+
+    def _write_acme(self, tmp_path: Path, *, declared_pause: bool = False) -> None:
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[
+                    LaneConfig(name="default", paused=declared_pause),
+                    LaneConfig(name="urgent"),
+                ],
+            ),
+            ensure_workspaces=True,
+        )
+
+    def _save_default_override(self, override: LaneConcurrencyOverride) -> None:
+        from cw.config import _save_concurrency_overrides
+        from cw.models import ConcurrencyOverrides
+
+        _save_concurrency_overrides(
+            ConcurrencyOverrides(lanes={"acme/default": override})
+        )
+
+    def _ls(self, *args: str) -> Result:
+        with freeze_time(self._T0 + timedelta(minutes=5)):
+            result = CliRunner().invoke(main, ["lane", "ls", *args])
+        assert result.exit_code == 0, result.output
+        return result
+
+    def test_lane_ls_circuit_breaker_pause_text_and_json(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        self._write_acme(tmp_path)
+        self._save_default_override(
+            LaneConcurrencyOverride(
+                paused=True,
+                paused_at=self._T0,
+                pause_source="circuit_breaker",
+                pause_trigger="spawn_errors",
+                consecutive_spawn_errors=3,
+                recent_spawn_errors=["boom"],
+                circuit_trip_streak=1,
+                circuit_auto_resume_at=self._T0 + timedelta(minutes=15),
+            )
+        )
+
+        lines = self._ls("acme").output.splitlines()
+
+        row = next(i for i, ln in enumerate(lines) if ln.startswith("default "))
+        assert lines[row].endswith(" True")
+        assert lines[row + 1 : row + 6] == [
+            "  paused since 2026-10-18T12:00:00Z (5m ago) by circuit_breaker"
+            " (spawn errors, trip #1)",
+            "    last spawn errors (oldest first):",
+            "      - boom",
+            "    auto-resume: 2026-10-18T12:15:00Z (in 10m)",
+            "    resume: cw lane resume acme default",
+        ]
+        assert lines[row + 6].startswith("urgent ")
+
+        data = json.loads(self._ls("acme", "--json").output)
+        by_name = {item["name"]: item for item in data}
+        assert by_name["default"]["paused"] is True
+        assert by_name["default"]["pause"] == {
+            "client": "acme",
+            "lane": "default",
+            "source": "circuit_breaker",
+            "trigger": "spawn_errors",
+            "since": "2026-10-18T12:00:00Z",
+            "trip_streak": 1,
+            "recent_errors": ["boom"],
+            "auto_resume_at": "2026-10-18T12:15:00Z",
+            "auto_resume_enabled": True,
+            "resume_command": "cw lane resume acme default",
+        }
+        assert by_name["urgent"]["pause"] is None
+
+    def test_lane_ls_operator_pause(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        self._write_acme(tmp_path)
+        self._save_default_override(
+            LaneConcurrencyOverride(
+                paused=True, paused_at=self._T0, pause_source="operator"
+            )
+        )
+
+        out = self._ls("-c", "acme").output
+
+        assert "  paused since 2026-10-18T12:00:00Z (5m ago) by operator" in out
+        assert "    auto-resume: no (operator-held)" in out
+
+    def test_lane_ls_legacy_pause(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        self._write_acme(tmp_path)
+        self._save_default_override(LaneConcurrencyOverride(paused=True))
+
+        out = self._ls("acme").output
+        data = json.loads(self._ls("acme", "--json").output)
+
+        assert "  paused: legacy, since unknown (no pause metadata recorded)" in out
+        assert data[0]["pause"]["source"] == "legacy"
+
+    def test_lane_ls_declared_pause(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        self._write_acme(tmp_path, declared_pause=True)
+
+        out = self._ls("acme").output
+        data = json.loads(self._ls("acme", "--json").output)
+
+        assert "  paused: declared in clients.yaml" in out
+        assert data[0]["pause"]["source"] == "declared"
+
+    def test_lane_ls_unpaused_lanes_have_null_pause(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        self._write_acme(tmp_path)
+
+        out = self._ls("acme").output
+        data = json.loads(self._ls("acme", "--json").output)
+
+        assert "paused" not in out.replace("PAUSED", "")
+        assert [item["pause"] for item in data] == [None, None]
+
 
 class TestLaneAdd:
     def test_lane_add_writes_clients_yaml(
@@ -15711,7 +15846,9 @@ class TestLanePauseResume:
             ConcurrencyOverrides(
                 lanes={
                     "acme/slow": LaneConcurrencyOverride(
-                        paused=True, consecutive_spawn_errors=5
+                        paused=True,
+                        consecutive_spawn_errors=5,
+                        consecutive_worktree_errors=4,
                     )
                 }
             )
@@ -15723,7 +15860,95 @@ class TestLanePauseResume:
 
         override = _load_concurrency_overrides().lanes["acme/slow"]
         assert override.consecutive_spawn_errors == 0
+        assert override.consecutive_worktree_errors == 0
         assert override.paused is False
+
+    def _write_acme_slow(self, tmp_path: Path) -> None:
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path / "ws",
+                lanes=[LaneConfig(name="default"), LaneConfig(name="slow")],
+            ),
+            ensure_workspaces=True,
+        )
+
+    def test_lane_pause_stamps_an_operator_hold(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2696: an operator pause is sticky -- no auto-resume schedule."""
+        from cw.config import _load_concurrency_overrides, _save_concurrency_overrides
+        from cw.models import ConcurrencyOverrides
+
+        self._write_acme_slow(tmp_path)
+        t0 = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+        _save_concurrency_overrides(
+            ConcurrencyOverrides(
+                lanes={
+                    "acme/slow": LaneConcurrencyOverride(
+                        paused=True,
+                        pause_source="circuit_breaker",
+                        pause_trigger="spawn_errors",
+                        circuit_auto_resume_at=t0,
+                        circuit_half_open=True,
+                    )
+                }
+            )
+        )
+
+        with freeze_time(datetime(2026, 10, 18, 13, 19, 36, 961607, tzinfo=UTC)):
+            result = CliRunner().invoke(main, ["lane", "pause", "acme", "slow"])
+        assert result.exit_code == 0, result.output
+
+        override = _load_concurrency_overrides().lanes["acme/slow"]
+        assert override.paused is True
+        assert override.paused_at == datetime(2026, 10, 18, 13, 19, 36, tzinfo=UTC)
+        assert override.pause_source == "operator"
+        assert override.pause_trigger is None
+        assert override.circuit_auto_resume_at is None
+        assert override.circuit_half_open is False
+
+    def test_lane_resume_clears_the_pause_metadata_but_keeps_the_streak(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.config import _load_concurrency_overrides, _save_concurrency_overrides
+        from cw.models import ConcurrencyOverrides
+
+        self._write_acme_slow(tmp_path)
+        t0 = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+        _save_concurrency_overrides(
+            ConcurrencyOverrides(
+                lanes={
+                    "acme/slow": LaneConcurrencyOverride(
+                        paused=True,
+                        paused_at=t0,
+                        pause_source="circuit_breaker",
+                        pause_trigger="worktree_errors",
+                        consecutive_spawn_errors=2,
+                        consecutive_worktree_errors=9,
+                        recent_spawn_errors=["boom"],
+                        circuit_trip_streak=2,
+                        circuit_auto_resume_at=t0,
+                        circuit_half_open=True,
+                    )
+                }
+            )
+        )
+
+        result = CliRunner().invoke(main, ["lane", "resume", "acme", "slow"])
+        assert result.exit_code == 0, result.output
+
+        override = _load_concurrency_overrides().lanes["acme/slow"]
+        assert override.paused is False
+        assert override.consecutive_spawn_errors == 0
+        assert override.consecutive_worktree_errors == 0
+        assert override.paused_at is None
+        assert override.pause_source is None
+        assert override.pause_trigger is None
+        assert override.recent_spawn_errors == []
+        assert override.circuit_auto_resume_at is None
+        assert override.circuit_half_open is False
+        assert override.circuit_trip_streak == 2
 
     def test_lane_pause_accepts_client_option(
         self, tmp_config_dir: Path, tmp_path: Path

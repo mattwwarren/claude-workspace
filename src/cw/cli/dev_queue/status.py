@@ -1,8 +1,17 @@
-"""Dev-queue status rendering: aggregate table, lane breakdown, per-tick summary."""
+"""Dev-queue status rendering: aggregate table, lane breakdown, per-tick summary.
+
+#2696 added the "Paused lanes:" block (each paused lane's cause, recent spawn
+errors, auto-resume time and ``cw lane resume`` hint, shown with or without
+tick data or tasks), the per-client "Effective config" line that compares the
+last tick's cap with the configured ceiling, and the matching ``paused_lanes``
+and ``effective`` keys in ``--json``.
+"""
 
 from __future__ import annotations
 
+import functools
 import json
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -10,10 +19,12 @@ import click
 
 from cw._lock_hold import format_longest, read_window, summarize
 from cw.cli._base import _emit_freshness_subline, handle_errors
+from cw.cli.config_cmds import _client_ceiling
 from cw.config import (
     _load_concurrency_overrides,
     get_client,
-    load_orchestrator_config,
+    load_effective_clients,
+    load_effective_config,
     load_state,
     state_dir,
 )
@@ -21,6 +32,11 @@ from cw.dev_queue import list_tickets
 from cw.dispatch import TICK_STALE_SECONDS
 from cw.dispatch_state import ExecutorBlockedMarker, load_executor_blocked_markers
 from cw.exceptions import CwError
+from cw.lane_pause import (
+    paused_lane_views,
+    render_lane_pause_lines,
+    worktree_breaker_threshold,
+)
 from cw.models import (
     DEFAULT_LANE,
     OCCUPIED_LANE_STATUSES,
@@ -39,9 +55,13 @@ from ._group import _ACTIVE_STATUSES, _PAUSED_LANE_MARKER, dev_queue
 from .tasks import _count_needs_attn, _needs_attn_by_client
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
-    from cw.models import Session
+    from cw.lane_pause import LanePauseView
+    from cw.models import ClientConfig, ConcurrencyOverrides, Session
+    from cw.orchestrate import TickSummary
+
+_RESUMED_SINCE_TICK = " [resumed since this tick]"
 
 
 def _lane_caps_for_client(
@@ -103,15 +123,16 @@ def _emit_dev_queue_lane_breakdown(
         cap = lane_caps.get(lane_name, 1)
         at_cap = len(occupants) >= cap
         override = overrides.lanes.get(f"{lane_tasks[0].client}/{lane_name}")
-        # A paused lane with pending work stranded behind it is noteworthy
-        # even with zero occupants -- without this, a single-default-lane
-        # client with a circuit-paused, pending-only lane rendered as if
-        # nothing were wrong (#1630's literal bug report).
-        paused_with_pending = override is not None and override.paused and pending > 0
-        noteworthy = (blocked + signoff) > 0 or at_cap or paused_with_pending
+        # A paused lane is noteworthy even with zero occupants -- without
+        # this, a single-default-lane client with a circuit-paused lane
+        # rendered as if nothing were wrong (#1630's literal bug report), and
+        # #2696 dropped the "with pending work" condition so a paused lane
+        # never hides.
+        paused = override is not None and bool(override.paused)
+        noteworthy = (blocked + signoff) > 0 or at_cap or paused
         if single_default_lane and not noteworthy:
             continue
-        marker = _PAUSED_LANE_MARKER if override is not None and override.paused else ""
+        marker = _PAUSED_LANE_MARKER if paused else ""
         click.echo(
             f"    lane {lane_name}:"
             f" pending={pending} running={running} blocked={blocked}"
@@ -254,6 +275,240 @@ def _echo_client_rows(
     return running_row_counts
 
 
+def _effective_clients_or_empty() -> dict[str, ClientConfig]:
+    """The effective clients, or none when ``clients.yaml`` cannot be loaded.
+
+    Same tolerance as :func:`_lane_caps_for_client`: an invalid file must not
+    stop status from naming the override-held pauses it can still see.
+    """
+    try:
+        return load_effective_clients()
+    except CwError:
+        return {}
+
+
+def _status_paused_views(
+    client: str | None,
+    overrides: ConcurrencyOverrides,
+    config: Callable[[], OrchestratorConfig],
+) -> list[LanePauseView]:
+    """Every paused lane (filtered to *client* when given), sorted (#2696).
+
+    *config* is called only when a lane is paused, for the auto-resume knob,
+    so a run with nothing paused never needs the orchestrator config.
+    """
+    clients = _effective_clients_or_empty()
+
+    def _views(*, auto_resume_enabled: bool) -> list[LanePauseView]:
+        return [
+            view
+            for view in paused_lane_views(
+                clients, overrides, auto_resume_enabled=auto_resume_enabled
+            )
+            if client is None or view.client == client
+        ]
+
+    views = _views(auto_resume_enabled=True)
+    if views and config().lane_circuit_auto_resume_minutes <= 0:
+        views = _views(auto_resume_enabled=False)
+    return views
+
+
+def _echo_paused_lanes(views: list[LanePauseView], *, now: datetime) -> None:
+    """Print the "Paused lanes:" block, one cause block per lane (#2696)."""
+    if not views:
+        return
+    click.echo("")
+    click.echo("Paused lanes:")
+    for view in views:
+        first, *rest = render_lane_pause_lines(view, now=now)
+        click.echo(f"  {view.client}/{view.lane}: {first}")
+        for line in rest:
+            click.echo(f"  {line}")
+
+
+@dataclass(frozen=True)
+class _EffectiveConfigView:
+    """One client's configuration as this command loaded it (#2696).
+
+    ``asdict`` is the ``effective`` object of ``status --json``.
+    """
+
+    ceiling: int
+    ceiling_source: str
+    lane_caps: dict[str, int]
+    circuit_breaker_threshold: int
+    worktree_breaker_threshold: int
+    auto_resume_minutes: int
+    auto_resume_max_minutes: int
+    last_tick_cap: int | None
+
+
+def _effective_config_view(
+    client_name: str,
+    *,
+    effective: OrchestratorConfig,
+    overrides: ConcurrencyOverrides,
+    tick: TickSummary | None,
+) -> _EffectiveConfigView:
+    ceiling = _client_ceiling(client_name, overrides, effective)
+    threshold = effective.lane_circuit_breaker_threshold
+    return _EffectiveConfigView(
+        ceiling=ceiling["ceiling"],
+        ceiling_source=ceiling["source"],
+        lane_caps=_lane_caps_for_client(client_name, effective),
+        circuit_breaker_threshold=threshold,
+        worktree_breaker_threshold=worktree_breaker_threshold(threshold),
+        auto_resume_minutes=effective.lane_circuit_auto_resume_minutes,
+        auto_resume_max_minutes=effective.lane_circuit_auto_resume_max_minutes,
+        last_tick_cap=tick.cap if tick is not None else None,
+    )
+
+
+def _effective_config_line(client_name: str, view: _EffectiveConfigView) -> str:
+    """The ``effective:`` text line, flagging a tick that used another cap."""
+    caps = ",".join(f"{name}:{cap}" for name, cap in view.lane_caps.items())
+    disabled = " (disabled)" if view.auto_resume_minutes == 0 else ""
+    line = (
+        f"  {client_name}: effective: ceiling={view.ceiling} ({view.ceiling_source})"
+        f" lane_caps={caps} breaker_threshold={view.circuit_breaker_threshold}"
+        f" worktree_breaker_threshold={view.worktree_breaker_threshold}"
+        f" auto_resume_minutes={view.auto_resume_minutes}{disabled}"
+        f" auto_resume_max_minutes={view.auto_resume_max_minutes}"
+    )
+    if view.last_tick_cap is not None and view.last_tick_cap != view.ceiling:
+        # The loop keeps its last-good config when a reload fails (only a
+        # log warning), and ``serve --max-parallel`` replaces every ceiling;
+        # right after an edit the mismatch can also last one tick.
+        line += (
+            f" [CONFIG? last tick used cap={view.last_tick_cap},"
+            f" configured ceiling={view.ceiling};"
+            " reload failed/pending or serve --max-parallel]"
+        )
+    return line
+
+
+def _echo_effective_config(
+    clients_seen: list[str],
+    *,
+    effective: OrchestratorConfig,
+    overrides: ConcurrencyOverrides,
+    tick_data: dict[str, TickSummary],
+) -> None:
+    """Print one ``effective:`` line per client in the table (#2696)."""
+    click.echo("")
+    click.echo(
+        "Effective config (declared + runtime overrides, as loaded by this command):"
+    )
+    for client_name in clients_seen:
+        view = _effective_config_view(
+            client_name,
+            effective=effective,
+            overrides=overrides,
+            tick=tick_data.get(client_name),
+        )
+        click.echo(_effective_config_line(client_name, view))
+
+
+def _status_json(client: str | None) -> dict[str, dict[str, object]]:
+    """The ``status --json`` payload: tick clients plus paused-lane clients.
+
+    A client with a paused lane but no tick appears with null tick fields.
+    The effective config is loaded once, and only when an entry is emitted.
+    """
+    tick_data = latest_tick_summary_by_client()
+    attn_by_client = _needs_attn_by_client(list_tickets(client))
+    overrides = _load_concurrency_overrides()
+    config = functools.cache(load_effective_config)
+    views = _status_paused_views(client, overrides, config)
+    names = [c for c in tick_data if client is None or c == client]
+    names += sorted({v.client for v in views} - set(names))
+    payload: dict[str, dict[str, object]] = {}
+    for name in names:
+        tick = tick_data.get(name)
+        payload[name] = {
+            "skip_reason": tick.skip_reason if tick is not None else None,
+            "freshness_detail": tick.freshness_detail if tick is not None else None,
+            "blocked_branch": tick.blocked_branch if tick is not None else None,
+            "needs_attn": attn_by_client.get(name, 0),
+            "paused_lanes": [
+                v.model_dump(mode="json") for v in views if v.client == name
+            ],
+            "effective": asdict(
+                _effective_config_view(
+                    name, effective=config(), overrides=overrides, tick=tick
+                )
+            ),
+        }
+    return payload
+
+
+def _echo_tick_section(
+    clients_seen: list[str],
+    by_client: dict[str, list[TicketTask]],
+    tasks: list[TicketTask],
+    *,
+    tick_data: dict[str, TickSummary],
+    running_row_counts: dict[str, int],
+    effective: OrchestratorConfig,
+    paused_clients: set[str],
+) -> None:
+    """Print the "Last dispatch tick per client:" section."""
+    markers = load_executor_blocked_markers()
+    click.echo("")
+    click.echo("Last dispatch tick per client:")
+    click.echo(
+        "  (snapshot from the most recent dispatch tick"
+        " — not live queue state; see the table above)"
+    )
+    now = datetime.now(UTC)
+    for client_name in clients_seen:
+        if client_name not in tick_data:
+            continue
+        tick = tick_data[client_name]
+        tick_line = (
+            f"  {client_name}: claimed={tick.claimed}  pending={tick.pending}"
+            f"  running={tick.running}/{tick.cap}  occupied={tick.occupied}"
+            f"  skip={tick.skip_reason}"
+        )
+        # The tick is a snapshot and the pause list is live (#2696): a
+        # lane_circuit_paused tick for a client with no paused lane left
+        # predates a resume.
+        if (
+            tick.skip_reason == DispatchSkipReason.LANE_CIRCUIT_PAUSED
+            and client_name not in paused_clients
+        ):
+            tick_line += _RESUMED_SINCE_TICK
+        age_secs = (now - tick.tick_at).total_seconds()
+        if age_secs > TICK_STALE_SECONDS:
+            tick_line += _stale_tick_annotation(
+                client_name, age=int(age_secs), markers=markers, now=now
+            )
+        # Reuses the count the table above already computed, not
+        # tick.lanes: a client gated at cap_full breaks out of the lane
+        # loop before any lane_stats entry is written, so tick.lanes is
+        # empty in exactly the case this annotation exists for.
+        task_running = running_row_counts[client_name]
+        if tick.running > task_running:
+            tick_line += _running_row_divergence_annotation(
+                tick.running,
+                task_running,
+                _unowned_ceiling_sessions(client_name, tasks),
+            )
+        click.echo(tick_line)
+        if tick.skip_reason == DispatchSkipReason.FRESHNESS_GATE:
+            n_pending = sum(
+                1 for t in by_client[client_name] if t.status == QueueItemStatus.PENDING
+            )
+            _emit_freshness_subline(
+                client_name,
+                tick.freshness_detail,
+                tick.blocked_branch,
+                n_pending,
+            )
+        _emit_dev_queue_lane_breakdown(by_client[client_name], client_name, effective)
+
+
 @dev_queue.command(name="status")
 @click.option("--client", "-c", default=None, help="Filter by client.")
 @click.option("--json", "output_json", is_flag=True, help="JSON dict keyed by client.")
@@ -266,30 +521,24 @@ def _echo_client_rows(
 )
 @handle_errors
 def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> None:
-    """Show dev queue status grouped by client."""
+    """Show dev queue status grouped by client.
+
+    Paused lanes are listed with their cause and the ``cw lane resume`` hint
+    even when the queue is empty or no dispatch tick has run (#2696).
+    """
     if output_json:
-        tick_data = latest_tick_summary_by_client()
-        attn_by_client = _needs_attn_by_client(list_tickets(client))
-        click.echo(
-            json.dumps(
-                {
-                    c: {
-                        "skip_reason": tick.skip_reason,
-                        "freshness_detail": tick.freshness_detail,
-                        "blocked_branch": tick.blocked_branch,
-                        "needs_attn": attn_by_client.get(c, 0),
-                    }
-                    for c, tick in tick_data.items()
-                    if client is None or c == client
-                }
-            )
-        )
+        click.echo(json.dumps(_status_json(client)))
         return
 
     tasks = list_tickets(client)
+    overrides = _load_concurrency_overrides()
+    config = functools.cache(load_effective_config)
+    views = _status_paused_views(client, overrides, config)
+    now = datetime.now(UTC)
 
     if not tasks:
         click.echo("Dev queue is empty.")
+        _echo_paused_lanes(views, now=now)
         return
 
     # Group by client
@@ -310,57 +559,20 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
     running_row_counts = _echo_client_rows(clients_seen, by_client, show_all=show_all)
 
     tick_data = latest_tick_summary_by_client()
+    _echo_paused_lanes(views, now=now)
+    _echo_effective_config(
+        clients_seen, effective=config(), overrides=overrides, tick_data=tick_data
+    )
     if tick_data:
-        config = load_orchestrator_config()
-        markers = load_executor_blocked_markers()
-        click.echo("")
-        click.echo("Last dispatch tick per client:")
-        click.echo(
-            "  (snapshot from the most recent dispatch tick"
-            " — not live queue state; see the table above)"
+        _echo_tick_section(
+            clients_seen,
+            by_client,
+            tasks,
+            tick_data=tick_data,
+            running_row_counts=running_row_counts,
+            effective=config(),
+            paused_clients={v.client for v in views},
         )
-        now = datetime.now(UTC)
-        for client_name in clients_seen:
-            if client_name in tick_data:
-                tick = tick_data[client_name]
-                tick_line = (
-                    f"  {client_name}: claimed={tick.claimed}  pending={tick.pending}"
-                    f"  running={tick.running}/{tick.cap}  occupied={tick.occupied}"
-                    f"  skip={tick.skip_reason}"
-                )
-                age_secs = (now - tick.tick_at).total_seconds()
-                age = int(age_secs)
-                if age_secs > TICK_STALE_SECONDS:
-                    tick_line += _stale_tick_annotation(
-                        client_name, age=age, markers=markers, now=now
-                    )
-                # Reuses the count the table above already computed, not
-                # tick.lanes: a client gated at cap_full breaks out of the lane
-                # loop before any lane_stats entry is written, so tick.lanes is
-                # empty in exactly the case this annotation exists for.
-                task_running = running_row_counts[client_name]
-                if tick.running > task_running:
-                    tick_line += _running_row_divergence_annotation(
-                        tick.running,
-                        task_running,
-                        _unowned_ceiling_sessions(client_name, tasks),
-                    )
-                click.echo(tick_line)
-                if tick.skip_reason == DispatchSkipReason.FRESHNESS_GATE:
-                    n_pending = sum(
-                        1
-                        for t in by_client[client_name]
-                        if t.status == QueueItemStatus.PENDING
-                    )
-                    _emit_freshness_subline(
-                        client_name,
-                        tick.freshness_detail,
-                        tick.blocked_branch,
-                        n_pending,
-                    )
-                _emit_dev_queue_lane_breakdown(
-                    by_client[client_name], client_name, config
-                )
 
     _echo_longest_lock_holds()
 

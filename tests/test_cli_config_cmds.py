@@ -7,13 +7,15 @@ side effect before their lock, so they acquire ``clients_lock`` /
 lock instead of a silent hang. The broader lane/concurrency behaviour tests
 live in ``tests/test_cli.py``.
 
-Also covers ``cw config concurrency get -c/--client`` (#2690).
+Also covers ``cw config concurrency get -c/--client`` (#2690) and its
+``--json`` output over a lane override holding a timestamp (#2696).
 """
 
 from __future__ import annotations
 
 import fcntl
 import json
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
@@ -24,7 +26,12 @@ from cw import _flock
 from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
 from cw._lock_guard import held_locks
 from cw.cli import main
-from cw.models import ClientConcurrencyOverride, ConcurrencyOverrides, LaneConfig
+from cw.models import (
+    ClientConcurrencyOverride,
+    ConcurrencyOverrides,
+    LaneConcurrencyOverride,
+    LaneConfig,
+)
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import _FakeClock, _hold_flock
 
@@ -166,6 +173,46 @@ def _concurrency_get_json(*args: str) -> dict[str, object]:
     assert result.exit_code == 0, result.output
     data: dict[str, object] = json.loads(result.output)
     return data
+
+
+def _lane_override_json(override: LaneConcurrencyOverride) -> dict[str, object]:
+    """``override.lanes["acme/default"]`` from ``config concurrency get --json``."""
+    cw.config._save_concurrency_overrides(
+        ConcurrencyOverrides(lanes={f"{_CLIENT}/default": override})
+    )
+    data = _concurrency_get_json()
+    override_json = data["override"]
+    assert isinstance(override_json, dict)
+    lane: dict[str, object] = override_json["lanes"][f"{_CLIENT}/default"]
+    return lane
+
+
+class TestConcurrencyGetJsonLaneOverride:
+    """``--json`` must serialize an override's datetimes (#2696, R14)."""
+
+    def test_json_with_paused_lane_override_is_valid(self) -> None:
+        lane = _lane_override_json(
+            LaneConcurrencyOverride(
+                paused=True,
+                paused_at=datetime(2026, 10, 18, 12, 0, tzinfo=UTC),
+                pause_source="operator",
+                circuit_auto_resume_at=datetime(2026, 10, 18, 12, 15, tzinfo=UTC),
+            )
+        )
+
+        assert lane["paused_at"] == "2026-10-18T12:00:00Z"
+        assert lane["circuit_auto_resume_at"] == "2026-10-18T12:15:00Z"
+
+    def test_json_with_starved_debounce_stamp_is_valid(self) -> None:
+        lane = _lane_override_json(
+            LaneConcurrencyOverride(
+                lane_starved_notify_next_eligible_at=datetime(
+                    2026, 10, 18, 12, 0, tzinfo=UTC
+                )
+            )
+        )
+
+        assert lane["lane_starved_notify_next_eligible_at"] == "2026-10-18T12:00:00Z"
 
 
 class TestConcurrencyGetClient:

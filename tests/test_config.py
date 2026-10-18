@@ -3298,6 +3298,24 @@ class TestOrchestratorConfigLaneCircuitBreaker:
 
         assert OrchestratorConfig().lane_circuit_breaker_threshold == 3
 
+    def test_auto_resume_defaults(self) -> None:
+        """#2696: auto-resume is enabled by default."""
+        from cw.models import OrchestratorConfig
+
+        config = OrchestratorConfig()
+
+        assert config.lane_circuit_auto_resume_minutes == 15
+        assert config.lane_circuit_auto_resume_max_minutes == 240
+
+    def test_auto_resume_can_be_disabled(self) -> None:
+        from cw.models import OrchestratorConfig
+
+        config = OrchestratorConfig.model_validate(
+            {"lane_circuit_auto_resume_minutes": 0}
+        )
+
+        assert config.lane_circuit_auto_resume_minutes == 0
+
 
 class TestOrchestratorConfigLivenessFirstBucketByStage:
     """OrchestratorConfig.liveness_first_bucket_by_stage field (#1001)."""

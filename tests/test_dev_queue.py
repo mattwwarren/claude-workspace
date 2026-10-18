@@ -89,6 +89,7 @@ from tests._worktree_helpers import patch_worktree
 from tests.conftest import (
     _make_daemon_session,
     _make_ticket_task,
+    _patch_ticks,
     _seed_lock_holds,
     _stop_leaves_worker_listed,
     _stop_makes_roster_unreadable,
@@ -963,21 +964,11 @@ class TestCLIDevQueueStatus:
 
 
 def _patch_tick_for(monkeypatch: pytest.MonkeyPatch, client_name: str) -> None:
-    """Force a fresh, non-skip tick for *client_name* so lane breakdown renders."""
-    from cw.orchestrate import TickSummary
+    """Force a fresh, non-skip tick for *client_name* so lane breakdown renders.
 
-    tick = TickSummary(
-        claimed=0,
-        pending=0,
-        running=0,
-        cap=2,
-        skip_reason="none",
-        tick_at=datetime.now(UTC),
-    )
-    monkeypatch.setattr(
-        "cw.cli.dev_queue.status.latest_tick_summary_by_client",
-        lambda: {client_name: tick},
-    )
+    A one-client caller of the shared ``tests.conftest._patch_ticks`` (#2696).
+    """
+    _patch_ticks(monkeypatch, {client_name: {"cap": 2}})
 
 
 def _write_orchestrator_yaml(tmp_orchestrator_config: Path, body: str) -> None:

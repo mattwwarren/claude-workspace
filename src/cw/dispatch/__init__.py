@@ -45,6 +45,12 @@ and ``productivity`` into ``cw.claim_evidence``, so reconcile imports them at
 module scope instead of through deferred ``cw.dispatch`` imports. Every old
 path still resolves: ``claim`` and ``routing`` re-export their moved names, and
 ``resolve_hold_finalize`` is imported below from ``cw.queue_rows`` directly.
+
+#2696 moved the per-lane circuit breaker out of ``lanes`` into
+``lane_circuit`` (``lanes`` keeps the per-client lane walk that drives it),
+re-exported the same way; ``__all__`` is unchanged. A test that patches a name
+the breaker looks up (``_save_concurrency_overrides``, ``record_event``) must
+target ``cw.dispatch.lane_circuit``.
 """
 
 from __future__ import annotations
@@ -97,18 +103,20 @@ from cw.dispatch.impl_gates import (
     _park_unconcluded_finalize_regress_merge_gate,
     _should_gate_for_unconcluded_finalize_regress_merge,
 )
-from cw.dispatch.lanes import (
+from cw.dispatch.lane_circuit import (
     _LANE_PAUSE_SOURCE_CIRCUIT_BREAKER,
     _check_lane_circuit_paused,
+    _maybe_notify_lane_starved,
+    _pending_in_lane,
+    _record_lane_spawn_error,
+    _reset_lane_spawn_errors,
+)
+from cw.dispatch.lanes import (
     _ClientDispatchResult,
     _dispatch_client_lanes,
-    _maybe_notify_lane_starved,
     _notify_stale_clients_with_pending,
-    _pending_in_lane,
     _record_client_freshness_block,
-    _record_lane_spawn_error,
     _reset_client_freshness_blocks,
-    _reset_lane_spawn_errors,
     _resolve_dispatch_skip_reason,
     _resolve_low_precedence_skip_reason,
     _stale_pending_clients,

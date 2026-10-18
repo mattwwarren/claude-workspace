@@ -17,6 +17,7 @@ import logging
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
+from cw.config import _load_concurrency_overrides
 from cw.dev_queue import (
     _impl_bypass_plan_available,
     dev_queue_lock,
@@ -81,8 +82,30 @@ _OCCUPIED_DEFER_SECONDS: int = 30
 # wall, flag break, missing binary) in plain ``CwError``, which therefore
 # still charges, as do ``WorktreeError`` and unknown exceptions. Typing the
 # host- and credential-level failures is #2722; extend this tuple when a typed
-# class lands.
+# class lands. #2696: a lane's half-open probe (the first spawn after the
+# breaker auto-resumes it) is uncharged too, whatever the failure -- see
+# _charges_unproductive_attempt.
 _INFRA_SPAWN_ERRORS: tuple[type[BaseException], ...] = (OSError,)
+
+
+def _charges_unproductive_attempt(
+    exc: BaseException, client_name: str, lane: str
+) -> bool:
+    """Whether a no-worker spawn failure charges the ticket's attempt ceiling.
+
+    False for :data:`_INFRA_SPAWN_ERRORS` (#2695), and False for any failure
+    while the lane's override has ``circuit_half_open`` set (#2696, R16): the
+    first spawn after an auto-resume is a probe of a lane-level fault, which
+    must not move one ticket toward ``attempt_cap_blocked``. The flag is read
+    here, at the charge site, strictly before the lane walk records the
+    failure (which trips the breaker again and clears the flag). The read is
+    the lock-free whole-file load; a missing or invalid file reads as "not
+    half-open", so the ticket is charged as before.
+    """
+    if isinstance(exc, _INFRA_SPAWN_ERRORS):
+        return False
+    override = _load_concurrency_overrides().lanes.get(f"{client_name}/{lane}")
+    return not (override is not None and override.circuit_half_open)
 
 
 def _apply_plan_bypass_if_available(
@@ -326,7 +349,8 @@ def _handle_hook_context_conflict(
     failure: :func:`_defer_genuinely_live_hook_conflict` releases it without
     a charge or a breaker increment. Otherwise behaviour is deliberately
     identical to the broad spawn-failure path (revert to PENDING with the
-    #868 backoff); the ONLY addition is recording WHICH session's live
+    #868 backoff, uncharged during a lane's half-open probe, #2696); the ONLY
+    addition is recording WHICH session's live
     cw-context.json blocked the worktree, so concierge recipe 1 can stop
     requeuing a row that cannot spawn until that session is closed (GitHub
     #1674). The refusal itself lives there, not here.
@@ -346,6 +370,7 @@ def _handle_hook_context_conflict(
         stamp_backoff=True,
         hook_context_conflict_session_id=exc.conflicting_session_id,
         created_at=task.created_at,
+        unproductive=_charges_unproductive_attempt(exc, client.name, task.lane),
     )
     return _SpawnOutcome(spawn_error=True, error=str(exc))
 
@@ -783,8 +808,12 @@ def _spawn_claimed_task(
                 client.name,
                 task.ticket_id,
                 stamp_backoff=True,
-                unproductive=not isinstance(exc, _INFRA_SPAWN_ERRORS),
+                unproductive=_charges_unproductive_attempt(exc, client.name, task.lane),
                 created_at=task.created_at,
             )
-            outcome = _SpawnOutcome(spawn_error=True, error=str(exc))
+            outcome = _SpawnOutcome(
+                spawn_error=True,
+                error=str(exc),
+                worktree_failure=isinstance(exc, WorktreeError),
+            )
         return outcome

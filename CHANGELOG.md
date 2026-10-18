@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A paused lane says why and how to resume it, and a tripped breaker heals itself (#2696).** `cw dev-queue status` prints a `Paused lanes:` block (who paused the lane and when, the trip's trigger and streak, the last five spawn errors, the auto-resume time and the exact `cw lane resume` command), even with an empty queue, no tick data, or no tickets in the paused lane; a pause recorded before this release shows as `legacy, since unknown`. It also prints an `effective:` line per client (ceiling and its source, lane caps, breaker thresholds, auto-resume knobs) that flags a last tick run with a different cap, and marks a stale `skip=lane_circuit_paused` tick `[resumed since this tick]`. `cw lane ls` and `cw dev-queue show` render the same cause lines. A circuit-breaker pause auto-resumes after `lane_circuit_auto_resume_minutes` (default `15`; set to `0` to disable), doubling per consecutive trip up to `lane_circuit_auto_resume_max_minutes` (default 240), half-open: one more failure re-trips, the first probe spawn does not charge the ticket's `unproductive_attempts`, and the starved-lane page is held for the first two trips. Operator, legacy and `clients.yaml` pauses are never auto-resumed. `WorktreeError` now counts on a separate per-lane counter that trips at 3x `lane_circuit_breaker_threshold`.
+- **`cw dev-queue status --json` gains `paused_lanes` and `effective` per client (#2696),** and lists a client with a paused lane even when it has no tick. `cw lane ls --json` gains a `pause` object per lane, `cw dev-queue show --json` gains `dispatch.lane_pause`, `lane.paused` gains `trigger`, `trip_streak`, `recent_errors` and `auto_resume_at`, and `lane.resumed` can carry `source: "auto_resume"`.
+
+### Fixed
+
+- **`cw config concurrency get --json` no longer crashes on a lane override holding a timestamp (#2696).** It exited 1 with `Object of type datetime is not JSON serializable` once a starved-lane page had stamped its debounce; the override is now dumped JSON-safe.
+
 ## [1.74.1] - 2026-10-16
 
 ### Fixed
