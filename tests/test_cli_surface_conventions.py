@@ -13,11 +13,11 @@ new command or a rewrapped help string is covered without touching this file.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
 
 import click
 
 from cw.cli import main
+from tests.conftest import walk_click_tree
 
 # Commands where ``-c`` is bound to a non-client option, so ``--client`` cannot
 # also take it. Keyed by command path, valued by the reason. Empty today: no
@@ -37,19 +37,6 @@ _STOP_PREFIXES = ("-", "<", "[", ".")
 
 def _ctx() -> click.Context:
     return click.Context(main)
-
-
-def _walk(
-    root: click.Command, path: tuple[str, ...] = ()
-) -> Iterator[tuple[tuple[str, ...], click.Command]]:
-    """Yield ``(path, command)`` for *root* and every command beneath it."""
-    yield path, root
-    if isinstance(root, click.Group):
-        ctx = _ctx()
-        for name in root.list_commands(ctx):
-            sub = root.get_command(ctx, name)
-            if sub is not None:
-                yield from _walk(sub, (*path, name))
 
 
 def _help_texts(cmd: click.Command) -> list[str]:
@@ -114,7 +101,7 @@ def _mention_unresolved(mention: str) -> bool:
 
 class TestTreeWalk:
     def test_tree_sanity(self) -> None:
-        paths = [path for path, _cmd in _walk(main)]
+        paths = [path for path, _cmd in walk_click_tree(main)]
         assert len(paths) > _MIN_COMMAND_COUNT
         assert ("dev-queue", "tasks") in paths
         assert ("dev-queue", "show") in paths
@@ -125,7 +112,7 @@ class TestClientShortOption:
     def test_every_client_option_accepts_dash_c(self) -> None:
         missing = [
             "cw " + " ".join(path)
-            for path, cmd in _walk(main)
+            for path, cmd in walk_click_tree(main)
             if path not in _CLIENT_SHORT_EXEMPT
             for param in cmd.params
             if isinstance(param, click.Option)
@@ -135,7 +122,7 @@ class TestClientShortOption:
         assert missing == [], f"--client without -c on: {missing}"
 
     def test_exempt_entries_are_real_collisions(self) -> None:
-        commands = dict(_walk(main))
+        commands = dict(walk_click_tree(main))
         for path in _CLIENT_SHORT_EXEMPT:
             cmd = commands[path]
             assert any(
@@ -149,7 +136,7 @@ class TestClientShortOption:
 class TestHelpMentionsResolve:
     def test_help_mentions_resolve(self) -> None:
         unresolved: list[str] = []
-        for path, cmd in _walk(main):
+        for path, cmd in walk_click_tree(main):
             for text in _help_texts(cmd):
                 for tokens in _extract_mentions(text):
                     mention = " ".join(["cw", *tokens])
