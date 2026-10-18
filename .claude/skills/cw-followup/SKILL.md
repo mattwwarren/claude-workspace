@@ -126,10 +126,15 @@ git -C <WORKTREE> merge-base --is-ancestor <FORK_POINT> HEAD
 ```
 
 ```bash
-git -C <WORKTREE> cherry -v HEAD origin/<BRANCH>
+set -o pipefail
+git -C <WORKTREE> cherry -v HEAD origin/<BRANCH> | awk 'NF == 0 || $1 != "-" { exit 1 }'
 ```
 
-The first must exit 0. The second lists each commit on `origin/<BRANCH>` with `-` when the rebased branch carries an equivalent change and `+` when it does not; every line must start with `-`. If the first exits non-zero or the second prints any `+` line, stop and report: do not push (a `+` line is work the rebase would discard from the remote branch). Only when both pass:
+The first must exit 0. The second must also exit 0: `pipefail` preserves a
+non-zero `git cherry` status, and `awk` rejects every non-empty line whose first
+field is not `-`. If either check fails, stop and report: do not push (a `+`
+line is work the rebase would discard from the remote branch). Only when both
+pass:
 
 ```bash
 git -C <WORKTREE> push --force-with-lease origin <BRANCH>
@@ -137,25 +142,25 @@ git -C <WORKTREE> push --force-with-lease origin <BRANCH>
 
 Before opening the PR, replicate `ship-it.md` Step 3a's gate check (this
 recovery path has no `$TITLE` of its own, so derive it from the branch tip).
-Print the changed files and the tip subject, each as its own command:
+Write the changed files and the tip subject to fresh scratch files, each as its
+own command. Keep Git output in those files; do not paste it into shell source
+or a shell assignment:
 
 ```bash
-git -C <WORKTREE> diff --name-only origin/main...HEAD
+git -C <WORKTREE> diff --name-only origin/main...HEAD | tee <CHANGED_FILES_FILE>
 ```
 
 ```bash
-git -C <WORKTREE> log -1 --format=%s <BRANCH>
+git -C <WORKTREE> log -1 --format=%s <BRANCH> | tee <SUBJECT_FILE>
 ```
 
-Then substitute the printed subject for `<subject>` and the printed file list
-(one path per line) for `<changed files>`:
+Then read the subject and changed-file list from those files. The gate consumes
+the files directly, so Git output is never embedded in shell assignments:
 
 ```bash
-TITLE='<subject>'
-CHANGED_FILES='<changed files>'
 GATE_FIRES=false
-if printf '%s' "$TITLE" | grep -qE '^(feat|fix)\('; then
-  if printf '%s\n' "$CHANGED_FILES" | grep -q '^src/'; then
+if grep -qE '^(feat|fix)\(' < <SUBJECT_FILE>; then
+  if grep -q '^src/' < <CHANGED_FILES_FILE>; then
     GATE_FIRES=true
   fi
 fi
@@ -171,8 +176,12 @@ re-derive the decision tree here; cross-reference `ship-it.md` Step 3a so the
 two copies can't drift.
 
 ```bash
-gh pr create --base main --head <BRANCH> --title "<subject>" ${EXTRA_LABEL_ARGS}  # body derived from the review summary
+read -r TITLE < <SUBJECT_FILE>
+gh pr create --base main --head <BRANCH> --title "$TITLE" ${EXTRA_LABEL_ARGS}  # body derived from the review summary
 ```
+
+Use the `read -r` value for the title exactly as shown; do not substitute raw
+Git output into the command. The title is passed as one quoted shell argument.
 
 #### `ambiguities_pending_resolution` / `premises_pending_verification`
 
