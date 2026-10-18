@@ -51,9 +51,12 @@ _RESOLUTIONS_ATTEMPTED_LINE = re.compile(
 _APPROVAL_REVOKED_LINE = re.compile(
     r"<!-- plan-stage-approval-revoked: at=[^;\n]+; fingerprint=[0-9a-f]{64} -->\n?"
 )
+# `row:<N>:<64hex>` is the content-bound row identity (#2728); the bare
+# `row:<N>` is kept so drafts persisted before #2728 keep a stable fingerprint.
 _RESOLUTIONS_APPLIED_LINE = re.compile(
     r"<!-- plan-stage-resolutions-applied: "
-    r"source=(?:comment:[^\n]+?|body:[0-9a-f]{64}|row:[0-9]+|none) -->\n?"
+    r"source=(?:comment:[^\n]+?|body:[0-9a-f]{64}"
+    r"|row:[0-9]+(?::[0-9a-f]{64})?|none) -->\n?"
 )
 # Single-occurrence lines that follow the settled block, in grammar order.
 _TRAILING_BOOKKEEPING_LINES = (

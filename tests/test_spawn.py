@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -19,6 +20,7 @@ from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION, Status
 from cw.cli import main
 from cw.codex_review import CODEX_REVIEW_UNPARSEABLE
 from cw.config import load_state, orchestrator_config_file, save_state
+from cw.context_queue_metadata import OPERATOR_RESOLUTIONS_SOURCE_KEY
 from cw.dev_queue import load_dev_queue
 from cw.exceptions import CwError, SpawnUnregisteredError, WorkerLaunchedError
 from cw.history import EventType, HistoryEvent, load_history
@@ -4171,6 +4173,9 @@ class TestWriteHookContextTaskFields:
                 "round": 2,
             },
         ]
+        assert context["queue_metadata"][OPERATOR_RESOLUTIONS_SOURCE_KEY] == (
+            "row:2:" + hashlib.sha256(b'["first","second"]').hexdigest()
+        )
 
     def test_operator_resolutions_empty_threaded_as_empty_list(
         self,
@@ -4198,6 +4203,7 @@ class TestWriteHookContextTaskFields:
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
         assert context["queue_metadata"][OPERATOR_RESOLUTIONS_KEY] == []
+        assert context["queue_metadata"][OPERATOR_RESOLUTIONS_SOURCE_KEY] is None
 
     def test_git_failure_sets_origin_sha_null(
         self,
@@ -4531,11 +4537,11 @@ class TestCwContextWorkspacePath:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (12 after the
-        queue_metadata.operator_resolutions addition)."""
+        """cw-context.json schema_version is current (13 after the
+        queue_metadata.operator_resolutions_source addition)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 12
+        assert CW_CONTEXT_SCHEMA_VERSION == 13
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -4550,7 +4556,7 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 12
+        assert context["schema_version"] == 13
 
 
 class TestCwContextMergeGateIgnorePaths:

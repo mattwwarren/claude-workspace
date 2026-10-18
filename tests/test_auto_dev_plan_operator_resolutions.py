@@ -93,27 +93,36 @@ class TestRowSourceIdentity:
     def test_applied_marker_grammar_lists_row(self) -> None:
         assert (
             "<!-- plan-stage-resolutions-applied:"
-            " source=comment:<id>|body:<sha>|row:<N>|none -->" in _plan()
+            " source=comment:<id>|body:<sha>|row:<N>:<sha>|none -->" in _plan()
         )
 
     def test_resolution_source_placeholder_lists_row(self) -> None:
         assert (
             "`<resolution-source>` is exactly one of `comment:<id>`, `body:<sha>`"
-            " or `row:<N>`" in _plan()
+            " or `row:<N>:<sha>`" in _plan()
         )
+
+    def test_placeholder_definition_is_cw_computed_and_legacy_aware(self) -> None:
+        """#2728: the digest is cw's; the worker never recomputes it."""
+        content = _plan()
+        window = _norm(_after(content, "`<resolution-source>` is exactly one of", 1600))
+        assert "queue_metadata.operator_resolutions_source" in window
+        assert "the worker never recomputes it" in window
+        assert "legacy" in window
 
     def test_fingerprint_rule_names_resolutions_as_inputs(self) -> None:
         content = _plan()
         start = content.index("### Plan-draft fingerprint rule")
         section = content[start : content.index("### Step 1d:", start)]
         window = _norm(_after(section, _INPUTS_NOT_BODY, span=900))
-        assert "`plan-stage-resolutions-applied: source=row:<N>`" in window
+        assert "`plan-stage-resolutions-applied: source=row:<N>:<sha>`" in window
+        assert "in every accepted form (including the legacy bare `row:<N>`)" in window
         assert "stripped" in window
 
     def test_scan_round_counter_resets_on_a_new_row_identity(self) -> None:
         """R3: one assertion, on the tracker-state-delta reset paragraph."""
         assert (
-            "A new `row:<N>` resolutions source identity (Step 1a.0b) is also a"
+            "A new `row:<N>:<sha>` resolutions source identity (Step 1a.0b) is also a"
             " tracker-state delta and resets `N` to 0"
             in _norm(
                 _after(_plan(), "**Tracker-state-delta reset (#2154).**", span=3200)
@@ -122,10 +131,12 @@ class TestRowSourceIdentity:
 
     def test_appendix_item_1_includes_row_identity(self) -> None:
         window = _norm(
-            _after(_appendix("plan"), "1. **Resolutions-delta detection.**", span=1400)
+            _after(_appendix("plan"), "1. **Resolutions-delta detection.**", span=2400)
         )
-        assert "`row:<N>`" in window
+        assert "`row:<N>:<sha>`" in window
         assert "queue_metadata.operator_resolutions" in window
+        assert "queue_metadata.operator_resolutions_source" in window
+        assert "legacy `row:<N>`" in window
 
 
 class TestRowDeliveredOrdering:
@@ -154,7 +165,7 @@ class TestRowDeliveredOrdering:
     def test_item_3_points_row_identities_away_before_its_label(self) -> None:
         appendix = _appendix("plan")
         pointer = appendix.index(
-            "For a `row:<N>` source identity, skip this item and follow"
+            "For a `row:<N>:<sha>` source identity, skip this item and follow"
             f" {_ORDERING.removesuffix('.**')}**"
         )
         assert pointer < appendix.index("**On delta: revise.**")
@@ -171,7 +182,7 @@ class TestRowDeliveredOrdering:
 
     def test_same_write_resets_the_scan_round_counter(self) -> None:
         paragraph = _ordering_paragraph()
-        assert "`plan-stage-resolutions-applied: source=row:<N>`" in paragraph
+        assert "`plan-stage-resolutions-applied: source=row:<N>:<sha>`" in paragraph
         assert "`<!-- plan-stage-scan-round: 0 -->`" in paragraph
         assert "In the SAME write" in paragraph
 
@@ -180,8 +191,25 @@ class TestRowDeliveredOrdering:
         assert "never tolerated as advisory-only drift" in paragraph
         assert "a row resolution is not an operator-authority comment" in paragraph
 
-    def test_row_identity_is_scoped_to_one_row_lifetime(self) -> None:
-        assert "only meaningful within one row lifetime" in _ordering_paragraph()
+    def test_row_identity_is_content_bound(self) -> None:
+        """#2728: a re-enqueued row's new resolutions are always detected."""
+        paragraph = _ordering_paragraph()
+        assert "content-bound" in paragraph
+        assert "queue_metadata.operator_resolutions_source" in _appendix("plan")
+        assert "only meaningful within one row lifetime" not in paragraph
+        assert "#2728" not in paragraph
+
+    def test_legacy_bare_identity_against_digest_form_is_a_delta(self) -> None:
+        """Fifth Delta comparison bullet: one redundant revision, no more."""
+        appendix = _appendix("plan")
+        start = appendix.index("2. **Delta comparison.**")
+        window = _norm(appendix[start : appendix.index("3. For a ", start)])
+        assert "persisted legacy `row:<N>`" in window
+        assert "`row:<N>:<sha>`" in window
+        assert "one redundant revision" in window
+
+    def test_cap_is_per_full_row_identity(self) -> None:
+        assert "the cap of 1 attempt per `row:<N>:<sha>`" in _ordering_paragraph()
 
 
 class TestCheckpoint1NoAlternate:

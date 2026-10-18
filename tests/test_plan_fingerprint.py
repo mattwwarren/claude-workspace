@@ -4,11 +4,17 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.context_queue_metadata import (
+    OPERATOR_RESOLUTIONS_SOURCE_KEY,
+    build_queue_metadata,
+)
 from cw.exceptions import PlanDraftBindingError
+from cw.models.operator_resolution import OperatorResolution
 from cw.plan_fingerprint import (
     PLAN_DRAFT_FINGERPRINT_KEY,
     bind_claimed_fingerprint,
@@ -119,6 +125,14 @@ _APPLIED_ROW = "<!-- plan-stage-resolutions-applied: source=row:3 -->\n"
 _ATTEMPTED_ROW = (
     "<!-- plan-stage-resolutions-attempted: source=row:3; outcome=succeeded -->\n"
 )
+_ROW_DIGEST = "c" * 64
+_APPLIED_ROW_DIGEST = (
+    f"<!-- plan-stage-resolutions-applied: source=row:3:{_ROW_DIGEST} -->\n"
+)
+_ATTEMPTED_ROW_DIGEST = (
+    "<!-- plan-stage-resolutions-attempted: "
+    f"source=row:3:{_ROW_DIGEST}; outcome=succeeded -->\n"
+)
 
 
 class TestRowResolutionsSource:
@@ -143,6 +157,55 @@ class TestRowResolutionsSource:
     def test_non_numeric_row_source_is_content(self) -> None:
         malformed = "<!-- plan-stage-resolutions-applied: source=row:x -->\n"
         assert compute_plan_draft_fingerprint(_ROUND + malformed + _BODY) != _BODY_SHA
+
+    def test_digest_applied_line_hashes_equal_to_the_bare_body(self) -> None:
+        """#2728: the content-bound ``row:<N>:<sha>`` form is bookkeeping too."""
+        text = _ROUND + _LAST_EVALUATED + _APPLIED_ROW_DIGEST + _BODY
+        assert compute_plan_draft_fingerprint(text) == _BODY_SHA
+
+    def test_digest_lines_with_reset_counter_and_attempt_hash_equal(self) -> None:
+        text = (
+            "<!-- plan-stage-scan-round: 0 -->\n"
+            + _LAST_EVALUATED
+            + _ATTEMPTED_ROW_DIGEST
+            + _APPLIED_ROW_DIGEST
+            + _BODY
+        )
+        assert compute_plan_draft_fingerprint(text) == _BODY_SHA
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            pytest.param("row:1:", id="empty-digest"),
+            pytest.param("row:1:" + "c" * 63, id="digest-63-chars"),
+            pytest.param("row:1:" + "c" * 65, id="digest-65-chars"),
+            pytest.param("row:1:" + "C" * 64, id="uppercase-digest"),
+            pytest.param("row:1:" + "g" * 64, id="non-hex-digest"),
+            pytest.param("row:x:" + "c" * 64, id="non-numeric-round"),
+        ],
+    )
+    def test_malformed_digest_source_is_content(self, source: str) -> None:
+        malformed = f"<!-- plan-stage-resolutions-applied: source={source} -->\n"
+        assert compute_plan_draft_fingerprint(_ROUND + malformed + _BODY) != _BODY_SHA
+
+    def test_cw_computed_identity_is_stripped_as_bookkeeping(self) -> None:
+        """Ties the cw helper's output to the regex: the string cw delivers as
+        ``queue_metadata.operator_resolutions_source`` is a valid applied source."""
+        from tests.conftest import _make_ticket_task
+
+        recorded_at = datetime(2026, 10, 18, 9, 0, tzinfo=UTC)
+        task = _make_ticket_task(
+            operator_resolutions=[
+                OperatorResolution(
+                    text=text, recorded_at=recorded_at, actor="octo", round=round_
+                )
+                for round_, text in enumerate(["first", "second"], start=1)
+            ]
+        )
+        source = build_queue_metadata(task)[OPERATOR_RESOLUTIONS_SOURCE_KEY]
+        assert isinstance(source, str)
+        applied = f"<!-- plan-stage-resolutions-applied: source={source} -->\n"
+        assert compute_plan_draft_fingerprint(_ROUND + applied + _BODY) == _BODY_SHA
 
     def test_a_new_conformance_line_changes_the_fingerprint(self) -> None:
         """Outcome 2: a plan-text change from folding in answers moves ``draft_fp``."""
