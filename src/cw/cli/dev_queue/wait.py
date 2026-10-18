@@ -1,18 +1,23 @@
 """``dev-queue wait`` — block until a ticket reaches terminal status.
 
 Sentinel-aware wait loop plus its terminal/attention/timeout emit helpers.
+Per-ticket state, the ``WAITING`` progress lines and the exit-5 stuck output
+live in ``_wait_state`` (#2693).
 """
 
 from __future__ import annotations
 
 import json
+import math
 import time
 from datetime import UTC, datetime
+from typing import NoReturn
 
 import click
 
 from cw.auto_dev_result import (
     INTERMEDIATE_ADVANCE_STATUSES,
+    SCOPE_GATED_APPROVAL_STATUSES,
     AutoDevResult,
     BlockedResult,
 )
@@ -25,6 +30,7 @@ from cw.dev_queue import (
     resolve_client,
     wait_for_terminal,
 )
+from cw.dev_queue.next_commands import is_human_kept_gate
 from cw.exceptions import CwError
 from cw.models import (
     QueueItemStatus,
@@ -41,17 +47,37 @@ from cw.reconcile._shared import (
     session_daemon_liveness,
 )
 from cw.result import reconstruct_staged_sentinel
+from cw.stuck_pending import (
+    HANDOFF_STUCK_SECONDS,
+    SECONDS_PER_MINUTE,
+    STUCK_PENDING_MINUTES,
+    PendingBlock,
+    PendingTracker,
+    handoff_unrouted_block,
+    is_internal_handoff,
+    probe_pending,
+)
+from cw.ticket_view import ViewSources
 
 from ._group import (
     _WAIT_EXIT_ATTENTION,
     _WAIT_EXIT_BLOCKED,
     _WAIT_EXIT_FAILED,
-    _WAIT_EXIT_SIGNOFF,
+    _WAIT_EXIT_HUMAN_GATE,
+    _WAIT_EXIT_STUCK,
     _WAIT_EXIT_TIMEOUT,
     dev_queue,
 )
+from ._wait_state import (
+    TicketWait,
+    emit_wait_stuck,
+    format_handoff_line,
+    format_waiting_line,
+)
 
-_WAIT_DEFAULT_TIMEOUT: int = 300
+# Six hours: a long wait is the normal case now that internal hand-offs and
+# self-clearing PENDING states keep waiting (#2693). 0 means no limit.
+_WAIT_DEFAULT_TIMEOUT: int = 21600
 
 # Poll interval for the sentinel-aware wait loop (seconds).
 _WAIT_SENTINEL_POLL_INTERVAL: float = 5.0
@@ -78,8 +104,6 @@ _WAIT_STATUS_EXIT: dict[str, int] = {
     "blocked": _WAIT_EXIT_BLOCKED,
     "ambiguities_pending_resolution": _WAIT_EXIT_BLOCKED,
     "premises_pending_verification": _WAIT_EXIT_BLOCKED,
-    "plan_pending_approval": _WAIT_EXIT_BLOCKED,
-    "review_pending_approval": _WAIT_EXIT_BLOCKED,
     "merge_gate_blocked": _WAIT_EXIT_BLOCKED,
     # PR created, awaiting CI/merge — dispatch routes the task to
     # BLOCKED_ON_USER (#899), so the sentinel path must agree with the
@@ -98,6 +122,24 @@ _WAIT_STATUS_EXIT: dict[str, int] = {
     # review.
     "stale_dispatch": _WAIT_EXIT_BLOCKED,
 }
+
+# Statuses that are a dispatch hand-off, never a wait exit (#2693): the wait
+# keeps polling a RUNNING row that carries one until dispatch routes it (the
+# row then settles BLOCKED_ON_USER, or advances), and exits 5 only if that has
+# not happened after HANDOFF_STUCK_SECONDS. The drift test unions this set
+# with _WAIT_STATUS_EXIT and INTERMEDIATE_ADVANCE_STATUSES.
+_WAIT_HANDOFF_STATUSES: frozenset[str] = SCOPE_GATED_APPROVAL_STATUSES
+
+_TERMINAL_STATUSES: frozenset[QueueItemStatus] = frozenset(
+    {
+        QueueItemStatus.COMPLETED,
+        QueueItemStatus.FAILED,
+        QueueItemStatus.CANCELLED,
+        QueueItemStatus.BLOCKED_ON_USER,
+        QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+    }
+)
+_MULTI_TICKET_NEEDS_ANY = "Pass --any to wait on more than one ticket."
 
 
 def _blocked_on_user_exit_code(task: TicketTask) -> int:
@@ -159,10 +201,10 @@ def _handle_terminal_task(
 
     if task.status == QueueItemStatus.COMPLETED:
         return
+    if is_human_kept_gate(task):
+        raise click.exceptions.Exit(_WAIT_EXIT_HUMAN_GATE)
     if task.status == QueueItemStatus.BLOCKED_ON_USER:
         raise click.exceptions.Exit(_blocked_on_user_exit_code(task))
-    if task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF:
-        raise click.exceptions.Exit(_WAIT_EXIT_SIGNOFF)
     raise click.exceptions.Exit(_WAIT_EXIT_FAILED)
 
 
@@ -174,7 +216,7 @@ def _handle_sentinel_terminal(
     output_json: bool,
     *,
     last_result_source: str | None,
-) -> None:
+) -> NoReturn:
     """Emit sentinel-terminal output and raise the mapped ``Exit`` for *sentinel*."""
     exit_code = _WAIT_STATUS_EXIT.get(sentinel.status, _WAIT_EXIT_FAILED)
     pr_url = sentinel.pr.url if sentinel.pr is not None else None
@@ -198,23 +240,6 @@ def _handle_sentinel_terminal(
             f"Sentinel: {sentinel.status.upper()}" + (f" ({pr_url})" if pr_url else "")
         )
     raise click.exceptions.Exit(exit_code)
-
-
-def _raise_if_deadline_exceeded(
-    deadline: float,
-    ticket_id: str,
-    resolved: str,
-    timeout_seconds: float,
-    output_json: bool,
-) -> None:
-    """Emit timeout output and raise ``Exit`` when the hard ceiling has passed.
-
-    No-op (returns) while time remains, so callers can fall through to a
-    poll-sleep. Used by every poll-and-retry branch in ``dev-queue wait``.
-    """
-    if time.monotonic() >= deadline:
-        _emit_wait_timeout(ticket_id, resolved, timeout_seconds, output_json)
-        raise click.exceptions.Exit(_WAIT_EXIT_TIMEOUT)
 
 
 def _handle_attention(
@@ -339,18 +364,18 @@ def _handle_reaped_mid_wait(
 
 
 def _emit_wait_timeout(
-    ticket_id: str,
-    resolved: str,
+    ticket_ids: list[str],
+    clients: list[str],
     timeout_seconds: float,
     output_json: bool,
 ) -> None:
-    """Emit timeout output for ``dev-queue wait``."""
+    """Emit timeout output for ``dev-queue wait`` (one or several tickets)."""
     if output_json:
         click.echo(
             json.dumps(
                 {
-                    "ticket_id": ticket_id,
-                    "client": resolved,
+                    "ticket_id": ",".join(ticket_ids),
+                    "client": ",".join(dict.fromkeys(clients)),
                     "status": "timeout",
                     "session_id": None,
                     "state": "timeout",
@@ -360,11 +385,220 @@ def _emit_wait_timeout(
             )
         )
     else:
-        click.echo(f"Timeout waiting for {ticket_id} (>{timeout_seconds:.0f}s)")
+        click.echo(
+            f"Timeout waiting for {', '.join(ticket_ids)} (>{timeout_seconds:.0f}s)"
+        )
+
+
+def _raise_stuck(
+    wait: TicketWait,
+    task: TicketTask,
+    block: PendingBlock,
+    age_seconds: float,
+    output_json: bool,
+    *,
+    sentinel_status: str | None = None,
+) -> None:
+    """Emit the exit-5 result for *wait*'s ticket and raise ``Exit(5)``."""
+    emit_wait_stuck(
+        ticket_id=wait.ticket_id,
+        client=wait.client,
+        status=task.status.value,
+        session_id=task.session_id,
+        block=block,
+        age_seconds=age_seconds,
+        sentinel_status=sentinel_status,
+        output_json=output_json,
+    )
+    raise click.exceptions.Exit(_WAIT_EXIT_STUCK)
+
+
+def _probe_pending_row(wait: TicketWait, task: TicketTask, output_json: bool) -> None:
+    """Throttled ticket-view probe of a PENDING row: progress line, maybe exit 5.
+
+    At most once per ``WAIT_PROBE_SECONDS``; a ``WAITING`` line goes to stderr
+    on first sight and whenever the skip code or its source changes. A
+    needs-action block held for ``--stuck-after-minutes`` raises ``Exit(5)``.
+    """
+    at = time.monotonic()
+    if not wait.probe_due(at):
+        return
+    now = datetime.now(UTC)
+    probe = probe_pending(wait.ticket_id, wait.client, now=now, sources=ViewSources())
+    if probe is None:
+        return
+    line, key = format_waiting_line(
+        wait.ticket_id, probe.view.dispatch, probe.block, now=now
+    )
+    if wait.progress_changed(key):
+        click.echo(line, err=True)
+    age = wait.tracker.observe(wait.ticket_id, probe.block, at)
+    if age is not None and probe.block is not None:
+        _raise_stuck(wait, task, probe.block, age, output_json)
+
+
+def _note_handoff(
+    wait: TicketWait, task: TicketTask, sentinel: AutoDevResult, output_json: bool
+) -> None:
+    """Keep waiting on a RUNNING row mid dispatch hand-off; exit 5 if unrouted.
+
+    The fix-loop hand-off has no grace (dispatch leaves the row RUNNING by
+    design). A plan/review approval result dispatch has not routed after
+    ``HANDOFF_STUCK_SECONDS`` raises ``Exit(5)`` with ``handoff_unrouted``.
+    """
+    at = time.monotonic()
+    if wait.handoff_since is None:
+        wait.handoff_since = at
+    elapsed = at - wait.handoff_since
+    scope_gated = sentinel.status in _WAIT_HANDOFF_STATUSES
+    label = sentinel.status if scope_gated else str(_handoff_reason(sentinel))
+    if wait.progress_changed(f"handoff|{label}"):
+        click.echo(format_handoff_line(wait.ticket_id, label, elapsed), err=True)
+    if scope_gated and elapsed >= HANDOFF_STUCK_SECONDS:
+        block = handoff_unrouted_block(sentinel.status, int(elapsed))
+        _raise_stuck(
+            wait, task, block, elapsed, output_json, sentinel_status=sentinel.status
+        )
+
+
+def _handoff_reason(sentinel: AutoDevResult) -> str | None:
+    return sentinel.blocker.reason if sentinel.blocker is not None else None
+
+
+def _check_reaped_mid_wait(
+    wait: TicketWait, task: TicketTask, output_json: bool
+) -> None:
+    """ATTENTION when a session id seen earlier was cleared by a reap (#542).
+
+    A bare non-None -> None transition is not enough: a normal inter-stage
+    hand-off clears ``session_id`` the same way, so the prior session must
+    carry ``reap_proposed_at`` (#1557); otherwise this is spawn-window grace.
+    """
+    if wait.observed_session_id is not None and _session_has_reap_evidence(
+        wait.observed_session_id
+    ):
+        _handle_reaped_mid_wait(
+            task, wait.ticket_id, wait.client, wait.observed_session_id, output_json
+        )
+
+
+def _poll_ticket(wait: TicketWait, timeout_seconds: float, output_json: bool) -> bool:
+    """One poll of one ticket; True when it completed (exit 0).
+
+    Every other exit state raises ``click.exceptions.Exit``; False means keep
+    waiting.
+    """
+    # --- Step 1: fast path — task already terminal in the queue ---
+    task = _find_task_or_timeout(wait, timeout_seconds, output_json)
+    if task.status in _TERMINAL_STATUSES:
+        # COMPLETED returns; every other terminal status raises Exit.
+        _handle_terminal_task(task, wait.ticket_id, wait.client, output_json)
+        return True
+    if task.status == QueueItemStatus.PENDING:
+        _probe_pending_row(wait, task, output_json)
+
+    # --- Step 2: resolve the session ---
+    session_id = task.session_id
+    if session_id is None:
+        _check_reaped_mid_wait(wait, task, output_json)
+        # Spawn-window grace: no session registered yet, or a session_id
+        # clear with no reap evidence (#1557) — keep polling.
+        return False
+    wait.observed_session_id = session_id
+    session = next((s for s in load_state().sessions if s.id == session_id), None)
+    if session is None:
+        # Session not in state yet — spawn-window grace, keep polling.
+        return False
+    if _check_last_result(wait, task, session, output_json):
+        return False
+
+    # --- Step 3: resolve claude session id ---
+    csid = session.claude_session_id or _csid_from_transcript(session)
+
+    # --- Step 4: parse sentinel from transcript ---
+    sentinel: AutoDevResult | BlockedResult | None = None
+    if session.worktree_path is not None and csid is not None:
+        sentinel = _parse_sentinel_from_transcript(
+            str(session.worktree_path), csid, warned_blocks=wait.warned_blocks
+        )
+
+    # Why: session.last_result (Step 2a) is the sole terminal-decision source
+    # (RFC 0012 harvest authority) -- a transcript-parsed terminal-shaped
+    # sentinel is no longer trusted for the terminal exit, since a stale
+    # sentinel from a requeued session's PRIOR run can still be sitting in the
+    # transcript (#2397). `sentinel` survives past this point only to feed
+    # _check_stale_attention's BlockedResult partial-write guard below.
+
+    # --- Step 5: HEARTBEAT / ATTENTION ---
+    # ATTENTION: stale AND worker not native OR not in daemon roster.
+    # BlockedResult → keep polling (partial write guard), so exclude from ATTENTION.
+    _check_stale_attention(
+        task, session, sentinel, wait.ticket_id, wait.client, output_json
+    )
+    return False
+
+
+def _find_task_or_timeout(
+    wait: TicketWait, timeout_seconds: float, output_json: bool
+) -> TicketTask:
+    """:func:`_find_task`, emitting the timeout document in the caller's mode."""
+    try:
+        return _find_ticket(load_dev_queue(), wait.ticket_id, wait.client)
+    except CwError:
+        pass
+    timeout = timeout_seconds if timeout_seconds > 0 else math.inf
+    try:
+        return wait_for_terminal(wait.ticket_id, wait.client, timeout=timeout)
+    except TimeoutError:
+        _emit_wait_timeout(
+            [wait.ticket_id], [wait.client], timeout_seconds, output_json
+        )
+        raise click.exceptions.Exit(_WAIT_EXIT_TIMEOUT) from None
+
+
+def _check_last_result(
+    wait: TicketWait, task: TicketTask, session: Session, output_json: bool
+) -> bool:
+    """Step 2a: the published result decides; True while a hand-off is pending.
+
+    session.last_result is the one-door published result -- a fresh Session
+    (e.g. after requeue's _reset_for_same_stage_requeue, #2397) is a new
+    object with last_result=None, so this check is structurally immune to a
+    stale transcript-parsed sentinel surviving from a requeued session's
+    prior run. Checked BEFORE any transcript parse. INTERMEDIATE_ADVANCE_STATUSES
+    (stage_complete) is excluded: dispatch advances the ticket to its next
+    stage rather than this wait exiting on it. An internal hand-off on a
+    RUNNING row keeps waiting (and skips the stale-transcript ATTENTION check,
+    since the reporting session has legitimately exited); on a row dispatch
+    already moved off RUNNING it is ignored.
+    """
+    sentinel = reconstruct_staged_sentinel(session.last_result)
+    if (
+        not isinstance(sentinel, AutoDevResult)
+        or sentinel.status in INTERMEDIATE_ADVANCE_STATUSES
+    ):
+        wait.handoff_since = None
+        return False
+    if is_internal_handoff(sentinel):
+        if task.status != QueueItemStatus.RUNNING:
+            wait.handoff_since = None
+            return False
+        _note_handoff(wait, task, sentinel, output_json)
+        return True
+    _handle_sentinel_terminal(
+        sentinel,
+        task,
+        wait.ticket_id,
+        wait.client,
+        output_json,
+        last_result_source=(
+            session.last_result_source.value if session.last_result_source else None
+        ),
+    )
 
 
 @dev_queue.command(name="wait")
-@click.argument("ticket_id")
+@click.argument("ticket_ids", nargs=-1, required=True, metavar="TICKET_ID...")
 @click.option(
     "--client",
     "-c",
@@ -375,9 +609,28 @@ def _emit_wait_timeout(
 @click.option(
     "--timeout",
     "timeout_seconds",
-    type=float,
+    type=click.FloatRange(min=0),
     default=_WAIT_DEFAULT_TIMEOUT,
-    help="Seconds to wait (default: 300).",
+    help="Seconds to wait (default: 21600 = 6 hours; 0 = no limit).",
+)
+@click.option(
+    "--any",
+    "any_ticket",
+    is_flag=True,
+    default=False,
+    help=(
+        "With several TICKET_IDs, return as soon as the first one reaches "
+        "an exit state. Without it, exactly one ticket is allowed."
+    ),
+)
+@click.option(
+    "--stuck-after-minutes",
+    type=click.IntRange(min=1),
+    default=STUCK_PENDING_MINUTES,
+    help=(
+        "Exit 5 when a pending ticket's blocker will not clear on its own "
+        "after this many minutes (default: 15)."
+    ),
 )
 @click.option(
     "--json",
@@ -388,9 +641,11 @@ def _emit_wait_timeout(
 )
 @handle_errors
 def dev_queue_wait(
-    ticket_id: str,
+    ticket_ids: tuple[str, ...],
     client: str | None,
     timeout_seconds: float,
+    any_ticket: bool,
+    stuck_after_minutes: int,
     output_json: bool,
 ) -> None:
     """Block until a dev-queue ticket reaches terminal status.
@@ -412,151 +667,60 @@ def dev_queue_wait(
     Exit codes:
       0   shipped / no_op (or COMPLETED queue status)
       1   scope_exceeded / forbidden_area / FAILED / CANCELLED
-      2   blocked / merge_pending / *_pending_* family / BLOCKED_ON_USER
-          (no reap proposal)
+      2   blocked / merge_pending / ambiguities_pending_resolution /
+          premises_pending_verification / BLOCKED_ON_USER (no reap
+          proposal), once dispatch has parked the row
       3   ATTENTION — transcript stale past idle budget, worker not in roster;
           or BLOCKED_ON_USER caused by a reap proposal (reap_proposed_at set);
           or a mid-wait session_id clear confirmed by reap_proposed_at on the
           prior session (#1557 — a bare clear during a normal stage handoff
           does NOT fire this; it falls through to spawn-window grace/timeout)
-      4   AWAITING_OPERATOR_SIGNOFF — ticket parked for an explicit operator
-          signoff before it ships (RFC 0007 Phase 3, #990)
+      4   human gate — the row is held for an action only a human can give:
+          AWAITING_OPERATOR_SIGNOFF (RFC 0007 Phase 3, #990), a finalize hold
+          (hold_finalize / finalize_gate: manual), or a scope_hint: large
+          approval gate
+      5   stuck — a PENDING ticket whose blocker will not clear on its own
+          (tripped lane breaker with no auto-resume, paused lane,
+          ssh key / disk pressure gate) for --stuck-after-minutes,
+          or a recorded plan/review approval result dispatch has not routed
+          for 300s. The reason and a next command are printed.
       124 hard timeout ceiling (--timeout) with no terminal or attention signal
+
+    Internal hand-offs never exit: a blocked result with blocker.reason
+    fix_loop_pending_dispatch, or a plan_pending_approval /
+    review_pending_approval result on a row that is still RUNNING, is
+    dispatch's own routine routing. The wait keeps polling until the row
+    settles, then the codes above apply.
+
+    While a ticket waits PENDING (lane cap, paused lane, ...), one
+    "WAITING | ..." progress line per change goes to stderr; stdout stays
+    one result document.
     """
+    if len(ticket_ids) > 1 and not any_ticket:
+        raise click.UsageError(_MULTI_TICKET_NEEDS_ANY)
     config = load_orchestrator_config()
-    resolved = resolve_client(ticket_id, config, client)
-
-    deadline = time.monotonic() + timeout_seconds
-    # Track the first non-None session_id seen so we can distinguish a
-    # legitimate spawn window (session_id never set yet) from a post-reap
-    # revert (session_id was set, then cleared by reconcile — #542).
-    observed_session_id: str | None = None
-    # Caller-owned dedup set (issue #1247): created once, outside the poll
-    # loop, so an unresolved malformed sentinel's WARNING re-logs at most
-    # once across the entire wait's lifetime rather than every 5s poll.
-    warned_blocks: set[str] = set()
-
+    threshold = stuck_after_minutes * SECONDS_PER_MINUTE
+    waits = [
+        TicketWait(
+            ticket_id=ticket_id,
+            client=resolve_client(ticket_id, config, client),
+            tracker=PendingTracker(threshold),
+        )
+        for ticket_id in dict.fromkeys(ticket_ids)
+    ]
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds > 0 else math.inf
     while True:
-        # --- Step 1: fast path — task already terminal in the queue ---
-        store = load_dev_queue()
-        try:
-            task = _find_ticket(store, ticket_id, resolved)
-        except CwError:
-            task = None
-        if task is None:
-            # Fallback: delegate to wait_for_terminal so it can surface
-            # "not found" errors (CwError) and handle TimeoutError.
-            try:
-                task = wait_for_terminal(ticket_id, resolved, timeout=timeout_seconds)
-            except TimeoutError:
-                _emit_wait_timeout(ticket_id, resolved, timeout_seconds, output_json)
-                raise click.exceptions.Exit(_WAIT_EXIT_TIMEOUT) from None
-
-        if task.status in {
-            QueueItemStatus.COMPLETED,
-            QueueItemStatus.FAILED,
-            QueueItemStatus.CANCELLED,
-            QueueItemStatus.BLOCKED_ON_USER,
-            QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
-        }:
-            # COMPLETED returns; every other terminal status raises Exit.
-            _handle_terminal_task(task, ticket_id, resolved, output_json)
-            return
-
-        # --- Step 2: resolve the session ---
-        session_id = task.session_id
-        if session_id is None:
-            if observed_session_id is not None and _session_has_reap_evidence(
-                observed_session_id
-            ):
-                # session_id was non-None on a prior poll and is now None, AND
-                # the prior session carries reap_proposed_at — reconcile
-                # reaped the session and reverted the task to PENDING; surface
-                # ATTENTION (#542).
-                _handle_reaped_mid_wait(
-                    task, ticket_id, resolved, observed_session_id, output_json
-                )
-            # Spawn-window grace: session hasn't registered yet, OR the
-            # non-None→None transition has no corresponding reap evidence
-            # (#1557 — a normal inter-stage handoff clears session_id the
-            # same way a reap does) — keep polling.
-            _raise_if_deadline_exceeded(
-                deadline, ticket_id, resolved, timeout_seconds, output_json
-            )
-            time.sleep(_WAIT_SENTINEL_POLL_INTERVAL)
-            continue
-
-        observed_session_id = session_id
-
-        cw_state = load_state()
-        session = next((s for s in cw_state.sessions if s.id == session_id), None)
-        if session is None:
-            # Session not in state yet — spawn-window grace, keep polling.
-            _raise_if_deadline_exceeded(
-                deadline, ticket_id, resolved, timeout_seconds, output_json
-            )
-            time.sleep(_WAIT_SENTINEL_POLL_INTERVAL)
-            continue
-
-        # --- Step 2a: last_result-first terminal check (RFC 0012 harvest authority) ---
-        # session.last_result is the one-door published result -- a fresh Session
-        # (e.g. after requeue's _reset_for_same_stage_requeue, #2397) is a new
-        # object with last_result=None, so this check is structurally immune to a
-        # stale transcript-parsed sentinel surviving from a requeued session's
-        # prior run. Checked BEFORE any transcript parse (Step 3/4 below).
-        # INTERMEDIATE_ADVANCE_STATUSES (stage_complete) is excluded here exactly
-        # as it is from the transcript path below: session.last_result can
-        # legitimately hold a stage_complete payload mid-pipeline (a completed
-        # stage hand-off, not a ticket-terminal outcome), and dispatch advances
-        # the ticket to its next stage rather than this wait exiting on it.
-        last_result_sentinel = reconstruct_staged_sentinel(session.last_result)
-        if (
-            isinstance(last_result_sentinel, AutoDevResult)
-            and last_result_sentinel.status not in INTERMEDIATE_ADVANCE_STATUSES
-        ):
-            _handle_sentinel_terminal(
-                last_result_sentinel,
-                task,
-                ticket_id,
-                resolved,
+        # The first ticket to reach an exit state ends the wait: every exit
+        # but COMPLETED raises click.exceptions.Exit out of _poll_ticket.
+        for wait in waits:
+            if _poll_ticket(wait, timeout_seconds, output_json):
+                return
+        if time.monotonic() >= deadline:
+            _emit_wait_timeout(
+                [w.ticket_id for w in waits],
+                [w.client for w in waits],
+                timeout_seconds,
                 output_json,
-                last_result_source=(
-                    session.last_result_source.value
-                    if session.last_result_source
-                    else None
-                ),
             )
-
-        # --- Step 3: resolve claude session id ---
-        csid = session.claude_session_id or _csid_from_transcript(session)
-
-        # --- Step 4: parse sentinel from transcript ---
-        sentinel: AutoDevResult | BlockedResult | None = None
-        if session.worktree_path is not None and csid is not None:
-            sentinel = _parse_sentinel_from_transcript(
-                str(session.worktree_path), csid, warned_blocks=warned_blocks
-            )
-
-        # Why: session.last_result (Step 2a) is now the sole terminal-decision
-        # source (RFC 0012 harvest authority) -- a transcript-parsed terminal-
-        # shaped sentinel is no longer trusted for the terminal exit, since a
-        # stale sentinel from a requeued session's PRIOR run can still be sitting
-        # in the transcript (#2397). `sentinel` survives past this point only to
-        # feed _check_stale_attention's BlockedResult partial-write guard below.
-
-        # --- Step 5: HEARTBEAT / ATTENTION ---
-        # ATTENTION: stale AND worker not native OR not in daemon roster.
-        # Must guard with _is_native_surface_ref to avoid false-attention on
-        # non-daemon surface refs (anything not an 8-char hex daemon short id).
-        # BlockedResult → keep polling (partial write guard), so exclude from ATTENTION.
-        _check_stale_attention(
-            task, session, sentinel, ticket_id, resolved, output_json
-        )
-
-        # HEARTBEAT: no terminal sentinel but transcript advancing (or session
-        # hasn't hit the budget yet) — keep polling within the hard ceiling.
-        _raise_if_deadline_exceeded(
-            deadline, ticket_id, resolved, timeout_seconds, output_json
-        )
-
+            raise click.exceptions.Exit(_WAIT_EXIT_TIMEOUT)
         time.sleep(_WAIT_SENTINEL_POLL_INTERVAL)
