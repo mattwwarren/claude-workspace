@@ -43,6 +43,7 @@ from cw.reconcile import (
     _detect_local_harvest_candidates,
 )
 from tests._clients_yaml import staged_client, write_clients_yaml
+from tests._opencode_helpers import invalid_merge_gate_frame, text_event
 from tests.conftest import _make_daemon_session
 
 
@@ -274,6 +275,81 @@ def test_opencode_harvest_no_sentinel_parks_blocked(
     assert result.blocker is not None
     assert result.blocker.reason == OPENCODE_NO_OUTPUT
     assert result.blocker.retry_eligible is True
+
+
+def test_opencode_harvest_validation_failed_sentinel_parks_with_real_reason(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A dead process whose last sentinel fails validation parks with its reason.
+
+    Regression for #2629.
+
+    Same arrangement as ``test_opencode_harvest_no_sentinel_parks_blocked``, but the
+    log carries a frame the parser rejects. The parser's ``validation_failed``
+    reaches the task row, which parks ``BLOCKED_ON_USER`` through the generic
+    Rule 5 branch, not the ``validation_failed`` requeue-under-cap arm.
+    """
+    worktree = make_git_repo("wt-opencode-validation-failed")
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
+
+    _write_opencode_log(
+        worktree,
+        [
+            text_event(
+                invalid_merge_gate_frame(worktree, ticket_id="T-validation-failed")
+            )
+        ],
+    )
+
+    dead_handle = LocalLivenessHandle(
+        pid=999_999_999, start_time_ns=1, backend="opencode"
+    )
+    # The harvest parses the log against the ticket id derived from the session
+    # name, so the session id must equal the frame's ticket id.
+    sess = _mk_opencode_session("T-validation-failed", worktree, dead_handle)
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="T-validation-failed",
+                    client="client-a",
+                    stage=Stage.FINALIZE,
+                    status=QueueItemStatus.RUNNING,
+                    session_id="T-validation-failed",
+                )
+            ]
+        )
+    )
+
+    candidates = _detect_local_harvest_candidates(load_state())
+    assert len(candidates) == 1
+
+    with freezegun.freeze_time("2026-01-01 12:00:00"):
+        _act_on_local_harvest_candidates(
+            load_state(),
+            candidates,
+            now=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
+        )
+
+    state = load_state()
+    session = next(s for s in state.sessions if s.id == "T-validation-failed")
+    assert session.status == SessionStatus.COMPLETED
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == "validation_failed"
+    assert result.blocker.retry_eligible is True
+
+    rows = load_dev_queue().tasks
+    assert len(rows) == 1
+    task = rows[0]
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER
+    assert task.blocked_reason == "validation_failed"
+    assert task.disposition == "blocked"
+    assert task.unproductive_attempts == 1
+    assert task.attempts == 0
 
 
 # ---------------------------------------------------------------------------

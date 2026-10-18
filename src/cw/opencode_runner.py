@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from cw.auto_dev_result import (
+    BLOCKER_REASON_NO_RESULT_EMITTED,
     AutoDevResult,
     BlockedResult,
     Blocker,
@@ -46,6 +47,7 @@ from cw.worktree import apply_worker_tmpdir
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from cw.executor_diagnostics import ExecutorFailureCategory
     from cw.models import TicketTask
 
 _SCHEMA_VERSION: Literal[4] = 4
@@ -735,14 +737,30 @@ def parse_last_sentinel(
     )
 
 
-def _persist_opencode_no_output_diagnostics(*, session_id: str, log_tail: str) -> None:
-    """Write a ``missing_output`` diagnostics bundle for an OPENCODE_NO_OUTPUT harvest.
+_UNUSABLE_SENTINEL_DETAILS_PREFIX = (
+    "worker emitted an unusable AUTO_DEV_RESULT sentinel: "
+)
+
+
+def _unusable_sentinel_category(reason: str) -> ExecutorFailureCategory:
+    """Diagnostics category for a parser-rejected sentinel, by its blocker reason."""
+    return (
+        "missing_output"
+        if reason == BLOCKER_REASON_NO_RESULT_EMITTED
+        else "schema_mismatch"
+    )
+
+
+def _persist_opencode_failure_diagnostics(
+    *, session_id: str, log_tail: str, category: ExecutorFailureCategory
+) -> None:
+    """Write a diagnostics bundle of *category* for an opencode harvest failure.
 
     Mirrors local_runner._persist_aider_no_output_diagnostics. Never raises
     (persist swallows OSError).
     """
     failure = build_executor_failure(
-        category="missing_output",
+        category=category,
         executor_name="opencode",
         session_id=session_id,
         argv=[],
@@ -772,34 +790,80 @@ def synthesize_opencode_result(
     - sentinel found in text → the parsed ``AutoDevResult`` of the LAST block in
       the log that is for ``task.ticket_id`` (:func:`parse_last_sentinel`,
       #2490); a block quoted for another ticket is never applied
-    - no sentinel / empty log / unparseable → ``OPENCODE_NO_OUTPUT`` (blocked,
-      ``retry_eligible``, details from the log tail when readable). The
-      synthesized blocker carries ``task.stage``'s own entry marker so a
-      PLAN-stage no-output failure never reads as a later-stage
-      self-escalation (see ``_STAGE_ENTRY_MARKERS``).
+    - a real block the parser rejects (``validation_failed``,
+      ``no_result_emitted`` incl. a truncated frame, ``status_unknown``,
+      ``schema_version_unsupported``) → blocked with the parser's reason and
+      details, the details prefixed ``_UNUSABLE_SENTINEL_DETAILS_PREFIX`` (#2629)
+    - no usable block / empty log / unparseable → ``OPENCODE_NO_OUTPUT`` (blocked,
+      details from the log tail when readable)
 
-    *session_id* is optional: when set, the ``OPENCODE_NO_OUTPUT`` branch also
-    persists a typed ``missing_output`` diagnostics bundle and appends a
+    Every blocked result is retry-eligible and carries ``task.stage``'s own entry
+    marker, so a PLAN-stage failure never reads as a later-stage
+    self-escalation (see ``_STAGE_ENTRY_MARKERS``). The parser's own
+    ``blocker.stage`` (always ``"unknown"``) is dropped.
+
+    *session_id* is optional: when set, every blocked branch here also persists a
+    diagnostics bundle (``missing_output`` or ``schema_mismatch``) and appends a
     ``[diagnostics: <path>]`` pointer.
     """
     log_path = worktree / OPENCODE_LOG_RELATIVE_PATH
     log_content = ""
     with contextlib.suppress(OSError):
         log_content = log_path.read_text(encoding="utf-8", errors="replace")
+    log_tail = log_content[-_OPENCODE_LOG_TAIL_CHARS:] if log_content else ""
 
     if log_content:
         result = parse_last_sentinel(log_content, ticket_id=task.ticket_id)
         if isinstance(result, AutoDevResult):
             return result
+        if isinstance(result, BlockedResult):
+            return _blocked_with_diagnostics(
+                task=task,
+                worktree=worktree,
+                session_id=session_id,
+                log_tail=log_tail,
+                reason=result.blocker.reason,
+                details=(_UNUSABLE_SENTINEL_DETAILS_PREFIX + result.blocker.details)[
+                    :_OPENCODE_LOG_TAIL_CHARS
+                ],
+                category=_unusable_sentinel_category(result.blocker.reason),
+            )
 
-    details = log_content[-_OPENCODE_LOG_TAIL_CHARS:] if log_content else ""
+    return _blocked_with_diagnostics(
+        task=task,
+        worktree=worktree,
+        session_id=session_id,
+        log_tail=log_tail,
+        reason=OPENCODE_NO_OUTPUT,
+        details=log_tail,
+        category="missing_output",
+    )
+
+
+def _blocked_with_diagnostics(
+    *,
+    task: TicketTask,
+    worktree: Path,
+    session_id: str | None,
+    log_tail: str,
+    reason: str,
+    details: str,
+    category: ExecutorFailureCategory,
+) -> AutoDevResult:
+    """Build a retry-eligible blocked result, persisting diagnostics when possible.
+
+    When *session_id* is set, the bundle holds the log tail and *details* gets the
+    ``[diagnostics: <path>]`` pointer appended.
+    """
     if session_id is not None:
-        _persist_opencode_no_output_diagnostics(session_id=session_id, log_tail=details)
+        _persist_opencode_failure_diagnostics(
+            session_id=session_id, log_tail=log_tail, category=category
+        )
         details = append_diagnostics_pointer(details, session_id=session_id)
     return make_blocked(
         ticket_id=task.ticket_id,
         worktree=worktree,
-        reason=OPENCODE_NO_OUTPUT,
+        reason=reason,
         details=details,
         retry_eligible=True,
         retry_delay_seconds=0,
