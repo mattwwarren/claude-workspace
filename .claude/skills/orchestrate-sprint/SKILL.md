@@ -19,7 +19,7 @@ already exist:
 - **pre-flight** → `/harden-ticket` (one ticket plans first-try)
 - **dispatch + wave watch** → `/cw-fanout` (enqueue N, run the loop, watch)
 - **in-flight health** → `/cw-queue-peek` (WAIT/PEEK/STOP ladder)
-- **attention stream** → the `session.needs_attention` event bus (`scripts/attention_watch.py`)
+- **attention stream** → the `session.needs_attention` event bus (`cw orchestrate watch`)
 - **act on a finished session** → `/cw-followup`
 - **clean exit** → `/handoff`
 
@@ -225,120 +225,109 @@ you'll just starve yourself of attention bandwidth.
 
 ### Phase 4 — Monitor (steady state)
 
-Arm the attention watch as a backgrounded `Bash`, not the Monitor tool. The
-Monitor tool has no persistent mode — there is no `persistent` parameter in
-its schema — and every Monitor expires within 30 minutes regardless, so it
-cannot stay armed for a sprint. `attention_watch.py` is built for the
-alternative instead: it runs `cw event tail --follow` in a reader thread,
-coalesces a burst of events behind a short drain window, prints them, and
-then **exits**. Unlike the old persistent Monitor, you re-arm it every time
-it wakes, not once per sprint.
+Arm **one** `Monitor` on the attention stream, once per sprint:
 
 ```
-Bash(command: "python3 ~/.claude/skills/orchestrate-sprint/scripts/attention_watch.py <client>",
-     run_in_background: true)
+Monitor(command: "cw orchestrate watch -c <client>",
+        description: "<client> attention stream",
+        timeout_ms: 1800000)
 ```
 
-Do not also open a `Monitor(..., description: "...")` call on top of this —
-there's nothing for it to watch. This is not the same shape as the old
-"backgrounded bash is unsafe" anti-pattern: that warning was about an
-*unbounded* `--follow` loop, whose stdout sits in a file nothing reads until
-the run eventually times out — and an unbounded loop never completes, so it
-never notifies. `attention_watch.py` is designed to exit the moment it has
-something to tell you, so the backgrounded-`Bash` completion notification
-*is* the delivery mechanism: you get notified exactly when there's a
-triage-worthy line to read, and no notification (silence) exactly when there
-isn't — the signal shape this whole mechanism depends on.
+`cw orchestrate watch` is a persistent, silent process. It follows the event
+bus in process and prints one line per event that needs you, each ending in
+the command to run next (`| next: <cmd>`), and **nothing at all while
+everything is healthy — silence means healthy.** You get a Monitor
+notification exactly when there is a line to triage. Do not poll on top of it.
 
-That signal has one bound built in: pass **`--max-idle-seconds`** (default
-`7200`). If no qualifying event arrives within that window, the script
-prints `WATCHER | idle backstop after <N>s, no events, re-arm` and exits `0`
-anyway — a bounded, deliberate wake rather than a silent one. This caps how
-long the harness could leave you uninformed even if a genuinely multi-hour
-background `Bash` turns out not to survive indefinitely (observed directly:
-five of five runs on this ticket's own build delivered exactly one
-completion notification, longest idle block ~19 minutes — multi-hour
-survival itself is unverified). Worst case with the backstop, one extra
-orchestrator turn every two hours while idle, against the old Monitor's two
-turns an hour.
+**Re-arm only on the Monitor's expiry notice, never per event.** The harness
+caps every Monitor at 30 minutes (`timeout_ms: 1800000` is the ceiling), so
+the Monitor ends on its own about every half hour; re-arm it then, with the
+same command. The process saves its position after each printed line, so a
+re-arm (or a restart of any kind) resumes exactly where the last run stopped:
+nothing replayed, nothing lost.
 
-If the harness kills the backgrounded process outright instead of the
-backstop firing on its own, the completion notification still fires (per
-direct observation), so the orchestrator still re-arms and the
-resume stamp keeps it lossless either way. This is documented behavior, not
-a tested one — this ticket's suite doesn't exercise an actual harness kill.
+**Read the first line.** It is always the resolved scope, on stdout so the
+Monitor shows it:
 
-**Pass the client and STOP. Do not pass a lane** unless a second orchestrator
-is running against this same client right now. The script's full signature is
-`attention_watch.py [CLIENT] [LANE]`, and that second argument does not mean
-"the lane I am dispatching into" — it scopes the entire event stream to that
-lane, silently discarding every event from every other lane. It exists for one
-narrow case: two orchestrators sharing a client, each needing only its own
-lane's events.
+```
+WATCH | scope | client=acme | lanes=fast | tickets=- | source=focus | start=resume | cursor=attention-acme-1f2e3d4c
+```
 
-Getting this wrong reads exactly like health. You dispatch into `default`,
-arm the watch with `default` because that is the lane you are working, and
-then a ticket you sent to `debt` wedges and never pages you. (Real incident:
-`#382` sat 105 minutes in a stalled session while the orchestrator reported
-"monitor armed, silence means healthy" — the monitor was lane-scoped to
-`default` and the ticket was in `debt`.) If you are the only orchestrator on
-this client — the normal case — a lane argument can only lose you events.
+Check `client=` and `lanes=` before you trust the silence. **The default scope
+is your focus-pointer lane** (`cw focus set <client>/<lane>`; `source=focus`),
+or the whole client when you have no focus lane (`lanes=*`, `source=client`).
+That default is right when you own one lane. If you are the only orchestrator
+on the client, or you dispatch into more than one lane, widen it:
+`--all-lanes` watches every lane, and `--ticket <id>` (repeatable) adds a
+ticket in any lane (a `--ticket`-only scope shows `lanes=-`). Getting this
+wrong reads exactly like health. (Real incident: `#382` sat 105 minutes in a
+stalled session while the orchestrator reported "monitor armed, silence means
+healthy" — the watch was scoped to `default` and the ticket was in `debt`.)
+The stream also resolves a lane-less event (liveness, phantom revert) through
+the ticket's row lane, so a scoped watch no longer silently drops those.
 
-**The watch exits on every event, so "leftover watch" now means at most one
-process per (client, lane) stamp, and only after a crash.** Because the script always exits
-after it fires, a stale watch surviving a `/clear` resume is not the
-steady-state risk it was under the old persistent-Monitor design — it can
-only happen if a prior watch crashed instead of exiting cleanly. Before
-arming a new one, list the running watches with `pgrep -af attention_watch.py`
-and read each one's arguments. A leftover is a watch whose client **and** lane
-arguments both match the one you are about to arm. An unscoped watch has no
-lane argument, and it is not a leftover of a lane-scoped watch, or the other
-way round. Stop a true leftover first, so two watches never share one stamp
-file or deliver the same event twice. Watches for other clients or other
-lanes use their own stamp files and are left alone. (A single `pgrep`
-pattern cannot tell "no lane" apart from "any lane", so read the argument
-list instead.)
+**Widening or narrowing the scope starts a new position.** The saved position
+is keyed by the resolved scope, so changing the focus lane or adding
+`--all-lanes` / `--ticket` at a re-arm starts at `start=now`: events from the
+gap between the old scope and the new one are not delivered. `start=now` on
+the first line is the visible tell; run `cw queue peek` once to cover the gap.
 
-**Triage the event, then re-arm — and re-arm *before* asking the human any
-blocking question.** The order is: event fires → watch exits → triage →
-re-arm → *then*, if still needed, ask. Re-arming closes the window; asking
-first does not. If you ask a blocking question before re-arming, any event
-that lands while you wait for the human queues up behind the question —
-not lost (the resume stamp already advances past it, so the next arm still
-picks it up) but arriving late, which reads exactly like a missed page if
-you're mid-conversation and not polling. (Observed directly on this ticket's
-own build.)
+**One watcher per scope.** Stop the old Monitor (`TaskStop`) before you arm a
+replacement. A second `cw orchestrate watch` on the same scope refuses to start
+with `WATCH | exited: another watcher (pid <pid>) owns cursor ...` while the
+first is alive. After a harness restart the recorded pid may have been reused
+by an unrelated process, which looks alive too — a recycled pid cannot be
+detected. Confirm no watcher is really running (`pgrep -af "cw orchestrate
+watch"`), then re-arm with `--force`.
 
-**Arm the watch only while tickets are in flight.** There's nothing to wake
-you for once the queue is empty — don't leave a watch running, or plan to
-re-arm one, across a lull with no dispatched/RUNNING tickets. Arm it again
-the next time you dispatch.
+**A `WATCH | exited: <reason>` line means the stream is down** (a fatal error,
+a signal, or a refused start): fix the cause and re-arm. That, and the expiry
+notice, are the only times you re-arm. (`WATCH | exited: signal SIGTERM` next
+to the expiry notice is just the Monitor ending the process on schedule.)
 
-It watches the `session.needs_attention` / `operator.escalation` /
-`timed_out` / `reap_proposed` / `phantom_reverted` / `session.liveness_changed`
-(`stale_30m`/`stale_45m` only) event bus for your client, deduped by a
-per-client resume stamp so a parked session doesn't spam and a re-arm after
-triage doesn't replay what you already saw. Events arrive to *you*; you
-triage; you push the human only what a product/scope fork or opted-in gate requires of them. Use
-`/cw-queue-peek` for the WAIT/PEEK/STOP verdict on any session running long.
-**Silence means healthy only within the `--max-idle-seconds` backstop
-window — and only once you've confirmed exactly one watch is armed for
-your client and lane (`pgrep -af attention_watch.py`, reading the arguments
-as described in the leftover check above; watches for other clients or
-lanes don't count).** A `WATCHER |` line of either kind — the
-idle backstop firing, or `cw event tail` exiting on its own — means re-arm,
-not "still healthy, ignore." With those two conditions held, the watch
-covers the failure signatures within its window, so no news within that
-window genuinely is good news (don't poll on top of it).
+What it pages on: `session.needs_attention`, `operator.escalation`,
+`session.timed_out`, `session.reap_proposed`,
+`session.stage_timed_out_retried`, `session.phantom_reverted` and
+`session.liveness_changed` (`stale_30m`/`stale_45m` only). A repeated page —
+the same ticket (or lane) parked the same way, including the per-lane
+"starved lane" page and the `dispatch_loop_stale` page — is suppressed until
+something resolves it (the ticket transitions or is requeued, the lane is
+resumed, dispatch ticks again), so a parked session does not spam you. Events
+arrive to *you*; you triage; you push the human only what a product/scope fork
+or opted-in gate requires of them.
 
-**A worker that spawns and then stalls (#2004 narrowed this gap).** The watch
-also subscribes to `session.liveness_changed`, filtered to
-`stale_30m`/`stale_45m`, so a session that claims a ticket, registers in the
-roster, reports RUNNING, and then does nothing eventually pages you once the
-reconcile liveness sweep crosses a bucket boundary. That leaves a narrower
-residual gap: the window before the first `stale_30m` crossing (and before the
-first liveness-sweep tick runs at all), during which the session is
-indistinguishable from a healthy one that is simply busy.
+**STUCK lines.** A PENDING ticket whose blocker will not clear on its own — a
+tripped lane breaker with no auto-resume scheduled, a paused lane, the ssh-key
+or disk-pressure gate — is reported once as
+
+```
+STUCK | 2026-10-18T14:03:00 | #ACM-7 | lane_circuit_paused | pending 15m | lane default circuit breaker tripped (spawn_errors); no auto-resume is scheduled | lane=default | next: cw lane resume acme default
+```
+
+after `--stuck-after-minutes` (default 15). `next: -` means there is no `cw`
+remedy (unlock the SSH key, free disk). The age counts from when this watcher
+first saw the row in that state, and that memory does not survive a re-arm:
+a row that stays stuck is reported again roughly once per Monitor re-arm.
+Caps, backoff and usage limits clear themselves and never page.
+
+**Waiting on specific tickets.** `cw dev-queue wait` is a safe long wait: it
+keeps waiting through dispatch's own hand-offs (a fix-loop hand-off, an
+unrouted plan/review approval result) instead of exiting early, defaults to a
+6-hour ceiling (`--timeout 0` = no limit), and takes several tickets with
+`--any`. Exit 4 is any human-kept gate (operator signoff, finalize hold,
+`scope_hint: large`); exit 5 is a stuck PENDING ticket (or an approval result
+dispatch has not routed for 300 s), with the reason and next command printed.
+**Run it as a background task** (`run_in_background: true`): a foreground
+tool call hits the harness's own timeout long before the 6-hour ceiling.
+
+**A worker that spawns and then stalls (#2004 narrowed this gap).** The stream
+subscribes to `session.liveness_changed`, filtered to `stale_30m`/`stale_45m`,
+so a session that claims a ticket, registers in the roster, reports RUNNING,
+and then does nothing eventually pages you once the reconcile liveness sweep
+crosses a bucket boundary. That leaves a narrower residual gap: the window
+before the first `stale_30m` crossing (and before the first liveness-sweep tick
+runs at all), during which the session is indistinguishable from a healthy one
+that is simply busy.
 
 So still run `cw queue peek --client <client>` at each natural checkpoint —
 after a gate, after a merge, before you report things are fine —
@@ -461,31 +450,24 @@ delegation.
 - **Re-sweeping a ticket that already has plan comments.** The sweep is in the
   thread; read it.
 - **Re-dispatching a gated ticket without a tracker-state delta.** It will wedge again. Park it, supply the delta, then release it.
-- **Arming the watch with the Monitor tool, or opening a second Monitor on
-  top of it.** The Monitor tool has no persistent mode — every Monitor
-  expires within 30 minutes and there is no `persistent` parameter — so it
-  cannot stay armed for a sprint. Arm `attention_watch.py` as a backgrounded
-  `Bash` instead, with no `Monitor` call alongside it, and re-arm it every
-  time it exits (Phase 4).
-- **Asking a blocking question before re-arming the watch.** Events that land
-  while you wait for the human arrive late, not lost — but late reads
-  exactly like a missed page. Triage, re-arm, *then* ask (Phase 4).
-- **Leaving the watch armed once the queue is empty.** Arm it only while
-  tickets are in flight; there's nothing to wake you for otherwise, and a
-  crashed leftover is the one way you get two overlapping watches (Phase 4).
-- **Passing a lane to `attention_watch.py` when you are the only
-  orchestrator.** It scopes the stream to that lane and silently drops every
-  other lane's events. Pass the client and stop (Phase 4).
-- **Treating watch silence as proof a worker is alive.** The watch now
-  subscribes to `session.liveness_changed` (`stale_30m`/`stale_45m`), so a
+- **Re-arming the stream per event.** The Monitor stays armed; re-arm only on
+  its 30-minute expiry notice or a `WATCH | exited:` line (Phase 4).
+- **Two watchers on one scope.** Stop the old Monitor before arming a new one;
+  use `--force` only after confirming the recorded pid is not a live watcher
+  (Phase 4).
+- **Trusting silence without reading the scope line.** The default is your
+  focus lane; if you own more than one lane, pass `--all-lanes` or `--ticket`
+  and check `lanes=` on the first line (Phase 4).
+- **Treating watch silence as proof a worker is alive.** The stream subscribes
+  to `session.liveness_changed` (`stale_30m`/`stale_45m`), so a
   spawned-then-stalled worker eventually pages — but the residual gap
   (pre-`stale_30m`, or before the first liveness-sweep tick) still needs
   confirmation. Run `cw queue peek` at checkpoints and read `idle_m` vs
   `age_m` (Phase 4).
-- **Polling on top of the watch.** The event bus is push; trust the silence —
-  but only within the `--max-idle-seconds` window, and only after confirming
-  exactly one watch is armed for your client and lane (`pgrep -af
-  attention_watch.py`, reading the arguments; Phase 4).
+- **Polling on top of the stream.** The event bus is push; trust the silence
+  once the scope line matches the work you dispatched (Phase 4).
+- **Running `cw dev-queue wait` in the foreground.** It now waits up to 6
+  hours; run it as a background task (Phase 4).
 - **Dribbling decisions.** Five one-question round-trips for what could've been
   one batched `AskUserQuestion`.
 - **Over-dispatching.** More running ≠ faster done; it's just less attention per
@@ -503,4 +485,3 @@ delegation.
 - `/cw-followup` — act on a finished session's sentinel (Phase 5)
 - `/cw-validate-result` — forensic read of one session (Phase 5)
 - `/handoff` — clean session transition (Phase 6)
-- `scripts/attention_watch.py` — the bundled wake-on-event watch (Phase 4)
