@@ -89,17 +89,6 @@ _ADR = (
 )
 
 
-@pytest.fixture(autouse=True)
-def _enable_shipped_release_rollout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The production default is fail-closed shadow mode."""
-    monkeypatch.setattr(
-        shipped_release, "SHIPPED_RELEASE_ROLLOUT_CLIENTS", frozenset({_CLIENT})
-    )
-    monkeypatch.setattr(shipped_release, "SHIPPED_RELEASE_SHADOW_MODE", False)
-
-
 @pytest.fixture
 def clients(tmp_path: Path) -> dict[str, ClientConfig]:
     return {
@@ -1023,7 +1012,10 @@ class TestThroughReconcile:
         assert after.reap_reason is ReapReason.ROUTED_RESULT_STRANDED
         assert after.reap_proposed_at is None
         assert not counts_toward_client_ceiling(after, _CLIENT)
-        assert _event_types("e2e") == [str(OrchestratorEventType.SESSION_COMPLETED)]
+        assert _event_types("e2e") == [
+            str(OrchestratorEventType.SESSION_COMPLETED),
+            str(OrchestratorEventType.SESSION_REAP_AUTHORIZED),
+        ]
         payload = _completed_events("e2e-payload")[0]
         assert payload == {
             "session_id": _SID,

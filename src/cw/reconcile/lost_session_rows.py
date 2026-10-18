@@ -161,11 +161,10 @@ def find_lost_session_rows(
         ):
             continue
         if task.session_id is not None:
-            # A dangling id alone is ambiguous state loss.  ``ever_spawned``
-            # is the durable post-launch fact written at the spawn-success
-            # seam; require it before treating the missing Session record as
-            # the #2502 post-launch write-failure shape.
-            if task.ever_spawned and resolve_session_for_task(task, state) is None:
+            # The bound session id is itself the evidence: the record may be
+            # missing because the post-launch state write failed before the
+            # durable ``ever_spawned`` marker was reached.
+            if resolve_session_for_task(task, state) is None:
                 parks.append(_lost_row(task))
         elif task.advisory_note != NO_SESSION_ADVISORY_NOTE and _past_spawn_grace(
             task, now
