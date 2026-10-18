@@ -101,18 +101,15 @@ _MUST_FIX_MECHANICALLY_REJECTED_REASON = "codex_must_fix_mechanically_rejected"
 # _MUST_FIX_MECHANICALLY_REJECTED_REASON, stamped by
 # _park_must_fix_mechanically_rejected above -- the one gate-class park whose
 # breadcrumbs is genuinely populated from blocker.reason rather than a
-# hardcoded "" literal. Named + anchored so
-# .claude/skills/orchestrate-sprint/scripts/attention_watch.py's
-# hand-transcribed BLOCKER_REASON_PAUSED_STATUSES (which runs outside src/cw
-# and cannot import this constant) has one file to keep in sync against;
-# tests/test_attention_watch.py pins the two equal. See #1597, #2250.
+# hardcoded "" literal. Named + anchored so the attention stream has one
+# allowlist to render breadcrumbs against. See #1597, #2250, #2693.
 #
-# IMPORTANT: this constant has no runtime reader anywhere in src/cw -- it is
-# the canonical *declaration* consumed only by attention_watch.py (an
-# out-of-package hand-copy) and by the pinning tests. Adding a paused_status
-# here does NOT by itself cause a breadcrumb to be emitted for it: the
-# producing _park_* helper must independently stamp non-empty breadcrumbs
-# content at its own call site. Every gate-class park other than
+# IMPORTANT: its one runtime reader is cw.attention_watch (``cw orchestrate
+# watch``), which imports it directly to decide which pages render their
+# breadcrumbs; it only *renders* breadcrumbs that a park already stamped.
+# Adding a paused_status here does NOT by itself cause a breadcrumb to be
+# emitted for it: the producing _park_* helper must independently stamp
+# non-empty breadcrumbs content at its own call site. Every gate-class park other than
 # _park_must_fix_mechanically_rejected (review_gates.py's _park_finalize_hold,
 # _park_signoff_gate, _park_scope_hint_gate, _park_review_health_gate and
 # _park_branch_staleness_gate, plus the _stage_advance_unchecked config-error
