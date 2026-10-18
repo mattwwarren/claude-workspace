@@ -1213,6 +1213,27 @@ def _make_tick_summary(**overrides: object) -> TickSummary:
     return TickSummary.model_validate(kwargs)
 
 
+def _patch_ticks(
+    monkeypatch: pytest.MonkeyPatch,
+    per_client: Mapping[str, Mapping[str, object]],
+) -> None:
+    """Patch ``cw dev-queue status``'s tick read to one tick per client (#2696).
+
+    Each value is a ``_make_tick_summary`` override mapping, so a client gets
+    the canonical defaults plus whatever it overrides. Installs ``{client:
+    tick}`` through the ``cw.cli.dev_queue.status.latest_tick_summary_by_client``
+    seam the status tests share; ``_patch_tick`` (``tests/test_cli.py``) and
+    ``_patch_tick_for`` (``tests/test_dev_queue.py``) are one-client callers.
+    """
+    ticks = {
+        client: _make_tick_summary(**overrides)
+        for client, overrides in per_client.items()
+    }
+    monkeypatch.setattr(
+        "cw.cli.dev_queue.status.latest_tick_summary_by_client", lambda: ticks
+    )
+
+
 def _patch_cw_dist_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch importlib.metadata.distribution() to raise PackageNotFoundError,
     simulating a registry/unknown install. Shared helper (#1514).
@@ -3148,6 +3169,22 @@ def simple_config() -> OrchestratorConfig:
     return OrchestratorConfig(
         tick_interval_seconds=30,
         per_client_max_parallel={"test-client": 1},
+    )
+
+
+@pytest.fixture
+def breaker_config() -> OrchestratorConfig:
+    """OrchestratorConfig with a low lane circuit-breaker threshold for tests.
+
+    ``simple_config`` plus ``lane_circuit_breaker_threshold=2``. Shared by
+    ``tests/test_dispatch.py`` and ``tests/test_dispatch_lane_circuit.py``
+    (#2696); a test needing other auto-resume knobs uses
+    ``breaker_config.model_copy(update={...})``.
+    """
+    return OrchestratorConfig(
+        tick_interval_seconds=30,
+        per_client_max_parallel={"test-client": 1},
+        lane_circuit_breaker_threshold=2,
     )
 
 
