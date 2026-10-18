@@ -24,6 +24,7 @@ from cw._lock_guard import LockRank, is_rank_held
 from cw.config import load_effective_clients, load_state, save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
+from cw.gh import BranchPr
 from cw.local_runner import AIDER_LOG_RELATIVE_PATH
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
@@ -1424,3 +1425,84 @@ def act_on_local_harvest(
         codex_probes=codex_probes,
         harvest_facts=facts,
     )
+
+
+# An 8-character surface ref: ``reconcile()`` normalizes the roster's session
+# ids to their first 8 characters, so an end-to-end shipped-release test needs
+# a surface that survives that (``_FAKE_SURFACE_REF`` does not).
+SHIPPED_SURFACE_REF = "abcd1234"
+# ``_shipped_salvage_payload``'s own PR url.
+SHIPPED_SENTINEL_PR_URL = "https://github.com/foo/bar/pull/99"
+# ``seed_stranded_shipped_session``'s default: stamp the seeded session's id.
+OWN_SESSION_ID = "<own-session-id>"
+
+
+def seed_stranded_shipped_session(
+    tmp_path: Path,
+    *,
+    now: datetime,
+    sid: str = "2715",
+    surface_ref: str = SHIPPED_SURFACE_REF,
+    status: SessionStatus = SessionStatus.ACTIVE,
+    stale_minutes: float | None = 31.0,
+    stamp_age_minutes: float | None = 90.0,
+    stamp_session_id: str | None = OWN_SESSION_ID,
+    last_result: dict[str, Any] | None = None,
+) -> Session:
+    """Build the #2715 Sweep S shape: a stranded, consumed, shipped session.
+
+    A headless EMIT_CLI DAEMON session (:func:`_mk_routed_session`) whose
+    consumed ``last_result`` is a ``shipped`` sentinel claiming *sid*, with a
+    transcript flat for *stale_minutes* (None writes none) and a drain stamp
+    (count 1) *stamp_age_minutes* old (None writes none). The stamp carries
+    the session's own id by default; pass another id, or None for the
+    pre-#2715 shape. Not persisted: the caller saves state.
+    """
+    worktree = tmp_path / f"wt-{sid}"
+    sess = _mk_routed_session(
+        sid,
+        worktree,
+        surface_ref=surface_ref,
+        status=status,
+        last_result=(
+            last_result
+            if last_result is not None
+            else {
+                **_shipped_salvage_payload(sid),
+                _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY: True,
+            }
+        ),
+    )
+    if stale_minutes is not None:
+        _stamp_transcript_age(
+            Path.home(),
+            worktree,
+            stale_minutes=stale_minutes,
+            now=now,
+            surface_ref=surface_ref,
+        )
+    if stamp_age_minutes is not None:
+        _write_agent_spawn_stamp(
+            worktree,
+            unresolved_count=1,
+            stamped_at=now - timedelta(minutes=stamp_age_minutes),
+            session_id=sid if stamp_session_id == OWN_SESSION_ID else stamp_session_id,
+        )
+    return sess
+
+
+def fake_branch_pr(
+    *,
+    url: str = SHIPPED_SENTINEL_PR_URL,
+    state: str = "OPEN",
+    number: int = 99,
+    merged_at: str | None = None,
+) -> BranchPr:
+    """A ``cw.gh.BranchPr`` as ``fetch_branch_prs`` returns it (#2715)."""
+    return BranchPr(number=number, url=url, state=state, merged_at=merged_at)
+
+
+def assert_no_parked_row_is_sessionless(queue: DevQueueStore) -> None:
+    """Invariant (#2715): no row the lost-session sweep parked lost its id."""
+    parked = [t for t in queue.tasks if t.disposition == "running_row_session_lost"]
+    assert all(t.session_id is not None for t in parked), parked

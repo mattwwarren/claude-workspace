@@ -105,6 +105,7 @@ from cw.reconcile.review_recipes import (
 )
 from cw.reconcile.review_recipes.core import capture_review_repo_slugs
 from cw.reconcile.routed_result_sessions import sweep_routed_result_sessions
+from cw.reconcile.shipped_release import capture_shipped_pr_probes, run_shipped_release
 from cw.reconcile.stalled import (
     _act_on_stalled_candidates,
     _detect_stalled_candidates,
@@ -127,6 +128,7 @@ from cw.reconcile.usage_limit_mid_turn import (
 if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, OrchestratorConfig, TicketTask
     from cw.reconcile.review_recipes._shared import RepoSlugs
+    from cw.reconcile.shipped_release import ShippedPrProbes
 
 _log = logging.getLogger(__name__)
 
@@ -411,6 +413,21 @@ def _capture_harvest_facts() -> HarvestFacts:
     return facts
 
 
+def _capture_closing_prepasses(
+    *, config: OrchestratorConfig, clients: dict[str, ClientConfig]
+) -> tuple[ShippedPrProbes, HarvestFacts]:
+    """The last two lockless pre-passes: shipped-release PRs (#2715), then harvest.
+
+    The tuple is evaluated left to right, so the harvest capture stays last
+    (its facts age from capture). One helper keeps ``reconcile()`` at its
+    statement count.
+    """
+    return (
+        capture_shipped_pr_probes(config=config, clients=clients),
+        _capture_harvest_facts(),
+    )
+
+
 def reconcile(
     *, dispatch_review_jobs: bool = False, lock_timeout_s: float | None = None
 ) -> ReconcileReport:
@@ -464,13 +481,15 @@ def reconcile(
     every ``gh``/``git`` call the in-lock sweeps would otherwise need -- PR
     merge state, the codex clean probes (#2563), the gate recipes'
     plan-of-record reads (#2545), the review recipes' repo slugs (#2564), the
-    worktree dirty checks (#2548) and the local harvest's git facts (#2565).
+    worktree dirty checks (#2548), the shipped-release PR lookups (#2715) and
+    the local harvest's git facts (#2565).
     The in-lock code only reads their results, and a candidate with no usable
     result defers to the next tick. The harvest capture runs last: its facts
     expire ``HARVEST_FACTS_MAX_AGE_SECONDS`` after capture, so no other
     pre-pass may run between it and the lock. Stacked worst case before the
     lock is requested, all lockless: codex probes 60 s, repo slugs 30 s, dirty
-    checks 30 s plus one in-flight check, and one 15 s roster call, harvest
+    checks 30 s plus one in-flight check, and one 15 s roster call, shipped
+    PRs 20 s plus one in-flight 15 s lookup, harvest
     facts 60 s plus one in-flight candidate's four 10 s git calls; only the
     harvest pass's own span (at most 100 s) counts against its 180 s age
     limit. The dirty checks expire ``DIRTY_CHECK_MAX_AGE_SECONDS`` after
@@ -560,10 +579,11 @@ def reconcile(
     # Fifth (#2548): the worktree dirty checks the phantom sweep and the
     # TIMED_OUT/COMPLETED backstops read in-lock.
     dirty_checks = _capture_dirty_checks(config=_orchestrator_config)
-    # Sixth and LAST (#2565): the local harvest's git facts. Last because their
-    # max age is measured from capture, so no other pre-pass may run between
-    # it and the lock.
-    harvest_facts = _capture_harvest_facts()
+    # Sixth (#2715), the shipped-release `gh pr list`, then LAST (#2565) the
+    # local harvest's git facts, whose max age is measured from capture.
+    shipped_probes, harvest_facts = _capture_closing_prepasses(
+        config=_orchestrator_config, clients=_clients
+    )
 
     jobs = DeferredReconcileJobs(
         review=DeferredReviewDispatch() if dispatch_review_jobs else None
@@ -586,6 +606,7 @@ def reconcile(
                 repo_slugs=repo_slugs,
                 harvest_facts=harvest_facts,
                 dirty_checks=dirty_checks,
+                shipped_probes=shipped_probes,
             )
     finally:
         # Post-lock drain (#1232, #1229). Everything in `jobs` was decided and
@@ -677,6 +698,7 @@ def _reconcile_locked(
     repo_slugs: RepoSlugs | None = None,
     harvest_facts: HarvestFacts | None = None,
     dirty_checks: DirtyChecks | None = None,
+    shipped_probes: ShippedPrProbes | None = None,
 ) -> ReconcileReport:
     """Body of reconcile(), called while sessions_lock is held.
 
@@ -725,9 +747,12 @@ def _reconcile_locked(
     phantom sweep acts only on roster absence (the process is genuinely
     gone), the mid-turn usage-limit sweep acts only on a transcript tail that
     ends on a usage-limit message (#2324), and the liveness sweep is
-    signal-only, as is the stranded-routed-result sweep (#2524), which pages
-    once and never closes. The phantom and usage-limit sweeps' destructive acts are both
-    gated by ``reap_policy`` (ADR-0006).
+    signal-only. The stranded-routed-result page (#2524) never closes; the
+    shipped release before it closes only a stranded session whose recorded
+    shipped result has its own OPEN/MERGED PR (#2715; ``shipped_probes`` from
+    its lockless pre-pass, ``None`` makes it a no-op), its age checks only
+    delaying that evidence-triggered act. The phantom and usage-limit sweeps'
+    destructive acts are both gated by ``reap_policy`` (ADR-0006).
     """
     if clients is None:
         clients = load_clients()
@@ -843,11 +868,20 @@ def _reconcile_locked(
         task_by_ticket=shared_task_by_ticket,
     )
 
-    # Stranded routed-result sweep (#2524): a live session whose staged result
-    # a #2458 partial route already routed, with no occupied row bound to it
-    # and a stale transcript. After the outage guard (it needs the roster);
-    # policy-independent and signal-only (ADR-0014) -- pages once via
-    # reap_proposed_at and never closes; the operator does (cw doctor --reap).
+    # Stranded routed-result sessions (#2524). First the shipped release
+    # (#2715) closes those whose emitted shipped result has its own OPEN or
+    # MERGED PR and a quiesced drain stamp (cw.reconcile.shipped_release);
+    # then the page sweep pages every remaining one once and never closes.
+    run_shipped_release(
+        state,
+        now=now,
+        native_live=native_live,
+        clients=clients,
+        config=orchestrator_config,
+        tasks=shared_tasks,
+        probes=shipped_probes,
+        deferred=deferred,
+    )
     sweep_routed_result_sessions(
         state,
         now=now,
