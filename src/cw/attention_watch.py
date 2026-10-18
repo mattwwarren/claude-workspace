@@ -356,12 +356,23 @@ class Latch:
                 del self._entries[key]
 
 
-def first_next_command(row: TicketTask | None, session: Session | None) -> str | None:
+def first_next_command(
+    row: TicketTask | None,
+    session: Session | None,
+    *,
+    skip_reason: str | None = None,
+    lane_resume_command: str | None = None,
+) -> str | None:
     """The first legal next command for *row*, or None when there is no row."""
     if row is None:
         return None
     # Every rule of the next-command table yields at least one command.
-    return next_commands(row, session=session)[0].command
+    return next_commands(
+        row,
+        session=session,
+        skip_reason=skip_reason,
+        lane_resume_command=lane_resume_command,
+    )[0].command
 
 
 def _why(payload: dict[str, object]) -> str:

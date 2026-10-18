@@ -33,6 +33,7 @@ import logging
 import os
 import signal
 import threading
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TextIO
 
 from cw.attention_watch import (
@@ -64,7 +65,6 @@ from cw.stuck_pending import SECONDS_PER_MINUTE, PendingTracker, scan_pending
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from datetime import datetime
     from types import FrameType
 
     from cw.attention_watch import WatchScope
@@ -240,7 +240,14 @@ class AttentionStream:
             return None
         if not state:
             state.append(load_state())
-        return first_next_command(row, resolve_session_for_task(row, state[0]))
+        probe = scan_pending([row], now=datetime.now(UTC))
+        block = probe[0].block if probe else None
+        return first_next_command(
+            row,
+            resolve_session_for_task(row, state[0]),
+            skip_reason=block.code if block is not None else None,
+            lane_resume_command=block.command if block is not None else None,
+        )
 
     # --- the stuck scan -------------------------------------------------------
 
@@ -269,7 +276,9 @@ class AttentionStream:
             self._tracker.retain(set())
             return []
         lines: list[str] = []
+        successful: set[str] = set()
         for probe in scan_pending(rows.values(), now=now):
+            successful.add(probe.view.ticket_id)
             age = self._tracker.observe(probe.view.ticket_id, probe.block, at)
             if age is not None and probe.block is not None:
                 lines.append(
@@ -281,7 +290,7 @@ class AttentionStream:
                         age_seconds=age,
                     )
                 )
-        self._tracker.retain(set(rows))
+        self._tracker.retain(successful)
         return lines
 
     # --- the loop ---------------------------------------------------------------

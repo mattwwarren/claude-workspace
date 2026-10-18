@@ -172,19 +172,23 @@ def orchestrate_retire() -> None:
 _WATCH_ALL_LANES_WITH_LANE = "--all-lanes cannot be combined with --lane."
 
 
-def _validate_watch_lanes(client_name: str, lanes: tuple[str, ...]) -> None:
-    """Refuse an explicit ``--lane`` the client does not declare."""
-    if not lanes:
+def _validate_lane(client_name: str, lane: str, declared: list[str]) -> None:
+    """Refuse a lane the client does not declare, using the shared CLI error."""
+    if lane in declared:
         return
+    msg = (
+        f"Lane '{lane}' is not declared for client '{client_name}'. "
+        f"Declared lanes: {', '.join(declared)}. "
+        f"Run: cw lane add {client_name} {lane}"
+    )
+    raise LaneNotFoundError(msg)
+
+
+def _validate_watch_lanes(client_name: str, lanes: tuple[str, ...]) -> None:
+    """Refuse explicit ``--lane`` values the client does not declare."""
     declared = [ln.name for ln in _resolve_client(client_name).effective_lanes]
     for lane in lanes:
-        if lane not in declared:
-            msg = (
-                f"Lane '{lane}' is not declared for client '{client_name}'. "
-                f"Declared lanes: {', '.join(declared)}. "
-                f"Run: cw lane add {client_name} {lane}"
-            )
-            raise LaneNotFoundError(msg)
+        _validate_lane(client_name, lane, declared)
 
 
 @orchestrate.command(name="watch")
@@ -394,13 +398,7 @@ def orchestrate_start(lane: str, client_name: str | None, as_json: bool) -> None
     """
     client_cfg = _resolve_client(client_name)
     declared = [ln.name for ln in client_cfg.effective_lanes]
-    if lane not in declared:
-        msg = (
-            f"Lane '{lane}' is not declared for client '{client_cfg.name}'. "
-            f"Declared lanes: {', '.join(declared)}. "
-            f"Run: cw lane add {client_cfg.name} {lane}"
-        )
-        raise LaneNotFoundError(msg)
+    _validate_lane(client_cfg.name, lane, declared)
 
     # R5: Reject if a live ORCHESTRATE session already exists for (client, lane)
     state = load_state()
@@ -588,13 +586,7 @@ def orchestrate_run(lane: str, client_name: str | None, once: bool) -> None:
     """
     client_cfg = _resolve_client(client_name)
     declared = [ln.name for ln in client_cfg.effective_lanes]
-    if lane not in declared:
-        msg = (
-            f"Lane '{lane}' is not declared for client '{client_cfg.name}'. "
-            f"Declared lanes: {', '.join(declared)}. "
-            f"Run: cw lane add {client_cfg.name} {lane}"
-        )
-        raise LaneNotFoundError(msg)
+    _validate_lane(client_cfg.name, lane, declared)
 
     # Any-status match: orchestrate start's binding self-completes to COMPLETED.
     state = load_state()
