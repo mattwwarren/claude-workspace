@@ -9,6 +9,10 @@ starts from. It never stages anything: staging a conflicted index would clear
 its unmerged stages and write the conflict markers into the baseline tree as if
 they were committed work.
 
+A cw review artifact present at start (untracked, or tracked and modified) is
+exempt from that check, recorded in the baseline, and unstaged every time the
+cycle stages, so it never reaches a cycle commit (#2689).
+
 **Invariant: a cycle starts only from a clean tree, so the baseline tree is
 exactly ``HEAD``'s tree, and the cycle's commit carries only what the cycle
 itself changed.** Nothing the cycle did not do can appear in
@@ -42,9 +46,10 @@ _REF_UNSET = 1
 # (codex_background.REVIEW_VERDICT_COMMENT_RELATIVE_PATH,
 # cw.review_findings.REVIEW_VERDICT_JSON_RELATIVE_PATH and
 # codex_background.REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH). Literals because
-# codex_background imports this package; a lockstep test pins them. Only an
-# UNTRACKED one is ignored — a tracked artifact that is modified, staged or
-# deleted still makes the tree dirty.
+# codex_background imports this package; a lockstep test pins them. The review
+# step rewrites them in place, so an untracked one or a tracked-modified one
+# (` M`, `M `, `MM`) is cw-owned and ignored — a deleted, renamed or
+# staged-new artifact is a real change and still makes the tree dirty.
 _CW_REVIEW_ARTIFACTS = frozenset(
     {
         ".claude/review-verdict.md",
@@ -55,14 +60,21 @@ _CW_REVIEW_ARTIFACTS = frozenset(
 _UNTRACKED_PREFIX = "?? "
 # Porcelain v1: a two-character status code and one space precede the path.
 _PORCELAIN_PATH_OFFSET = 3
+_STATUS_CODE_WIDTH = 2
+# Tracked-modified porcelain codes: worktree-modified, staged, or both.
+_MODIFIED_TRACKED_CODES = frozenset({" M", "M ", "MM"})
 
 
 class CycleBaseline(NamedTuple):
-    """The commit and tree a clean fix cycle starts from (tree == HEAD's tree)."""
+    """The commit and tree a clean fix cycle starts from (tree == HEAD's tree).
+
+    ``review_artifacts`` holds the cw review artifacts present at cycle start,
+    untracked or tracked-modified; every cycle staging step unstages them.
+    """
 
     head_sha: str
     tree_sha: str
-    untracked_review_artifacts: frozenset[str] = frozenset()
+    review_artifacts: frozenset[str] = frozenset()
 
 
 class DirtyStart(NamedTuple):
@@ -98,33 +110,25 @@ def _unmerged_paths(worktree: Path) -> tuple[str, ...]:
 
 
 def _is_review_artifact(line: str) -> bool:
-    """Whether a porcelain line is an untracked cw review artifact."""
-    return (
+    """Whether a porcelain line is an untracked or modified cw review artifact."""
+    return line[_PORCELAIN_PATH_OFFSET:] in _CW_REVIEW_ARTIFACTS and (
         line.startswith(_UNTRACKED_PREFIX)
-        and line[_PORCELAIN_PATH_OFFSET:] in _CW_REVIEW_ARTIFACTS
+        or line[:_STATUS_CODE_WIDTH] in _MODIFIED_TRACKED_CODES
     )
 
 
-def _dirty_lines(worktree: Path) -> tuple[str, ...]:
-    """Return the porcelain lines that make the tree dirty."""
-    out = git_output(["status", "--porcelain", "--untracked-files=all"], cwd=worktree)
-    return tuple(
-        line for line in out.splitlines() if line and not _is_review_artifact(line)
-    )
+def unstage_review_artifacts(worktree: Path, artifacts: frozenset[str]) -> None:
+    """Keep cw review artifacts present at cycle start out of cycle staging.
 
-
-def unstage_review_artifacts(
-    worktree: Path, untracked_artifacts: frozenset[str]
-) -> None:
-    """Keep review artifacts untracked at cycle start out of cycle staging."""
+    For a tracked path ``git restore --staged`` resets the index entry to
+    ``HEAD``; the worktree edit is left alone.
+    """
     staged = git_output(
         ["diff", "--cached", "--name-only", "--no-renames"], cwd=worktree
     )
-    artifacts = sorted(
-        path for path in staged.splitlines() if path in untracked_artifacts
-    )
-    if artifacts:
-        git_output(["restore", "--staged", "--", *artifacts], cwd=worktree)
+    staged_artifacts = sorted(path for path in staged.splitlines() if path in artifacts)
+    if staged_artifacts:
+        git_output(["restore", "--staged", "--", *staged_artifacts], cwd=worktree)
 
 
 def capture_cycle_baseline(worktree: Path) -> CycleBaseline | DirtyStart:
@@ -132,9 +136,9 @@ def capture_cycle_baseline(worktree: Path) -> CycleBaseline | DirtyStart:
 
     Read-only and never stages. Probes, in order: the three
     unfinished-operation markers, ``git ls-files -u``, then
-    ``git status --porcelain --untracked-files=all`` (minus untracked cw review
-    artifacts). Any finding returns a :class:`DirtyStart`. Any git failure
-    propagates as ``CalledProcessError``.
+    ``git status --porcelain --untracked-files=all`` (minus untracked and
+    tracked-modified cw review artifacts). Any finding returns a
+    :class:`DirtyStart`. Any git failure propagates as ``CalledProcessError``.
     """
     markers = tuple(m for m in _OPERATION_MARKERS if _marker_is_set(worktree, m))
     unmerged = _unmerged_paths(worktree)
@@ -143,7 +147,7 @@ def capture_cycle_baseline(worktree: Path) -> CycleBaseline | DirtyStart:
     )
     status_lines = tuple(line for line in status.splitlines() if line)
     dirty = tuple(line for line in status_lines if not _is_review_artifact(line))
-    untracked_artifacts = frozenset(
+    artifacts = frozenset(
         line[_PORCELAIN_PATH_OFFSET:]
         for line in status_lines
         if _is_review_artifact(line)
@@ -153,7 +157,7 @@ def capture_cycle_baseline(worktree: Path) -> CycleBaseline | DirtyStart:
     return CycleBaseline(
         head_sha=git_output(["rev-parse", "HEAD"], cwd=worktree).strip(),
         tree_sha=git_output(["rev-parse", "HEAD^{tree}"], cwd=worktree).strip(),
-        untracked_review_artifacts=untracked_artifacts,
+        review_artifacts=artifacts,
     )
 
 
@@ -165,7 +169,7 @@ def cycle_touched_paths(worktree: Path, baseline: CycleBaseline) -> set[str]:
     :func:`cw.codex_fix_loop.fence._name_only`.
     """
     git_output(["add", "-A"], cwd=worktree)
-    unstage_review_artifacts(worktree, baseline.untracked_review_artifacts)
+    unstage_review_artifacts(worktree, baseline.review_artifacts)
     new_tree = git_output(["write-tree"], cwd=worktree).strip()
     out = git_output(
         ["diff-tree", "-r", "--name-only", "--no-renames", baseline.tree_sha, new_tree],
