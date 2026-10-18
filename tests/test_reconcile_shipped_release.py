@@ -1284,3 +1284,52 @@ class TestAdrAmendment:
         assert "issuecomment-6215180981" in amendment
         assert "issuecomment-6249899648" in amendment
         assert "the draining veto only delays the act" in amendment
+
+
+class TestFinishReleaseAuditMutations:
+    """The close audit names ``daemon_stopped`` only when the stop succeeded."""
+
+    @staticmethod
+    def _finalized_mutations(
+        monkeypatch: pytest.MonkeyPatch, *, stop_succeeded: bool
+    ) -> list[str]:
+        from cw.doctor import routed_result_wedge
+
+        seen: list[list[str]] = []
+
+        def fake_finalize(
+            session_id: str,
+            *,
+            mutations: list[str],
+            stop_succeeded: bool,
+            stop_error: str | None,
+        ) -> dict[str, object]:
+            seen.append(list(mutations))
+            return {"session_id": session_id}
+
+        monkeypatch.setattr(
+            routed_result_wedge, "_finalize_audit_intent", fake_finalize
+        )
+        monkeypatch.setattr(routed_result_wedge, "_emit_audit_record", lambda _a: True)
+        shipped_release._finish_release_audit(
+            "sess1",
+            stop_succeeded=stop_succeeded,
+            stop_error=None if stop_succeeded else "boom",
+        )
+        assert len(seen) == 1
+        return seen[0]
+
+    def test_stop_succeeded_records_daemon_stopped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert self._finalized_mutations(monkeypatch, stop_succeeded=True) == [
+            "session_status_completed",
+            "daemon_stopped",
+        ]
+
+    def test_stop_failed_omits_daemon_stopped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert self._finalized_mutations(monkeypatch, stop_succeeded=False) == [
+            "session_status_completed"
+        ]

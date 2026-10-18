@@ -564,9 +564,12 @@ def _finish_release_audit(
             _finalize_audit_intent,
         )
 
+        mutations = ["session_status_completed"]
+        if stop_succeeded:
+            mutations.append("daemon_stopped")
         audit = _finalize_audit_intent(
             session_id,
-            mutations=["session_status_completed"],
+            mutations=mutations,
             stop_succeeded=stop_succeeded,
             stop_error=stop_error,
         )
