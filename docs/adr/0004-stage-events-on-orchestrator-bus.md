@@ -36,8 +36,9 @@ For every event recorded with type `STAGE_ENTERED` or `STAGE_ERRORED`:
 
 ## What this means for callers
 
-> **Note:** `cw orchestrate watch` is deprecated (RFC 0007 Phase 4) and will
-> be removed in the release after v1.14.0. Use `cw board` instead.
+> **Note:** the `cw orchestrate watch` TUI below was deprecated (RFC 0007
+> Phase 4) in favour of `cw board`. #2693 removed it and reused the name for
+> the attention stream, which does not read `last_stage`.
 
 - **`cw orchestrate status`** (CLI text) and **`cw orchestrate watch`**
   (TUI) read `SessionSummary.last_stage`, which is populated from

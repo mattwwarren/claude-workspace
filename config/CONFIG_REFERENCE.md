@@ -1498,7 +1498,7 @@ highest first:
    (see above)
 
 When a ticket is gated, it parks at `AWAITING_OPERATOR_SIGNOFF` instead of
-advancing (`cw dev-queue wait` exits `4`; `cw dev-queue status`'s lane
+advancing (`cw dev-queue wait` exits `4`, its exit for every human-kept gate; `cw dev-queue status`'s lane
 breakdown shows a `signoff=N` count alongside `blocked=N`). Clear the gate
 with the same command used for an ordinary approval gate:
 

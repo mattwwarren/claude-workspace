@@ -101,7 +101,9 @@ instead of advancing unattended. Resolution precedence: per-ticket
   REVIEW-stage plan/review gate on a signoff-configured ticket re-routes it
   to `AWAITING_OPERATOR_SIGNOFF` instead of advancing — run `approve` a
   second time to clear it.
-- `cw dev-queue wait` exits **4** for a signoff-parked ticket (§4).
+- `cw dev-queue wait` exits **4** for a signoff-parked ticket, and for every
+  other human-kept gate (a finalize hold, a `scope_hint: large` approval
+  gate) (§4).
 - A signoff-parked row is escalation-eligible (§11.2) but is NOT eligible
   for re-dispatch until approved.
 
@@ -174,7 +176,8 @@ this path. Use the purpose-built monitor skills:
   peek-stop ladder. Do not cancel a worker on a single att bump — confirm the
   ladder says STOP first.
 - **Block on one ticket to terminal** → **`cw dev-queue wait`** (§4 below) — the
-  sentinel-aware single-ticket monitor.
+  sentinel-aware ticket monitor; several tickets with `--any` return on the
+  first one to reach an exit state.
 - **Terminal exit / attention state** → `cw event tail --type
   session.needs_attention --type session.timed_out`, or the **`cw-session-watch`**
   skill for the exit-event classification.
@@ -469,19 +472,33 @@ Run it at checkpoints — after a gate, after a merge, before reporting that a
 wave is healthy — not on a timer. Event-driven monitoring covers the named
 failures; peek covers the unnamed one.
 
-This has landed (#2004): the attention watch (`scripts/attention_watch.py`,
-see the `orchestrate-sprint` skill's Phase 4) subscribes to
+This has landed (#2004): the attention stream (`cw orchestrate watch`, see
+the `orchestrate-sprint` skill's Phase 4) subscribes to
 `session.liveness_changed`, filtered to `stale_30m`/`stale_45m`, so a stalled
 worker pages you once the reconcile liveness sweep crosses one of those
-bucket boundaries. Since #2250 the watch is wake-on-event rather than a
-persistent Monitor: the orchestrator runs it as a backgrounded `Bash`, it
-exits after delivering a burst of events (or after its `--max-idle-seconds`
-backstop, default 7200s, with a `WATCHER | idle backstop …` line), and the
-orchestrator re-arms it after triage. A per-client resume stamp under
-`~/.claude-workspace/` makes each re-arm pick up exactly where the last wake
-left off, so events landing between wakes are delivered late, never lost. `cw queue peek` remains valuable as a **confirmation**
-step — and it still covers the narrower residual window before the first
-`stale_30m` crossing — but it is no longer the only line of defense.
+bucket boundaries. Since #2693 the stream is one persistent, silent process
+under a single `Monitor` (re-armed only on the Monitor's 30-minute expiry):
+it follows the inbox in process, prints one line per actionable event with
+the next command to run (`| next: <cmd>`), and saves its position in the
+event-bus cursor store (`events_dir()/cursors/attention-<client>-<hash>.json`)
+after each printed line, so a restart or re-arm resumes exactly where it
+stopped. Its **first stdout line is the resolved scope** (`WATCH | scope |
+client=… | lanes=… | tickets=… | source=… | start=… | cursor=…`): the default
+is the caller's focus-pointer lane, else the whole client, and `--all-lanes`
+/ `--ticket` widen it. Lane-less events (liveness, phantom revert) are scoped
+through the ticket's row lane, and a repeated page is suppressed until a
+resolving event (transition, requeue, lane resume, dispatch tick) clears it.
+A PENDING row whose blocker will not clear on its own (a tripped breaker with
+no auto-resume, a paused lane, the ssh-key or disk-pressure gate) is reported
+once as a `STUCK | …` line after `--stuck-after-minutes` (default 15); that
+age is counted from the watcher's first sighting and resets at a re-arm, so a
+still-stuck row re-pages about once per re-arm. One watcher per scope: a
+second start is refused while the recorded owner pid is alive. A recycled pid
+cannot be detected, so a stale record after a restart needs `--force`.
+Changing the scope at a re-arm starts a new position at `start=now`. `cw
+queue peek` remains valuable as a **confirmation** step — and it still covers
+the narrower residual window before the first `stale_30m` crossing — but it
+is no longer the only line of defense.
 
 > **Do not hand-roll a liveness check.** `peek` already computes `idle_m`
 > correctly from parsed transcript records. Substitutes based on file mtimes
@@ -503,16 +520,30 @@ channel flow; this section is the single-ticket blocking-wait contract.
 Use `cw dev-queue wait` — the sentinel-aware monitor (#535):
 
 ```bash
-cw dev-queue wait <TICKET-ID> --client <client> --timeout <seconds> --json
+cw dev-queue wait <TICKET-ID>... --client <client> [--any] [--timeout <seconds>] \
+  [--stuck-after-minutes <N>] --json
 ```
+
+`--timeout` defaults to 21600 s (6 hours); `0` means no limit. Several
+ticket ids need `--any` and return as soon as the first one reaches an exit
+state (the result document names that ticket). `--stuck-after-minutes`
+(default 15) sets when a stuck PENDING ticket exits 5. A long wait should run
+as a background task, not a foreground tool call.
+
+Internal hand-offs never exit: a `blocked` result with
+`blocker.reason: fix_loop_pending_dispatch`, or a `plan_pending_approval` /
+`review_pending_approval` result on a row that is still `RUNNING`, is
+dispatch's own routing. The wait keeps polling until the row settles, then
+the codes below apply.
 
 Exit codes:
 
 - `0` — `shipped` / `no_op` (or `COMPLETED` queue status)
 - `1` — `scope_exceeded` / `forbidden_area` / `validation_failed` / `failed`
   dispositions, or `FAILED` / `CANCELLED` queue status
-- `2` — `blocked` / any `*_pending_*` status / `BLOCKED_ON_USER` **not**
-  caused by a reap proposal
+- `2` — `blocked` / `merge_pending` / `ambiguities_pending_resolution` /
+  `premises_pending_verification` / `BLOCKED_ON_USER` **not** caused by a
+  reap proposal, once dispatch has parked the row
 - `3` — ATTENTION: transcript stale past the wait command's fixed 900 s
   reporting threshold AND worker not in daemon roster (roster absence is the
   evidence; the threshold only debounces the report — nothing is
@@ -521,8 +552,17 @@ Exit codes:
   stage handoff no longer fires this); or a `BLOCKED_ON_USER` park that
   originated from a reap proposal (`reap_proposed_at` set on the owning
   session)
-- `4` — `AWAITING_OPERATOR_SIGNOFF`: ticket parked for an explicit operator
-  signoff before it ships (§2; clear with `cw dev-queue approve`)
+- `4` — human gate: the row is held for an action only a human can give —
+  `AWAITING_OPERATOR_SIGNOFF` (§2), a finalize hold (`hold_finalize` /
+  `finalize_gate: manual`), or a `scope_hint: large` approval gate (cleared
+  by the operator's `cw dev-queue approve`)
+- `5` — stuck: a `PENDING` ticket whose blocker will not clear on its own (a
+  tripped lane breaker with no auto-resume, a paused lane, the ssh-key or
+  disk-pressure gate) for `--stuck-after-minutes`, or a recorded plan/review
+  approval result dispatch has not routed for 300 s (`handoff_unrouted`,
+  usually a dead `cw dev-queue run`). Text mode prints `Stuck: <ticket>
+  (<status>, <N>m): <reason> - <detail>` and, when there is one, `Next:
+  <command>`
 - `124` — hard timeout ceiling reached with no terminal or attention signal
 
 With `--json`, the output is:
@@ -533,11 +573,29 @@ With `--json`, the output is:
   "client": "<client>",
   "status": "<queue-task-status>",
   "session_id": "<session-id>",
-  "state": "terminal|attention|timeout",
+  "state": "terminal|attention|timeout|stuck",
   "sentinel_status": "<AutoDevResult.status or null>",
   "pr_url": "<url or null>"
 }
 ```
+
+A `stuck` document (exit 5) adds `reason` (the machine code: a skip reason
+such as `lane_circuit_paused` / `ssh_key_gate` / `disk_pressure_gate`, the
+synthetic `lane_paused`, or `handoff_unrouted` — branch on this), `detail`
+(display text, do not parse), `age_seconds` (since this wait first saw the
+state, not since enqueue) and `next_command` (the `cw lane resume …` remedy
+for the two lane-pause codes, otherwise `null`). `status` is `pending`, or
+`running` for `handoff_unrouted`, whose `sentinel_status` is the unrouted
+result's status.
+
+While a ticket waits `PENDING`, one `WAITING | #<ticket> | pending:
+<skip_reason> (<source>, <age>s ago)` line per change (at most one per 30 s)
+goes to **stderr**, with the stuck detail appended when the code needs
+action; a `RUNNING` row mid hand-off prints `WAITING | #<ticket> | running:
+dispatch hand-off <reason> (<n>s)`. stdout stays one result document. A
+known limitation: the ticket view prefers a ticket's latest per-ticket
+`dispatch.tick` over the client-wide one, so an old per-ticket tick can hide a
+fresh client-wide ssh-key or disk-pressure gate until it ages out.
 
 `sentinel_status` is non-null only when the sentinel was read directly from
 the transcript (i.e., the sentinel fired before reconcile updated queue
@@ -664,7 +722,9 @@ every refusal names the right one for the row (`Run: ...`), and
 
 **Row lag.** A worker can record its result before the dispatch loop routes
 its completion, so the row still reads `RUNNING` while `cw dev-queue wait`
-already reports the park. `approve` and `requeue` first route such a row
+already reports the park. (For a `plan_pending_approval` /
+`review_pending_approval` result, `wait` now keeps waiting until dispatch
+routes the row, then exits 2 or 4 — or 5 after 300 s unrouted.) `approve` and `requeue` first route such a row
 the way the dispatch loop would (bounded at 10s, one stderr line saying what
 was routed); if the completion is not routable yet they refuse as before,
 naming `cw dev-queue wait`. When that routing just parked the row at a

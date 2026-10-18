@@ -303,11 +303,13 @@ cw dev-queue show <ticket> [--json]      # one task in full + legal next command
 cw queue peek [-c <client>]              # RUNNING sessions: age, idle gap, WAIT/PEEK/STOP verdict
 cw peek <session> [-n <lines>]           # tail a worker's output — no manual transcript digging
 cw session show|result|wait <session>    # one session's state / last sentinel / block-until-status
-cw dev-queue wait <ticket> -c <client>   # block until terminal; sentinel-aware exit codes
+cw dev-queue wait <ticket>... -c <client> # block until terminal (6h; --any for several);
+                                         #   exit 4 human gate, 5 stuck
 cw event tail [-f] [--type <t>…]         # orchestrator event bus (poll or follow)
 cw doctor [--reap]                       # health; --reap clears a wedged lane
-cw orchestrate status|workers            # orchestrator view (`orchestrate watch` is
-                                         #   deprecated: use `cw board`)
+cw orchestrate status|workers            # orchestrator view (live board: `cw board`)
+cw orchestrate watch -c <client>         # attention stream for one Monitor: silent while
+                                         #   healthy; first line is the resolved scope
 cw done <session> [--cleanup]            # mark completed; --cleanup removes its worktree
 ```
 Prefer the **event bus and blocking waits** (`cw dev-queue wait`, `cw session wait`,

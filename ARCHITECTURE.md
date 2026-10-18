@@ -404,7 +404,7 @@ new one.
 | [0004](docs/adr/0004-stage-events-on-orchestrator-bus.md) | Stage-transition events on the orchestrator event bus | Accepted |
 | [0007](docs/adr/0007-reconcile-cadence-and-ownership.md) | Reconcile cadence and ownership: on-demand, ticker, or daemon primary runner | Deferred |
 | [0008](docs/adr/0008-tracker-resolution-is-a-typed-seam.md) | Tracker resolution is a declared descriptor, not bespoke code | Proposed |
-| [0010](docs/adr/0010-live-dashboard-extends-orchestrate-watch.md) | The live work dashboard extends `cw orchestrate watch`, not a new surface *(deprecated — see `cw board`)* | Accepted |
+| [0010](docs/adr/0010-live-dashboard-extends-orchestrate-watch.md) | The live work dashboard extends `cw orchestrate watch`, not a new surface *(superseded by `cw board`; the name was reused by #2693)* | Accepted |
 | [0013](docs/adr/0013-agent-delegated-ticket-work.md) | Provider-portable ticket work is agent work; cw keeps one GitHub-only programmatic client | Accepted |
 | [0015](docs/adr/0015-voided-finding-suppression-is-content-anchored.md) | Voided-finding suppression is content-anchored, never positional | Accepted |
 | [0016](docs/adr/0016-ledger-claim-matching-is-gated-and-measured.md) | Ledger claim matching ships gated and measured, never on by default | Accepted |
