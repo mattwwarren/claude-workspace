@@ -8,13 +8,16 @@ lock instead of a silent hang. The broader lane/concurrency behaviour tests
 live in ``tests/test_cli.py``.
 
 Also covers ``cw config concurrency get -c/--client`` (#2690) and its
-``--json`` output over a lane override holding a timestamp (#2696).
+``--json`` output over a lane override holding a timestamp (#2696), and the
+client dispatch-ceiling setter ``cw config concurrency set|clear ceiling -c``
+with its worker refusal and ``lane.config_changed`` audit event (#2697).
 """
 
 from __future__ import annotations
 
 import fcntl
 import json
+import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -31,12 +34,19 @@ from cw.models import (
     ConcurrencyOverrides,
     LaneConcurrencyOverride,
     LaneConfig,
+    OrchestratorEventType,
 )
+from tests._cli_review_helpers import _enter_operator_machine, _write_session_context
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import _FakeClock, _hold_flock
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
+    from click.testing import Result
+
+    from tests.conftest import CapturedEvent
 
 _CLIENT = "acme"
 
@@ -53,6 +63,13 @@ def _no_serve_message(lock_name: str, lock_path: Path) -> str:
 
 def _snapshot(path: Path) -> bytes | None:
     return path.read_bytes() if path.exists() else None
+
+
+@pytest.fixture(autouse=True)
+def _operator_machine(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # The `-c` ceiling commands and `lane set` refuse inside a headless worker
+    # before their lock, and this suite may itself run inside one.
+    _enter_operator_machine(monkeypatch, tmp_path)
 
 
 @pytest.fixture(autouse=True)
@@ -85,6 +102,8 @@ _CONCURRENCY_COMMANDS: dict[str, list[str]] = {
         "clear",
         "max_parallel_clients",
     ],
+    "ceiling-set": ["config", "concurrency", "set", "ceiling=4", "-c", _CLIENT],
+    "ceiling-clear": ["config", "concurrency", "clear", "ceiling", "-c", _CLIENT],
 }
 
 
@@ -103,6 +122,21 @@ class TestHeldLockFailsCleanly:
         assert _no_serve_message("concurrency_override", lock_path) in result.output
         assert "cw dev-queue serve" not in result.output
         assert _snapshot(overrides) == before
+
+    def test_lane_set(self, capture_events: Callable[..., list[CapturedEvent]]) -> None:
+        events = capture_events("cw.cli.config_cmds")
+        lock_path = cw.config.clients_lock_file()
+        before = cw.config.clients_file().read_bytes()
+
+        with _hold_flock(lock_path):
+            result = CliRunner().invoke(
+                main, ["lane", "set", _CLIENT, "fast", "max_parallel=3"]
+            )
+
+        assert result.exit_code != 0
+        assert _no_serve_message("clients", lock_path) in result.output
+        assert cw.config.clients_file().read_bytes() == before
+        assert events == []
 
     def test_lane_add(self) -> None:
         lock_path = cw.config.clients_lock_file()
@@ -158,6 +192,9 @@ class TestFreeLocksStillWork:
             ["config", "concurrency", "set", "max_parallel_clients=4"],
             ["config", "concurrency", "clear", "max_parallel_clients"],
             ["config", "concurrency", "clear"],
+            ["config", "concurrency", "set", "ceiling=4", "-c", _CLIENT],
+            ["config", "concurrency", "clear", "ceiling", "-c", _CLIENT],
+            ["lane", "set", _CLIENT, "fast", "max_parallel=3"],
         ],
         ids=" ".join,
     )
@@ -288,3 +325,300 @@ class TestConcurrencyGetClient:
         )
         assert result.exit_code != 0
         assert "Unknown client 'nope'" in result.output
+
+
+# --- Client dispatch-ceiling setter (#2697) ---
+
+_STAMP = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+
+
+def _concurrency(*args: str) -> Result:
+    return CliRunner().invoke(main, ["config", "concurrency", *args])
+
+
+def _client_override() -> ClientConcurrencyOverride | None:
+    return cw.config._load_concurrency_overrides().clients.get(_CLIENT)
+
+
+@pytest.fixture
+def ceiling_events(
+    capture_events: Callable[..., list[CapturedEvent]],
+) -> list[CapturedEvent]:
+    return capture_events(
+        "cw.cli.config_cmds", OrchestratorEventType.LANE_CONFIG_CHANGED
+    )
+
+
+def _ceiling_event(old: int | None, new: int | None) -> CapturedEvent:
+    return (
+        OrchestratorEventType.LANE_CONFIG_CHANGED,
+        {"client": _CLIENT, "lane": None, "changes": {"ceiling": [old, new]}},
+        None,
+    )
+
+
+def _seed_client_override(ceiling: int | None) -> None:
+    cw.config._save_concurrency_overrides(
+        ConcurrencyOverrides(
+            max_parallel_clients=6,
+            clients={
+                _CLIENT: ClientConcurrencyOverride(
+                    ceiling=ceiling,
+                    consecutive_freshness_blocks=3,
+                    dispatch_stale_notify_next_eligible_at=_STAMP,
+                )
+            },
+        )
+    )
+
+
+class TestClientCeilingSet:
+    def test_set_writes_the_client_ceiling(
+        self, ceiling_events: list[CapturedEvent]
+    ) -> None:
+        result = _concurrency("set", "ceiling=4", "-c", _CLIENT)
+
+        assert result.exit_code == 0, result.output
+        assert result.output == (
+            f"Set ceiling=4 for client '{_CLIENT}' (override: (unset) -> 4).\n"
+        )
+        override = _client_override()
+        assert override is not None
+        assert override.ceiling == 4
+        assert ceiling_events == [_ceiling_event(None, 4)]
+        data = _concurrency_get_json("-c", _CLIENT)
+        assert data["client"] == {"name": _CLIENT, "ceiling": 4, "source": "override"}
+
+    def test_set_preserves_the_other_override_fields(
+        self, ceiling_events: list[CapturedEvent]
+    ) -> None:
+        _seed_client_override(2)
+
+        result = _concurrency("set", "ceiling=5", "--client", _CLIENT)
+
+        assert result.exit_code == 0, result.output
+        assert "(override: 2 -> 5)." in result.output
+        overrides = cw.config._load_concurrency_overrides()
+        assert overrides.max_parallel_clients == 6
+        assert overrides.clients[_CLIENT] == ClientConcurrencyOverride(
+            ceiling=5,
+            consecutive_freshness_blocks=3,
+            dispatch_stale_notify_next_eligible_at=_STAMP,
+        )
+        assert ceiling_events == [_ceiling_event(2, 5)]
+
+    def test_resetting_the_same_value_is_a_no_op(
+        self, ceiling_events: list[CapturedEvent]
+    ) -> None:
+        _seed_client_override(4)
+        before = _snapshot(cw.config.concurrency_override_file())
+
+        result = _concurrency("set", "ceiling=4", "-c", _CLIENT)
+
+        assert result.exit_code == 0, result.output
+        assert result.output == (
+            f"Set ceiling=4 for client '{_CLIENT}' (override unchanged: 4).\n"
+        )
+        assert _snapshot(cw.config.concurrency_override_file()) == before
+        assert ceiling_events == []
+
+    @pytest.mark.parametrize(
+        ("args", "message"),
+        [
+            (["ceiling=4"], "Supported: max_parallel_clients"),
+            (["ceiling=4"], "-c CLIENT"),
+            (
+                ["max_parallel_clients=4", "-c", _CLIENT],
+                "With -c/--client the only concurrency key is 'ceiling'",
+            ),
+            (["ceiling=0", "-c", _CLIENT], "'ceiling' must be a positive integer"),
+            (["ceiling=-1", "-c", _CLIENT], "'ceiling' must be a positive integer"),
+            (["ceiling=abc", "-c", _CLIENT], "'ceiling' must be a positive integer"),
+            (["ceiling", "-c", _CLIENT], "Expected key=value"),
+            (["ceiling=4", "-c", "nope"], "Unknown client 'nope'"),
+        ],
+        ids=[
+            "no-client-supported",
+            "no-client-mentions-c",
+            "host-key-with-c",
+            "zero",
+            "negative",
+            "not-int",
+            "no-equals",
+            "unknown-client",
+        ],
+    )
+    def test_refusals(
+        self, ceiling_events: list[CapturedEvent], args: list[str], message: str
+    ) -> None:
+        before = _snapshot(cw.config.concurrency_override_file())
+
+        result = _concurrency("set", *args)
+
+        assert result.exit_code != 0
+        assert message in result.output
+        assert _snapshot(cw.config.concurrency_override_file()) == before
+        assert ceiling_events == []
+
+    def test_host_wide_set_is_unchanged(
+        self, ceiling_events: list[CapturedEvent]
+    ) -> None:
+        result = _concurrency("set", "max_parallel_clients=4")
+
+        assert result.exit_code == 0, result.output
+        assert result.output == "Set max_parallel_clients=4\n"
+        assert cw.config._load_concurrency_overrides().max_parallel_clients == 4
+        assert ceiling_events == []
+
+    def test_help_mentions_the_ceiling_and_the_worker_refusal(self) -> None:
+        result = _concurrency("set", "--help")
+
+        assert result.exit_code == 0, result.output
+        text = " ".join(result.output.split())
+        assert "one client's ceiling with -c" in text
+        assert "refused inside a dispatch worker" in text
+
+
+class TestClientCeilingClear:
+    def test_clear_resets_only_the_ceiling(
+        self, ceiling_events: list[CapturedEvent]
+    ) -> None:
+        _seed_client_override(4)
+
+        result = _concurrency("clear", "ceiling", "-c", _CLIENT)
+
+        assert result.exit_code == 0, result.output
+        assert result.output == (
+            f"Cleared override for 'ceiling' on client '{_CLIENT}'"
+            " (override: 4 -> (unset)).\n"
+        )
+        overrides = cw.config._load_concurrency_overrides()
+        assert overrides.max_parallel_clients == 6
+        assert overrides.clients[_CLIENT] == ClientConcurrencyOverride(
+            consecutive_freshness_blocks=3,
+            dispatch_stale_notify_next_eligible_at=_STAMP,
+        )
+        assert ceiling_events == [_ceiling_event(4, None)]
+
+    @pytest.mark.parametrize("ceiling", [None, "absent"], ids=["unset", "no-entry"])
+    def test_nothing_to_clear_is_a_no_op(
+        self, ceiling_events: list[CapturedEvent], ceiling: str | None
+    ) -> None:
+        if ceiling is None:
+            _seed_client_override(None)
+        before = _snapshot(cw.config.concurrency_override_file())
+
+        result = _concurrency("clear", "ceiling", "-c", _CLIENT)
+
+        assert result.exit_code == 0, result.output
+        assert result.output == (
+            f"No ceiling override is set for client '{_CLIENT}'.\n"
+        )
+        assert _snapshot(cw.config.concurrency_override_file()) == before
+        assert ceiling_events == []
+
+    @pytest.mark.parametrize(
+        ("args", "message"),
+        [
+            (["-c", _CLIENT], "With -c/--client, KEY must be 'ceiling'"),
+            (
+                ["max_parallel_clients", "-c", _CLIENT],
+                "With -c/--client, KEY must be 'ceiling'",
+            ),
+            (["ceiling"], "Supported: max_parallel_clients"),
+            (["ceiling", "-c", "nope"], "Unknown client 'nope'"),
+        ],
+        ids=["bare-with-c", "host-key-with-c", "ceiling-without-c", "unknown-client"],
+    )
+    def test_refusals(
+        self, ceiling_events: list[CapturedEvent], args: list[str], message: str
+    ) -> None:
+        _seed_client_override(4)
+        before = _snapshot(cw.config.concurrency_override_file())
+
+        result = _concurrency("clear", *args)
+
+        assert result.exit_code != 0
+        assert message in result.output
+        assert _snapshot(cw.config.concurrency_override_file()) == before
+        assert ceiling_events == []
+
+    @pytest.mark.parametrize(
+        ("args", "output"),
+        [
+            ([], "Cleared all concurrency overrides.\n"),
+            (
+                ["max_parallel_clients"],
+                "Cleared override for 'max_parallel_clients'.\n",
+            ),
+        ],
+        ids=["all", "host-key"],
+    )
+    def test_host_wide_clear_is_unchanged(
+        self, ceiling_events: list[CapturedEvent], args: list[str], output: str
+    ) -> None:
+        _seed_client_override(4)
+
+        result = _concurrency("clear", *args)
+
+        assert result.exit_code == 0, result.output
+        assert result.output == output
+        assert cw.config._load_concurrency_overrides().max_parallel_clients is None
+        assert ceiling_events == []
+
+
+class TestClientCeilingWorkerRefusal:
+    @pytest.mark.parametrize(
+        "args",
+        [["set", "ceiling=4", "-c", _CLIENT], ["clear", "ceiling", "-c", _CLIENT]],
+        ids=" ".join,
+    )
+    def test_headless_context_refuses(
+        self, tmp_path: Path, ceiling_events: list[CapturedEvent], args: list[str]
+    ) -> None:
+        _seed_client_override(2)
+        _write_session_context(tmp_path, headless=True)
+        before = _snapshot(cw.config.concurrency_override_file())
+
+        result = _concurrency(*args)
+
+        assert result.exit_code != 0
+        assert "dispatch worker" in result.output
+        assert _snapshot(cw.config.concurrency_override_file()) == before
+        assert ceiling_events == []
+
+    def test_worker_refusal_precedes_the_client_lookup(self, tmp_path: Path) -> None:
+        _write_session_context(tmp_path, headless=True)
+
+        result = _concurrency("set", "ceiling=4", "-c", "nope")
+
+        assert result.exit_code != 0
+        assert "dispatch worker" in result.output
+        assert "Unknown client" not in result.output
+
+
+class TestClientCeilingEmitFailure:
+    def test_emit_failure_says_the_change_was_applied(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        def _fail(*_args: object, **_kwargs: object) -> None:
+            msg = "inbox full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.cli.config_cmds.record_event", _fail)
+
+        with caplog.at_level(logging.WARNING, logger="cw.cli.config_cmds"):
+            result = _concurrency("set", "ceiling=4", "-c", _CLIENT)
+
+        assert result.exit_code != 0
+        text = " ".join(result.output.split())
+        assert (
+            f"The change to the dispatch ceiling of client '{_CLIENT}' WAS applied"
+            " (ceiling: (unset) -> 4)"
+        ) in text
+        override = _client_override()
+        assert override is not None
+        assert override.ceiling == 4
+        assert [
+            r.levelno for r in caplog.records if r.name == "cw.cli.config_cmds"
+        ] == [logging.WARNING]

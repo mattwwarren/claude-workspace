@@ -2139,6 +2139,9 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/cli/config_cmds.py", "lane_rm"): 2,
     ("cw/cli/config_cmds.py", "lane_pause"): 1,
     ("cw/cli/config_cmds.py", "lane_resume"): 1,
+    # `cw lane set` / `cw config lane set` (#2697): only the worker guard and
+    # key/value parsing precede the lock; the audit event follows it.
+    ("cw/cli/lane_set.py", "lane_set"): 1,
     # `cw review settle`'s row write (#2701). It runs after the settle's audit
     # events by design (events-before-effect, ADR-0016 invariant 10); a timeout
     # leaves those events with no effect, which is documented accepted noise,
