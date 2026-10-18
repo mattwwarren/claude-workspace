@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **An opencode harvest keeps the parser's blocker reason instead of `opencode_no_output` (#2629).** When the final `AUTO_DEV_RESULT` block was real but unusable (`validation_failed`, `no_result_emitted` including a truncated frame, `status_unknown`, `schema_version_unsupported`), the harvest discarded the parser's reason and details and reported `opencode_no_output` with the log tail. The reason and details now propagate, the details prefixed `worker emitted an unusable AUTO_DEV_RESULT sentinel: `. The blocker stays pinned to the dispatched stage's entry marker and retry-eligible. When a session id is known, a diagnostics bundle holds the log tail and the details end with its `[diagnostics: <path>]` pointer. Routing is unchanged: the row still parks `BLOCKED_ON_USER`, and the `validation_failed` attempt cap still applies only to a `BlockedResult` sentinel. A log with no usable block still reports `opencode_no_output`.
+
 ## [1.75.0] - 2026-10-18
 
 ### Added
