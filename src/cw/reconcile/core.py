@@ -192,8 +192,7 @@ def _run_terminal_backstops_and_sweeps(
     timed_out_ticket_ids = revert_timed_out_tasks(dirty_checks)
     completed_silent_ticket_ids = revert_completed_silent_tasks(dirty_checks)
     park_terminal_sibling_tasks()
-    # #2715: park RUNNING rows bound to a session with no record; page
-    # sessionless ones. After adoption and the backstops have had their turn.
+    # #2715: park record-missing RUNNING rows; page sessionless ones.
     run_lost_session_recovery(now=now, clients=clients, native_live=native_live)
     run_concierge_recoveries(now=now, native_live=native_live, config=config)
     # #2307: re-evaluate codex-orphan parks the boot pass left with an ACTIVE
@@ -420,12 +419,7 @@ def _capture_harvest_facts() -> HarvestFacts:
 def _capture_closing_prepasses(
     *, config: OrchestratorConfig, clients: dict[str, ClientConfig]
 ) -> tuple[ShippedPrProbes, HarvestFacts]:
-    """The last two lockless pre-passes: shipped-release PRs (#2715), then harvest.
-
-    The tuple is evaluated left to right, so the harvest capture stays last
-    (its facts age from capture). One helper keeps ``reconcile()`` at its
-    statement count.
-    """
+    """Shipped-release PRs (#2715), then the harvest facts, which stay last."""
     return (
         capture_shipped_pr_probes(config=config, clients=clients),
         _capture_harvest_facts(),
@@ -751,12 +745,10 @@ def _reconcile_locked(
     phantom sweep acts only on roster absence (the process is genuinely
     gone), the mid-turn usage-limit sweep acts only on a transcript tail that
     ends on a usage-limit message (#2324), and the liveness sweep is
-    signal-only. The stranded-routed-result page (#2524) never closes; the
-    shipped release before it closes only a stranded session whose recorded
-    shipped result has its own OPEN/MERGED PR (#2715; ``shipped_probes`` from
-    its lockless pre-pass, ``None`` makes it a no-op), its age checks only
-    delaying that evidence-triggered act. The phantom and usage-limit sweeps'
-    destructive acts are both gated by ``reap_policy`` (ADR-0006).
+    signal-only, as is the #2524 page; the shipped release before it closes on
+    a recorded shipped result with its own OPEN/MERGED PR only (#2715;
+    ``shipped_probes=None`` makes it a no-op). The phantom and usage-limit
+    sweeps' destructive acts are both gated by ``reap_policy`` (ADR-0006).
     """
     if clients is None:
         clients = load_clients()

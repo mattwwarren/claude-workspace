@@ -16,21 +16,24 @@ with its daemon worker still live in the roster.
 This module finds that shape (:func:`find_stranded_routed_sessions`) and pages
 it exactly once (:func:`sweep_routed_result_sessions`). ADR-0014 governs it:
 the transcript-age bucket only debounces a signal (invariant 1), the new
-heuristic lands as a signal first (invariant 3), and the only actors that ever
-close such a session are explicit operator commands (the orchestrator session
-counts, ADR-0020) -- ``cw doctor --reap``
-(``cw.doctor.routed_result_wedge``), ``cw spawn close --confirmed-dead``, and
-the operator-run ``cw dev-queue approve`` / ``cw dev-queue requeue`` (#2517;
-they stop the worker, confirm it left the roster, then close the session;
-invariant 2). The finders below (:func:`routed_marker_candidates`,
+heuristic lands as a signal first (invariant 3), and the operator commands
+close such a session (the orchestrator session counts, ADR-0020) --
+``cw doctor --reap`` (``cw.doctor.routed_result_wedge``),
+``cw spawn close --confirmed-dead``, and the operator-run
+``cw dev-queue approve`` / ``cw dev-queue requeue`` (#2517; they stop the
+worker, confirm it left the roster, then close the session; invariant 2). The
+finders below (:func:`routed_marker_candidates`,
 :func:`split_resolvable_routed_sessions`) are called only from those commands.
-Accordingly, nothing here ever mutates a session's status or a
-queue row, emits ``session.completed``, stops a daemon worker, runs a
+One automatic close exists, outside this module: ``cw.reconcile.shipped_release``
+(#2715, ADR-0006 amendment, the Option B decision) closes the subset whose
+emitted result is ``shipped`` with its own OPEN or MERGED PR and a quiesced,
+session-bound drain stamp, reusing :func:`find_stranded_routed_sessions` as
+its population and running just before this page sweep. Every other consumed
+result stays page-only. Nothing in this module ever mutates a session's status
+or a queue row, emits ``session.completed``, stops a daemon worker, runs a
 subprocess, or calls ``gh``; the only state written is the existing
 ``Session.reap_proposed_at`` page-once latch, through the shared proposal
-emitter. An automatic close under ``reap_policy: auto`` is deliberately not
-built here: it is deferred to a separate ticket that starts with a
-superseding-ADR decision.
+emitter.
 
 The reconcile caller passes the already-loaded client set as a per-client
 rollout gate. Sessions for an unconfigured client remain fail-open and are
@@ -474,8 +477,10 @@ def _page_breadcrumbs(hit: StrandedRoutedSession) -> str:
 def _page_stranded_session(hit: StrandedRoutedSession) -> bool:
     """Emit the once-only ``session.needs_attention`` page; True when it landed.
 
-    No push notification (operator decision D1): this runs inside reconcile's
-    ``sessions_lock`` hold, which must never start a thread or subprocess.
+    No push notification (operator decision D1). That is a decision, not a
+    lock constraint: other in-lock reconcile paths do fire one (the push is a
+    non-blocking daemon thread). The #2715 lost-session pages follow the same
+    no-push decision for parity.
     An ``OSError`` from the inbox write is logged and reported as False, so
     the caller leaves the session unstamped and the next tick retries
     (at-least-once, the #2490 lesson).

@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Reconcile closes a stranded shipped session once its own PR is open or merged (#2715).** A live DAEMON session whose consumed `cw result emit` result is `shipped`, with no lane-occupying row bound to it (the #2524 `routed_result_session_stranded` shape), is now closed instead of only paged when its own PR is OPEN or MERGED and its drain stamp is readable, carries the session's own id and is past `fix_loop_await_deadline_minutes`. The session is marked `COMPLETED` with `reap_reason=routed_result_stranded`, its worker is stopped after the sessions lock releases, and one `session.completed` carries a new optional `pr_url`. No queue row is touched; a `signoff` or `hold_finalize` row still pins its session. The PR lookup is a lockless `gh pr list` pre-pass, at most three per tick. It fails closed: a missing, unreadable or foreign drain stamp (including every stamp written before this release) leaves the session page-only. The Stop hook's drain-stamp snapshot now records the session id for this check.
+- **Reconcile parks a RUNNING row whose session record is missing (#2715).** A row bound to a `session_id` that `sessions.json` does not hold (the state write failed after launch) is parked `BLOCKED_ON_USER` as `running_row_session_lost`, keeping its `session_id`, with no unproductive charge and one page; it escalates after 45 minutes and `cw dev-queue requeue` releases it. At most three rows park per tick, and none when `sessions.json` holds no session and more than three would park. A RUNNING row with no session 30 s after its claim gets one `running_row_no_session` page and the `?no_session` advisory, and is never parked.
+
 ## [1.74.1] - 2026-10-16
 
 ### Fixed

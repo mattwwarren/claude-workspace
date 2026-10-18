@@ -63,6 +63,13 @@ re-exports. Submodules:
 - ``routed_result_sessions`` — signal-only, page-once detector for live
   sessions stranded after a #2458 partial route already routed their result
   (#2524; never closes -- the operator does, via ``cw doctor --reap``).
+- ``shipped_release`` — closes the stranded subset whose emitted ``shipped``
+  result has its own OPEN or MERGED PR and a quiesced, session-bound drain
+  stamp (#2715; evidence-triggered, fail-closed, not ``reap_policy``-gated;
+  completes no row).
+- ``lost_session_rows`` — parks a RUNNING row bound to a session with no
+  record (``running_row_session_lost``) and pages, once, a RUNNING row with
+  no session past the spawn grace (#2715; not ``reap_policy``-gated).
 - ``usage_limit_mid_turn`` — roster-present usage-limit stop sweep (#2324;
   ``reap_policy``-gated revert or BLOCKED_ON_USER park, plus lockout arm).
 - ``phantom`` — phantom (dead-surface) sweep.

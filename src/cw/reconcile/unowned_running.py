@@ -32,11 +32,13 @@ no revert, stop, park or removal, so it is not gated by ``reap_policy``
 (ADR-0006) and is not timer-driven (ADR-0014). It applies to any Session
 status and any backend, since the codex preflight writes the same context.
 
-Not covered here (the #2591 follow-up): a row whose Session was never recorded
-(the ``sessions.json`` write failed), a row bound to an absent Session, and
-any signal for a row that cannot be tied. Each such row is left untouched. A
-live unrecorded worker is still stopped by the leaked-worker sweep, never
-adopted.
+Not covered here: a row whose Session was never recorded (the
+``sessions.json`` write failed), a row bound to an absent Session, and any
+signal for a row that cannot be tied. Such a row is never adopted. A bound
+row whose Session record is missing is parked by
+``cw.reconcile.lost_session_rows`` (#2715), and a row still unbound past the
+spawn grace is paged there; a live unrecorded worker is stopped by the
+leaked-worker sweep.
 
 Runs from ``cw.reconcile.core._run_terminal_backstops_and_sweeps``, under
 ``reconcile()``'s ``sessions_lock``, before the TIMED_OUT backstop. It reads

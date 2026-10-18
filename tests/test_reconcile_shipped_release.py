@@ -1268,3 +1268,16 @@ class TestBoundaryGuards:
         assert "subprocess" not in imports
         assert stop_calls == []
         assert gh_argv == []
+
+
+class TestAdrAmendment:
+    """D4: the amendment cites the operator authority and the delay-only rule."""
+
+    def test_cites_the_operator_authority_and_the_delay_only_rule(self) -> None:
+        text = _ADR.read_text(encoding="utf-8")
+        start = text.index("## Amendment (#2715)")
+        amendment = text[start : text.index("\n## ", start + 1)]
+
+        assert "issuecomment-6215180981" in amendment
+        assert "issuecomment-6249899648" in amendment
+        assert "the draining veto only delays the act" in amendment
