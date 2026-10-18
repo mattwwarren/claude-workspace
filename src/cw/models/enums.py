@@ -258,6 +258,11 @@ class OrchestratorEventType(StrEnum):
     LANE_CREATED = "lane.created"
     LANE_PAUSED = "lane.paused"
     LANE_RESUMED = "lane.resumed"
+    # GitHub #2697: audit trail for `cw lane set` / `cw config lane set` and
+    # the client-ceiling setter `cw config concurrency set|clear ceiling -c`.
+    # Payload {client, lane, changes: {key: [old, new]}}; `lane` is None for a
+    # client ceiling. See docs/events.md.
+    LANE_CONFIG_CHANGED = "lane.config_changed"
     # ``cw focus set`` / ``cw focus clear`` audit trail (#1644). ``cw focus
     # show`` is read-only and deliberately emits nothing.
     FOCUS_SET = "focus.set"

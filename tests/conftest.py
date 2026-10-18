@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, NoReturn, TypedDict, cast
 from unittest.mock import MagicMock
 
+import click
 import pytest
 import yaml
 
@@ -2818,6 +2819,106 @@ def init_repo_with_remote(path: Path, remote_url: str | None) -> Path:
             check=True,
         )
     return path
+
+
+def _write_tracker_config(root: Path, system: str) -> None:
+    """Write a project-config.yaml under *root* naming tracker *system*.
+
+    Hoisted from ``test_preflight.py``'s private ``_write_config`` (#2697) so
+    the ``cw preflight`` CLI tests share it.
+    """
+    _write_project_config_yaml(root, f"tracking:\n  primary:\n    system: {system}\n")
+
+
+def _make_agent_repo(root: Path, *, tracker: str | None = "github-issues") -> Path:
+    """Build a repo root with the required plan-review agents present locally.
+
+    Hoisted from ``test_preflight.py`` (#2697); also used by
+    ``test_cli_preflight.py``. *tracker* ``None`` writes no project-config.
+    """
+    agents = root / ".claude" / "agents"
+    agents.mkdir(parents=True, exist_ok=True)
+    (agents / "plan-reviewer.md").write_text("stub\n", encoding="utf-8")
+    (agents / "plan-soundness-reviewer.md").write_text("stub\n", encoding="utf-8")
+    if tracker is not None:
+        _write_tracker_config(root, tracker)
+    return root
+
+
+def _install_check_stubs(
+    pf: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    captured: dict[str, tuple[str, ...]],
+) -> None:
+    """Stub ``cw.preflight``'s four subprocess-touching checks (#2697).
+
+    *pf* is the ``cw.preflight`` module. With the stubs in place
+    ``run_preflight`` runs with no real ``gh``/``cw``; each stub records its
+    arguments in *captured* under ``ticket_open``, ``no_open_pr`` and
+    ``not_queued``. Hoisted from ``test_preflight.py`` so
+    ``test_cli_preflight.py`` shares it.
+    """
+
+    def _fake_doctor() -> tuple[dict[str, object], dict[str, object]]:
+        return (
+            {
+                "name": "cw_backend_healthy",
+                "passed": True,
+                "severity": "hard",
+                "detail": "",
+            },
+            {
+                "name": "cw_doctor_clean",
+                "passed": True,
+                "severity": "soft",
+                "detail": "",
+            },
+        )
+
+    def _fake_ticket_open(ticket: str, repo: str, tracker: str) -> dict[str, object]:
+        captured["ticket_open"] = (ticket, repo, tracker)
+        return {"name": "ticket_open", "passed": True, "severity": "hard", "detail": ""}
+
+    def _fake_no_open_pr(ticket: str, repo: str, tracker: str) -> dict[str, object]:
+        captured["no_open_pr"] = (ticket, repo, tracker)
+        return {
+            "name": "no_open_pr_for_ticket",
+            "passed": True,
+            "severity": "hard",
+            "detail": "",
+        }
+
+    def _fake_not_queued(ticket: str, client: str) -> dict[str, object]:
+        captured["not_queued"] = (ticket, client)
+        return {
+            "name": "not_already_queued",
+            "passed": True,
+            "severity": "hard",
+            "detail": "",
+        }
+
+    monkeypatch.setattr(pf, "_check_cw_doctor", _fake_doctor)
+    monkeypatch.setattr(pf, "_check_ticket_open", _fake_ticket_open)
+    monkeypatch.setattr(pf, "_check_no_open_pr", _fake_no_open_pr)
+    monkeypatch.setattr(pf, "_check_not_queued", _fake_not_queued)
+
+
+def walk_click_tree(
+    root: click.Command, path: tuple[str, ...] = ()
+) -> Iterator[tuple[tuple[str, ...], click.Command]]:
+    """Yield ``(path, command)`` for *root* and every command beneath it.
+
+    Hoisted from ``test_cli_surface_conventions.py``'s private ``_walk``
+    (#2697) so the orchestrator command-shape lint can resolve allowlisted
+    verbs against the same live Click tree.
+    """
+    yield path, root
+    if isinstance(root, click.Group):
+        ctx = click.Context(root)
+        for name in root.list_commands(ctx):
+            sub = root.get_command(ctx, name)
+            if sub is not None:
+                yield from walk_click_tree(sub, (*path, name))
 
 
 def commit_tracked_file(worktree: Path, relpath: str, content: str = "x = 1\n") -> None:

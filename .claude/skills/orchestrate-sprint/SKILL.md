@@ -99,6 +99,11 @@ what plays when; the agents and pipelines do the playing.
    afterwards; there is no pre-action approval gate. Only the escalations
    under *The human decides* below pause for a person.
 
+Orchestrator command shapes: do not prescribe command substitution, shell loops
+or jq filter flags in commands you run; the allowlist and the rule are in
+docs/dispatch-runbook.md, section Orchestrator permission allowlist.
+tests/test_orchestrator_command_shapes.py enforces it.
+
 ## Decision ownership
 
 Rule 5 says batch decisions to the human; this section is the reference

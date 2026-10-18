@@ -43,13 +43,11 @@ Optional flags from the user:
 Run the bundled parser to resolve the session and pull the parsed sentinel plus the raw payload:
 
 ```bash
-uv run --project "$(git rev-parse --show-toplevel)" python \
-  .claude/skills/cw-followup/scripts/parse_sentinel.py \
-  --ticket-id <NUMBER>
+uv run python .claude/skills/cw-followup/scripts/parse_sentinel.py --ticket-id <NUMBER>
 # or --session-id <SHORT> or --transcript-path <PATH>
 ```
 
-The script emits one JSON object on stdout with `result_kind`, `result`, `raw_payload`, `session`, `transcript_path`, and `sentinel_found`. Capture it to a variable; the rest of the skill reads from this object.
+Run it from a cw worktree (uv finds the project from the current directory). The script emits one JSON object on stdout with `result_kind`, `result`, `raw_payload`, `session`, `transcript_path`, and `sentinel_found`. Keep the printed JSON in view; the rest of the skill reads fields from this object. Where a later command needs one of its values, copy the value verbatim from the printed JSON and substitute it literally for the `<placeholder>`; do not chain commands through shell variables or command substitution.
 
 If `sentinel_found` is false, stop and surface the transcript path + the session record. Treat this as a no-result-emitted failure (see `references/no-sentinel-patterns.md` for likely causes).
 
@@ -70,23 +68,17 @@ The branch table below uses `effective_status`.
 
 #### `shipped`
 
-The PR auto-merges via `gh pr merge --auto`. Verify it landed:
+The PR auto-merges via `gh pr merge --auto`. Verify it landed: read `result.pr.url` from the Step 1 JSON (fall back to `raw_payload.pr.url` when it is absent) and substitute it for `<PR_URL>`:
 
 ```bash
-PR_URL=$(jq -r '.result.pr.url // .raw_payload.pr.url' <<<"$RESULT")
-gh pr view "$PR_URL" --json mergeStateStatus,state,number,title
+gh pr view <PR_URL> --json mergeStateStatus,state,number,title
 ```
 
 Print the merge state. If still open, suggest the review-monitor will handle it. If closed, recommend `cw orchestrate retire`.
 
 #### `no_op`
 
-The ticket was satisfied by a prior PR. Pull the citation from `friction_highlights`:
-
-```bash
-jq -r '.raw_payload.friction_highlights[]' <<<"$RESULT"
-# look for the satisfying-PR pointer; spec uses a "satisfying_pr: <url>" highlight
-```
+The ticket was satisfied by a prior PR. Pull the citation from `raw_payload.friction_highlights` in the Step 1 JSON: look for the satisfying-PR pointer (the spec uses a `satisfying_pr: <url>` highlight).
 
 Draft a close comment in the form:
 
@@ -98,42 +90,86 @@ Close it with that citation (no confirmation needed once the satisfying PR is ve
 
 ```bash
 gh issue close <TICKET> --repo mattwwarren/claude-workspace \
-  --comment "$DRAFT_COMMENT"
+  --comment "<the drafted close comment>"
 ```
 
 #### `merge_gate_blocked`
 
 The branch was correctly built but `local main` diverged from `origin/main` before merge gate ran. Read `prior_pr_warnings` to see which PRs need to land first.
 
-Default action (when prior PRs have since merged): rebase + force-push + open PR. Force-push applies only to a cw-owned branch (one the pipeline created for the ticket), only run by the orchestrator (never a headless worker), always with `--force-with-lease`, and only after the evidence holds: prior PRs merged, rebase onto `origin/main` clean, `fork_point_sha` verified, and `git -C "$WORKTREE" log "origin/$BRANCH" ^HEAD` showing no remote-only commits (run it after the rebase and before the push; the only entries allowed are the pre-rebase copies of your own commits, so confirm with `git -C "$WORKTREE" cherry -v HEAD "origin/$BRANCH"` that no `+` line carries work absent from the rebased branch). No confirmation step once that holds. A shared branch's history rewrite stays with the human. (This is recovery after a park; a worker's own `--force-with-lease` push of the branch it is working on after its own rebase — `/auto-dev-finalize`'s rebase retry, `/review-monitor` — is pipeline behavior and unchanged, ADR-0020 invariant 3.)
+Default action (when prior PRs have since merged): rebase + force-push + open PR. Force-push applies only to a cw-owned branch (one the pipeline created for the ticket), only run by the orchestrator (never a headless worker), always with `--force-with-lease` (never plain `--force`), and only after the evidence holds: prior PRs merged, rebase onto `origin/main` clean, and both pre-push checks below pass. No confirmation step once that holds. A shared branch's history rewrite stays with the human. (This is recovery after a park; a worker's own `--force-with-lease` push of the branch it is working on after its own rebase — `/auto-dev-finalize`'s rebase retry, `/review-monitor` — is pipeline behavior and unchanged, ADR-0020 invariant 3.)
+
+Read `session.worktree_path`, `raw_payload.branch` and `raw_payload.fork_point_sha` from the Step 1 JSON. **Copy each value verbatim from the printed JSON** (never retype a SHA from memory) and substitute it for `<WORKTREE>`, `<BRANCH>` and `<FORK_POINT>`. A mistranscribed `<FORK_POINT>` makes the rebase silently drop or duplicate commits, which is why the two checks below gate the push. Run each command as its own Bash call:
 
 ```bash
-WORKTREE=$(jq -r '.session.worktree_path' <<<"$RESULT")
-BRANCH=$(jq -r '.raw_payload.branch' <<<"$RESULT")
-FORK_POINT=$(jq -r '.raw_payload.fork_point_sha' <<<"$RESULT")
+git -C <WORKTREE> fetch origin
+```
 
-git -C "$WORKTREE" fetch origin
-git -C "$WORKTREE" checkout -B "$BRANCH" "origin/$BRANCH"
-git -C "$WORKTREE" rebase --onto origin/main "$FORK_POINT" "$BRANCH"
-git -C "$WORKTREE" push --force-with-lease origin "$BRANCH"
+```bash
+git -C <WORKTREE> checkout -B <BRANCH> origin/<BRANCH>
+```
+
+```bash
+git -C <WORKTREE> merge-base --is-ancestor <FORK_POINT> HEAD
+```
+
+A non-zero exit means `<FORK_POINT>` is not on the branch (mistranscribed, or the branch was not cut from it): stop and report; do not rebase.
+
+```bash
+git -C <WORKTREE> rebase --onto origin/main <FORK_POINT> <BRANCH>
+```
+
+Pre-push checks, both required, after the rebase and before the push:
+
+```bash
+git -C <WORKTREE> merge-base --is-ancestor <FORK_POINT> HEAD
+```
+
+```bash
+set -o pipefail
+git -C <WORKTREE> cherry -v HEAD origin/<BRANCH> | awk 'NF == 0 || $1 != "-" { exit 1 }'
+```
+
+The first must exit 0. The second must also exit 0: `pipefail` preserves a
+non-zero `git cherry` status, and `awk` rejects every non-empty line whose first
+field is not `-`. If either check fails, stop and report: do not push (a `+`
+line is work the rebase would discard from the remote branch). Only when both
+pass:
+
+```bash
+git -C <WORKTREE> push --force-with-lease origin <BRANCH>
 ```
 
 Before opening the PR, replicate `ship-it.md` Step 3a's gate check (this
-recovery path has no `$TITLE` of its own, so derive it from the branch tip):
+recovery path has no `$TITLE` of its own, so derive it from the branch tip).
+Write the changed files and the tip subject to fresh scratch files, each as its
+own command. Keep Git output in those files; do not paste it into shell source
+or a shell assignment:
 
 ```bash
-CHANGED_FILES=$(git -C "$WORKTREE" diff --name-only origin/main...HEAD)
-TITLE=$(git -C "$WORKTREE" log -1 --format=%s "$BRANCH")
+CHANGED_FILES_FILE=/tmp/cw-followup-changed-files.txt
+git -C <WORKTREE> diff --name-only origin/main...HEAD | tee "$CHANGED_FILES_FILE"
+```
+
+```bash
+SUBJECT_FILE=/tmp/cw-followup-subject.txt
+git -C <WORKTREE> log -1 --format=%s <BRANCH> | tee "$SUBJECT_FILE"
+```
+
+Then read the subject and changed-file list from those files. The gate consumes
+the files directly, so Git output is never embedded in shell assignments:
+
+```bash
 GATE_FIRES=false
-if printf '%s' "$TITLE" | grep -qE '^(feat|fix)\('; then
-  if printf '%s\n' "$CHANGED_FILES" | grep -q '^src/'; then
+if grep -qE '^(feat|fix)\(' "$SUBJECT_FILE"; then
+  if grep -q '^src/' "$CHANGED_FILES_FILE"; then
     GATE_FIRES=true
   fi
 fi
 EXTRA_LABEL_ARGS=""
 ```
 
-If `$GATE_FIRES` is `true` and `CHANGED_FILES` doesn't already include
+If `$GATE_FIRES` is `true` and the changed-file list doesn't already include
 `CHANGELOG.md`, apply the same decision tree as `.claude/commands/ship-it.md`
 Step 3a before opening the PR — add a real `[Unreleased]` entry by default,
 or, only as a deliberate escape hatch, `gh label create no-changelog ... ||
@@ -142,44 +178,40 @@ re-derive the decision tree here; cross-reference `ship-it.md` Step 3a so the
 two copies can't drift.
 
 ```bash
-gh pr create --base main --head "$BRANCH" --title "$TITLE" ${EXTRA_LABEL_ARGS}  # body derived from the review summary
+read -r TITLE < "$SUBJECT_FILE"
+gh pr create --base main --head <BRANCH> --title "$TITLE" ${EXTRA_LABEL_ARGS}  # body derived from the review summary
 ```
+
+Use the `read -r` value for the title exactly as shown; do not substitute raw
+Git output into the command. The title is passed as one quoted shell argument.
 
 #### `ambiguities_pending_resolution` / `premises_pending_verification`
 
-Render a Decisions section and append it to the ticket body. Pipe the parser output through `render_decisions.py`:
+Render a Decisions section and append it to the ticket body. Save the Step 1 parser output to a scratch file with the Write tool, substitute its path for `<path>`, and run `render_decisions.py` on it:
 
 ```bash
-echo "$RESULT" | uv run --project "$(git rev-parse --show-toplevel)" \
-  python .claude/skills/cw-followup/scripts/render_decisions.py \
-  --auto-accept-defaults  # only when every ambiguity's default is backed by the ticket's sources of truth (cite them)
+uv run python .claude/skills/cw-followup/scripts/render_decisions.py --input <path>
 ```
 
-Without `--auto-accept-defaults`, the script leaves each decision as a fill-in stub. Answer each ambiguity / premise yourself from the ticket's sources of truth (ticket body, approved plan-of-record, pre-flight resolutions, recorded decisions, linked RFCs and dependency tickets; verify premises against the code), then substitute the answers into the stub before appending. Only a genuine product/scope fork (a question those sources cannot answer) goes to the human, batched into one `AskUserQuestion` with a recommendation for each.
+Append `--auto-accept-defaults` only when every ambiguity's default is backed by the ticket's sources of truth (cite them). Without `--auto-accept-defaults`, the script leaves each decision as a fill-in stub. Answer each ambiguity / premise yourself from the ticket's sources of truth (ticket body, approved plan-of-record, pre-flight resolutions, recorded decisions, linked RFCs and dependency tickets; verify premises against the code), then substitute the answers into the stub before appending. Only a genuine product/scope fork (a question those sources cannot answer) goes to the human, batched into one `AskUserQuestion` with a recommendation for each.
 
-To append to the ticket body without losing the existing content:
+To append to the ticket body without losing the existing content, read `raw_payload.ticket_id` from the Step 1 JSON, substitute it for `<TICKET>`, and print the current body (read `body` from the printed JSON):
 
 ```bash
-TICKET=$(jq -r '.raw_payload.ticket_id' <<<"$RESULT")
-gh issue view "$TICKET" --repo mattwwarren/claude-workspace --json body --jq .body
+gh issue view <TICKET> --repo mattwwarren/claude-workspace --json body
 ```
 
 Use the **Write tool** to author the concatenated result (the existing body above, plus the decisions section) to a scratch file — see CLAUDE.md's **Agent File Operations** rule.
 
 ```bash
-gh issue edit "$TICKET" --repo mattwwarren/claude-workspace --body-file /tmp/body.md
+gh issue edit <TICKET> --repo mattwwarren/claude-workspace --body-file /tmp/body.md
 ```
 
 After append, re-dispatch: `cw dev-queue add <TICKET>` (add `-c <CLIENT>` only for a multi-client setup); if the dispatch loop is idle, also run `cw dev-queue run --once` to kick it. The orchestrator re-dispatches itself (skip only under `--dry-run`).
 
 #### `blocked` (validated, real `AutoDevResult` with `status=blocked`)
 
-Print the blocker fields verbatim:
-
-```bash
-jq '.result.blocker' <<<"$RESULT"
-# stage, reason, details
-```
+Print the blocker fields verbatim: read `result.blocker` (`stage`, `reason`, `details`) from the Step 1 JSON.
 
 When `blocker.reason == "tool_denied"` (issue #182): re-dispatch is the typical recovery, but the classifier non-determinism flagged in #183 means a delay before retry is sensible. Run `cw dev-queue add <TICKET>` (optionally with `-c <CLIENT>`) after a 2-3 minute pause for the auto-mode classifier to settle; if the dispatch loop is idle, run `cw dev-queue run --once` after adding.
 
@@ -191,18 +223,18 @@ When `blocker.reason == "codex_must_fix_findings"` (issue #2210): `blocker.detai
 |---|---|---|
 | **Out of scope / already decided** | The finding asks for work the plan or ticket explicitly excludes, or contradicts a recorded operator decision (cite which). | Settle it `REJECTED`, with `--reason` quoting the source: "Plan §Scope excludes X (issue comment <url>)". |
 | **Not reproducible** | The finding is wrong against the code. Verify it yourself, citing `file:line`. | Settle it `REJECTED`, with the evidence as the reason. |
-| **Real, in-scope defect** | The finding is correct and fixing it stays inside the agreed scope. | Do **not** settle it. Requeue the ticket into the fix loop (`cw dev-queue requeue "$TICKET" -c <CLIENT> --stage impl --regress`; the park sits at REVIEW; a backward `--stage` on a parked row is an inferred regress, announced on stdout, so `--regress` only makes it explicit). Nothing to ask anyone. |
+| **Real, in-scope defect** | The finding is correct and fixing it stays inside the agreed scope. | Do **not** settle it. Requeue the ticket into the fix loop (`cw dev-queue requeue <TICKET> -c <CLIENT> --stage impl --regress`; the park sits at REVIEW; a backward `--stage` on a parked row is an inferred regress, announced on stdout, so `--regress` only makes it explicit). Nothing to ask anyone. |
 | **Product or scope question** | Fixing it needs behavior the sources of truth do not decide, or grows scope beyond the plan (new files, features or contracts the ticket never asked for). | Escalate to the human: batch every such finding into one `AskUserQuestion`, each with a recommendation. This is the only bucket that reaches them. |
 
 Never settle a finding you cannot tie to a specific source or to code evidence. That one is a product or scope question, not a rejection.
 
-To settle: save the payload with the **Write tool** to a scratch file, then run `cw review settle <file> --reason "<the cited source or evidence>" --ticket "$TICKET" -c <CLIENT> --out marker.md`. That records the settle on the ticket's cw dev-queue row, which is the authoritative record on every tracker: the next review pass reads the row first, whatever the tracker. Verify it with `cw review dispositions "$TICKET" -c <CLIENT>`. The printed `marker.md` is the human-readable mirror: on GitHub post it with `gh issue comment "$TICKET" --repo <REPO> --body-file marker.md` **as its own comment, unedited** (the GitHub review pass also reads it back, and honours a disposition block only when it opens the comment body under its `## Review Finding Dispositions` title; a block pasted under a preamble is not a record and is not applied). On any other tracker, post it with that tracker's own tool. If settle prints a stderr WARNING that the row was NOT recorded (a GitHub ticket with no dev-queue row), the posted marker is the only record until the next review pass folds it in.
+To settle: save the payload with the **Write tool** to a scratch file, then run `cw review settle <file> --reason "<the cited source or evidence>" --ticket <TICKET> -c <CLIENT> --out marker.md`. That records the settle on the ticket's cw dev-queue row, which is the authoritative record on every tracker: the next review pass reads the row first, whatever the tracker. Verify it with `cw review dispositions <TICKET> -c <CLIENT>`. The printed `marker.md` is the human-readable mirror: on GitHub post it with `gh issue comment <TICKET> --repo <REPO> --body-file marker.md` **as its own comment, unedited** (the GitHub review pass also reads it back, and honours a disposition block only when it opens the comment body under its `## Review Finding Dispositions` title; a block pasted under a preamble is not a record and is not applied). On any other tracker, post it with that tracker's own tool. If settle prints a stderr WARNING that the row was NOT recorded (a GitHub ticket with no dev-queue row), the posted marker is the only record until the next review pass folds it in.
 
 `--reason` is mandatory and must be non-blank: the citation, never a placeholder. The command records your resolved `gh` login as the settling actor and emits a `review.finding_settled` audit event per finding, so the record says who silenced the finding, when, why, and against which reviewed sha. A settle can be withdrawn with `outcome: "REVERSED"` (see `cw review settle --help`).
 
 **Where it runs.** The orchestrator runs it, from wherever it already is (main checkout, interactive cw session worktree, or any directory outside a headless worker). It refuses only inside a headless dispatch worker (`.claude/cw-context.json` with `headless: true`, or `$TMPDIR` inside such a worktree), because a worker settling its own reviewer's findings is the pipeline adjudicating itself. A worker hands the payload to the orchestrator, which runs it. Do not write a context file, and do not hand-author the `REVIEW-FINDING-DISPOSITIONS` marker. A worker never runs this command.
 
-When every finding is settled or fixed and the branch should ship as-is (issue #2205), the path is `cw dev-queue approve "$TICKET" -c <CLIENT> --override-must-fix --reason "<the same citations>"` followed by `cw dev-queue requeue "$TICKET" -c <CLIENT> --stage finalize`. A bare `requeue --stage finalize` is not enough: FINALIZE's MUST_FIX Override Verification step re-reads `.claude/review-verdict.json` and parks the row again. The override is bound to the verdict's reviewed SHA and exact MUST_FIX finding set, so a new review round or a new commit voids it. Use it only when every remaining MUST_FIX finding is in one of the two settle buckets above. The reason is recorded on the row and in the audit event, and it is rendered into the PR body's `## Operator override` section. If the ticket or lane has a finalize hold, operator signoff or `scope_hint: large`, this step is the human's.
+When every finding is settled or fixed and the branch should ship as-is (issue #2205), the path is `cw dev-queue approve <TICKET> -c <CLIENT> --override-must-fix --reason "<the same citations>"` followed by `cw dev-queue requeue <TICKET> -c <CLIENT> --stage finalize`. A bare `requeue --stage finalize` is not enough: FINALIZE's MUST_FIX Override Verification step re-reads `.claude/review-verdict.json` and parks the row again. The override is bound to the verdict's reviewed SHA and exact MUST_FIX finding set, so a new review round or a new commit voids it. Use it only when every remaining MUST_FIX finding is in one of the two settle buckets above. The reason is recorded on the row and in the audit event, and it is rendered into the PR body's `## Operator override` section. If the ticket or lane has a finalize hold, operator signoff or `scope_hint: large`, this step is the human's.
 
 When `blocker.reason` is anything else: read the Phase E retry fields the Blocker now carries (issue #174) — `retry_eligible`, `retry_delay_seconds`, and `recovery_hint`. When `retry_eligible` is true, re-dispatch after `retry_delay_seconds` (honouring `recovery_hint`); when it is false or absent, triage per `recovery_hint` yourself (requeue, regress, fix, file the follow-up, or close — a close only when the ticket's acceptance criteria are verified satisfied, citing the merged PR/commit, or it is verified duplicate/obsolete, citing the superseding ticket). Escalate to the human only a genuine product/scope fork, surfacing the blocker verbatim.
 
@@ -210,13 +242,13 @@ When `blocker.reason` is anything else: read the Phase E retry fields the Blocke
 
 A Large plan (more than 10 files or 500 lines) parks here. Size alone is not a reason to involve a human. The `auto_adopt_clean_plan` gate recipe (on by default) releases the park on the next reconcile tick unless the plan touches a forbidden area, `scope_hint: large` is set, or the draft is unbound or was already approved once. If it is still parked and the row carries `scope_hint: large` (or is `AWAITING_OPERATOR_SIGNOFF` / `finalize_gate_held`), that is an opted-in gate (`signoff: operator` style): do not approve it; notify the human with the plan. Otherwise decide it yourself against the ticket's sources of truth:
 
-- **Plan stays within the ticket's agreed scope** (every file and behavior traces to the ticket, its pre-flight resolutions, or a recorded decision): approve it with `cw dev-queue approve "$TICKET" -c <CLIENT>`. Approval is the row path: it binds the draft's fingerprint, and the plan stage accepts it on re-dispatch. A prose comment such as "approved" is not evidence and the ticket would only re-park.
+- **Plan stays within the ticket's agreed scope** (every file and behavior traces to the ticket, its pre-flight resolutions, or a recorded decision): approve it with `cw dev-queue approve <TICKET> -c <CLIENT>`. Approval is the row path: it binds the draft's fingerprint, and the plan stage accepts it on re-dispatch. A prose comment such as "approved" is not evidence and the ticket would only re-park.
 - **Plan grows scope or touches a forbidden area**: adjudicate against the sources of truth first (trim, split into a follow-up ticket, or approve). Only if the growth is a genuine product/scope fork, put it to the human in one batched `AskUserQuestion` with your recommendation.
 - **Abandon**: when the evidence shows the ticket is a duplicate or obsolete (cite it), abandon it yourself; otherwise abandoning is a product fork for the human.
 
 #### `review_pending_approval`
 
-A Large review parks here after its fix loop. The `auto_approve_clean_review` gate recipe (on by default) releases it when health is PROCEED, no forbidden area was touched, and a reviewer ran, unless the row carries `scope_hint: large`. If it is still parked, read `health` and `review.*`. A row carrying `scope_hint: large` (or `AWAITING_OPERATOR_SIGNOFF` / `finalize_gate_held`) is an opted-in gate: do not approve it; notify the human with a recommendation. A degraded health or a forbidden-area touch you adjudicate yourself against the ticket's sources of truth, escalating only a genuine product/scope fork. Otherwise approve with `cw dev-queue approve "$TICKET" -c <CLIENT>`, or requeue the fix loop for an in-scope defect.
+A Large review parks here after its fix loop. The `auto_approve_clean_review` gate recipe (on by default) releases it when health is PROCEED, no forbidden area was touched, and a reviewer ran, unless the row carries `scope_hint: large`. If it is still parked, read `health` and `review.*`. A row carrying `scope_hint: large` (or `AWAITING_OPERATOR_SIGNOFF` / `finalize_gate_held`) is an opted-in gate: do not approve it; notify the human with a recommendation. A degraded health or a forbidden-area touch you adjudicate yourself against the ticket's sources of truth, escalating only a genuine product/scope fork. Otherwise approve with `cw dev-queue approve <TICKET> -c <CLIENT>`, or requeue the fix loop for an in-scope defect.
 
 #### `scope_exceeded` / `forbidden_area`
 

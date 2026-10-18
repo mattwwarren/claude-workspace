@@ -10,11 +10,10 @@ When `parse_sentinel.py` reports `sentinel_found: false` the `/auto-dev` skill e
 | **Tool denial deadlock** | A tool call (typically `gh issue comment`) was denied; the skill stalls indefinitely with no recovery path. Issue #182. Catch via the Layer 1 30-min TIMED_OUT backstop landed in PR #179. |
 | **Process killed externally** | Disconnect, OOM, manual SIGKILL. The JSONL is truncated mid-write and the last record may be malformed. |
 
-When in doubt, scan the JSONL for the last few records to see what the agent was doing at exit:
+When in doubt, scan the JSONL for the last few records to see what the agent was doing at exit. Read `transcript_path` from the parse output, substitute it literally for `<TRANSCRIPT>`, and run:
 
 ```bash
-TRANSCRIPT=$(jq -r '.transcript_path' <<<"$RESULT")
-tail -n 30 "$TRANSCRIPT" | jq -c 'select(.type == "assistant") | .message.content[0].text // .message.content[0].input' 2>/dev/null | head -5
+tail -n 30 <TRANSCRIPT> | jq -c 'select(.type == "assistant") | .message.content[0].text // .message.content[0].input' 2>/dev/null | head -5
 ```
 
 If the final assistant turn ended in a `Bash` or `Task` tool call and there is no subsequent assistant message, the orphan-style explanation (Step 1 mid-dispatch or stalled mid-turn) is most likely. If the final assistant turn is a normal text block that just stops short of emitting the sentinel, the producer skipped the emit step — likely cause: pre-flight `no_op` not yet wired through the emit path.

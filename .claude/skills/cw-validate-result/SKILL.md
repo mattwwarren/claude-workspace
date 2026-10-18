@@ -28,10 +28,10 @@ One of:
 Runs the bundled validator script:
 
 ```bash
-uv run --project "$(git rev-parse --show-toplevel)" python \
-  .claude/skills/cw-validate-result/scripts/validate_sentinel.py \
-  --ticket-id <N>
+uv run python .claude/skills/cw-validate-result/scripts/validate_sentinel.py --ticket-id <N>
 ```
+
+Run it from a cw worktree (uv finds the project from the current directory).
 
 The script delegates transcript resolution + sentinel parsing to the `/cw-followup` skill's `parse_sentinel.py` (single source of truth — never re-implement). On top of that, it walks the headless-contract checklist and emits PASS/FAIL per row.
 

@@ -145,9 +145,11 @@ themselves.
    yourself — no pipeline step returns one:
 
    ```bash
-   OWNER_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
-   # https://github.com/${OWNER_REPO}/milestone/<milestone_number from step 4>
+   gh repo view --json nameWithOwner
    ```
+
+   Read `nameWithOwner` from the printed JSON and substitute it literally:
+   `https://github.com/<nameWithOwner>/milestone/<milestone_number from step 4>`.
 
    Open a docs-only PR (`gh pr create`) containing just the RFC footer edit.
 

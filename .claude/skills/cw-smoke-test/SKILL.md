@@ -21,25 +21,23 @@ One required argument:
 - ticket id (e.g. `171` or `#171`) — a GitHub issue in the resolved `--client`'s repo (or `--repo OWNER/NAME` to target another).
 
 Optional flags:
-- `--client <NAME>` — cw client name; resolves the repo root/tracker (via `clients.yaml`) as well as the dev-queue lookup (default `claude-workspace`).
+- `--client <NAME>` — cw client name; resolves the repo root/tracker (via `clients.yaml`) as well as the dev-queue lookup (default `claude-workspace`). Always pass it to `cw preflight` as `-c <CLIENT>`: the command has no default client.
 - `--skip-preflight` — run pre-flight in advisory mode (still report; do not abort). Useful when the issue is already known (e.g. cw doctor reports stale linkage drift).
 
 ## How it works
 
 ### Step 1 — pre-flight
 
-Run the bundled checker:
+Run the built-in command:
 
 ```bash
-uv run --project "$(git rev-parse --show-toplevel)" python \
-  .claude/skills/cw-smoke-test/scripts/preflight.py \
-  --ticket-id <NUMBER> --client <CLIENT>
+cw preflight <NUMBER> -c <CLIENT>
 ```
 
-The script emits one JSON object with `ok` (bool) and `checks` (list). Each row carries `name`, `passed`, `severity` (`hard` | `soft`), and `detail`.
+Add `--repo OWNER/NAME` to override the repo derived from the client's `origin` remote. The command prints one JSON object with `ok` (bool), `ticket_id`, `client`, `repo`, `repo_root`, `tracker` and `checks` (list), and exits 1 when any hard check failed. Each row carries `name`, `passed`, `severity` (`hard` | `soft`), and `detail`.
 
 Hard checks (must pass):
-- `client_repo_resolved` — `--client` resolves to a repo root: either it has an entry in `clients.yaml`, or `clients.yaml` doesn't exist at all (single-tenant fallback to this repo). Fails loudly on a populated `clients.yaml` missing the client, or one that fails to load/validate — never silently falls back to the wrong repo.
+- `client_repo_resolved` — `-c` resolves to a repo root: either it has an entry in `clients.yaml`, or `clients.yaml` doesn't exist at all (single-tenant fallback to the nearest ancestor of the current directory holding `.git`, which in a linked worktree is the worktree itself). Fails loudly on a populated `clients.yaml` missing the client, or one that fails to load/validate — never silently falls back to the wrong repo.
 - `repo_resolved` — a GitHub `owner/repo` slug was derived from the resolved repo root's `origin` remote, or supplied via `--repo`.
 - `agents_present` — `plan-reviewer.md` and `plan-soundness-reviewer.md` exist under `~/.claude/agents/` or the resolved client repo's `.claude/agents/`.
 - `cw_backend_healthy` — `cw doctor` reports backend + config + state file all OK.

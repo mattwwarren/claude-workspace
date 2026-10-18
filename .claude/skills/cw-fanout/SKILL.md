@@ -14,7 +14,7 @@ single ticket, one tick) and the active driver that sits in front of
 Pure orchestration — it composes existing pieces and adds no new parsing or
 validation logic:
 
-- **pre-flight** reuses `cw-smoke-test/scripts/preflight.py` (per ticket).
+- **pre-flight** reuses `cw preflight <T> -c <C>` (per ticket).
 - **dispatch** uses `cw dev-queue add` + `cw dev-queue run`.
 - **wave lifecycle** uses the bundled `scripts/wave_status.py` (is the batch done?).
 - **in-flight health** uses `cw queue peek` (WAIT/PEEK/STOP).
@@ -56,19 +56,21 @@ Optional flags:
 
 ### Step 1 — batch pre-flight
 
-Run the bundled checker once per ticket (it is the single source of truth for
-readiness; never re-implement it):
+Run the built-in command once per ticket, each as its own Bash call (it is the
+single source of truth for readiness; never re-implement it):
 
 ```bash
-uv run --project "$(git rev-parse --show-toplevel)" python \
-  .claude/skills/cw-smoke-test/scripts/preflight.py \
-  --ticket-id <NUMBER> --client <CLIENT>
+cw preflight <T1> -c <CLIENT>
 ```
 
-`--repo` is no longer defaulted and is derived per-client from `--client`'s
-resolved repo root (#2158) — omit `--repo` by default, and pass it explicitly
-only when that automatic derivation fails (e.g. no resolvable GitHub `origin`
-remote on the client's repo).
+```bash
+cw preflight <T2> -c <CLIENT>
+```
+
+`-c` is required (there is no default client). The repo is derived from the
+client's resolved repo root (#2158) — omit `--repo` by default, and pass
+`--repo OWNER/NAME` only when that automatic derivation fails (e.g. no
+resolvable GitHub `origin` remote on the client's repo).
 
 Each call emits one JSON object with `ok` (bool) and `checks`. Aggregate into a
 table: one row per ticket, `ok` plus any failing hard checks. Then:
@@ -178,14 +180,16 @@ cw event tail --since fanout-mon \
 ```
 
 **On `session.needs_attention`**: detect the gate type from the ticket's
-disposition field, then close it inline:
+disposition field, then close it inline. Run:
 
 ```bash
-GATE=$(cw dev-queue tasks --ticket <T> -c <CLIENT> --json \
-  | jq -r '.[0].disposition // "unknown"')
+cw dev-queue tasks --ticket <T> -c <CLIENT> --json
 ```
 
-If `GATE` is one of `plan_pending_approval`, `review_pending_approval`,
+and read `disposition` from the first row of the printed JSON (treat a missing
+or null `disposition` as unknown). Call that value the gate.
+
+If the gate is one of `plan_pending_approval`, `review_pending_approval`,
 `ambiguities_pending_resolution`, `premises_pending_verification`:
 
 1. Run `/cw-followup --ticket-id <T>` inline. It resolves the gate against
@@ -194,17 +198,15 @@ If `GATE` is one of `plan_pending_approval`, `review_pending_approval`,
 2. Check if the ticket was removed from the queue (do this before any
    approve/requeue attempt to avoid spurious errors):
    ```bash
-   cw dev-queue tasks --ticket <T> -c <CLIENT> --json | jq length
+   cw dev-queue tasks --ticket <T> -c <CLIENT> --json
    ```
-   If the result is `0` (ticket no longer in queue): print
+   If it prints an empty array `[]` (ticket no longer in queue): print
    `gate abandoned: #<T> (<GATE>) → operator removed ticket; wave continues`
    and skip sub-step 5 below (no re-dispatch needed).
-3. Re-check status after followup:
-   ```bash
-   STATUS=$(cw dev-queue tasks --ticket <T> -c <CLIENT> --json \
-     | jq -r '.[0].status')
-   ```
-4. If `STATUS` is still `blocked_on_user`:
+3. Re-check status after followup: run the same
+   `cw dev-queue tasks --ticket <T> -c <CLIENT> --json` and read `status` from
+   the first row of the printed JSON.
+4. If that status is still `blocked_on_user`:
    - `plan_pending_approval` → `cw dev-queue approve <T> -c <CLIENT>` when
      the plan stays within the ticket's agreed scope. Approve binds the
      draft's fingerprint to the row. An unreviewed plan goes back to PLAN as
@@ -229,7 +231,7 @@ If `GATE` is one of `plan_pending_approval`, `review_pending_approval`,
 5. On successful re-dispatch: print
    `gate closed: #<T> (<GATE>) → re-dispatched, watching` — resume the loop.
 
-If `GATE` is non-gate / unknown, or `session.timed_out` fires without a
+If the gate is non-gate / unknown, or `session.timed_out` fires without a
 recognized gate disposition: triage it yourself right away. Read the blocker
 and the session's transcript tail / `branch_state`, then act per
 `/cw-followup` (requeue, approve, regress, `cw spawn close`, file the

@@ -243,6 +243,10 @@ is the single biggest lever for first-try ships.
 > re-resolving on a later round, post one consolidated comment restating every prior
 > resolution plus the new ones, and leave the earlier unmarked comments as history.
 
+**Readiness check.** `cw preflight <ticket> -c <client>` runs the mechanical dispatch
+checks (ticket open, no open PR, not already queued, `cw doctor` healthy, reviewer agents
+present) and prints one JSON object; it exits 1 when a hard check failed. `-c` is required.
+
 **Skills** (ship with the repo; each wraps a whole operator motion):
 - `harden-ticket` — pre-flight a ticket before dispatch (above).
 - `sprint-buildout` — turn a hardened RFC into filed GitHub tickets (drives `cw sprint plan|apply`).
@@ -286,7 +290,8 @@ cw dev-queue refresh-all                         # fast-forward main on every cl
 
 **Lanes & authority:**
 ```bash
-cw lane add|ls|pause|resume|rm           # manage lanes; per-lane concurrency + reap_policy
+cw lane add|ls|pause|resume|rm|set       # manage lanes; per-lane concurrency + reap_policy
+                                         #   (set: max_parallel / attempt_ceiling only)
 cw orchestrate start --lane <name>       # bind a lane's reap authority (records the binding)
 cw orchestrate run   --lane <name> [--once]   # cw-side loop: authorize reaps for the lane
 ```

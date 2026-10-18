@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime
-from io import StringIO
 from typing import TYPE_CHECKING, TypedDict
 
 import click
-from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
-from cw.atomic import atomic_write_text
 from cw.cli._base import handle_errors, main
+from cw.cli._clients_doc import dump_clients_doc, load_clients_doc
+from cw.cli._worker_guard import refuse_inside_dispatch_worker
 from cw.config import (
     _load_concurrency_overrides,
     _save_concurrency_overrides,
@@ -36,6 +36,7 @@ from cw.lane_pause import (
 )
 from cw.models import (
     OCCUPIED_LANE_STATUSES,
+    ClientConcurrencyOverride,
     ConcurrencyOverrides,
     LaneConcurrencyOverride,
     OrchestratorConfig,
@@ -52,6 +53,60 @@ if TYPE_CHECKING:
 # persisted ``LaneConcurrencyOverride.pause_source`` of ``cw lane pause``.
 # See #875, #2696.
 _LANE_PAUSE_SOURCE_OPERATOR = LanePauseSource.OPERATOR.value
+
+logger = logging.getLogger(__name__)
+
+
+def _render_config_value(value: object) -> str:
+    """One before/after value in setter output: ``(unset)`` or its JSON form."""
+    return "(unset)" if value is None else json.dumps(value)
+
+
+def _emit_lane_config_changed(
+    client: str, lane: str | None, changes: dict[str, list[object]]
+) -> None:
+    """Record one ``lane.config_changed`` audit event for an applied change.
+
+    Shared by ``cw lane set`` (``lane`` = the lane name) and the client-ceiling
+    branch of ``cw config concurrency set|clear`` (``lane`` = None), #2697.
+    *changes* maps each changed key to ``[old, new]``, None meaning unset.
+
+    Called after the config file was replaced and its lock released, as
+    ``cw lane add`` records ``lane.created``. A failed emit therefore must not
+    read as a failed change: the failure is logged at WARNING and re-raised as
+    a :class:`CwError` stating that the change WAS applied, so the operator
+    neither re-runs the command nor assumes nothing happened.
+    """
+    try:
+        record_event(
+            OrchestratorEventType.LANE_CONFIG_CHANGED,
+            {"client": client, "lane": lane, "changes": changes},
+        )
+    except Exception as exc:
+        logger.warning(
+            "lane.config_changed emit failed after the change was applied:"
+            " client=%s lane=%s changes=%s",
+            client,
+            lane,
+            changes,
+            exc_info=True,
+        )
+        target = (
+            f"the dispatch ceiling of client '{client}'"
+            if lane is None
+            else f"lane '{lane}' of client '{client}'"
+        )
+        summary = ", ".join(
+            f"{key}: {_render_config_value(old)} -> {_render_config_value(new)}"
+            for key, (old, new) in changes.items()
+        )
+        msg = (
+            f"The change to {target} WAS applied ({summary}), but recording its"
+            f" {OrchestratorEventType.LANE_CONFIG_CHANGED.value} audit event"
+            f" failed ({exc.__class__.__name__}: {exc}). Do not re-run the"
+            " command; only the audit record is missing."
+        )
+        raise CwError(msg) from exc
 
 
 @main.group("config", invoke_without_command=True, help="Show or manage configuration.")
@@ -181,66 +236,198 @@ def config_concurrency_get(as_json: bool, client_name: str | None) -> None:
 
 
 _CONCURRENCY_SET_KEYS: frozenset[str] = frozenset({"max_parallel_clients"})
+# The only key `config concurrency set|clear` accepts with -c (#2697): that
+# client's ClientConcurrencyOverride.ceiling.
+_CEILING_KEY = "ceiling"
+_CEILING_IN_WORKER_MSG = (
+    "Refusing to change a client dispatch ceiling from inside a dispatch worker"
+    " (.claude/cw-context.json reports headless). A worker must not raise its"
+    " own client's limits. Run `cw config concurrency set ceiling=N -c CLIENT`"
+    " from the orchestrator session."
+)
+_concurrency_client_option = click.option(
+    "--client",
+    "-c",
+    "client_name",
+    default=None,
+    help="Client whose dispatch ceiling to change (key: ceiling). Without -c the"
+    " host-wide max_parallel_clients is changed.",
+)
 
 
-@config_concurrency.command("set", help="Set a concurrency override.")
-@click.argument("assignment")
-@handle_errors
-def config_concurrency_set(assignment: str) -> None:
-    """Set a concurrency override.
+def _unknown_host_key(key: str) -> CwError:
+    valid = ", ".join(sorted(_CONCURRENCY_SET_KEYS))
+    msg = (
+        f"Unknown concurrency key {key!r}. Supported: {valid};"
+        f" with -c CLIENT the only key is {_CEILING_KEY}."
+    )
+    return CwError(msg)
 
-    ASSIGNMENT must be in ``key=value`` form, e.g. ``max_parallel_clients=4``.
-    Supported keys: max_parallel_clients.
-    """
+
+def _guard_ceiling_client(client_name: str) -> None:
+    """The `-c` preconditions, in order: not a dispatch worker, a known client."""
+    refuse_inside_dispatch_worker(_CEILING_IN_WORKER_MSG)
+    get_client(client_name)
+
+
+def _parse_ceiling(value_str: str) -> int:
+    text = value_str.strip()
+    if not (text.isascii() and text.isdigit()) or int(text) < 1:
+        msg = (
+            f"Value for {_CEILING_KEY!r} must be a positive integer, got: {value_str!r}"
+        )
+        raise CwError(msg)
+    return int(text)
+
+
+def _parse_concurrency_assignment(
+    assignment: str, client_name: str | None
+) -> tuple[str, int]:
+    """Validate ``key=value`` for `set`: the host key without -c, ceiling with it."""
     if "=" not in assignment:
         msg = f"Expected key=value, got: {assignment!r}"
         raise CwError(msg)
     key, _, value_str = assignment.partition("=")
     key = key.strip()
+    if client_name is not None:
+        if key != _CEILING_KEY:
+            msg = (
+                f"With -c/--client the only concurrency key is {_CEILING_KEY!r},"
+                f" got {key!r}."
+            )
+            raise CwError(msg)
+        return key, _parse_ceiling(value_str)
     if key not in _CONCURRENCY_SET_KEYS:
-        valid = ", ".join(sorted(_CONCURRENCY_SET_KEYS))
-        msg = f"Unknown concurrency key {key!r}. Supported: {valid}"
-        raise CwError(msg)
+        raise _unknown_host_key(key)
     try:
         value = int(value_str.strip())
     except ValueError as exc:
         msg = f"Value for {key!r} must be an integer, got: {value_str!r}"
         raise CwError(msg) from exc
+    return key, value
 
-    # bounded=True (#2501): operator command; only validation precedes the lock.
+
+def _put_client_ceiling(
+    current: ConcurrencyOverrides, client: str, value: int
+) -> int | None:
+    """Set *client*'s ceiling to *value* and save, unless already set; return the old.
+
+    The caller holds ``concurrency_override_lock``. The client's other override
+    fields (debounce stamp, freshness counter) are kept.
+    """
+    entry = current.clients.get(client, ClientConcurrencyOverride())
+    old = entry.ceiling
+    if old != value:
+        current.clients[client] = entry.model_copy(update={_CEILING_KEY: value})
+        _save_concurrency_overrides(current)
+    return old
+
+
+def _take_client_ceiling(current: ConcurrencyOverrides, client: str) -> int | None:
+    """Unset *client*'s ceiling and save, if one is set; return the old ceiling.
+
+    The caller holds ``concurrency_override_lock``. The client's entry and its
+    other fields stay.
+    """
+    entry = current.clients.get(client)
+    old = entry.ceiling if entry is not None else None
+    if entry is not None and old is not None:
+        current.clients[client] = entry.model_copy(update={_CEILING_KEY: None})
+        _save_concurrency_overrides(current)
+    return old
+
+
+@config_concurrency.command("set")
+@click.argument("assignment")
+@_concurrency_client_option
+@handle_errors
+def config_concurrency_set(assignment: str, client_name: str | None) -> None:
+    """Set a concurrency override (host-wide, or one client's ceiling with -c).
+
+    ASSIGNMENT must be in ``key=value`` form. Without -c the only key is
+    max_parallel_clients (e.g. ``max_parallel_clients=4``). With -c CLIENT the
+    only key is ceiling, that client's dispatch ceiling (e.g. ``ceiling=3 -c
+    acme``); refused inside a dispatch worker.
+    """
+    if client_name is not None:
+        _guard_ceiling_client(client_name)
+    key, value = _parse_concurrency_assignment(assignment, client_name)
+
+    old: int | None = None
+    # bounded=True (#2501): operator command; only validation (with -c, also
+    # the worker guard and the client lookup) precedes the lock. The old
+    # ceiling is read, and the no-op decided, under it.
     with concurrency_override_lock(bounded=True):
         current = _load_concurrency_overrides()
-        updates = {key: value}
-        updated = current.model_copy(update=updates)
-        _save_concurrency_overrides(updated)
-    click.echo(f"Set {key}={value}")
+        if client_name is None:
+            _save_concurrency_overrides(current.model_copy(update={key: value}))
+        else:
+            old = _put_client_ceiling(current, client_name, value)
+    if client_name is None:
+        click.echo(f"Set {key}={value}")
+        return
+    if old == value:
+        click.echo(
+            f"Set ceiling={value} for client '{client_name}'"
+            f" (override unchanged: {value})."
+        )
+        return
+    _emit_lane_config_changed(client_name, None, {_CEILING_KEY: [old, value]})
+    click.echo(
+        f"Set ceiling={value} for client '{client_name}'"
+        f" (override: {_render_config_value(old)} -> {value})."
+    )
 
 
-@config_concurrency.command("clear", help="Clear concurrency overrides.")
+@config_concurrency.command("clear")
 @click.argument("key", required=False, default=None)
+@_concurrency_client_option
 @handle_errors
-def config_concurrency_clear(key: str | None) -> None:
-    """Clear concurrency overrides.
+def config_concurrency_clear(key: str | None, client_name: str | None) -> None:
+    """Clear concurrency overrides (host-wide, or one client's ceiling with -c).
 
     Without KEY, clears all overrides.
     With KEY, clears only that specific key (e.g. ``max_parallel_clients``).
+    With -c CLIENT, KEY must be ceiling; refused inside a dispatch worker.
     """
+    if client_name is not None:
+        _guard_ceiling_client(client_name)
+        if key != _CEILING_KEY:
+            msg = (
+                f"With -c/--client, KEY must be {_CEILING_KEY!r}: clear one"
+                " client's ceiling with"
+                " `cw config concurrency clear ceiling -c CLIENT`."
+            )
+            raise CwError(msg)
+    elif key is not None and key not in _CONCURRENCY_SET_KEYS:
+        raise _unknown_host_key(key)
+
     # bounded=True (#2501) on both branches: operator command, only
-    # validation precedes the lock.
+    # validation (with -c, also the worker guard and the client lookup)
+    # precedes the lock.
     if key is None:
         with concurrency_override_lock(bounded=True):
             _save_concurrency_overrides(ConcurrencyOverrides())
         click.echo("Cleared all concurrency overrides.")
-    else:
-        if key not in _CONCURRENCY_SET_KEYS:
-            valid = ", ".join(sorted(_CONCURRENCY_SET_KEYS))
-            msg = f"Unknown concurrency key {key!r}. Supported: {valid}"
-            raise CwError(msg)
-        with concurrency_override_lock(bounded=True):
-            current = _load_concurrency_overrides()
-            updated = current.model_copy(update={key: None})
-            _save_concurrency_overrides(updated)
+        return
+    old: int | None = None
+    with concurrency_override_lock(bounded=True):
+        current = _load_concurrency_overrides()
+        if client_name is None:
+            _save_concurrency_overrides(current.model_copy(update={key: None}))
+        else:
+            old = _take_client_ceiling(current, client_name)
+    if client_name is None:
         click.echo(f"Cleared override for {key!r}.")
+        return
+    if old is None:
+        click.echo(f"No ceiling override is set for client '{client_name}'.")
+        return
+    _emit_lane_config_changed(client_name, None, {_CEILING_KEY: [old, None]})
+    click.echo(
+        f"Cleared override for {_CEILING_KEY!r} on client '{client_name}'"
+        f" (override: {_render_config_value(old)} -> (unset))."
+    )
 
 
 # Legacy ``cw lane <cmd> CLIENT NAME`` form: exactly two positional args.
@@ -396,14 +583,8 @@ def lane_add(
 
     # bounded=True (#2501): operator command; nothing precedes the lock.
     with clients_lock(bounded=True):
-        rt = YAML(typ="rt")
-        rt.default_flow_style = False
         clients_path = clients_file()
-        content = clients_path.read_text() if clients_path.exists() else "clients:\n"
-        doc = rt.load(content)
-        if not isinstance(doc, dict) or "clients" not in doc:
-            msg = f"{clients_path} has no 'clients:' key."
-            raise CwError(msg)
+        rt, doc = load_clients_doc(clients_path)
         clients_map = doc["clients"]
         if client not in clients_map:
             msg = f"Client '{client}' not found in {clients_path}"
@@ -427,9 +608,7 @@ def lane_add(
         new_lane["max_parallel"] = effective_max_parallel
         new_lane["priority"] = effective_priority
         lanes_list.append(new_lane)
-        buf = StringIO()
-        rt.dump(doc, buf)
-        atomic_write_text(clients_path, buf.getvalue())
+        dump_clients_doc(rt, doc, clients_path)
 
     record_event(
         OrchestratorEventType.LANE_CREATED,
@@ -480,16 +659,8 @@ def lane_rm(positional: tuple[str, ...], client_option: str | None) -> None:
             raise CwError(msg)
 
         with clients_lock(bounded=True):
-            rt = YAML(typ="rt")
-            rt.default_flow_style = False
             clients_path = clients_file()
-            content = (
-                clients_path.read_text() if clients_path.exists() else "clients:\n"
-            )
-            doc = rt.load(content)
-            if not isinstance(doc, dict) or "clients" not in doc:
-                msg = f"{clients_path} has no 'clients:' key."
-                raise CwError(msg)
+            rt, doc = load_clients_doc(clients_path)
             clients_map = doc["clients"]
             if client not in clients_map:
                 msg = f"Client '{client}' not found."
@@ -510,9 +681,7 @@ def lane_rm(positional: tuple[str, ...], client_option: str | None) -> None:
                 msg = f"Lane '{name}' not found for client '{client}'."
                 raise CwError(msg)
             client_entry["lanes"] = new_lanes
-            buf = StringIO()
-            rt.dump(doc, buf)
-            atomic_write_text(clients_path, buf.getvalue())
+            dump_clients_doc(rt, doc, clients_path)
 
     click.echo(f"Lane '{name}' removed from client '{client}'.")
 

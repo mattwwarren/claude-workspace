@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`cw preflight TICKET -c CLIENT` runs the dispatch pre-flight checks (#2697).** It replaces the `cw-smoke-test` skill's preflight script with a built-in command: the same checks and the same JSON object on stdout (`ok`, `ticket_id`, `client`, `repo`, `repo_root`, `tracker`, `checks`), exit 1 when a hard check failed. `--repo OWNER/NAME` overrides the slug derived from the client's `origin` remote, and a leading `#` on the ticket is stripped. With no `clients.yaml` the repo root is the nearest ancestor of the current directory holding `.git`, so it works from a linked worktree.
+- **`cw lane set` (alias `cw config lane set`) changes a lane's `max_parallel` or `attempt_ceiling` (#2697).** `cw lane set CLIENT LANE KEY=VALUE...` (or `LANE KEY=VALUE... -c CLIENT`) rewrites `clients.yaml` in place, keeping its comments, prints each change as `old -> new`, and applies several assignments together or not at all; `KEY=null` removes the key so the lane inherits. Every other key is refused with the supported-key list, including the gate keys `signoff` and `finalize_gate` (human opt-in gates, ADR-0020), `reap_policy`, the guard toggles and `paused` (use `cw lane pause` / `cw lane resume`). It refuses inside a dispatch worker.
+- **`cw config concurrency set ceiling=N -c CLIENT` and `clear ceiling -c CLIENT` set one client's dispatch ceiling override (#2697).** The override is kept with its other per-client fields, `cw config concurrency get -c CLIENT` reports it as `source: override`, and both forms refuse inside a dispatch worker. Without `-c` the commands behave as before.
+- **A `lane.config_changed` audit event records every change made by `cw lane set` and the client-ceiling setter (#2697).** Payload `{client, lane, changes: {<key>: [<old>, <new>]}}`, with `lane` null for a client ceiling and only changed keys listed. Refusals, validation failures and no-ops emit nothing. The event is written after the config file is replaced; if it fails, the command says the change was applied.
+
+### Changed
+
+- **The `cw-smoke-test` preflight script is removed; use `cw preflight` (#2697).** Its `--client` option defaulted to `claude-workspace`; `cw preflight` has no default and requires `-c CLIENT`.
+- **Orchestrator-run skills no longer prescribe command substitution, shell loops or `--jq` (#2697).** `cw-fanout`, `cw-followup`, `cw-validate-result`, `cw-session-watch`, `sprint-buildout`, `orchestrate-sprint` and `queue-issues` now run one plain command per Bash call and say which field to read from the printed JSON. The `cw-followup` merge-gate recovery copies `fork_point_sha` verbatim and pushes with `--force-with-lease` only after `git merge-base --is-ancestor` passes and `git cherry -v` shows no `+` line. A new doc lint enforces the rule. One fence is exempt: the `cw-session-watch` arm-automerge recovery fence, a merge-safety control whose rewrite is tracked in #2753.
+
+### Docs
+
+- **Orchestrator permission allowlist (#2697).** `docs/dispatch-runbook.md` gains an "Orchestrator permission allowlist" section: the read-only `Bash(cw <verb>:*)` entries an orchestrator needs, the state-changing verbs left off on purpose, the command-shape rule, and an orchestrator bootstrap note (no context file is needed to run `cw review settle`, `cw dev-queue resolve`, `cw preflight` or `cw orchestrate watch` from a fresh worktree).
+
+### Fixed
+
+- **Pre-flight no longer fails with `ModuleNotFoundError: No module named 'yaml'` under bare `python3` (#2697).** The checks now run inside the installed `cw` package.
+
 ## [1.76.0] - 2026-10-18
 
 ### Added
