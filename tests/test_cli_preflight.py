@@ -13,10 +13,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
-import cw.preflight as pf
 import pytest
 from click.testing import CliRunner, Result
 
+import cw.preflight as pf
 from cw.cli import main
 from cw.config import clients_file
 from tests._clients_yaml import ClientSpec, write_clients_yaml
@@ -171,7 +171,7 @@ class TestPreflightCommand:
         result = _invoke("--help")
 
         assert result.exit_code == 0
-        assert "Run pre-flight checks for TICKET" in result.output
+        assert "Run pre-flight checks for one ticket before dispatch." in result.output
         assert "-c, --client" in result.output
         assert "--repo" in result.output
 

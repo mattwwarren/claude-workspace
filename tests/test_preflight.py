@@ -13,10 +13,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
-import cw.preflight as pf
 import pytest
 from click.testing import CliRunner
 
+import cw.preflight as pf
 from cw.cli import main
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import (
@@ -106,6 +106,127 @@ class TestNoOpenPrHonorsTracker:
         monkeypatch.setattr(pf.subprocess, "run", _fake_run)
         pf._check_no_open_pr("403", "owner/repo", "github-issues")
         assert any("in:title" in str(a) for a in captured["argv"])
+
+
+def _patch_gh(monkeypatch: pytest.MonkeyPatch, proc: _Proc | None) -> None:
+    """``gh`` resolves and returns *proc*; ``None`` means gh is not on PATH."""
+    gh = None if proc is None else "/usr/bin/gh"
+    monkeypatch.setattr(pf.shutil, "which", lambda _name: gh)
+    monkeypatch.setattr(pf.subprocess, "run", lambda *_a, **_k: proc)
+
+
+class TestGhChecks:
+    """The github-issues branches of the two gh-backed checks."""
+
+    @pytest.mark.parametrize(
+        ("proc", "passed", "detail"),
+        [
+            pytest.param(None, False, "gh CLI not on PATH", id="no-gh"),
+            pytest.param(
+                _Proc(returncode=1, stderr="not found"),
+                False,
+                "gh issue view failed: not found",
+                id="gh-failure",
+            ),
+            pytest.param(
+                _Proc(stdout=json.dumps({"number": 7, "state": "OPEN", "title": "T"})),
+                True,
+                "#7 state=OPEN title='T'",
+                id="open",
+            ),
+            pytest.param(
+                _Proc(stdout=json.dumps({"number": 7, "state": "CLOSED"})),
+                False,
+                "#7 state=CLOSED title=''",
+                id="closed",
+            ),
+        ],
+    )
+    def test_ticket_open(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        proc: _Proc | None,
+        passed: bool,
+        detail: str,
+    ) -> None:
+        _patch_gh(monkeypatch, proc)
+        assert pf._check_ticket_open("7", "o/r", "github-issues") == {
+            "name": "ticket_open",
+            "passed": passed,
+            "severity": "hard",
+            "detail": detail,
+        }
+
+    def test_ticket_open_invalid_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_gh(monkeypatch, _Proc(stdout="nope"))
+        result = pf._check_ticket_open("7", "o/r", "github-issues")
+        assert result["passed"] is False
+        assert result["detail"].startswith("gh output not valid JSON: ")
+
+    @pytest.mark.parametrize(
+        ("tracker", "proc", "passed", "detail"),
+        [
+            pytest.param(
+                "github-issues", None, False, "gh CLI not on PATH", id="no-gh"
+            ),
+            pytest.param(
+                "github-issues",
+                _Proc(returncode=1, stdout="rate limited"),
+                False,
+                "gh pr list failed: rate limited",
+                id="gh-failure",
+            ),
+            pytest.param(
+                "github-issues",
+                _Proc(
+                    stdout=json.dumps(
+                        [
+                            {"number": 1, "title": "fix: thing (#70)"},
+                            {"number": 2, "title": "feat: other (#7)"},
+                        ]
+                    )
+                ),
+                False,
+                "open PRs reference ticket: #2 feat: other (#7)",
+                id="title-match-filters-fuzzy-hits",
+            ),
+            pytest.param(
+                "github-issues",
+                _Proc(stdout=json.dumps([{"number": 1, "title": "fix: #70"}])),
+                True,
+                "no open PR references the ticket",
+                id="fuzzy-only",
+            ),
+            pytest.param(
+                "linear",
+                _Proc(stdout=json.dumps([{"number": 3, "title": "anything"}])),
+                False,
+                "open PRs reference ticket: #3 anything",
+                id="branch-head-hit",
+            ),
+        ],
+    )
+    def test_no_open_pr(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tracker: str,
+        proc: _Proc | None,
+        passed: bool,
+        detail: str,
+    ) -> None:
+        _patch_gh(monkeypatch, proc)
+        assert pf._check_no_open_pr("7", "o/r", tracker) == {
+            "name": "no_open_pr_for_ticket",
+            "passed": passed,
+            "severity": "hard",
+            "detail": detail,
+        }
+
+    def test_no_open_pr_invalid_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_gh(monkeypatch, _Proc(stdout="nope"))
+        result = pf._check_no_open_pr("7", "o/r", "github-issues")
+        assert result["passed"] is False
+        assert result["detail"].startswith("gh output not valid JSON: ")
 
 
 def _make_doctor_json(
