@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -47,32 +46,13 @@ _log = logging.getLogger(__name__)
 # embedded slash anchors a pattern to the worktree root, and the trailing ``*``
 # covers the lock file. An exclude hides only untracked files; a tracked review
 # artifact is handled by the fix-loop baseline.
-class _CwExcludePatterns(Sequence[str]):
-    """The cw exclude patterns, including the shared review-artifact paths."""
-
-    _BASE = (".cw/", ".claude/cw-context.json*")
-
-    @staticmethod
-    def _values() -> tuple[str, ...]:
-        # Defer this import: importing it at module load creates a cycle when
-        # ``cw.worktree`` is imported before ``cw.codex_fix_loop``.
-        from cw.codex_fix_loop.baseline import (  # noqa: PLC0415
-            _CW_REVIEW_ARTIFACT_PATHS,
-        )
-
-        return (*_CwExcludePatterns._BASE, *_CW_REVIEW_ARTIFACT_PATHS)
-
-    def __getitem__(self, index: int | slice) -> str | tuple[str, ...]:
-        return self._values()[index]
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._values())
-
-    def __len__(self) -> int:
-        return len(self._values())
-
-
-_CW_EXCLUDE_PATTERNS = _CwExcludePatterns()
+_CW_EXCLUDE_PATTERNS: tuple[str, ...] = (
+    ".cw/",
+    ".claude/cw-context.json*",
+    ".claude/review-verdict.md",
+    ".claude/review-verdict.json",
+    ".claude/review-verdict-unparseable.md",
+)
 # Matches git's "fatal: '<branch>' is already used by worktree at '<path>'"
 # line so create_worktree can name the colliding worktree in a targeted error
 # (#2034) instead of surfacing git's bare stderr.
