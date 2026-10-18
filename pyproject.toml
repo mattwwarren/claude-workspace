@@ -287,6 +287,14 @@ ignore = [
 # (#2613); only this cw.executor deferral remains. Inline import at function
 # level is the sanctioned mechanism, not a workaround.
 "src/cw/reconcile/codex_boot.py" = ["PLC0415"]
+# shipped_release defers the cw.doctor.routed_result_wedge audit-outbox helpers
+# inside _close_unpinned and _finish_release_audit (#2715): importing
+# cw.doctor runs doctor/linkage.py, which does `from cw.reconcile import
+# reconcile`, and cw.reconcile imports this module, so a module-level import
+# here hits a partially initialized cw.reconcile (a cold `import cw.reconcile`
+# fails). Moving the helpers out of cw.doctor is out of scope. Inline import at
+# function level is the sanctioned mechanism, not a workaround.
+"src/cw/reconcile/shipped_release.py" = ["PLC0415"]
 # claim defers the cw.dispatch.gating import inside _spawn_claimed_task to break
 # the gating ↔ claim circular dependency (#1310): gating imports claim at module
 # top, so claim's own reach back into gating must be function-level. Inline

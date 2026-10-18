@@ -68,6 +68,7 @@ from cw.reconcile._shared import (
     feature_branch_key,
 )
 from cw.reconcile._shared._worktree_evidence import _read_agent_spawn_stamp_context
+from cw.reconcile.deferred import PostLockJob
 from cw.reconcile.dispositions import emit_routed_sentinel_completion
 from cw.reconcile.probe_store import BoundedProbeStore, ProbeStoreUnavailableError
 from cw.reconcile.routed_result_sessions import (
@@ -440,7 +441,7 @@ def _close_unpinned(
                 continue
             closing.append((sessions_by_id[candidate.session_id], candidate))
         if closing:
-            from cw.doctor.routed_result_wedge import (  # noqa: PLC0415
+            from cw.doctor.routed_result_wedge import (
                 _audit_outbox_lock,
                 _queue_audit_intents,
                 _read_audit_outbox,
@@ -559,7 +560,7 @@ def _finish_release_audit(
 ) -> None:
     """Finalize and deliver the close audit after the stop outcome is known."""
     try:
-        from cw.doctor.routed_result_wedge import (  # noqa: PLC0415
+        from cw.doctor.routed_result_wedge import (
             _emit_audit_record,
             _finalize_audit_intent,
         )
@@ -595,8 +596,6 @@ def _attach_release_audit_to_stop(
     session_id: str, surface_ref: str, deferred: DeferredReconcileJobs
 ) -> None:
     """Finalize the audit from the post-lock stop job's eventual result."""
-    from cw.reconcile.deferred import PostLockJob  # noqa: PLC0415
-
     label = f"surface_stop:{surface_ref}"
     for index in range(len(deferred.post_lock) - 1, -1, -1):
         job = deferred.post_lock[index]
@@ -606,7 +605,7 @@ def _attach_release_audit_to_stop(
         def _run(job: PostLockJob = job) -> object:
             try:
                 result = job.run()
-            except Exception as error:  # noqa: BLE001
+            except Exception as error:  # noqa: BLE001 - any stop failure must still finalize the close audit and fail closed
                 _finish_release_audit(
                     session_id,
                     stop_succeeded=False,
