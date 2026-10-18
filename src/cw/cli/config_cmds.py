@@ -26,6 +26,7 @@ from cw.config import (
 from cw.dev_queue import dev_queue_lock, load_dev_queue
 from cw.events import record_event
 from cw.exceptions import CwError
+from cw.lane_pause import LanePauseSource, utc_now_seconds
 from cw.models import (
     OCCUPIED_LANE_STATUSES,
     ConcurrencyOverrides,
@@ -36,8 +37,10 @@ from cw.models import (
 )
 
 # ``source`` field on LANE_PAUSED / LANE_RESUMED events emitted by an operator
-# via ``cw lane pause/resume`` (vs. the circuit breaker in dispatch). See #875.
-_LANE_PAUSE_SOURCE_OPERATOR = "operator"
+# via ``cw lane pause/resume`` (vs. the circuit breaker in dispatch), and the
+# persisted ``LaneConcurrencyOverride.pause_source`` of ``cw lane pause``.
+# See #875, #2696.
+_LANE_PAUSE_SOURCE_OPERATOR = LanePauseSource.OPERATOR.value
 
 
 @main.group("config", invoke_without_command=True, help="Show or manage configuration.")
@@ -123,7 +126,9 @@ def config_concurrency_get(as_json: bool, client_name: str | None) -> None:
                 "default_ceiling": declared.default_ceiling,
                 "per_client_ceiling": declared.per_client_ceiling,
             },
-            "override": overrides.model_dump(),
+            # mode="json": the lane overrides hold datetimes (paused_at,
+            # circuit_auto_resume_at, the starved debounce stamp, #2696).
+            "override": overrides.model_dump(mode="json"),
             "effective": {
                 "max_parallel_clients": effective.max_parallel_clients,
                 "default_ceiling": effective.default_ceiling,
@@ -467,7 +472,19 @@ def lane_pause(positional: tuple[str, ...], client_option: str | None) -> None:
     with concurrency_override_lock(bounded=True):
         current = _load_concurrency_overrides()
         lane_override = current.lanes.get(lane_key, LaneConcurrencyOverride())
-        updated_lane = lane_override.model_copy(update={"paused": True})
+        # An operator pause is sticky (#2696): it records who and when, and
+        # drops any circuit-breaker schedule or half-open probe so the dispatch
+        # loop never auto-resumes it. Re-pausing restamps ``paused_at``.
+        updated_lane = lane_override.model_copy(
+            update={
+                "paused": True,
+                "paused_at": utc_now_seconds(),
+                "pause_source": _LANE_PAUSE_SOURCE_OPERATOR,
+                "pause_trigger": None,
+                "circuit_auto_resume_at": None,
+                "circuit_half_open": False,
+            }
+        )
         current.lanes[lane_key] = updated_lane
         _save_concurrency_overrides(current)
 
@@ -506,11 +523,24 @@ def lane_resume(positional: tuple[str, ...], client_option: str | None) -> None:
         # stale ``lane_starved_notify_next_eligible_at`` left over from the
         # prior episode would otherwise silently suppress the *next* trip's
         # first attention notification until that old window expires.
+        # #2696: it also clears the worktree counter and the recorded pause
+        # cause. It is not a half-open probe -- an explicit resume says the
+        # fault is fixed -- so the flag is cleared and a later failure charges
+        # the ticket as before. ``circuit_trip_streak`` is kept: only a real
+        # spawn success resets it, so a resume without a fix gets a longer
+        # next auto-resume cool-down.
         updated_lane = lane_override.model_copy(
             update={
                 "paused": False,
                 "consecutive_spawn_errors": 0,
+                "consecutive_worktree_errors": 0,
                 "lane_starved_notify_next_eligible_at": None,
+                "paused_at": None,
+                "pause_source": None,
+                "pause_trigger": None,
+                "recent_spawn_errors": [],
+                "circuit_auto_resume_at": None,
+                "circuit_half_open": False,
             }
         )
         current.lanes[lane_key] = updated_lane

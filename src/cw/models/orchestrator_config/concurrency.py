@@ -34,6 +34,36 @@ class LaneConcurrencyOverride(BaseModel):
     # after a resume notifies immediately rather than inheriting a stale
     # debounce window from the prior episode.
     lane_starved_notify_next_eligible_at: datetime | None = None
+    # --- #2696: persisted pause cause and auto-resume state ---------------
+    # Every field below defaults, so an override file written before #2696
+    # loads unchanged (and an older binary ignores them -- not extra=forbid).
+    # Consecutive WorktreeError count (R3): a separate counter tripping at
+    # 3x lane_circuit_breaker_threshold (cw.lane_pause.worktree_breaker_threshold),
+    # so a flaky worktree setup does not pause the lane as fast as a broken
+    # spawn backend. Reset by a spawn success or ``cw lane resume``.
+    consecutive_worktree_errors: int = 0
+    # When the lane was paused (whole seconds, UTC). Set by a breaker trip and
+    # by ``cw lane pause``; None for a pause recorded before #2696 (legacy).
+    paused_at: datetime | None = None
+    # Who paused it: "circuit_breaker" or "operator" (cw.lane_pause.LanePauseSource).
+    # None with paused=True is a legacy pause: operator-held, never auto-resumed.
+    pause_source: str | None = None
+    # Which counter tripped: "spawn_errors" or "worktree_errors"
+    # (cw.lane_pause.LanePauseTrigger); set only with pause_source=circuit_breaker.
+    pause_trigger: str | None = None
+    # The last few recorded spawn errors, oldest first: whitespace-collapsed,
+    # redact()ed and capped (cw.dispatch.claim.events._sanitize_spawn_error_text).
+    recent_spawn_errors: list[str] = Field(default_factory=list)
+    # Consecutive breaker trips with no spawn success in between; doubles the
+    # auto-resume cool-down. Kept by ``cw lane resume``, reset by a success.
+    circuit_trip_streak: int = 0
+    # When the dispatch loop may lift a circuit-breaker pause; None when
+    # auto-resume is off, for operator/legacy pauses, and once resumed.
+    circuit_auto_resume_at: datetime | None = None
+    # True from an auto-resume until the first spawn success or the next
+    # recorded error: the lane is in its half-open probe, and a failed probe
+    # spawn does not charge the ticket's unproductive_attempts (R16).
+    circuit_half_open: bool = False
 
 
 class ClientConcurrencyOverride(BaseModel):

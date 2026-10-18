@@ -11,14 +11,23 @@ lane walk that drives it.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw.config import (
     _load_concurrency_overrides,
     _save_concurrency_overrides,
     concurrency_override_lock,
 )
+from cw.dispatch.claim.events import _sanitize_spawn_error_text
 from cw.events import record_event
+from cw.lane_pause import (
+    LanePauseSource,
+    LanePauseTrigger,
+    breaker_tripped,
+    iso_z,
+    utc_now_seconds,
+    worktree_breaker_threshold,
+)
 from cw.models import (
     ConcurrencyOverrides,
     DispatchSkipReason,
@@ -32,8 +41,16 @@ if TYPE_CHECKING:
 
 
 # ``source`` field on a LANE_PAUSED event emitted by the per-lane circuit breaker
-# (as opposed to an operator-initiated ``cw lane pause``). See GitHub issue #875.
-_LANE_PAUSE_SOURCE_CIRCUIT_BREAKER = "circuit_breaker"
+# (as opposed to an operator-initiated ``cw lane pause``), and the persisted
+# ``LaneConcurrencyOverride.pause_source`` of a trip. See GitHub #875, #2696.
+_LANE_PAUSE_SOURCE_CIRCUIT_BREAKER = LanePauseSource.CIRCUIT_BREAKER.value
+
+# How many recorded spawn errors a lane override keeps, oldest dropped (#2696).
+_RECENT_SPAWN_ERRORS_KEPT = 5
+
+# Bound on the cool-down's doubling exponent (#2696): far past any useful
+# cool-down, it only keeps ``base << exponent`` from growing without limit.
+_COOLDOWN_EXPONENT_CAP = 30
 
 
 def _pending_in_lane(
@@ -64,9 +81,10 @@ def _check_lane_circuit_paused(
 ) -> bool:
     """Return True when a lane is paused *by the breaker* and has pending work.
 
-    Distinguishes a circuit-breaker trip (consecutive_spawn_errors >= threshold)
-    from a plain operator pause: only the former, with pending work still
-    waiting, warrants the LANE_CIRCUIT_PAUSED skip_reason. See GitHub #875.
+    Distinguishes a circuit-breaker trip (either breaker counter at its trip
+    point, :func:`cw.lane_pause.breaker_tripped`) from a plain operator pause:
+    only the former, with pending work still waiting, warrants the
+    LANE_CIRCUIT_PAUSED skip_reason. See GitHub #875, #2696.
 
     ``overrides`` is loaded once per :func:`_dispatch_client_lanes` call (not
     once per paused lane) and passed in by the caller.
@@ -74,7 +92,7 @@ def _check_lane_circuit_paused(
     override = overrides.lanes.get(f"{client_name}/{lane_cfg.name}")
     if override is None:
         return False
-    if override.consecutive_spawn_errors < config.lane_circuit_breaker_threshold:
+    if not breaker_tripped(override, threshold=config.lane_circuit_breaker_threshold):
         return False
     return _pending_in_lane(lane_cfg, queue_snapshot, client_name) > 0
 
@@ -149,67 +167,206 @@ def _maybe_notify_lane_starved(
         )
 
 
+class _Trip(NamedTuple):
+    """What a breaker trip recorded, for the ``lane.paused`` event payload."""
+
+    consecutive_count: int
+    trigger: LanePauseTrigger
+    streak: int
+    recent_errors: list[str]
+    auto_resume_at: datetime | None
+
+
+def _auto_resume_cooldown_minutes(streak: int, *, base: int, max_minutes: int) -> int:
+    """Cool-down before the *streak*-th consecutive trip auto-resumes (#2696).
+
+    ``base`` doubles per consecutive trip, capped at *max_minutes*. The
+    exponent is bounded so a flapping lane cannot grow the shift without limit.
+    """
+    exponent = min(max(streak - 1, 0), _COOLDOWN_EXPONENT_CAP)
+    return min(base << exponent, max_minutes)
+
+
+def _is_operator_held(override: LaneConcurrencyOverride) -> bool:
+    """A pause the breaker must not take over: ``operator`` or legacy (no source).
+
+    Decision 5 (#2696): a ``cw lane pause`` that lands while a spawn is in
+    flight must stay operator-held even if that spawn's failure reaches the
+    threshold -- otherwise the trip would turn the hold into an
+    auto-resumable pause. A legacy pause is operator-held too (R1).
+    """
+    return (
+        override.paused is True
+        and override.pause_source != _LANE_PAUSE_SOURCE_CIRCUIT_BREAKER
+    )
+
+
+def _trip_updates(
+    override: LaneConcurrencyOverride,
+    trigger: LanePauseTrigger,
+    *,
+    config: OrchestratorConfig,
+) -> tuple[dict[str, object], int, datetime | None]:
+    """The pause fields a trip writes, plus its streak and resume time."""
+    paused_at = utc_now_seconds()
+    streak = override.circuit_trip_streak + 1
+    auto_resume_at = None
+    if config.lane_circuit_auto_resume_minutes > 0:
+        auto_resume_at = paused_at + timedelta(
+            minutes=_auto_resume_cooldown_minutes(
+                streak,
+                base=config.lane_circuit_auto_resume_minutes,
+                max_minutes=config.lane_circuit_auto_resume_max_minutes,
+            )
+        )
+    updates: dict[str, object] = {
+        "paused": True,
+        "paused_at": paused_at,
+        "pause_source": _LANE_PAUSE_SOURCE_CIRCUIT_BREAKER,
+        "pause_trigger": trigger.value,
+        "circuit_trip_streak": streak,
+        "circuit_auto_resume_at": auto_resume_at,
+    }
+    return updates, streak, auto_resume_at
+
+
+def _apply_recorded_error(
+    override: LaneConcurrencyOverride,
+    error_text: str,
+    *,
+    config: OrchestratorConfig,
+    worktree_failure: bool,
+) -> tuple[LaneConcurrencyOverride, _Trip | None]:
+    """Count one recorded error on *override*; trip at the counter's threshold.
+
+    Pure: no I/O. Every recorded error is appended to ``recent_spawn_errors``
+    (worktree failures too, so a worktree trip shows its cause) and clears
+    ``circuit_half_open`` -- the one-uncharged-failure-per-window bound holds
+    across failure kinds (Decision 2).
+    """
+    recent = [*override.recent_spawn_errors, error_text][-_RECENT_SPAWN_ERRORS_KEPT:]
+    threshold = config.lane_circuit_breaker_threshold
+    if worktree_failure:
+        field = "consecutive_worktree_errors"
+        count = override.consecutive_worktree_errors + 1
+        threshold = worktree_breaker_threshold(threshold)
+        trigger = LanePauseTrigger.WORKTREE_ERRORS
+    else:
+        field = "consecutive_spawn_errors"
+        count = override.consecutive_spawn_errors + 1
+        trigger = LanePauseTrigger.SPAWN_ERRORS
+    updates: dict[str, object] = {
+        field: count,
+        "recent_spawn_errors": recent,
+        "circuit_half_open": False,
+    }
+    if count < threshold or _is_operator_held(override):
+        return override.model_copy(update=updates), None
+    trip_updates, streak, auto_resume_at = _trip_updates(
+        override, trigger, config=config
+    )
+    updates.update(trip_updates)
+    trip = _Trip(count, trigger, streak, recent, auto_resume_at)
+    return override.model_copy(update=updates), trip
+
+
 def _record_lane_spawn_error(
     lane_cfg: LaneConfig,
     client_name: str,
     last_error: str,
     *,
     config: OrchestratorConfig,
+    worktree_failure: bool = False,
 ) -> None:
-    """Increment the lane's spawn-error counter; trip the breaker at threshold.
+    """Count one spawn failure on the lane; trip the breaker at its threshold.
 
-    Under the override lock: load → increment → save.  When the post-increment
-    count reaches ``lane_circuit_breaker_threshold`` the lane is paused and a
-    circuit-breaker-sourced LANE_PAUSED event is emitted with the post-increment
-    count and the (always-string) last error.  See GitHub #875.
+    Under the override lock: load → count → save. A ``WorktreeError``
+    (*worktree_failure*, R3) counts on ``consecutive_worktree_errors`` and
+    trips at 3x ``lane_circuit_breaker_threshold``; anything else counts on
+    ``consecutive_spawn_errors`` and trips at the threshold. Either way the
+    error is recorded, sanitized, in ``recent_spawn_errors`` (#2696).
 
-    ``last_error`` is collapsed to a single line before use: some raise sites
-    (e.g. a WorktreeError embedding git's multi-line stderr) legitimately
-    contain newlines, but ``cli.queues._format_event_line`` renders one event
-    per terminal line — an embedded newline would break that contract (#2034).
+    A trip pauses the lane and persists its cause (``paused_at``,
+    ``pause_source``, ``pause_trigger``, the trip streak and, when auto-resume
+    is on, ``circuit_auto_resume_at``), then emits a circuit-breaker-sourced
+    LANE_PAUSED after the lock is released. A trip never takes over an
+    operator-held pause (Decision 5). See GitHub #875, #2696.
+
+    The event's ``last_error`` is collapsed to a single line but not redacted,
+    as before: some raise sites (e.g. a WorktreeError embedding git's
+    multi-line stderr) legitimately contain newlines, but
+    ``cli.queues._format_event_line`` renders one event per terminal line
+    (#2034). Its ``recent_errors`` is the persisted, redacted list.
     """
-    last_error = " ".join(last_error.split())
+    collapsed = " ".join(last_error.split())
     lane_key = f"{client_name}/{lane_cfg.name}"
-    tripped = False
     with concurrency_override_lock():
         overrides = _load_concurrency_overrides()
         override = overrides.lanes.get(lane_key, LaneConcurrencyOverride())
-        count = override.consecutive_spawn_errors + 1
-        updates: dict[str, object] = {"consecutive_spawn_errors": count}
-        if count >= config.lane_circuit_breaker_threshold:
-            updates["paused"] = True
-            tripped = True
-        overrides.lanes[lane_key] = override.model_copy(update=updates)
+        updated, trip = _apply_recorded_error(
+            override,
+            _sanitize_spawn_error_text(last_error),
+            config=config,
+            worktree_failure=worktree_failure,
+        )
+        overrides.lanes[lane_key] = updated
         _save_concurrency_overrides(overrides)
-    if tripped:
+    if trip is not None:
         record_event(
             OrchestratorEventType.LANE_PAUSED,
             {
                 "client": client_name,
                 "lane": lane_cfg.name,
                 "source": _LANE_PAUSE_SOURCE_CIRCUIT_BREAKER,
-                "consecutive_count": count,
-                "last_error": last_error,
+                "consecutive_count": trip.consecutive_count,
+                "last_error": collapsed,
+                "trigger": trip.trigger.value,
+                "trip_streak": trip.streak,
+                "recent_errors": trip.recent_errors,
+                "auto_resume_at": (
+                    iso_z(trip.auto_resume_at) if trip.auto_resume_at else None
+                ),
             },
         )
 
 
-def _reset_lane_spawn_errors(lane_cfg: LaneConfig, client_name: str) -> None:
-    """Reset the lane's spawn-error counter to zero after a successful spawn.
+def _has_breaker_progress(override: LaneConcurrencyOverride) -> bool:
+    """Whether a spawn success has anything to clear on *override*."""
+    return bool(
+        override.consecutive_spawn_errors
+        or override.consecutive_worktree_errors
+        or override.circuit_trip_streak
+        or override.recent_spawn_errors
+        or override.circuit_half_open
+    )
 
-    Short-circuits (no write) when the counter is already zero or the lane has
-    no override, so a steady-state healthy lane never rewrites the override
-    file.  Never clears ``paused`` — a breaker-paused lane resumes only via
-    ``cw lane resume``.  See GitHub #875.
+
+def _reset_lane_spawn_errors(lane_cfg: LaneConfig, client_name: str) -> None:
+    """Clear the lane's breaker progress after a successful spawn.
+
+    Zeroes both counters and the trip streak, empties
+    ``recent_spawn_errors`` and ends a half-open probe (``circuit_half_open``).
+    Short-circuits (no write) when there is nothing to clear or the lane has no
+    override, so a steady-state healthy lane never rewrites the override file.
+    Never touches ``paused`` or the pause metadata: those are cleared by every
+    resume (``cw lane resume`` or auto-resume), and clearing ``pause_source``
+    on a still-paused lane would misread it as a legacy pause. See GitHub
+    #875, #2696.
     """
     lane_key = f"{client_name}/{lane_cfg.name}"
     with concurrency_override_lock():
         overrides = _load_concurrency_overrides()
         override = overrides.lanes.get(lane_key)
-        if override is None or override.consecutive_spawn_errors == 0:
+        if override is None or not _has_breaker_progress(override):
             return
         overrides.lanes[lane_key] = override.model_copy(
-            update={"consecutive_spawn_errors": 0}
+            update={
+                "consecutive_spawn_errors": 0,
+                "consecutive_worktree_errors": 0,
+                "circuit_trip_streak": 0,
+                "recent_spawn_errors": [],
+                "circuit_half_open": False,
+            }
         )
         _save_concurrency_overrides(overrides)
 

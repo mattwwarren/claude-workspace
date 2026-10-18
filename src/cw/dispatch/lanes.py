@@ -697,6 +697,7 @@ def _dispatch_client_lanes(
                     client_name=client.name,
                     last_error=outcome.error or "",
                     config=config,
+                    worktree_failure=outcome.worktree_failure,
                 )
             if outcome.spawned:
                 running_count += 1

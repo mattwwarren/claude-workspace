@@ -786,5 +786,9 @@ def _spawn_claimed_task(
                 unproductive=not isinstance(exc, _INFRA_SPAWN_ERRORS),
                 created_at=task.created_at,
             )
-            outcome = _SpawnOutcome(spawn_error=True, error=str(exc))
+            outcome = _SpawnOutcome(
+                spawn_error=True,
+                error=str(exc),
+                worktree_failure=isinstance(exc, WorktreeError),
+            )
         return outcome
