@@ -82,13 +82,18 @@ WORKER_TMPDIR_RELATIVE_PATH: Path = Path(".cw", "tmp")
 # gives: a reader that hand-types the literal is one typo away from silently
 # always returning the default, the defect #1730 shipped.
 #
-# Shape: {"unresolved_count": int, "last_stamped_at": isoformat str | None}.
+# Shape: {"unresolved_count": int, "last_stamped_at": isoformat str | None,
+# "session_id": str (Stop-hook snapshot only)}.
 # A counter rather than a flag because Claude Code can dispatch several
 # subagent tool_use blocks in one assistant turn, so two Pre hooks can fire
 # before either Post does -- a boolean would lose the second spawn.
+# ``session_id`` is the cw session id the Stop hook's count > 0 snapshot
+# copies from the context it rewrites (#2715): the context owner when that
+# snapshot was written. Only ``cw.reconcile.shipped_release`` reads it.
 AGENT_SPAWN_STAMP_KEY = "agent_spawn_stamp"
 AGENT_SPAWN_UNRESOLVED_COUNT_KEY = "unresolved_count"
 AGENT_SPAWN_LAST_STAMPED_AT_KEY = "last_stamped_at"
+AGENT_SPAWN_SESSION_ID_KEY = "session_id"
 
 # Set True in cw-context.json by a successful ``cw result emit`` (#2458).
 # The Stop hook's lock-free peek (``cw.cli.stop_hook._peek_staged_emit_result``)

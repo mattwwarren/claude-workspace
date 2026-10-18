@@ -317,20 +317,27 @@ def _stamp_transcript_age(
 
 
 def _write_agent_spawn_stamp(
-    worktree: Path, *, unresolved_count: int, stamped_at: datetime
+    worktree: Path,
+    *,
+    unresolved_count: int,
+    stamped_at: datetime,
+    session_id: str | None = None,
 ) -> None:
     """Write an ``agent_spawn_stamp`` into *worktree*'s cw-context.json.
 
     Promoted from ``tests/test_doctor.py``'s class-8 ``_write_spawn_stamp``
-    (#2524): the same on-disk payload ``cw agent-spawn-pre`` produces.
+    (#2524): the same on-disk payload ``cw agent-spawn-pre`` produces. A
+    non-None *session_id* adds the Stop-hook snapshot's ``session_id`` sub-key
+    (#2715); the default writes exactly the pre-#2715 shape.
     """
     (worktree / ".claude").mkdir(parents=True, exist_ok=True)
-    payload = {
-        "agent_spawn_stamp": {
-            "unresolved_count": unresolved_count,
-            "last_stamped_at": stamped_at.isoformat(),
-        }
+    stamp: dict[str, object] = {
+        "unresolved_count": unresolved_count,
+        "last_stamped_at": stamped_at.isoformat(),
     }
+    if session_id is not None:
+        stamp["session_id"] = session_id
+    payload = {"agent_spawn_stamp": stamp}
     (worktree / HOOK_CONTEXT_RELATIVE_PATH).write_text(
         json.dumps(payload), encoding="utf-8"
     )

@@ -134,6 +134,7 @@ EXPECTED_EXPORTS = {
     "_redact_and_truncate",
     "_usage_limit_is_recent",
     # Worktree / subagent-spawn evidence (_worktree_evidence)
+    "_agent_spawn_stamp_session_id",
     "_is_headless",
     "_read_agent_spawn_stamp_context",
     "_read_unresolved_subagent_spawn",
@@ -219,7 +220,7 @@ class TestPackageExportCompleteness:
     """Guards that ``cw.reconcile._shared`` keeps its full pre-split surface."""
 
     def test_expected_surface_size(self) -> None:
-        assert len(EXPECTED_EXPORTS) == 147
+        assert len(EXPECTED_EXPORTS) == 148
 
     def test_all_matches_full_surface(self) -> None:
         assert set(_shared.__all__) == EXPECTED_EXPORTS
@@ -292,7 +293,7 @@ class TestPatchOwnership:
     def test_package_binds_no_patched_global(self) -> None:
         """A stale ``cw.reconcile._shared.<global>`` target fails loudly.
 
-        The package re-exports only its own 147 names, never a third-party
+        The package re-exports only its own 148 names, never a third-party
         global a submodule imports, so a patch left on the package raises
         instead of resolving and silently not intercepting.
         ``_locate_session_transcript`` is itself part of the surface, so the

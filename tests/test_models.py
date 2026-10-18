@@ -2331,7 +2331,8 @@ class TestPackageExportCompleteness:
     ``WORKER_TMPDIR_RELATIVE_PATH`` and two ``DEFAULT_DISK_PRESSURE_MIN_FREE_
     INODE*`` defaults = 69, plus #2389's ``CodexHarvestOutcome`` and the six
     ``codex_legacy_recovery`` marker names = 76, later additions = 93, plus
-    #2590's ``LaunchedFixWorker`` = 94) — hardcoded here, NOT
+    #2590's ``LaunchedFixWorker`` = 94, plus #2715's
+    ``AGENT_SPAWN_SESSION_ID_KEY`` = 95) — hardcoded here, NOT
     re-derived from the package, so a dropped or renamed export is a
     falsifiable failure rather than a tautology. A deliberate addition updates
     this set in the same commit.
@@ -2342,6 +2343,7 @@ class TestPackageExportCompleteness:
 
         expected = {
             "AGENT_SPAWN_LAST_STAMPED_AT_KEY",
+            "AGENT_SPAWN_SESSION_ID_KEY",
             "AGENT_SPAWN_STAMP_KEY",
             "AGENT_SPAWN_UNRESOLVED_COUNT_KEY",
             "BASH_TOOL_NAME",

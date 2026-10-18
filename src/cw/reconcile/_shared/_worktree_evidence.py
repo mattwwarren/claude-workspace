@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from cw.config import get_client
 from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
+    AGENT_SPAWN_SESSION_ID_KEY,
     AGENT_SPAWN_STAMP_KEY,
     HOOK_CONTEXT_RELATIVE_PATH,
     extract_unresolved_spawn_count,
@@ -140,6 +141,26 @@ def _unresolved_subagent_spawn_age_seconds(
     if stamped_at.tzinfo is None:
         stamped_at = stamped_at.replace(tzinfo=UTC)
     return (now - stamped_at).total_seconds()
+
+
+def _agent_spawn_stamp_session_id(worktree_path: Path | None) -> str | None:
+    """Return the cw session id the Stop-hook snapshot wrote into the stamp.
+
+    The ``session_id`` sub-key of ``agent_spawn_stamp`` (#2715): the context
+    owner when the Stop hook's count > 0 snapshot was written. Returns it only
+    when it is a non-empty string; a None path, an unreadable context, a
+    missing or non-dict stamp, and a missing, empty or non-string id all
+    return None. Reads through :func:`_read_agent_spawn_stamp_context`, so it
+    shares the other readers' parse. Its one caller, the shipped release,
+    treats None as "hold": a stamp it cannot tie to the session it would stop
+    never justifies the stop.
+    """
+    context = _read_agent_spawn_stamp_context(worktree_path)
+    stamp = context.get(AGENT_SPAWN_STAMP_KEY) if context is not None else None
+    session_id = (
+        stamp.get(AGENT_SPAWN_SESSION_ID_KEY) if isinstance(stamp, dict) else None
+    )
+    return session_id if isinstance(session_id, str) and session_id else None
 
 
 def _read_unresolved_subagent_spawn(worktree_path: Path | None) -> bool:

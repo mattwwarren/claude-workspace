@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from cw.cli.stop_hook._constants import _LOGGER_NAME
 from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
+    AGENT_SPAWN_SESSION_ID_KEY,
     AGENT_SPAWN_STAMP_KEY,
     AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
     extract_unresolved_spawn_count,
@@ -161,12 +162,24 @@ def _snapshot_agent_spawn_stamp(
     nothing, so a clear drops any stale summary. ``entries`` is a diagnostic
     sub-key written only after spawn, absent from every freshly spawned
     context and read by nothing, so the context schema version is unchanged.
+
+    #2715: a count > 0 snapshot also copies the context's own top-level
+    ``session_id`` (the cw session id the spawn wrote) into the stamp, when
+    it is a non-empty string. It names the context owner when this snapshot
+    was written, and only ``cw.reconcile.shipped_release`` reads it, to refuse
+    to stop a session on a stamp another session left behind. The clear path
+    writes none, and ``cw agent-spawn-pre`` rebuilds the stamp without it, so
+    a later spawn drops it (the shipped release then holds). Diagnostic-sized
+    like ``entries``, so the context schema version is unchanged.
     """
     stamp: dict[str, object] = {
         AGENT_SPAWN_UNRESOLVED_COUNT_KEY: count,
         AGENT_SPAWN_LAST_STAMPED_AT_KEY: datetime.now(UTC).isoformat(),
     }
     if count > 0:
+        session_id = context.get(AGENT_SPAWN_SESSION_ID_KEY)
+        if isinstance(session_id, str) and session_id:
+            stamp[AGENT_SPAWN_SESSION_ID_KEY] = session_id
         if entries:
             stamp[_ENTRIES_KEY] = entries
         logger.info(

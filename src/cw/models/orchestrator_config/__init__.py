@@ -40,6 +40,7 @@ from cw.models.orchestrator_config.concurrency import (
 )
 from cw.models.orchestrator_config.constants import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
+    AGENT_SPAWN_SESSION_ID_KEY,
     AGENT_SPAWN_STAMP_KEY,
     AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
     BASH_TOOL_NAME,
@@ -76,6 +77,7 @@ from cw.models.orchestrator_config.stage import (
 
 __all__ = [
     "AGENT_SPAWN_LAST_STAMPED_AT_KEY",
+    "AGENT_SPAWN_SESSION_ID_KEY",
     "AGENT_SPAWN_STAMP_KEY",
     "AGENT_SPAWN_UNRESOLVED_COUNT_KEY",
     "BASH_TOOL_NAME",

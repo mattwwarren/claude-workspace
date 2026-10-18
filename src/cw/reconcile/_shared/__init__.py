@@ -200,6 +200,7 @@ from cw.reconcile._shared._types import (
     _resolve_routed_sentinel,
 )
 from cw.reconcile._shared._worktree_evidence import (
+    _agent_spawn_stamp_session_id,
     _is_headless,
     _read_agent_spawn_stamp_context,
     _read_unresolved_subagent_spawn,
@@ -292,6 +293,7 @@ __all__ = [
     "UsageLimitDetection",
     "_TaskLookupResult",
     "_TranscriptRecordIterator",
+    "_agent_spawn_stamp_session_id",
     "_apply_correction_signal_fields",
     "_apply_queue_mutations",
     "_apply_salvaged_completion",
