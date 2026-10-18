@@ -3185,6 +3185,7 @@ def breaker_config() -> OrchestratorConfig:
         tick_interval_seconds=30,
         per_client_max_parallel={"test-client": 1},
         lane_circuit_breaker_threshold=2,
+        lane_circuit_auto_resume_minutes=15,
     )
 
 

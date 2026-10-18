@@ -1819,7 +1819,8 @@ reason. Wait for the annotation to clear; only a tick line still reading
   `cw dev-queue show` appends them to `skip_reason`. `status --json` carries
   them per client as `paused_lanes`, including a paused client with no tick.
 - **Auto-resume.** A circuit-breaker pause lifts on its own after
-  `lane_circuit_auto_resume_minutes` (default 15; `0` turns it off), doubling
+  `lane_circuit_auto_resume_minutes` (opt-in; default `0`, with `15` as the
+  recommended starting value; `0` keeps it off), doubling
   per consecutive trip with no spawn success in between up to
   `lane_circuit_auto_resume_max_minutes` (default 240). The resume is
   half-open: the lane's counters drop to one below their trip point, so one

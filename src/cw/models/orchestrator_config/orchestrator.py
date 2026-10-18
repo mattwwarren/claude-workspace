@@ -92,8 +92,10 @@ class OrchestratorConfig(BaseModel):
     # spawn does not charge the ticket's unproductive_attempts. 0 disables
     # auto-resume (a tripped lane then waits for ``cw lane resume``).
     # Operator and legacy pauses are never auto-resumed. Auto-resume is
-    # enabled by default; set this to 0 to disable the bounded cooldown/probe.
-    lane_circuit_auto_resume_minutes: int = 15
+    # opt-in; set this to a positive value to enable the bounded
+    # cooldown/probe. Existing installations therefore do not change
+    # behavior until the operator explicitly configures the rollout.
+    lane_circuit_auto_resume_minutes: int = 0
     # Cap (minutes) on the doubling auto-resume cool-down above (#2696).
     lane_circuit_auto_resume_max_minutes: int = 240
     # Fixed interval (minutes) for the dispatch loop's proactive staleness
