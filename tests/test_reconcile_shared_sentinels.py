@@ -35,6 +35,7 @@ from cw.models import (
     CompletionReason,
     CwState,
     DevQueueStore,
+    OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
     Session,
@@ -71,6 +72,7 @@ from tests._reconcile_helpers import (
     _shipped_salvage_payload,
     _stage_complete_payload,
     _ul_record,
+    _write_agent_spawn_stamp,
     _write_idle_transcript_with_text,
     _write_salvage_transcript,
     _write_transcript_records,
@@ -3092,6 +3094,96 @@ class TestUnresolvedSubagentSpawnAgeSeconds:
         now = datetime(2026, 1, 1, tzinfo=UTC)
 
         assert _unresolved_subagent_spawn_age_seconds(None, now) is None
+
+    def test_session_id_key_changes_nothing_for_the_age_readers(
+        self, tmp_path: Path
+    ) -> None:
+        """#2715: the extra ``session_id`` sub-key is invisible to the age
+        reader and the fail-open draining veto (both keep their results)."""
+        from cw.reconcile._shared import _unresolved_subagent_spawn_age_seconds
+        from cw.reconcile.idle._detect import _background_work_still_draining
+
+        stamped_at = datetime(2026, 1, 1, tzinfo=UTC)
+        _write_agent_spawn_stamp(
+            tmp_path, unresolved_count=1, stamped_at=stamped_at, session_id="s1"
+        )
+        session = _make_daemon_session(id="s1", worktree_path=tmp_path)
+        config = OrchestratorConfig()
+
+        young = stamped_at + timedelta(minutes=5)
+        old = stamped_at + timedelta(minutes=31)
+        assert _unresolved_subagent_spawn_age_seconds(tmp_path, young) == 5 * 60
+        assert _background_work_still_draining(session, now=young, config=config)
+        assert not _background_work_still_draining(session, now=old, config=config)
+
+
+class TestAgentSpawnStampSessionId:
+    """Unit tests for ``_agent_spawn_stamp_session_id`` (#2715)."""
+
+    _write_context = staticmethod(TestReadUnresolvedSubagentSpawn._write_context)
+
+    def test_returns_the_stamped_session_id(self, tmp_path: Path) -> None:
+        from cw.reconcile._shared import _agent_spawn_stamp_session_id
+
+        _write_agent_spawn_stamp(
+            tmp_path,
+            unresolved_count=1,
+            stamped_at=datetime(2026, 1, 1, tzinfo=UTC),
+            session_id="abc12345",
+        )
+
+        assert _agent_spawn_stamp_session_id(tmp_path) == "abc12345"
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {},
+            {"agent_spawn_stamp": "not-a-dict"},
+            {"agent_spawn_stamp": {"unresolved_count": 1}},
+            {"agent_spawn_stamp": {"unresolved_count": 1, "session_id": ""}},
+            {"agent_spawn_stamp": {"unresolved_count": 1, "session_id": 7}},
+            {"agent_spawn_stamp": {"unresolved_count": 1, "session_id": None}},
+            [1, 2],
+        ],
+        ids=[
+            "no-stamp",
+            "non-dict-stamp",
+            "missing-id",
+            "empty-id",
+            "int-id",
+            "null-id",
+            "non-object-context",
+        ],
+    )
+    def test_none_for_unusable_shapes(self, tmp_path: Path, payload: object) -> None:
+        from cw.reconcile._shared import _agent_spawn_stamp_session_id
+
+        (tmp_path / ".claude").mkdir(parents=True)
+        (tmp_path / HOOK_CONTEXT_RELATIVE_PATH).write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+        assert _agent_spawn_stamp_session_id(tmp_path) is None
+
+    def test_none_on_malformed_json(self, tmp_path: Path) -> None:
+        from cw.reconcile._shared import _agent_spawn_stamp_session_id
+
+        (tmp_path / ".claude").mkdir(parents=True)
+        (tmp_path / HOOK_CONTEXT_RELATIVE_PATH).write_text(
+            "{ truncated", encoding="utf-8"
+        )
+
+        assert _agent_spawn_stamp_session_id(tmp_path) is None
+
+    def test_none_on_missing_worktree(self, tmp_path: Path) -> None:
+        from cw.reconcile._shared import _agent_spawn_stamp_session_id
+
+        assert _agent_spawn_stamp_session_id(tmp_path / "gone") is None
+
+    def test_none_on_none_path(self) -> None:
+        from cw.reconcile._shared import _agent_spawn_stamp_session_id
+
+        assert _agent_spawn_stamp_session_id(None) is None
 
 
 # ---------------------------------------------------------------------------

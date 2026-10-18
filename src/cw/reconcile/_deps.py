@@ -18,7 +18,7 @@ so that cluster modules can reference them as public attributes
 from __future__ import annotations
 
 from cw.config import load_effective_clients
-from cw.gh import branch_exists_on_origin, pr_is_merged_for_ticket
+from cw.gh import branch_exists_on_origin, fetch_branch_prs, pr_is_merged_for_ticket
 from cw.native_daemon import _host_timezone as host_timezone
 from cw.native_daemon import get_native_daemon_client, read_supervisor_resume_session_id
 from cw.notify import fire_push_notification
@@ -27,6 +27,7 @@ from cw.worktree import _checked_out_branch as checked_out_branch
 __all__ = [
     "branch_exists_on_origin",
     "checked_out_branch",
+    "fetch_branch_prs",
     "fire_push_notification",
     "get_native_daemon_client",
     "host_timezone",

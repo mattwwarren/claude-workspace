@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.cli.agent_spawn_stamp import _adjust_unresolved_count
 from cw.cli.stop_hook.agent_stamp import (
     _ALLOWED_VALUE_KEYS,
     _MAX_ENTRIES,
@@ -34,6 +35,7 @@ from cw.cli.stop_hook.agent_stamp import (
 from cw.config import load_state
 from cw.models import (
     AGENT_SPAWN_LAST_STAMPED_AT_KEY,
+    AGENT_SPAWN_SESSION_ID_KEY,
     AGENT_SPAWN_STAMP_KEY,
     AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
     HOOK_CONTEXT_RELATIVE_PATH,
@@ -363,3 +365,74 @@ def test_signal_stop_persists_capped_structural_entries(
     cleared = _read_stamp(worktree)
     assert cleared[AGENT_SPAWN_UNRESOLVED_COUNT_KEY] == 0
     assert _ENTRIES_KEY not in cleared
+
+
+class TestSnapshotSessionId:
+    """#2715: the count > 0 snapshot binds the stamp to its context owner."""
+
+    def test_positive_count_copies_the_context_session_id(self) -> None:
+        context: dict[str, object] = {"session_id": "abc12345"}
+
+        _snapshot_agent_spawn_stamp(context, 2)
+
+        stamp = context[AGENT_SPAWN_STAMP_KEY]
+        assert isinstance(stamp, dict)
+        assert stamp[AGENT_SPAWN_SESSION_ID_KEY] == "abc12345"
+        assert stamp[AGENT_SPAWN_UNRESOLVED_COUNT_KEY] == 2
+        assert isinstance(stamp[AGENT_SPAWN_LAST_STAMPED_AT_KEY], str)
+        assert set(stamp) == {
+            AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
+            AGENT_SPAWN_LAST_STAMPED_AT_KEY,
+            AGENT_SPAWN_SESSION_ID_KEY,
+        }
+
+    @pytest.mark.parametrize("session_id", ["", 7, None, True])
+    def test_unusable_session_id_is_not_copied(self, session_id: object) -> None:
+        context: dict[str, object] = {"session_id": session_id}
+
+        _snapshot_agent_spawn_stamp(context, 1)
+
+        stamp = context[AGENT_SPAWN_STAMP_KEY]
+        assert isinstance(stamp, dict)
+        assert AGENT_SPAWN_SESSION_ID_KEY not in stamp
+
+    def test_context_without_a_session_id_writes_none(self) -> None:
+        context: dict[str, object] = {}
+
+        _snapshot_agent_spawn_stamp(context, 1)
+
+        stamp = context[AGENT_SPAWN_STAMP_KEY]
+        assert isinstance(stamp, dict)
+        assert AGENT_SPAWN_SESSION_ID_KEY not in stamp
+
+    def test_zero_count_clear_writes_no_session_id(self) -> None:
+        context: dict[str, object] = {"session_id": "abc12345"}
+
+        _snapshot_agent_spawn_stamp(context, 0)
+
+        stamp = context[AGENT_SPAWN_STAMP_KEY]
+        assert isinstance(stamp, dict)
+        assert AGENT_SPAWN_SESSION_ID_KEY not in stamp
+
+    def test_spawn_increment_after_a_snapshot_drops_the_session_id(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Characterization: ``cw agent-spawn-pre`` rebuilds the stamp as
+        exactly ``{unresolved_count, last_stamped_at}``, so a spawn after the
+        snapshot drops the id and the shipped release holds (fail closed)."""
+        worktree = tmp_path / "wt"
+        _write_hook_context_file(worktree, session_id="abc12345")
+        deferred = _invoke_hook_command(
+            "signal-stop", _stop_payload(worktree, background_tasks=[{"id": "t1"}])
+        )
+        assert deferred.exit_code == 0, deferred.output
+        assert _read_stamp(worktree)[AGENT_SPAWN_SESSION_ID_KEY] == "abc12345"
+
+        _adjust_unresolved_count(1, {"cwd": str(worktree)})
+
+        stamp = _read_stamp(worktree)
+        assert set(stamp) == {
+            AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
+            AGENT_SPAWN_LAST_STAMPED_AT_KEY,
+        }
+        assert stamp[AGENT_SPAWN_UNRESOLVED_COUNT_KEY] == 2

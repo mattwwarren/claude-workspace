@@ -9,7 +9,7 @@ import tempfile
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.parse import quote as _urlquote
 
 if TYPE_CHECKING:
@@ -204,6 +204,106 @@ def _fetch_branch_merged_pr(
         return len(data) > 0, True
     except (ValueError, AttributeError):
         return None, True
+
+
+# Most PRs ``fetch_branch_prs`` asks gh for; a head branch rarely has more.
+_BRANCH_PRS_LIMIT = 5
+
+
+class BranchPr(NamedTuple):
+    """One PR whose head is a given branch, as ``gh pr list`` reports it.
+
+    ``state`` is gh's own ``OPEN``/``CLOSED``/``MERGED`` string; ``merged_at``
+    is gh's ``mergedAt`` ISO string, or None for an unmerged PR (gh renders it
+    as ``null``).
+    """
+
+    number: int
+    url: str
+    state: str
+    merged_at: str | None
+
+
+def _parse_branch_pr(item: object) -> BranchPr | None:
+    """Parse one ``gh pr list`` item, or None when its shape is not the contract.
+
+    ``number`` must be a non-bool int, ``url`` and ``state`` strings, and
+    ``mergedAt`` a string, ``null`` or absent.
+    """
+    if not isinstance(item, dict):
+        return None
+    number = item.get("number")
+    url = item.get("url")
+    state = item.get("state")
+    merged_at = item.get("mergedAt")
+    if (
+        type(number) is not int
+        or not isinstance(url, str)
+        or not isinstance(state, str)
+        or not (merged_at is None or isinstance(merged_at, str))
+    ):
+        return None
+    return BranchPr(number=number, url=url, state=state, merged_at=merged_at)
+
+
+def fetch_branch_prs(
+    branch: str, timeout: int = _PR_VIEW_TIMEOUT, *, cwd: Path | None = None
+) -> tuple[list[BranchPr] | None, bool]:
+    """Return (prs, gh_available) for every PR whose head is *branch* (#2715).
+
+    Runs ``gh pr list --head <branch> --state all`` (at most
+    ``_BRANCH_PRS_LIMIT`` PRs, in gh's order) with the same ladder as
+    :func:`_fetch_branch_merged_pr`:
+
+      (prs, True)   -- the branch's PRs, any state
+      ([], True)    -- no PR for the branch
+      (None, True)  -- transient error (timeout, OSError, non-zero exit,
+                       malformed JSON, a non-list payload, or an item that is
+                       not the documented shape)
+      (None, False) -- gh binary not found (FileNotFoundError)
+    """
+    try:
+        result = _sp.run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--state",
+                "all",
+                "--json",
+                "number,url,state,mergedAt",
+                "--limit",
+                str(_BRANCH_PRS_LIMIT),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            cwd=cwd,
+        )
+    except FileNotFoundError:
+        return None, False
+    except (OSError, _sp.TimeoutExpired):
+        return None, True
+    if result.returncode != 0:
+        return None, True
+    return _parse_branch_prs(result.stdout), True
+
+
+def _parse_branch_prs(stdout: str) -> list[BranchPr] | None:
+    """Parse ``gh pr list``'s JSON list, or None when any part is malformed."""
+    try:
+        data = json.loads(stdout)
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(data, list):
+        return None
+    prs = [_parse_branch_pr(item) for item in data]
+    if any(pr is None for pr in prs):
+        return None
+    return [pr for pr in prs if pr is not None]
 
 
 def pr_is_merged_for_ticket(

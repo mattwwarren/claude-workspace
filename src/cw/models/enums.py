@@ -157,6 +157,10 @@ class ReapReason(StrEnum):
     # still bound to it and a stale transcript. Two jobs: the reason on the
     # reconcile sweep's session.reap_proposed page, and the reap_reason
     # stamped on the session when an operator closes it via cw doctor --reap.
+    # GitHub #2715: cw.reconcile.shipped_release stamps it too when it closes
+    # the shipped-with-own-PR subset, differing from the doctor close only in
+    # completed_reason=NORMAL (doctor: USER) and its session.completed event
+    # carrying pr_url.
     ROUTED_RESULT_STRANDED = "routed_result_stranded"
 
 

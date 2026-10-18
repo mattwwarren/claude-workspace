@@ -100,6 +100,23 @@ _DEFERRED_OTHER_IMPORTS: Counter[_ImportKey] = Counter(
             "cw.gh",
             ("add_pr_reviewer",),
         ): 1,
+        (
+            "src/cw/reconcile/shipped_release.py",
+            "_close_unpinned",
+            "cw.doctor.routed_result_wedge",
+            (
+                "_audit_outbox_lock",
+                "_queue_audit_intents",
+                "_read_audit_outbox",
+                "_write_audit_outbox",
+            ),
+        ): 1,
+        (
+            "src/cw/reconcile/shipped_release.py",
+            "_finish_release_audit",
+            "cw.doctor.routed_result_wedge",
+            ("_emit_audit_record", "_finalize_audit_intent"),
+        ): 1,
     }
 )
 
@@ -114,6 +131,7 @@ _RECONCILE_PLC0415_KEYS = frozenset(
         "src/cw/reconcile/review_recipes/fix_agent.py",
         "src/cw/reconcile/review_recipes/auto_fix_ci.py",
         "src/cw/reconcile/review_recipes/request_reviewer.py",
+        "src/cw/reconcile/shipped_release.py",
     }
 )
 

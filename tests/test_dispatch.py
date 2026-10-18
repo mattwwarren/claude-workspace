@@ -18045,10 +18045,18 @@ class TestPostLaunchSpawnFailure:
         that reverted a RUNNING row bound to an unrecorded session, or one
         left unbound, would show up as a second spawn. ``stop_calls`` is not
         asserted: the leaked-worker sweep may stop an unrecorded worker.
+
+        #2715: when the ``sessions.json`` write failed, the row is bound to a
+        session with no record, so tick 2's reconcile parks it
+        (``running_row_session_lost``, ``session_id`` kept) with one page; a
+        parked row is never respawned. The stamp failure is adopted (#2591)
+        and stays RUNNING.
         """
         from freezegun import freeze_time
 
-        self._arrange(sample_client_config, monkeypatch, capture_events)
+        _outcomes, post_launch_pages = self._arrange(
+            sample_client_config, monkeypatch, capture_events
+        )
         if failure == "state_write":
             request.getfixturevalue("fail_state_write_after_launch")
         else:
@@ -18066,7 +18074,26 @@ class TestPostLaunchSpawnFailure:
                 frozen.tick(timedelta(hours=1))
 
         assert len(daemon.spawn_calls) == 1
-        assert statuses == [QueueItemStatus.RUNNING] * 3
+        if failure == "stamp":
+            assert statuses == [QueueItemStatus.RUNNING] * 3
+            return
+        assert statuses == [
+            QueueItemStatus.RUNNING,
+            QueueItemStatus.BLOCKED_ON_USER,
+            QueueItemStatus.BLOCKED_ON_USER,
+        ]
+        row = load_dev_queue().tasks[0]
+        assert row.disposition == "running_row_session_lost"
+        assert row.session_id is not None
+        lost_pages = [
+            e.payload
+            for e in read_events(
+                event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
+            )
+            if e.payload.get("paused_status") == "running_row_session_lost"
+        ]
+        assert [p["session_id"] for p in lost_pages] == [row.session_id]
+        assert len(post_launch_pages) == 1
 
     def test_handler_without_worktree_skips_stamp_and_pages(
         self,

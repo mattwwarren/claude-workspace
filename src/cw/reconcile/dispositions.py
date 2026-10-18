@@ -5,7 +5,8 @@ Extracted from the near-identical SESSION_COMPLETED tails duplicated across
 two different shapes rather than a single helper:
 
 - :func:`build_salvage_completion_payload` is a PURE function — it builds and
-  returns the 8-field ``SESSION_COMPLETED`` payload dict. Zero I/O: it never
+  returns the 8-field ``SESSION_COMPLETED`` payload dict, plus an optional
+  ``pr_url`` (#2715, the shipped release's own-PR URL). Zero I/O: it never
   calls ``record_event`` or touches the daemon client. Callers that need to
   interleave the emission with their own additional mutations (e.g. idle.py's
   and stalled.py's salvage loops, which call ``_apply_salvaged_completion``
@@ -43,13 +44,16 @@ def build_salvage_completion_payload(
     *,
     ticket_id: str | None,
     status: Status,
+    pr_url: str | None = None,
 ) -> dict[str, object]:
     """Build the 8-field salvaged SESSION_COMPLETED payload. Pure — zero I/O.
 
     ``ticket_id`` is passed through unguarded, matching the pre-existing
-    idle.py/stalled.py inline payload constructions this replaces.
+    idle.py/stalled.py inline payload constructions this replaces. A non-None
+    *pr_url* adds one ``pr_url`` key (#2715); with None the payload is
+    byte-identical to the 8-field shape every other caller relies on.
     """
-    return {
+    payload: dict[str, object] = {
         "session_id": session.id,
         "session_name": session.name,
         "client": session.client,
@@ -59,6 +63,9 @@ def build_salvage_completion_payload(
         "salvaged": True,
         "status": status,
     }
+    if pr_url is not None:
+        payload["pr_url"] = pr_url
+    return payload
 
 
 def emit_routed_sentinel_completion(
@@ -67,6 +74,7 @@ def emit_routed_sentinel_completion(
     ticket_id: str | None,
     status: Status,
     deferred: DeferredReconcileJobs,
+    pr_url: str | None = None,
 ) -> None:
     """Emit a salvaged SESSION_COMPLETED, then queue the surface stop if any.
 
@@ -75,10 +83,10 @@ def emit_routed_sentinel_completion(
     and runs after ``sessions_lock`` releases (#1232). No ``correlation_id``
     is passed, matching those same call sites (phantom.py's analogous call
     does pass one; that divergence is deliberate and out of scope here — see
-    GitHub #1306).
+    GitHub #1306). *pr_url* is forwarded to the payload builder (#2715).
     """
     payload = build_salvage_completion_payload(
-        session, ticket_id=ticket_id, status=status
+        session, ticket_id=ticket_id, status=status, pr_url=pr_url
     )
     record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
     if session.surface_ref is not None:
