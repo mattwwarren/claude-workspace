@@ -76,7 +76,7 @@ if TYPE_CHECKING:
 
 # paused_status written to SESSION_NEEDS_ATTENTION when the RFC 0011 A3
 # proactive finalize hold parks a ticket at the REVIEW->FINALIZE checkpoint.
-# Deliberately distinct from dev_queue.lifecycle.FINALIZE_GATE_HELD_DISPOSITION
+# Deliberately distinct from dev_queue.dispositions.FINALIZE_GATE_HELD_DISPOSITION
 # ("finalize_gate_held") -- that constant classifies TicketTask.disposition,
 # this one is a paused_status string. Different namespaces, same event. Follows
 # the _APPROVAL_GATE_REASON / _UNKNOWN_CLIENT_REASON convention in routing.py.
@@ -87,7 +87,7 @@ _FINALIZE_HOLD_REASON = "finalize_hold"
 # paused_status written to SESSION_NEEDS_ATTENTION when the RFC 0007
 # Phase 3 operator-signoff gate parks a ticket at the REVIEW->FINALIZE
 # ship checkpoint (GitHub #990, #1552). Shares its literal string value
-# with dev_queue.lifecycle.SIGNOFF_GATE_DISPOSITION (task.disposition) by
+# with dev_queue.dispositions.SIGNOFF_GATE_DISPOSITION (task.disposition) by
 # deliberate choice on that ticket -- unlike the _FINALIZE_HOLD_REASON /
 # FINALIZE_GATE_HELD_DISPOSITION pair, which uses distinct strings across
 # the two namespaces. See GitHub #1552.
@@ -97,7 +97,7 @@ _SIGNOFF_GATE_REASON = "signoff_gate"
 # paused_status written to SESSION_NEEDS_ATTENTION when the #1702 review-health
 # gate parks a REVIEW-stage ticket whose sentinel reported
 # health.recommendation == "EXIT_FOR_HUMAN_REVIEW". Shares its literal string
-# value with dev_queue.lifecycle.REVIEW_HEALTH_GATE_DISPOSITION
+# value with dev_queue.dispositions.REVIEW_HEALTH_GATE_DISPOSITION
 # (task.disposition) by deliberate choice, following the _SIGNOFF_GATE_REASON /
 # SIGNOFF_GATE_DISPOSITION precedent above rather than the _FINALIZE_HOLD_REASON
 # / FINALIZE_GATE_HELD_DISPOSITION one -- still two constants in two namespaces,
@@ -108,7 +108,7 @@ _REVIEW_HEALTH_GATE_REASON = "review_health_gate"
 # paused_status written to SESSION_NEEDS_ATTENTION when the #1823 branch-
 # staleness gate parks a REVIEW-stage ticket whose branch is behind
 # origin/<default_branch> with overlapping intervening churn. Shares its
-# literal string value with dev_queue.lifecycle.
+# literal string value with dev_queue.dispositions.
 # BRANCH_STALENESS_GATE_DISPOSITION (task.disposition) on the same
 # _REVIEW_HEALTH_GATE_REASON precedent above -- still two constants in two
 # namespaces, do not collapse them.
@@ -118,7 +118,7 @@ _BRANCH_STALENESS_REASON = "branch_behind_main"
 # paused_status written to SESSION_NEEDS_ATTENTION when the #1870 empty-diff
 # gate parks a REVIEW-stage ticket whose branch measures zero commits ahead of
 # origin/<default_branch>. Shares its literal string value with
-# dev_queue.lifecycle.EMPTY_DIFF_GATE_DISPOSITION (task.disposition) on the
+# dev_queue.dispositions.EMPTY_DIFF_GATE_DISPOSITION (task.disposition) on the
 # _BRANCH_STALENESS_REASON precedent above -- still two constants in two
 # namespaces, do not collapse them.
 #
@@ -133,7 +133,7 @@ _EMPTY_DIFF_GATE_REASON = "empty_diff_gate"
 # paused_status written to SESSION_NEEDS_ATTENTION when the #2123 review-
 # staleness gate parks a REVIEW-stage ticket whose sentinel does not carry a
 # review.reviewed_sha matching the worktree's live HEAD. Shares its literal
-# string value with dev_queue.lifecycle.REVIEW_STALENESS_GATE_DISPOSITION
+# string value with dev_queue.dispositions.REVIEW_STALENESS_GATE_DISPOSITION
 # (task.disposition) on the _EMPTY_DIFF_GATE_REASON precedent above -- still two
 # constants in two namespaces, do not collapse them.
 _REVIEW_STALENESS_REASON = "review_artifacts_stale"
@@ -654,7 +654,8 @@ def _park_review_health_gate(task: TicketTask) -> None:
     recovery is ``cw dev-queue requeue``/``drain``.
 
     ``breadcrumbs`` is hardcoded ``""`` here, deliberately (#1729) -- see the
-    module-level comment above ``routing.BREADCRUMB_ELIGIBLE_PAUSED_STATUSES``.
+    module-level comment above
+    ``routing.stage_failure.BREADCRUMB_ELIGIBLE_PAUSED_STATUSES``.
     #1775 reaffirms that choice specifically for a degraded reviewer's stated
     reason: it has no data path into this function's scope (``task`` only,
     no ``ReviewVerdict`` in hand) and does not need one. On the
@@ -668,9 +669,9 @@ def _park_review_health_gate(task: TicketTask) -> None:
     per-reviewer rationale instead reaches the operator via the sentinel's
     ``friction_highlights``/``health.agent_health_summary`` and the on-disk
     diagnostics bundle (see ``docs/events.md``'s ``review_health_gate``
-    entry) -- mirroring how ``routing._park_must_fix_mechanically_
-    rejected`` documents its own deliberate divergence from this same
-    convention.
+    entry) -- mirroring how ``routing.stage_failure.
+    _park_must_fix_mechanically_rejected`` documents its own deliberate
+    divergence from this same convention.
     """
     record_event(
         OrchestratorEventType.SESSION_NEEDS_ATTENTION,

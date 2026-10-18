@@ -123,7 +123,7 @@ joins the event's `ticket_id`/`client` payload fields against the live
 dev-queue store; it does **not** match `payload["paused_status"]` against
 `HOLD_DISPOSITIONS` -- those are two disjoint string namespaces (see
 `AWAITING_OPERATOR_DISPOSITION`'s docstring in
-`cw.dev_queue.lifecycle`), so the classification always resolves the actual
+`cw.dev_queue.dispositions`), so the classification always resolves the actual
 `TicketTask.disposition`.
 
 The buffer is durable, not in-memory: the first held event for a ticket

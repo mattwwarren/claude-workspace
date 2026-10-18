@@ -75,8 +75,9 @@ REVIEW_HEALTH_GATE_DISPOSITION = "review_health_gate"
 #
 # Unlike every other disposition in this module, this one is NOT derived from a
 # (status, blocker_reason) pair by _derive_disposition/_hold_aware_disposition.
-# It is stamped directly by dispatch.routing._park_must_fix_mechanically_
-# rejected, Rule 5's sole reason-keyed override -- deliberately, so it can
+# It is stamped directly by
+# dispatch.routing.stage_failure._park_must_fix_mechanically_rejected, Rule 5's
+# sole reason-keyed override -- deliberately, so it can
 # never resolve to AWAITING_OPERATOR_DISPOSITION (a HOLD_DISPOSITIONS member)
 # by riding the OPERATOR_UNAVAILABLE_BLOCKER_REASONS path.
 #

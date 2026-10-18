@@ -1319,7 +1319,8 @@ def test_reconcile_review_completion_preserves_fix_dispatch_hold_across_backstop
     Unlike ``test_run_fix_dispatch_spawns_real_fix_session_through_sessions_
     lock`` (whose task's ``session_id`` is unrelated to the terminal session),
     this reproduces the real shape a REVIEW session leaves behind per
-    ``dispatch/routing/__init__.py``'s ``fix_loop_pending_dispatch`` handler:
+    ``dispatch/routing/stage_failure.py``'s ``fix_loop_pending_dispatch``
+    handler:
     the RUNNING task's OWN ``session_id`` names a session that has since gone
     DAEMON COMPLETED (the REVIEW session's Stop hook). Pre-fix,
     ``revert_completed_silent_tasks()`` reverts that row to PENDING and

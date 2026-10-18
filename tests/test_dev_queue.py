@@ -14898,7 +14898,8 @@ class TestMustFixMechanicallyRejectedDisposition:
 
     Deliberately NOT inside ``TestHoldAwareDisposition``: #1714 does not extend
     ``_hold_aware_disposition``. The new disposition is stamped directly by
-    ``dispatch.routing._park_must_fix_mechanically_rejected``, never derived
+    ``dispatch.routing.stage_failure._park_must_fix_mechanically_rejected``, never
+    derived
     from a (status, blocker_reason) pair.
     """
 

@@ -65,7 +65,7 @@ if TYPE_CHECKING:
 
 
 # paused_status written to SESSION_NEEDS_ATTENTION when this gate parks a row.
-# Shares its literal string value with dev_queue.lifecycle.
+# Shares its literal string value with dev_queue.dispositions.
 # UNCONCLUDED_FINALIZE_REGRESS_MERGE_GATE_DISPOSITION (task.disposition) on the
 # review_gates._EMPTY_DIFF_GATE_REASON precedent -- still two constants in two
 # namespaces, do not collapse them. Gate-class, so it hardcodes breadcrumbs=""
