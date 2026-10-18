@@ -7,9 +7,15 @@ empty, never absent or null).
 
 from __future__ import annotations
 
+import hashlib
+import re
 from datetime import UTC, datetime
 
-from cw.context_queue_metadata import build_queue_metadata
+from cw.context_queue_metadata import (
+    OPERATOR_RESOLUTIONS_SOURCE_KEY,
+    build_queue_metadata,
+    operator_resolutions_source,
+)
 from cw.models import (
     MUST_FIX_OVERRIDE_KEY,
     PLAN_APPROVED_FINGERPRINT_KEY,
@@ -45,7 +51,10 @@ def _resolution(round_: int, text: str) -> OperatorResolution:
 
 def test_key_set_is_the_old_one_plus_operator_resolutions() -> None:
     metadata = build_queue_metadata(_make_ticket_task())
-    assert set(metadata) == _PRE_EXISTING_KEYS | {OPERATOR_RESOLUTIONS_KEY}
+    assert set(metadata) == _PRE_EXISTING_KEYS | {
+        OPERATOR_RESOLUTIONS_KEY,
+        OPERATOR_RESOLUTIONS_SOURCE_KEY,
+    }
 
 
 def test_populated_task_values_match_the_old_inline_dict() -> None:
@@ -81,6 +90,7 @@ def test_populated_task_values_match_the_old_inline_dict() -> None:
         SCOPE_DRIFT_APPROVED_HEAD_KEY: "f" * 40,
         MUST_FIX_OVERRIDE_KEY: override.model_dump(mode="json"),
         OPERATOR_RESOLUTIONS_KEY: [],
+        OPERATOR_RESOLUTIONS_SOURCE_KEY: None,
     }
 
 
@@ -113,3 +123,79 @@ def test_resolutions_are_a_list_of_dicts_in_round_order() -> None:
 def test_empty_resolutions_are_an_empty_list() -> None:
     metadata = build_queue_metadata(_make_ticket_task())
     assert metadata[OPERATOR_RESOLUTIONS_KEY] == []
+
+
+_IDENTITY_RE = re.compile(r"row:[0-9]+:[0-9a-f]{64}")
+
+
+def _digest(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+class TestOperatorResolutionsSource:
+    """#2728: ``row:<N>:<sha256>`` -- cw computes the content-bound identity of
+    the row's resolutions list and delivers it, so a re-enqueued row whose
+    round 1 differs never equals a surviving draft's stale applied line."""
+
+    def test_empty_list_has_no_identity(self) -> None:
+        assert operator_resolutions_source([]) is None
+        assert (
+            build_queue_metadata(_make_ticket_task())[OPERATOR_RESOLUTIONS_SOURCE_KEY]
+            is None
+        )
+
+    def test_one_entry_digest_covers_the_json_list_of_texts(self) -> None:
+        assert operator_resolutions_source([_resolution(1, "first")]) == (
+            "row:1:" + _digest(b'["first"]')
+        )
+
+    def test_two_entries_use_the_highest_round_and_digest_every_text(self) -> None:
+        resolutions = [_resolution(1, "first"), _resolution(2, "second")]
+        assert operator_resolutions_source(resolutions) == (
+            "row:2:" + _digest(b'["first","second"]')
+        )
+
+    def test_threaded_into_queue_metadata(self) -> None:
+        task = _make_ticket_task(
+            operator_resolutions=[_resolution(1, "first"), _resolution(2, "second")]
+        )
+        assert build_queue_metadata(task)[OPERATOR_RESOLUTIONS_SOURCE_KEY] == (
+            "row:2:" + _digest(b'["first","second"]')
+        )
+
+    def test_re_enqueued_row_with_different_round_one_text_differs(self) -> None:
+        """The ticket's acceptance case: same ``N``, different content."""
+        before = operator_resolutions_source([_resolution(1, "old text")])
+        after = operator_resolutions_source([_resolution(1, "new text")])
+        assert before is not None
+        assert after is not None
+        assert before.startswith("row:1:")
+        assert after.startswith("row:1:")
+        assert before != after
+
+    def test_same_list_gives_the_same_identity(self) -> None:
+        assert operator_resolutions_source(
+            [_resolution(1, "a"), _resolution(2, "b")]
+        ) == operator_resolutions_source([_resolution(1, "a"), _resolution(2, "b")])
+
+    def test_same_latest_text_with_a_different_earlier_round_differs(self) -> None:
+        """Latest-text-only hashing would collide on [A, B] vs [X, B]."""
+        assert operator_resolutions_source(
+            [_resolution(1, "A"), _resolution(2, "B")]
+        ) != operator_resolutions_source([_resolution(1, "X"), _resolution(2, "B")])
+
+    def test_entry_boundaries_are_unambiguous(self) -> None:
+        assert operator_resolutions_source(
+            [_resolution(1, "ab"), _resolution(2, "c")]
+        ) != operator_resolutions_source([_resolution(1, "a"), _resolution(2, "bc")])
+
+    def test_non_ascii_and_lone_surrogate_text_do_not_raise(self) -> None:
+        for text in ("é✓", "\ud800"):
+            identity = operator_resolutions_source([_resolution(1, text)])
+            assert identity is not None
+            assert _IDENTITY_RE.fullmatch(identity)
+
+    def test_entries_out_of_round_order_are_normalized(self) -> None:
+        assert operator_resolutions_source(
+            [_resolution(2, "second"), _resolution(1, "first")]
+        ) == ("row:2:" + _digest(b'["first","second"]'))
