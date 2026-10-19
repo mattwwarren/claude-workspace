@@ -40,7 +40,7 @@ from cw.dev_queue.next_commands import (
 )
 from cw.models import DispatchSkipReason, QueueItemStatus
 from tests._ticket_view_helpers import ACME, ACME_TICKET, CASES
-from tests.conftest import walk_click_tree
+from tests.conftest import _norm, walk_click_tree
 
 ROOT = Path(__file__).parent.parent
 SKILLS = ROOT / ".claude" / "skills"
@@ -224,7 +224,8 @@ def _resolvable_spans() -> list[str]:
     content = _content()
     spans: list[str] = []
     for heading in (STATE_HEADING, SEMANTICS_HEADING, HAZARDS_HEADING):
-        section = _section(content, heading)
+        # Whitespace-collapsed, so a span wrapped across lines still pairs up.
+        section = _norm(_section(content, heading))
         spans.extend(s for s in _SPAN_RE.findall(section) if s.startswith(_CW_PREFIX))
     return spans
 
