@@ -207,13 +207,13 @@ Use the **Write tool** to author the concatenated result (the existing body abov
 gh issue edit <TICKET> --repo mattwwarren/claude-workspace --body-file /tmp/body.md
 ```
 
-After append, re-dispatch: `cw dev-queue add <TICKET>` (add `-c <CLIENT>` only for a multi-client setup); if the dispatch loop is idle, also run `cw dev-queue run --once` to kick it. The orchestrator re-dispatches itself (skip only under `--dry-run`).
+After append, release the park; the orchestrator does this itself (skip only under `--dry-run`). At the plan stage, save the answered Decisions section with the **Write tool** to a scratch file and run `cw dev-queue resolve <TICKET> -c <CLIENT> --file <decisions.md>`: it records the answers on the row as binding resolutions and requeues it at the same stage. At any other stage, run `cw dev-queue requeue <TICKET> -c <CLIENT>` now that the ticket carries the answers. Never `cw dev-queue add` here: a re-add against a parked row is refused (#1653).
 
 #### `blocked` (validated, real `AutoDevResult` with `status=blocked`)
 
 Print the blocker fields verbatim: read `result.blocker` (`stage`, `reason`, `details`) from the Step 1 JSON.
 
-When `blocker.reason == "tool_denied"` (issue #182): re-dispatch is the typical recovery, but the classifier non-determinism flagged in #183 means a delay before retry is sensible. Run `cw dev-queue add <TICKET>` (optionally with `-c <CLIENT>`) after a 2-3 minute pause for the auto-mode classifier to settle; if the dispatch loop is idle, run `cw dev-queue run --once` after adding.
+When `blocker.reason == "tool_denied"` (issue #182): re-dispatch is the typical recovery, but the classifier non-determinism flagged in #183 means a delay before retry is sensible. Run `cw dev-queue requeue <TICKET> -c <CLIENT>` after a 2-3 minute pause for the auto-mode classifier to settle; the row is parked, so a re-add would be refused.
 
 When `blocker.reason == "codex_must_fix_findings"` (issue #2210): `blocker.details` is the rendered review comment, and it ends in a `### Settle a finding` section carrying one fenced `json` payload per blocking finding (capped at 10; any remainder is listed compactly below them). Those payloads exist so a decision can be recorded permanently instead of the same finding re-parking the next round.
 

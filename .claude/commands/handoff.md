@@ -101,6 +101,10 @@ When this skill is invoked:
    - Show handoff location(s)
    - Display resume prompt
 
+## Orchestrator handoffs
+
+When the session being handed off is an orchestrator, list the live tickets and the gates each is parked at. Do not copy state-reading recipes: the next session reads each ticket with `cw dev-queue show <T> -c <C>` and re-arms `cw orchestrate watch -c <C>` as in `/orchestrate-sprint`. Do not include hand-edits to the queue store, fixed `wait` timeouts, or workarounds for a cw bug; file the bug instead.
+
 ## Related Skills
 
 - `/session-done` - Normal session wrap-up (work complete)
