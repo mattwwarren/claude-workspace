@@ -1,6 +1,6 @@
 ---
 name: orchestrate-sprint
-description: Conductor skill for running a sprint or queue of work as a long-lived orchestrator session — sets the orchestrator discipline up front, then carries a body of work through harden → dispatch → monitor → triage → handoff while keeping the main thread's context pristine. Composes the existing cw skills (queue-issues, harden-ticket, cw-fanout, cw-queue-peek, cw-followup) and the session.needs_attention event bus into one steady-state loop. Use this whenever the user wants to "orchestrate a mountain of work with me", run or babysit a sprint, drive a dev-queue of tickets to done, set up a long-running orchestrator/monitor session, or says things like "let's run the queue", "be my orchestrator", "dispatch these and watch them and tell me when something needs me", or "kick off the sprint and hand off when you fill up". Reach for it even when the user names only one phase (just "monitor the queue", just "harden and dispatch these") — this skill is the home for the whole arc and the discipline that makes it good.
+description: Conductor skill for running a sprint or queue of work as a long-lived orchestrator session — sets the orchestrator discipline up front, then carries a body of work through harden → dispatch → monitor → triage → handoff while keeping the main thread's context pristine. Loads /cw-orchestration first, then composes the existing cw skills (queue-issues, harden-ticket, cw-fanout, cw-queue-peek, cw-followup) and the session.needs_attention event bus into one steady-state loop. Use this whenever the user wants to "orchestrate a mountain of work with me", run or babysit a sprint, drive a dev-queue of tickets to done, set up a long-running orchestrator/monitor session, or says things like "let's run the queue", "be my orchestrator", "dispatch these and watch them and tell me when something needs me", or "kick off the sprint and hand off when you fill up". Reach for it even when the user names only one phase (just "monitor the queue", just "harden and dispatch these") — this skill is the home for the whole arc and the discipline that makes it good.
 ---
 
 # orchestrate-sprint
@@ -15,6 +15,8 @@ before you run out of room.
 This skill adds no new parsing or validation logic. It composes pieces that
 already exist:
 
+- **state-to-command map** → `/cw-orchestration` (load first: which `cw`
+  command releases each queue state, and who runs it)
 - **work-list** → `/queue-issues` (select + enqueue ready tickets)
 - **pre-flight** → `/harden-ticket` (one ticket plans first-try)
 - **dispatch + wave watch** → `/cw-fanout` (enqueue N, run the loop, watch)
@@ -40,13 +42,20 @@ what plays when; the agents and pipelines do the playing.
 
 ### The rules, and why they exist
 
-1. **Delegate nearly everything to sonnet agents.** Searches, log pulls, code
-   sweeps, confidence checks, "what does this file do" — all of it goes to a
-   subagent that returns a *verdict*, not a file dump. Pin the model explicitly
-   (`model: sonnet` for analysis/review, `haiku` for pure lookups); never fan
-   out Opus. The agent burns its own context on the raw material; you keep only
-   its conclusion. If you catch yourself about to Read a third file into the
-   main thread, stop — that's a subagent.
+1. **Read cw state through cw; delegate only what has no cw view.** Queue
+   and session state comes from `cw dev-queue show <T> -c <C>`,
+   `cw dev-queue tasks -c <C>`, `cw queue peek -c <C>` and
+   `cw session result <ref>`. Each is one cheap, authoritative read, so run it
+   yourself rather than sending an agent to reconstruct it. Code sweeps, log
+   pulls, confidence checks and "what does this file do" still go to a
+   subagent that returns a *verdict*, not a file dump. Pin the model
+   explicitly (`model: sonnet` for analysis/review, `haiku` for pure lookups);
+   never fan out Opus. Never use Read Only Helper for `gh` or `git` (its
+   tools are Read, Grep and Glob). Anything that needs `gh` or `git` runs
+   directly, or in a `general-purpose` agent. Accept an agent's verdict when
+   it cites its evidence, or read the source yourself, not both. If you catch
+   yourself about to Read a third file into the main thread, stop — that's a
+   subagent.
 
 2. **Contain code generation to auto-dev / headless cw sessions.** The point of
    the pipeline is that implementation happens in isolated, test-gated,
@@ -109,6 +118,10 @@ tests/test_orchestrator_command_shapes.py enforces it.
 Rule 5 says batch decisions to the human; this section is the reference
 table it points at — the line between what you simply do and what you ask.
 
+Invoking `/orchestrate-sprint` is the standing authorization to approve
+in-scope gates (ADR-0020): there is no kickoff question, and the human-kept
+gates listed under *The human decides* stay excluded.
+
 **The orchestrator decides and acts, without asking:**
 
 - Dispatch and enqueue timing — including running `/cw-fanout` immediately
@@ -145,6 +158,9 @@ table it points at — the line between what you simply do and what you ask.
   is read and resolved.
 - Resolving missing-data items an AI session can resolve (fetch the artifact,
   read the log, file the follow-up ticket).
+- Recording the answers to a plan-stage ambiguities or premises park with
+  `cw dev-queue resolve`, answered from the ticket's sources of truth, and
+  fixing a row's lane with `cw dev-queue move` (forms in `/cw-orchestration`).
 - Stopping a wedged session per the peek-stop ladder (`/cw-queue-peek`'s
   explicit STOP rows).
 - Approving a plan or review gate whose plan stays within the ticket's agreed
@@ -192,9 +208,13 @@ hardening the next batch while a wave runs. But this is the spine.
 
 ### Phase 0 — Set the frame (once, at kickoff)
 
+Load `/cw-orchestration` first, before any cw command. Its state-to-command
+map is how you read and release every queue state below.
+
 State the discipline you're operating under so the human knows what to
-expect: you'll delegate to sonnet, keep implementation in auto-dev, surface
-decisions in batches, and hand off before you fill. Confirm the client and the
+expect: you'll read cw state through cw, delegate code reading to sonnet,
+keep implementation in auto-dev, surface decisions in batches, and hand off
+before you fill. Confirm the client and the
 source of the work-list (a Linear project, a label, an explicit ticket list).
 
 ### Phase 1 — Build the work-list
@@ -238,6 +258,12 @@ Monitor(command: "cw orchestrate watch -c <client>",
         timeout_ms: 1800000)
 ```
 
+Never use ScheduleWakeup, cron or sleep polling; arm one Monitor per sprint.
+Arm it with `timeout_ms: 1800000` and re-arm only when it expires. Its flags:
+`--lane` (repeatable), `--ticket` (repeatable), `--all-lanes`, `--since`
+(start after an event id), `--stuck-after-minutes` and `--force`; pass
+`--all-lanes` unless you are deliberately scoping.
+
 `cw orchestrate watch` is a persistent, silent process. It follows the event
 bus in process and prints one line per event that needs you, each ending in
 the command to run next (`| next: <cmd>`), and **nothing at all while
@@ -258,7 +284,8 @@ Monitor shows it:
 WATCH | scope | client=acme | lanes=fast | tickets=- | source=focus | start=resume | cursor=attention-acme-1f2e3d4c
 ```
 
-Check `client=` and `lanes=` before you trust the silence. **The default scope
+Always check the first line for `lanes=` (and `client=`) before you trust
+the silence. **The default scope
 is your focus-pointer lane** (`cw focus set <client>/<lane>`; `source=focus`),
 or the whole client when you have no focus lane (`lanes=*`, `source=client`).
 That default is right when you own one lane. If you are the only orchestrator
@@ -283,7 +310,7 @@ with `WATCH | exited: another watcher (pid <pid>) owns cursor ...` while the
 first is alive. After a harness restart the recorded pid may have been reused
 by an unrelated process, which looks alive too — a recycled pid cannot be
 detected. Confirm no watcher is really running (`pgrep -af "cw orchestrate
-watch"`), then re-arm with `--force`.
+watch"`), then re-arm: a second watch on the same scope needs `--force`.
 
 **A `WATCH | exited: <reason>` line means the stream is down** (a fatal error,
 a signal, or a refused start): fix the cause and re-arm. That, and the expiry
@@ -315,6 +342,13 @@ first saw the row in that state, and that memory does not survive a re-arm:
 a row that stays stuck is reported again roughly once per Monitor re-arm.
 Caps, backoff and usage limits clear themselves and never page.
 
+**Silence rule.** Nothing changed means no output. Emit one CKPT line only
+when something changed. Its shape is
+`CKPT | <ticket-or-lane> | <what changed> | <action taken or next>`.
+Between Monitor lines, say nothing and start no timed checks of your own.
+Leave PR review and CI watching alone unless the operator asks; the review
+pipeline owns it.
+
 **Waiting on specific tickets.** `cw dev-queue wait` is a safe long wait: it
 keeps waiting through dispatch's own hand-offs (a fix-loop hand-off, an
 unrouted plan/review approval result) instead of exiting early, defaults to a
@@ -323,7 +357,9 @@ unrouted plan/review approval result) instead of exiting early, defaults to a
 `scope_hint: large`); exit 5 is a stuck PENDING ticket (or an approval result
 dispatch has not routed for 300 s), with the reason and next command printed.
 **Run it as a background task** (`run_in_background: true`): a foreground
-tool call hits the harness's own timeout long before the 6-hour ceiling.
+tool call hits the harness's own timeout long before the 6-hour ceiling. A
+background `cw dev-queue wait` is for sequencing work, not for watching: the
+Monitor is the watch.
 
 **A worker that spawns and then stalls (#2004 narrowed this gap).** The stream
 subscribes to `session.liveness_changed`, filtered to `stale_30m`/`stale_45m`,
@@ -383,6 +419,12 @@ be read in light of that arithmetic — it is not evidence of "N real failures."
   `plan_pending_approval` / `review_pending_approval` park, `cw dev-queue
   approve` is itself the delta: it records the approval on the queue row,
   which is the evidence the plan stage reads. A prose approval comment is not.
+  For an `ambiguities_pending_resolution` / `premises_pending_verification`
+  park at the plan stage, `cw dev-queue resolve` records your answers on the
+  row and requeues it in one step: the recorded resolution is the delta.
+
+  Route to `/harden-ticket` when the operator flags hardening or a ticket
+  parks twice on the same disposition.
 - **Premise-pending-verification on an external unknown** → verify the
   premise yourself (pull the log / artifact / dependency state). If it
   genuinely cannot be resolved, park it, write the gate down, and escalate
@@ -403,15 +445,19 @@ hands here; your job is the routing.
 
 This is non-optional and easy to skip until it's too late. At ~80% context, or
 when the open decisions outnumber what you can hold, run `/handoff` — capture
-the live waves, the parked-and-gated tickets (with their gates), the armed
-watch, and the next action per in-flight ticket. A clean handoff is what makes
+the live ticket list, the gate each parked ticket sits at, the armed watch
+(its scope line), and the next action per in-flight ticket. Carry state, not
+recipes: the next session reads each ticket with `cw dev-queue show <T> -c <C>`
+and re-arms `cw orchestrate watch -c <C>` per Phase 4. Leave out hand-edits
+of the queue store, fixed `wait` timeouts and workarounds for a cw bug; file
+the bug instead. A clean handoff is what makes
 the *next* orchestrator session as good as this one. Running yourself into a
 context wall and dying mid-wave is the one failure mode that wastes everyone's
 work.
 
 ## When to break containment (the honest exceptions)
 
-"Contain code-gen to auto-dev" and "delegate everything" are defaults with a
+"Contain code-gen to auto-dev" and "delegate code reading" are defaults with a
 high prior, not absolutes. Name the exception out loud when you take it:
 
 - **Codifying judgment** (writing a skill, a CLAUDE.md rule, a Pre-flight
@@ -475,6 +521,13 @@ delegation.
   hours; run it as a background task (Phase 4).
 - **Dribbling decisions.** Five one-question round-trips for what could've been
   one batched `AskUserQuestion`.
+- **Asking the same question twice.** Ask a recurring either/or question once
+  per sprint, then apply the answer.
+- **Handing the operator an orchestrator command.** If `/cw-orchestration`
+  marks a command `Who: orchestrator`, run it yourself instead of asking the
+  operator to.
+- **Timer polling.** `ScheduleWakeup`, cron, sleep loops or a periodic peek
+  on top of the armed Monitor (Phase 4).
 - **Over-dispatching.** More running ≠ faster done; it's just less attention per
   ticket and a higher wedge rate.
 - **Reading raw material into the main thread.** The third file Read is a
@@ -483,6 +536,7 @@ delegation.
 
 ## Related skills
 
+- `/cw-orchestration` — state-to-command map and cw vocabulary (load first)
 - `/queue-issues` — select + enqueue ready tickets (Phase 1)
 - `/harden-ticket` — pre-flight one ticket to plan first-try (Phase 2)
 - `/cw-fanout` — dispatch N + watch the wave (Phase 3/4)

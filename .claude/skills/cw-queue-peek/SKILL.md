@@ -23,7 +23,9 @@ sessions.
 - Watching a parallel dispatch wave where one or more tickets are running long
 - A session is past its expected wall-clock and you want to know if it's still progressing
 - A PR was merged but the worker session is still alive (the canonical "stuck post-create" pattern)
-- Periodic check during orchestration of a queue ("anything need attention?")
+- A check during orchestration of a queue ("anything need attention?"), run
+  at a checkpoint, not on a timer; with the `cw orchestrate watch` Monitor
+  armed, no periodic peeks
 - Right before considering a `cw spawn close` — verify the peek confirms it's stuck
 
 Do **not** use this skill for:

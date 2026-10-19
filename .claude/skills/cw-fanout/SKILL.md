@@ -120,16 +120,23 @@ back to the operator.
 This is the handoff `/cw-queue-peek` was built to receive. Drive it from
 **checkpoints**, not a busy `sleep` poll — react to events and re-check state.
 
-**Primary: subscribe to the operator channel.** Wave-watching converts from
-hand-rolled bash liveness monitors to a `cw-operator` subscription (see the
-[operator channel](../../../docs/operator-channel.md) doc for wiring). React
-to terminal `task.transition` pushes (read `disposition` off the payload) and
-`session.needs_attention` pushes as they arrive on
-`<channel source="cw-operator">` — that is what drives Step 4b below. A
-`cancelled` transition also forwards but always carries `disposition: null`;
-handle it as its own case, not an error. `wave_status.py` (4a) is still the
-terminal-state confirmation for the whole batch; the channel is what tells you
-*when* to re-check it instead of polling on a timer.
+**Primary: the one `cw orchestrate watch` Monitor.** Arm a single Monitor on
+`cw orchestrate watch -c <CLIENT> --all-lanes` (or `--ticket <T>` per wave
+ticket when you deliberately scope it), exactly as `/orchestrate-sprint`
+Phase 4 describes; if an orchestrator session already armed one whose scope
+covers the wave, reuse it and never arm a second. It prints one line per
+event that needs you, ending in `| next: <cmd>`, and nothing while the wave
+is healthy. Each line is what drives Step 4b below. Never use ScheduleWakeup,
+cron or sleep polling on top of it. `wave_status.py` (4a) is still the
+terminal-state confirmation for the whole batch; the Monitor is what tells
+you *when* to re-check it.
+
+If the session is subscribed to the `cw-operator` channel instead (see the
+[operator channel](../../../docs/operator-channel.md) doc for wiring), its
+`<channel source="cw-operator">` pushes play the same role: terminal
+`task.transition` pushes (read `disposition` off the payload; a `cancelled`
+transition always carries `disposition: null`, so handle it as its own case)
+and `session.needs_attention` pushes. Use one signal source, not both.
 
 **a. Wave lifecycle — am I done?**
 
@@ -161,16 +168,16 @@ LOOP:
     classify and close gate (Step 4b)
   tail event bus for new attention signals (Step 4b)
   run peek-stop ladder (Step 4c)
-  sleep/checkpoint
+  wait for the next Monitor line
 ```
 
 **b. Attention signals — does anything need me now?**
 
-With the operator channel subscribed (the primary path above), attention
-signals arrive as `<channel source="cw-operator">` pushes and drive straight
-into the gate-closure logic below — no polling needed. If the channel server
-is down (see the Fallback below), tail the event bus with a durable consumer
-cursor instead (resumes where it left off):
+With the Monitor armed (the primary path above), attention signals arrive as
+watch lines and drive straight into the gate-closure logic below — no polling
+needed. If neither the watch nor the channel is available (see the Fallback
+below), tail the event bus with a durable consumer cursor instead, at
+checkpoints (it resumes where it left off):
 
 ```bash
 cw event tail --since fanout-mon \
@@ -223,11 +230,15 @@ If the gate is one of `plan_pending_approval`, `review_pending_approval`,
      `cw dev-queue approve <T> -c <CLIENT>` (this arm is sound: review →
      finalize; if session not found, fall back to
      `cw dev-queue requeue <T> -c <CLIENT>`)
-   - `ambiguities_pending_resolution` / `premises_pending_verification` →
-     answer **as an issue COMMENT** (the scanner's response-check is blind to
-     body edits — #980) while ALSO keeping the binding resolutions folded in
-     the issue BODY under its single `auto-dev-preflight-resolutions` marker,
-     then `cw dev-queue requeue <T> -c <CLIENT>`
+   - `ambiguities_pending_resolution` / `premises_pending_verification` at
+     the plan stage → save the answers with the Write tool and run
+     `cw dev-queue resolve <T> -c <CLIENT> --file <decisions.md>`: it records
+     them on the row as binding resolutions and requeues it, with no tracker
+     comment needed. At any other stage, answer **as an issue COMMENT** (the
+     scanner's response-check is blind to body edits — #980) while ALSO
+     keeping the binding resolutions folded in the issue BODY under its
+     single `auto-dev-preflight-resolutions` marker, then
+     `cw dev-queue requeue <T> -c <CLIENT>`
 5. On successful re-dispatch: print
    `gate closed: #<T> (<GATE>) → re-dispatched, watching` — resume the loop.
 
@@ -264,18 +275,17 @@ If pending tickets sit unclaimed across ticks:
 - `cw dev-queue status` lane lines — a `[PAUSED]` marker means the per-lane
   circuit breaker (#875) tripped on consecutive spawn errors (a quota window
   does this). Remedy: `cw lane resume <CLIENT> <lane>` — resume also resets
-  the consecutive-error counter. The pause is currently SILENT (no attention
-  event until the Wave-4 escalation work lands) — this check is on you.
+  the consecutive-error counter. The watch reports a pending ticket on a
+  paused lane as a `STUCK` line after `--stuck-after-minutes` (default 15);
+  with no watch armed, this check is on you.
 - BLOCKED_ON_USER rows **hold lane slots by design** — a parked ticket can
   starve the lane. Requeue or remove it to convert a dead slot into a
   working one.
 - `disposition=attempt_cap_blocked` after an environmental outage (quota
-  window, hang loop): stop ALL dispatch loops (`pkill -f "cw dev-queue run"`,
-  then pgrep-verify ZERO — TaskStop on a wrapper does not reliably kill the
-  python child), reset the row's `attempts`/`disposition` in
-  `~/.local/share/cw/dev_queue.json`, verify the write, requeue, restart the
-  loop. NEVER edit that file with a loop alive — a tick's read-modify-write
-  silently clobbers the edit.
+  window, hang loop): once the cause is fixed, run
+  `cw dev-queue requeue <T> -c <CLIENT> --reset-attempts`. It zeroes the
+  unproductive-attempt counter and requeues in one step, with the loop left
+  running. Never hand-edit the queue store for this.
 
 **c. In-flight health — is a running session stuck?**
 
@@ -291,14 +301,17 @@ form and death checks it names (`cw spawn close --confirmed-dead <session_id>`
 only for a verified-dead session). Always close the session **before**
 `cw dev-queue remove`.
 
-Surface progress sparingly — one line when the wave shrinks or a ticket flips
-to needs-attention; otherwise stay quiet. `cw watch` shows the live board.
+Nothing changed means no output. Emit one CKPT line only when something
+changed (the wave shrinks, a ticket flips to needs-attention, a gate closes);
+otherwise stay quiet. `cw watch` shows the live board.
 
 ### Fallback: Poll Ladder
 
-Use this when the channel server (`cw queue-channel serve`) is down,
-`cw-operator` isn't wired into `.mcp.json`, or you need recovery forensics —
-it's also the `cw event tail` command referenced in 4b above.
+Use this when neither the `cw orchestrate watch` Monitor nor the operator
+channel (`cw queue-channel serve`, wired into `.mcp.json`) is available, or
+you need recovery forensics — it's also the `cw event tail` command
+referenced in 4b above. Even here, never use ScheduleWakeup or a sleep loop:
+re-check at checkpoints (after a gate, after a merge, before you report).
 
 **Monitor LIVENESS, not just queue state.** Queue rows, the roster, and
 `wave_status` output can all lag or lie (false parks on live sessions — #976;
@@ -417,9 +430,10 @@ fanout: client=claude-workspace wave=[204,205,206] → all shipped; 0 need atten
 
 ## Related
 
-- [operator channel](../../../docs/operator-channel.md) — primary
-  attention-signal source for Step 4 monitoring; the `cw event tail` bus is
-  the fallback when its server is down.
+- `cw orchestrate watch` under one Monitor — primary attention-signal source
+  for Step 4 monitoring (`/orchestrate-sprint` Phase 4).
+- [operator channel](../../../docs/operator-channel.md) — the alternative
+  push source; the `cw event tail` bus is the fallback when neither is up.
 - `/cw-smoke-test` — single-ticket end-to-end dogfood (the N=1 form of this).
 - `/cw-queue-peek` — in-flight WAIT/PEEK/STOP ladder (Step 4c).
 - `/cw-validate-result` — forensic read on a finished ticket (Step 5).

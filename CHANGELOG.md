@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Docs
+
+- **A tracked `cw-orchestration` skill maps every queue state to the `cw` command that releases it (#2698).** The skill moves into this repo from the global config repo and is rewritten: a state-to-command list that defers to `cw dev-queue show`'s `next:` line and marks each entry orchestrator-run or operator-only, command semantics for `cw dev-queue wait` (exit codes 0-5 and 124), `cw orchestrate watch`, `cw preflight`, `cw lane set`, `cw config concurrency set` and `cw review settle`, and cited cw hazards. A doc test resolves every command and flag in it against the live CLI and checks its first commands against `next_commands`. After upgrading, run `scripts/install-skills.sh` so `~/.claude/skills/cw-orchestration` links to the tracked copy.
+- **Orchestrator skills hold one silent Monitor and stop timer polling (#2698).** `orchestrate-sprint` loads `/cw-orchestration` first, reads cw state through `cw dev-queue show`/`tasks`, `cw queue peek` and `cw session result`, bans `ScheduleWakeup`, cron and sleep polling, emits a `CKPT` line only when something changed, and adds `resolve`, `move` and the ADR-0020 standing authorization to Decision ownership. `cw-followup` and `cw-fanout` release parked rows with `cw dev-queue resolve` or `requeue` instead of a refused `cw dev-queue add`, and `cw-fanout` replaces the `dev_queue.json` hand-edit with `requeue --reset-attempts`. `harden-ticket` takes flagged and twice-parked tickets, and `/handoff` gains an orchestrator section that carries state, not recipes.
+
 ## [1.77.0] - 2026-10-18
 
 ### Added

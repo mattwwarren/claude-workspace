@@ -82,6 +82,7 @@ IS the hardening sweep, and a better one than a pre-flight pass:
 - **Batch waves where the operator explicitly wants zero mid-wave
   interrupts** — pre-answering everything up front trades one early operator
   round for an uninterrupted wave.
+- the operator flags hardening, or a ticket parks twice on the same disposition (route here instead of a third dispatch).
 
 ## Workflow
 
