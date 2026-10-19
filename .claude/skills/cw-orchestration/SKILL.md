@@ -91,8 +91,11 @@ Skills compose over the primitives; prefer them for in-flight work.
 - Hand-roll `claude --bg` spawns when a cw command does it.
 - Use `ScheduleWakeup`, sleep or cron polling, or `/loop` babysitting to watch
   work. The `cw orchestrate watch` Monitor is push; silence means healthy.
-- Run `gh pr create` or `gh pr merge` to ship a headless run; the pipeline
-  ships with auto-merge itself.
+- Do not run `gh pr create` or `gh pr merge` for normal pipeline-owned
+  headless shipping; the pipeline ships with auto-merge itself. Preserve the
+  documented `attach_ui_evidence` and `pr.auto_merge: false` recovery paths,
+  where the orchestrator may run `gh pr merge` after the required recovery
+  work.
 - Parse `cw list` or `cw watch` output: the text columns are unstable. Use
   `cw dev-queue show <T> -c <C>`, `cw dev-queue tasks -c <C> --json`,
   `cw session result <ref>` or `cw queue peek -c <C> --json`.
