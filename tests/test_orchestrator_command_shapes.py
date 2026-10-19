@@ -243,6 +243,7 @@ def test_orchestrator_doc_set_is_populated() -> None:
         ".claude/skills/cw-fanout/SKILL.md",
         ".claude/skills/cw-followup/SKILL.md",
         ".claude/skills/cw-followup/references/no-sentinel-patterns.md",
+        ".claude/skills/cw-orchestration/SKILL.md",
         ".claude/skills/cw-session-watch/SKILL.md",
         ".claude/skills/cw-validate-result/SKILL.md",
         ".claude/skills/orchestrate-sprint/SKILL.md",

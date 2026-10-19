@@ -271,6 +271,36 @@ class TestInstallSkillsSymlinkMigration:
         assert installed.readlink() == src.resolve()
         assert (installed / "SKILL.md").read_text() == "# cw-fanout skill\n"
 
+    def test_skill_dir_in_symlinked_skills_root_handed_over(
+        self, script: Path, fake_home: Path, tmp_path: Path
+    ) -> None:
+        """``~/.claude/skills`` symlinked into another repo (#2698).
+
+        The cw skill's real directory there becomes a symlink into this repo;
+        a foreign skill beside it and the root symlink itself are untouched.
+        """
+        global_skills = tmp_path / "global-repo" / "skills"
+        stale_dir = global_skills / "cw-fanout"
+        stale_dir.mkdir(parents=True)
+        (stale_dir / "SKILL.md").write_text("# global copy\n")
+        foreign = global_skills / "foreign-skill"
+        foreign.mkdir()
+        (foreign / "SKILL.md").write_text("# foreign skill\n")
+        skills_root = fake_home / ".claude" / "skills"
+        skills_root.symlink_to(global_skills)
+
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+
+        installed = global_skills / "cw-fanout"
+        assert installed.is_symlink()
+        src = script.parent.parent / ".claude" / "skills" / "cw-fanout"
+        assert installed.readlink() == src.resolve()
+        assert (installed / "SKILL.md").read_text() == "# cw-fanout skill\n"
+        assert (foreign / "SKILL.md").read_text() == "# foreign skill\n"
+        assert skills_root.is_symlink()
+        assert skills_root.readlink() == global_skills
+
     def test_skill_dir_symlink_wrong_target_repointed(
         self, script: Path, fake_home: Path, tmp_path: Path
     ) -> None:
