@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.77.1] - 2026-10-19
+
 ### Docs
 
 - **A tracked `cw-orchestration` skill maps every queue state to the `cw` command that releases it (#2698).** The skill moves into this repo from the global config repo and is rewritten: a state-to-command list that defers to `cw dev-queue show`'s `next:` line and marks each entry orchestrator-run or operator-only, command semantics for `cw dev-queue wait` (exit codes 0-5 and 124), `cw orchestrate watch`, `cw preflight`, `cw lane set`, `cw config concurrency set` and `cw review settle`, and cited cw hazards. A doc test resolves every command and flag in it against the live CLI and checks its first commands against `next_commands`. After upgrading, run `scripts/install-skills.sh` so `~/.claude/skills/cw-orchestration` links to the tracked copy.
