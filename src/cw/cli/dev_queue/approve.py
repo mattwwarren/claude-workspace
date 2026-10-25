@@ -24,7 +24,11 @@ from cw.dev_queue import (
     resolve_client,
     revoke_plan_approval,
 )
-from cw.dev_queue.approval import REVIEW_APPROVED_SHA_KEY, REVIEW_APPROVER_KIND_KEY
+from cw.dev_queue.approval import (
+    AUDIT_EVENT_RECORDED_KEY,
+    REVIEW_APPROVED_SHA_KEY,
+    REVIEW_APPROVER_KIND_KEY,
+)
 from cw.dev_queue.next_commands import human_gate_settled_notice, is_human_kept_gate
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
@@ -536,6 +540,12 @@ def dev_queue_approve(
             f" {result['from_stage']} -> {result['to_stage']}{promoted_note}"
         )
     _echo_review_approval(ticket_id, resolved, result)
+    if result.get(AUDIT_EVENT_RECORDED_KEY) is False:
+        click.echo(
+            f"Approval recorded for {ticket_id} ({resolved}), but its audit"
+            " event was not written (see the log); the approval stands.",
+            err=True,
+        )
     # After the whole confirmation chain (incl. the --post-marker tip) and
     # before the orphan close, so a close failure still shows the row.
     echo_resulting_row(ticket_id, resolved)

@@ -46,7 +46,7 @@ from cw.dev_queue.plan_promotion import DEV_QUEUE_APPROVE_ACTOR, promote_plan_dr
 from cw.dev_queue.refusal import refusal_hint
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
-from cw.exceptions import ApproveGateError
+from cw.exceptions import ApproveGateError, CwError
 from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_body
 from cw.models import (
     PLAN_APPROVED_FINGERPRINT_KEY,
@@ -87,6 +87,9 @@ _BODY_SHA_DISPLAY_LEN = 12
 # recorded (``_stamp_review_approval``), both None when it recorded none.
 REVIEW_APPROVER_KIND_KEY = "review_approver_kind"
 REVIEW_APPROVED_SHA_KEY = "review_approved_sha"
+# False iff the approval persisted but its gate-release audit event did not
+# (#2767): the row is the authority finalize reads, the event is best-effort.
+AUDIT_EVENT_RECORDED_KEY = "audit_event_recorded"
 
 
 def approve_ticket(
@@ -362,14 +365,18 @@ def _save_approval_and_audit(
     awaiting_signoff: bool,
     plan_requeued: bool,
     review_stamp: tuple[str, str | None, dict[str, str | None]] | None,
-) -> None:
-    """Persist an approval and its gate-release audit in safe order.
+) -> bool:
+    """Persist an approval, then emit its gate-release audit event best-effort.
 
-    Save the queue row before emitting the audit event. If event emission
-    fails, restore the queue snapshot so a failed approval cannot leave either
-    side of the pair durable without the other.
+    The queue row's recorded approval is the authority finalize reads; the
+    audit event is secondary and follows the state change, like
+    ``lane.config_changed``. A failed emission is logged and reported through
+    the return value (False) -- a persisted approval is never undone because
+    its event could not be written.
+
+    Returns:
+        True when the audit event was recorded, False when it was not.
     """
-    previous_store = load_dev_queue()
     save_dev_queue(store)
     try:
         _record_approve_scope_routing_decision(
@@ -382,16 +389,16 @@ def _save_approval_and_audit(
             plan_requeued=plan_requeued,
             review_stamp=review_stamp,
         )
-    except Exception:
-        try:
-            save_dev_queue(previous_store)
-        except Exception:
-            _log.exception(
-                "approve: failed to roll back queue after audit failure for %s/%s",
-                client_name,
-                ticket_id,
-            )
-        raise
+    except (OSError, ValueError, CwError):
+        _log.warning(
+            "approve: approval recorded but the gate-release audit event failed"
+            " for %s/%s",
+            client_name,
+            ticket_id,
+            exc_info=True,
+        )
+        return False
+    return True
 
 
 def _stamp_plan_approval(
@@ -782,7 +789,9 @@ def _approve_ticket_locked(
     ``operator_initiated`` (``"operator"`` / ``"recipe"``), bound to the
     sentinel's reviewed head. The result reports it under
     ``review_approver_kind`` / ``review_approved_sha`` (both None when this
-    call stamped nothing) and the scope-routing event carries it.
+    call stamped nothing) and the scope-routing event carries it. The row is
+    saved first and the event is best-effort: ``audit_event_recorded`` is False
+    when the event failed after the approval persisted (never rolled back).
 
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
@@ -937,7 +946,7 @@ def _approve_ticket_locked(
     to_stage = task.stage.value
 
     # #1617 (D4): persist the row and its gate-release audit through one helper.
-    _save_approval_and_audit(
+    audit_event_recorded = _save_approval_and_audit(
         store,
         ticket_id,
         client_name,
@@ -966,4 +975,5 @@ def _approve_ticket_locked(
         # #2767: what THIS call stamped, never the row's stored record.
         REVIEW_APPROVER_KIND_KEY: review_stamp[0] if review_stamp else None,
         REVIEW_APPROVED_SHA_KEY: review_stamp[1] if review_stamp else None,
+        AUDIT_EVENT_RECORDED_KEY: audit_event_recorded,
     }

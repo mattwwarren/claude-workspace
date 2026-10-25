@@ -12446,6 +12446,27 @@ class TestDevQueueApproveCli:
         )
         assert "Finalize cannot match a head to it" in result.output
 
+    def test_review_approve_says_when_the_audit_event_was_not_written(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2767: a failed audit event keeps the approval, exits 0, and says so."""
+        self._seed_review_pending(
+            tmp_config_dir, tmp_path, signoff=False, reviewed_sha=self._REVIEWED_SHA
+        )
+
+        def _fail_scope_event(*_args: object, **_kwargs: object) -> None:
+            message = "event inbox unavailable"
+            raise OSError(message)
+
+        monkeypatch.setattr("cw.dev_queue.approval.record_event", _fail_scope_event)
+        result = CliRunner().invoke(
+            main, ["dev-queue", "approve", "ACME-1", "--client", "acme"]
+        )
+        assert result.exit_code == 0, result.output
+        assert f"{self._RECORDED} reviewed head abcdef012345." in result.output
+        assert "its audit event was not written" in result.output
+        assert "the approval stands" in result.output
+
     def test_result_without_review_keys_prints_no_recorded_line(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

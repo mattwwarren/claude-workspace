@@ -9615,33 +9615,53 @@ class TestReviewApprovalRecord:
         assert t.review_approved_sha == _HEAD_SHA
         assert t.review_approved_at is not None
 
-    def test_audit_failure_refuses_review_approval_before_persistence(
+    def test_audit_failure_keeps_the_persisted_approval(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A review approval never persists without its scope audit event."""
+        """A failed audit event never undoes the approval the row records."""
         from cw.dev_queue import approve_ticket
         from cw.models import OrchestratorEventType
 
         _seed_gate_row(tmp_config_dir, tmp_path)
-        before = load_dev_queue().model_dump()
 
         def _raise_event(
             event_type: OrchestratorEventType,
             *_args: object,
             **_kwargs: object,
         ) -> None:
+            message = "event inbox unavailable"
             if event_type == OrchestratorEventType.SCOPE_ROUTING_DECISION:
-                raise OSError("event inbox unavailable")
+                raise OSError(message)
 
         monkeypatch.setattr("cw.dev_queue.approval.record_event", _raise_event)
 
-        with pytest.raises(OSError, match="event inbox unavailable"):
-            approve_ticket("GEN-500", "genhealth")
+        with caplog.at_level(logging.WARNING, logger="cw.dev_queue.approval"):
+            result = approve_ticket("GEN-500", "genhealth")
 
-        assert load_dev_queue().model_dump() == before
+        assert result["audit_event_recorded"] is False
+        assert result["review_approver_kind"] == "operator"
+        assert result["review_approved_sha"] == _HEAD_SHA
+        t = _only_row()
+        assert t.stage == Stage.FINALIZE
+        assert t.review_approver_kind == "operator"
+        assert t.review_approved_sha == _HEAD_SHA
+        assert any(
+            r.levelno == logging.WARNING and "audit event failed" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_audit_success_reports_event_recorded(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import approve_ticket
+
+        _seed_gate_row(tmp_config_dir, tmp_path)
+
+        assert approve_ticket("GEN-500", "genhealth")["audit_event_recorded"] is True
 
     def test_sentinel_without_reviewed_sha_stamps_none_sha(
         self, tmp_config_dir: Path, tmp_path: Path
