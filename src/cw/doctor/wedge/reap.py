@@ -47,6 +47,19 @@ from cw.native_daemon import get_native_daemon_client
 from cw.reconcile.leaked_workers import sweep_leaked_daemon_workers
 
 _REAP_CHECK_NAME = "wedge-reap"
+_NON_REAP_WEDGE_CLASSES: frozenset[str] = frozenset(
+    {
+        "wedge/repo-ahead-of-queue",
+        _WEDGE_BLOCKED_DEAD_SESSION,
+        _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
+        _WEDGE_TERMINAL_SIBLING,
+        _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL,
+        _WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN,
+        _WEDGE_LEAKED_DAEMON_WORKER,
+        WEDGE_ROUTED_RESULT_STRANDED,
+        WEDGE_PENDING_WORKTREE_OCCUPIED,
+    }
+)
 
 
 def _reap_daemon_sessions(
@@ -198,7 +211,7 @@ def _reap_wedge_findings(
         apart.
     Class-9 (active-null-liveness-orphan, #2237): advisory only — no
         mutations. Absent from daemon_reap_findings AND listed in the
-        running_ticket_ids exclusion set (that set is default-inclusive, so
+        running_ticket_keys exclusion set (that set is default-inclusive, so
         leaving it out would still revert the ticket's RUNNING task to
         PENDING). ADR-0014: its eligibility is an elapsed-time cutoff with no
         roster/PID/terminal-result evidence; the recipe names
@@ -220,35 +233,43 @@ def _reap_wedge_findings(
         re-detects fresh, flips only the session, stops its worker and owns
         its own bounded ``sessions_lock``. It never reverts a row (the row
         already advanced past this session), so it is listed in the
-        running_ticket_ids exclusion set -- left out, the default-inclusive
+        running_ticket_keys exclusion set -- left out, the default-inclusive
         set would revert a RUNNING row of the same ticket claimed by a new
         session.
     Class-12 (pending-worktree-occupied, #2516): advisory only. The finding
         names a PENDING row held by an occupied worktree; ``--reap`` changes
         nothing for it and writes no audit row. It is listed in the
-        running_ticket_ids exclusion set so the default-inclusive set never
-        reverts a RUNNING row of the same ticket id.
+        running_ticket_keys exclusion set so the default-inclusive set never
+        reverts a RUNNING row of the same (client, ticket id).
 
     The former class-1 (pane-idle-but-active) wedge was removed with the
     multiplexer substrate — under the native daemon there are no panes to
     inspect for an idle shell (see #504).
     """
+    running_ticket_keys: set[tuple[str, str]] = {
+        (client, f.ticket_id)
+        for f in findings
+        if f.ticket_id
+        and (client := getattr(f, "client", None)) is not None
+        and f.wedge_class not in _NON_REAP_WEDGE_CLASSES
+    }
+    # Older actionable findings have no client identity and remain explicitly
+    # global by ticket id. A class-12 finding is client-scoped, so preserve
+    # that client's RUNNING row even when a legacy finding for the same ticket
+    # supplies the global fallback.
     running_ticket_ids: set[str] = {
         f.ticket_id
         for f in findings
         if f.ticket_id
-        and f.wedge_class
-        not in {
-            "wedge/repo-ahead-of-queue",
-            _WEDGE_BLOCKED_DEAD_SESSION,
-            _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
-            _WEDGE_TERMINAL_SIBLING,
-            _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL,
-            _WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN,
-            _WEDGE_LEAKED_DAEMON_WORKER,
-            WEDGE_ROUTED_RESULT_STRANDED,
-            WEDGE_PENDING_WORKTREE_OCCUPIED,
-        }
+        and getattr(f, "client", None) is None
+        and f.wedge_class not in _NON_REAP_WEDGE_CLASSES
+    }
+    pending_worktree_keys: set[tuple[str, str]] = {
+        (client, f.ticket_id)
+        for f in findings
+        if f.ticket_id
+        and (client := getattr(f, "client", None)) is not None
+        and f.wedge_class == WEDGE_PENDING_WORKTREE_OCCUPIED
     }
     blocked_ticket_ids: set[str] = {
         f.ticket_id
@@ -292,7 +313,8 @@ def _reap_wedge_findings(
     )
 
     if not (
-        running_ticket_ids
+        running_ticket_keys
+        or running_ticket_ids
         or blocked_ticket_ids
         or terminal_sibling_ticket_ids
         or daemon_reap_findings
@@ -307,9 +329,12 @@ def _reap_wedge_findings(
         changed = False
         for task in queue.tasks:
             if (
-                task.ticket_id in running_ticket_ids
-                and task.status == QueueItemStatus.RUNNING
-            ):
+                (task.client, task.ticket_id) in running_ticket_keys
+                or (
+                    task.ticket_id in running_ticket_ids
+                    and (task.client, task.ticket_id) not in pending_worktree_keys
+                )
+            ) and task.status == QueueItemStatus.RUNNING:
                 transition_task_status(task, QueueItemStatus.PENDING)
                 task.session_id = None
                 changed = True
