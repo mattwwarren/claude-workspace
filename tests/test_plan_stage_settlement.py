@@ -1107,9 +1107,11 @@ def test_fingerprint_has_exactly_two_components_everywhere() -> None:
     """Both fingerprint-read sites (appendix step 0, core-doc cap check) agree.
 
     Operator round-2 disposition, item 2: `operator_comment` (a comment id,
-    or `none`) and `body_sha` (a SHA-256 of the live-fetched body, over the
-    raw string) -- and nothing else. No `updated_at`/`updatedAt`, no
-    `plan_approved_at`, no comment timestamp, anywhere in either copy.
+    or `none`) and `body_sha` (the output of `cw body-sha`, #2761) -- and
+    nothing else. No `updated_at`/`updatedAt`, no `plan_approved_at`, no
+    comment timestamp, anywhere in either copy. Neither copy describes the
+    hash itself any more ("computed over the raw string"): the command is
+    the one definition, so a paraphrase cannot drift from it.
     """
     block = _step1c0_block()
     fingerprint_window = _after(block, FINGERPRINT_READ_ANCHOR, span=900)
@@ -1119,8 +1121,9 @@ def test_fingerprint_has_exactly_two_components_everywhere() -> None:
         assert "operator_comment" in window
         assert "body_sha" in window
         assert "exactly two components" in window
-        assert "SHA-256" in window
-        assert "raw string" in window
+        assert "cw body-sha" in window
+        assert "raw string" not in window
+        assert "computed over" not in window
         # The fingerprint marker itself never carries updated_at/plan_approved_at
         # as a component value -- explanatory prose may still name the term to
         # say why it was dropped (checked by the narrower marker-grammar test).
