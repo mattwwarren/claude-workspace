@@ -168,8 +168,17 @@ def _populate_global_agents_dir(path: Path, **role_to_content: str) -> None:
         _write(path / f"{stem.replace('_', '-')}.md", content)
 
 
-def _task() -> TicketTask:
-    return _make_ticket_task(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+def _task(*, scope_hint: str | None = "small") -> TicketTask:
+    """REVIEW-stage task; ``scope_hint`` defaults to ``"small"`` (#2767).
+
+    Most codex tests run over an origin-less ``make_git_repo`` worktree, whose
+    diff cannot be measured, so the codex clean tail needs a tier source to
+    complete. The hint is that source; pass ``scope_hint=None`` to exercise
+    the ``scope_tier_unresolvable`` block.
+    """
+    return _make_ticket_task(
+        ticket_id="T-1", client="test", stage=Stage.REVIEW, scope_hint=scope_hint
+    )
 
 
 def _install_pre_commit_hook(repo: Path, script: str) -> None:

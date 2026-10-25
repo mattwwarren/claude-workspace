@@ -1,7 +1,8 @@
 """Consolidation of reviewer documents into a typed :class:`AutoDevResult`.
 
-Owns the disposition table — which of the blocked/empty-diff/stage_complete
-outcomes a pass lands on, and in which precedence order — plus the two
+Owns the disposition table — which of the blocked/empty-diff/
+review_pending_approval/stage_complete outcomes a pass lands on, and in which
+precedence order — plus the two
 suppression seams (operator voids, cross-round adjudications) applied between
 consolidation and that table, and the codex-subsystem blocked-result
 constructor every park here goes through.
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING
 from cw._git import git_output, run_git
 from cw.auto_dev_result import (
     EMPTY_DIFF_BLOCKER_REASON,
+    SCOPE_TIER_LARGE,
     AutoDevResult,
     Blocker,
     Health,
@@ -39,7 +41,11 @@ from cw.codex_review._verdict._health import (
 )
 from cw.codex_review._verdict._render import render_verdict_comment
 from cw.local_runner import _SCHEMA_VERSION, make_blocked, resolve_tier
-from cw.plan_files import parse_plan_files_modified
+from cw.plan_files import (
+    parse_plan_files_modified,
+    parse_plan_scope_tier,
+    resolve_review_scope_tier,
+)
 from cw.review_adjudication import apply_voided_suppression
 from cw.review_finding_dispositions import suppress_adjudicated_findings
 from cw.review_findings import consolidate_verdict
@@ -65,6 +71,12 @@ if TYPE_CHECKING:
     from cw.review_markers import RefusedDisposition
 
 _log = logging.getLogger(__name__)
+
+# #2767: the clean tail found no tier source (no plan marker, no scope_hint,
+# unmeasurable diff). Module-private: this module is its only producer, and the
+# same string is the Claude review's reason for the same shape
+# (``auto-dev-review.md``).
+_SCOPE_TIER_UNRESOLVABLE = "scope_tier_unresolvable"
 
 
 def _with_capability(
@@ -199,6 +211,120 @@ def _empty_diff_recovery_hint(worktree: Path, default_branch: str) -> str:
     return hint
 
 
+def _empty_diff_result(
+    *,
+    task: TicketTask,
+    worktree: Path,
+    branch: str,
+    default_branch: str,
+    verdict: ReviewVerdict,
+) -> AutoDevResult:
+    """The ``empty_diff_blocked`` result for a clean pass over a 0/0 diff (#1870).
+
+    ``Scope.tier`` keeps the hint-only :func:`~cw.local_runner.resolve_tier`:
+    the result blocks whatever the tier is, so nothing ships on it (#2767
+    classifies this call site non-ship-path).
+    """
+    return AutoDevResult(
+        schema_version=_SCHEMA_VERSION,
+        ticket_id=task.ticket_id,
+        status="empty_diff_blocked",
+        stage_reached=STAGE3_REVIEW,
+        scope=Scope(
+            tier=resolve_tier(task.scope_hint),
+            files=0,
+            lines_estimate=0,
+            lines_actual=0,
+            forbidden_touched=False,
+        ),
+        plan_source="none",
+        branch=branch,
+        fork_point_sha=None,
+        commits=[],
+        # The real verdict rides along unchanged: agents_run and the finding
+        # counts describe reviewers that genuinely ran, and zeroing them
+        # would misreport the review as never having happened.
+        review=verdict.review,
+        # Not _derive_health(documents): those documents reviewed nothing, so
+        # a PROCEED derived from them would vouch for an empty branch.
+        health=Health(
+            lowest_agent_confidence="MEDIUM",
+            any_incomplete_risk=True,
+            recommendation="EXIT_FOR_HUMAN_REVIEW",
+        ),
+        blocker=Blocker(
+            stage=STAGE3_REVIEW,
+            reason=EMPTY_DIFF_BLOCKER_REASON,
+            details=(
+                f"Branch {branch} measures an empty diff against "
+                f"origin/{default_branch} (0 files, 0 lines) -- "
+                "nothing to review."
+            ),
+            recovery_hint=_empty_diff_recovery_hint(worktree, default_branch),
+        ),
+        worktree_path=str(worktree),
+    )
+
+
+def _tier_unresolvable_result(
+    *,
+    task: TicketTask,
+    worktree: Path,
+    plan_text: str | None,
+    default_branch: str,
+    verdict: ReviewVerdict,
+) -> AutoDevResult:
+    """Block a clean pass whose scope tier has no source (#2767).
+
+    Reached only when the plan carries no ``**Scope tier:**`` marker, the row
+    has no ``small``/``large`` ``scope_hint`` and the branch diff could not be
+    measured. Defaulting to small here would let a large ticket skip its
+    review approval gate, so the pass blocks instead. ``scope.tier`` is the
+    schema's required concrete value, not a resolved tier. Retry-eligible: the
+    fix is a tier source, after which the same review can run again.
+    """
+    plan_marker = parse_plan_scope_tier(plan_text) if plan_text is not None else None
+    _log.warning(
+        "scope_tier_unresolvable: ticket=%s worktree=%s no tier source "
+        "(plan_marker=%s scope_hint=%r measured=%s; origin/%s)",
+        task.ticket_id,
+        worktree,
+        plan_marker,
+        task.scope_hint,
+        None,  # measured: None by construction, a measurement always resolves
+        default_branch,
+    )
+    blocked = make_codex_blocked(
+        ticket_id=task.ticket_id,
+        worktree=worktree,
+        reason=_SCOPE_TIER_UNRESOLVABLE,
+        details=(
+            "The review was clean but its scope tier has no source: "
+            ".cw/plan.md carries no **Scope tier:** marker, the row has no "
+            "scope_hint, and the branch could not be measured against "
+            f"origin/{default_branch}. Refusing to default to small."
+        ),
+        retry_eligible=True,
+    )
+    recovery_hint = (
+        "Add a `**Scope tier:** small` or `**Scope tier:** large` line to "
+        f".cw/plan.md, set the row's scope_hint, or restore origin/{default_branch} "
+        f"in the worktree, then run `cw dev-queue requeue {task.ticket_id} "
+        f"-c {task.client} --stage review`."
+    )
+    blocker = blocked.blocker
+    return blocked.model_copy(
+        update={
+            "review": verdict.review,
+            "blocker": (
+                blocker.model_copy(update={"recovery_hint": recovery_hint})
+                if blocker is not None
+                else None
+            ),
+        }
+    )
+
+
 def synthesize_codex_review_result(
     *,
     task: TicketTask,
@@ -260,7 +386,17 @@ def synthesize_codex_review_result(
       the review at all: the reviewers did their job, there was simply nothing
       under them. An *unmeasurable* worktree (``compute_branch_diff_scope``
       returns ``None``) is explicitly NOT this case and still falls through.
-    - otherwise (documents complete, no MUST_FIX)  → stage_complete
+    - documents complete and non-blocking, but no scope tier source exists (no
+      ``**Scope tier:**`` marker in ``.cw/plan.md``, no ``small``/``large``
+      ``scope_hint``, and an unmeasurable diff) → blocked/
+      ``scope_tier_unresolvable``, ``retry_eligible=True`` with a recovery
+      hint (#2767). The tier is resolved by
+      :func:`~cw.plan_files.resolve_review_scope_tier` in the Claude review's
+      order; defaulting to small would let a large ticket skip its approval
+      gate.
+    - otherwise, tier large → review_pending_approval (#2767): dispatch parks
+      the row at REVIEW until the operator approves it.
+    - otherwise (documents complete, no MUST_FIX, tier small) → stage_complete
 
     Returns ``(result, verdict)``; ``verdict`` is ``None`` only on the zero-
     documents path (nothing to render into a review comment).
@@ -440,59 +576,48 @@ def synthesize_codex_review_result(
     # guard is load-bearing -- an *unmeasurable* worktree also reports 0/0 into
     # the scope block below, and conflating the two would park every clean
     # review whose git state could not be read (the warning above is exactly
-    # that case, and it keeps its pre-#1870 stage_complete fallback).
+    # that case). Since #2767 an unmeasurable worktree completes only when the
+    # plan marker or scope_hint supplies a tier; with neither it blocks as
+    # scope_tier_unresolvable below, never as an empty diff.
     if (
         measured is not None
         and measured["files"] == 0
         and measured["lines_actual"] == 0
     ):
-        empty = AutoDevResult(
-            schema_version=_SCHEMA_VERSION,
-            ticket_id=task.ticket_id,
-            status="empty_diff_blocked",
-            stage_reached=STAGE3_REVIEW,
-            scope=Scope(
-                tier=resolve_tier(task.scope_hint),
-                files=0,
-                lines_estimate=0,
-                lines_actual=0,
-                forbidden_touched=False,
-            ),
-            plan_source="none",
+        empty = _empty_diff_result(
+            task=task,
+            worktree=worktree,
             branch=branch,
-            fork_point_sha=None,
-            commits=[],
-            # The real verdict rides along unchanged: agents_run and the finding
-            # counts describe reviewers that genuinely ran, and zeroing them
-            # would misreport the review as never having happened.
-            review=verdict.review,
-            # Not _derive_health(documents): those documents reviewed nothing, so
-            # a PROCEED derived from them would vouch for an empty branch.
-            health=Health(
-                lowest_agent_confidence="MEDIUM",
-                any_incomplete_risk=True,
-                recommendation="EXIT_FOR_HUMAN_REVIEW",
-            ),
-            blocker=Blocker(
-                stage=STAGE3_REVIEW,
-                reason=EMPTY_DIFF_BLOCKER_REASON,
-                details=(
-                    f"Branch {branch} measures an empty diff against "
-                    f"origin/{default_branch} (0 files, 0 lines) -- "
-                    "nothing to review."
-                ),
-                recovery_hint=_empty_diff_recovery_hint(worktree, default_branch),
-            ),
-            worktree_path=str(worktree),
+            default_branch=default_branch,
+            verdict=verdict,
         )
         return empty, verdict
+    # #2767: the Claude review's tier order (plan marker, scope_hint, measured
+    # diff), exhausted before blocking. Never a silent small: a large tier
+    # parks at REVIEW for the operator's approval instead of advancing.
+    tier = resolve_review_scope_tier(
+        plan_text,
+        task.scope_hint,
+        (measured["files"], measured["lines_actual"]) if measured else None,
+    )
+    if tier is None:
+        unresolvable = _tier_unresolvable_result(
+            task=task,
+            worktree=worktree,
+            plan_text=plan_text,
+            default_branch=default_branch,
+            verdict=verdict,
+        )
+        return unresolvable, verdict
     result = AutoDevResult(
         schema_version=_SCHEMA_VERSION,
         ticket_id=task.ticket_id,
-        status="stage_complete",
+        status=(
+            "review_pending_approval" if tier == SCOPE_TIER_LARGE else "stage_complete"
+        ),
         stage_reached=STAGE3_REVIEW,
         scope=Scope(
-            tier=resolve_tier(task.scope_hint),
+            tier=tier,
             files=measured["files"] if measured is not None else 0,
             # lines_estimate stays 0: a plan/scope_hint line-count mapping is a
             # follow-on, same as synthesize_git_result's own precedent.
