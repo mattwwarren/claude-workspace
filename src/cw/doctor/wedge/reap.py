@@ -224,7 +224,7 @@ def _reap_wedge_findings(
         detect+stop+audit authority the unconditional reconcile-pass sweep
         uses) — re-reads state fresh rather than trusting the findings'
         snapshot, mirroring class-6/8's per-session re-selection. Listed in
-        the running_ticket_ids exclusion set: its remedy is a daemon stop, not
+        the running_ticket_keys exclusion set: its remedy is a daemon stop, not
         a queue-task revert (a RUNNING task whose session already completed is
         class-3's job, not this class's).
     Class-11 (active-routed-result-stranded, #2524): explicit-command close
@@ -242,6 +242,10 @@ def _reap_wedge_findings(
         running_ticket_keys exclusion set so the default-inclusive set never
         reverts a RUNNING row of the same (client, ticket id).
 
+    Queue mutations require an explicit client on the finding. Ownerless
+    legacy findings remain report-only rather than falling back to
+    ticket-id-only matching across clients.
+
     The former class-1 (pane-idle-but-active) wedge was removed with the
     multiplexer substrate — under the native daemon there are no panes to
     inspect for an idle shell (see #504).
@@ -253,33 +257,19 @@ def _reap_wedge_findings(
         and (client := getattr(f, "client", None)) is not None
         and f.wedge_class not in _NON_REAP_WEDGE_CLASSES
     }
-    # Older actionable findings have no client identity and remain explicitly
-    # global by ticket id. A class-12 finding is client-scoped, so preserve
-    # that client's RUNNING row even when a legacy finding for the same ticket
-    # supplies the global fallback.
-    running_ticket_ids: set[str] = {
-        f.ticket_id
-        for f in findings
-        if f.ticket_id
-        and getattr(f, "client", None) is None
-        and f.wedge_class not in _NON_REAP_WEDGE_CLASSES
-    }
-    pending_worktree_keys: set[tuple[str, str]] = {
+    blocked_ticket_keys: set[tuple[str, str]] = {
         (client, f.ticket_id)
         for f in findings
         if f.ticket_id
         and (client := getattr(f, "client", None)) is not None
-        and f.wedge_class == WEDGE_PENDING_WORKTREE_OCCUPIED
+        and f.wedge_class == _WEDGE_BLOCKED_DEAD_SESSION
     }
-    blocked_ticket_ids: set[str] = {
-        f.ticket_id
+    terminal_sibling_keys: set[tuple[str, str]] = {
+        (client, f.ticket_id)
         for f in findings
-        if f.ticket_id and f.wedge_class == _WEDGE_BLOCKED_DEAD_SESSION
-    }
-    terminal_sibling_ticket_ids: set[str] = {
-        f.ticket_id
-        for f in findings
-        if f.ticket_id and f.wedge_class == _WEDGE_TERMINAL_SIBLING
+        if f.ticket_id
+        and (client := getattr(f, "client", None)) is not None
+        and f.wedge_class == _WEDGE_TERMINAL_SIBLING
     }
     # (session_id, wedge_class) pairs rather than a bare id list (#2078 fix
     # cycle): the audit trail needs to tell "daemon entry actually absent"
@@ -314,9 +304,8 @@ def _reap_wedge_findings(
 
     if not (
         running_ticket_keys
-        or running_ticket_ids
-        or blocked_ticket_ids
-        or terminal_sibling_ticket_ids
+        or blocked_ticket_keys
+        or terminal_sibling_keys
         or daemon_reap_findings
         or has_leaked_worker_findings
         or routed_result_findings
@@ -330,22 +319,37 @@ def _reap_wedge_findings(
         for task in queue.tasks:
             if (
                 (task.client, task.ticket_id) in running_ticket_keys
-                or (
-                    task.ticket_id in running_ticket_ids
-                    and (task.client, task.ticket_id) not in pending_worktree_keys
-                )
-            ) and task.status == QueueItemStatus.RUNNING:
+                and task.status == QueueItemStatus.RUNNING
+            ):
                 transition_task_status(task, QueueItemStatus.PENDING)
                 task.session_id = None
                 changed = True
-        if blocked_ticket_ids:
-            blocked_changed = _collapse_blocked_on_user_tasks(queue, blocked_ticket_ids)
-            changed = changed or blocked_changed
-        if terminal_sibling_ticket_ids:
-            sibling_changed = _cancel_terminal_sibling_parks(
-                queue, terminal_sibling_ticket_ids
+        for client, ticket_id in blocked_ticket_keys:
+            scoped_queue = queue.model_copy(
+                update={
+                    "tasks": [
+                        t
+                        for t in queue.tasks
+                        if (t.client, t.ticket_id) == (client, ticket_id)
+                    ]
+                }
             )
-            changed = changed or sibling_changed
+            changed = (
+                _collapse_blocked_on_user_tasks(scoped_queue, {ticket_id}) or changed
+            )
+        for client, ticket_id in terminal_sibling_keys:
+            scoped_queue = queue.model_copy(
+                update={
+                    "tasks": [
+                        t
+                        for t in queue.tasks
+                        if (t.client, t.ticket_id) == (client, ticket_id)
+                    ]
+                }
+            )
+            changed = (
+                _cancel_terminal_sibling_parks(scoped_queue, {ticket_id}) or changed
+            )
         queue_saved = changed
         if queue_saved:
             save_dev_queue(queue)
