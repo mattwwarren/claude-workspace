@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -22,27 +23,34 @@ from cw.dev_queue import (
 from cw.events import read_events
 from cw.exceptions import CwError
 from cw.models import (
+    DEFAULT_LANE,
     LaneConcurrencyOverride,
     MustFixOverride,
     QueueItemStatus,
     Stage,
 )
-from cw.models.ticket_view import TicketView
+from cw.models.ticket_view import NextCommand, TicketView
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
+    REVIEW_PENDING,
     bound_session_for,
     install_acme_client,
     invoke_dev_queue,
     make_task,
     seed_queue,
     stdout_lines,
+    write_lane_client,
     write_lane_override,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from cw.models import TicketTask
+
+_STAGE_COMPLETE: dict[str, object] = {"status": "stage_complete"}
 
 
 _C = ACME
@@ -412,6 +420,147 @@ class TestHumanGateShow:
             " the ticket finalizes"
         ]
         assert not [ln for ln in lines if "requeue" in ln]
+
+
+_LABEL = "operator-only human gate; not for an agent to run: "
+_NO_GATE = (
+    "approve cannot take this row because no bound session is at the approval gate"
+)
+_TERMINAL_REFUSES = "approve refuses at the terminal stage"
+_REQUEUE_FINALIZE = f"cw dev-queue requeue {_T} -c {_C} --stage finalize"
+_REQUEUE_REVIEW = f"cw dev-queue requeue {_T} -c {_C} --stage review"
+_SHOW_CMD = f"cw dev-queue show {_T} -c {_C}"
+_PLAIN_REQUEUE = f"cw dev-queue requeue {_T} -c {_C}"
+_OFF_PURPOSE = (
+    "stage {stage} is not in this row's lane pipeline, so approve and requeue"
+    " --stage refuse it until the operator adds it to pipeline.stages or removes"
+    " and re-adds the ticket; inspect the row"
+)
+
+
+def _blocked(stage: Stage, **overrides: object) -> TicketTask:
+    return make_task(
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        stage=stage,
+        session_id="sess-1",
+        **overrides,
+    )
+
+
+def _next_lines() -> list[str]:
+    result = invoke_dev_queue("show", _T, "-c", _C)
+    assert result.exit_code == 0, result.output
+    lines = stdout_lines(result)
+    return lines[lines.index("next:") + 1 :]
+
+
+def _next_json() -> list[dict[str, object]]:
+    result = invoke_dev_queue("show", _T, "-c", _C, "--json")
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    entries = payload["next"]
+    assert isinstance(entries, list)
+    return entries
+
+
+def _line(command: str, purpose: str) -> str:
+    return f"  {command}   # {purpose}"
+
+
+class TestTerminalStageShow:
+    """#2760: ``show`` never offers an ``approve`` the verb refuses."""
+
+    @pytest.mark.parametrize("lane_override", [False, True])
+    def test_rule9_terminal_lists_only_the_requeue(
+        self, tmp_path: Path, lane_override: bool
+    ) -> None:
+        if lane_override:
+            write_lane_client(
+                _C,
+                tmp_path / "ws",
+                lane_stages={DEFAULT_LANE: ("plan", "impl", "review", "finalize")},
+                client_stages=("plan", "impl"),
+            )
+        task = _blocked(Stage.FINALIZE, disposition="review_pending_approval")
+        seed_queue([task], [bound_session_for(task, last_result=REVIEW_PENDING)])
+        assert _next_lines() == [
+            _line(
+                _REQUEUE_FINALIZE,
+                f"re-run the finalize stage; {_TERMINAL_REFUSES}",
+            )
+        ]
+        entries = _next_json()
+        assert entries[0]["operator_only"] is False
+
+    def test_human_terminal_at_the_gate(self) -> None:
+        task = _blocked(
+            Stage.FINALIZE, scope_hint="large", disposition="review_pending_approval"
+        )
+        seed_queue([task], [bound_session_for(task, last_result=REVIEW_PENDING)])
+        purpose = (
+            f"{_LABEL}release the finalize approval gate and ship; {_TERMINAL_REFUSES}"
+        )
+        assert _next_lines() == [_line(_REQUEUE_FINALIZE, purpose)]
+        entries = _next_json()
+        assert entries[0]["operator_only"] is True
+        assert entries[0]["purpose"] == purpose
+
+    def test_sessionless_finalize_hold_interior_and_terminal(self) -> None:
+        review = _blocked(Stage.REVIEW, disposition=FINALIZE_GATE_HELD_DISPOSITION)
+        seed_queue([review])
+        assert _next_lines() == [
+            _line(_REQUEUE_REVIEW, f"{_LABEL}re-run the review stage; {_NO_GATE}")
+        ]
+        final = _blocked(Stage.FINALIZE, disposition=FINALIZE_GATE_HELD_DISPOSITION)
+        seed_queue([final])
+        purpose = f"{_LABEL}release the finalize-hold gate and ship; {_NO_GATE}"
+        assert _next_lines() == [_line(_REQUEUE_FINALIZE, purpose)]
+        assert _next_json()[0]["operator_only"] is True
+
+    def test_off_gate_row(self) -> None:
+        task = _blocked(
+            Stage.REVIEW, scope_hint="large", disposition="review_pending_approval"
+        )
+        seed_queue([task], [bound_session_for(task, last_result=_STAGE_COMPLETE)])
+        purpose = f"{_LABEL}re-run the review stage; {_NO_GATE}"
+        assert _next_lines() == [_line(_REQUEUE_REVIEW, purpose)]
+        entries = _next_json()
+        assert entries[0]["operator_only"] is True
+        assert entries[0]["purpose"] == purpose
+
+    def test_off_pipeline_harden_row(self) -> None:
+        task = _blocked(Stage.HARDEN, disposition="approval_gate")
+        seed_queue([task], [bound_session_for(task)])
+        lines = _next_lines()
+        assert lines == [
+            _line(_SHOW_CMD, _OFF_PURPOSE.format(stage="harden")),
+            _line(_PLAIN_REQUEUE, "re-run the current stage"),
+        ]
+        assert not [ln for ln in lines if "approve ACM-1" in ln]
+        entries = _next_json()
+        assert [e["operator_only"] for e in entries] == [False, False]
+
+    def test_off_pipeline_signoff_row(self) -> None:
+        task = make_task(
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF, stage=Stage.HARDEN
+        )
+        seed_queue([task])
+        assert _next_lines() == [
+            _line(_SHOW_CMD, _OFF_PURPOSE.format(stage="harden")),
+            _line(_PLAIN_REQUEUE, f"{_LABEL}re-run the current stage"),
+        ]
+        entries = _next_json()
+        assert [e["operator_only"] for e in entries] == [False, True]
+
+    def test_interior_finalize_hold_approve_is_flagged(self) -> None:
+        task = _blocked(Stage.REVIEW, disposition=FINALIZE_GATE_HELD_DISPOSITION)
+        seed_queue([task], [bound_session_for(task)])
+        entries = _next_json()
+        assert entries[0]["command"] == f"cw dev-queue approve {_T} -c {_C}"
+        assert entries[0]["operator_only"] is True
+
+    def test_schema_carries_the_flag(self) -> None:
+        assert "operator_only" in NextCommand.model_json_schema()["properties"]
 
 
 class TestCancelEcho:

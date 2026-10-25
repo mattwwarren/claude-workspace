@@ -32,18 +32,20 @@ from cw.config import get_client, load_state
 from cw.dev_queue.approval import (
     _body_drift_message,
     _raise_if_not_at_approval_gate,
+    _raise_if_terminal_stage,
     _raise_stage_not_in_pipeline,
     _record_body_drift,
     _stamp_plan_approval,
 )
 from cw.dev_queue.crud import _find_ticket
 from cw.dev_queue.lifecycle import _plan_is_reviewed
-from cw.dev_queue.next_commands import dev_queue_command, refusal_suffix
+from cw.dev_queue.next_commands import dev_queue_command
 from cw.dev_queue.refusal import refusal_hint
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.models.enums import stage_position
 from cw.models.operator_resolution import OperatorResolution
 from cw.operator_identity import resolve_operator_login
 
@@ -298,9 +300,12 @@ def _stamp_at_gate(
     stages = resolve_pipeline_stages(task, client_cfg)
     if task.stage not in stages:
         _raise_stage_not_in_pipeline(ticket_id, task, stages, client_name)
+    position = stage_position(task.stage, stages)
     session = _require_session(task, ticket_id)
     try:
-        _raise_if_not_at_approval_gate(ticket_id, session, task)
+        # Positional: the gate-helper spy in the operator-resolutions tests
+        # records *args.
+        _raise_if_not_at_approval_gate(ticket_id, session, task, position)
     except ApproveGateError as exc:
         msg = (
             f"Cannot use --approve on ticket '{ticket_id}': it is not at an"
@@ -308,13 +313,7 @@ def _stamp_at_gate(
             f" Nothing was recorded.{_approve_sequence(task)} Gate check: {exc}"
         )
         raise ApproveGateError(msg) from exc
-    if task.stage == stages[-1]:
-        msg = (
-            f"Cannot approve ticket '{ticket_id}':"
-            f" already at terminal stage {task.stage!r}."
-            f"{refusal_suffix(task, session=session, skip='approve')}"
-        )
-        raise ApproveGateError(msg)
+    _raise_if_terminal_stage(ticket_id, session, task, position)
     fingerprint = _stamp_plan_approval(task, task.stage.value, session)
     drift = _record_body_drift(task, client_cfg)
     return {

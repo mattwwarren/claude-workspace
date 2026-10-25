@@ -85,6 +85,7 @@ from tests._ticket_view_helpers import (
     make_blocked,
     make_task,
     seed_queue,
+    write_lane_client,
 )
 from tests._worktree_helpers import patch_worktree
 from tests.conftest import (
@@ -17024,19 +17025,14 @@ _ACME_REVIEW_RERUN = (
     "Re-run review to produce a current verdict:"
     " `cw dev-queue requeue ACM-1 -c acme --stage review`."
 )
-# Rows whose plain approve the verb refuses: no plain approve offered, plus the
-# sessionless human-kept gates (labelled approve listed, refused, #2718). The
+# Rows whose plain approve the verb refuses: no plain approve offered. The
 # order_* rows sit at a releasable gate behind a higher-priority rule, so
 # approve succeeds on them.
 _APPROVE_REFUSED_CASES = tuple(
     sorted(
         case_id
         for case_id, case in CASES.items()
-        if (_ACME_APPROVE not in case.expected and not case_id.startswith("order_"))
-        or (
-            case.task.status == QueueItemStatus.BLOCKED_ON_USER
-            and not case.with_session
-        )
+        if _ACME_APPROVE not in case.expected and not case_id.startswith("order_")
     )
 )
 
@@ -17075,14 +17071,19 @@ class TestApproveRefusalsNameNextCommand:
         "case_id",
         ["rule0_finalize_held_no_session", "rule0_scope_hint_large_no_session"],
     )
-    def test_sessionless_human_gate_never_suggests_requeue(self, case_id: str) -> None:
+    def test_sessionless_human_gate_names_the_labelled_requeue(
+        self, case_id: str
+    ) -> None:
+        from cw.dev_queue.next_commands import refusal_suffix
+
         msg = self._refusal(case_id)
         assert "session not found" in msg
         assert "human-kept gate" in msg
         assert "operator-only; not for an agent to run" in msg
-        assert _ACME_APPROVE in msg
-        assert "cw dev-queue requeue" not in msg
+        assert "cw dev-queue requeue ACM-1 -c acme --stage review" in msg
+        assert _ACME_APPROVE not in msg
         assert "Use 'requeue'" not in msg
+        assert msg.endswith(refusal_suffix(CASES[case_id].task, session=None))
 
     def test_ordinary_sessionless_row_keeps_the_requeue_sentence(self) -> None:
         msg = self._refusal("rule10_plain_blocked_no_session")
@@ -17129,10 +17130,44 @@ class TestApproveRefusalsNameNextCommand:
         with pytest.raises(ApproveGateError, match="not in pipeline") as excinfo:
             approve_ticket("ACM-1", "acme")
         assert str(excinfo.value).endswith(
-            " No approve or requeue can act on it until the lane pipeline includes"
-            " that stage; fix the lane's pipeline.stages, or run"
-            " `cw dev-queue remove ACM-1 -c acme` and re-add the ticket."
+            " No approve or `requeue --stage` can act on it until the lane pipeline"
+            " includes that stage; fix the lane's pipeline.stages, or run"
+            " `cw dev-queue remove ACM-1 -c acme` and re-add the ticket. A plain"
+            " `requeue` re-runs the current stage."
         )
+
+
+class TestResolveApproveTerminalRefusal:
+    """``resolve --approve`` refuses at a pipeline's last stage (#2760).
+
+    ``record_operator_resolution`` only accepts a plan-stage row, so the
+    terminal position here comes from a plan-only pipeline.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _plan_only_acme(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        install_acme_client(tmp_path, monkeypatch)
+        write_lane_client(
+            "acme", tmp_path / "ws", lanes=("default", "fast"), client_stages=["plan"]
+        )
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: "alice")
+
+    def test_names_the_terminal_stage_and_records_nothing(self) -> None:
+        from cw.dev_queue import load_dev_queue, record_operator_resolution
+        from cw.exceptions import ApproveGateError
+
+        task = make_blocked(stage=Stage.PLAN, disposition="approval_gate")
+        seed_queue(
+            [task],
+            [bound_session_for(task, last_result={"status": "plan_pending_approval"})],
+        )
+        with pytest.raises(ApproveGateError, match="already at terminal stage"):
+            record_operator_resolution(
+                "ACM-1", "acme", "1. Keep it.", approve=True, operator_initiated=True
+            )
+        (row,) = load_dev_queue().tasks
+        assert row.operator_resolutions == []
+        assert row.plan_approved_at is None
 
 
 class TestScopeDriftRefusalsNameNextCommand:
@@ -17521,8 +17556,8 @@ class TestRequeueRefusalsNameNextCommand:
         with pytest.raises(RequeueStageError, match="is not in the pipeline") as exc:
             requeue_ticket("ACM-1", "acme", "review", native_daemon=self.fake)
         assert str(exc.value).endswith(
-            " No requeue can act on a row whose stage is not in its lane pipeline;"
-            " fix the lane's pipeline.stages, or run"
+            " No --stage requeue can act on a row whose stage is not in its lane"
+            " pipeline; fix the lane's pipeline.stages, or run"
             " `cw dev-queue remove ACM-1 -c acme` and re-add the ticket."
         )
 

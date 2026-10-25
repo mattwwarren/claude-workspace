@@ -2,19 +2,32 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
+import yaml
 
 from cw.dev_queue.next_commands import refusal_suffix
-from cw.dev_queue.refusal import bound_session, refusal_hint
+from cw.dev_queue.refusal import bound_session, refusal_hint, row_pipeline_position
 from cw.exceptions import CwError
-from cw.models import Stage
+from cw.models import DEFAULT_LANE, Stage
+from cw.models.enums import PipelinePosition
 from tests._ticket_view_helpers import (
+    ACME,
     PLAN_PENDING,
+    REVIEW_PENDING,
     bound_session_for,
     make_blocked,
     make_task,
     seed_queue,
+    write_lane_client,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+_TERMINAL = PipelinePosition.TERMINAL
+_INTERIOR = PipelinePosition.INTERIOR
 
 
 class TestBoundSession:
@@ -60,3 +73,48 @@ class TestRefusalHint:
         task = make_blocked(stage=Stage.PLAN)
         seed_queue([task], [bound_session_for(task, last_result=PLAN_PENDING)])
         assert "approve" not in refusal_hint(task, skip="approve")
+
+    def test_terminal_gate_row_uses_the_resolved_position(self, tmp_path: Path) -> None:
+        write_lane_client(ACME, tmp_path / "ws")
+        task = make_blocked(stage=Stage.FINALIZE)
+        session = bound_session_for(task, last_result=REVIEW_PENDING)
+        seed_queue([task], [session])
+        assert refusal_hint(task) == refusal_suffix(
+            task, session=bound_session(task), pipeline_position=_TERMINAL
+        )
+        assert "cw dev-queue approve" not in refusal_hint(task)
+
+
+class TestRowPipelinePosition:
+    """#2760: the fail-soft position a refusal hint resolves from config."""
+
+    def test_default_pipeline(self, tmp_path: Path) -> None:
+        write_lane_client(ACME, tmp_path / "ws")
+        assert row_pipeline_position(make_blocked(stage=Stage.FINALIZE)) is _TERMINAL
+        assert row_pipeline_position(make_blocked(stage=Stage.REVIEW)) is _INTERIOR
+
+    def test_lane_stages_off_pipeline(self, tmp_path: Path) -> None:
+        write_lane_client(
+            ACME,
+            tmp_path / "ws",
+            lane_stages={DEFAULT_LANE: ("plan", "impl", "review")},
+        )
+        assert row_pipeline_position(make_blocked(stage=Stage.FINALIZE)) is (
+            PipelinePosition.OFF_PIPELINE
+        )
+
+    def test_unknown_client_is_interior(self) -> None:
+        assert row_pipeline_position(make_blocked(stage=Stage.FINALIZE)) is _INTERIOR
+
+    @pytest.mark.parametrize(
+        "error",
+        [OSError("disk"), ValueError("bad"), CwError("x"), yaml.YAMLError("y")],
+    )
+    def test_unreadable_config_is_interior(
+        self, error: Exception, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _fail(_name: str) -> object:
+            raise error
+
+        monkeypatch.setattr("cw.dev_queue.refusal.get_client", _fail)
+        assert row_pipeline_position(make_blocked(stage=Stage.FINALIZE)) is _INTERIOR

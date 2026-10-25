@@ -191,6 +191,28 @@ class Stage(StrEnum):
     FINALIZE = "finalize"
 
 
+class PipelinePosition(StrEnum):
+    """Where a row's stage sits in its resolved lane pipeline (#2760).
+
+    ``INTERIOR`` is also the fail-soft value when the pipeline is unknown (no
+    or unreadable client config): it is the pre-#2760 behaviour of the
+    next-command table.
+    """
+
+    INTERIOR = "interior"
+    TERMINAL = "terminal"
+    OFF_PIPELINE = "off_pipeline"
+
+
+def stage_position(stage: Stage, stages: list[Stage]) -> PipelinePosition:
+    """*stage*'s position in *stages* (a resolved pipeline); empty-list safe."""
+    if stage not in stages:
+        return PipelinePosition.OFF_PIPELINE
+    if stage == stages[-1]:
+        return PipelinePosition.TERMINAL
+    return PipelinePosition.INTERIOR
+
+
 class LivenessBucket(StrEnum):
     """RFC 0008 W2 staleness bucket, latched onto ``Session``.
 
