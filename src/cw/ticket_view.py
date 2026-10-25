@@ -33,6 +33,7 @@ from cw.config import (
     load_state,
 )
 from cw.dev_queue import _find_ticket, load_dev_queue, session_attention_state
+from cw.dev_queue.gate_backoff import gate_wait_released
 from cw.dev_queue.next_commands import next_commands
 from cw.dispatch import TICK_STALE_SECONDS, resolve_hold_finalize, resolve_signoff
 from cw.events import read_events
@@ -418,9 +419,18 @@ def _row_skip_reason(
     *,
     now: datetime,
     sources: ViewSources,
+    wait_released: bool,
 ) -> str | None:
-    """The skip reason derivable live from the row and lane, or None."""
-    if task.next_eligible_at is not None and task.next_eligible_at > now:
+    """The skip reason derivable live from the row and lane, or None.
+
+    *wait_released* (#2717): the client turned gate-block backoff off, so the
+    gate's own ``next_eligible_at`` wait no longer holds the row.
+    """
+    if (
+        not wait_released
+        and task.next_eligible_at is not None
+        and task.next_eligible_at > now
+    ):
         return DispatchSkipReason.SPAWN_ERROR_BACKOFF.value
     if ceiling is not None and task.unproductive_attempts >= ceiling:
         return DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value
@@ -463,18 +473,29 @@ def _dispatch_view(
     if task.status != QueueItemStatus.PENDING:
         return None
     lane_paused = _lane_paused(task, client_cfg)
+    wait_released = gate_wait_released(
+        task,
+        backoff_enabled=client_cfg is None or client_cfg.gate_block_backoff_enabled,
+    )
     view = DispatchView(
         skip_reason=None,
         source=DispatchSource.NONE,
         as_of=None,
         stale=False,
-        backoff_until=task.next_eligible_at,
+        backoff_until=None if wait_released else task.next_eligible_at,
         lane_paused=lane_paused,
         lane_pause=_lane_pause_view(task, sources) if lane_paused else None,
         lane_stats=None,
         lane_occupants=None,
     )
-    row_reason = _row_skip_reason(task, ceiling, lane_paused, now=now, sources=sources)
+    row_reason = _row_skip_reason(
+        task,
+        ceiling,
+        lane_paused,
+        now=now,
+        sources=sources,
+        wait_released=wait_released,
+    )
     if row_reason is not None:
         return view.model_copy(
             update={

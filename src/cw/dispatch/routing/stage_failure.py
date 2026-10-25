@@ -22,6 +22,7 @@ logger.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import (
@@ -42,6 +43,11 @@ from cw.dev_queue import (
     _extract_pr_url_or_info,
     _stage_regress,
     transition_task_status,
+)
+from cw.dev_queue.gate_backoff import (
+    clear_gate_block_wait,
+    is_gate_block,
+    record_gate_block,
 )
 from cw.dispatch.routing.pr_refs import _extract_blocked_on_pr
 from cw.dispatch.routing.stage_walk import _is_earlier_stage_report
@@ -102,7 +108,11 @@ _MUST_FIX_MECHANICALLY_REJECTED_REASON = "codex_must_fix_mechanically_rejected"
 # _park_must_fix_mechanically_rejected above -- the one gate-class park whose
 # breadcrumbs is genuinely populated from blocker.reason rather than a
 # hardcoded "" literal. Named + anchored so the attention stream has one
-# allowlist to render breadcrumbs against. See #1597, #2250, #2693.
+# allowlist to render breadcrumbs against. See #1597, #2250, #2693. A
+# gate-block park (merge_gate_blocked, or a prior_pipeline_pr_open blocker)
+# additionally appends its #2717 backoff note `occurrence=N
+# next_eligible_at=<iso>`, so merge_gate_blocked is non-empty even with no
+# blocker.
 #
 # IMPORTANT: its one runtime reader is cw.attention_watch (``cw orchestrate
 # watch``), which imports it directly to decide which pages render their
@@ -175,6 +185,43 @@ def _breadcrumb_for_reason(blocker_reason: str | None, blocker: object | None) -
     return unrecognized
 
 
+def _gate_block_breadcrumb_note(
+    task: TicketTask,
+    status: str,
+    blocker_reason: str | None,
+    blocker: object | None,
+    *,
+    enabled: bool,
+    fingerprint_stage: str,
+    fingerprint_stage_base_ref: str | None,
+) -> str:
+    """Stamp the #2717 gate-block backoff and return its breadcrumb note.
+
+    ``""`` (and no stamp) for a non-gate-block park. The blocking PR comes from
+    ``blocker.details``, not ``task.blocked_on_pr``: that is only stamped after
+    ``transition_task_status``, which clears it, so it is not set yet here.
+    Runs before the page and the transition, while ``task.stage_base_ref`` is
+    still the spawn-time HEAD the fingerprint keys on.
+    """
+    if not is_gate_block(status, blocker_reason):
+        return ""
+    if not enabled:
+        # Release only the gate-owned window; a later usage-limit or
+        # spawn-error window remains protected by clear_gate_block_wait.
+        clear_gate_block_wait(task)
+        return ""
+    details = blocker.get("details") if isinstance(blocker, dict) else None
+    return record_gate_block(
+        task,
+        status=status,
+        blocker_reason=blocker_reason,
+        blocking_pr=_extract_blocked_on_pr(details),
+        now=datetime.now(UTC),
+        fingerprint_stage=fingerprint_stage,
+        fingerprint_stage_base_ref=fingerprint_stage_base_ref,
+    )
+
+
 def _park_must_fix_mechanically_rejected(task: TicketTask) -> None:
     """Park *task* BLOCKED_ON_USER for a mechanically-rejected MUST_FIX (#1714).
 
@@ -239,6 +286,10 @@ def _route_stage_failure(
     blocker_reason: str | None,
     disposition: str | None,
     claim_unproductive: bool,
+    *,
+    gate_backoff_enabled: bool = True,
+    gate_fingerprint_stage: str | None = None,
+    gate_fingerprint_stage_base_ref: str | None = None,
 ) -> None:
     """Rule 5 body: blocked/merge_gate_blocked/scope_exceeded/forbidden_area.
 
@@ -364,7 +415,27 @@ def _route_stage_failure(
             },
         )
         return
-    breadcrumbs = _breadcrumb_for_reason(blocker_reason, blocker)
+    # #2717: a gate-block park appends `occurrence=N next_eligible_at=<iso>`
+    # (and stamps the backoff); a bare note when there is no blocker reason.
+    base = _breadcrumb_for_reason(blocker_reason, blocker)
+    note = _gate_block_breadcrumb_note(
+        task,
+        status,
+        blocker_reason,
+        blocker,
+        enabled=gate_backoff_enabled,
+        fingerprint_stage=(
+            task.stage.value
+            if gate_fingerprint_stage is None
+            else gate_fingerprint_stage
+        ),
+        fingerprint_stage_base_ref=(
+            task.stage_base_ref
+            if gate_fingerprint_stage is None
+            else gate_fingerprint_stage_base_ref
+        ),
+    )
+    breadcrumbs = " ".join(part for part in (base, note) if part)
     record_event(
         OrchestratorEventType.SESSION_NEEDS_ATTENTION,
         {

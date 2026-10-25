@@ -1017,3 +1017,69 @@ class TestFormatCompactAge:
         from cw._util import format_compact_age
 
         assert format_compact_age(delta) == "0m"
+
+
+class TestExponentialBackoffSeconds:
+    """Tests for exponential_backoff_seconds (the shared doubling-with-cap, #2717)."""
+
+    def test_first_count_returns_initial(self) -> None:
+        from cw._util import exponential_backoff_seconds
+
+        assert exponential_backoff_seconds(1, initial_seconds=60, cap_seconds=900) == 60
+
+    def test_second_count_doubles(self) -> None:
+        from cw._util import exponential_backoff_seconds
+
+        assert (
+            exponential_backoff_seconds(2, initial_seconds=60, cap_seconds=900) == 120
+        )
+
+    def test_cap_holds(self) -> None:
+        from cw._util import exponential_backoff_seconds
+
+        assert (
+            exponential_backoff_seconds(5, initial_seconds=60, cap_seconds=900) == 900
+        )
+        assert (
+            exponential_backoff_seconds(6, initial_seconds=60, cap_seconds=900) == 900
+        )
+
+    @pytest.mark.parametrize("count", [0, -1, -100])
+    def test_non_positive_count_clamps_to_initial(self, count: int) -> None:
+        from cw._util import exponential_backoff_seconds
+
+        assert (
+            exponential_backoff_seconds(count, initial_seconds=60, cap_seconds=900)
+            == 60
+        )
+
+    def test_huge_count_returns_cap(self) -> None:
+        """The shift is bounded, so an absurd count cannot build a huge int."""
+        from cw._util import exponential_backoff_seconds
+
+        assert (
+            exponential_backoff_seconds(10_000, initial_seconds=60, cap_seconds=900)
+            == 900
+        )
+
+    @pytest.mark.parametrize("count", range(1, 10))
+    def test_parity_with_spawn_error_formula(self, count: int) -> None:
+        """Byte-identical to queue_rows' historical inline formula (2, 300)."""
+        from cw._util import exponential_backoff_seconds
+
+        expected = min(2 * (2 ** (count - 1)), 300)
+        assert (
+            exponential_backoff_seconds(count, initial_seconds=2, cap_seconds=300)
+            == expected
+        )
+
+    @pytest.mark.parametrize("count", [1, 2, 3, 4, 5, 10])
+    def test_parity_with_concierge_formula(self, count: int) -> None:
+        """Byte-identical to concierge's historical inline formula (300, 3600)."""
+        from cw._util import exponential_backoff_seconds
+
+        expected = min(300 * (2 ** (count - 1)), 3600)
+        assert (
+            exponential_backoff_seconds(count, initial_seconds=300, cap_seconds=3600)
+            == expected
+        )

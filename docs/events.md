@@ -344,7 +344,8 @@ full" from "the whole host is out of budget") → `cap_full` (running ≥ cap)
 `spawn_error` (exception during spawn) → `lane_circuit_paused` (per-lane
 circuit breaker tripped after consecutive spawn errors, #875) →
 `spawn_error_backoff` (pending tasks exist but all in exponential backoff
-after spawn_error, next_eligible_at in the future) → `no_pending` (nothing
+after spawn_error, next_eligible_at in the future; the same claim backoff also
+covers a gate-block park's wait, #2717, which reuses this value) → `no_pending` (nothing
 to claim) → `none` (at least one session spawned). Three values sit outside
 this per-client precedence chain, emitted **per task** instead:
 `attempt_cap_blocked` (payload carries `ticket_id`) when the attempt
@@ -1258,7 +1259,15 @@ open enum; consumers MUST tolerate unknown values. Known values:
   never paged. Nothing is closed, requeued or reaped automatically.
 - `"merge_gate_blocked"` — Rule 5: the merge/CI gate rejected the PR
   (optionally `blocker.reason` in `breadcrumbs`, e.g.
-  `"prior_pipeline_pr_open"` per issue #777; empty otherwise). See #1117.
+  `"prior_pipeline_pr_open"` per issue #777). See #1117. A gate-block park
+  (this status, or a `prior_pipeline_pr_open` blocker under any status) then
+  appends its backoff note `occurrence=N next_eligible_at=<ISO>` (#2717), e.g.
+  `"prior_pipeline_pr_open occurrence=2 next_eligible_at=2026-07-16T12:02:00+00:00"`.
+  `N` is the count of consecutive gate-block parks with the same status,
+  reason, blocking PR, stage and branch HEAD (unbounded); `<ISO>` is the UTC
+  instant, whole seconds, before which the claim screen will not re-claim the
+  row. With no blocker the note stands alone, so `breadcrumbs` is never empty
+  for this status.
 - `"scope_exceeded"` — Rule 5: the session's changes exceeded the
   configured scope limit. `breadcrumbs` empty (validator forbids a
   `blocker` for this status). See #1117.

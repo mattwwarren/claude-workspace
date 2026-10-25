@@ -23,6 +23,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
+from cw._util import exponential_backoff_seconds
 from cw.dev_queue import (
     dev_queue_lock,
     load_dev_queue,
@@ -230,10 +231,10 @@ def _revert_claimed_task_to_pending(
                 )
             if stamp_backoff:
                 stored_task.spawn_error_count += 1
-                delay = min(
-                    _SPAWN_ERROR_BACKOFF_INITIAL_SECONDS
-                    * (2 ** (stored_task.spawn_error_count - 1)),
-                    _SPAWN_ERROR_BACKOFF_CAP_SECONDS,
+                delay = exponential_backoff_seconds(
+                    stored_task.spawn_error_count,
+                    initial_seconds=_SPAWN_ERROR_BACKOFF_INITIAL_SECONDS,
+                    cap_seconds=_SPAWN_ERROR_BACKOFF_CAP_SECONDS,
                 )
                 stored_task.next_eligible_at = datetime.now(UTC) + timedelta(
                     seconds=delay

@@ -533,6 +533,30 @@ class TestRenderEvent:
         )
         assert "reason=" not in line
 
+    @pytest.mark.parametrize(
+        ("status", "crumbs"),
+        [
+            pytest.param(
+                "merge_gate_blocked",
+                "prior_pipeline_pr_open occurrence=2"
+                " next_eligible_at=2026-07-16T12:02:00+00:00",
+                id="merge_gate_blocked",
+            ),
+            pytest.param(
+                "blocked",
+                "prior_pipeline_pr_open occurrence=2"
+                " next_eligible_at=2026-07-16T12:02:00+00:00",
+                id="blocked",
+            ),
+        ],
+    )
+    def test_gate_block_occurrence_note_surfaced(
+        self, status: str, crumbs: str
+    ) -> None:
+        """#2717: the gate-block backoff note rides the Rule 5 breadcrumbs."""
+        line = render_event(_page(paused_status=status, breadcrumbs=crumbs), None)
+        assert f"reason={crumbs}" in line
+
     def test_finalize_regress_repeat_breadcrumbs_surfaced(self) -> None:
         event = _page(paused_status="finalize_regress_repeat", breadcrumbs="attempts=3")
         assert "reason=attempts=3" in render_event(event, None)

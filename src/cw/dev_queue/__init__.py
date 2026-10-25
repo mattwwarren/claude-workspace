@@ -32,6 +32,9 @@ module is now a package of focused submodules:
 * ``gates`` — the leaf approval-gate predicate, ``DRAIN_DISPOSITIONS`` and
   the single ``APPROVAL_GATE_REASON`` definition (#2692), shared by
   ``approval``, ``drain`` and ``next_commands`` without an import cycle.
+* ``gate_backoff`` — the leaf gate-block retry backoff (#2717): stamps
+  ``TicketTask.gate_block`` and the shared ``next_eligible_at`` wait at a
+  ``merge_gate_blocked``/``prior_pipeline_pr_open`` park. Not re-exported.
 * ``refusal`` — loads a refused row's bound session for the
   ``next_commands`` refusal hint (#2692).
 * ``next_commands`` — the pure state -> legal-next-command table behind

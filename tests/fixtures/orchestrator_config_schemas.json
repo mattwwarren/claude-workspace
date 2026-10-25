@@ -2218,6 +2218,11 @@
      "title": "Sentinel Mismatch Veto Enabled",
      "type": "boolean"
     },
+    "gate_block_backoff_enabled": {
+     "default": true,
+     "title": "Gate Block Backoff Enabled",
+     "type": "boolean"
+    },
     "tracker_mcp_gate": {
      "anyOf": [
       {

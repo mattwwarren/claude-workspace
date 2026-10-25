@@ -67,6 +67,10 @@ from cw.dev_queue import (
     _hold_aware_disposition,
     transition_task_status,
 )
+from cw.dev_queue.gate_backoff import (
+    is_gate_block,
+    reset_gate_block_unless_gate,
+)
 from cw.dispatch.impl_gates import (
     _park_unconcluded_finalize_regress_merge_gate,
     _should_gate_for_unconcluded_finalize_regress_merge,
@@ -171,6 +175,11 @@ __all__ = [
 ]
 
 _log = logging.getLogger("cw.dispatch")
+
+
+def _gate_block_backoff_enabled(client: ClientConfig | None) -> bool:
+    """Return the typed per-client rollout state (#2717)."""
+    return client is None or client.gate_block_backoff_enabled
 
 
 # ``rule`` values stamped onto the #1617 ``dispatch.scope_routing_decision``
@@ -667,6 +676,10 @@ def _route_staged_decision(
     Same-stage and no-``stage_reached`` sentinels route through Rule 1-6 exactly
     as before. Returns ``False`` on refusal, ``True`` for every routed path.
     """
+    # Keep the spawn-time branch-head input stable across any stage-pointer
+    # walk performed while classifying this sentinel. The stage input is
+    # captured after the walk because it identifies the effective Rule 5 stage.
+    gate_fingerprint_stage_base_ref = task.stage_base_ref
     walk_outcome = _resolve_stage_walk(task, last_result, clients)
     if walk_outcome == "refuse":
         stage_reached = (
@@ -692,6 +705,7 @@ def _route_staged_decision(
         # the Rule 1-6 status table (the sentinel's status was never observed at
         # this stage). Routed, so callers persist the parked state (#1149).
         return True
+    gate_fingerprint_stage = task.stage.value
     pr_url = _extract_pr_url(last_result)
     # Hoisted above the disposition computation (#1254): Rule 5's branch already
     # read blocker/blocker_reason for the regress check and the breadcrumbs, and
@@ -706,6 +720,9 @@ def _route_staged_decision(
     # advancing and regressing branches are already covered by the hardcodes
     # at lifecycle.py's _advance_task_pointer/_stage_regress chokepoints.
     claim_unproductive = is_unproductive(extract_claim_evidence(last_result))
+    # GitHub #2717: any routed outcome that is not a gate-block ends the
+    # consecutive gate-block run, ahead of every rule branch below.
+    reset_gate_block_unless_gate(task, status, blocker_reason)
     if status in SCOPE_GATED_APPROVAL_STATUSES:
         # Rule 1: scope-gated approval; small tier auto-advances, large blocks.
         # Must fire before Rule 2 (SCOPE_GATED ⊂ PAUSED_FOR_USER_INPUT).
@@ -796,6 +813,12 @@ def _route_staged_decision(
             blocker_reason,
             disposition,
             claim_unproductive,
+            gate_backoff_enabled=(
+                not is_gate_block(status, blocker_reason)
+                or _gate_block_backoff_enabled(clients.get(task.client))
+            ),
+            gate_fingerprint_stage=gate_fingerprint_stage,
+            gate_fingerprint_stage_base_ref=gate_fingerprint_stage_base_ref,
         )
     else:
         # Rule 6: None/not dict/missing status -- conservative fallback

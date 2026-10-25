@@ -132,6 +132,10 @@ class ClientConfig(BaseModel):
     # setting readable so clients.yaml written during the staged rollout
     # remains loadable after the policy becomes the default implementation.
     sentinel_mismatch_veto_enabled: bool = False
+    # Per-client rollout for the #2717 gate-block retry backoff. True keeps
+    # the fixed 60-second-to-900-second backoff enabled; False disables new
+    # gate stamps and releases an existing gate-owned wait.
+    gate_block_backoff_enabled: bool = True
     # Per-client opt-in for the #2442 pre-dispatch tracker-MCP gate. None (the
     # default) means the gate never runs for this client -- it never even
     # reads the branch's settings file. There is deliberately no fleet-wide

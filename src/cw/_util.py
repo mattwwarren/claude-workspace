@@ -36,6 +36,26 @@ def format_compact_age(delta: timedelta) -> str:
     return f"{delta // timedelta(days=1)}d"
 
 
+# Upper bound on the doubling exponent. Any realistic cap is reached long
+# before 2**32, so this only stops an absurd count from building a huge int.
+_BACKOFF_MAX_SHIFT = 32
+
+
+def exponential_backoff_seconds(
+    count: int, *, initial_seconds: int, cap_seconds: int
+) -> int:
+    """Doubling-with-cap delay for the *count*-th consecutive occurrence (#2717).
+
+    ``min(initial_seconds * 2**(count - 1), cap_seconds)``: the 1st occurrence
+    waits *initial_seconds* unscaled. A *count* of 0 or less clamps to the
+    initial delay. The single copy behind the spawn-error backoff
+    (``cw.queue_rows``), concierge's false-park recovery backoff and the
+    gate-block backoff (``cw.dev_queue.gate_backoff``). Pure.
+    """
+    shift = min(max(count - 1, 0), _BACKOFF_MAX_SHIFT)
+    return min(initial_seconds << shift, cap_seconds)
+
+
 def _tail_lines(content: str, n: int) -> str:
     """Return the last *n* lines of *content*, preserving no trailing newline."""
     all_lines = content.splitlines()

@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from cw.models.enums import OCCUPIED_LANE_STATUSES, QueueItemStatus, ReapReason, Stage
 from cw.models.events import PrState, WatchedPr
+from cw.models.gate_block import GateBlockBackoff
 from cw.models.operator_resolution import OperatorResolution
 
 # Runtime (not TYPE_CHECKING) because ``finding_dispositions``' annotation
@@ -223,7 +224,10 @@ from cw.review_finding_dispositions import FindingDisposition
 #      ledger `cw dev-queue resolve` writes. ``Field(default_factory=list)``,
 #      so no migration filler is needed; a pre-v46 row recorded no
 #      resolutions.
-DEV_QUEUE_SCHEMA_VERSION = 46
+# v47: added TicketTask.gate_block (GitHub #2717) — the consecutive
+#      gate-block backoff record. ``| None`` with a ``None`` default, so no
+#      migration filler is needed; a pre-v47 row recorded no gate-block run.
+DEV_QUEUE_SCHEMA_VERSION = 47
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -692,6 +696,12 @@ class TicketTask(BaseModel):
     # Both are cleared atomically on a successful spawn.
     spawn_error_count: int = 0
     next_eligible_at: datetime | None = None
+    # GitHub #2717: consecutive gate-block parks, separate from
+    # spawn_error_count/unproductive_attempts and NOT cleared by
+    # transition_task_status. Reset by a non-gate routed outcome; its wait is
+    # cleared by requeue and the Variant B AUTO release. ``until`` guards the
+    # shared next_eligible_at clock. Written only by cw.dev_queue.gate_backoff.
+    gate_block: GateBlockBackoff | None = None
     # Exponential backoff state for concierge recipe 1's false-park recovery
     # (GitHub #1030) — a distinct field pair from spawn_error_count/
     # next_eligible_at above: that pair covers subprocess spawn errors at the
