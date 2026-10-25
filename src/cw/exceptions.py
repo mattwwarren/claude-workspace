@@ -6,6 +6,8 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from cw._usage_limit_patterns import USAGE_LIMIT_PATTERNS
+
 # ``datetime`` is deliberately imported at RUNTIME above rather than listed here
 # (#1409 review round 1): ``parse_usage_limit_reset`` and
 # ``UsageLimitError.__init__`` both annotate it, and ``from __future__ import
@@ -29,20 +31,26 @@ DEV_QUEUE_LOCK_NAME = "dev_queue"
 CLIENTS_LOCK_NAME = "clients"
 CONCURRENCY_OVERRIDE_LOCK_NAME = "concurrency_override"
 
-# Usage-limit detection regex. Matches all documented Claude usage-limit phrasings:
-# - "You've hit your session limit · resets 3:45pm"   (verified against errors.md)
-# - "You've hit your weekly limit · resets Mon 12:00am" (verified against errors.md)
-# - "You've hit your Opus limit · resets 3:45pm"      (verified against errors.md)
-# Uses \S+ rather than an explicit allow-list so undocumented future limit types
-# (e.g. "5-hour limit") are also detected. Replaces the narrower
-# r"hit (?:your )?(?:session|usage) limit" from reconcile.py:126 which missed
-# weekly and Opus variants.
+# Usage-limit detection regex, compiled from the table in
+# ``cw._usage_limit_patterns`` (#2220). It matches every observed Claude
+# blocking usage-limit wording: "You've hit your session limit", "Usage limit
+# reached", "usage limit; resets <time>" and "· limit resets <time>". The
+# non-blocking continue/credits notices are deliberately not matched.
 #
-# DELIBERATELY UNCHANGED by #1409: four consumers (native_daemon, queue_peek,
-# reconcile/_shared, tests) depend on this broad "detect anything" match, so the
-# reset-time fragment is parsed by the separate anchored companion below rather
-# than by adding capture groups here.
-USAGE_LIMIT_RE = re.compile(r"hit (?:your )?\S+ limit", re.IGNORECASE)
+# The strings come from an external binary and can change without notice, so
+# each wording is a data row there with its provenance, not a branch here.
+# Reset-bearing rows use lookaheads so ``match.end()`` lands right after
+# "limit": ``parse_usage_limit_reset`` applies the companion below at the LAST
+# match's end (R5), and a consuming pattern would swallow the "resets" it needs.
+#
+# Four consumers (native_daemon, queue_peek, reconcile/_shared, tests) depend on
+# this broad "detect anything" match, so the reset-time fragment is parsed by the
+# separate anchored companion below rather than by adding capture groups here
+# (#1409).
+USAGE_LIMIT_RE = re.compile(
+    "|".join(f"(?:{entry.pattern})" for entry in USAGE_LIMIT_PATTERNS),
+    re.IGNORECASE,
+)
 
 # Anchored companion to USAGE_LIMIT_RE: the "· resets <time>" fragment that
 # follows a matched usage-limit phrase (#1409). Applied with .match() to a short
@@ -119,9 +127,12 @@ def parse_usage_limit_reset(text: str, *, now: datetime) -> datetime | None:
     captured ``claude --bg`` usage-limit message exists, and a usage limit
     cannot be induced on demand. The recognised forms and every test fixture
     are derived from *interactive* Claude transcript wording — ``resets
-    3:45pm``, ``resets Mon 12:00am``, ``resets 11pm (America/New_York)``. If
-    the real spawn-time text differs, this returns None and dispatch keeps
-    today's flat ``usage_limit_backoff_seconds`` back-off.
+    3:45pm``, ``resets Mon 12:00am``, ``resets 11pm (America/New_York)`` — and,
+    for the templates added in #2220, from strings in the installed ``claude``
+    binary rather than a captured spawn message. Those templates are anchored
+    by lookahead so the anchor ends right after "limit". If the real
+    spawn-time text differs, this returns None and dispatch keeps today's flat
+    ``usage_limit_backoff_seconds`` back-off.
 
     *now* MUST be timezone-aware; production passes the host-local clock via
     ``native_daemon._local_now()`` (``datetime.now(_host_timezone())``), a real

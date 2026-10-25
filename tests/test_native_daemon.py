@@ -463,6 +463,84 @@ class TestRealNativeDaemonClientSpawn:
         with pytest.raises(UsageLimitError, match="usage limit"):
             client.spawn_bg(cwd=tmp_path, prompt="x")
 
+    # #2220: usage-limit wordings that do not contain "hit". Derived from
+    # strings in the installed claude binary, not from a captured spawn.
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "Usage limit reached",
+            "Usage limit reached \u00b7 limit resets 3:45pm",
+            "usage limit; resets 3:45pm, too far out to wait for",
+        ],
+    )
+    def test_non_hit_usage_limit_variants_raise_usage_limit_error_from_stderr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        from cw.exceptions import UsageLimitError
+
+        def fake_run(*_a: object, **_kw: object) -> _FakeCompleted:
+            raise subprocess.CalledProcessError(1, ["claude"], output="", stderr=raw)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        client = RealNativeDaemonClient()
+        with pytest.raises(UsageLimitError, match="usage limit"):
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
+    def test_non_hit_usage_limit_variant_in_stdout_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.exceptions import UsageLimitError
+
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *_a, **_kw: _FakeCompleted(
+                stdout="usage limit; resets 3:45pm, too far out to wait for"
+            ),
+        )
+        client = RealNativeDaemonClient()
+        with pytest.raises(UsageLimitError, match="usage limit"):
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
+    def test_non_hit_variant_carries_parsed_reset_at(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pinned_local_now: datetime,
+    ) -> None:
+        from cw.exceptions import UsageLimitError
+
+        raw = "Usage limit reached \u00b7 limit resets 3:45pm"
+
+        def fake_run(*_a: object, **_kw: object) -> _FakeCompleted:
+            raise subprocess.CalledProcessError(1, ["claude"], output="", stderr=raw)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        client = RealNativeDaemonClient()
+
+        exc_info: pytest.ExceptionInfo[UsageLimitError]
+        with pytest.raises(UsageLimitError) as exc_info:
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
+        assert exc_info.value.reset_at == pinned_local_now.replace(hour=15, minute=45)
+
+    def test_rate_limit_stderr_is_not_a_usage_limit_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.exceptions import UsageLimitError
+
+        def fake_run(*_a: object, **_kw: object) -> _FakeCompleted:
+            raise subprocess.CalledProcessError(
+                1, ["claude"], output="", stderr="rate limit exceeded"
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        client = RealNativeDaemonClient()
+        with pytest.raises(CwError) as exc_info:
+            client.spawn_bg(cwd=tmp_path, prompt="x")
+
+        assert not isinstance(exc_info.value, UsageLimitError)
+
     def test_disclaimer_not_accepted_raises_typed_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

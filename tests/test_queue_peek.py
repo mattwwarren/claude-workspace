@@ -1638,6 +1638,52 @@ class TestParseTranscript:
         result = queue_peek.parse_transcript(p)
         assert result["usage_limit_detected"] is True
 
+    def test_non_hit_usage_limit_message_sets_flag_true(self, tmp_path: Path) -> None:
+        """#2220: a usage-limit banner worded without "hit" is detected."""
+        p = tmp_path / "t.jsonl"
+        _make_transcript(
+            p,
+            [
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-01T10:00:00Z",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Usage limit reached · limit resets 3:45pm",
+                            }
+                        ]
+                    },
+                }
+            ],
+        )
+        result = queue_peek.parse_transcript(p)
+        assert result["usage_limit_detected"] is True
+
+    def test_quoted_usage_limit_phrase_does_not_set_flag(self, tmp_path: Path) -> None:
+        """#2220: agent prose quoting the banner must not trip the flag."""
+        p = tmp_path / "t.jsonl"
+        _make_transcript(
+            p,
+            [
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-01T10:00:00Z",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": 'The message "Usage limit reached" is detected',
+                            }
+                        ]
+                    },
+                }
+            ],
+        )
+        result = queue_peek.parse_transcript(p)
+        assert result["usage_limit_detected"] is False
+
     def test_no_usage_limit_message_flag_false(self, tmp_path: Path) -> None:
         p = tmp_path / "t.jsonl"
         _make_transcript(
