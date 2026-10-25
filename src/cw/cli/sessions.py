@@ -367,8 +367,9 @@ def _peek_session(
     if session.status == SessionStatus.COMPLETED:
         msg = (
             f"Session '{session_name}' is completed (status: completed)."
-            f" Run 'cw post-mortem {session.id}' for its transcript"
-            " once that command is available."
+            f" Run 'cw session result {session.id}' for its recorded result or"
+            f" 'cw session show {session.id}' for its worktree and Claude"
+            " session id."
         )
         raise CwError(msg)
     if session.claude_session_id is None:
@@ -379,8 +380,8 @@ def _peek_session(
     if not transcript_path.is_file():
         msg = (
             f"Transcript for session '{session_name}' not found at"
-            f" {transcript_path}. Run 'cw post-mortem {session.id}' for the full"
-            " transcript once that command is available."
+            f" {transcript_path}. Run 'cw session show {session.id}' for the"
+            " session's worktree and Claude session id."
         )
         raise CwError(msg)
     # Bound peak memory to the scrollback window: a long-running session's
