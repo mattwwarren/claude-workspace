@@ -864,12 +864,14 @@ def detect_gates(claude_md_path: Path | None = None) -> dict[str, Any]:
 _GIT_STATUS_FAILED = "git-status-failed"
 
 # Dependency-sync gates change the environment as they run, so a prior pass is
-# not sufficient evidence that re-running them is redundant. Keep this list
-# deliberately focused on explicit install/sync commands; ordinary `uv run`
-# gates remain eligible for same-SHA skips.
+# not sufficient evidence that re-running them is redundant. ``uv run`` also
+# performs implicit synchronization; treat every ``uv run`` gate as
+# environment-mutating because the command does not prove synchronization is a
+# no-op.
+ENVIRONMENT_MUTATING_REASON = "environment-mutating"
 _ENVIRONMENT_MUTATING_GATE_RE = re.compile(
     r"(?<![\w-])(?:"
-    r"uv\s+sync|uv\s+pip\s+install|"
+    r"uv\s+(?:run|sync)|uv\s+pip\s+install|"
     r"(?:python(?:\d+(?:\.\d+)?)?\s+-m\s+)?pip\s+install|"
     r"(?:npm|yarn|pnpm)\s+(?:install|ci)|poetry\s+install|cargo\s+fetch"
     r")(?![\w-])"
@@ -938,7 +940,7 @@ def gate_pass_check(name: str) -> dict[str, Any]:
     if command is None:
         reason = "unknown-gate"
     elif _is_environment_mutating_gate(command):
-        reason = "environment-mutating"
+        reason = ENVIRONMENT_MUTATING_REASON
     else:
         reason = gate_skip_reason(stamp, command, head, dirty)
     skip = reason == "matched"
@@ -966,7 +968,11 @@ def gate_pass_record(name: str, base: str) -> dict[str, Any]:
     if command is None:
         return {"gate": name, "recorded": False, "reason": "unknown-gate"}
     if _is_environment_mutating_gate(command):
-        return {"gate": name, "recorded": False, "reason": "environment-mutating"}
+        return {
+            "gate": name,
+            "recorded": False,
+            "reason": ENVIRONMENT_MUTATING_REASON,
+        }
     head, dirty = _worktree_state()
     if not head or dirty:
         reason = "head-unresolved" if not head else "dirty-worktree"

@@ -1298,11 +1298,11 @@ def test_dash_s_gate_timeout_reads_config_without_pyyaml(tmp_path: Path) -> None
 # ---------------------------------------------------------------------------
 
 _QUOTED_PYTEST_GATE = (
-    "uv run pytest tests/ -m 'not integration' "
-    "&& uv run coverage report --fail-under=88"
+    "python -m pytest tests/ -m 'not integration' "
+    "&& python -m coverage report --fail-under=88"
 )
 _GATE_REPO_CLAUDE_MD = _gates_section(
-    _bash_block("uv run mypy --strict src/", _QUOTED_PYTEST_GATE)
+    _bash_block("python -m mypy --strict src/", _QUOTED_PYTEST_GATE)
 )
 _STATE_REL = Path(".claude") / "prep-pr-state.json"
 
@@ -1431,17 +1431,17 @@ class TestGatePass:
     ) -> None:
         name = _gate_names()[0]
         monkeypatch.setattr(
-            _mod, "_gate_command", lambda _name: "uv sync --locked --dev"
+            _mod, "_gate_command", lambda _name: "uv run mypy ."
         )
         assert _gate_pass(capsys, "record", name) == {
             "gate": name,
             "recorded": False,
-            "reason": "environment-mutating",
+            "reason": _mod.ENVIRONMENT_MUTATING_REASON,
         }
         assert not (gate_repo / _STATE_REL).exists()
         checked = _gate_pass(capsys, "check", name)
         assert checked["skip"] is False
-        assert checked["reason"] == "environment-mutating"
+        assert checked["reason"] == _mod.ENVIRONMENT_MUTATING_REASON
         assert not (gate_repo / _STATE_REL).exists()
 
     def test_edited_stamp_command_is_command_changed(
