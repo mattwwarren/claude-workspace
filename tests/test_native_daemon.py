@@ -471,8 +471,6 @@ class TestRealNativeDaemonClientSpawn:
             "Usage limit reached",
             "Usage limit reached \u00b7 limit resets 3:45pm",
             "usage limit; resets 3:45pm, too far out to wait for",
-            "Continuing now at lower priority until your limit resets at 3:45pm.",
-            "Now using usage credits for Opus \u00b7 Your Opus limit resets 3:45pm",
         ],
     )
     def test_non_hit_usage_limit_variants_raise_usage_limit_error_from_stderr(

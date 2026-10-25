@@ -459,19 +459,6 @@ class TestParseUsageLimitReset:
                 datetime(2026, 9, 26, 23, 0, tzinfo=_NY),
                 id="semicolon-resets-month-day",
             ),
-            pytest.param(
-                "Continuing now at lower priority until your limit resets at "
-                "3:45pm. Your weekly limit still applies",
-                _SUNDAY_10AM_NY,
-                datetime(2026, 9, 20, 15, 45, tzinfo=_NY),
-                id="until-your-limit-resets-at",
-            ),
-            pytest.param(
-                "Now using usage credits for Opus · Your Opus limit resets Mon 3pm",
-                _SUNDAY_10AM_NY,
-                datetime(2026, 9, 21, 15, 0, tzinfo=_NY),
-                id="credits-notice-your-model-limit-resets",
-            ),
         ],
     )
     def test_resolves_expected_instant(
@@ -784,11 +771,26 @@ class TestUsageLimitRe:
             "You've hit your session limit · resets 3:45pm",
             "Usage limit reached",
             "usage limit; resets 3:45pm, too far out to wait for",
-            "Continuing now at lower priority until your limit resets at 3:45pm.",
-            "Now using usage credits for Opus · Your Opus limit resets 3:45pm",
+            "Usage limit reached · limit resets 3:45pm",
         ],
     )
     def test_matches_each_observed_variant(self, text: str) -> None:
         from cw.exceptions import USAGE_LIMIT_RE
 
         assert USAGE_LIMIT_RE.search(text)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Continuing now at lower priority until your limit resets at 3:45pm. "
+            "Your weekly limit still applies",
+            "Now using usage credits for Opus · Your Opus limit resets 3:45pm",
+        ],
+        ids=["lower-priority-notice", "credits-notice"],
+    )
+    def test_non_blocking_notices_do_not_match(self, text: str) -> None:
+        # #2220: the worker keeps running after these, so a transcript consumer
+        # must not treat them as a usage-limit stop.
+        from cw.exceptions import USAGE_LIMIT_RE
+
+        assert USAGE_LIMIT_RE.search(text) is None

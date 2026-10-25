@@ -31,13 +31,9 @@ _FIXTURE_BY_ENTRY: dict[str, tuple[str, ...]] = {
     "usage_limit_semicolon_resets": (
         "usage limit; resets 3:45pm, too far out to wait for",
     ),
-    "until_your_limit_resets_at": (
-        "Continuing now at lower priority until your limit resets at 3:45pm. "
-        "Your weekly limit still applies",
-    ),
     "limit_resets_time": (
-        "Now using usage credits for Opus · Your Opus limit resets 3:45pm",
-        "Usage limit reached · limit resets Mon 12:00am",
+        "Usage limit reached \u00b7 limit resets Mon 12:00am",
+        "usage \u2013 limit resets 3:45pm",
     ),
 }
 
@@ -95,6 +91,10 @@ class TestUsageLimitNegatives:
             "the limit resets 3pm daily",
             "add a test for usage limit; resets handling",
             "wait until your limit resets",
+            "Continuing now at lower priority until your limit resets at 3:45pm. "
+            "Your weekly limit still applies",
+            "Now using usage credits for Opus \u00b7 Your Opus limit resets 3:45pm",
+            "Your weekly limit resets Mon 3pm",
             'I will quote the message "Usage limit reached" in the test',
             "see `Usage limit reached`",
             "the usage limit reached 80% earlier",
@@ -110,10 +110,10 @@ class TestReDoSBounds:
         [
             "limit " * _REPEAT_LARGE,
             "usage limit; " * _REPEAT_LARGE,
-            "until your limit resets at " * _REPEAT_MEDIUM,
-            "· limit resets " * _REPEAT_MEDIUM,
+            "your limit resets at " * _REPEAT_MEDIUM,
+            "\u00b7 limit resets " * _REPEAT_MEDIUM,
         ],
-        ids=["limit", "usage-limit-semicolon", "until-your-limit", "middot-limit"],
+        ids=["limit", "usage-limit-semicolon", "your-limit", "middot-limit"],
     )
     def test_adversarial_input_finishes_quickly(self, text: str) -> None:
         start = time.perf_counter()

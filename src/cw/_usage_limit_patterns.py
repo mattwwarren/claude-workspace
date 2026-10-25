@@ -79,30 +79,27 @@ USAGE_LIMIT_PATTERNS: tuple[UsageLimitPattern, ...] = (
         ),
         pattern=r"\busage limit(?=;\s{1,3}resets\s{1,4}" + _RESET_WHEN + ")",
     ),
-    # Lower-priority-mode copy: "Continuing now at lower priority until your
-    # limit resets at <time>". Bare "until your limit resets" (no time) is
-    # deliberately NOT matched: it is generic prose.
-    UsageLimitPattern(
-        name="until_your_limit_resets_at",
-        source=("claude binary 2.1.278 / 2.1.310 'until your limit resets at ${time}'"),
-        pattern=(
-            r"\buntil your limit(?=\s{1,4}resets\s{1,4}at\s{1,4}" + _RESET_WHEN + ")"
-        ),
-    ),
-    # "· Your <model> limit resets <time>" (credits notice) and
-    # "· limit resets <time>" (Usage limit reached helper). Needs BOTH a
-    # usage-style opener (middot U+00B7, en dash U+2013, em dash U+2014, or
-    # "your <word>") and a following clock time. ASCII "-" and "|" openers are
-    # excluded on purpose so "rate-limit resets 3pm" and table/list rows do not
-    # match.
+    # "Usage limit reached · limit resets <time>" (the helper that follows the
+    # banner). Needs BOTH a middot (U+00B7) / en dash (U+2013) / em dash (U+2014)
+    # opener directly before "limit" and a following clock time. ASCII "-" and
+    # "|" openers are excluded on purpose so "rate-limit resets 3pm" and
+    # table/list rows do not match.
+    #
+    # Deliberately NOT matched (#2220 operator disposition): the non-blocking
+    # notices "Continuing now at lower priority until your limit resets at
+    # <time>" and "Now using usage credits for X · Your X limit resets <time>".
+    # The worker keeps running after them, and the transcript consumers
+    # (reconcile, queue_peek) would otherwise arm backoff and a per-client
+    # lockout for a healthy session. The "· Your <model> limit" form fails the
+    # opener below because "Your <model>" sits between the middot and "limit".
     UsageLimitPattern(
         name="limit_resets_time",
         source=(
-            "claude binary 2.1.278 / 2.1.310 'Your ${model} limit resets "
-            "${time}' and 'Usage limit reached · limit resets ${time}'"
+            "claude binary 2.1.278 / 2.1.310 helper "
+            "'Usage limit reached · limit resets ${time}'"
         ),
         pattern=(
-            r"(?:[\u00b7\u2013\u2014]|\byour\s{1,4}\S{1,20})\s{0,3}limit"
+            r"[\u00b7\u2013\u2014]\s{0,3}limit"
             r"(?=\s{1,4}resets\s{1,4}" + _RESET_WHEN + ")"
         ),
     ),

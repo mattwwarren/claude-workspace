@@ -33,9 +33,9 @@ CONCURRENCY_OVERRIDE_LOCK_NAME = "concurrency_override"
 
 # Usage-limit detection regex, compiled from the table in
 # ``cw._usage_limit_patterns`` (#2220). It matches every observed Claude
-# usage-limit wording: "You've hit your session limit", "Usage limit reached",
-# "usage limit; resets <time>", "until your limit resets at <time>" and
-# "· Your <model> limit resets <time>".
+# blocking usage-limit wording: "You've hit your session limit", "Usage limit
+# reached", "usage limit; resets <time>" and "· limit resets <time>". The
+# non-blocking continue/credits notices are deliberately not matched.
 #
 # The strings come from an external binary and can change without notice, so
 # each wording is a data row there with its provenance, not a branch here.
@@ -66,10 +66,8 @@ USAGE_LIMIT_RE = re.compile(
 # - The optional date prefix is a weekday (``Mon``) or a month-day (``Sep 26,``);
 #   the month-day form is the wording a running session's mid-turn limit stop
 #   prints (#2324).
-# - An optional ``at`` follows ``resets`` because "until your limit resets at
-#   <time>" (#2220) is worded that way; the other forms have no ``at``.
 USAGE_LIMIT_RESET_RE = re.compile(
-    r"\W{0,8}resets\s{1,4}(?:at\s{1,4})?"
+    r"\W{0,8}resets\s{1,4}"
     r"(?:(?P<day>mon|tue|wed|thu|fri|sat|sun)[a-z]{0,6}\s{1,4}"
     r"|(?P<month>[a-z]+)\.?"
     r"\s{1,4}(?P<mday>[0-9]{1,2}),?\s{1,4})?"
