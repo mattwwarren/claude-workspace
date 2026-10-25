@@ -272,9 +272,7 @@ def _screen_and_claim(
         # #2717: disabling the rollout releases a gate-owned wait as part of
         # this locked claim transaction, so a later non-gate route cannot
         # retain an orphaned claim clock.
-        if gate_wait_released(
-            task, backoff_enabled=client.gate_block_backoff_enabled
-        ):
+        if gate_wait_released(task, backoff_enabled=client.gate_block_backoff_enabled):
             clear_gate_block_wait(task)
             save_dev_queue(store)
         else:
