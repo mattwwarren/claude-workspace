@@ -189,16 +189,20 @@ def _check_wedge_repo_ahead(
         # Check PR status via gh CLI
         recipe: str
         prs, _ = _gh_pr_states(branch)
+        # ``cw spawn complete`` takes a session id, not a ticket id; a RUNNING
+        # task may legally have none recorded, so leave a fillable placeholder.
+        sid = task.session_id or "<session_id>"
         if not prs:
             recipe = (
                 f"Branch {branch} is ahead of main with no open PR. "
-                f"Suggested: cw spawn-complete {task.ticket_id} or open the PR."
+                f"Suggested: open the PR, then cw spawn complete {sid} "
+                "--status shipped."
             )
         else:
             pr_state = prs[0].get("state", "OPEN")
             recipe = (
                 f"Branch {branch} has {pr_state} PR but queue still RUNNING. "
-                f"Suggested: cw spawn-complete {task.ticket_id} --status shipped."
+                f"Suggested: cw spawn complete {sid} --status shipped."
             )
         findings.append(
             WedgeFinding(
