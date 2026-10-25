@@ -56,6 +56,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
+from cw._util import exponential_backoff_seconds
 from cw.config import get_client, load_state, save_state
 from cw.dev_queue import (
     _extract_pr_url,
@@ -491,13 +492,19 @@ def _detect_false_park_candidates(
 def _resolve_false_park_recovery_backoff(count: int) -> float:
     """Return the backoff delay (seconds) for the *count*-th recovery.
 
-    Same doubling-with-cap shape as dispatch.py's spawn-error backoff:
+    Same doubling-with-cap shape as the spawn-error backoff, via the shared
+    :func:`cw._util.exponential_backoff_seconds` (#2717):
     ``min(INITIAL * 2**(count - 1), CAP)``, where *count* is the
     already-incremented ``false_park_recovery_count`` (so the 1st recovery
     uses the INITIAL delay unscaled).
     """
-    delay_seconds = _FALSE_PARK_RECOVERY_BACKOFF_INITIAL_SECONDS * (2 ** (count - 1))
-    return float(min(delay_seconds, _FALSE_PARK_RECOVERY_BACKOFF_CAP_SECONDS))
+    return float(
+        exponential_backoff_seconds(
+            count,
+            initial_seconds=_FALSE_PARK_RECOVERY_BACKOFF_INITIAL_SECONDS,
+            cap_seconds=_FALSE_PARK_RECOVERY_BACKOFF_CAP_SECONDS,
+        )
+    )
 
 
 def _act_on_false_park_candidates(
