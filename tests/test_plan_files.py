@@ -9,7 +9,14 @@ lives in tests/conftest.py so the two suites cannot drift apart.
 
 from __future__ import annotations
 
-from cw.plan_files import _looks_like_path, parse_plan_files_modified
+from cw.plan_files import (
+    SMALL_TIER_MAX_FILES,
+    SMALL_TIER_MAX_LINES,
+    _looks_like_path,
+    parse_plan_files_modified,
+    parse_plan_scope_tier,
+    resolve_review_scope_tier,
+)
 from tests.conftest import _plan_text
 
 
@@ -167,3 +174,96 @@ def test_parses_shared_conftest_plan_fixture() -> None:
     """
     paths = ["src/cw/one.py", "tests/test_one.py"]
     assert parse_plan_files_modified(_plan_text(paths)) == paths
+
+
+# --- #2767: the plan's `**Scope tier:**` marker and the review tier resolver ---
+
+
+def test_parse_scope_tier_reads_canonical_marker() -> None:
+    """The canonical Stage 1g line yields its tier."""
+    assert parse_plan_scope_tier("# Plan\n\n**Scope tier:** large\n") == "large"
+    assert parse_plan_scope_tier("**Scope tier:** small\n") == "small"
+
+
+def test_parse_scope_tier_tolerates_measurement_suffix() -> None:
+    """The ``(N files, ~M lines, forbidden_touched=...)`` suffix is ignored."""
+    plan = "**Scope tier:** large (31 files, ~2179 lines, forbidden_touched=false)\n"
+    assert parse_plan_scope_tier(plan) == "large"
+
+
+def test_parse_scope_tier_tolerates_downgrade_note() -> None:
+    """A Stage 3 downgrade note after the value does not hide the value."""
+    plan = "**Scope tier:** small *(downgraded at Stage 3 from large)*\n"
+    assert parse_plan_scope_tier(plan) == "small"
+
+
+def test_parse_scope_tier_is_case_insensitive_and_normalizes() -> None:
+    """The marker parser defines its own case rule: it returns lowercase."""
+    assert parse_plan_scope_tier("**scope TIER:** Large\n") == "large"
+
+
+def test_parse_scope_tier_ignores_fenced_illustration() -> None:
+    """A marker inside a code fence is an illustration, not the plan's tier."""
+    plan = "```\n**Scope tier:** large\n```\n\n**Scope tier:** small\n"
+    assert parse_plan_scope_tier(plan) == "small"
+    assert parse_plan_scope_tier("~~~\n**Scope tier:** large\n~~~\n") is None
+
+
+def test_parse_scope_tier_missing_marker_returns_none() -> None:
+    """No marker line -> None, and looser phrasings are not parsed."""
+    assert parse_plan_scope_tier("# Plan\n\njust do the thing\n") is None
+    assert parse_plan_scope_tier("tier: small\n**Scope:** Small\n") is None
+
+
+def test_parse_scope_tier_garbage_value_returns_none() -> None:
+    """A marker with a value other than small/large is not a tier."""
+    assert parse_plan_scope_tier("**Scope tier:** medium\n") is None
+    assert parse_plan_scope_tier("**Scope tier:** smallish\n") is None
+
+
+def test_parse_scope_tier_first_match_wins() -> None:
+    """The first marker in document order wins over a later one."""
+    plan = "**Scope tier:** large\n\nlater:\n\n**Scope tier:** small\n"
+    assert parse_plan_scope_tier(plan) == "large"
+
+
+_LARGE_PLAN = "# Plan\n\n**Scope tier:** large\n"
+_SMALL_PLAN = "# Plan\n\n**Scope tier:** small\n"
+
+
+def test_resolve_marker_beats_conflicting_hint_and_measurement() -> None:
+    """Source 1 (the plan marker) wins over the hint and the diff stat."""
+    assert resolve_review_scope_tier(_LARGE_PLAN, "small", (1, 1)) == "large"
+    assert resolve_review_scope_tier(_SMALL_PLAN, "large", (99, 9999)) == "small"
+
+
+def test_resolve_hint_used_when_no_marker() -> None:
+    """Source 2 (``scope_hint``) applies when the plan carries no marker."""
+    assert resolve_review_scope_tier("# Plan\n", "large", (1, 1)) == "large"
+    assert resolve_review_scope_tier(None, "small", (99, 9999)) == "small"
+
+
+def test_resolve_ignores_unrecognized_hint() -> None:
+    """A hint outside {small, large} is not a source; the diff decides."""
+    assert resolve_review_scope_tier(None, "medium", (1, 1)) == "small"
+    assert resolve_review_scope_tier(None, "Large", None) is None
+
+
+def test_resolve_measured_diff_boundaries() -> None:
+    """Source 3: small iff files <= 10 AND lines <= 500, else large."""
+    assert SMALL_TIER_MAX_FILES == 10
+    assert SMALL_TIER_MAX_LINES == 500
+    assert resolve_review_scope_tier(None, None, (10, 500)) == "small"
+    assert resolve_review_scope_tier(None, None, (11, 500)) == "large"
+    assert resolve_review_scope_tier(None, None, (10, 501)) == "large"
+
+
+def test_resolve_no_source_returns_none() -> None:
+    """All three sources absent -> None (the caller blocks, never small)."""
+    assert resolve_review_scope_tier(None, None, None) is None
+    assert resolve_review_scope_tier("# Plan, no marker\n", None, None) is None
+
+
+def test_resolve_none_plan_text_skips_marker_source() -> None:
+    """``plan_text=None`` (no ``.cw/plan.md``) falls through to the hint."""
+    assert resolve_review_scope_tier(None, "large", None) == "large"
