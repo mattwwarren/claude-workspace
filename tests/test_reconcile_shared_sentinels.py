@@ -359,6 +359,29 @@ def test_detect_usage_limit_returns_true_when_message_present(
     assert detection.transcript_tail_at is None
 
 
+def test_detect_usage_limit_true_for_non_hit_variant(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """_detect_usage_limit recognises a wording without "hit" (#2220)."""
+    from cw.reconcile import _detect_usage_limit
+
+    home = Path.home()
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-ul-non-hit"
+    sess = _mk_headless_daemon_session("ul-non-hit", worktree, started_at)
+
+    transcript = _write_idle_transcript_with_text(
+        home, worktree, "usage limit; resets 5:20pm, too far out to wait for"
+    )
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+
+    detection = _detect_usage_limit(sess)
+    assert detection.detected is True
+
+
 def test_detect_usage_limit_returns_false_when_absent(
     tmp_config_dir: Path,
     tmp_path: Path,
