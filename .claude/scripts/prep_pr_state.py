@@ -10,6 +10,7 @@ Subcommands:
   clean         — Remove state file
   gate-timeout  — Foreground/poll timeout ceilings for a named gate
   gate-elapsed  — Elapsed time since a timestamp vs a ceiling
+  gate-pass     — Record a gate pass at HEAD, or check whether one still applies
 """
 
 from __future__ import annotations
@@ -24,14 +25,27 @@ import sys
 from collections import Counter
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
+from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from types import ModuleType
+
+try:
+    yaml: ModuleType | None = import_module("yaml")
+except ImportError:  # pragma: no cover - downstream repo without PyYAML
+    yaml = None
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # State file lives in the repo's .claude/ directory
 STATE_FILE = Path(".claude/prep-pr-state.json")
+
+# Per-repo config, read for quality_gates.timeouts (cwd-relative like STATE_FILE)
+PROJECT_CONFIG_PATH = Path(".claude/project-config.yaml")
 
 # Scope creep thresholds
 SCOPE_FILE_COUNT_THRESHOLD = 0.30  # 30% increase
@@ -104,6 +118,32 @@ class ScopeSnapshot:
 
 
 @dataclass
+class GatePass:
+    """A gate that passed at ``sha`` with ``command`` on a clean worktree."""
+
+    name: str
+    command: str
+    sha: str
+    recorded: str
+    skipped_at: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> GatePass:
+        """Create from dictionary."""
+        return cls(
+            name=data["name"],
+            command=data["command"],
+            sha=data["sha"],
+            recorded=data["recorded"],
+            skipped_at=list(data.get("skipped_at", [])),
+        )
+
+
+@dataclass
 class PrepPrState:
     """Complete state for a prep-pr session."""
 
@@ -115,6 +155,7 @@ class PrepPrState:
     detected_from: list[str] = field(default_factory=list)
     started: str = ""
     updated: str = ""
+    gate_passes: list[GatePass] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Set timestamps if not already set."""
@@ -134,6 +175,7 @@ class PrepPrState:
             "detected_from": self.detected_from,
             "started": self.started,
             "updated": self.updated,
+            "gate_passes": [p.to_dict() for p in self.gate_passes],
         }
 
     @classmethod
@@ -143,6 +185,9 @@ class PrepPrState:
             ScopeSnapshot.from_dict(s) for s in data.get("snapshots", [])
         ]
         data["gates"] = [Gate.from_dict(g) for g in data.get("gates", [])]
+        data["gate_passes"] = [
+            GatePass.from_dict(p) for p in data.get("gate_passes", [])
+        ]
         return cls(**data)
 
     def add_snapshot(self, snapshot: ScopeSnapshot) -> None:
@@ -192,10 +237,10 @@ def clean_state() -> bool:
 # --- Git Helpers ---
 
 
-def _run_git(args: list[str]) -> str:
+def _run_git(args: list[str], *, default: str = "") -> str:
     """Run a git command and return stdout.
 
-    Returns empty string on failure instead of raising.
+    Returns *default* (empty string unless given) on failure instead of raising.
     """
     cmd = ["git", *args]
     try:
@@ -207,10 +252,10 @@ def _run_git(args: list[str]) -> str:
         )
     except FileNotFoundError:
         logger.exception("git not found")
-        return ""
+        return default
     except subprocess.CalledProcessError as e:
         logger.warning("git command failed: %s\n%s", " ".join(cmd), e.stderr.strip())
-        return ""
+        return default
     return result.stdout.strip()
 
 
@@ -277,21 +322,202 @@ GATE_TIMEOUT_FALLBACK_SECONDS: int = 480
 # budget to spare.
 GATE_POLL_CEILING_SECONDS: int = 1800
 
+# The Bash tool's own foreground timeout cap (600000 ms). A configured ceiling
+# above it cannot be honoured, so every resolved ceiling is clamped to it (#2758).
+BASH_FOREGROUND_CAP_SECONDS: int = 600
 
-def gate_timeout_seconds(name: str) -> int:
-    """Foreground ceiling for a gate by name, falling back to the default.
+# project-config.yaml location of per-repo ceiling overrides:
+# quality_gates.timeouts.<gate-name>: <seconds> (#2758).
+GATE_TIMEOUT_CONFIG_SECTION = "quality_gates"
+GATE_TIMEOUT_CONFIG_KEY = "timeouts"
 
-    Lookup is by longest hyphen-delimited prefix: the full name first, then
-    with trailing ``-segment`` parts dropped one at a time, so a derived name
-    such as ``pytest-integration`` resolves to ``pytest`` while ``pre-commit``
-    still matches its own exact key.
+# One ``key: value`` entry line inside the canonical timeouts block, and the
+# integer shape the PyYAML-free scanner converts (anything else stays a string
+# so the shared validator rejects it, as PyYAML's float/bool/str would be).
+_TIMEOUT_ENTRY_RE = re.compile(r"(?P<key>[^\s:]+):[ ]+(?P<value>\S.*)")
+_INT_RE = re.compile(r"-?\d+")
+
+
+def _matching_key(name: str, table: Mapping[str, object]) -> str | None:
+    """Longest hyphen-delimited prefix of *name* that is a key of *table*.
+
+    The full name first, then with trailing ``-segment`` parts dropped one at a
+    time, so ``pytest-integration`` matches ``pytest`` and ``pre-commit`` still
+    matches its own exact key. None when no prefix is a key.
     """
     parts = name.split("-")
     for end in range(len(parts), 0, -1):
         prefix = "-".join(parts[:end])
-        if prefix in GATE_TIMEOUT_DEFAULTS:
-            return GATE_TIMEOUT_DEFAULTS[prefix]
-    return GATE_TIMEOUT_FALLBACK_SECONDS
+        if prefix in table:
+            return prefix
+    return None
+
+
+def gate_timeout_seconds(name: str) -> int:
+    """Foreground ceiling for a gate by name, falling back to the default.
+
+    Lookup is by longest hyphen-delimited prefix (see ``_matching_key``), so a
+    derived name such as ``pytest-integration`` resolves to ``pytest``.
+    """
+    key = _matching_key(name, GATE_TIMEOUT_DEFAULTS)
+    if key is None:
+        return GATE_TIMEOUT_FALLBACK_SECONDS
+    return GATE_TIMEOUT_DEFAULTS[key]
+
+
+def _non_canonical(detail: str) -> ValueError:
+    msg = (
+        f"{GATE_TIMEOUT_CONFIG_SECTION}.{GATE_TIMEOUT_CONFIG_KEY} is not in the "
+        f"canonical block shape the PyYAML-free reader needs ({detail})"
+    )
+    return ValueError(msg)
+
+
+def _timeouts_block(lines: list[str]) -> list[str]:
+    """Stripped entry lines under a column-0 ``quality_gates:`` / ``timeouts:``.
+
+    The block ends at the first line indented at or below ``timeouts:``. Raises
+    ValueError on an inline (flow-style) value for either key.
+    """
+    section_header = f"{GATE_TIMEOUT_CONFIG_SECTION}:"
+    key_header = f"{GATE_TIMEOUT_CONFIG_KEY}:"
+    in_section = False
+    block_indent: int | None = None
+    block: list[str] = []
+    for line in lines:
+        indent = len(line) - len(line.lstrip(" "))
+        stripped = line.strip()
+        if block_indent is not None:
+            if indent <= block_indent:
+                break
+            block.append(stripped)
+        elif indent == 0:
+            in_section = stripped == section_header
+            if not in_section and stripped.startswith(section_header):
+                raise _non_canonical(stripped)
+        elif in_section and stripped.startswith(key_header):
+            if stripped != key_header:
+                raise _non_canonical(stripped)
+            block_indent = indent
+    return block
+
+
+def _scan_timeouts(text: str) -> dict[object, object]:
+    """Read ``quality_gates.timeouts`` without PyYAML (canonical block shape).
+
+    Comment lines and trailing `` #`` comments are dropped. Integer values
+    become ``int``; any other value stays a string for the validator to reject.
+    Raises ValueError on an entry that is not ``key: value``.
+    """
+    lines = [_strip_inline_comment(line).rstrip() for line in text.splitlines()]
+    lines = [
+        line for line in lines if line.strip() and not line.lstrip().startswith("#")
+    ]
+    entries: dict[object, object] = {}
+    for entry in _timeouts_block(lines):
+        match = _TIMEOUT_ENTRY_RE.fullmatch(entry)
+        if match is None:
+            raise _non_canonical(entry)
+        value = match["value"]
+        entries[match["key"]] = int(value) if _INT_RE.fullmatch(value) else value
+    return entries
+
+
+def _nested_mapping(
+    parent: Mapping[object, object], key: str
+) -> Mapping[object, object]:
+    """``parent[key]`` as a mapping: absent/null is empty, anything else raises."""
+    child = parent.get(key)
+    if child is None:
+        return {}
+    if not isinstance(child, dict):
+        msg = f"{key} is not a mapping"
+        raise TypeError(msg)
+    return child
+
+
+def _parse_timeouts(text: str) -> Mapping[object, object]:
+    """The raw ``quality_gates.timeouts`` mapping from config *text*."""
+    if yaml is None:
+        return _scan_timeouts(text)
+    doc = yaml.safe_load(text)
+    if doc is None:
+        return {}
+    if not isinstance(doc, dict):
+        msg = "root is not a mapping"
+        raise TypeError(msg)
+    section = _nested_mapping(doc, GATE_TIMEOUT_CONFIG_SECTION)
+    return _nested_mapping(section, GATE_TIMEOUT_CONFIG_KEY)
+
+
+def load_timeout_overrides(config_path: Path = PROJECT_CONFIG_PATH) -> dict[str, int]:
+    """Valid ``quality_gates.timeouts`` entries from *config_path*.
+
+    A missing file is silently empty. An unreadable or malformed file, or a
+    wrong shape at either level (TypeError), logs a warning and yields ``{}``.
+    Each entry needs a string key and a positive integer (not bool) value; an
+    invalid entry is logged and skipped without affecting its siblings.
+    """
+    if not config_path.exists():
+        return {}
+    errors: tuple[type[Exception], ...] = (OSError, ValueError, TypeError)
+    if yaml is not None:
+        errors = (*errors, yaml.YAMLError)
+    try:
+        raw = _parse_timeouts(config_path.read_text(encoding="utf-8"))
+    except errors as exc:
+        logger.warning("Ignoring gate timeouts in %s: %s", config_path, exc)
+        return {}
+    overrides: dict[str, int] = {}
+    for key, value in raw.items():
+        if (
+            isinstance(key, str)
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and value > 0
+        ):
+            overrides[key] = value
+        else:
+            logger.warning(
+                "Ignoring %s.%s.%s = %r in %s: not a positive integer of seconds",
+                GATE_TIMEOUT_CONFIG_SECTION,
+                GATE_TIMEOUT_CONFIG_KEY,
+                key,
+                value,
+                config_path,
+            )
+    return overrides
+
+
+def resolve_gate_timeout(
+    name: str, config_path: Path = PROJECT_CONFIG_PATH
+) -> dict[str, Any]:
+    """Resolve a gate's foreground ceiling: config override, default, clamp.
+
+    A configured key (exact or longest hyphen prefix) wins over the built-in
+    table. The result is clamped to the Bash tool's 600 s foreground cap, and
+    ``clamped``/``note`` say so when the clamp changed it.
+    """
+    overrides = load_timeout_overrides(config_path)
+    key = _matching_key(name, overrides)
+    configured = overrides[key] if key is not None else None
+    value = configured if configured is not None else gate_timeout_seconds(name)
+    clamped = value > BASH_FOREGROUND_CAP_SECONDS
+    note = (
+        f"configured {value}s exceeds the {BASH_FOREGROUND_CAP_SECONDS}s Bash "
+        f"foreground cap; using {BASH_FOREGROUND_CAP_SECONDS}s"
+        if clamped
+        else None
+    )
+    return {
+        "gate": name,
+        "foreground_ceiling_s": min(value, BASH_FOREGROUND_CAP_SECONDS),
+        "poll_ceiling_s": GATE_POLL_CEILING_SECONDS,
+        "source": "project-config" if configured is not None else "default",
+        "configured_s": configured,
+        "clamped": clamped,
+        "note": note,
+    }
 
 
 def elapsed_exceeds_ceiling(
@@ -632,6 +858,112 @@ def detect_gates(claude_md_path: Path | None = None) -> dict[str, Any]:
     }
 
 
+# --- Gate-Pass Stamps (#2758) ---
+
+# _run_git default for `git status`: a failed status reads as dirty (fail closed).
+_GIT_STATUS_FAILED = "git-status-failed"
+
+
+def _gate_command(name: str) -> str | None:
+    """Command of the gate called *name* in ``detect_gates()``, else None.
+
+    The command is looked up here rather than passed in, so a re-quoted
+    command string can never drift from the one ``detect-gates`` printed.
+    """
+    for gate in detect_gates()["gates"]:
+        if gate["name"] == name:
+            return str(gate["command"])
+    return None
+
+
+def _worktree_state() -> tuple[str, bool]:
+    """``(HEAD sha or "", dirty)`` for the cwd worktree.
+
+    Untracked non-ignored files count as dirty; ignored files do not. The state
+    file is excluded by pathspec, so it never dirties the tree whether or not
+    the repo ignores it.
+    """
+    head = _run_git(["rev-parse", "HEAD"])
+    status = _run_git(
+        ["status", "--porcelain", "--", ".", f":(exclude){STATE_FILE.as_posix()}"],
+        default=_GIT_STATUS_FAILED,
+    )
+    return head, bool(status)
+
+
+def gate_skip_reason(
+    stamp: GatePass | None, command: str, head: str, dirty: bool
+) -> str:
+    """Why a gate may (``matched``) or may not be skipped, fail-closed order."""
+    if stamp is None:
+        return "no-stamp"
+    if not head:
+        return "head-unresolved"
+    if dirty:
+        return "dirty-worktree"
+    if stamp.sha != head:
+        return "sha-changed"
+    if stamp.command != command:
+        return "command-changed"
+    return "matched"
+
+
+def gate_pass_check(name: str) -> dict[str, Any]:
+    """Report whether *name* already passed at HEAD; record the skip if so.
+
+    Never creates the state file; writes it only to append a skip timestamp.
+    """
+    command = _gate_command(name)
+    head, dirty = _worktree_state()
+    state = load_state()
+    stamps = state.gate_passes if state is not None else []
+    stamp = next((p for p in stamps if p.name == name), None)
+    if command is None:
+        reason = "unknown-gate"
+    else:
+        reason = gate_skip_reason(stamp, command, head, dirty)
+    skip = reason == "matched"
+    message = None
+    if skip and state is not None and stamp is not None:
+        stamp.skipped_at.append(datetime.now(UTC).isoformat())
+        save_state(state)
+        message = (
+            f"gate-skip: {name} already passed at {head} earlier in this prep-pr "
+            "run; worktree clean; not re-run"
+        )
+    return {
+        "gate": name,
+        "skip": skip,
+        "reason": reason,
+        "sha": head or None,
+        "stamped_sha": stamp.sha if stamp is not None else None,
+        "message": message,
+    }
+
+
+def gate_pass_record(name: str, base: str) -> dict[str, Any]:
+    """Stamp *name* as passed at HEAD, only on a clean worktree."""
+    command = _gate_command(name)
+    if command is None:
+        return {"gate": name, "recorded": False, "reason": "unknown-gate"}
+    head, dirty = _worktree_state()
+    if not head or dirty:
+        reason = "head-unresolved" if not head else "dirty-worktree"
+        return {"gate": name, "recorded": False, "reason": reason}
+    state = load_state() or PrepPrState(base_branch=base)
+    state.gate_passes = [p for p in state.gate_passes if p.name != name]
+    state.gate_passes.append(
+        GatePass(
+            name=name,
+            command=command,
+            sha=head,
+            recorded=datetime.now(UTC).isoformat(),
+        )
+    )
+    save_state(state)
+    return {"gate": name, "recorded": True, "sha": head}
+
+
 # --- Scope Tracking ---
 
 
@@ -823,6 +1155,11 @@ def cmd_status(args: argparse.Namespace) -> None:  # noqa: ARG001
         "gate_count": len(state.gates),
         "started": state.started,
         "updated": state.updated,
+        "gate_skips": [
+            {"gate": p.name, "sha": p.sha, "count": len(p.skipped_at)}
+            for p in state.gate_passes
+            if p.skipped_at
+        ],
     }
     print(json.dumps(status, indent=2))
 
@@ -835,11 +1172,15 @@ def cmd_clean(args: argparse.Namespace) -> None:  # noqa: ARG001
 
 def cmd_gate_timeout(args: argparse.Namespace) -> None:
     """Handle gate-timeout subcommand."""
-    result = {
-        "gate": args.name,
-        "foreground_ceiling_s": gate_timeout_seconds(args.name),
-        "poll_ceiling_s": GATE_POLL_CEILING_SECONDS,
-    }
+    print(json.dumps(resolve_gate_timeout(args.name), indent=2))
+
+
+def cmd_gate_pass(args: argparse.Namespace) -> None:
+    """Handle gate-pass subcommand (``record`` or ``check``)."""
+    if args.action == "record":
+        result = gate_pass_record(args.name, args.base)
+    else:
+        result = gate_pass_check(args.name)
     print(json.dumps(result, indent=2))
 
 
@@ -916,6 +1257,38 @@ def main() -> None:
         help="Ceiling in seconds",
     )
 
+    # gate-pass
+    gate_pass_parser = subparsers.add_parser(
+        "gate-pass",
+        help=(
+            "Skip a redundant gate re-run: record a pass, or check for one at the"
+            " current HEAD"
+        ),
+    )
+    gate_pass_parser.add_argument(
+        "action",
+        choices=["record", "check"],
+        help=(
+            "record: stamp the gate as passed at HEAD (clean tree only); check:"
+            " report whether a stamp still applies"
+        ),
+    )
+    gate_pass_parser.add_argument(
+        "name",
+        help=(
+            "Gate name exactly as detect-gates printed it (its command is looked"
+            " up from CLAUDE.md, not passed)"
+        ),
+    )
+    gate_pass_parser.add_argument(
+        "--base",
+        default="main",
+        help=(
+            "Base branch recorded if a new state file is created (record only;"
+            " default: main)"
+        ),
+    )
+
     args = parser.parse_args()
 
     dispatch = {
@@ -926,6 +1299,7 @@ def main() -> None:
         "clean": cmd_clean,
         "gate-timeout": cmd_gate_timeout,
         "gate-elapsed": cmd_gate_elapsed,
+        "gate-pass": cmd_gate_pass,
     }
 
     handler = dispatch.get(args.command)
