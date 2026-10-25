@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import psutil
 import pytest
@@ -152,10 +153,26 @@ class TestScopedProcessIter:
         assert [process.pid for process in found] == [os.getpid()]
         assert found[0].info["name"] == psutil.Process().name()
 
-    def test_a_pid_absent_from_the_table_is_simply_missing(self) -> None:
-        absent = max(psutil.pids()) + 1
+    def test_a_pid_absent_from_the_table_is_simply_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A stub table keeps the host's live PIDs out of the test: guessing an
+        # unused PID (e.g. ``max(pids) + 1``) races the OS handing it to a new
+        # process between the snapshot and the check (#2780).
+        def _table(
+            _attrs: object = None, _ad_value: object = None
+        ) -> list[SimpleNamespace]:
+            return [
+                SimpleNamespace(pid=101, info={"name": "alpha"}),
+                SimpleNamespace(pid=202, info={"name": "beta"}),
+            ]
 
-        assert list(scoped_process_iter({absent})(["name"])) == []
+        monkeypatch.setattr("tests._host_probe_guard.REAL_PROCESS_ITER", _table)
+
+        assert list(scoped_process_iter({303})(["name"])) == []
+        # Positive control: the stub is wired in, so the empty result above
+        # comes from the filter and not from an empty table.
+        assert [p.pid for p in scoped_process_iter({101})(["name"])] == [101]
 
     def test_an_empty_scope_yields_nothing(self) -> None:
         assert list(scoped_process_iter(set())(["name"])) == []
