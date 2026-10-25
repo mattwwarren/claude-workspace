@@ -10,6 +10,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **A repo can set its own `/prep-pr` gate ceilings, and a gate that already passed at the same commit is not re-run (#2758).** `quality_gates.timeouts.<gate-name>: <seconds>` in `.claude/project-config.yaml` overrides the built-in ceiling, matched by longest hyphen prefix like the built-in table (`pre-commit` covers `pre-commit-run-2`). A value above the Bash tool's 600 s foreground cap is clamped to 600, and `gate-timeout` now also prints `source`, `configured_s`, `clamped` and `note` (additive fields). An invalid value or malformed file falls back to the built-in table with a warning; without PyYAML only the canonical block shape is read. This repo sets `pre-commit: 600`. The new `prep_pr_state.py gate-pass record|check <gate>` stamps a gate as passed at `HEAD` on a clean worktree, bound to the command `detect-gates` reports for it; Step 7 checks the stamp first and skips the gate when the SHA, the clean tree and the command all still match, records the skip on the stamp, and Step 10 lists it from `status` (`gate_skips`). Stamps live in the worktree's state file, so they do not cross worktrees, and a gate that timed out has no stamp: the 600 s ceiling, not the skip, addresses a first-pass timeout.
 
+### Fixed
+
+- **A review finding that sets `no_diff_anchor` beside a concrete `file` or line is accepted instead of rejected as `schema_invalid` (#2180).** The rejection force-parked the pass as `review_blocked` for a finding the reviewer had stated correctly, and nothing resubmits a rejected finding. `Finding` now folds the cited location into `suggested_fix` as a `Fix location (reviewer-cited, outside the diff): path:start-end.` prefix and resets itself to `file: "N/A"` with null lines, so every consumer keyed on that shape is unchanged. Stray lines beside `file: "N/A"` are dropped. A blank `file` is still rejected, and `_rescue_findings` logs one `#2180` warning per such finding so the reviewer's concrete anchor stays visible.
+
 ## [1.77.2] - 2026-10-25
 
 ### Fixed
