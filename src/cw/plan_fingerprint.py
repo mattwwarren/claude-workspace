@@ -6,6 +6,12 @@ the single definition of how a ``.cw/plan-draft.md`` fingerprint is computed
 implementation inside ``cw`` -- ``cw result emit`` (#2382) and the approve-time
 promotion gate (#2342) both call it, so a producer's self-reported value can
 always be checked against, or replaced by, a value cw computed itself.
+
+:func:`compute_body_sha` is the one implementation of the ticket-body half of
+the ``plan-stage-last-evaluated`` tracker-state fingerprint (#2761):
+``cw dev-queue approve``'s drift check and the ``cw body-sha`` command a
+plan-stage worker runs both call it, so the persisted and the recomputed value
+can never disagree over how the body was hashed.
 """
 
 from __future__ import annotations
@@ -97,6 +103,20 @@ def compute_plan_draft_fingerprint(text: str) -> str:
             offset = trailing_match.end()
     stripped = text[offset:]
     return hashlib.sha256(stripped.encode("utf-8")).hexdigest()
+
+
+def compute_body_sha(body: str) -> str:
+    """Return the ``body_sha`` of a ticket *body* (#2761).
+
+    SHA-256 of ``body.rstrip()`` encoded as UTF-8, rendered as full lowercase
+    hex. Trailing whitespace of any kind (``\\n``, ``\\r\\n``, spaces) is
+    stripped first, so a newline added by a heredoc, ``echo`` or the Write
+    tool can never read as a body edit; leading whitespace and interior
+    content stay hash material. This is the one implementation shared by
+    ``cw dev-queue approve`` and ``cw body-sha``: a worker persists the
+    command's output verbatim instead of hashing the body by hand.
+    """
+    return hashlib.sha256(body.rstrip().encode("utf-8")).hexdigest()
 
 
 def extract_persisted_body_sha(draft_text: str) -> str | None:

@@ -662,10 +662,10 @@ def fetch_issue_body(
 
     Shaped after :func:`fetch_issue_comments` (same *cwd* contract: multi-client
     callers MUST pass it). The string is returned exactly as ``gh issue view
-    --json body`` reports it, because the plan stage's ``body_sha`` is a
-    SHA-256 over that raw string; ``cw dev-queue approve``'s advisory
-    ticket-body drift check (#2311) recomputes it from this value and fails
-    open on None.
+    --json body`` reports it; ``cw.plan_fingerprint.compute_body_sha``
+    normalizes it before hashing (#2761). ``cw dev-queue approve``'s advisory
+    ticket-body drift check (#2311) and ``cw body-sha`` both hash this value,
+    and the drift check fails open on None.
     """
     try:
         result = _sp.run(

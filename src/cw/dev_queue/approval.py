@@ -23,7 +23,6 @@ level: neither imports ``approval`` back.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -59,6 +58,7 @@ from cw.models import (
 )
 from cw.plan_fingerprint import (
     PLAN_DRAFT_RELATIVE_PATH,
+    compute_body_sha,
     extract_persisted_body_sha,
     is_plan_draft_fingerprint,
 )
@@ -483,7 +483,7 @@ def _record_body_drift(
     )
     if body is None:
         return None
-    live_body_sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    live_body_sha = compute_body_sha(body)
     if live_body_sha == persisted_body_sha:
         return None
     event_type = OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED

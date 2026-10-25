@@ -74,6 +74,7 @@ from cw.models import (
     UsageLimitAct,
     WatchedPr,
 )
+from cw.plan_fingerprint import compute_body_sha
 from cw.reconcile.liveness_page import close_command
 from cw.worktree import is_genuinely_live_home_reason, worktree_path_for
 from tests._reconcile_helpers import _routed_last_result, _write_agent_spawn_stamp
@@ -6376,10 +6377,11 @@ def _seed_plan_worktree(
 # #2311 -- ticket-body drift detection at approve time. The draft's
 # `plan-stage-last-evaluated` marker persists the body_sha the plan stage
 # evaluated; the live body either still hashes to it or was edited since.
+# Both sides hash through the one shared ``compute_body_sha`` (#2761).
 _EVALUATED_TICKET_BODY = "Original ticket body.\n"
 _EDITED_TICKET_BODY = "Original ticket body.\n\nNew binding requirement.\n"
-_EVALUATED_BODY_SHA = hashlib.sha256(_EVALUATED_TICKET_BODY.encode("utf-8")).hexdigest()
-_EDITED_BODY_SHA = hashlib.sha256(_EDITED_TICKET_BODY.encode("utf-8")).hexdigest()
+_EVALUATED_BODY_SHA = compute_body_sha(_EVALUATED_TICKET_BODY)
+_EDITED_BODY_SHA = compute_body_sha(_EDITED_TICKET_BODY)
 # Bookkeeping lines are stripped by the Plan-draft fingerprint rule, so this
 # draft's fingerprint is _RECONCILED_DRAFT_FINGERPRINT.
 _BODY_EVALUATED_DRAFT = (
@@ -7676,6 +7678,92 @@ class TestApproveTicket:
         )
         approve_ticket("GEN-500", "genhealth")
         assert events == []
+
+    @pytest.mark.parametrize("suffix", ["\n", "\r\n", "  \n\n"])
+    def test_approve_no_warning_when_body_differs_only_by_trailing_newline(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+        suffix: str,
+    ) -> None:
+        """#2761: the incident shape. Trailing whitespace on the live body is
+        never drift, because both sides hash through ``compute_body_sha``."""
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+
+        events = capture_events(
+            "cw.dev_queue.approval",
+            OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED,
+        )
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-nl1")
+        calls = _stub_fetch_issue_body(monkeypatch, _EVALUATED_TICKET_BODY + suffix)
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result[BODY_DRIFT_WARNING_KEY] is None
+        assert len(calls) == 1
+        assert events == []
+
+    def test_approve_still_warns_on_real_edit_with_trailing_newline_noise(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """Normalization strips only trailing whitespace: a content edit
+        still warns, and the event carries the normalized live sha."""
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+
+        events = capture_events(
+            "cw.dev_queue.approval",
+            OrchestratorEventType.PLAN_APPROVAL_BODY_DRIFT_WARNED,
+        )
+        self._arm_plan_pending(tmp_config_dir, tmp_path, monkeypatch, "sess-nl2")
+        _stub_fetch_issue_body(monkeypatch, _EDITED_TICKET_BODY + "\n")
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        warning = result[BODY_DRIFT_WARNING_KEY]
+        assert isinstance(warning, str)
+        assert _EDITED_BODY_SHA[:12] in warning
+        assert len(events) == 1
+        _etype, payload, _correlation_id = events[0]
+        assert payload["persisted_body_sha"] == _EVALUATED_BODY_SHA
+        assert payload["live_body_sha"] == _EDITED_BODY_SHA
+
+    def test_approve_warns_once_on_legacy_unnormalized_persisted_sha(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression for the #2761 incident: a draft persisted with the old
+        hand-computed ``sha256(body + "\\n")`` against a live body with no
+        trailing newline still warns. No legacy shim: approve stays advisory
+        and the approval lands; the next plan round rewrites the marker."""
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY, approve_ticket
+
+        live_body = "Original ticket body."
+        legacy_sha = hashlib.sha256((live_body + "\n").encode("utf-8")).hexdigest()
+        legacy_draft = (
+            "<!-- plan-stage-scan-round: 1 -->\n"
+            "<!-- plan-stage-last-evaluated: operator_comment=none|body_sha="
+            + legacy_sha
+            + " -->\n"
+            + _RECONCILED_DRAFT_BODY
+        )
+        self._arm_plan_pending(
+            tmp_config_dir, tmp_path, monkeypatch, "sess-nl3", draft=legacy_draft
+        )
+        _stub_fetch_issue_body(monkeypatch, live_body)
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        warning = result[BODY_DRIFT_WARNING_KEY]
+        assert isinstance(warning, str)
+        assert legacy_sha[:12] in warning
+        assert compute_body_sha(live_body)[:12] in warning
+        assert result["plan_requeued"] is True
+        assert result["plan_approved_fingerprint"] == _RECONCILED_DRAFT_FINGERPRINT
 
     def test_body_drift_event_shares_the_promotion_event_actor(self) -> None:
         """Both approve-path audit events name one actor constant."""
