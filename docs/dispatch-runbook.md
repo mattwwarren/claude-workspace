@@ -632,7 +632,7 @@ directly (see §6 in [`session-disposition.md`](session-disposition.md)).
 | `scope_exceeded` | Scope rejection; the orchestrator relaxes the constraint and re-dispatches, or closes the ticket only when its acceptance criteria are verified satisfied (cite the merged PR/commit in the close comment) or it is verified duplicate/obsolete (cite the superseding ticket). |
 | `forbidden_area` | Forbidden-area rejection; the orchestrator updates constraints or reroutes. |
 | `blocked` | Triage `blocker.reason`. Check `blocker.retry_eligible` and `blocker.recovery_hint`. `blocker.reason: "plan_unreviewable"` / `"plan_unsound"` mean plan review needs orchestrator judgment — if the pipeline bounces repeatedly on an intricate ticket, use the **spec-driven subagent escape hatch** (§7) rather than retrying. A `blocked` at FINALIZE with `blocker.reason: "agent_block"` self-heals: dispatch auto-regresses the ticket to IMPL (up to 2 regressions, #770) — no operator action. |
-| `merge_gate_blocked` | A prior pipeline PR is still open. The orchestrator merges or closes it, then re-dispatches. |
+| `merge_gate_blocked` | A prior pipeline PR is still open. The orchestrator merges or closes it, then re-dispatches. Each consecutive park on the same gate backs the row off before it can be claimed again: 60 s, doubling to a 900 s cap (#2717). The page's `breadcrumbs` read `occurrence=N next_eligible_at=<ISO>`. `cw dev-queue requeue` bypasses the wait, and under `reap_policy: auto` the Variant B release clears it once the blocking PR is MERGED or CLOSED. The delays are fixed constants, not configurable. While waiting, `cw dev-queue show` and lane summaries label the row `spawn_error_backoff`. |
 | `stale_dispatch` | **This** ticket already has an open, unmerged PR from an earlier dispatch (#1862) — distinct from `merge_gate_blocked`, which is about a *different* ticket's PR. The session found it and refused rather than re-implementing work already in review; `blocker.details` names the PR. Land or close that PR, then `cw dev-queue requeue <T> -c <client>`. Re-dispatching first just reproduces the refusal. |
 
 Not a sentinel status but seen in the same `disposition` field:
@@ -707,7 +707,10 @@ every refusal names the right one for the row (`Run: ...`), and
   the row and requeues); otherwise answer or verify on the ticket, then
   `requeue`.
 - `merge_gate_blocked` / `stale_dispatch`: merge or close the open PR, then
-  `requeue`.
+  `requeue`. A `merge_gate_blocked` (or `prior_pipeline_pr_open`) park also
+  backs the row off, 60 s doubling to 900 s per consecutive park (#2717);
+  `requeue` bypasses that wait and the `reap_policy: auto` release clears it.
+  The delays are not configurable.
 - `plan_scope_drift` (IMPL): `approve --scope-drift <paths>`, or `requeue`
   to re-run impl without them.
 - Codex MUST_FIX park (`codex_must_fix_findings`):
