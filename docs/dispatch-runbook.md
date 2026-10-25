@@ -485,7 +485,9 @@ it follows the inbox in process, prints one line per actionable event with
 the next command to run (`| next: <cmd>`), and saves its position in the
 event-bus cursor store (`events_dir()/cursors/attention-<client>-<hash>.json`)
 after each printed line, so a restart or re-arm resumes exactly where it
-stopped. Its **first stdout line is the resolved scope** (`WATCH | scope |
+stopped. For a human-kept gate the `| next:` field instead reads `HUMAN GATE:
+cw dev-queue show <T> -c <C>`: an operator-only stop sign to notify the human,
+not a command to run (#2760). Its **first stdout line is the resolved scope** (`WATCH | scope |
 client=… | lanes=… | tickets=… | source=… | start=… | cursor=…`): the default
 is the caller's focus-pointer lane, else the whole client, and `--all-lanes`
 / `--ticket` widen it. Lane-less events (liveness, phantom revert) are scoped
