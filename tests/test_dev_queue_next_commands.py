@@ -35,8 +35,10 @@ from cw.dev_queue import (
     approve_ticket,
     precheck_requeue,
 )
+from cw.dev_queue.crud import _APPROVABLE_STATUSES
 from cw.dev_queue.must_fix_override import _require_codex_must_fix_park
 from cw.dev_queue.next_commands import (
+    _OFF_PIPELINE_STATUSES,
     HUMAN_GATE_LABEL,
     HUMAN_GATE_PURPOSE_LABEL,
     LANE_PAUSED_SKIP_CODE,
@@ -1162,6 +1164,9 @@ class TestOffPipelineGate:
         case = CASES[case_id]
         cmds = next_commands(case.task, session=case.session(), pipeline_position=_OFF)
         assert [c.command for c in cmds] == case.expected
+
+    def test_off_pipeline_statuses_mirror_the_approvable_statuses(self) -> None:
+        assert _OFF_PIPELINE_STATUSES == _APPROVABLE_STATUSES
 
     def test_real_guards_on_a_default_pipeline_harden_row(self, tmp_path: Path) -> None:
         write_lane_client(_C, tmp_path / "ws")
