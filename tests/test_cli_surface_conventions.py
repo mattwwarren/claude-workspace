@@ -4,18 +4,34 @@ Two conventions an orchestrator relies on without reading source:
 
 - every ``--client`` option also accepts ``-c``;
 - every ``cw ...`` command named in help text (command help, short help,
-  epilog, option help) resolves to a real command.
+  epilog, option help) resolves to a real command;
+- every ``cw ...`` command named in a runtime string anywhere under
+  ``src/cw`` (wedge recipes, ``CwError`` messages, hints) resolves too (#2703).
 
-Both are walked over the live Click tree rather than grepped from source, so a
-new command or a rewrapped help string is covered without touching this file.
+The first two are walked over the live Click tree rather than grepped from
+source, so a new command or a rewrapped help string is covered without touching
+this file. The third parses each source file with :mod:`ast`, because runtime
+strings live in Python source, not in Click metadata.
+
+Known limitations of the runtime walk: an explicit ``"a" + "b"`` (``BinOp``)
+concatenation splits a string into two constants, so a mention that straddles
+the ``+`` is read as two fragments (implicit adjacent-literal concatenation is
+fine). Mention styles the heuristic does not recognize (for example bare
+``- cw x`` bullets in ``prompts.py``) are not covered. Only command paths are
+resolved, never flags or option values.
 """
 
 from __future__ import annotations
 
+import ast
 import re
+import sys
+from pathlib import Path
 
 import click
+import pytest
 
+import cw
 from cw.cli import main
 from tests.conftest import walk_click_tree
 
@@ -24,14 +40,24 @@ from tests.conftest import walk_click_tree
 # command binds ``-c`` to anything but its client option.
 _CLIENT_SHORT_EXEMPT: dict[tuple[str, ...], str] = {}
 
-# ``cw ...`` help mentions that intentionally name something that is not a
-# command. Empty today: every mention must resolve.
+# ``cw ...`` help and runtime mentions that intentionally name something that is
+# not a command. Empty today: every mention must resolve.
 _MENTION_EXEMPT: set[str] = set()
 
 _MIN_COMMAND_COUNT = 40
+_MIN_RUNTIME_FILES = 100
+_MIN_RUNTIME_MENTIONS = 150
+_EXPR_PLACEHOLDER = "<expr>"
 _LINE_PREFIXES = ("Recipe:", "Example:")
 _MENTION_RE = re.compile(r"\bcw((?: [a-z][a-z0-9_-]*)*)")
 _BACKTICK_SPAN_RE = re.compile(r"(`+)([^`]+)\1")
+# ``cw ...`` introduced by a quote, or by a verb that precedes a command in
+# prose ("Run cw x", "Suggested: cw x"). Backticks are not listed: backtick
+# spans are already their own source above. Plain "the cw binary" prose is not.
+_INTRODUCED_RE = re.compile(
+    r"""(?:['"]|\b(?:Run|run|Use|use|Suggested|Try|with):?\s)"""
+    r"(cw(?: [a-z][a-z0-9_-]*)*)(?![\w-])"
+)
 _STOP_PREFIXES = ("-", "<", "[", ".")
 
 
@@ -54,17 +80,19 @@ def _strip_line_prefix(line: str) -> str:
     return stripped
 
 
-def _extract_mentions(text: str) -> list[list[str]]:
+def _extract_mentions(text: str, *, runtime: bool = False) -> list[list[str]]:
     """Return the subcommand tokens of each ``cw ...`` mention in *text*.
 
     Order matters: whole lines starting with ``cw `` are read from the raw text
     first, because whitespace normalization (needed so backticked spans may
-    wrap across lines) leaves no lines behind.
+    wrap across lines) leaves no lines behind. With ``runtime=True`` the bare
+    line-start rule additionally requires leading whitespace, so a runtime
+    string that merely begins with prose "cw ..." is not read as a command.
     """
     sources: list[str] = []
     for line in text.split("\n"):
         candidate = _strip_line_prefix(line)
-        if candidate.startswith("cw "):
+        if candidate.startswith("cw ") and not (runtime and not line[:1].isspace()):
             sources.append(candidate)
     normalized = " ".join(text.split())
     sources.extend(
@@ -72,6 +100,7 @@ def _extract_mentions(text: str) -> list[list[str]]:
         for match in _BACKTICK_SPAN_RE.finditer(normalized)
         if _MENTION_RE.search(match.group(2))
     )
+    sources.extend(match.group(1) for match in _INTRODUCED_RE.finditer(normalized))
     return [
         match.group(1).split()
         for source in sources
@@ -97,6 +126,74 @@ def _unresolved(tokens: list[str]) -> bool:
 
 def _mention_unresolved(mention: str) -> bool:
     return _unresolved(mention.split()[1:])
+
+
+def _docstring_ids(tree: ast.AST) -> set[int]:
+    """``id()`` of every docstring constant (module, class, function)."""
+    ids: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            continue
+        first = node.body[0] if node.body else None
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            ids.add(id(first.value))
+    return ids
+
+
+def _joined_text(node: ast.JoinedStr) -> str:
+    """Text of an f-string with each replacement field turned into ``<expr>``."""
+    return "".join(
+        part.value
+        if isinstance(part, ast.Constant) and isinstance(part.value, str)
+        else _EXPR_PLACEHOLDER
+        for part in node.values
+    )
+
+
+def _runtime_strings(source: str) -> list[tuple[int, str]]:
+    """``(lineno, text)`` for each runtime string literal in *source*.
+
+    Docstrings are skipped. An f-string is one string whose replacement fields
+    read as ``<expr>`` (a stop token for :func:`_unresolved`), and its constant
+    pieces are not also reported on their own.
+    """
+    tree = ast.parse(source)
+    consumed = _docstring_ids(tree)
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if id(node) in consumed:
+            continue
+        if isinstance(node, ast.JoinedStr):
+            consumed.update(id(child) for child in ast.walk(node) if child is not node)
+            found.append((node.lineno, _joined_text(node)))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            found.append((node.lineno, node.value))
+    return found
+
+
+def _runtime_mentions(source: str) -> list[tuple[int, list[str]]]:
+    """``(lineno, tokens)`` for every ``cw ...`` mention in runtime strings."""
+    return [
+        (lineno, tokens)
+        for lineno, text in _runtime_strings(source)
+        for tokens in _extract_mentions(text, runtime=True)
+    ]
+
+
+def _runtime_mentions_unresolved(source: str) -> list[str]:
+    """``line: cw ...`` for each runtime mention that names a missing command."""
+    return [
+        f"{lineno}: {mention}"
+        for lineno, tokens in _runtime_mentions(source)
+        if (mention := " ".join(["cw", *tokens])) not in _MENTION_EXEMPT
+        and _unresolved(tokens)
+    ]
 
 
 class TestTreeWalk:
@@ -149,6 +246,82 @@ class TestHelpMentionsResolve:
         )
 
 
+class TestRuntimeMentionsResolve:
+    def test_runtime_mentions_resolve(self) -> None:
+        root = Path(cw.__file__).parent
+        files = sorted(root.rglob("*.py"))
+        unresolved: list[str] = []
+        scanned = 0
+        for path in files:
+            source = path.read_text(encoding="utf-8")
+            scanned += len(_runtime_mentions(source))
+            unresolved.extend(
+                f"{path.relative_to(root.parent)}:{finding}"
+                for finding in _runtime_mentions_unresolved(source)
+            )
+        # A broken collector must not pass vacuously.
+        assert len(files) > _MIN_RUNTIME_FILES
+        assert scanned > _MIN_RUNTIME_MENTIONS
+        assert unresolved == [], "runtime strings name missing commands:\n" + "\n".join(
+            unresolved
+        )
+
+
+class TestRuntimeStrings:
+    def test_fstring_phantom_is_flagged_with_expr_placeholder(self) -> None:
+        source = 'x = f"Suggested: cw spawn-complete {task.ticket_id}."\n'
+        assert _runtime_strings(source) == [
+            (1, f"Suggested: cw spawn-complete {_EXPR_PLACEHOLDER}.")
+        ]
+        assert _runtime_mentions_unresolved(source) == ["1: cw spawn-complete"]
+
+    def test_corrected_recipe_is_not_flagged(self) -> None:
+        source = 'x = f"Suggested: cw spawn complete {sid} --status shipped."\n'
+        assert _runtime_mentions_unresolved(source) == []
+
+    def test_quoted_phantom_is_flagged(self) -> None:
+        source = "x = f\"Run 'cw post-mortem {x}' for it\"\n"
+        assert _runtime_mentions_unresolved(source) == ["1: cw post-mortem"]
+
+    def test_implicit_concatenation_phantom_is_flagged(self) -> None:
+        source = (
+            'x = (\n    "Transcript missing."\n    f" Run \'cw post-mortem {i}\'"\n)\n'
+        )
+        assert _runtime_mentions_unresolved(source) == ["2: cw post-mortem"]
+
+    def test_docstrings_are_not_scanned(self) -> None:
+        source = (
+            '"""Module: run cw state."""\n'
+            "class C:\n"
+            '    """Class: Run \'cw state\'."""\n'
+            "    def f(self) -> None:\n"
+            '        """Func: `cw state`."""\n'
+            "    async def g(self) -> None:\n"
+            '        """Async: `cw state`."""\n'
+        )
+        assert _runtime_strings(source) == []
+        assert _runtime_mentions_unresolved(source) == []
+
+    def test_prose_mentions_are_ignored(self) -> None:
+        source = 'a = "cw binary not on PATH"\nb = "the cw dev-queue row"\n'
+        assert _runtime_mentions(source) == []
+
+    def test_runtime_ignores_column_zero_cw_but_accepts_indented(self) -> None:
+        assert _extract_mentions("cw foo", runtime=True) == []
+        assert _extract_mentions("  cw doctor --reap", runtime=True) == [["doctor"]]
+
+    def test_introduced_source_reads_verbs_and_quotes(self) -> None:
+        assert _extract_mentions("Run: cw doctor --reap") == [["doctor"]]
+        assert _extract_mentions("then 'cw spawn close' it") == [["spawn", "close"]]
+        assert _extract_mentions("Suggested: cw spawn-complete <x>") == [
+            ["spawn-complete"]
+        ]
+
+    def test_exempt_mention_is_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys.modules[__name__], "_MENTION_EXEMPT", {"cw nonesuch"})
+        assert _runtime_mentions_unresolved("x = \"Run 'cw nonesuch'\"\n") == []
+
+
 class TestResolver:
     def test_phantom_subcommand_is_unresolved(self) -> None:
         assert _mention_unresolved("cw dev-queue inspect")
@@ -192,3 +365,7 @@ class TestExtractMentions:
 
     def test_backtick_span_without_cw_is_ignored(self) -> None:
         assert _extract_mentions("pass `--status shipped` here") == []
+
+    def test_introduced_mention_is_extracted_in_help_mode(self) -> None:
+        text = "Suggested: cw spawn complete <id> --status shipped, then Run cw doctor."
+        assert _extract_mentions(text) == [["spawn", "complete"], ["doctor"]]

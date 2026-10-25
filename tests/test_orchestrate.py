@@ -2582,6 +2582,8 @@ class TestOrchestrateStart:
         assert result.exit_code != 0
         assert "impl" in result.output
         assert "orch-live-01" in result.output
+        assert "cw spawn close orch-live-01" in result.output
+        assert "--status completed" not in result.output
 
     def test_start_allows_rebind_on_terminal(
         self,
