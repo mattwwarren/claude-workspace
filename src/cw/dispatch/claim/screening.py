@@ -276,6 +276,7 @@ def _screen_and_claim(
             task, backoff_enabled=client.gate_block_backoff_enabled
         ):
             clear_gate_block_wait(task)
+            save_dev_queue(store)
         else:
             return _CLAIM_BACKOFF
     if _is_fix_dispatch_held(task):
