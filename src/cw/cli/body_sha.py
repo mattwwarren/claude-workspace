@@ -13,6 +13,7 @@ advisory check, a worker must never persist a fabricated or empty hash.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import click
@@ -58,7 +59,7 @@ def _read_body_file(path: str) -> str:
     """
     try:
         if path == _STDIN_PATH:
-            raw = click.get_binary_stream("stdin").read()
+            raw = sys.stdin.buffer.read()
         else:
             raw = Path(path).read_bytes()
     except OSError as exc:
