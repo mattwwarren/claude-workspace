@@ -49,6 +49,7 @@ from cw.review_findings._classify import (
 )
 from cw.review_findings._models import (
     _ESCALATION_STRIP_REASON,
+    _NO_DIFF_ANCHOR_FILE,
     Finding,
     RejectedFinding,
     ReviewerFindingsDocument,
@@ -279,6 +280,40 @@ def _raw_finding_payload(item: object) -> dict[str, Any]:
     return {"value": item}
 
 
+def _warn_if_concrete_anchor_on_marker(
+    item: object, reviewer_role: str, index: int
+) -> None:
+    """Log once when a raw finding sets ``no_diff_anchor`` beside a real anchor.
+
+    ``Finding`` normalizes that combination (#2180), after which the finding is
+    indistinguishable from a genuine ``no_diff_anchor`` one. ``Finding``'s own
+    validator can run more than once per finding, so it cannot log without
+    duplicating; this runs once per raw item and is the audit signal that backs
+    the reviewer rule against setting the marker to dodge anchor verification
+    -- a signal, not a gate.
+    """
+    if not isinstance(item, dict) or item.get("no_diff_anchor") is not True:
+        return
+    file = item.get("file")
+    line_start = item.get("line_start")
+    line_end = item.get("line_end")
+    if (not isinstance(file, str) or file == _NO_DIFF_ANCHOR_FILE) and (
+        line_start is None and line_end is None
+    ):
+        return
+    _log.warning(
+        "auto-dev: no_diff_anchor finding carries a concrete anchor — folded "
+        "into suggested_fix and accepted (#2180) (reviewer_role=%s, "
+        "finding_index=%d, severity=%s, cited=%s:%s-%s)",
+        reviewer_role,
+        index,
+        item.get("severity"),
+        file,
+        line_start,
+        line_end,
+    )
+
+
 def _rescue_findings(payload: object) -> tuple[object, list[RejectedFinding]]:
     """Reduce *payload*'s ``findings[]`` to its schema-valid survivors (#2029).
 
@@ -344,6 +379,8 @@ def _rescue_findings(payload: object) -> tuple[object, list[RejectedFinding]]:
                 )
             )
             continue
+        # After validation so the "accepted" in the warning is true.
+        _warn_if_concrete_anchor_on_marker(item, reviewer_role, index)
         survivors.append(item)
 
     return {**payload, "findings": survivors}, rejected

@@ -124,7 +124,8 @@ class Adjudication(BaseModel):
 
     @model_validator(mode="after")
     def _check_operator_action_has_no_diff_anchor(self) -> Adjudication:
-        # Mirrors Finding._check_no_diff_anchor_file_is_na: an operator_action
+        # Mirrors the Finding invariant for a no_diff_anchor finding (kept by
+        # Finding._normalize_no_diff_anchor_location): an operator_action
         # entry is copied straight off a no_diff_anchor Finding, which is
         # itself model-pinned to file="N/A" with no line anchor. Enforcing the
         # same shape here means a coordinating-session typo on this entry's

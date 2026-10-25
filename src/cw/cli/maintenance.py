@@ -208,6 +208,15 @@ def doctor(
       explicit --routed-session-id values.
       Recipe: cw doctor --reap, or cw spawn close --confirmed-dead <id>
 
+    \b
+    wedge/pending-worktree-occupied (advisory only)
+      PENDING queue row that dispatch has skipped as worktree_occupied for 60
+      or more consecutive dispatch ticks: a live session or daemon worker
+      holds its worktree and never releases it. Reported by every cw doctor
+      run; --reap changes nothing for it.
+      Recipe: cw dev-queue show <ticket> -c <client>; if the holder is dead,
+      cw spawn close --confirmed-dead <id>
+
     ``--reap`` also reconciles session state against the native daemon
     roster, marking phantom sessions COMPLETED and reverting their tickets
     to PENDING.

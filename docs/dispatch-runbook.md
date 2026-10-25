@@ -349,6 +349,21 @@ for scripting and field reads; it prints two distinct sections:
     routed shows up here (see `wedge/active-routed-result-stranded` below).
     When every counted session is owned, or the state file cannot be read, the
     original generic text is shown.
+  - Since #2516 the footer reads client-wide ticks only. The dispatch loop
+    also records a per-ticket `dispatch.tick` (with a `ticket_id`) each time
+    it passes over one PENDING row for a ticket-specific reason; that event
+    no longer replaces the client's line, so `pending=` and `skip=` stop
+    flipping between two ticks.
+- **"Pending tickets held by dispatch" block** (#2516) — printed after the
+  footer, only when some PENDING row has per-ticket skips. One line per row,
+  per client in table order, longest run first:
+  `  acme: 49: worktree_occupied x103 (last 12s ago)`. `xN` counts
+  consecutive per-ticket tick events with the newest reason (normally one per
+  tick); a different reason, a gap over 10 minutes or the row's creation time
+  ends the run. `[stale]` marks a run whose newest event is older than 90s
+  (the loop has stopped skipping it, or the row was requeued). This is where
+  a ticket skipped as `worktree_occupied` every tick shows up while the
+  client footer reads `skip=no_pending` with `pending=1`.
 
 ### Reading one ticket (`cw dev-queue show`, #2691)
 
@@ -864,6 +879,17 @@ common wedge conditions:
   transcript is flat, and no live process is working in its worktree. `cw dev-queue approve` and
   `requeue` also close this session when run for the ticket (see the
   `worktree_occupied` paragraph).
+- `wedge/pending-worktree-occupied` (#2516) — advisory only. A `PENDING` row
+  that dispatch has skipped as `worktree_occupied` on 60 or more consecutive
+  per-ticket ticks, the newest within the last 90s: a live session or daemon
+  worker holds the ticket's worktree and never releases it. The finding has
+  no session id; the client and the count are in its recipe. A plain
+  `cw doctor` reports it on every run; `cw doctor --reap` changes nothing for
+  it. Inspect with `cw dev-queue show <ticket> -c <client>`; if the holder is
+  dead, `cw spawn close --confirmed-dead <id>`, then `cw dev-queue requeue` /
+  `approve`. Also check `wedge/leaked-daemon-worker`. A stale run is not
+  reported here: a loop that stopped ticking is the loop-liveness check's
+  case.
 
 Run `cw doctor --reap --json` for machine-readable output.
 
@@ -1898,6 +1924,11 @@ reason. Wait for the annotation to clear; only a tick line still reading
   the same lines under each paused row and a `pause` object in `--json`, and
   `cw dev-queue show` appends them to `skip_reason`. `status --json` carries
   them per client as `paused_lanes`, including a paused client with no tick.
+  It also carries `pending_skips` per client (#2516): one
+  `{ticket_id, skip_reason, consecutive, first_at, last_at, stale}` object per
+  PENDING row in the "Pending tickets held by dispatch" block, `Z`-suffixed
+  timestamps, `[]` when none. A client with a held row but no tick and no
+  paused lane still gets an entry, with null tick fields.
 - **Auto-resume.** A circuit-breaker pause lifts on its own after
   `lane_circuit_auto_resume_minutes` (default `15`; set to `0` to disable), doubling
   per consecutive trip with no spawn success in between up to
@@ -2246,6 +2277,9 @@ An orchestrator started in a fresh Claude Code worktree needs no setup step:
 > after 5 consecutive blocked ticks, #974), a persistent block leaves no live
 > trace except the `skip_reason` in `cw dev-queue status`. Do not "restart
 > the monitor" reflexively; read the skip_reason first. (See #908.)
+> `skip=no_pending` beside `pending>0` is not "nothing to do": cross-check
+> the "Pending tickets held by dispatch" block, which names a row skipped
+> every tick for a per-ticket reason such as `worktree_occupied` (#2516).
 
 `cw dev-queue status` shows `pending > 0` but `claimed = 0` across multiple
 ticks. The per-client footer reads something like:

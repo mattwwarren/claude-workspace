@@ -47,6 +47,7 @@ from cw.doctor.loop_health import (
     _check_loop_liveness,
     _check_timed_out_merged,
 )
+from cw.doctor.pending_skip_wedge import _check_wedge_pending_worktree_occupied
 from cw.doctor.routed_result_wedge import (
     _check_wedge_routed_result_session,
     has_pending_routed_result_audits,
@@ -103,6 +104,7 @@ def _collect_wedge_findings(
     findings.extend(_check_wedge_active_null_liveness_orphan(link_state, queue))
     findings.extend(_check_wedge_leaked_daemon_worker(link_state))
     findings.extend(_check_wedge_routed_result_session(link_state, queue))
+    findings.extend(_check_wedge_pending_worktree_occupied(queue))
     return findings
 
 
