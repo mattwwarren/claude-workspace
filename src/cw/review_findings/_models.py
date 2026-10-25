@@ -160,6 +160,26 @@ def _is_blank(s: str) -> bool:
     return not s.strip()
 
 
+# The fixed ``Finding.file`` literal for a ``no_diff_anchor`` finding (#1817).
+_NO_DIFF_ANCHOR_FILE = "N/A"
+
+
+def _format_cited_location(
+    file: str, line_start: int | None, line_end: int | None
+) -> str:
+    """Render a reviewer-cited ``file[:start[-end]]`` location (#2180).
+
+    Describes what the reviewer wrote, so it is deliberately unvalidated: a
+    lone ``line_end`` renders as ``file:end`` and an inverted range renders as
+    cited. ``-end`` is appended only when it differs from ``line_start``.
+    """
+    if line_start is None:
+        return file if line_end is None else f"{file}:{line_end}"
+    if line_end is None or line_end == line_start:
+        return f"{file}:{line_start}"
+    return f"{file}:{line_start}-{line_end}"
+
+
 class EscalationMetadata(BaseModel):
     """A structured cross-reviewer escalation (review.md ESCALATIONS block).
 
@@ -196,7 +216,12 @@ class Finding(BaseModel):
     mechanically rejected as ``"unknown_file"`` — the silent-drop this marker
     exists to close. When it is set, ``file`` MUST be the fixed literal
     ``"N/A"``: :attr:`file` stays required and non-blank so the field remains
-    queryable, and a per-reviewer freeform value would defeat that.
+    queryable, and a per-reviewer freeform value would defeat that. A concrete
+    ``file``/line anchor supplied alongside the marker anyway is not rejected
+    (#2180): the validator folds it into :attr:`suggested_fix` as a ``Fix
+    location`` prefix and resets the model to ``"N/A"`` with null lines, so
+    consumers keyed on that invariant need no change. Reviewers should still
+    emit ``"N/A"``/null and name any known fix location in ``suggested_fix``.
 
     ``anchor_degraded`` (#2081) is stamped by ``validate_reviewer_document``,
     never by a reviewer: it marks a finding whose cited line resolved against
@@ -311,32 +336,32 @@ class Finding(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _check_no_diff_anchor_has_no_line_anchor(self) -> Finding:
-        # A claimed line position is meaningless when the finding itself
-        # asserts there is no diff to anchor it to — fail fast on the producer
-        # mistake rather than carrying a contradiction into classification.
-        if self.no_diff_anchor and (
-            self.line_start is not None or self.line_end is not None
-        ):
-            msg = (
-                "a finding with no_diff_anchor=True must not claim a line "
-                f"anchor (got line_start={self.line_start}, "
-                f"line_end={self.line_end})"
+    def _normalize_no_diff_anchor_location(self) -> Finding:
+        # Why (#2180): a reviewer that sets `no_diff_anchor` AND names a real
+        # file/line used to be rejected as `schema_invalid`, and a rejected
+        # MUST_FIX force-parks the pass (#1714) -- a `review_blocked` park for
+        # a finding the reviewer stated correctly. Nothing resubmits a rejected
+        # finding, so a sharper error message could not have removed the park.
+        # Normalize instead: fold the cited location into `suggested_fix` (the
+        # operator-facing surface) and restore the invariant every consumer
+        # keys on -- `file == "N/A"` with null lines. This must run BEFORE
+        # `_check_line_range`, so a lone/inverted range is dropped rather than
+        # rejected. Idempotent: a second pass sees "N/A"/null and no-ops, so
+        # the prefix lands once however many times validation re-runs.
+        if not self.no_diff_anchor:
+            return self
+        has_lines = self.line_start is not None or self.line_end is not None
+        if self.file != _NO_DIFF_ANCHOR_FILE:
+            location = _format_cited_location(self.file, self.line_start, self.line_end)
+            self.suggested_fix = (
+                f"Fix location (reviewer-cited, outside the diff): {location}. "
+                f"{self.suggested_fix}"
             )
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _check_no_diff_anchor_file_is_na(self) -> Finding:
-        # The docstring above documents "N/A" as the required literal — a
-        # per-reviewer freeform value here is the exact "unknown_file"
-        # silent-drop this marker exists to close (#1817 review, 2026-08-11).
-        if self.no_diff_anchor and self.file != "N/A":
-            msg = (
-                "a finding with no_diff_anchor=True must have "
-                f'file="N/A" (got file={self.file!r})'
-            )
-            raise ValueError(msg)
+            self.file = _NO_DIFF_ANCHOR_FILE
+        # "N/A" names nothing, so lines beside it name nothing either.
+        if has_lines:
+            self.line_start = None
+            self.line_end = None
         return self
 
     @model_validator(mode="after")

@@ -1249,6 +1249,84 @@ def _consolidate_from(runner: CliRunner, docs_dir: Path) -> Any:
     )
 
 
+def _concrete_anchor_no_diff_finding() -> dict[str, Any]:
+    """A MUST_FIX with ``no_diff_anchor`` set beside a real file and line range."""
+    return dict(
+        _finding_kwargs(
+            severity="MUST_FIX",
+            no_diff_anchor=True,
+            file="docs/missing-ticket.md",
+            line_start=3,
+            line_end=4,
+        )
+    )
+
+
+class TestReviewConsolidateConcreteAnchorOnNoDiffAnchor:
+    """#2180: ``no_diff_anchor`` alongside a concrete anchor is normalized.
+
+    Previously this combination was rejected as ``schema_invalid``, and a
+    rejected MUST_FIX force-parks the pass (#1714) -- a ``review_blocked`` park
+    for a finding the reviewer had stated correctly.
+    """
+
+    def test_concrete_anchor_is_accepted_and_still_blocks(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        docs_dir = tmp_path / "review-findings"
+        docs_dir.mkdir()
+        doc = _doc_payload(
+            _concrete_anchor_no_diff_finding(),
+            detail="reviewed the diff",
+        )
+        (docs_dir / "a-concrete-anchor.json").write_text(
+            json.dumps(doc), encoding="utf-8"
+        )
+
+        result = _consolidate_from(runner, docs_dir)
+
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["rejected"] == []
+        assert verdict["rejected_must_fix"] == []
+        assert verdict["blocking"] is True
+        assert len(verdict["accepted"]) == 1
+        accepted = verdict["accepted"][0]["finding"]
+        assert accepted["file"] == "N/A"
+        assert accepted["line_start"] is None
+        assert accepted["line_end"] is None
+        assert accepted["no_diff_anchor"] is True
+        assert "docs/missing-ticket.md:3-4" in accepted["suggested_fix"]
+
+    def test_stdin_documents_path_accepts_concrete_anchor_with_plan(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text(_plan_text(["src/cw/foo.py"]))
+        raw = _concrete_anchor_no_diff_finding()
+        payload = _consolidate_payload(documents=[_doc_payload(raw)])
+        result = runner.invoke(
+            main,
+            [
+                "review",
+                "consolidate",
+                "--no-base-check",
+                "--plan",
+                str(plan_path),
+                "-",
+            ],
+            input=json.dumps(payload),
+        )
+
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["rejected"] == []
+        assert verdict["rejected_must_fix"] == []
+        assert verdict["blocking"] is True
+        assert verdict["accepted"][0]["in_plan_scope"] is None
+        assert verdict["accepted"][0]["finding"]["file"] == "N/A"
+
+
 class TestReviewConsolidateDocumentsFromSchemaInvalidFindings:
     """#2029: one unparseable finding must not delete the whole document."""
 

@@ -3079,34 +3079,207 @@ class TestNoDiffAnchorFindings:
         assert accepted == [finding]
         assert rejected == []
 
-    def test_no_diff_anchor_with_line_anchor_raises_validation_error(self) -> None:
-        # A claimed line position is meaningless when the marker asserts there
-        # is no diff to anchor it to — fail fast on the producer mistake.
-        with pytest.raises(ValidationError):
-            Finding.model_validate(
-                _finding_kwargs(
-                    no_diff_anchor=True, file="N/A", line_start=5, line_end=None
-                )
+    def test_concrete_anchor_is_folded_into_suggested_fix(self) -> None:
+        # #2180: a reviewer that sets the marker AND names a real file/line
+        # range is normalized, not rejected -- the model keeps the
+        # ``file == "N/A"`` / null-lines invariant its consumers key on, and
+        # the cited location survives in ``suggested_fix``.
+        finding = Finding.model_validate(
+            _finding_kwargs(
+                no_diff_anchor=True,
+                file="src/cw/foo.py",
+                line_start=10,
+                line_end=12,
+                suggested_fix="Add the missing guard",
             )
+        )
+        assert finding.no_diff_anchor is True
+        assert finding.file == "N/A"
+        assert finding.line_start is None
+        assert finding.line_end is None
+        assert finding.suggested_fix == (
+            "Fix location (reviewer-cited, outside the diff): "
+            "src/cw/foo.py:10-12. Add the missing guard"
+        )
+
+    @pytest.mark.parametrize(
+        ("line_start", "line_end", "expected_location"),
+        [
+            (None, None, "src/cw/foo.py"),
+            (7, None, "src/cw/foo.py:7"),
+            (7, 7, "src/cw/foo.py:7"),
+            (7, 9, "src/cw/foo.py:7-9"),
+            (None, 9, "src/cw/foo.py:9"),
+            (9, 7, "src/cw/foo.py:9-7"),
+        ],
+    )
+    def test_folded_location_string_rules(
+        self,
+        line_start: int | None,
+        line_end: int | None,
+        expected_location: str,
+    ) -> None:
+        # Includes the lone-``line_end`` and inverted-range shapes, which the
+        # normalizer must handle BEFORE ``_check_line_range`` would reject them.
+        finding = Finding.model_validate(
+            _finding_kwargs(
+                no_diff_anchor=True,
+                file="src/cw/foo.py",
+                line_start=line_start,
+                line_end=line_end,
+                suggested_fix="Fix it",
+            )
+        )
+        assert finding.file == "N/A"
+        assert (finding.line_start, finding.line_end) == (None, None)
+        assert finding.suggested_fix == (
+            f"Fix location (reviewer-cited, outside the diff): {expected_location}. "
+            "Fix it"
+        )
+
+    @pytest.mark.parametrize(
+        ("line_start", "line_end"), [(5, None), (None, 7), (9, 7), (5, 7)]
+    )
+    def test_stray_lines_on_na_file_are_dropped_without_touching_suggested_fix(
+        self, line_start: int | None, line_end: int | None
+    ) -> None:
+        # ``file == "N/A"`` names nothing, so the lines name nothing either:
+        # drop them, and leave ``suggested_fix`` alone.
+        finding = Finding.model_validate(
+            _finding_kwargs(
+                no_diff_anchor=True,
+                file="N/A",
+                line_start=line_start,
+                line_end=line_end,
+                suggested_fix="Fix it",
+            )
+        )
+        assert finding.file == "N/A"
+        assert (finding.line_start, finding.line_end) == (None, None)
+        assert finding.suggested_fix == "Fix it"
+
+    def test_normalization_is_idempotent(self) -> None:
+        # The model validator can run more than once per finding (re-validation
+        # of a dumped copy); a second pass must not double the prefix.
+        once = Finding.model_validate(
+            _finding_kwargs(
+                no_diff_anchor=True,
+                file="src/cw/foo.py",
+                line_start=3,
+                line_end=4,
+            )
+        )
+        twice = Finding.model_validate(once.model_dump())
+        assert twice == once
+        assert twice.suggested_fix.count("Fix location") == 1
+
+    def test_blank_file_with_no_diff_anchor_is_still_rejected(self) -> None:
+        # ``_reject_blank`` is a field validator and runs before the
+        # normalizer: a blank file is a producer error, not a concrete anchor.
         with pytest.raises(ValidationError):
             Finding.model_validate(
-                _finding_kwargs(
-                    no_diff_anchor=True, file="N/A", line_start=None, line_end=7
-                )
+                _finding_kwargs(no_diff_anchor=True, file="   ", line_start=None)
             )
 
-    def test_no_diff_anchor_with_non_na_file_raises_validation_error(self) -> None:
-        # #1817 review (2026-08-11): the docstring's "N/A" literal requirement
-        # was documented but unenforced — this is the enforcement.
-        with pytest.raises(ValidationError):
-            Finding.model_validate(
+    def test_anchor_is_untouched_when_no_diff_anchor_is_false(self) -> None:
+        finding = Finding.model_validate(
+            _finding_kwargs(
+                no_diff_anchor=False,
+                file="src/cw/foo.py",
+                line_start=10,
+                line_end=12,
+                suggested_fix="Fix it",
+            )
+        )
+        assert finding.file == "src/cw/foo.py"
+        assert (finding.line_start, finding.line_end) == (10, 12)
+        assert finding.suggested_fix == "Fix it"
+
+    def test_concrete_anchor_finding_survives_validate_reviewer_document(
+        self,
+    ) -> None:
+        finding = Finding.model_validate(
+            _finding_kwargs(
+                no_diff_anchor=True,
+                file="src/cw/foo.py",
+                line_start=10,
+                line_end=10,
+            )
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff()
+        )
+        assert rejected == []
+        assert len(accepted) == 1
+        assert accepted[0].file == "N/A"
+
+    def test_parse_reviewer_document_accepts_concrete_anchor(self) -> None:
+        # Raw-payload path (``--documents-from``): ``_make_reviewer_doc`` would
+        # validate through the model first and pre-normalize the finding, which
+        # defeats the point -- so build the dict by hand.
+        payload = _doc_payload(
+            dict(
                 _finding_kwargs(
                     no_diff_anchor=True,
-                    file="src/cw/review_findings.py",
-                    line_start=None,
-                    line_end=None,
+                    file="src/cw/foo.py",
+                    line_start=10,
+                    line_end=12,
                 )
             )
+        )
+        doc, rejected = parse_reviewer_document(payload)
+        assert rejected == []
+        assert len(doc.findings) == 1
+        assert doc.findings[0].file == "N/A"
+        assert doc.findings[0].line_start is None
+        assert "src/cw/foo.py:10-12" in doc.findings[0].suggested_fix
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"file": "src/cw/foo.py", "line_start": None, "line_end": None},
+            {"file": "N/A", "line_start": 5, "line_end": None},
+            {"file": "N/A", "line_start": None, "line_end": 7},
+        ],
+    )
+    def test_concrete_anchor_on_marker_logs_single_warning(
+        self, overrides: dict[str, object], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # The normalized finding is indistinguishable from a genuine
+        # ``no_diff_anchor`` one, so the rescue pass is the single-fire audit
+        # point for "reviewer supplied a concrete anchor alongside the marker".
+        payload = _doc_payload(dict(_finding_kwargs(no_diff_anchor=True, **overrides)))
+        with caplog.at_level(logging.WARNING, logger="cw.review_findings._document"):
+            parse_reviewer_document(payload)
+        warnings = [
+            rec.getMessage()
+            for rec in caplog.records
+            if rec.levelno == logging.WARNING and "#2180" in rec.getMessage()
+        ]
+        assert len(warnings) == 1
+        assert "Code Quality Reviewer" in warnings[0]
+        assert "MUST_FIX" in warnings[0]
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {
+                "no_diff_anchor": True,
+                "file": "N/A",
+                "line_start": None,
+                "line_end": None,
+            },
+            {"no_diff_anchor": False},
+        ],
+    )
+    def test_no_concrete_anchor_warning_for_clean_findings(
+        self, overrides: dict[str, object], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        payload = _doc_payload(dict(_finding_kwargs(**overrides)))
+        with caplog.at_level(logging.WARNING, logger="cw.review_findings._document"):
+            _doc, rejected = parse_reviewer_document(payload)
+        assert rejected == []
+        assert not [rec for rec in caplog.records if "#2180" in rec.getMessage()]
 
     def test_no_diff_anchor_finding_preserves_reviewer_text(self) -> None:
         finding = _make_finding(
