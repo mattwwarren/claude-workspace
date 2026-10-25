@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.77.2] - 2026-10-25
+
 ### Fixed
 
 - **Usage limits worded without "hit" are now detected (#2220).** `USAGE_LIMIT_RE` only matched "You've hit your ... limit", so a spawn, transcript or reconcile scan missed `Usage limit reached`, `usage limit; resets <time>` and `Usage limit reached · limit resets <time>`, and treated a usage-limited worker as an ordinary failure. The wordings now live as rows with provenance in the new `cw._usage_limit_patterns` table and are joined into the same `USAGE_LIMIT_RE`. Reset-bearing rows are anchored by lookahead on a clock time and the bare `Usage limit reached` row skips quoted or backticked mentions, so prose such as "rate-limit resets 3pm" does not match. The non-blocking `until your limit resets at <time>` and `Your <model> limit resets <time>` notices are deliberately not matched: the worker keeps running after them.
