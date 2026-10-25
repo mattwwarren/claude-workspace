@@ -234,6 +234,7 @@ The `/sprint-buildout` skill wraps this pair end-to-end — presenting the one a
 |---------|-------------|
 | `cw config show` / `cw config concurrency` | Show configuration / manage concurrency overrides (`set ceiling=N -c <client>` sets one client's dispatch ceiling) |
 | `cw preflight <ticket> -c <client>` | Pre-flight checks for one ticket before dispatch (one JSON object; exit 1 on a hard failure) |
+| `cw body-sha <ticket> -c <client>` / `cw body-sha --body-file <path>` | Print a ticket body's `body_sha` (the value `cw dev-queue approve` recomputes; `-` reads stdin; exit 1 when no body can be read) |
 | `cw completion <shell>` | Print shell completion snippet |
 | `cw result validate -` / `cw result emit` | Validate, or record onto a session, an AUTO_DEV_RESULT sentinel |
 | `cw event record/tail/wait/prune` | Record, read, block-until, or prune events on the orchestrator bus |
