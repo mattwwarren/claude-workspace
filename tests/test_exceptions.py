@@ -434,6 +434,44 @@ class TestParseUsageLimitReset:
                 datetime(2026, 9, 20, 23, 0, tzinfo=_NY),
                 id="month-day-today-later",
             ),
+            pytest.param(
+                "Usage limit reached · limit resets 3:45pm",
+                _SUNDAY_10AM_NY,
+                datetime(2026, 9, 20, 15, 45, tzinfo=_NY),
+                id="reached-then-limit-resets",
+            ),
+            pytest.param(
+                "Usage limit reached · limit resets Mon 12:00am",
+                _SUNDAY_10AM_NY,
+                datetime(2026, 9, 21, 0, 0, tzinfo=_NY),
+                id="reached-then-limit-resets-weekday",
+            ),
+            pytest.param(
+                "usage limit; resets 3:45pm, too far out to wait for",
+                _SUNDAY_10AM_NY,
+                datetime(2026, 9, 20, 15, 45, tzinfo=_NY),
+                id="semicolon-resets-time-only",
+            ),
+            pytest.param(
+                "usage limit; resets Sep 26, 11pm, and this run already waited "
+                "for 1 resets",
+                _SUNDAY_10AM_NY,
+                datetime(2026, 9, 26, 23, 0, tzinfo=_NY),
+                id="semicolon-resets-month-day",
+            ),
+            pytest.param(
+                "Continuing now at lower priority until your limit resets at "
+                "3:45pm. Your weekly limit still applies",
+                _SUNDAY_10AM_NY,
+                datetime(2026, 9, 20, 15, 45, tzinfo=_NY),
+                id="until-your-limit-resets-at",
+            ),
+            pytest.param(
+                "Now using usage credits for Opus · Your Opus limit resets Mon 3pm",
+                _SUNDAY_10AM_NY,
+                datetime(2026, 9, 21, 15, 0, tzinfo=_NY),
+                id="credits-notice-your-model-limit-resets",
+            ),
         ],
     )
     def test_resolves_expected_instant(
@@ -594,6 +632,11 @@ class TestParseUsageLimitReset:
                 _SUNDAY_10AM_NY,
                 id="month-arbitrary-suffix-rejected",
             ),
+            pytest.param(
+                "Usage limit reached",
+                _SUNDAY_10AM_NY,
+                id="usage-limit-reached-without-reset-time",
+            ),
         ],
     )
     def test_returns_none(self, text: str, now: datetime) -> None:
@@ -674,6 +717,20 @@ class TestParseUsageLimitReset:
                 assert result.tzinfo is not None
                 assert now < result <= horizon
 
+    def test_last_anchor_wins_across_branches(self) -> None:
+        """The last anchor is the ``limit`` of ``limit resets``, not the title.
+
+        ``Usage limit reached`` also matches, but it ends before the ``·``; the
+        later ``limit`` (lookahead-anchored) must be the one the parser reads.
+        """
+        from cw.exceptions import parse_usage_limit_reset
+
+        result = parse_usage_limit_reset(
+            "Usage limit reached · limit resets 3:45pm", now=_SUNDAY_10AM_NY
+        )
+
+        assert result == datetime(2026, 9, 20, 15, 45, tzinfo=_NY)
+
 
 class TestUsageLimitRe:
     def test_matches_session_limit(self) -> None:
@@ -702,3 +759,36 @@ class TestUsageLimitRe:
         from cw.exceptions import USAGE_LIMIT_RE
 
         assert USAGE_LIMIT_RE.search("connection limit exceeded") is None
+
+    def test_pattern_is_join_of_table(self) -> None:
+        from cw._usage_limit_patterns import USAGE_LIMIT_PATTERNS
+        from cw.exceptions import USAGE_LIMIT_RE
+
+        expected = "|".join(f"(?:{entry.pattern})" for entry in USAGE_LIMIT_PATTERNS)
+
+        assert USAGE_LIMIT_RE.pattern == expected
+
+    def test_flags_are_ignorecase_only(self) -> None:
+        import re
+
+        from cw.exceptions import USAGE_LIMIT_RE
+
+        assert USAGE_LIMIT_RE.flags & re.IGNORECASE
+        assert not USAGE_LIMIT_RE.flags & re.VERBOSE
+        assert not USAGE_LIMIT_RE.flags & re.DOTALL
+        assert not USAGE_LIMIT_RE.flags & re.MULTILINE
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "You've hit your session limit · resets 3:45pm",
+            "Usage limit reached",
+            "usage limit; resets 3:45pm, too far out to wait for",
+            "Continuing now at lower priority until your limit resets at 3:45pm.",
+            "Now using usage credits for Opus · Your Opus limit resets 3:45pm",
+        ],
+    )
+    def test_matches_each_observed_variant(self, text: str) -> None:
+        from cw.exceptions import USAGE_LIMIT_RE
+
+        assert USAGE_LIMIT_RE.search(text)
