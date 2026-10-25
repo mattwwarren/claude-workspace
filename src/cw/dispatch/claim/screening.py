@@ -27,7 +27,7 @@ from cw.dev_queue.dispositions import (
     _PRE_DISPATCH_STALE_PR_REASON,
     _PRE_DISPATCH_TRACKER_MCP_REASON,
 )
-from cw.dev_queue.gate_backoff import gate_wait_released
+from cw.dev_queue.gate_backoff import clear_gate_block_wait, gate_wait_released
 from cw.dispatch.claim.events import (
     _emit_attempt_cap_attention_event,
     _emit_attempt_cap_blocked_event,
@@ -268,16 +268,16 @@ def _screen_and_claim(
             occupied_reason,
         )
         return _CLAIM_SKIPPED
-    if (
-        task.next_eligible_at is not None
-        and now < task.next_eligible_at
-        # #2717: turning gate_block_backoff_enabled off releases a gate wait
-        # already stamped on this row, read-only (ADR-0014 invariant 1).
-        and not gate_wait_released(
+    if task.next_eligible_at is not None and now < task.next_eligible_at:
+        # #2717: disabling the rollout releases a gate-owned wait as part of
+        # this locked claim transaction, so a later non-gate route cannot
+        # retain an orphaned claim clock.
+        if gate_wait_released(
             task, backoff_enabled=client.gate_block_backoff_enabled
-        )
-    ):
-        return _CLAIM_BACKOFF
+        ):
+            clear_gate_block_wait(task)
+        else:
+            return _CLAIM_BACKOFF
     if _is_fix_dispatch_held(task):
         return _CLAIM_SKIPPED
     if _park_if_pre_dispatch_gated(

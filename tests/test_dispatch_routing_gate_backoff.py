@@ -442,7 +442,7 @@ class TestClaimScreen:
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """Flipping the switch off frees an already-stamped wait, read-only."""
+        """Flipping the switch off frees an already-stamped wait."""
         from cw.dispatch.claim import _claim_next_pending
 
         write_clients_yaml(sample_client_config)
@@ -461,6 +461,55 @@ class TestClaimScreen:
 
         assert claimed is not None
         assert claimed.ticket_id == "GB-1"
+
+    def test_disabled_wait_is_cleared_before_non_gate_reclaim(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        tmp_path: Path,
+    ) -> None:
+        """A disabled gate wait cannot block a re-claim after a non-gate route."""
+        from cw.dispatch.claim import _claim_next_pending
+
+        write_clients_yaml(sample_client_config)
+        self._park_pending(sample_client_config)
+        disabled = sample_client_config.model_copy(
+            update={"gate_block_backoff_enabled": False}
+        )
+
+        with freeze_time("2026-07-16 12:00:30"):
+            claimed, _ = _claim_next_pending(
+                _CLIENT,
+                lane="default",
+                client=disabled,
+                config=simple_config,
+            )
+
+        assert claimed is not None
+        assert claimed.next_eligible_at is None
+
+        parked = park_via_routing(
+            "GB-1",
+            _CLIENT,
+            tmp_path,
+            "blocked",
+            _AGENT_BLOCK_RESULT,
+            task=claimed,
+            client_config=disabled,
+        )
+        transition_task_status(parked, QueueItemStatus.PENDING)
+        save_dev_queue(DevQueueStore(tasks=[parked]))
+
+        with freeze_time("2026-07-16 12:00:30"):
+            reclaimed, _ = _claim_next_pending(
+                _CLIENT,
+                lane="default",
+                client=disabled,
+                config=simple_config,
+            )
+
+        assert reclaimed is not None
+        assert reclaimed.ticket_id == "GB-1"
 
     def test_disabling_backoff_keeps_a_usage_limit_window(
         self,
