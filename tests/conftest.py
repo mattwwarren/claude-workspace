@@ -1186,16 +1186,19 @@ def _patch_ticks(
 
     Each value is a ``_make_tick_summary`` override mapping, so a client gets
     the canonical defaults plus whatever it overrides. Installs ``{client:
-    tick}`` through the ``cw.cli.dev_queue.status.latest_tick_summary_by_client``
-    seam the status tests share; ``_patch_tick`` (``tests/test_cli.py``) and
-    ``_patch_tick_for`` (``tests/test_dev_queue.py``) are one-client callers.
+    tick}`` through the ``cw.cli.dev_queue.status.client_tick_snapshots`` seam
+    the status tests share (#2516: status reads client-wide ticks through it,
+    so the stub takes and ignores the one ``events`` argument; per-ticket
+    events seeded in the inbox still reach the held-by-dispatch block);
+    ``_patch_tick`` (``tests/test_cli.py``) and ``_patch_tick_for``
+    (``tests/test_dev_queue.py``) are one-client callers.
     """
     ticks = {
         client: _make_tick_summary(**overrides)
         for client, overrides in per_client.items()
     }
     monkeypatch.setattr(
-        "cw.cli.dev_queue.status.latest_tick_summary_by_client", lambda: ticks
+        "cw.cli.dev_queue.status.client_tick_snapshots", lambda _events: ticks
     )
 
 

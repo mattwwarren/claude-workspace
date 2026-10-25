@@ -1074,7 +1074,7 @@ class TestOperatorActionOutcome:
     ) -> None:
         """A coordinating-session typo on file/line must fail fast (#1817 review).
 
-        Mirrors ``Finding``'s own ``_check_no_diff_anchor_file_is_na``: an
+        Mirrors the ``Finding`` invariant for a ``no_diff_anchor`` finding: an
         ``operator_action`` entry is copied straight off a ``no_diff_anchor``
         finding, which is itself model-pinned to ``file="N/A"`` with no line
         anchor — a mismatched entry here would fail the location-key match
