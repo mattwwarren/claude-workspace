@@ -477,6 +477,13 @@ def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:
     _emit_stage_change(task, old_stage, task.stage, "advance")
 
 
+def _clear_review_approval(task: TicketTask) -> None:
+    """Drop *task*'s v48 review-approval record (#2767); all three go together."""
+    task.review_approved_at = None
+    task.review_approver_kind = None
+    task.review_approved_sha = None
+
+
 def _stage_regress(
     task: TicketTask, target_stage: Stage, *, merge_conflict_detected: bool = False
 ) -> None:
@@ -502,6 +509,12 @@ def _stage_regress(
     Also clears ``must_fix_override`` when *target_stage* is ``Stage.REVIEW``
     (GitHub #2205) -- the re-review produces a new verdict, and an override
     bound to the old one must not ship the new one.
+
+    Also clears the v48 review-approval record (``review_approved_at``,
+    ``review_approver_kind``, ``review_approved_sha``, GitHub #2767) for every
+    target -- the work the approval was bound to is about to be redone. The
+    durable trace of who approved which head is the
+    ``dispatch.scope_routing_decision`` event ``approve`` emitted.
 
     Also stamps ``pending_operator_comment = True`` (GitHub #1730) -- the
     sibling per-arrival marker saying this re-entry may carry an operator
@@ -555,6 +568,9 @@ def _stage_regress(
     # operator's MUST_FIX override was bound to (#2205).
     if target_stage == Stage.REVIEW:
         task.must_fix_override = None
+    # Any regress re-runs work the review approval was bound to, so it is
+    # revoked for every target (#2767); a re-review re-stamps it at approve.
+    _clear_review_approval(task)
     # unproductive=False (GitHub #1750): the shared chokepoint for every
     # regress (operator `--regress` via requeue.py, routing.py's Rule 5a
     # FINALIZE self-heal). A deliberate backward move is a pipeline-stage
@@ -649,11 +665,17 @@ def _reset_for_same_stage_requeue(task: TicketTask) -> None:
     ``regress_attempts`` is intentionally NOT touched -- ``requeue_ticket``
     resets it itself immediately after calling this helper; the approve path
     never regresses, so it has no analogous reset to make.
+
+    A REVIEW-stage reset also clears ``must_fix_override`` (#2205) and the
+    review-approval record (#2767): both are bound to the prior review round.
+    A FINALIZE re-run keeps the record, which Step 4.0 re-checks.
     """
     # A same-stage REVIEW requeue starts a new review round. An override is
-    # bound to the prior verdict and must not survive that re-entry (#2205).
+    # bound to the prior verdict and must not survive that re-entry (#2205),
+    # and neither may an approval of the prior round (#2767).
     if task.stage == Stage.REVIEW:
         task.must_fix_override = None
+        _clear_review_approval(task)
     transition_task_status(task, QueueItemStatus.PENDING)
     task.session_id = None
     task.stage_base_ref = None

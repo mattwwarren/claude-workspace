@@ -67,6 +67,7 @@ from cw.worktree import _git_dir, resolve_task_worktree
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, DevQueueStore, Session, TicketTask
+    from cw.models.tasks import ReviewApproverKind
 
 
 _log = logging.getLogger(__name__)
@@ -81,6 +82,11 @@ None. Not a persisted ``TicketTask`` field, so it lives here rather than in
 ``cw.models.tasks`` beside ``PLAN_APPROVED_FINGERPRINT_KEY``.
 """
 _BODY_SHA_DISPLAY_LEN = 12
+
+# :func:`approve_ticket` result keys (#2767): the review approval THIS call
+# recorded (``_stamp_review_approval``), both None when it recorded none.
+REVIEW_APPROVER_KIND_KEY = "review_approver_kind"
+REVIEW_APPROVED_SHA_KEY = "review_approved_sha"
 
 
 def approve_ticket(
@@ -119,13 +125,19 @@ def approve_ticket(
     never mutates the row; on a mismatch the
     ``PLAN_APPROVAL_BODY_DRIFT_WARNED`` audit event is recorded before
     anything is persisted -- None on every other path and whenever there is
-    nothing to compare).
+    nothing to compare), and review_approver_kind / review_approved_sha
+    (#2767, ``REVIEW_APPROVER_KIND_KEY`` / ``REVIEW_APPROVED_SHA_KEY``; the
+    review approval *this* call recorded on the row -- ``"operator"`` here and
+    the sentinel's ``review.reviewed_sha`` on a REVIEW-stage advance or
+    signoff re-route, the SHA None when the sentinel carried none; both None
+    on every other path, the signoff clear included).
 
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
             last_result is absent, last_result status is not an approval gate,
-            promoting the plan draft failed on I/O, or recording the
-            body-drift audit event failed (nothing is recorded).
+            the row is at its pipeline's terminal stage, promoting the plan
+            draft failed on I/O, or recording the body-drift audit event
+            failed (nothing is recorded).
         CwError: if no matching task is found.
     """
     with _lock(bounded=bounded):
@@ -277,8 +289,15 @@ def _record_approve_scope_routing_decision(
     finalize_held: bool,
     awaiting_signoff: bool,
     plan_requeued: bool,
+    review_stamp: tuple[str, str | None] | None,
 ) -> None:
     """Emit the #1617 scope-routing audit event for the gate-release site (D4).
+
+    ``review_stamp`` (#2767) is the ``(approver_kind, reviewed_sha)`` pair
+    :func:`_stamp_review_approval` recorded in this call, or None. It lands in
+    the payload as ``approver_kind`` / ``reviewed_sha`` on every emission (both
+    null when nothing was stamped). ``_stage_regress`` clears the row's record,
+    so this event is the durable trace of who approved which reviewed head.
 
     Extracted from ``_approve_ticket_locked`` to keep that function under the
     PLR0912/PLR0915 branch/statement ceilings. This site has no ``last_result``
@@ -320,6 +339,8 @@ def _record_approve_scope_routing_decision(
             "resolved_tier": _resolve_scope_tier(session.last_result, task),
             "rule": _RULE_GATE_RELEASE,
             "disposition": disposition,
+            "approver_kind": review_stamp[0] if review_stamp else None,
+            "reviewed_sha": review_stamp[1] if review_stamp else None,
         },
         correlation_id=ticket_id,
     )
@@ -373,6 +394,40 @@ def _stamp_plan_approval(
         fingerprint if isinstance(fingerprint, str) else None
     )
     return task.plan_approved_fingerprint
+
+
+def _stamp_review_approval(
+    task: TicketTask,
+    from_stage: str,
+    session: Session,
+    *,
+    operator_initiated: bool,
+    finalize_held: bool,
+) -> tuple[ReviewApproverKind, str | None] | None:
+    """Record the v48 review-approval fact on a REVIEW-stage release (#2767).
+
+    Runs after the branch chain, on both the direct advance and the signoff
+    re-route; it stamps nothing for any other stage or on the
+    ``finalize_held`` path (which mutates nothing). The guard lives here, not
+    at the call site, so ``_approve_ticket_locked`` pays one statement against
+    the PLR0915 ceiling.
+
+    ``approver_kind`` is ``"operator"`` for the human ``approve`` and
+    ``"recipe"`` for the automatic caller. The head is the sentinel's
+    ``review.reviewed_sha`` (the tree the review actually saw), None when it
+    carried none: recorded absence, which finalize Step 4.0 parks on.
+
+    Returns what THIS call stamped, for the return dict and the audit event.
+    """
+    from cw.dispatch import _resolve_review_reviewed_sha
+
+    if from_stage != Stage.REVIEW.value or finalize_held:
+        return None
+    kind: ReviewApproverKind = "operator" if operator_initiated else "recipe"
+    task.review_approved_at = datetime.now(UTC)
+    task.review_approver_kind = kind
+    task.review_approved_sha = _resolve_review_reviewed_sha(session.last_result)
+    return kind, task.review_approved_sha
 
 
 def _promote_plan_draft_on_direct_advance(
@@ -658,6 +713,14 @@ def _approve_ticket_locked(
     The drift never blocks and never mutates the row; automatic callers always
     get None.
 
+    A REVIEW-stage release (direct advance or signoff re-route, never the
+    ``finalize_held`` no-op) stamps the v48 review-approval record (#2767,
+    :func:`_stamp_review_approval`): ``approver_kind`` follows
+    ``operator_initiated`` (``"operator"`` / ``"recipe"``), bound to the
+    sentinel's reviewed head. The result reports it under
+    ``review_approver_kind`` / ``review_approved_sha`` (both None when this
+    call stamped nothing) and the scope-routing event carries it.
+
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
             last_result is absent, last_result status is not an approval gate,
@@ -715,6 +778,10 @@ def _approve_ticket_locked(
             PLAN_PROMOTED_KEY: False,
             # No plan approval, so no ticket-body drift to warn about.
             BODY_DRIFT_WARNING_KEY: None,
+            # The signoff clear stamps no review approval (#2767): a re-routed
+            # row was stamped by the approve that parked it here.
+            REVIEW_APPROVER_KIND_KEY: None,
+            REVIEW_APPROVED_SHA_KEY: None,
         }
 
     state = load_state()
@@ -797,6 +864,13 @@ def _approve_ticket_locked(
             session=session,
         )
         _advance_task_pointer(task, stages)
+    review_stamp = _stamp_review_approval(
+        task,
+        from_stage,
+        session,
+        operator_initiated=operator_initiated,
+        finalize_held=finalize_held,
+    )
     to_stage = task.stage.value
 
     # #1617 (D4): _approve_ticket_locked is a gate-release site, excluded from
@@ -816,6 +890,7 @@ def _approve_ticket_locked(
         finalize_held=finalize_held,
         awaiting_signoff=awaiting_signoff,
         plan_requeued=plan_requeued,
+        review_stamp=review_stamp,
     )
 
     return {
@@ -832,4 +907,7 @@ def _approve_ticket_locked(
         BODY_DRIFT_WARNING_KEY: (
             _body_drift_message(task, *body_drift) if body_drift else None
         ),
+        # #2767: what THIS call stamped, never the row's stored record.
+        REVIEW_APPROVER_KIND_KEY: review_stamp[0] if review_stamp else None,
+        REVIEW_APPROVED_SHA_KEY: review_stamp[1] if review_stamp else None,
     }
