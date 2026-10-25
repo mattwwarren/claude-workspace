@@ -23,13 +23,13 @@ from cw.dev_queue import (
 from cw.dev_queue.next_commands import (
     HUMAN_GATE_CELL_LABEL,
     compact_command,
-    is_human_kept_gate,
+    is_human_gate_command,
     next_commands,
 )
 from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
 from cw.models import QueueItemStatus, Session, TicketTask
 from cw.reconcile._shared import resolve_attempt_ceiling
-from cw.ticket_view import ViewSources, resolve_human_opt_in
+from cw.ticket_view import ViewSources, next_command_facts
 from cw.worktree import fast_forward_main
 
 from ._group import dev_queue
@@ -99,20 +99,6 @@ def _attention_cell(task: TicketTask, sessions_by_id: dict[str, Session]) -> str
     return session_attention_state(task, session) or task_attention_state(task) or "—"
 
 
-def _human_opt_in(task: TicketTask, sources: ViewSources) -> bool:
-    """The resolved human opt-in; an unreadable config counts as armed.
-
-    Failing closed only ever removes the ``requeue --stage finalize`` jump
-    from a MUST_FIX row's cell, never adds one (#2692 R5).
-    """
-    try:
-        return resolve_human_opt_in(
-            task, sources.effective_client(task.client), sources.orchestrator_config
-        )
-    except (CwError, OSError, ValueError, yaml.YAMLError):
-        return True
-
-
 def _unproductive_cell(task: TicketTask, sources: ViewSources) -> str:
     """``unproductive/ceiling`` (#2695): ``none`` when disabled, ``?`` unreadable."""
     try:
@@ -128,13 +114,25 @@ def _unproductive_cell(task: TicketTask, sources: ViewSources) -> str:
 def _next_cell(
     task: TicketTask, sessions_by_id: dict[str, Session], sources: ViewSources
 ) -> str:
-    """The row's first legal command, compacted; labelled for a human gate."""
+    """The row's first legal command, compacted; labelled for a human gate.
+
+    The opt-in and pipeline position are resolved as ``show`` resolves them
+    (``next_command_facts``): an unreadable config counts as armed (it can
+    only drop the ``requeue --stage finalize`` jump, #2692 R5) and as an
+    interior stage (the pre-#2760 cell; ``approve`` fails on it anyway).
+    """
     session = sessions_by_id.get(task.session_id) if task.session_id else None
+    facts = next_command_facts(task, sources)
     first = next_commands(
-        task, session=session, operator_opt_in=_human_opt_in(task, sources)
+        task,
+        session=session,
+        operator_opt_in=facts.operator_opt_in,
+        pipeline_position=facts.position,
     )[0]
     cell = compact_command(task, first.command)
-    return f"{HUMAN_GATE_CELL_LABEL}{cell}" if is_human_kept_gate(task) else cell
+    if is_human_gate_command(task, first):
+        return f"{HUMAN_GATE_CELL_LABEL}{cell}"
+    return cell
 
 
 def _print_tasks_human(
@@ -236,8 +234,9 @@ def dev_queue_tasks(
 
     NEXT is the row's first legal command (``cw dev-queue show`` lists them
     all), without the ``cw dev-queue`` prefix and the row's own ticket and
-    client. A gate the human opted into reads ``HUMAN GATE: approve``: the
-    operator's release, not a step for an agent (#2692).
+    client. A gate the human opted into reads ``HUMAN GATE: approve``, or
+    ``HUMAN GATE: requeue --stage <stage>`` when ``approve`` cannot take the
+    gate: the operator's command, not a step for an agent (#2692, #2760).
     """
     if ticket_arg is not None and ticket is not None:
         msg = "Pass the ticket either positionally or via -t/--ticket, not both."
