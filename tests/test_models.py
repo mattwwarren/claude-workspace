@@ -46,6 +46,7 @@ from cw.models import (
     WatchedPr,
     counts_toward_client_ceiling,
 )
+from cw.models.gate_block import GateBlockBackoff
 from cw.models.operator_resolution import OPERATOR_RESOLUTIONS_KEY, OperatorResolution
 from cw.review_finding_dispositions import FindingDisposition
 from tests.conftest import _make_daemon_session
@@ -1263,7 +1264,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 46
+        assert DEV_QUEUE_SCHEMA_VERSION == 47
 
     def test_ticket_task_old_row_without_codex_orphan_fields_defaults_none(
         self,
@@ -2824,6 +2825,58 @@ class TestOperatorResolutionsField:
         store = DevQueueStore.model_validate(migrate_dev_queue(raw))
         assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION
         assert store.tasks[0].operator_resolutions == []
+
+
+class TestGateBlockField:
+    """v47 (#2717): the row's consecutive gate-block backoff record."""
+
+    def _record(self, count: int = 1) -> GateBlockBackoff:
+        return GateBlockBackoff(
+            count=count,
+            fingerprint="merge_gate_blocked|prior_pipeline_pr_open|88|impl|abc",
+            until=datetime(2026, 7, 16, 12, 1, tzinfo=UTC),
+        )
+
+    def test_field_is_declared(self) -> None:
+        assert "gate_block" in TicketTask.model_fields
+
+    def test_field_defaults_none(self) -> None:
+        assert TicketTask(ticket_id="GEN-1", client="acme").gate_block is None
+
+    def test_model_round_trips_through_json_mode_dump(self) -> None:
+        record = self._record(count=3)
+        dumped = record.model_dump(mode="json")
+        assert dumped == {
+            "count": 3,
+            "fingerprint": "merge_gate_blocked|prior_pipeline_pr_open|88|impl|abc",
+            "until": "2026-07-16T12:01:00Z",
+        }
+        assert GateBlockBackoff.model_validate(dumped) == record
+
+    def test_count_zero_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            self._record(count=0)
+
+    def test_previous_schema_version_row_loads_with_none(self) -> None:
+        """A pre-v47 row carries no key and loads with ``None`` -- no migration
+        filler exists for it (the v42/v44/v45/v46 precedent)."""
+        from cw.dev_queue.migrate import migrate_dev_queue
+
+        raw: dict[str, object] = {
+            "schema_version": DEV_QUEUE_SCHEMA_VERSION - 1,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-2717",
+                    "client": "acme",
+                    "priority": 0,
+                    "status": "blocked_on_user",
+                    "stage": "impl",
+                }
+            ],
+        }
+        store = DevQueueStore.model_validate(migrate_dev_queue(raw))
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION
+        assert store.tasks[0].gate_block is None
 
 
 class TestClaimedAtField:
