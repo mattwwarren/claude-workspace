@@ -28,6 +28,7 @@ clients:
   #   worktree_base: /path/to/worktrees     # base dir for git worktree isolation
   #   blocked_result_requeue_enabled: false # opt in per client to #2401 deterministic-parse BlockedResult cap requeues
   #   sentinel_mismatch_veto_enabled: false # opt in per client to #2405 cap-only phantom vetoes
+  #   gate_block_backoff_enabled: true      # set false to disable the #2717 gate-block retry backoff for this client
 
   # Worktree mode — for multi-branch workflows from a shared repo
   # my-worktree-project:

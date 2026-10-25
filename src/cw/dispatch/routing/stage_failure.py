@@ -44,7 +44,11 @@ from cw.dev_queue import (
     _stage_regress,
     transition_task_status,
 )
-from cw.dev_queue.gate_backoff import is_gate_block, record_gate_block
+from cw.dev_queue.gate_backoff import (
+    clear_gate_block_wait,
+    is_gate_block,
+    record_gate_block,
+)
 from cw.dispatch.routing.pr_refs import _extract_blocked_on_pr
 from cw.dispatch.routing.stage_walk import _is_earlier_stage_report
 from cw.events import record_event
@@ -199,7 +203,12 @@ def _gate_block_breadcrumb_note(
     Runs before the page and the transition, while ``task.stage_base_ref`` is
     still the spawn-time HEAD the fingerprint keys on.
     """
-    if not enabled or not is_gate_block(status, blocker_reason):
+    if not is_gate_block(status, blocker_reason):
+        return ""
+    if not enabled:
+        # Release only the gate-owned window; a later usage-limit or
+        # spawn-error window remains protected by clear_gate_block_wait.
+        clear_gate_block_wait(task)
         return ""
     details = blocker.get("details") if isinstance(blocker, dict) else None
     return record_gate_block(

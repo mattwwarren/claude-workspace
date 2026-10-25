@@ -51,7 +51,6 @@ assertions.
 from __future__ import annotations
 
 import logging
-import os
 from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import (
@@ -177,28 +176,10 @@ __all__ = [
 
 _log = logging.getLogger("cw.dispatch")
 
-_GATE_BLOCK_BACKOFF_DISABLED_CLIENTS_ENV = (
-    "CW_GATE_BLOCK_BACKOFF_DISABLED_CLIENTS"
-)
 
-
-def _gate_block_backoff_enabled(client: str) -> bool:
-    """Return the operator-controlled per-client rollout state (#2717)."""
-    disabled = {
-        name.strip()
-        for name in os.environ.get(
-            _GATE_BLOCK_BACKOFF_DISABLED_CLIENTS_ENV, ""
-        ).split(",")
-        if name.strip()
-    }
-    enabled = client not in disabled
-    if not enabled:
-        _log.warning(
-            "gate-block backoff disabled for client %r via %s",
-            client,
-            _GATE_BLOCK_BACKOFF_DISABLED_CLIENTS_ENV,
-        )
-    return enabled
+def _gate_block_backoff_enabled(client: ClientConfig | None) -> bool:
+    """Return the typed per-client rollout state (#2717)."""
+    return client is None or client.gate_block_backoff_enabled
 
 
 # ``rule`` values stamped onto the #1617 ``dispatch.scope_routing_decision``
@@ -695,9 +676,9 @@ def _route_staged_decision(
     Same-stage and no-``stage_reached`` sentinels route through Rule 1-6 exactly
     as before. Returns ``False`` on refusal, ``True`` for every routed path.
     """
-    # Keep the spawn-time fingerprint inputs stable across any stage-pointer
-    # walk performed while classifying this sentinel.
-    gate_fingerprint_stage = task.stage.value
+    # Keep the spawn-time branch-head input stable across any stage-pointer
+    # walk performed while classifying this sentinel. The stage input is
+    # captured after the walk because it identifies the effective Rule 5 stage.
     gate_fingerprint_stage_base_ref = task.stage_base_ref
     walk_outcome = _resolve_stage_walk(task, last_result, clients)
     if walk_outcome == "refuse":
@@ -724,6 +705,7 @@ def _route_staged_decision(
         # the Rule 1-6 status table (the sentinel's status was never observed at
         # this stage). Routed, so callers persist the parked state (#1149).
         return True
+    gate_fingerprint_stage = task.stage.value
     pr_url = _extract_pr_url(last_result)
     # Hoisted above the disposition computation (#1254): Rule 5's branch already
     # read blocker/blocker_reason for the regress check and the breadcrumbs, and
@@ -833,7 +815,7 @@ def _route_staged_decision(
             claim_unproductive,
             gate_backoff_enabled=(
                 not is_gate_block(status, blocker_reason)
-                or _gate_block_backoff_enabled(task.client)
+                or _gate_block_backoff_enabled(clients.get(task.client))
             ),
             gate_fingerprint_stage=gate_fingerprint_stage,
             gate_fingerprint_stage_base_ref=gate_fingerprint_stage_base_ref,

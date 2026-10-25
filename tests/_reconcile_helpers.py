@@ -1536,6 +1536,7 @@ def park_via_routing(
     *,
     stage: Stage = Stage.IMPL,
     task: TicketTask | None = None,
+    client_config: ClientConfig | None = None,
 ) -> TicketTask:
     """Route a RUNNING row through the REAL ``apply_staged_decision`` and persist.
 
@@ -1564,7 +1565,7 @@ def park_via_routing(
         task,
         status,
         dict(last_result),
-        {client: ClientConfig(name=client, workspace_path=workspace)},
+        {client: client_config or ClientConfig(name=client, workspace_path=workspace)},
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
     return task

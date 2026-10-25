@@ -17,6 +17,7 @@ from cw.dev_queue.gate_backoff import (
     GATE_BLOCK_BACKOFF_INITIAL_SECONDS,
     clear_gate_block_wait,
     gate_block_page_note,
+    gate_wait_released,
     is_gate_block,
     record_gate_block,
     reset_gate_block_unless_gate,
@@ -248,6 +249,34 @@ class TestClearGateBlockWait:
 
         assert task.next_eligible_at is None
         assert task.gate_block is not None
+
+
+class TestGateWaitReleased:
+    def test_disabled_backoff_releases_the_gates_own_wait(self) -> None:
+        task = _gate_task()
+        _record(task)
+
+        assert gate_wait_released(task, backoff_enabled=False) is True
+        # Read-only: the row is untouched.
+        assert task.next_eligible_at is not None
+
+    def test_enabled_backoff_releases_nothing(self) -> None:
+        task = _gate_task()
+        _record(task)
+
+        assert gate_wait_released(task, backoff_enabled=True) is False
+
+    def test_a_later_usage_limit_window_is_not_released(self) -> None:
+        task = _gate_task()
+        _record(task)
+        task.next_eligible_at = _NOW + timedelta(hours=3)
+
+        assert gate_wait_released(task, backoff_enabled=False) is False
+
+    def test_a_spawn_error_window_without_gate_block_is_not_released(self) -> None:
+        task = _gate_task(next_eligible_at=_NOW + timedelta(seconds=8))
+
+        assert gate_wait_released(task, backoff_enabled=False) is False
 
 
 class TestResetGateBlockUnlessGate:

@@ -75,6 +75,74 @@ def _breadcrumbs(pages: list[CapturedEvent]) -> list[object]:
 
 
 class TestGateBlockPark:
+    def test_client_rollout_can_disable_backoff(self, tmp_path: Path) -> None:
+        client = ClientConfig(
+            name=_CLIENT,
+            workspace_path=tmp_path,
+            gate_block_backoff_enabled=False,
+        )
+
+        task = park_via_routing(
+            "GB-DISABLED",
+            _CLIENT,
+            tmp_path,
+            "merge_gate_blocked",
+            gate_blocked_last_result(),
+            client_config=client,
+        )
+
+        assert task.gate_block is None
+        assert task.next_eligible_at is None
+
+    def test_disabled_rollout_releases_already_stamped_gate_wait(
+        self, tmp_path: Path
+    ) -> None:
+        task = _gate_park(tmp_path, ticket_id="GB-STAMPED")
+        client = ClientConfig(
+            name=_CLIENT,
+            workspace_path=tmp_path,
+            gate_block_backoff_enabled=False,
+        )
+
+        park_via_routing(
+            "GB-STAMPED",
+            _CLIENT,
+            tmp_path,
+            "merge_gate_blocked",
+            gate_blocked_last_result(),
+            task=task,
+            client_config=client,
+        )
+
+        assert task.gate_block is not None
+        assert task.gate_block.count == 1
+        assert task.next_eligible_at is None
+
+    def test_fingerprint_stage_is_the_post_walk_stage(self, tmp_path: Path) -> None:
+        """A later-stage sentinel walks the row; the run keys on the landing stage."""
+        task = _gate_park(tmp_path, ticket_id="GB-WALK")
+        assert task.gate_block is not None
+        assert task.gate_block.fingerprint.split("|")[3] == Stage.IMPL.value
+
+        # Re-arm the row one rung behind; the sentinel reports IMPL, so the
+        # walk lands on IMPL and the run must continue, not restart.
+        transition_task_status(task, QueueItemStatus.RUNNING)
+        task.stage = Stage.PLAN
+        last_result = {**gate_blocked_last_result(), "stage_reached": "stage2_impl"}
+        with freeze_time(_FROZEN):
+            park_via_routing(
+                "GB-WALK",
+                _CLIENT,
+                tmp_path,
+                "merge_gate_blocked",
+                last_result,
+                task=task,
+            )
+
+        assert task.stage == Stage.IMPL
+        assert task.gate_block is not None
+        assert task.gate_block.count == 2
+
     def test_first_park_stamps_backoff_and_page_note(
         self,
         tmp_path: Path,
@@ -368,6 +436,57 @@ class TestClaimScreen:
 
         assert claimed == (None, True)
         assert load_dev_queue().tasks[0].model_dump() == before
+
+    def test_disabling_backoff_releases_a_waiting_row(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Flipping the switch off frees an already-stamped wait, read-only."""
+        from cw.dispatch.claim import _claim_next_pending
+
+        write_clients_yaml(sample_client_config)
+        self._park_pending(sample_client_config)
+        disabled = sample_client_config.model_copy(
+            update={"gate_block_backoff_enabled": False}
+        )
+
+        with freeze_time("2026-07-16 12:00:30"):
+            claimed, _ = _claim_next_pending(
+                _CLIENT,
+                lane="default",
+                client=disabled,
+                config=simple_config,
+            )
+
+        assert claimed is not None
+        assert claimed.ticket_id == "GB-1"
+
+    def test_disabling_backoff_keeps_a_usage_limit_window(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        from cw.dispatch.claim import _claim_next_pending
+
+        write_clients_yaml(sample_client_config)
+        self._park_pending(sample_client_config)
+        store = load_dev_queue()
+        store.tasks[0].next_eligible_at = _NOW + timedelta(hours=3)
+        save_dev_queue(store)
+        disabled = sample_client_config.model_copy(
+            update={"gate_block_backoff_enabled": False}
+        )
+
+        with freeze_time("2026-07-16 12:00:30"):
+            claimed = _claim_next_pending(
+                _CLIENT,
+                lane="default",
+                client=disabled,
+                config=simple_config,
+            )
+
+        assert claimed == (None, True)
 
     def test_claimed_after_window(
         self,

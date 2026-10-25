@@ -149,6 +149,23 @@ def clear_gate_block_wait(task: TicketTask) -> None:
         task.next_eligible_at = None
 
 
+def gate_wait_released(task: TicketTask, *, backoff_enabled: bool) -> bool:
+    """True when *task*'s claim wait is the gate's own and the client turned it off.
+
+    A read-only predicate, so the claim screen can ignore an already-stamped
+    gate wait the moment ``gate_block_backoff_enabled`` flips to False without
+    mutating the row (ADR-0014 invariant 1). A later usage-limit or
+    spawn-error window (``next_eligible_at != gate_block.until``) is not the
+    gate's to release and is still honoured.
+    """
+    record = task.gate_block
+    return (
+        not backoff_enabled
+        and record is not None
+        and task.next_eligible_at == record.until
+    )
+
+
 def reset_gate_block_unless_gate(
     task: TicketTask, status: str | None, blocker_reason: str | None
 ) -> None:
