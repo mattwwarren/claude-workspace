@@ -293,10 +293,7 @@ class TestComputeBodySha:
 
     def test_hashes_the_rstripped_utf8_bytes(self) -> None:
         assert compute_body_sha("x\n") == hashlib.sha256(b"x").hexdigest()
-        assert (
-            compute_body_sha("café\n")
-            == hashlib.sha256("café".encode()).hexdigest()
-        )
+        assert compute_body_sha("café\n") == hashlib.sha256("café".encode()).hexdigest()
 
 
 class TestBindClaimedFingerprint:
