@@ -49,6 +49,7 @@ from cw.review_findings._classify import (
 )
 from cw.review_findings._models import (
     _ESCALATION_STRIP_REASON,
+    _NO_DIFF_ANCHOR_FILE,
     Finding,
     RejectedFinding,
     ReviewerFindingsDocument,
@@ -296,7 +297,7 @@ def _warn_if_concrete_anchor_on_marker(
     file = item.get("file")
     line_start = item.get("line_start")
     line_end = item.get("line_end")
-    if (not isinstance(file, str) or file == "N/A") and (
+    if (not isinstance(file, str) or file == _NO_DIFF_ANCHOR_FILE) and (
         line_start is None and line_end is None
     ):
         return
@@ -356,7 +357,6 @@ def _rescue_findings(payload: object) -> tuple[object, list[RejectedFinding]]:
     survivors: list[object] = []
     rejected: list[RejectedFinding] = []
     for index, item in enumerate(raw_findings):
-        _warn_if_concrete_anchor_on_marker(item, reviewer_role, index)
         try:
             Finding.model_validate(item)
         except ValidationError as exc:
@@ -379,6 +379,8 @@ def _rescue_findings(payload: object) -> tuple[object, list[RejectedFinding]]:
                 )
             )
             continue
+        # After validation so the "accepted" in the warning is true.
+        _warn_if_concrete_anchor_on_marker(item, reviewer_role, index)
         survivors.append(item)
 
     return {**payload, "findings": survivors}, rejected

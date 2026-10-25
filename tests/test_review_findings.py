@@ -3260,6 +3260,27 @@ class TestNoDiffAnchorFindings:
         assert "Code Quality Reviewer" in warnings[0]
         assert "MUST_FIX" in warnings[0]
 
+    def test_rejected_marker_finding_logs_no_concrete_anchor_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # A blank ``file`` fails ``Finding`` validation, so the finding is never
+        # accepted and the "accepted" audit warning must not fire for it. The
+        # clean sibling keeps the document itself valid.
+        payload = _doc_payload(
+            dict(
+                _finding_kwargs(
+                    no_diff_anchor=True, file="   ", line_start=None, line_end=None
+                )
+            ),
+            dict(_finding_kwargs()),
+        )
+        with caplog.at_level(logging.WARNING, logger="cw.review_findings._document"):
+            doc, rejected = parse_reviewer_document(payload)
+        assert len(doc.findings) == 1
+        assert len(rejected) == 1
+        assert rejected[0].reason == "schema_invalid"
+        assert not [rec for rec in caplog.records if "#2180" in rec.getMessage()]
+
     @pytest.mark.parametrize(
         "overrides",
         [
