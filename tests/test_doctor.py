@@ -9585,16 +9585,16 @@ class TestPendingWorktreeOccupiedWedge:
         (row,) = [t for t in store.tasks if t.ticket_id == "TST-X"]
         assert row.status == QueueItemStatus.RUNNING
 
-    def test_client_scoped_class12_guard_preserves_only_its_client(
+    def test_existing_ticket_backed_wedge_class_still_reaps(
         self, tmp_config_dir: Path
     ) -> None:
+        """A ticket-backed finding of another class reverts its RUNNING row,
+        whether or not a class-12 finding for a different ticket rides along.
+        """
         from cw.config import state_file as _sf
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.doctor import WedgeFinding, _reap_wedge_findings
-        from cw.doctor.pending_skip_wedge import (
-            WEDGE_PENDING_WORKTREE_OCCUPIED,
-            PendingWorktreeOccupiedFinding,
-        )
+        from cw.doctor.pending_skip_wedge import WEDGE_PENDING_WORKTREE_OCCUPIED
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
 
         save_dev_queue(
@@ -9606,21 +9606,20 @@ class TestPendingWorktreeOccupiedWedge:
                         status=QueueItemStatus.RUNNING,
                     ),
                     TicketTask(
-                        ticket_id="TST-X",
-                        client="client-b",
+                        ticket_id="TST-Y",
+                        client="client-a",
                         status=QueueItemStatus.RUNNING,
                     ),
                 ]
             )
         )
         findings = [
-            PendingWorktreeOccupiedFinding(
+            WedgeFinding(
                 wedge_class=WEDGE_PENDING_WORKTREE_OCCUPIED,
                 session_id=None,
-                ticket_id="TST-X",
+                ticket_id="TST-Y",
                 recipe="inspect",
                 state_file=str(_sf()),
-                client="client-a",
             ),
             WedgeFinding(
                 wedge_class="wedge/task-running-no-session",
@@ -9633,10 +9632,6 @@ class TestPendingWorktreeOccupiedWedge:
 
         assert _reap_wedge_findings(findings) is None
 
-        rows = {
-            task.client: task
-            for task in load_dev_queue().tasks
-            if task.ticket_id == "TST-X"
-        }
-        assert rows["client-a"].status == QueueItemStatus.RUNNING
-        assert rows["client-b"].status == QueueItemStatus.PENDING
+        rows = {t.ticket_id: t.status for t in load_dev_queue().tasks}
+        assert rows["TST-X"] == QueueItemStatus.PENDING
+        assert rows["TST-Y"] == QueueItemStatus.RUNNING
