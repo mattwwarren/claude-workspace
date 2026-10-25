@@ -1628,3 +1628,112 @@ class TestEveryStagePairWalk:
         self._write_pipeline(tmp_path, pipeline)
         failures = _walk(_walk_other_rows())
         assert not failures, "\n".join(failures)
+
+
+# The finalize Step 4.0 park sentinel (#2767): rule 0c keys on its stamp.
+_STEP40_PARK: dict[str, object] = {
+    "status": "review_pending_approval",
+    "stage_reached": "stage4a_merge_gate",
+    "scope": {"tier": "large"},
+}
+_REVIEW_REQUEUE = cmd("requeue", "--stage review")
+_STEP40_PURPOSE = "returns the ticket to review to obtain the large-tier approval"
+
+
+def _step40_row(**overrides: object) -> TicketTask:
+    kwargs: dict[str, object] = {
+        "stage": Stage.FINALIZE,
+        "disposition": "review_pending_approval",
+    }
+    kwargs.update(overrides)
+    return make_blocked(**kwargs)
+
+
+class TestFinalizeApprovalPark:
+    """Rule 0c (#2767, R18): a Step 4.0 park is released through review."""
+
+    @pytest.mark.parametrize("scope_hint", [None, "large"])
+    @pytest.mark.parametrize("position", [_TERMINAL, _INTERIOR])
+    def test_lists_only_the_labelled_review_requeue(
+        self, scope_hint: str | None, position: PipelinePosition
+    ) -> None:
+        task = _step40_row(scope_hint=scope_hint)
+        session = bound_session_for(task, last_result=_STEP40_PARK)
+        cmds = next_commands(task, session=session, pipeline_position=position)
+        assert [c.command for c in cmds] == [_REVIEW_REQUEUE]
+        assert cmds[0].operator_only is True
+        assert cmds[0].purpose.startswith(HUMAN_GATE_PURPOSE_LABEL)
+        assert _STEP40_PURPOSE in cmds[0].purpose
+        assert not [c for c in cmds if _verb(c.command) == "approve"]
+        assert not [c for c in cmds if "--stage finalize" in c.command]
+
+    def test_unstamped_finalize_rows_are_unchanged(self) -> None:
+        """A18: selectivity against stamped versus unstamped fixtures only."""
+        plain = _step40_row()
+        assert _first(plain, _gate_session(plain), _TERMINAL).purpose == _P1
+        large = _large_final()
+        assert _first(large, _gate_session(large), _TERMINAL).purpose == _P2
+        review_stamped = bound_session_for(
+            plain, last_result={**_STEP40_PARK, "stage_reached": "stage3_review"}
+        )
+        assert _first(plain, review_stamped, _TERMINAL).purpose == _P1
+
+    def test_review_stage_row_keeps_rule9_approve(self) -> None:
+        task = make_blocked(stage=Stage.REVIEW, disposition="review_pending_approval")
+        session = bound_session_for(task, last_result=_STEP40_PARK)
+        assert _verb(_first(task, session, _INTERIOR).command) == "approve"
+
+    def test_sessionless_row_keeps_rule10_requeue(self) -> None:
+        task = _step40_row()
+        assert [c.command for c in next_commands(task, session=None)] == [
+            cmd("requeue")
+        ]
+
+    def test_off_pipeline_keeps_show_and_plain_requeue(self) -> None:
+        task = _step40_row()
+        session = bound_session_for(task, last_result=_STEP40_PARK)
+        cmds = next_commands(task, session=session, pipeline_position=_OFF)
+        assert [c.command for c in cmds] == [cmd("show"), cmd("requeue")]
+
+    def test_approve_refusal_names_the_review_requeue(self, tmp_path: Path) -> None:
+        write_lane_client(_C, tmp_path / "ws")
+        task = _step40_row()
+        seed_queue([task], [bound_session_for(task, last_result=_STEP40_PARK)])
+        with pytest.raises(ApproveGateError, match="terminal stage") as exc:
+            approve_ticket(_T, _C)
+        message = str(exc.value)
+        assert _REVIEW_REQUEUE in message
+        assert "operator-only; not for an agent to run" in message
+        assert "--stage finalize" not in message
+        assert "Run:" not in message
+
+    def test_emitted_command_is_legal(self, tmp_path: Path) -> None:
+        """The command resolves in the Click tree, and the CLI's regress opt-in
+        (``infer_regress``) is what makes the backward move legal."""
+        tokens = shlex.split(_REVIEW_REQUEUE)
+        leaf = _resolve_command(tokens[1:])
+        opts = {
+            opt
+            for param in leaf.params
+            if isinstance(param, click.Option)
+            for opt in (*param.opts, *param.secondary_opts)
+        }
+        assert {t for t in tokens if t.startswith("-")} <= opts
+        assert _parse(_REVIEW_REQUEUE).flags == {"--stage": "review"}
+        write_lane_client(_C, tmp_path / "ws")
+        task = _step40_row()
+        seed_queue([task], [bound_session_for(task, last_result=_STEP40_PARK)])
+        precheck_requeue(
+            _T, _C, "review", native_daemon=FakeNativeDaemonClient(), infer_regress=True
+        )
+        with pytest.raises(RequeueStageError):
+            precheck_requeue(_T, _C, "review", native_daemon=FakeNativeDaemonClient())
+
+    def test_attention_stream_withholds_it(self) -> None:
+        task = _step40_row()
+        assert not is_human_kept_gate(task)
+        first = _first(
+            task, bound_session_for(task, last_result=_STEP40_PARK), _TERMINAL
+        )
+        assert is_human_gate_command(task, first)
+        assert human_gate_attention_command(task) == f"HUMAN GATE: {cmd('show')}"
