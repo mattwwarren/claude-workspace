@@ -11751,26 +11751,39 @@ class TestDevQueueTasksNextColumn:
         result = CliRunner().invoke(main, ["dev-queue", "tasks"])
         assert _next_cells(result.output) == ["requeue --stage finalize"]
 
-    def test_every_first_command_fits_the_column(self) -> None:
+    def test_every_first_command_fits_the_column(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.cli.dev_queue.tasks import _next_cell
         from cw.dev_queue.next_commands import (
             HUMAN_GATE_CELL_LABEL,
             compact_command,
-            is_human_kept_gate,
+            is_human_gate_command,
             next_commands,
         )
-        from tests._ticket_view_helpers import CASES
+        from cw.ticket_view import ViewSources
+        from tests._ticket_view_helpers import CASES, write_lane_client
 
-        for case in CASES.values():
-            first = next_commands(case.task, session=case.session())[0]
-            cell = compact_command(case.task, first.command)
-            if is_human_kept_gate(case.task):
-                cell = f"{HUMAN_GATE_CELL_LABEL}{cell}"
-                expected = compact_command(case.task, case.expected[0])
-                assert cell == f"{HUMAN_GATE_CELL_LABEL}{expected}"
-            assert cell.startswith(HUMAN_GATE_CELL_LABEL) == is_human_kept_gate(
-                case.task
+        # Every stage a CASES row sits at is in the pipeline, so each row's
+        # position is interior or terminal and case.expected[0] is the cell.
+        write_lane_client(
+            "acme",
+            tmp_path / "ws",
+            client_stages=["plan", "harden", "impl", "review", "finalize"],
+        )
+        for case_id, case in CASES.items():
+            session = case.session()
+            sessions_by_id = {session.id: session} if session is not None else {}
+            cell = _next_cell(case.task, sessions_by_id, ViewSources())
+            first = next_commands(case.task, session=session)[0]
+            bare = compact_command(case.task, case.expected[0])
+            expected = (
+                f"{HUMAN_GATE_CELL_LABEL}{bare}"
+                if is_human_gate_command(case.task, first)
+                else bare
             )
-            assert len(cell) <= _NEXT_WIDTH
+            assert cell == expected, case_id
+            assert len(cell) <= _NEXT_WIDTH, case_id
 
     @pytest.mark.parametrize(
         ("overrides", "last_result", "cell"),
