@@ -1430,9 +1430,7 @@ class TestGatePass:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         name = _gate_names()[0]
-        monkeypatch.setattr(
-            _mod, "_gate_command", lambda _name: "uv run mypy ."
-        )
+        monkeypatch.setattr(_mod, "_gate_command", lambda _name: "uv run mypy .")
         assert _gate_pass(capsys, "record", name) == {
             "gate": name,
             "recorded": False,
