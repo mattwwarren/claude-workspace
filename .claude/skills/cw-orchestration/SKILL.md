@@ -66,7 +66,7 @@ shows the first `next:` command per row in its NEXT column.
 - Never edit `~/.local/share/cw/dev_queue.json` with a dispatch loop alive: a tick's read-modify-write silently drops the edit. Use `cw dev-queue requeue <T> -c <C> --reset-attempts` instead (docs/dispatch-runbook.md).
 - Close the session before removing its row: `cw spawn close --confirmed-dead <id>` first, then `cw dev-queue remove <T> -c <C>`; reversed, they race the dispatcher (#317).
 - After upgrading cw, restart `cw dev-queue serve` before using `cw dev-queue resolve`: an older loop rewrites the queue without the resolutions ledger and erases recorded answers (#2702, #2729).
-- `cw review settle` and `cw dev-queue resolve` are refused inside a headless dispatch worker; the orchestrator runs them (#2701, #2702).
+- `cw review settle`, `cw dev-queue resolve` and `cw dev-queue approve` are refused inside a headless dispatch worker; the orchestrator runs them (#2701, #2702, #2776).
 - `cw dev-queue requeue` on a row that is already PENDING is a no-op, and `--reset-attempts` is not applied there (src/cw/dev_queue/requeue.py, #2692).
 - `cw dev-queue add` against a row that is pending, running or parked is refused; release a parked row with `resolve`, `requeue` or `approve` (src/cw/dev_queue/crud.py, #1653).
 - Do not start `cw dev-queue run` when a dispatch loop is already live; check `pgrep -f 'cw dev-queue (run|serve)'` first. A manual tick races the live loop and can phantom-sweep in-flight sessions (#317).
