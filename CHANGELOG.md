@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Runtime messages no longer name `cw` commands that do not exist (#2703).** The `wedge/repo-ahead-of-queue` recipe told operators to run `cw spawn-complete <ticket>`, and `cw peek` pointed at `cw post-mortem`; neither command exists. The wedge recipe now reads `cw spawn complete <session_id> --status shipped` (with a `<session_id>` placeholder when the task has no session recorded), `cw peek` names `cw session result` / `cw session show`, and the duplicate-lane error from `cw orchestrate start` names `cw spawn close <id>` instead of `cw spawn complete <id> --status completed`, whose `completed` is not a valid `--status`. A new walker in `tests/test_cli_surface_conventions.py` parses every `src/cw/**/*.py` runtime string and fails when a `cw ...` mention names a command the Click tree cannot resolve.
+
 ## [1.77.1] - 2026-10-19
 
 ### Docs

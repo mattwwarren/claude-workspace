@@ -46,7 +46,7 @@ _MENTION_EXEMPT: set[str] = set()
 
 _MIN_COMMAND_COUNT = 40
 _MIN_RUNTIME_FILES = 100
-_MIN_RUNTIME_MENTIONS = 150
+_MIN_RUNTIME_MENTIONS = 80
 _EXPR_PLACEHOLDER = "<expr>"
 _LINE_PREFIXES = ("Recipe:", "Example:")
 _MENTION_RE = re.compile(r"\bcw((?: [a-z][a-z0-9_-]*)*)")
