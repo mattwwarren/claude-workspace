@@ -365,11 +365,13 @@ def _save_approval_and_audit(
 ) -> None:
     """Persist an approval and its gate-release audit in safe order.
 
-    Review approvals record the audit first, so an event-inbox failure refuses
-    the approval before the row can become durable. Other approval paths retain
-    the established save-first ordering.
+    Save the queue row before emitting the audit event. If event emission
+    fails, restore the queue snapshot so a failed approval cannot leave either
+    side of the pair durable without the other.
     """
-    if review_stamp is not None:
+    previous_store = load_dev_queue()
+    save_dev_queue(store)
+    try:
         _record_approve_scope_routing_decision(
             ticket_id,
             client_name,
@@ -380,19 +382,16 @@ def _save_approval_and_audit(
             plan_requeued=plan_requeued,
             review_stamp=review_stamp,
         )
-        save_dev_queue(store)
-        return
-    save_dev_queue(store)
-    _record_approve_scope_routing_decision(
-        ticket_id,
-        client_name,
-        task,
-        session,
-        finalize_held=finalize_held,
-        awaiting_signoff=awaiting_signoff,
-        plan_requeued=plan_requeued,
-        review_stamp=review_stamp,
-    )
+    except Exception:
+        try:
+            save_dev_queue(previous_store)
+        except Exception:
+            _log.exception(
+                "approve: failed to roll back queue after audit failure for %s/%s",
+                client_name,
+                ticket_id,
+            )
+        raise
 
 
 def _stamp_plan_approval(
@@ -937,10 +936,9 @@ def _approve_ticket_locked(
     )
     to_stage = task.stage.value
 
-    # #1617 (D4): review approvals use event-first ordering so an audit failure
-    # cannot leave a durable review approval without its audit trail.
+    # #1617 (D4): persist the row and its gate-release audit through one helper.
     _save_approval_and_audit(
-            store,
+        store,
         ticket_id,
         client_name,
         task,
@@ -950,7 +948,6 @@ def _approve_ticket_locked(
         plan_requeued=plan_requeued,
         review_stamp=review_stamp,
     )
-    save_dev_queue(store)
 
     return {
         "from_stage": from_stage,

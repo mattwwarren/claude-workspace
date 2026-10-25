@@ -116,7 +116,9 @@ The recorded approval counts for the current HEAD only when its `reviewed_sha` i
 Because this decision is HEAD-sensitive, the exact fence must also be run after
 any `/prep-pr` or Step 4c.5 branch mutation and immediately before each
 auto-merge arm. A delegated `/prep-pr`/`ship-it` arm is subject to the same
-rule; a failing re-check parks before auto-merge is enabled.
+rule and MUST run this exact fence after its final branch mutation and
+immediately before its own auto-merge arm; a failing re-check parks before
+auto-merge is enabled.
 
 ```bash
 GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
@@ -532,6 +534,8 @@ result per the two cases below:
   If the push fails, or the verify comparison mismatches → do NOT invoke `/prep-pr`. STOP and return a BLOCK whose text includes the verbatim push failure output (or the mismatch detail) — the Unavailability classifier below inspects that text and, on a signature match, emits the `push_auth_failed` sentinel via the existing template (`stage_reached: "stage4b_pr_create"`); otherwise it falls through to a generic `agent_block` per the "Any other agent BLOCK" gate-collapse row.
   This `git push` has no `timeout` wrapper — no push site in this file family does (#1414 R9: accepted residual risk, consistent with `ship-it.md`'s push and `prep-pr.md`'s own Step 1 push).
 - The concrete, shell-quoted `PR_TITLE` literal composed above, and an instruction to invoke `/prep-pr --skip-review --base main --title "<the exact rendered PR_TITLE literal>"` via the Skill tool. Replace the angle-bracket notation with that literal before sending the prompt — never send an unresolved title variable. **If the user chose Force at Step 4a (stacking onto an open pipeline PR), append `--draft`** so `/prep-pr` passes it through to the project's `/ship-it` (its Step 8 supports `--draft` pass-through). The PR must stay a draft until the parent merges. `--skip-review` is required: Stage 3 already ran the full scope-aware review set, and `/prep-pr`'s thinner pass would double up.
+
+  **Headless delegated fence (mandatory):** after the delegated chain's final branch mutation, the child MUST execute the exact Step 4.0 fence above immediately before its project `/ship-it` auto-merge arm. Only `REVIEW_APPROVAL_NOT_REQUIRED` or `REVIEW_APPROVAL_RECORDED` permits that arm; on any other output, it MUST NOT invoke `arm-automerge` or `gh pr merge --auto`, and must return a `review_pending_approval`/`HEADLESS BLOCK` to finalize. The parent re-verification after the child returns is additional defense, not a substitute for this pre-arm fence.
 
   **Headless:** when finalize itself runs headless (`--headless` in "$ARGUMENTS"), the `/prep-pr` invocation MUST include `--headless` so the flag propagates down the `prep-pr` → `ship-it` chain and every interactive gate collapses per the gate-collapse table:
   - Plain case: `/prep-pr --skip-review --base main --headless --title "<the exact rendered PR_TITLE literal>"`
