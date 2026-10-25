@@ -845,8 +845,8 @@ class TestCLIDevQueueStatus:
             claimed=0, pending=1, running=0, cap=3, skip_reason="none", tick_at=stale_at
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
-            lambda: {"genhealth": tick},
+            "cw.cli.dev_queue.status.client_tick_snapshots",
+            lambda _events: {"genhealth": tick},
         )
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status"])
@@ -870,8 +870,8 @@ class TestCLIDevQueueStatus:
             claimed=0, pending=1, running=0, cap=3, skip_reason="none", tick_at=fresh_at
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
-            lambda: {"genhealth": tick},
+            "cw.cli.dev_queue.status.client_tick_snapshots",
+            lambda _events: {"genhealth": tick},
         )
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status"])
@@ -933,8 +933,8 @@ class TestCLIDevQueueStatus:
             tick_at=datetime.now(UTC),
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
-            lambda: {"genhealth": tick},
+            "cw.cli.dev_queue.status.client_tick_snapshots",
+            lambda _events: {"genhealth": tick},
         )
 
         result = CliRunner().invoke(main, ["dev-queue", "status", "--json"])
@@ -1257,8 +1257,8 @@ class TestStatusFreshnessSubline:
             blocked_branch="docs/foo",
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
-            lambda: {"my-client": tick},
+            "cw.cli.dev_queue.status.client_tick_snapshots",
+            lambda _events: {"my-client": tick},
         )
         ws = Path("/repo/my-client")
         monkeypatch.setattr(
@@ -1299,8 +1299,8 @@ class TestStatusFreshnessSubline:
             blocked_branch=None,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
-            lambda: {"my-client": tick},
+            "cw.cli.dev_queue.status.client_tick_snapshots",
+            lambda _events: {"my-client": tick},
         )
         monkeypatch.setattr(
             "cw.cli._base.get_client",
@@ -1338,8 +1338,8 @@ class TestStatusFreshnessSubline:
             blocked_branch="feat/x",
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
-            lambda: {"unknown-client": tick},
+            "cw.cli.dev_queue.status.client_tick_snapshots",
+            lambda _events: {"unknown-client": tick},
         )
         msg = "not found"
 
@@ -1376,8 +1376,8 @@ class TestStatusFreshnessSubline:
             blocked_branch=None,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
-            lambda: {"my-client": tick},
+            "cw.cli.dev_queue.status.client_tick_snapshots",
+            lambda _events: {"my-client": tick},
         )
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status"])
@@ -1407,8 +1407,8 @@ class TestStatusFreshnessSubline:
             blocked_branch=None,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
-            lambda: {"my-client": tick},
+            "cw.cli.dev_queue.status.client_tick_snapshots",
+            lambda _events: {"my-client": tick},
         )
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status"])
@@ -1436,8 +1436,8 @@ class TestStatusFreshnessSubline:
             blocked_branch="docs/foo",
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
-            lambda: {"my-client": tick},
+            "cw.cli.dev_queue.status.client_tick_snapshots",
+            lambda _events: {"my-client": tick},
         )
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status", "--json"])
@@ -1456,7 +1456,7 @@ class TestStatusFreshnessSubline:
     ) -> None:
         """--json emits {} when there are no tick events."""
         monkeypatch.setattr(
-            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
+            "cw.cli.dev_queue.status.client_tick_snapshots",
             dict,
         )
         runner = CliRunner()
@@ -1495,8 +1495,8 @@ class TestStatusFreshnessSubline:
             blocked_branch=None,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
-            lambda: {"client-a": tick_a, "client-b": tick_b},
+            "cw.cli.dev_queue.status.client_tick_snapshots",
+            lambda _events: {"client-a": tick_a, "client-b": tick_b},
         )
         runner = CliRunner()
         result = runner.invoke(
@@ -1529,8 +1529,8 @@ class TestStatusFreshnessSubline:
             blocked_branch=None,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
-            lambda: {"my-client": tick},
+            "cw.cli.dev_queue.status.client_tick_snapshots",
+            lambda _events: {"my-client": tick},
         )
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status"])
@@ -1559,8 +1559,8 @@ class TestStatusFreshnessSubline:
             blocked_branch=None,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
-            lambda: {"my-client": tick},
+            "cw.cli.dev_queue.status.client_tick_snapshots",
+            lambda _events: {"my-client": tick},
         )
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status"])
@@ -1589,8 +1589,8 @@ class TestStatusFreshnessSubline:
             blocked_branch=None,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
-            lambda: {"my-client": tick},
+            "cw.cli.dev_queue.status.client_tick_snapshots",
+            lambda _events: {"my-client": tick},
         )
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status"])

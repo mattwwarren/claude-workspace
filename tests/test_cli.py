@@ -10599,7 +10599,7 @@ def _patch_tick(
     cap: int = 3,
     skip_reason: str = "none",
 ) -> None:
-    """Shared ``latest_tick_summary_by_client`` patch for dev-queue status tests.
+    """Shared ``client_tick_snapshots`` patch for dev-queue status tests.
 
     Consolidates the two per-class builders ``TestDevQueueStatusBlockedAnnotation``
     and ``TestDevQueueStatusRunningRowDivergence`` used to maintain independently

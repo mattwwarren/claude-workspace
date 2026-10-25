@@ -5,6 +5,14 @@ errors, auto-resume time and ``cw lane resume`` hint, shown with or without
 tick data or tasks), the per-client "Effective config" line that compares the
 last tick's cap with the configured ceiling, and the matching ``paused_lanes``
 and ``effective`` keys in ``--json``.
+
+#2516 reads the "Last dispatch tick per client:" snapshot from client-wide
+ticks only (``client_tick_snapshots``), so a per-ticket ``dispatch.tick`` can
+no longer overwrite a client's tick line. The same single inbox read feeds the
+"Pending tickets held by dispatch" block: each PENDING row's current run of
+per-ticket skips (``cw.pending_skip_streak``), e.g. a ticket skipped as
+``worktree_occupied`` every tick while the client tick reads ``no_pending``.
+``--json`` carries it as a per-client ``pending_skips`` list.
 """
 
 from __future__ import annotations
@@ -12,12 +20,13 @@ from __future__ import annotations
 import functools
 import json
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import click
 
 from cw._lock_hold import format_longest, read_window, summarize
+from cw._util import format_compact_age
 from cw.cli._base import _emit_freshness_subline, handle_errors
 from cw.cli.config_cmds import _client_ceiling
 from cw.config import (
@@ -31,8 +40,10 @@ from cw.config import (
 from cw.dev_queue import list_tickets
 from cw.dispatch import TICK_STALE_SECONDS
 from cw.dispatch_state import ExecutorBlockedMarker, load_executor_blocked_markers
+from cw.events import read_events
 from cw.exceptions import CwError
 from cw.lane_pause import (
+    iso_z,
     paused_lane_views,
     render_lane_pause_lines,
     worktree_breaker_threshold,
@@ -42,10 +53,12 @@ from cw.models import (
     OCCUPIED_LANE_STATUSES,
     DispatchSkipReason,
     OrchestratorConfig,
+    OrchestratorEventType,
     QueueItemStatus,
     TicketTask,
 )
-from cw.orchestrate import latest_tick_summary_by_client
+from cw.orchestrate import client_tick_snapshots
+from cw.pending_skip_streak import pending_skip_streaks
 from cw.reconcile.routed_result_sessions import (
     format_orphan_sessions,
     unowned_ceiling_sessions,
@@ -58,10 +71,21 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from cw.lane_pause import LanePauseView
-    from cw.models import ClientConfig, ConcurrencyOverrides, Session
+    from cw.models import (
+        ClientConfig,
+        ConcurrencyOverrides,
+        OrchestratorEvent,
+        Session,
+    )
     from cw.orchestrate import TickSummary
+    from cw.pending_skip_streak import SkipStreak
 
 _RESUMED_SINCE_TICK = " [resumed since this tick]"
+_HELD_HEADER = (
+    "Pending tickets held by dispatch"
+    " (latest per-ticket skip; xN = consecutive per-ticket tick events):"
+)
+_SECONDS_PER_MINUTE = 60
 
 
 def _lane_caps_for_client(
@@ -410,19 +434,94 @@ def _echo_effective_config(
         click.echo(_effective_config_line(client_name, view))
 
 
-def _status_json(client: str | None) -> dict[str, dict[str, object]]:
-    """The ``status --json`` payload: tick clients plus paused-lane clients.
+def _read_tick_events() -> list[OrchestratorEvent]:
+    """Every ``dispatch.tick`` in the inbox: the one read status makes (#2516)."""
+    return read_events(event_types=[OrchestratorEventType.DISPATCH_TICK])
 
-    A client with a paused lane but no tick appears with null tick fields.
-    The effective config is loaded once, and only when an entry is emitted.
+
+def _held_by_client(
+    tasks: Sequence[TicketTask],
+    events: list[OrchestratorEvent],
+    *,
+    now: datetime,
+) -> dict[str, list[SkipStreak]]:
+    """Each client's PENDING rows with a per-ticket skip streak (#2516).
+
+    Sorted longest streak first, then by ticket id.
     """
-    tick_data = latest_tick_summary_by_client()
-    attn_by_client = _needs_attn_by_client(list_tickets(client))
+    held: dict[str, list[SkipStreak]] = {}
+    for streak in pending_skip_streaks(tasks, events, now=now).values():
+        held.setdefault(streak.client, []).append(streak)
+    for streaks in held.values():
+        streaks.sort(key=lambda s: (-s.consecutive, s.ticket_id))
+    return held
+
+
+def _ago(delta: timedelta) -> str:
+    """Seconds below a minute, otherwise ``format_compact_age``."""
+    seconds = max(int(delta.total_seconds()), 0)
+    if seconds < _SECONDS_PER_MINUTE:
+        return f"{seconds}s"
+    return format_compact_age(delta)
+
+
+def _echo_pending_skips(
+    clients_seen: list[str],
+    held: dict[str, list[SkipStreak]],
+    *,
+    now: datetime,
+) -> None:
+    """Print the "Pending tickets held by dispatch" block, when any (#2516)."""
+    if not held:
+        return
+    click.echo("")
+    click.echo(_HELD_HEADER)
+    for client_name in clients_seen:
+        for streak in held.get(client_name, []):
+            stale = " [stale]" if streak.stale else ""
+            click.echo(
+                f"  {client_name}: {streak.ticket_id}: {streak.skip_reason}"
+                f" x{streak.consecutive}"
+                f" (last {_ago(now - streak.last_at)} ago){stale}"
+            )
+
+
+def _pending_skips_json(streaks: list[SkipStreak]) -> list[dict[str, object]]:
+    """The ``pending_skips`` list of ``status --json`` (#2516).
+
+    ``consecutive`` counts per-ticket tick events, normally one per tick.
+    """
+    return [
+        {
+            "ticket_id": s.ticket_id,
+            "skip_reason": s.skip_reason,
+            "consecutive": s.consecutive,
+            "first_at": iso_z(s.first_at),
+            "last_at": iso_z(s.last_at),
+            "stale": s.stale,
+        }
+        for s in streaks
+    ]
+
+
+def _status_json(client: str | None) -> dict[str, dict[str, object]]:
+    """The ``status --json`` payload: tick, paused-lane and held-row clients.
+
+    A client with a paused lane or a held PENDING row but no client-wide tick
+    appears with null tick fields. The effective config is loaded once, and
+    only when an entry is emitted.
+    """
+    events = _read_tick_events()
+    tick_data = client_tick_snapshots(events)
+    tasks = list_tickets(client)
+    attn_by_client = _needs_attn_by_client(tasks)
+    held = _held_by_client(tasks, events, now=datetime.now(UTC))
     overrides = _load_concurrency_overrides()
     config = functools.cache(load_effective_config)
     views = _status_paused_views(client, overrides, config)
     names = [c for c in tick_data if client is None or c == client]
     names += sorted({v.client for v in views} - set(names))
+    names += sorted(held.keys() - set(names))
     payload: dict[str, dict[str, object]] = {}
     for name in names:
         tick = tick_data.get(name)
@@ -439,6 +538,7 @@ def _status_json(client: str | None) -> dict[str, dict[str, object]]:
                     name, effective=config(), overrides=overrides, tick=tick
                 )
             ),
+            "pending_skips": _pending_skips_json(held.get(name, [])),
         }
     return payload
 
@@ -558,7 +658,8 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
     click.echo("-" * 90)
     running_row_counts = _echo_client_rows(clients_seen, by_client, show_all=show_all)
 
-    tick_data = latest_tick_summary_by_client()
+    events = _read_tick_events()
+    tick_data = client_tick_snapshots(events)
     _echo_paused_lanes(views, now=now)
     _echo_effective_config(
         clients_seen, effective=config(), overrides=overrides, tick_data=tick_data
@@ -573,6 +674,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
             effective=config(),
             paused_clients={v.client for v in views},
         )
+    _echo_pending_skips(clients_seen, _held_by_client(tasks, events, now=now), now=now)
 
     _echo_longest_lock_holds()
 
