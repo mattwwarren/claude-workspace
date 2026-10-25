@@ -53,7 +53,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `notifications` | bool | `false` | Desktop notifications on session events. A top-level `notifications: true` key in `clients.yaml` (sibling of `clients:`) turns it on for every client that doesn't set it explicitly |
 | `auto_background_threshold` | int \| null | `null` | Auto-background the session after N conversation turns |
 | `worker_model` | string \| null | `null` | Pin the model for DAEMON-origin worker spawns (auto-dev). Forwarded as `--model <id>` to `claude --bg` from both initial spawn and DAEMON-origin resume. USER-origin sessions (interactive `cw start` / `cw resume`) always inherit the operator's logged-in default model. Opaque string — no validation. |
-| `quality_gate_commands` | string \| null | `null` | Per-client override for the gate list named in the `impl`/`debt` session prompts (default: `ruff check, mypy, pytest`). Set it for a client whose stack is not Python, e.g. `"npm run lint && npm test"`. Empty string omits the gate sentence entirely. Opaque string — no validation. Distinct from the `quality_gates:` key removed from `project-config.yaml` by #1616 (that key was unread; this one is read by `get_purpose_prompt`), and from the CLAUDE.md "## Quality Gates" section (#1744). |
+| `quality_gate_commands` | string \| null | `null` | Per-client override for the gate list named in the `impl`/`debt` session prompts (default: `ruff check, mypy, pytest`). Set it for a client whose stack is not Python, e.g. `"npm run lint && npm test"`. Empty string omits the gate sentence entirely. Opaque string — no validation. Distinct from the `quality_gates:` key removed from `project-config.yaml` by #1616 (that key was unread; this one is read by `get_purpose_prompt`), from the later, live `quality_gates.timeouts` key in `project-config.yaml` (#2758, per-gate `/prep-pr` ceilings; see [Quality Gate Timeouts](#quality-gate-timeouts-quality_gatestimeouts-2758)), and from the CLAUDE.md "## Quality Gates" section (#1744). |
 | `operator_github_login` | string \| null | `null` | Override the runtime-resolved GitHub login used for counterparty/self-identity resolution (RFC 0011 S1). Rare multi-account case; the runtime `gh api user` login is authoritative when unset. |
 | `occupancy_gate_enabled` | bool \| null | `null` | Per-client rollout override for the #2077 pre-claim worktree-occupancy screen (#2396). `null` inherits the fleet-wide `orchestrator.yaml` setting; `false` skips the precompute for this client only and falls back to post-claim occupancy handling. |
 | `blocked_result_requeue_enabled` | bool | `false` | Per-client opt-in for #2401 deterministic-parse `BlockedResult` requeues. Set `true` one client at a time after reconciling any already-requeued deterministic-parse rows/events; missing or unusable client configuration fails closed to terminal handling. Roll back by setting it `false`; inspect `last_blocked_result` and use `cw dev-queue requeue <ticket> -c <client> --from-failed` after operator review. |
@@ -1880,6 +1880,47 @@ entirely — it is not a template substitution rendering an empty or em-dash
 placeholder value. For example, with the config above, a ticket with no epic
 gets `Part of RFC 0011 Wave 0 (Sprint 0)`; a ticket with `Epic: I` gets `Part
 of RFC 0011 Wave 1 (Sprint 1), Epic #I`.
+
+## Quality Gate Timeouts (`quality_gates.timeouts`, #2758)
+
+`/prep-pr` Step 7 asks `prep_pr_state.py gate-timeout <gate-name>` for each
+gate's foreground ceiling. The built-in table (`mypy` and `pytest` 600 s,
+`pre-commit` 480 s, anything else 480 s) can be raised or lowered per repo in
+`.claude/project-config.yaml`:
+
+```yaml
+# .claude/project-config.yaml
+quality_gates:
+  timeouts:
+    pre-commit: 600     # seconds; covers pre-commit-run and pre-commit-run-2
+```
+
+- **Matching.** Keys match gate names (as `detect-gates` prints them) by longest
+  hyphen-delimited prefix, the same rule as the built-in table: `pre-commit`
+  covers `pre-commit-run-2`, and an exact `pre-commit-run-2:` key beats it. A
+  gate with no configured key keeps the built-in value.
+- **Clamp.** No ceiling can exceed the Bash tool's 600 s foreground cap. A
+  larger value resolves to 600; the `gate-timeout` JSON then reports
+  `clamped: true`, the requested value in `configured_s`, and a `note`
+  explaining the clamp. Every response also carries `source`
+  (`project-config` or `default`).
+- **Invalid values.** Each value must be a positive integer of seconds
+  (booleans, floats, strings, `0` and negatives are rejected). A bad entry is
+  skipped with a warning on stderr and does not affect its siblings. A
+  malformed or unreadable file, or a `quality_gates` / `timeouts` value that is
+  not a mapping, falls back to the built-in table with a warning. A missing
+  file is silent.
+- **Without PyYAML.** The script also runs under a bare `python3`. There it
+  reads only the canonical block shape shown above (a column-0
+  `quality_gates:`, a nested `timeouts:`, one `key: value` per line; comments
+  allowed). Flow style such as `quality_gates: {timeouts: ...}` is reported
+  with a warning and ignored.
+- **Path.** The file is read relative to the current directory, like
+  `.claude/prep-pr-state.json`, so run `/prep-pr` from the worktree root.
+
+This key is unrelated to the `quality_gates:` key removed by #1616 (that one was
+never read). `claude-workspace` sets `pre-commit: 600`: its full hook suite runs
+the test suite and outgrew the 480 s default.
 
 ## Worktree Context File (`.claude/cw-context.json`)
 

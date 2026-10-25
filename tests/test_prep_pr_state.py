@@ -13,9 +13,13 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import logging
+import os
 import re
+import subprocess
 import sys
 import types
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -23,7 +27,13 @@ from typing import Any, Protocol, cast
 import pytest
 
 from cw.codex_review._context import _load_claude_md_quality_gates
-from tests.conftest import _bash_fences
+from tests.conftest import (
+    _bash_fences,
+    _write_project_config_yaml,
+    commit_tracked_file,
+    git_in,
+)
+from tests.test_prep_pr_finalize import _python
 
 # ---------------------------------------------------------------------------
 # Protocol for dynamically-loaded Gate objects
@@ -609,12 +619,28 @@ class TestGateTimeoutSeconds:
         )
 
     def test_gate_timeout_cli_subcommand_json_shape(
-        self, capsys: pytest.CaptureFixture[str]
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        monkeypatch.chdir(tmp_path)  # no project-config.yaml: built-in table only
         _mod.cmd_gate_timeout(argparse.Namespace(name="mypy"))
         out = json.loads(capsys.readouterr().out)
-        assert set(out.keys()) == {"gate", "foreground_ceiling_s", "poll_ceiling_s"}
+        assert set(out.keys()) == {
+            "gate",
+            "foreground_ceiling_s",
+            "poll_ceiling_s",
+            "source",
+            "configured_s",
+            "clamped",
+            "note",
+        }
         assert out["gate"] == "mypy"
+        assert out["source"] == "default"
+        assert out["configured_s"] is None
+        assert out["clamped"] is False
+        assert out["note"] is None
         assert out["foreground_ceiling_s"] == _mod.gate_timeout_seconds("mypy")
         assert out["poll_ceiling_s"] == _mod.GATE_POLL_CEILING_SECONDS
 
@@ -971,3 +997,695 @@ class TestRealClaudeMdGates:
         assert int(m_hook.group(1)) == commands.index(HOOK_SUITE_COMMAND) + 1, (
             "the prose names the wrong gate number for the hook suite. " + _PIN_GUIDANCE
         )
+
+
+# ---------------------------------------------------------------------------
+# #2758: per-repo gate-timeout override (quality_gates.timeouts)
+# ---------------------------------------------------------------------------
+
+_BASH_CAP_S = 600
+_PRE_COMMIT_DEFAULT_S = 480
+_CONFIG_REFERENCE = _REPO_ROOT / "config" / "CONFIG_REFERENCE.md"
+
+
+def _timeouts_yaml(*entries: str) -> str:
+    """A canonical ``quality_gates.timeouts`` block holding *entries*."""
+    return "quality_gates:\n  timeouts:\n" + "".join(f"    {e}\n" for e in entries)
+
+
+def _config_path(root: Path) -> Path:
+    return root / ".claude" / "project-config.yaml"
+
+
+def _resolve(tmp_path: Path, name: str, content: str | None = None) -> dict[str, Any]:
+    """Resolve *name* against a tmp project-config.yaml holding *content*."""
+    if content is not None:
+        _write_project_config_yaml(tmp_path, content)
+    return cast(
+        "dict[str, Any]",
+        _mod.resolve_gate_timeout(name, config_path=_config_path(tmp_path)),
+    )
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+
+@pytest.fixture(params=["pyyaml", "no-pyyaml"])
+def yaml_mode(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Run a test once with PyYAML and once through the dependency-free scanner."""
+    mode = cast("str", request.param)
+    if mode == "no-pyyaml":
+        monkeypatch.setattr(_mod, "yaml", None)
+    return mode
+
+
+_INVALID_TIMEOUT_VALUES = ['"fast"', "1.5", "true", "0", "-5"]
+
+_MALFORMED_CONFIGS = [
+    pytest.param("a: [unclosed\n", id="malformed-yaml"),
+    pytest.param("- a\n- b\n", id="root-not-mapping"),
+    pytest.param("quality_gates:\n  - 1\n  - 2\n", id="section-not-mapping"),
+    pytest.param("quality_gates:\n  timeouts: 5\n", id="timeouts-not-mapping"),
+]
+
+_NON_CANONICAL_CONFIGS = [
+    pytest.param("quality_gates: {timeouts: {pre-commit: 600}}\n", id="flow-root"),
+    pytest.param("quality_gates:\n  timeouts: {pre-commit: 600}\n", id="flow-timeouts"),
+    pytest.param(_timeouts_yaml("pre-commit 600"), id="entry-without-colon"),
+]
+
+
+class TestGateTimeoutConfigOverride:
+    def test_exact_key_overrides_default(self, tmp_path: Path, yaml_mode: str) -> None:
+        del yaml_mode
+        out = _resolve(tmp_path, "pre-commit", _timeouts_yaml("pre-commit: 600"))
+        assert out["foreground_ceiling_s"] == _BASH_CAP_S
+        assert out["source"] == "project-config"
+        assert out["configured_s"] == _BASH_CAP_S
+        assert out["clamped"] is False
+        assert out["note"] is None
+
+    def test_prefix_key_covers_derived_name(
+        self, tmp_path: Path, yaml_mode: str
+    ) -> None:
+        del yaml_mode
+        out = _resolve(tmp_path, "pre-commit-run-2", _timeouts_yaml("pre-commit: 600"))
+        assert out["foreground_ceiling_s"] == _BASH_CAP_S
+        assert out["source"] == "project-config"
+
+    def test_exact_key_beats_prefix_key(self, tmp_path: Path, yaml_mode: str) -> None:
+        del yaml_mode
+        content = _timeouts_yaml("pre-commit: 600", "pre-commit-run-2: 300")
+        out = _resolve(tmp_path, "pre-commit-run-2", content)
+        assert out["foreground_ceiling_s"] == 300
+        assert out["configured_s"] == 300
+
+    def test_unconfigured_gate_keeps_default(self, tmp_path: Path) -> None:
+        out = _resolve(tmp_path, "mypy", _timeouts_yaml("pre-commit: 600"))
+        assert out["foreground_ceiling_s"] == _mod.gate_timeout_seconds("mypy")
+        assert out["source"] == "default"
+        assert out["configured_s"] is None
+        assert out["clamped"] is False
+        assert out["gate"] == "mypy"
+        assert out["poll_ceiling_s"] == _mod.GATE_POLL_CEILING_SECONDS
+
+    def test_override_below_default_is_honoured(self, tmp_path: Path) -> None:
+        out = _resolve(tmp_path, "pre-commit", _timeouts_yaml("pre-commit: 120"))
+        assert out["foreground_ceiling_s"] == 120
+
+    def test_override_above_cap_is_clamped(
+        self, tmp_path: Path, yaml_mode: str
+    ) -> None:
+        del yaml_mode
+        out = _resolve(tmp_path, "pre-commit", _timeouts_yaml("pre-commit: 900"))
+        assert out["foreground_ceiling_s"] == _BASH_CAP_S
+        assert out["clamped"] is True
+        assert out["configured_s"] == 900
+        assert "900" in out["note"]
+        assert "600" in out["note"]
+
+    def test_override_at_cap_is_not_clamped(self, tmp_path: Path) -> None:
+        out = _resolve(tmp_path, "pre-commit", _timeouts_yaml("pre-commit: 600"))
+        assert out["clamped"] is False
+
+    @pytest.mark.parametrize("value", _INVALID_TIMEOUT_VALUES)
+    def test_invalid_value_falls_back_with_warning(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        yaml_mode: str,
+        value: str,
+    ) -> None:
+        del yaml_mode
+        content = _timeouts_yaml(f"pre-commit: {value}", "mypy: 300")
+        with caplog.at_level(logging.WARNING):
+            out = _resolve(tmp_path, "pre-commit", content)
+            sibling = _resolve(tmp_path, "mypy")
+        assert out["foreground_ceiling_s"] == _PRE_COMMIT_DEFAULT_S
+        assert out["source"] == "default"
+        assert any("pre-commit" in w for w in _warnings(caplog))
+        # One bad entry does not poison a valid sibling.
+        assert sibling["foreground_ceiling_s"] == 300
+        assert sibling["source"] == "project-config"
+
+    def test_missing_file_is_silent(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            out = _resolve(tmp_path, "pre-commit")
+        assert out["foreground_ceiling_s"] == _PRE_COMMIT_DEFAULT_S
+        assert out["source"] == "default"
+        assert _warnings(caplog) == []
+
+    @pytest.mark.parametrize("content", _MALFORMED_CONFIGS)
+    def test_malformed_config_falls_back_with_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, content: str
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            out = _resolve(tmp_path, "pre-commit", content)
+        assert out["foreground_ceiling_s"] == _PRE_COMMIT_DEFAULT_S
+        assert out["source"] == "default"
+        assert _warnings(caplog)
+
+    def test_empty_config_is_silent_default(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            out = _resolve(tmp_path, "pre-commit", "")
+        assert out["source"] == "default"
+        assert _warnings(caplog) == []
+
+    def test_config_without_section_is_silent_default(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, yaml_mode: str
+    ) -> None:
+        del yaml_mode
+        with caplog.at_level(logging.WARNING):
+            out = _resolve(tmp_path, "pre-commit", "pr:\n  tool: gh\n")
+            no_timeouts = _resolve(
+                tmp_path, "pre-commit", "quality_gates:\n  other: 1\n"
+            )
+        assert out["source"] == "default"
+        assert no_timeouts["source"] == "default"
+        assert _warnings(caplog) == []
+
+    def test_non_utf8_config_falls_back_with_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, yaml_mode: str
+    ) -> None:
+        del yaml_mode
+        path = _config_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"quality_gates:\n  timeouts:\n    pre-commit: \xff\xfe\n")
+        with caplog.at_level(logging.WARNING):
+            out = _resolve(tmp_path, "pre-commit")
+        assert out["foreground_ceiling_s"] == _PRE_COMMIT_DEFAULT_S
+        assert _warnings(caplog)
+
+    def test_config_path_directory_falls_back_with_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _config_path(tmp_path).mkdir(parents=True)
+        with caplog.at_level(logging.WARNING):
+            out = _resolve(tmp_path, "pre-commit")
+        assert out["foreground_ceiling_s"] == _PRE_COMMIT_DEFAULT_S
+        assert _warnings(caplog)
+
+    def test_cmd_gate_timeout_reads_cwd_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _write_project_config_yaml(tmp_path, _timeouts_yaml("pre-commit: 900"))
+        monkeypatch.chdir(tmp_path)
+        _mod.cmd_gate_timeout(argparse.Namespace(name="pre-commit-run-2"))
+        out = json.loads(capsys.readouterr().out)
+        assert out["foreground_ceiling_s"] == _BASH_CAP_S
+        assert out["clamped"] is True
+        assert out["configured_s"] == 900
+
+    def test_live_repo_config_sets_hook_suite_to_cap(self) -> None:
+        out = _mod.resolve_gate_timeout(
+            "pre-commit-run-2",
+            config_path=_REPO_ROOT / ".claude" / "project-config.yaml",
+        )
+        assert out["foreground_ceiling_s"] == _BASH_CAP_S
+        assert out["source"] == "project-config"
+        assert out["clamped"] is False
+
+    def test_config_reference_documents_timeouts_key(self) -> None:
+        text = _CONFIG_REFERENCE.read_text(encoding="utf-8")
+        assert "quality_gates.timeouts" in text
+
+
+class TestGateTimeoutScannerWithoutPyYaml:
+    """The dependency-free scanner used when PyYAML is not importable."""
+
+    @pytest.fixture(autouse=True)
+    def _no_pyyaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_mod, "yaml", None)
+
+    def test_trailing_comment_is_stripped(self, tmp_path: Path) -> None:
+        out = _resolve(
+            tmp_path,
+            "pre-commit-run-2",
+            _timeouts_yaml("pre-commit: 600  # Bash cap"),
+        )
+        assert out["foreground_ceiling_s"] == _BASH_CAP_S
+        assert out["source"] == "project-config"
+
+    def test_comment_line_between_keys_is_tolerated(self, tmp_path: Path) -> None:
+        content = _timeouts_yaml("mypy: 300", "# why", "pre-commit: 600")
+        assert _resolve(tmp_path, "mypy", content)["foreground_ceiling_s"] == 300
+        assert _resolve(tmp_path, "pre-commit")["foreground_ceiling_s"] == 600
+
+    def test_top_level_key_after_block_stops_the_scan(self, tmp_path: Path) -> None:
+        content = _timeouts_yaml("mypy: 300") + "other:\n  pre-commit: 900\n"
+        assert _resolve(tmp_path, "mypy", content)["foreground_ceiling_s"] == 300
+        out = _resolve(tmp_path, "pre-commit")
+        assert out["foreground_ceiling_s"] == _PRE_COMMIT_DEFAULT_S
+        assert out["source"] == "default"
+
+    def test_sibling_key_does_not_leak(self, tmp_path: Path) -> None:
+        content = _timeouts_yaml("mypy: 300") + "  other:\n    pre-commit: 900\n"
+        out = _resolve(tmp_path, "pre-commit", content)
+        assert out["foreground_ceiling_s"] == _PRE_COMMIT_DEFAULT_S
+        assert _resolve(tmp_path, "mypy")["foreground_ceiling_s"] == 300
+
+    def test_timeouts_under_another_section_is_ignored(self, tmp_path: Path) -> None:
+        content = "other:\n  timeouts:\n    pre-commit: 600\n"
+        out = _resolve(tmp_path, "pre-commit", content)
+        assert out["source"] == "default"
+
+    @pytest.mark.parametrize("content", _NON_CANONICAL_CONFIGS)
+    def test_non_canonical_shape_falls_back_with_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, content: str
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            out = _resolve(tmp_path, "pre-commit", content)
+        assert out["foreground_ceiling_s"] == _PRE_COMMIT_DEFAULT_S
+        assert out["source"] == "default"
+        assert _warnings(caplog)
+
+
+def test_dash_s_gate_timeout_reads_config_without_pyyaml(tmp_path: Path) -> None:
+    """Under ``python -S`` (no site-packages, so no PyYAML) the override still
+    applies: the script's own scanner reads the canonical block."""
+    hidden = subprocess.run(
+        [*_python(no_site=True), "-c", "import yaml"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert hidden.returncode != 0
+    assert "No module named 'yaml'" in hidden.stderr
+    _write_project_config_yaml(tmp_path, _timeouts_yaml("pre-commit: 600"))
+    result = subprocess.run(
+        [*_python(no_site=True), str(_SCRIPT), "gate-timeout", "pre-commit-run-2"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["foreground_ceiling_s"] == _BASH_CAP_S
+    assert out["source"] == "project-config"
+
+
+# ---------------------------------------------------------------------------
+# #2758: gate-pass stamps — skip a redundant gate re-run at an unchanged SHA
+# ---------------------------------------------------------------------------
+
+_QUOTED_PYTEST_GATE = (
+    "python -m pytest tests/ -m 'not integration' "
+    "&& python -m coverage report --fail-under=88"
+)
+_GATE_REPO_CLAUDE_MD = _gates_section(
+    _bash_block("python -m mypy --strict src/", _QUOTED_PYTEST_GATE)
+)
+_STATE_REL = Path(".claude") / "prep-pr-state.json"
+
+
+@pytest.fixture
+def gate_repo(
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """A real git repo with a committed CLAUDE.md gate set, as the cwd.
+
+    Every inherited ``GIT_*`` var is removed first: ``prep_pr_state._run_git``
+    runs git with the inherited env, and pytest may itself run inside a git
+    hook whose ``GIT_DIR`` / ``GIT_INDEX_FILE`` would redirect git away from
+    this repo (green locally, red in a hook or CI). The state file is left
+    untracked and unignored on purpose, so the dirty check's pathspec
+    exclusion is what keeps it from dirtying the tree.
+    """
+    for key in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(key)
+    repo = make_git_repo("repo")
+    commit_tracked_file(repo, "CLAUDE.md", _GATE_REPO_CLAUDE_MD)
+    monkeypatch.chdir(repo)
+    return repo
+
+
+def _gate_names() -> list[str]:
+    return [g["name"] for g in _mod.detect_gates()["gates"]]
+
+
+def _gate_pass(
+    capsys: pytest.CaptureFixture[str], action: str, name: str, base: str = "main"
+) -> dict[str, Any]:
+    _mod.cmd_gate_pass(argparse.Namespace(action=action, name=name, base=base))
+    return cast("dict[str, Any]", json.loads(capsys.readouterr().out))
+
+
+def _state_json(repo: Path) -> dict[str, Any]:
+    return cast("dict[str, Any]", json.loads((repo / _STATE_REL).read_text()))
+
+
+def _stamps(repo: Path, name: str) -> list[dict[str, Any]]:
+    return [p for p in _state_json(repo)["gate_passes"] if p["name"] == name]
+
+
+class TestGatePass:
+    def test_record_then_check_skips_at_same_sha(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        gates = _mod.detect_gates()["gates"]
+        assert any(g["command"] == _QUOTED_PYTEST_GATE for g in gates)
+        head = git_in(gate_repo, "rev-parse", "HEAD")
+        for name in _gate_names():
+            recorded = _gate_pass(capsys, "record", name)
+            assert recorded == {"gate": name, "recorded": True, "sha": head}
+            checked = _gate_pass(capsys, "check", name)
+            assert checked["skip"] is True
+            assert checked["reason"] == "matched"
+            assert checked["sha"] == head
+            assert checked["stamped_sha"] == head
+            assert head in checked["message"]
+            assert name in checked["message"]
+
+    def test_new_commit_is_sha_changed(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name = _gate_names()[0]
+        _gate_pass(capsys, "record", name)
+        commit_tracked_file(gate_repo, "src/new.py")
+        checked = _gate_pass(capsys, "check", name)
+        assert checked["skip"] is False
+        assert checked["reason"] == "sha-changed"
+        assert checked["message"] is None
+
+    def test_modified_tracked_file_is_dirty(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name = _gate_names()[0]
+        _gate_pass(capsys, "record", name)
+        (gate_repo / "CLAUDE.md").write_text(_GATE_REPO_CLAUDE_MD + "\nedit\n")
+        assert _gate_pass(capsys, "check", name)["reason"] == "dirty-worktree"
+
+    def test_untracked_file_is_dirty(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name = _gate_names()[0]
+        _gate_pass(capsys, "record", name)
+        (gate_repo / "scratch.txt").write_text("x\n")
+        assert _gate_pass(capsys, "check", name)["reason"] == "dirty-worktree"
+
+    def test_other_gate_stamp_is_no_stamp(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        first, second = _gate_names()
+        _gate_pass(capsys, "record", first)
+        checked = _gate_pass(capsys, "check", second)
+        assert checked["skip"] is False
+        assert checked["reason"] == "no-stamp"
+        assert checked["stamped_sha"] is None
+
+    def test_no_state_is_no_stamp_and_creates_nothing(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        checked = _gate_pass(capsys, "check", _gate_names()[0])
+        assert checked["reason"] == "no-stamp"
+        assert not (gate_repo / _STATE_REL).exists()
+
+    def test_unknown_gate(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        checked = _gate_pass(capsys, "check", "no-such-gate")
+        assert checked["skip"] is False
+        assert checked["reason"] == "unknown-gate"
+        recorded = _gate_pass(capsys, "record", "no-such-gate")
+        assert recorded == {
+            "gate": "no-such-gate",
+            "recorded": False,
+            "reason": "unknown-gate",
+        }
+        assert not (gate_repo / _STATE_REL).exists()
+
+    def test_environment_mutating_gate_is_never_stamped_or_skipped(
+        self,
+        gate_repo: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        name = _gate_names()[0]
+        monkeypatch.setattr(_mod, "_gate_command", lambda _name: "uv run mypy .")
+        assert _gate_pass(capsys, "record", name) == {
+            "gate": name,
+            "recorded": False,
+            "reason": _mod.ENVIRONMENT_MUTATING_REASON,
+        }
+        assert not (gate_repo / _STATE_REL).exists()
+        checked = _gate_pass(capsys, "check", name)
+        assert checked["skip"] is False
+        assert checked["reason"] == _mod.ENVIRONMENT_MUTATING_REASON
+        assert not (gate_repo / _STATE_REL).exists()
+
+    def test_edited_stamp_command_is_command_changed(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name = _gate_names()[0]
+        _gate_pass(capsys, "record", name)
+        state = _state_json(gate_repo)
+        state["gate_passes"][0]["command"] = "uv run mypy ."
+        (gate_repo / _STATE_REL).write_text(json.dumps(state))
+        assert _gate_pass(capsys, "check", name)["reason"] == "command-changed"
+
+    def test_unignored_state_file_does_not_dirty_the_tree(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name = _gate_names()[0]
+        _gate_pass(capsys, "record", name)
+        # The state file really is untracked and unignored here.
+        assert "?? .claude/" in git_in(gate_repo, "status", "--porcelain")
+        assert _gate_pass(capsys, "check", name)["skip"] is True
+
+    def test_ignored_state_file_behaves_the_same(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        commit_tracked_file(gate_repo, ".gitignore", f"{_STATE_REL.as_posix()}\n")
+        name = _gate_names()[0]
+        _gate_pass(capsys, "record", name)
+        assert git_in(gate_repo, "status", "--porcelain") == ""
+        assert _gate_pass(capsys, "check", name)["skip"] is True
+
+    def test_record_on_dirty_tree_is_refused(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        (gate_repo / "scratch.txt").write_text("x\n")
+        name = _gate_names()[0]
+        recorded = _gate_pass(capsys, "record", name)
+        assert recorded == {"gate": name, "recorded": False, "reason": "dirty-worktree"}
+        assert not (gate_repo / _STATE_REL).exists()
+
+    def test_record_creates_state_with_base_branch(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _gate_pass(capsys, "record", _gate_names()[0], base="develop")
+        assert _state_json(gate_repo)["base_branch"] == "develop"
+
+    def test_second_record_replaces_the_stamp(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name = _gate_names()[0]
+        _gate_pass(capsys, "record", name)
+        _gate_pass(capsys, "check", name)
+        assert len(_stamps(gate_repo, name)[0]["skipped_at"]) == 1
+        _gate_pass(capsys, "record", name)
+        stamps = _stamps(gate_repo, name)
+        assert len(stamps) == 1
+        assert stamps[0]["skipped_at"] == []
+
+    def test_each_skip_is_recorded_on_the_stamp(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name = _gate_names()[0]
+        _gate_pass(capsys, "record", name)
+        assert _stamps(gate_repo, name)[0]["skipped_at"] == []
+        _gate_pass(capsys, "check", name)
+        assert len(_stamps(gate_repo, name)[0]["skipped_at"]) == 1
+        _gate_pass(capsys, "check", name)
+        skipped_at = _stamps(gate_repo, name)[0]["skipped_at"]
+        assert len(skipped_at) == 2
+        assert all(datetime.fromisoformat(ts).tzinfo is not None for ts in skipped_at)
+
+    def test_non_skip_check_leaves_state_untouched(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name = _gate_names()[0]
+        _gate_pass(capsys, "record", name)
+        before = (gate_repo / _STATE_REL).read_bytes()
+        (gate_repo / "scratch.txt").write_text("x\n")
+        assert _gate_pass(capsys, "check", name)["skip"] is False
+        assert (gate_repo / _STATE_REL).read_bytes() == before
+
+    def test_status_reports_gate_skips(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name = _gate_names()[0]
+        _gate_pass(capsys, "record", name)
+        _mod.cmd_status(argparse.Namespace())
+        assert json.loads(capsys.readouterr().out)["gate_skips"] == []
+        _gate_pass(capsys, "check", name)
+        _gate_pass(capsys, "check", name)
+        _mod.cmd_status(argparse.Namespace())
+        head = git_in(gate_repo, "rev-parse", "HEAD")
+        assert json.loads(capsys.readouterr().out)["gate_skips"] == [
+            {"gate": name, "sha": head, "count": 2}
+        ]
+
+    def test_unresolved_head_is_head_unresolved(
+        self,
+        gate_repo: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        del gate_repo
+        name = _gate_names()[0]
+        _gate_pass(capsys, "record", name)
+
+        def _git_fails(_args: list[str], *, default: str = "") -> str:
+            return default
+
+        monkeypatch.setattr(_mod, "_run_git", _git_fails)
+        assert _gate_pass(capsys, "check", name)["reason"] == "head-unresolved"
+        assert _gate_pass(capsys, "record", name) == {
+            "gate": name,
+            "recorded": False,
+            "reason": "head-unresolved",
+        }
+
+    def test_git_status_failure_reads_as_dirty(
+        self,
+        gate_repo: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        name = _gate_names()[0]
+        _gate_pass(capsys, "record", name)
+        head = git_in(gate_repo, "rev-parse", "HEAD")
+
+        def _status_fails(args: list[str], *, default: str = "") -> str:
+            return head if args[0] == "rev-parse" else default
+
+        monkeypatch.setattr(_mod, "_run_git", _status_fails)
+        assert _gate_pass(capsys, "check", name)["reason"] == "dirty-worktree"
+
+
+class TestRunGitDefault:
+    def test_called_process_error_returns_default(self, gate_repo: Path) -> None:
+        del gate_repo
+        assert (
+            _mod._run_git(["rev-parse", "--verify", "no-such-ref"], default="fb")
+            == "fb"
+        )
+        assert _mod._run_git(["rev-parse", "--verify", "no-such-ref"]) == ""
+
+    def test_missing_git_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _no_git(*_args: object, **_kwargs: object) -> object:
+            raise FileNotFoundError
+
+        monkeypatch.setattr(_mod.subprocess, "run", _no_git)
+        assert _mod._run_git(["status"], default="fb") == "fb"
+
+
+def _stamp(sha: str = "abc", command: str = "uv run mypy .") -> Any:
+    return _mod.GatePass(name="mypy", command=command, sha=sha, recorded="t")
+
+
+@pytest.mark.parametrize(
+    ("stamp_fields", "head", "dirty", "expected"),
+    [
+        pytest.param(None, "abc", False, "no-stamp", id="no-stamp"),
+        pytest.param({}, "", False, "head-unresolved", id="head-unresolved"),
+        pytest.param({}, "abc", True, "dirty-worktree", id="dirty"),
+        pytest.param({"sha": "old"}, "abc", False, "sha-changed", id="sha"),
+        pytest.param(
+            {"command": "uv run mypy src/"},
+            "abc",
+            False,
+            "command-changed",
+            id="command",
+        ),
+        pytest.param({}, "abc", False, "matched", id="matched"),
+    ],
+)
+def test_gate_skip_reason_table(
+    stamp_fields: dict[str, str] | None, head: str, dirty: bool, expected: str
+) -> None:
+    stamp = None if stamp_fields is None else _stamp(**stamp_fields)
+    assert _mod.gate_skip_reason(stamp, "uv run mypy .", head, dirty) == expected
+
+
+class TestGatePassPersistence:
+    def test_round_trip_keeps_gate_passes(self) -> None:
+        state = _mod.PrepPrState(base_branch="main")
+        stamp = _stamp()
+        stamp.skipped_at.append("2026-01-01T00:00:00+00:00")
+        state.gate_passes.append(stamp)
+        loaded = _mod.PrepPrState.from_dict(json.loads(json.dumps(state.to_dict())))
+        assert loaded.gate_passes == [stamp]
+
+    def test_legacy_state_without_gate_passes_loads(self) -> None:
+        legacy = {"base_branch": "main", "snapshots": [], "gates": []}
+        assert _mod.PrepPrState.from_dict(legacy).gate_passes == []
+
+    def test_gate_pass_from_dict_defaults_skipped_at(self) -> None:
+        data = {"name": "mypy", "command": "c", "sha": "abc", "recorded": "t"}
+        assert _mod.GatePass.from_dict(data).skipped_at == []
+
+    def test_clean_removes_stamps(
+        self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _gate_pass(capsys, "record", _gate_names()[0])
+        assert _mod.clean_state() is True
+        assert not (gate_repo / _STATE_REL).exists()
+
+
+class TestGatePassMainDispatch:
+    def _main(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        *argv: str,
+    ) -> dict[str, Any]:
+        monkeypatch.setattr(sys, "argv", ["prep_pr_state.py", *argv])
+        _mod.main()
+        return cast("dict[str, Any]", json.loads(capsys.readouterr().out))
+
+    def test_record_check_and_timeout_dispatch(
+        self,
+        gate_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        name = _gate_names()[0]
+        recorded = self._main(monkeypatch, capsys, "gate-pass", "record", name)
+        assert recorded["recorded"] is True
+        assert _state_json(gate_repo)["base_branch"] == "main"
+        checked = self._main(monkeypatch, capsys, "gate-pass", "check", name)
+        assert checked["skip"] is True
+        timeout = self._main(monkeypatch, capsys, "gate-timeout", name)
+        assert timeout["source"] == "default"
+
+    def test_record_base_option(
+        self,
+        gate_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        name = _gate_names()[0]
+        self._main(monkeypatch, capsys, "gate-pass", "record", name, "--base", "dev")
+        assert _state_json(gate_repo)["base_branch"] == "dev"
+
+    def test_unknown_action_exits_nonzero(
+        self, gate_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        del gate_repo
+        monkeypatch.setattr(
+            sys, "argv", ["prep_pr_state.py", "gate-pass", "bogus", "x"]
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            _mod.main()
+        assert excinfo.value.code != 0

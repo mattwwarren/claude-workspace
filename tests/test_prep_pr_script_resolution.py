@@ -37,6 +37,7 @@ SUBCOMMANDS = (
     "check-scope",
     "gate-timeout",
     "gate-elapsed",
+    "gate-pass",
     "clean",
 )
 
