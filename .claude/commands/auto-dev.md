@@ -410,8 +410,8 @@ of:
 2. this rule's own two-branch test finds no operator-authority comment newer
    than T ("delta absent," above);
 3. the calling stage's own persisted `body_sha` — the ticket-body half of its
-   tracker-state fingerprint — equals a freshly computed SHA-256 of the
-   live-fetched body.
+   tracker-state fingerprint — equals the output of `cw body-sha` for the live
+   ticket, never a hand-computed hash; a non-zero exit fails this condition.
 
 The comment-scoped rule composes with condition 3; it never exempts the
 caller from it. The plan stage's instantiation of all three conditions lives

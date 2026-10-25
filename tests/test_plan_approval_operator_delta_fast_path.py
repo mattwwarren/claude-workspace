@@ -5,9 +5,17 @@ headless contract. Shared readers are imported from the established test
 helpers rather than duplicated here.
 """
 
+import re
+
 from tests.conftest import _REPO_ROOT, _appendix, _checkpoint1_section, _cmd, _norm
 from tests.test_agent_comment_provenance import RULE_ANCHOR, _rule_section
 from tests.test_auto_dev_preflight_resolutions import _after
+from tests.test_plan_stage_settlement import (
+    DELTA_RESET_ANCHOR,
+    FINGERPRINT_READ_ANCHOR,
+    _cap_check_block,
+    _step1c0_block,
+)
 
 NEW_SUBSECTION_ANCHOR = "### Operator-authority delta (#2433)"
 DESTRUCTIVE_GATE_ANCHOR = "### Destructive-directive gate"
@@ -16,6 +24,9 @@ PROVENANCE_ANCHOR = "### Provenance — what carries operator authority"
 # with (#2433 fix cycle 6, generalized to every caller by #2311).
 COMPOSITION_RULE_NAME = "Fast-path composition requires a third condition"
 AUTO_DEV_DOC_PATH = "`.claude/commands/auto-dev.md`"
+# How far either side of a `body_sha` mention the #2761 guard scans for a
+# hand-hash description.
+_NEARBY_SPAN = 250
 
 
 def _headless_contract() -> str:
@@ -173,7 +184,7 @@ def test_step1a0b_fast_path_requires_body_sha_match_third_condition() -> None:
     assert "ALL three conditions hold" in window
     assert "plan_approved_fingerprint` both exist on the row" in window
     assert "no operator-authority comment newer than `plan_approved_at`" in window
-    assert "equals a freshly computed SHA-256 of the live-fetched issue body" in window
+    assert "equals the output of `cw body-sha`" in window
     assert (
         "A `body_sha` mismatch disqualifies this branch exactly as a newer "
         "operator-authority comment does" in window
@@ -286,3 +297,78 @@ def test_auto_dev_rule_generalizes_composition_to_every_caller_not_only_fast_pat
     assert "Checkpoint 1" in window
     assert "**Row path** bullet" in window
     assert "**Fingerprint mismatch sub-case**" in window
+
+
+# ---------------------------------------------------------------------------
+# #2761 -- `body_sha` is the output of `cw body-sha`, never a hand-computed
+# hash. The definition lives once, in auto-dev-plan.md's Tracker-state-delta
+# reset; every other site points at the command instead of describing it.
+# ---------------------------------------------------------------------------
+
+
+def _delta_reset_window() -> str:
+    return _norm(_after(_cap_check_block(), DELTA_RESET_ANCHOR, span=2600))
+
+
+def test_tracker_state_delta_reset_defines_body_sha_via_cw_body_sha() -> None:
+    window = _delta_reset_window()
+    assert "`cw body-sha <n> -c <client>`" in window
+    assert "`cw body-sha --body-file .cw/ticket-body.txt`" in window
+    assert "`get_issue`" in window
+    assert "with the Write tool" in window
+    assert "`cw.plan_fingerprint.compute_body_sha`" in window
+    assert "the same function `cw dev-queue approve` uses" in window
+    assert "never hash the body by hand" in window
+
+
+def test_tracker_state_delta_reset_says_what_to_do_when_cw_body_sha_fails() -> None:
+    window = _delta_reset_window()
+    assert "if `cw body-sha` exits non-zero, do not persist a `body_sha`" in window
+    assert "leave the marker absent" in window
+    assert "write no `plan-stage-last-evaluated` line this round" in window
+    assert "never substitute a hand-computed hash" in window
+
+
+def test_appendix_fingerprint_read_obtains_body_sha_from_cw_body_sha() -> None:
+    window = _norm(_after(_step1c0_block(), FINGERPRINT_READ_ANCHOR, span=1200))
+    assert "obtained from `cw body-sha`" in window
+    assert "*Tracker-state-delta reset* in `auto-dev-plan.md`" in window
+    assert "SHA-256" not in window
+
+
+def test_step1a0b_condition3_compares_against_cw_body_sha() -> None:
+    window = _norm(
+        _after(_appendix("plan"), "Operator-authority-delta alternate", span=2600)
+    )
+    assert "equals the output of `cw body-sha`" in window
+    assert "a non-zero exit fails the condition" in window
+    assert "SHA-256" not in window
+
+
+def test_auto_dev_fast_path_condition3_names_cw_body_sha() -> None:
+    window = _norm(
+        _after(
+            _norm(_cmd("auto-dev.md")),
+            "the calling stage's own persisted `body_sha`",
+            span=400,
+        )
+    )
+    assert "equals the output of `cw body-sha`" in window
+    assert "a non-zero exit fails this condition" in window
+    assert "SHA-256" not in window
+
+
+def test_no_prompt_describes_body_sha_as_a_hand_computed_hash() -> None:
+    """No `sha256`/`sha256sum` wording sits near any `body_sha` mention in the
+    three prompt files, and the old description is gone everywhere."""
+    for text in (_cmd("auto-dev-plan.md"), _appendix("plan"), _cmd("auto-dev.md")):
+        norm = _norm(text)
+        assert "sha256sum" not in norm
+        assert "SHA-256 of the live-fetched" not in norm
+        assert "computed over the raw string" not in norm
+        for match in re.finditer("body_sha", norm):
+            nearby = norm[
+                max(0, match.start() - _NEARBY_SPAN) : match.end() + _NEARBY_SPAN
+            ].lower()
+            assert "sha256" not in nearby
+            assert "sha-256 of" not in nearby

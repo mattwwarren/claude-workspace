@@ -18,6 +18,7 @@ from cw.models.operator_resolution import OperatorResolution
 from cw.plan_fingerprint import (
     PLAN_DRAFT_FINGERPRINT_KEY,
     bind_claimed_fingerprint,
+    compute_body_sha,
     compute_plan_draft_fingerprint,
     extract_persisted_body_sha,
     is_plan_draft_fingerprint,
@@ -263,6 +264,36 @@ class TestExtractPersistedBodySha:
         assert extract_persisted_body_sha(_LAST_EVALUATED + _BODY) is None
         assert extract_persisted_body_sha(_ROUND + "body\n" + _LAST_EVALUATED) is None
         assert extract_persisted_body_sha(_BODY + _ROUND + _LAST_EVALUATED) is None
+
+
+class TestComputeBodySha:
+    """#2761: the one ``body_sha`` implementation, shared by ``cw dev-queue
+    approve`` and ``cw body-sha``. Trailing whitespace is never drift."""
+
+    @pytest.mark.parametrize("suffix", ["\n", "\r\n\n", "   ", " \t\n  \n"])
+    def test_trailing_whitespace_does_not_change_the_sha(self, suffix: str) -> None:
+        body = "Ticket body.\n\nSecond paragraph."
+        assert compute_body_sha(body + suffix) == compute_body_sha(body)
+
+    def test_content_edit_changes_the_sha(self) -> None:
+        assert compute_body_sha("Ticket body.") != compute_body_sha("Ticket body!")
+
+    def test_leading_whitespace_is_hashed(self) -> None:
+        assert compute_body_sha("  Ticket body.") != compute_body_sha("Ticket body.")
+
+    def test_interior_whitespace_is_hashed(self) -> None:
+        assert compute_body_sha("a\n\nb") != compute_body_sha("a\nb")
+
+    @pytest.mark.parametrize("body", ["", "   ", "\n\n", "\r\n \t"])
+    def test_empty_or_whitespace_only_body_hashes_as_empty(self, body: str) -> None:
+        assert compute_body_sha(body) == hashlib.sha256(b"").hexdigest()
+
+    def test_result_is_a_full_lowercase_hex_digest(self) -> None:
+        assert is_plan_draft_fingerprint(compute_body_sha("Ticket body.\n"))
+
+    def test_hashes_the_rstripped_utf8_bytes(self) -> None:
+        assert compute_body_sha("x\n") == hashlib.sha256(b"x").hexdigest()
+        assert compute_body_sha("café\n") == hashlib.sha256("café".encode()).hexdigest()
 
 
 class TestBindClaimedFingerprint:
