@@ -225,9 +225,8 @@ def _reap_wedge_findings(
         session.
     Class-12 (pending-worktree-occupied, #2516): advisory only. The finding
         names a PENDING row held by an occupied worktree; ``--reap`` changes
-        nothing for it and writes no audit row. It is listed in the
-        running_ticket_ids exclusion set so the default-inclusive set never
-        reverts a RUNNING row of the same ticket.
+        nothing for it and writes no audit row. It is not part of the queue
+        mutation path.
 
     The former class-1 (pane-idle-but-active) wedge was removed with the
     multiplexer substrate — under the native daemon there are no panes to
@@ -237,6 +236,7 @@ def _reap_wedge_findings(
         f.ticket_id
         for f in findings
         if f.ticket_id
+        and f.wedge_class != WEDGE_PENDING_WORKTREE_OCCUPIED
         and f.wedge_class
         not in {
             "wedge/repo-ahead-of-queue",
@@ -247,7 +247,6 @@ def _reap_wedge_findings(
             _WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN,
             _WEDGE_LEAKED_DAEMON_WORKER,
             WEDGE_ROUTED_RESULT_STRANDED,
-            WEDGE_PENDING_WORKTREE_OCCUPIED,
         }
     }
     blocked_ticket_ids: set[str] = {

@@ -9,12 +9,10 @@ else names the stall.
 
 Advisory only. :func:`_check_wedge_pending_worktree_occupied` reads the
 inbox and reports; it records no event and mutates nothing. ``cw doctor
---reap`` leaves the row alone: the class is listed in the
-``running_ticket_keys`` exclusion set of ``cw.doctor.wedge.reap``, which is
-default-inclusive and would otherwise revert a RUNNING row of the same
-ticket. A stale streak (newest event older than ``TICK_STALE_SECONDS``) is
-not reported: the dispatch loop itself has stopped ticking, which the
-loop-liveness check owns.
+--reap`` leaves the row alone because this class is not part of the queue
+mutation path. A stale streak (newest event older than
+``TICK_STALE_SECONDS``) is not reported: the dispatch loop itself has
+stopped ticking, which the loop-liveness check owns.
 """
 
 from __future__ import annotations
