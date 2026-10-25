@@ -39,6 +39,13 @@ if TYPE_CHECKING:
 # enough that a ticket skipped yesterday and again today is two runs.
 STREAK_MAX_GAP_SECONDS = 600
 
+# Canonical keys for the per-ticket ``dispatch.tick`` payload. Keep these
+# beside the parser so readers of this newly introduced shape share its wire
+# names.
+DISPATCH_TICK_CLIENT_KEY = "client"
+DISPATCH_TICK_TICKET_ID_KEY = "ticket_id"
+DISPATCH_TICK_SKIP_REASON_KEY = "skip_reason"
+
 
 @dataclass(frozen=True)
 class SkipStreak:
@@ -65,9 +72,9 @@ def _per_ticket_skip(
     """``((client, ticket_id), skip)`` for a well-formed per-ticket tick, else None."""
     if event.type is not OrchestratorEventType.DISPATCH_TICK:
         return None
-    client = event.payload.get("client")
-    ticket_id = event.payload.get("ticket_id")
-    reason = event.payload.get("skip_reason")
+    client = event.payload.get(DISPATCH_TICK_CLIENT_KEY)
+    ticket_id = event.payload.get(DISPATCH_TICK_TICKET_ID_KEY)
+    reason = event.payload.get(DISPATCH_TICK_SKIP_REASON_KEY)
     if not (
         isinstance(client, str)
         and isinstance(ticket_id, str)

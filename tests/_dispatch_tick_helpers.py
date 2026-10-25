@@ -18,6 +18,11 @@ from freezegun import freeze_time
 
 from cw.events import record_event
 from cw.models import OrchestratorEvent, OrchestratorEventType
+from cw.pending_skip_streak import (
+    DISPATCH_TICK_CLIENT_KEY,
+    DISPATCH_TICK_SKIP_REASON_KEY,
+    DISPATCH_TICK_TICKET_ID_KEY,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -31,12 +36,12 @@ def client_tick_event(
 ) -> OrchestratorEvent:
     """An in-memory client-wide ``dispatch.tick`` (no ``ticket_id``) at *at*."""
     body: dict[str, object] = {
-        "client": client,
+        DISPATCH_TICK_CLIENT_KEY: client,
         "claimed": 0,
         "pending": 1,
         "running": 0,
         "cap": 3,
-        "skip_reason": "no_pending",
+        DISPATCH_TICK_SKIP_REASON_KEY: "no_pending",
     }
     body.update(payload)
     return OrchestratorEvent(
@@ -58,10 +63,10 @@ def skip_tick_events(
         OrchestratorEvent(
             type=OrchestratorEventType.DISPATCH_TICK,
             payload={
-                "client": client,
+                DISPATCH_TICK_CLIENT_KEY: client,
                 "claimed": 0,
-                "skip_reason": reason,
-                "ticket_id": ticket_id,
+                DISPATCH_TICK_SKIP_REASON_KEY: reason,
+                DISPATCH_TICK_TICKET_ID_KEY: ticket_id,
             },
             created_at=start + i * step,
         )

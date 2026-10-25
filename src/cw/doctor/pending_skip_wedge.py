@@ -10,7 +10,7 @@ else names the stall.
 Advisory only. :func:`_check_wedge_pending_worktree_occupied` reads the
 inbox and reports; it records no event and mutates nothing. ``cw doctor
 --reap`` leaves the row alone: the class is listed in the
-``running_ticket_ids`` exclusion set of ``cw.doctor.wedge.reap``, which is
+``running_ticket_keys`` exclusion set of ``cw.doctor.wedge.reap``, which is
 default-inclusive and would otherwise revert a RUNNING row of the same
 ticket. A stale streak (newest event older than ``TICK_STALE_SECONDS``) is
 not reported: the dispatch loop itself has stopped ticking, which the
@@ -19,6 +19,7 @@ loop-liveness check owns.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -38,6 +39,13 @@ WEDGE_PENDING_WORKTREE_OCCUPIED = "wedge/pending-worktree-occupied"
 # About 30 minutes at the default 30s tick: long past any live session's
 # normal worktree release, short enough to surface the same working day.
 PENDING_SKIP_WEDGE_THRESHOLD = 60
+
+
+@dataclass(frozen=True)
+class PendingWorktreeOccupiedFinding(WedgeFinding):
+    """Class-12 finding retaining the owning queue client's identity."""
+
+    client: str = ""
 
 
 def _recipe(streak: SkipStreak) -> str:
@@ -76,12 +84,13 @@ def _check_wedge_pending_worktree_occupied(
     streaks = pending_skip_streaks(pending_rows, events, now=datetime.now(UTC))
     path = str(state_file())
     return [
-        WedgeFinding(
+        PendingWorktreeOccupiedFinding(
             wedge_class=WEDGE_PENDING_WORKTREE_OCCUPIED,
             session_id=None,
             ticket_id=streak.ticket_id,
             recipe=_recipe(streak),
             state_file=path,
+            client=streak.client,
         )
         for _key, streak in sorted(streaks.items())
         if _is_wedged(streak)
