@@ -67,6 +67,7 @@ from cw.dev_queue import (
     _hold_aware_disposition,
     transition_task_status,
 )
+from cw.dev_queue.gate_backoff import reset_gate_block_unless_gate
 from cw.dispatch.impl_gates import (
     _park_unconcluded_finalize_regress_merge_gate,
     _should_gate_for_unconcluded_finalize_regress_merge,
@@ -706,6 +707,9 @@ def _route_staged_decision(
     # advancing and regressing branches are already covered by the hardcodes
     # at lifecycle.py's _advance_task_pointer/_stage_regress chokepoints.
     claim_unproductive = is_unproductive(extract_claim_evidence(last_result))
+    # GitHub #2717: any routed outcome that is not a gate-block ends the
+    # consecutive gate-block run, ahead of every rule branch below.
+    reset_gate_block_unless_gate(task, status, blocker_reason)
     if status in SCOPE_GATED_APPROVAL_STATUSES:
         # Rule 1: scope-gated approval; small tier auto-advances, large blocks.
         # Must fire before Rule 2 (SCOPE_GATED ⊂ PAUSED_FOR_USER_INPUT).

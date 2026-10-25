@@ -37,6 +37,7 @@ from cw.dev_queue.crud import (
     _find_ticket,
     _validate_stage_in_pipeline,
 )
+from cw.dev_queue.gate_backoff import clear_gate_block_wait
 from cw.dev_queue.lifecycle import (
     _PLAN_SOUNDNESS_MARKER,
     _PLAN_SPEC_MARKER,
@@ -769,6 +770,8 @@ def requeue_ticket(
         prior, was_capped = (
             _reset_unproductive_attempts(task) if reset_attempts else (0, False)
         )
+        # Why: an operator requeue bypasses the gate's own backoff wait (#2717).
+        clear_gate_block_wait(task)
 
         client_cfg = get_client(client_name)
         stages = resolve_pipeline_stages(task, client_cfg)

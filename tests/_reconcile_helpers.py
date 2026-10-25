@@ -22,7 +22,7 @@ import pytest
 from cw._config_migrate import migrate_cw_state
 from cw._lock_guard import LockRank, is_rank_held
 from cw.config import load_effective_clients, load_state, save_state
-from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.dev_queue import load_dev_queue, save_dev_queue, transition_task_status
 from cw.events import read_events
 from cw.gh import BranchPr
 from cw.local_runner import AIDER_LOG_RELATIVE_PATH
@@ -1525,3 +1525,72 @@ def assert_no_parked_row_is_sessionless(queue: DevQueueStore) -> None:
     """Invariant (#2715): no row the lost-session sweep parked lost its id."""
     parked = [t for t in queue.tasks if t.disposition == "running_row_session_lost"]
     assert all(t.session_id is not None for t in parked), parked
+
+
+def park_via_routing(
+    ticket_id: str,
+    client: str,
+    workspace: Path,
+    status: str,
+    last_result: dict[str, object],
+    *,
+    stage: Stage = Stage.IMPL,
+    task: TicketTask | None = None,
+) -> TicketTask:
+    """Route a RUNNING row through the REAL ``apply_staged_decision`` and persist.
+
+    No outcome field is hand-set: routing stamps status, disposition,
+    blocked_reason, ``blocked_on_pr`` and (#2717) ``gate_block`` exactly as
+    production does for *status*/*last_result*. Builds a fresh RUNNING row
+    with ``session_id=f"sess-{ticket_id}"``, or, when *task* is given, re-arms
+    that row to RUNNING (a re-claim) so consecutive parks share one row. Saves
+    a one-row store before and after routing; tests append other rows later.
+    """
+    from cw.dispatch import apply_staged_decision
+
+    if task is None:
+        task = _make_ticket_task(
+            ticket_id=ticket_id,
+            client=client,
+            status=QueueItemStatus.RUNNING,
+            stage=stage,
+            session_id=f"sess-{ticket_id}",
+        )
+    else:
+        transition_task_status(task, QueueItemStatus.RUNNING)
+        task.session_id = f"sess-{ticket_id}"
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    apply_staged_decision(
+        task,
+        status,
+        dict(last_result),
+        {client: ClientConfig(name=client, workspace_path=workspace)},
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    return task
+
+
+def gate_blocked_last_result(
+    pr_number: int | None = 88, *, reason: str | None = "prior_pipeline_pr_open"
+) -> dict[str, object]:
+    """A ``merge_gate_blocked`` sentinel, the shape Rule 5 parks (#1713/#2717).
+
+    *pr_number* lands in ``blocker.details`` as ``PR #<N>`` (``None`` omits
+    the number); ``reason=None`` gives ``blocker: None``.
+    """
+    if reason is None:
+        return {"status": "merge_gate_blocked", "blocker": None}
+    details = (
+        "no blocking PR named"
+        if pr_number is None
+        else f"PR #{pr_number} (dev/other-ticket) is open and shares files with "
+        "this branch: src/cw/foo.py"
+    )
+    return {
+        "status": "merge_gate_blocked",
+        "blocker": {
+            "stage": "stage4a_merge_gate",
+            "reason": reason,
+            "details": details,
+        },
+    }

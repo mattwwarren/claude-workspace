@@ -11409,15 +11409,20 @@ class TestApplyStagedDecision:
                 id="blocked_with_blocker",
             ),
             pytest.param(
+                # #2717: a gate-block park appends its backoff note. No
+                # details, so no blocking PR; time frozen in the test body.
                 "merge_gate_blocked",
                 {"stage": "s4_finalize", "reason": "prior_pipeline_pr_open"},
-                "prior_pipeline_pr_open",
+                "prior_pipeline_pr_open occurrence=1"
+                " next_eligible_at=2026-07-16T12:01:00+00:00",
                 id="merge_gate_blocked_with_blocker",
             ),
             pytest.param(
+                # #2717: no blocker, so the note stands alone (no leading
+                # space).
                 "merge_gate_blocked",
                 None,
-                "",
+                "occurrence=1 next_eligible_at=2026-07-16T12:01:00+00:00",
                 id="merge_gate_blocked_without_blocker",
             ),
             pytest.param(
@@ -11489,15 +11494,21 @@ class TestApplyStagedDecision:
         silently drop that case to "". Confirms breadcrumbs mirrors
         blocker["reason"] whenever a blocker dict is present (blocked, always;
         merge_gate_blocked, when populated), and stays "" when it isn't
-        (merge_gate_blocked with blocker=None, and scope_exceeded/
-        forbidden_area, which the validator forbids from ever carrying a
-        blocker).
+        (scope_exceeded/forbidden_area, which the validator forbids from ever
+        carrying a blocker).
+
+        #2717: a merge_gate_blocked park is a gate-block, so its breadcrumbs
+        gain the backoff note ``occurrence=N next_eligible_at=<iso>``: appended
+        after the reason when a blocker is present, and standing alone (not
+        "") when blocker=None. Time is frozen so the instant is exact.
 
         #2097 adds the recognition flag: a reason outside
         KNOWN_BLOCKER_REASONS that does not declare itself freeform via the
         `x_` prefix is still surfaced verbatim, with ` (unrecognized)`
         appended.
         """
+        from freezegun import freeze_time
+
         from cw.dispatch import apply_staged_decision
 
         captured: list[tuple[object, dict[str, object]]] = []
@@ -11517,7 +11528,8 @@ class TestApplyStagedDecision:
 
         task = self._make_running_task("SF-BC-1", stage=Stage.IMPL)
         last_result: dict[str, object] = {"status": status, "blocker": blocker}
-        apply_staged_decision(task, status, last_result, self._clients(tmp_path))
+        with freeze_time("2026-07-16 12:00:00"):
+            apply_staged_decision(task, status, last_result, self._clients(tmp_path))
 
         assert len(captured) == 1
         _, payload = captured[0]

@@ -66,6 +66,8 @@ from tests._reconcile_helpers import (
     _mk_daemon_session_with_worktree,
     _mk_session,
     _mk_timed_out_daemon_session,
+    gate_blocked_last_result,
+    park_via_routing,
 )
 from tests.conftest import _make_daemon_session, _make_ticket_task
 
@@ -2531,35 +2533,6 @@ _STALE_DISPATCH_PR_NUMBER = 1899
 _STALE_DISPATCH_SLUG = "foo/bar"
 
 
-def _park_stale_dispatch_via_routing(
-    ticket_id: str, client: str, workspace: Path
-) -> TicketTask:
-    """Park a RUNNING row through the REAL #1902 routing path and persist it.
-
-    No field is hand-set: ``apply_staged_decision`` stamps status,
-    disposition, blocked_reason, and ``blocked_on_pr`` exactly as production
-    does when an agent reports a ``stale_dispatch`` sentinel.
-    """
-    from cw.dispatch import apply_staged_decision
-
-    task = _make_ticket_task(
-        ticket_id=ticket_id,
-        client=client,
-        status=QueueItemStatus.RUNNING,
-        stage=Stage.IMPL,
-        session_id=f"sess-{ticket_id}",
-    )
-    save_dev_queue(DevQueueStore(tasks=[task]))
-    apply_staged_decision(
-        task,
-        "stale_dispatch",
-        dict(_STALE_DISPATCH_LAST_RESULT),
-        {client: ClientConfig(name=client, workspace_path=workspace)},
-    )
-    save_dev_queue(DevQueueStore(tasks=[task]))
-    return task
-
-
 def _register_and_hydrate_merged_watch(
     monkeypatch: pytest.MonkeyPatch, *, state: str = "MERGED"
 ) -> None:
@@ -2619,7 +2592,9 @@ def test_release_stale_gated_tasks_auto_policy_requeues_stale_dispatch_variant_b
     hydrated by the real ``hydrate_pr_states`` pass, and no other task row
     carries that PR anywhere in the store.
     """
-    _park_stale_dispatch_via_routing("SG-SD1", "client-a", tmp_path)
+    park_via_routing(
+        "SG-SD1", "client-a", tmp_path, "stale_dispatch", _STALE_DISPATCH_LAST_RESULT
+    )
     save_state(CwState(sessions=[]))
     _register_and_hydrate_merged_watch(monkeypatch)
     monkeypatch.setattr(
@@ -2634,6 +2609,8 @@ def test_release_stale_gated_tasks_auto_policy_requeues_stale_dispatch_variant_b
     assert reloaded.status == QueueItemStatus.PENDING
     assert reloaded.session_id is None
     assert reloaded.blocked_on_pr is None  # unconditional-clear on transition
+    # #2717: stale_dispatch is not a gate-block, so the release has no record.
+    assert reloaded.gate_block is None
 
     events = read_events()
     reap_events = [
@@ -2655,7 +2632,9 @@ def test_release_stale_gated_tasks_auto_policy_requeues_stale_dispatch_variant_b
     PENDING once its own blocking PR is observed CLOSED unmerged (GitHub
     #1920) -- mirrors the MERGED case above, same end-to-end production
     path (#1927)."""
-    _park_stale_dispatch_via_routing("SG-SD1C", "client-a", tmp_path)
+    park_via_routing(
+        "SG-SD1C", "client-a", tmp_path, "stale_dispatch", _STALE_DISPATCH_LAST_RESULT
+    )
     save_state(CwState(sessions=[]))
     _register_and_hydrate_merged_watch(monkeypatch, state="CLOSED")
     monkeypatch.setattr(
@@ -2693,7 +2672,13 @@ def test_release_stale_gated_tasks_stale_dispatch_open_pr_not_released_end_to_en
     ``WatchedPr`` source releases on MERGED specifically, not merely on the
     watch existing.
     """
-    _park_stale_dispatch_via_routing("SG-SD-OPEN", "client-a", tmp_path)
+    park_via_routing(
+        "SG-SD-OPEN",
+        "client-a",
+        tmp_path,
+        "stale_dispatch",
+        _STALE_DISPATCH_LAST_RESULT,
+    )
     save_state(CwState(sessions=[]))
     _register_and_hydrate_merged_watch(monkeypatch, state="OPEN")
     monkeypatch.setattr(
@@ -2752,7 +2737,9 @@ def test_release_stale_gated_tasks_stale_dispatch_signal_only_stamps(
     """Default signal_only (ADR-0006): the same end-to-end production path as
     the AUTO test above stamps ``stale_gate_detected_at`` and leaves
     ``status`` untouched -- no destructive mutation without an opt-in."""
-    _park_stale_dispatch_via_routing("SG-SD3", "client-a", tmp_path)
+    park_via_routing(
+        "SG-SD3", "client-a", tmp_path, "stale_dispatch", _STALE_DISPATCH_LAST_RESULT
+    )
     save_state(CwState(sessions=[]))
     _register_and_hydrate_merged_watch(monkeypatch)
 
@@ -2774,7 +2761,9 @@ def test_release_stale_gated_tasks_stale_dispatch_signal_only_stamps_closed(
     the AUTO CLOSED test above stamps ``stale_gate_detected_at`` and leaves
     ``status`` untouched -- no destructive mutation without an opt-in
     (GitHub #1920)."""
-    _park_stale_dispatch_via_routing("SG-SD3C", "client-a", tmp_path)
+    park_via_routing(
+        "SG-SD3C", "client-a", tmp_path, "stale_dispatch", _STALE_DISPATCH_LAST_RESULT
+    )
     save_state(CwState(sessions=[]))
     _register_and_hydrate_merged_watch(monkeypatch, state="CLOSED")
 
@@ -2785,6 +2774,157 @@ def test_release_stale_gated_tasks_stale_dispatch_signal_only_stamps_closed(
     assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
     assert reloaded.stale_gate_detected_at is not None
     assert reloaded.blocked_on_pr == _STALE_DISPATCH_PR_NUMBER
+
+
+# GitHub #2717: the blocking COMPLETED row's PR number, aligned with the
+# parked row's ``blocked_on_pr`` (``gate_blocked_last_result(50)``).
+_GATE_BLOCKING_PR = 50
+_GATE_FROZEN_NOW = "2026-07-16 12:00:00"
+_GATE_NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
+
+
+def _append_gate_blocking_row(state: str) -> None:
+    """Append the COMPLETED row whose PR the gate-parked row waits behind."""
+    store = load_dev_queue()
+    store.tasks.append(
+        _make_ticket_task(
+            ticket_id="SG-GB-BLOCKER",
+            client="client-a",
+            status=QueueItemStatus.COMPLETED,
+            pr_url=f"https://github.com/foo/bar/pull/{_GATE_BLOCKING_PR}",
+            pr_state=PrState(state=state),
+        )
+    )
+    save_dev_queue(store)
+    save_state(CwState(sessions=[]))
+
+
+def _set_auto_reap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "cw.reconcile.tasks.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+    )
+
+
+@pytest.mark.parametrize("pr_state", ["MERGED", "CLOSED"])
+def test_release_variant_b_auto_clears_gate_block_wait_keeps_count(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pr_state: str,
+) -> None:
+    """#2717: the AUTO release fires on MERGED/CLOSED evidence, so the gate's
+    own backoff wait is cleared (the row is claimable at once) while the run
+    count is kept for a re-park on the same fingerprint."""
+    with freezegun.freeze_time(_GATE_FROZEN_NOW):
+        park_via_routing(
+            "SG-GB1",
+            "client-a",
+            tmp_path,
+            "merge_gate_blocked",
+            gate_blocked_last_result(_GATE_BLOCKING_PR),
+        )
+    _append_gate_blocking_row(pr_state)
+    _set_auto_reap(monkeypatch)
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-GB1"]
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-GB1")
+    assert reloaded.status == QueueItemStatus.PENDING
+    assert reloaded.next_eligible_at is None
+    assert reloaded.gate_block is not None
+    assert reloaded.gate_block.count == 1
+
+
+def test_release_variant_b_signal_only_leaves_gate_block_wait(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """#2717: the default signal_only policy only stamps the detection; the
+    gate's wait and record are untouched."""
+    with freezegun.freeze_time(_GATE_FROZEN_NOW):
+        parked = park_via_routing(
+            "SG-GB2",
+            "client-a",
+            tmp_path,
+            "merge_gate_blocked",
+            gate_blocked_last_result(_GATE_BLOCKING_PR),
+        )
+    _append_gate_blocking_row("MERGED")
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-GB2"]
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-GB2")
+    assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
+    assert reloaded.stale_gate_detected_at is not None
+    assert reloaded.next_eligible_at == parked.next_eligible_at
+    assert reloaded.gate_block == parked.gate_block
+
+
+def test_release_variant_b_auto_preserves_usage_limit_window(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2717: a later usage-limit window written over the gate's wait is not
+    the gate's to clear (``next_eligible_at != gate_block.until``)."""
+    with freezegun.freeze_time(_GATE_FROZEN_NOW):
+        park_via_routing(
+            "SG-GB3",
+            "client-a",
+            tmp_path,
+            "merge_gate_blocked",
+            gate_blocked_last_result(_GATE_BLOCKING_PR),
+        )
+    usage_limit_until = _GATE_NOW + timedelta(hours=4)
+    store = load_dev_queue()
+    store.tasks[0].next_eligible_at = usage_limit_until
+    save_dev_queue(store)
+    _append_gate_blocking_row("MERGED")
+    _set_auto_reap(monkeypatch)
+
+    assert release_stale_gated_tasks() == ["SG-GB3"]
+
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-GB3")
+    assert reloaded.status == QueueItemStatus.PENDING
+    assert reloaded.next_eligible_at == usage_limit_until
+
+
+def test_repark_after_auto_release_same_pr_escalates(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2717 Assumption 6: the release keeps the count, so a worker that
+    re-reports the same blocking PR continues the run (count 2, 120 s)."""
+    with freezegun.freeze_time(_GATE_FROZEN_NOW):
+        park_via_routing(
+            "SG-GB4",
+            "client-a",
+            tmp_path,
+            "merge_gate_blocked",
+            gate_blocked_last_result(_GATE_BLOCKING_PR),
+        )
+    _append_gate_blocking_row("MERGED")
+    _set_auto_reap(monkeypatch)
+    assert release_stale_gated_tasks() == ["SG-GB4"]
+    released_row = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-GB4")
+
+    with freezegun.freeze_time(_GATE_FROZEN_NOW):
+        reparked = park_via_routing(
+            "SG-GB4",
+            "client-a",
+            tmp_path,
+            "merge_gate_blocked",
+            gate_blocked_last_result(_GATE_BLOCKING_PR),
+            task=released_row,
+        )
+
+    assert reparked.gate_block is not None
+    assert reparked.gate_block.count == 2
+    assert reparked.next_eligible_at == _GATE_NOW + timedelta(seconds=120)
 
 
 def test_is_variant_b_gate_task_stale_dispatch_requires_matching_blocked_reason(

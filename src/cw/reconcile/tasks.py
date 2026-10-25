@@ -21,6 +21,7 @@ from cw.dev_queue import (
     save_dev_queue,
     transition_task_status,
 )
+from cw.dev_queue.gate_backoff import clear_gate_block_wait
 from cw.events import advance_cursor, read_events, record_event
 from cw.gh import (
     _GH_PR_STATE_CLOSED,
@@ -934,6 +935,9 @@ def _release_variant_b(task: TicketTask, policy: ReapPolicy) -> None:
     if policy is ReapPolicy.AUTO:
         transition_task_status(task, QueueItemStatus.PENDING)
         task.session_id = None
+        # Why: the release fired on MERGED/CLOSED evidence, so the gate cleared
+        # and its backoff wait goes too (#2717); evidence-driven, ADR-0014 inv 1.
+        clear_gate_block_wait(task)
     else:
         task.stale_gate_detected_at = datetime.now(UTC)
 

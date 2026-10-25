@@ -77,7 +77,12 @@ from cw.models import (
 from cw.plan_fingerprint import compute_body_sha
 from cw.reconcile.liveness_page import close_command
 from cw.worktree import is_genuinely_live_home_reason, worktree_path_for
-from tests._reconcile_helpers import _routed_last_result, _write_agent_spawn_stamp
+from tests._reconcile_helpers import (
+    _routed_last_result,
+    _write_agent_spawn_stamp,
+    gate_blocked_last_result,
+    park_via_routing,
+)
 from tests._ticket_view_helpers import (
     CASES,
     bound_session_for,
@@ -11122,6 +11127,100 @@ class TestRequeueTicket:
         assert result["already_pending"] is True
         assert self._reset_keys(result) == (False, 0, False)
         assert load_dev_queue().model_dump() == before
+
+    # -- #2717: gate-block backoff wait ---------------------------------------
+
+    @staticmethod
+    def _gate_park(tmp_path: Path) -> TicketTask:
+        with freeze_time("2026-07-16 12:00:00"):
+            return park_via_routing(
+                "GEN-500",
+                "genhealth",
+                tmp_path / "ws",
+                "merge_gate_blocked",
+                gate_blocked_last_result(),
+            )
+
+    def test_requeue_clears_gate_block_wait_keeps_count(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        parked = self._gate_park(tmp_path)
+        assert parked.next_eligible_at is not None
+
+        requeue_ticket("GEN-500", "genhealth")
+
+        t = load_dev_queue().tasks[0]
+        assert t.status == QueueItemStatus.PENDING
+        assert t.next_eligible_at is None
+        assert t.gate_block is not None
+        assert t.gate_block.count == 1
+
+    def test_requeue_leaves_spawn_error_wait_without_gate_block(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        window = datetime.now(UTC) + timedelta(seconds=30)
+        task = _make_blocked_task()
+        task.spawn_error_count = 2
+        task.next_eligible_at = window
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        requeue_ticket("GEN-500", "genhealth")
+
+        assert load_dev_queue().tasks[0].next_eligible_at == window
+
+    def test_requeue_leaves_usage_limit_window_over_gate_wait(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        self._gate_park(tmp_path)
+        store = load_dev_queue()
+        later = datetime(2026, 7, 16, 18, 0, tzinfo=UTC)
+        store.tasks[0].next_eligible_at = later
+        save_dev_queue(store)
+
+        requeue_ticket("GEN-500", "genhealth")
+
+        t = load_dev_queue().tasks[0]
+        assert t.next_eligible_at == later
+        assert t.gate_block is not None
+
+    def test_requeue_keeps_wait_after_a_non_gate_outcome(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2717 Assumption 7 (documented, not changed): a later non-gate
+        outcome drops the record but keeps the wait, so requeue no longer
+        recognises the wait as the gate's own."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        parked = self._gate_park(tmp_path)
+        wait = parked.next_eligible_at
+        park_via_routing(
+            "GEN-500",
+            "genhealth",
+            tmp_path / "ws",
+            "blocked",
+            {
+                "status": "blocked",
+                "blocker": {"stage": "stage2_impl", "reason": "agent_block"},
+            },
+            task=parked,
+        )
+        assert load_dev_queue().tasks[0].gate_block is None
+
+        requeue_ticket("GEN-500", "genhealth")
+
+        t = load_dev_queue().tasks[0]
+        assert t.next_eligible_at == wait
+        assert t.gate_block is None
 
 
 # ---------------------------------------------------------------------------
