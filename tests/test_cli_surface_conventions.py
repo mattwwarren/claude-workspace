@@ -51,13 +51,14 @@ _EXPR_PLACEHOLDER = "<expr>"
 _LINE_PREFIXES = ("Recipe:", "Example:")
 _MENTION_RE = re.compile(r"\bcw((?: [a-z][a-z0-9_-]*)*)")
 _BACKTICK_SPAN_RE = re.compile(r"(`+)([^`]+)\1")
-# ``cw ...`` introduced by a quote, or by a verb that precedes a command in
-# prose ("Run cw x", "Suggested: cw x"). Backticks are not listed: backtick
-# spans are already their own source above. Plain "the cw binary" prose is not.
-_INTRODUCED_RE = re.compile(
-    r"""(?:['"]|\b(?:Run|run|Use|use|Suggested|Try|with):?\s)"""
-    r"(cw(?: [a-z][a-z0-9_-]*)*)(?![\w-])"
-)
+# ``cw ...`` introduced by a quote or ``Suggested:`` (strict: always a command),
+# or by a prose verb ("Run cw x"; weak: "Use cw to clean up" is just prose, so
+# :func:`_plausible_verb_mention` also vets it). Both sources apply in help mode
+# as well as ``runtime=True``. Backticks are not listed: backtick spans are
+# already their own source above. Plain "the cw binary" prose is not.
+_MENTION_BODY = r"(cw(?: [a-z][a-z0-9_-]*)*)(?![\w-])"
+_STRICT_INTRODUCED_RE = re.compile(r"""(?:['"]|\bSuggested:?\s)""" + _MENTION_BODY)
+_VERB_INTRODUCED_RE = re.compile(r"\b(?:Run|run|Use|use|Try|with):?\s" + _MENTION_BODY)
 _STOP_PREFIXES = ("-", "<", "[", ".")
 
 
@@ -80,6 +81,20 @@ def _strip_line_prefix(line: str) -> str:
     return stripped
 
 
+def _plausible_verb_mention(mention: str) -> bool:
+    """True if a verb-introduced *mention* reads as a command, not prose.
+
+    Its first subcommand token must be a real top-level command of ``main`` or
+    look like a command name (contain ``-`` or ``_``), so a phantom such as
+    ``Run cw post-mortem`` is still flagged but ``Use cw to clean up`` is not.
+    """
+    tokens = mention.split()[1:]
+    if not tokens:
+        return False
+    first = tokens[0]
+    return main.get_command(_ctx(), first) is not None or "-" in first or "_" in first
+
+
 def _extract_mentions(text: str, *, runtime: bool = False) -> list[list[str]]:
     """Return the subcommand tokens of each ``cw ...`` mention in *text*.
 
@@ -100,7 +115,14 @@ def _extract_mentions(text: str, *, runtime: bool = False) -> list[list[str]]:
         for match in _BACKTICK_SPAN_RE.finditer(normalized)
         if _MENTION_RE.search(match.group(2))
     )
-    sources.extend(match.group(1) for match in _INTRODUCED_RE.finditer(normalized))
+    sources.extend(
+        match.group(1) for match in _STRICT_INTRODUCED_RE.finditer(normalized)
+    )
+    sources.extend(
+        match.group(1)
+        for match in _VERB_INTRODUCED_RE.finditer(normalized)
+        if _plausible_verb_mention(match.group(1))
+    )
     return [
         match.group(1).split()
         for source in sources
@@ -317,6 +339,19 @@ class TestRuntimeStrings:
             ["spawn-complete"]
         ]
 
+    @pytest.mark.parametrize(
+        "text",
+        ["Use cw to clean up", "run cw in a worktree", "Try cw again later"],
+    )
+    def test_verb_prose_is_not_read_as_a_command(self, text: str) -> None:
+        assert _extract_mentions(text) == []
+        assert _extract_mentions(text, runtime=True) == []
+        assert _runtime_mentions_unresolved(f'x = "{text}"\n') == []
+
+    def test_verb_introduced_phantom_with_dash_is_still_flagged(self) -> None:
+        source = 'x = "Run cw post-mortem <id>"\n'
+        assert _runtime_mentions_unresolved(source) == ["1: cw post-mortem"]
+
     def test_exempt_mention_is_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(sys.modules[__name__], "_MENTION_EXEMPT", {"cw nonesuch"})
         assert _runtime_mentions_unresolved("x = \"Run 'cw nonesuch'\"\n") == []
@@ -365,6 +400,10 @@ class TestExtractMentions:
 
     def test_backtick_span_without_cw_is_ignored(self) -> None:
         assert _extract_mentions("pass `--status shipped` here") == []
+
+    def test_verb_introduced_real_command_is_extracted(self) -> None:
+        assert _extract_mentions("Run cw doctor") == [["doctor"]]
+        assert _extract_mentions("Run cw doctor", runtime=True) == [["doctor"]]
 
     def test_introduced_mention_is_extracted_in_help_mode(self) -> None:
         text = "Suggested: cw spawn complete <id> --status shipped, then Run cw doctor."
