@@ -12369,7 +12369,12 @@ class TestDevQueueApproveCli:
         _enter_operator_machine(monkeypatch, tmp_path)
 
     def _seed_review_pending(
-        self, tmp_config_dir: Path, tmp_path: Path, *, signoff: bool
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        *,
+        signoff: bool,
+        reviewed_sha: str | None = None,
     ) -> None:
         from cw.config import save_state
         from cw.dev_queue import save_dev_queue
@@ -12392,15 +12397,84 @@ class TestDevQueueApproveCli:
             signoff="operator" if signoff else None,
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
+        last_result: dict[str, object] = {"status": "review_pending_approval"}
+        if reviewed_sha is not None:
+            last_result["review"] = {"reviewed_sha": reviewed_sha}
         session = Session(
             id="sess-approve-cli",
             name="acme/impl-1",
             client="acme",
             purpose=SessionPurpose.IMPL,
             workspace_path=ws,
-            last_result={"status": "review_pending_approval"},
+            last_result=last_result,
         )
         save_state(CwState(sessions=[session]))
+
+    _REVIEWED_SHA = "abcdef0123456789abcdef0123456789abcdef01"
+    _RECORDED = "Review approval recorded for ACME-1 (acme): approver_kind=operator,"
+
+    @pytest.mark.parametrize("signoff", [False, True])
+    def test_review_approve_prints_recorded_head(
+        self, tmp_config_dir: Path, tmp_path: Path, signoff: bool
+    ) -> None:
+        """#2767: the direct advance and the signoff re-route both say which
+        reviewed head the approval is bound to and what finalize will accept."""
+        self._seed_review_pending(
+            tmp_config_dir, tmp_path, signoff=signoff, reviewed_sha=self._REVIEWED_SHA
+        )
+        result = CliRunner().invoke(
+            main, ["dev-queue", "approve", "ACME-1", "--client", "acme"]
+        )
+        assert result.exit_code == 0, result.output
+        assert f"{self._RECORDED} reviewed head abcdef012345." in result.output
+        assert "nothing but merges of the default branch" in result.output
+        assert self._REVIEWED_SHA not in result.output
+        assert ("awaiting operator signoff" in result.output) is signoff
+
+    def test_review_approve_without_reviewed_sha_says_finalize_will_park(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#2767: a sentinel with no reviewed head gets the None-SHA wording."""
+        self._seed_review_pending(tmp_config_dir, tmp_path, signoff=False)
+        result = CliRunner().invoke(
+            main, ["dev-queue", "approve", "ACME-1", "--client", "acme"]
+        )
+        assert result.exit_code == 0, result.output
+        assert (
+            f"{self._RECORDED} reviewed head <not reported by the review sentinel>."
+            in result.output
+        )
+        assert "Finalize cannot match a head to it" in result.output
+
+    def test_result_without_review_keys_prints_no_recorded_line(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2767 (A12): the CLI reads the two new keys with ``.get``, so a result
+        that omits them prints only the plain advance line."""
+        from cw.dev_queue import BODY_DRIFT_WARNING_KEY
+
+        self._seed_review_pending(tmp_config_dir, tmp_path, signoff=False)
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.approve.approve_ticket",
+            lambda *_a, **_kw: {
+                "from_stage": "review",
+                "to_stage": "finalize",
+                "ticket_id": "ACME-1",
+                "client": "acme",
+                "awaiting_signoff": False,
+                "plan_requeued": False,
+                "finalize_held": False,
+                "plan_approved_fingerprint": None,
+                "plan_promoted": False,
+                BODY_DRIFT_WARNING_KEY: None,
+            },
+        )
+        result = CliRunner().invoke(
+            main, ["dev-queue", "approve", "ACME-1", "--client", "acme"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Approved ACME-1 (acme): review -> finalize" in result.output
+        assert "Review approval recorded" not in result.output
 
     def test_approve_plain_advance_message(
         self, tmp_config_dir: Path, tmp_path: Path

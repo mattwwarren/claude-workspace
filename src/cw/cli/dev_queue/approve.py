@@ -24,6 +24,7 @@ from cw.dev_queue import (
     resolve_client,
     revoke_plan_approval,
 )
+from cw.dev_queue.approval import REVIEW_APPROVED_SHA_KEY, REVIEW_APPROVER_KIND_KEY
 from cw.dev_queue.next_commands import human_gate_settled_notice, is_human_kept_gate
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
@@ -246,6 +247,38 @@ def _approve_scope_drift(
     )
 
 
+def _echo_review_approval(
+    ticket_id: str, resolved: str, result: dict[str, str | bool | None]
+) -> None:
+    """Say which reviewed head a REVIEW-stage approval was bound to (#2767).
+
+    Prints only when this call recorded a review approval. The two keys are
+    read with ``.get`` (A12): a result without them recorded none.
+    """
+    kind = result.get(REVIEW_APPROVER_KIND_KEY)
+    if kind is None:
+        return
+    sha = result.get(REVIEW_APPROVED_SHA_KEY)
+    if isinstance(sha, str):
+        tail = (
+            f"reviewed head {sha[:_HEAD_SHA_DISPLAY_LEN]}. Finalize ships the"
+            " branch only if that commit is still in its history and nothing"
+            " but merges of the default branch lands after it; any other later"
+            " commit parks it at finalize, to be returned to review for"
+            " re-approval."
+        )
+    else:
+        tail = (
+            "reviewed head <not reported by the review sentinel>. Finalize"
+            " cannot match a head to it and will park the ticket at finalize,"
+            " to be returned to review for re-approval."
+        )
+    click.echo(
+        f"Review approval recorded for {ticket_id} ({resolved}):"
+        f" approver_kind={kind}, {tail}"
+    )
+
+
 def _approve_must_fix_override(ticket_id: str, resolved: str, reason: str) -> None:
     """The ``--override-must-fix`` branch of ``dev_queue_approve`` (#2205)."""
     # bounded=True (#2501): operator command. settle_lagging_row (#2692) may
@@ -359,6 +392,14 @@ def dev_queue_approve(
     gate on a ticket with signoff configured re-routes it to
     AWAITING_OPERATOR_SIGNOFF instead of advancing -- run `approve` again
     to clear it.
+
+    A REVIEW-stage approval is recorded on the row, bound to the head the
+    review ran against, and the command prints that head. Finalize ships a
+    large ticket only while that commit is in its history with nothing but
+    merges of the default branch after it; otherwise it parks at finalize and
+    is returned to review (`requeue --stage review`) for re-approval. A
+    ticket parked at finalize itself is refused: `approve` never releases the
+    terminal stage.
 
     On success, a leftover routed-result session for the ticket -- one that
     already routed its result but was never completed because background
@@ -494,6 +535,7 @@ def dev_queue_approve(
             f"Approved {ticket_id} ({resolved}):"
             f" {result['from_stage']} -> {result['to_stage']}{promoted_note}"
         )
+    _echo_review_approval(ticket_id, resolved, result)
     # After the whole confirmation chain (incl. the --post-marker tip) and
     # before the orphan close, so a close failure still shows the row.
     echo_resulting_row(ticket_id, resolved)
