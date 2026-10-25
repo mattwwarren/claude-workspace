@@ -76,7 +76,6 @@ from cw.dev_queue.gates import (
 from cw.models import DispatchSkipReason, QueueItemStatus, ReapReason, Stage
 from cw.models.enums import PipelinePosition
 from cw.models.ticket_view import NextCommand
-from cw.opencode_runner import STAGE4A_MERGE_GATE
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -100,7 +99,7 @@ _RERUN_CURRENT = "re-run the current stage"
 _FINALIZE_HOLD_GATE = "finalize-hold"
 # Rule 0c (#2767): the finalize Step 4.0 park.
 _REVIEW_PENDING = "review_pending_approval"
-_FINALIZE_PARK_STAGE_REACHED = STAGE4A_MERGE_GATE
+_FINALIZE_PARK_STAGE_REACHED = "stage4a_merge_gate"
 _FINALIZE_APPROVAL_PARK_PURPOSE = (
     "returns the ticket to review to obtain the large-tier approval; approve"
     " refuses at the terminal stage and a finalize re-run would only park again"
