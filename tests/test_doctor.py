@@ -9562,8 +9562,8 @@ class TestPendingWorktreeOccupiedWedge:
         from cw.dev_queue import load_dev_queue, save_dev_queue
         from cw.doctor import _reap_wedge_findings
         from cw.doctor.pending_skip_wedge import (
-            PendingWorktreeOccupiedFinding,
             WEDGE_PENDING_WORKTREE_OCCUPIED,
+            PendingWorktreeOccupiedFinding,
         )
         from cw.models import DevQueueStore, QueueItemStatus, TicketTask
 
@@ -9595,3 +9595,59 @@ class TestPendingWorktreeOccupiedWedge:
         rows = {t.client: t for t in store.tasks if t.ticket_id == "TST-X"}
         assert rows["client-a"].status == QueueItemStatus.RUNNING
         assert rows["client-b"].status == QueueItemStatus.RUNNING
+
+    def test_legacy_actionable_finding_does_not_cross_client_class12_guard(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.config import state_file as _sf
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.doctor import WedgeFinding, _reap_wedge_findings
+        from cw.doctor.pending_skip_wedge import (
+            WEDGE_PENDING_WORKTREE_OCCUPIED,
+            PendingWorktreeOccupiedFinding,
+        )
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="TST-X",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                    ),
+                    TicketTask(
+                        ticket_id="TST-X",
+                        client="client-b",
+                        status=QueueItemStatus.RUNNING,
+                    ),
+                ]
+            )
+        )
+        findings = [
+            PendingWorktreeOccupiedFinding(
+                wedge_class=WEDGE_PENDING_WORKTREE_OCCUPIED,
+                session_id=None,
+                ticket_id="TST-X",
+                recipe="inspect",
+                state_file=str(_sf()),
+                client="client-a",
+            ),
+            WedgeFinding(
+                wedge_class="wedge/task-running-no-session",
+                session_id=None,
+                ticket_id="TST-X",
+                recipe="fix",
+                state_file=str(_sf()),
+            ),
+        ]
+
+        assert _reap_wedge_findings(findings) is None
+
+        rows = {
+            task.client: task
+            for task in load_dev_queue().tasks
+            if task.ticket_id == "TST-X"
+        }
+        assert rows["client-a"].status == QueueItemStatus.RUNNING
+        assert rows["client-b"].status == QueueItemStatus.PENDING
