@@ -28,6 +28,7 @@ from cw.models import (
 )
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 from cw.reconcile.gate_plan_probes import PlanProbes
+from cw.reconcile.gate_predicates import _review_tier_verified
 from cw.reconcile.gate_recipes import (
     RECIPE_AUTO_ADOPT_PLAN,
     RECIPE_AUTO_APPROVE_REVIEW,
@@ -101,9 +102,12 @@ def _clean_result(
             "recommendation": recommendation,
             "any_incomplete_risk": False,
         },
+        # #2767: a measured Large diff, so the recipe can verify the tier.
         "scope": {
-            "files": 1,
+            "tier": "large",
+            "files": 17,
             "lines_estimate": 10,
+            "lines_actual": 1280,
             "forbidden_touched": forbidden_touched,
         },
     }
@@ -608,6 +612,135 @@ class TestGateRecipeWillRelease:
         }
         assert not gate_recipe_will_release(
             _make_task(), _clean_result(), clients, _config()
+        )
+
+
+_RECIPE_REVIEWED_SHA = "9" * 40
+
+
+def _scope_result(files: object, lines_actual: object) -> dict[str, Any]:
+    result = _clean_result()
+    result["scope"]["files"] = files
+    result["scope"]["lines_actual"] = lines_actual
+    return result
+
+
+def _codex_marker_large_result() -> dict[str, Any]:
+    """Large by plan marker, small measured numbers, no hint (#2767 R6)."""
+    result = _scope_result(3, 40)
+    result["review"]["agents_run"] = 3
+    return result
+
+
+class TestReviewTierVerified:
+    """#2767 (R6): the review recipe releases only a large tier it re-derives
+    from the row hint and the sentinel's measured numbers (no plan marker)."""
+
+    @pytest.mark.parametrize(
+        ("files", "lines_actual"), [(11, 10), (3, 501), (17, 1280)]
+    )
+    def test_true_for_large_numbers_without_hint(
+        self, files: int, lines_actual: int
+    ) -> None:
+        assert _review_tier_verified(_scope_result(files, lines_actual), _make_task())
+
+    @pytest.mark.parametrize(("files", "lines_actual"), [(10, 500), (1, 2)])
+    def test_false_for_small_numbers(self, files: int, lines_actual: int) -> None:
+        assert not _review_tier_verified(
+            _scope_result(files, lines_actual), _make_task()
+        )
+
+    def test_false_for_small_hint_with_large_numbers(self) -> None:
+        assert not _review_tier_verified(
+            _scope_result(17, 1280), _make_task(scope_hint="small")
+        )
+
+    @pytest.mark.parametrize(
+        ("files", "lines_actual"),
+        [(None, 1280), (17, None), (True, 1280), (17, True), ("17", 1280)],
+    )
+    def test_false_for_missing_or_malformed_numbers(
+        self, files: object, lines_actual: object
+    ) -> None:
+        assert not _review_tier_verified(
+            _scope_result(files, lines_actual), _make_task()
+        )
+
+    @pytest.mark.parametrize("last_result", [None, {"status": "x"}, {"scope": 1}])
+    def test_false_without_a_scope_block(self, last_result: object) -> None:
+        assert not _review_tier_verified(last_result, _make_task())
+
+    def test_codex_marker_large_park_is_left_for_the_orchestrator(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Detect yields nothing, will-release agrees, and an act on a
+        hand-built candidate leaves the row parked."""
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
+        result = _codex_marker_large_result()
+        task = _make_task()
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        state = CwState(sessions=[_make_session(last_result=result)])
+        save_state(state)
+
+        assert (
+            _detect_auto_approve_review(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
+        assert not gate_recipe_will_release(task, result, _SEAM1_CLIENTS, _config())
+        candidate = GateRecipeCandidate(
+            ticket_id="GEN-1",
+            client="acme",
+            lane=task.lane,
+            recipe=RECIPE_AUTO_APPROVE_REVIEW,
+            evidence={},
+            session_id="sess-1",
+        )
+        assert call_and_drain(_act_auto_approve_review, [candidate], now=_NOW) == []
+        row = load_dev_queue().tasks[0]
+        assert row.status == QueueItemStatus.BLOCKED_ON_USER
+        assert row.stage == Stage.REVIEW
+        assert row.review_approver_kind is None
+
+    def test_verified_large_release_stamps_recipe_and_reviewed_sha(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
+        result = _clean_result()
+        result["review"]["reviewed_sha"] = _RECIPE_REVIEWED_SHA
+        task = _make_task()
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=result)]))
+
+        assert gate_recipe_will_release(task, result, _SEAM1_CLIENTS, _config())
+        recovered = call_and_drain(
+            run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+        )
+
+        assert recovered == ["GEN-1"]
+        row = load_dev_queue().tasks[0]
+        assert row.stage == Stage.FINALIZE
+        assert row.review_approver_kind == "recipe"
+        assert row.review_approved_sha == _RECIPE_REVIEWED_SHA
+        assert row.review_approved_at is not None
+
+    def test_finalize_stage_review_pending_row_is_never_a_candidate(self) -> None:
+        task = _make_task(stage=Stage.FINALIZE)
+        state = CwState(sessions=[_make_session(last_result=_clean_result())])
+
+        assert (
+            _detect_auto_approve_review(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
+        assert not gate_recipe_will_release(
+            task, _clean_result(), _SEAM1_CLIENTS, _config()
         )
 
 

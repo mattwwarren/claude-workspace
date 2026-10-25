@@ -16,6 +16,9 @@ person is actually needed:
 - the operator set ``scope_hint: large`` on the row ("gate this");
 - the row is not at the stage the gate belongs to (an earlier-stage report);
 - review only: the health recommendation is not PROCEED, or no reviewer ran;
+- review only: the large tier cannot be re-derived from the row hint and the
+  sentinel's measured numbers (#2767; the plan marker needs a worktree read,
+  which cannot run under ``sessions_lock``);
 - plan only: the draft carries no valid fingerprint to bind the approval to,
   or the row already holds an approval for this exact draft (the worker
   re-parked a plan that was already released, so a person must look).
@@ -30,6 +33,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import SCOPE_TIER_LARGE
+from cw.plan_files import resolve_review_scope_tier
 from cw.plan_fingerprint import PLAN_DRAFT_FINGERPRINT_KEY, is_plan_draft_fingerprint
 
 if TYPE_CHECKING:
@@ -131,6 +135,35 @@ def _row_eligible(task: TicketTask, stage: Stage) -> bool:
       and is never released automatically.
     """
     return task.stage == stage and task.scope_hint != SCOPE_TIER_LARGE
+
+
+def _measured_count(value: object) -> int | None:
+    """*value* as a measured diff count, or None if it is not a plain int."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _review_tier_verified(last_result: object, task: TicketTask) -> bool:
+    """True iff the review gate's large tier re-derives without the plan marker.
+
+    The tier is re-resolved from ``task.scope_hint`` and the sentinel's
+    ``scope.files`` / ``scope.lines_actual`` only (#2767, R6). A codex
+    sentinel that is large by the plan marker alone, with no hint and small
+    numbers, is left for the orchestrator, as is any sentinel whose numbers
+    are missing or malformed (``bool`` excluded, as in
+    :func:`_predicate_holds`).
+    """
+    if not isinstance(last_result, dict):
+        return False
+    scope = last_result.get("scope")
+    if not isinstance(scope, dict):
+        return False
+    files = _measured_count(scope.get("files"))
+    lines = _measured_count(scope.get("lines_actual"))
+    measured = (files, lines) if files is not None and lines is not None else None
+    tier = resolve_review_scope_tier(None, task.scope_hint, measured)
+    return tier == SCOPE_TIER_LARGE
 
 
 def _plan_gate_snapshot(last_result: object) -> dict[str, object] | None:
