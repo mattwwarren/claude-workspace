@@ -23,6 +23,8 @@ re-exports. Submodules:
 - ``routed_result_wedge`` — the stranded routed-result session class (#2524)
   and its explicit-command ``--reap`` close (the orchestrator session counts,
   ADR-0020).
+- ``pending_skip_wedge`` — the advisory PENDING-row-held-by-an-occupied-
+  worktree class (#2516); read-only, ``--reap`` changes nothing for it.
 - ``lock_holds`` — the longest recent completed sessions / dev-queue lock
   holds and waits from the ``cw._lock_hold`` sidecar, with the aggregate
   state load/save share (#2637).

@@ -23,6 +23,7 @@ from cw.dev_queue import dev_queue_lock, save_dev_queue, transition_task_status
 from cw.doctor import _deps
 from cw.doctor._shared import CheckResult, WedgeFinding
 from cw.doctor.loop_health import _reap_session_by_selector
+from cw.doctor.pending_skip_wedge import WEDGE_PENDING_WORKTREE_OCCUPIED
 from cw.doctor.routed_result_wedge import (
     WEDGE_ROUTED_RESULT_STRANDED,
     has_pending_routed_result_audits,
@@ -222,6 +223,11 @@ def _reap_wedge_findings(
         running_ticket_ids exclusion set -- left out, the default-inclusive
         set would revert a RUNNING row of the same ticket claimed by a new
         session.
+    Class-12 (pending-worktree-occupied, #2516): advisory only. The finding
+        names a PENDING row held by an occupied worktree; ``--reap`` changes
+        nothing for it and writes no audit row. It is listed in the
+        running_ticket_ids exclusion set so the default-inclusive set never
+        reverts a RUNNING row of the same ticket id.
 
     The former class-1 (pane-idle-but-active) wedge was removed with the
     multiplexer substrate — under the native daemon there are no panes to
@@ -241,6 +247,7 @@ def _reap_wedge_findings(
             _WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN,
             _WEDGE_LEAKED_DAEMON_WORKER,
             WEDGE_ROUTED_RESULT_STRANDED,
+            WEDGE_PENDING_WORKTREE_OCCUPIED,
         }
     }
     blocked_ticket_ids: set[str] = {

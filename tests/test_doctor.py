@@ -9511,3 +9511,76 @@ class TestCheckWorkerTmpPressure:
         by_name = {c.name: c for c in report.checks}
         assert "worker-tmpdir-scope" in by_name
         assert by_name["worker-tmpdir-scope"].ok is True
+
+
+class TestPendingWorktreeOccupiedWedge:
+    """``wedge/pending-worktree-occupied`` wiring and reap exclusion (#2516)."""
+
+    _NOW = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+
+    def test_collect_wedge_findings_reports_the_class_as_advisory(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from freezegun import freeze_time
+
+        from cw.doctor.core import _collect_wedge_findings
+        from cw.doctor.pending_skip_wedge import (
+            PENDING_SKIP_WEDGE_THRESHOLD,
+            WEDGE_PENDING_WORKTREE_OCCUPIED,
+        )
+        from cw.models import CwState, DevQueueStore
+        from tests._dispatch_tick_helpers import (
+            seed_dispatch_events,
+            skip_tick_events,
+        )
+
+        step = timedelta(seconds=30)
+        count = PENDING_SKIP_WEDGE_THRESHOLD
+        start = self._NOW - timedelta(seconds=10) - (count - 1) * step
+        seed_dispatch_events(
+            skip_tick_events(
+                "client-a", "TST-P", "worktree_occupied", count=count, start=start
+            )
+        )
+        row = _make_ticket_task(
+            ticket_id="TST-P",
+            client="client-a",
+            created_at=self._NOW - timedelta(days=1),
+        )
+
+        with freeze_time(self._NOW):
+            findings = _collect_wedge_findings(CwState(), DevQueueStore(tasks=[row]))
+
+        held = [f for f in findings if f.wedge_class == WEDGE_PENDING_WORKTREE_OCCUPIED]
+        assert [f.ticket_id for f in held] == ["TST-P"]
+        assert DoctorReport(version="x", wedge_findings=held).ok is True
+
+    def test_reap_leaves_a_running_row_of_the_same_ticket_alone(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.config import state_file as _sf
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.doctor import _reap_wedge_findings
+        from cw.doctor.pending_skip_wedge import WEDGE_PENDING_WORKTREE_OCCUPIED
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        task = TicketTask(
+            ticket_id="TST-X",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=None,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        finding = WedgeFinding(
+            wedge_class=WEDGE_PENDING_WORKTREE_OCCUPIED,
+            session_id=None,
+            ticket_id="TST-X",
+            recipe="inspect",
+            state_file=str(_sf()),
+        )
+
+        assert _reap_wedge_findings([finding]) is None
+
+        store = load_dev_queue()
+        (row,) = [t for t in store.tasks if t.ticket_id == "TST-X"]
+        assert row.status == QueueItemStatus.RUNNING
