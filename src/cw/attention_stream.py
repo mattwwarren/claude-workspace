@@ -62,6 +62,7 @@ from cw.events_follow import (
 from cw.models import QueueItemStatus
 from cw.reconcile._shared import resolve_session_for_task
 from cw.stuck_pending import SECONDS_PER_MINUTE, PendingTracker, scan_pending
+from cw.ticket_view import ViewSources, next_command_facts
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -223,17 +224,25 @@ class AttentionStream:
             return []
         rows = RowIndex(load_dev_queue(), self._scope.client)
         state: list[CwState] = []
+        sources = ViewSources()
         return [
-            render_event(event, self._command(event, rows, state))
+            render_event(event, self._command(event, rows, state, sources))
             for event in watched
             if in_scope(event, self._scope, rows) and self._latch.admit(event)
         ]
 
     @staticmethod
     def _command(
-        event: OrchestratorEvent, rows: RowIndex, state: list[CwState]
+        event: OrchestratorEvent,
+        rows: RowIndex,
+        state: list[CwState],
+        sources: ViewSources,
     ) -> str | None:
-        """The event row's first next command; *state* caches one state load."""
+        """The event row's first next command; *state* caches one state load.
+
+        *sources* shares the page's config reads; the human opt-in and the
+        pipeline position are resolved as ``show`` resolves them (#2760 R7).
+        """
         ticket = event.payload.get("ticket_id")
         row = rows.row(ticket) if isinstance(ticket, str) and ticket else None
         if row is None:
@@ -242,11 +251,14 @@ class AttentionStream:
             state.append(load_state())
         probe = scan_pending([row], now=datetime.now(UTC))
         block = probe[0].block if probe else None
+        facts = next_command_facts(row, sources)
         return first_next_command(
             row,
             resolve_session_for_task(row, state[0]),
             skip_reason=block.code if block is not None else None,
             lane_resume_command=block.command if block is not None else None,
+            operator_opt_in=facts.operator_opt_in,
+            pipeline_position=facts.position,
         )
 
     # --- the stuck scan -------------------------------------------------------

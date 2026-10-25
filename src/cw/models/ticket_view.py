@@ -44,12 +44,25 @@ class DispatchSource(StrEnum):
 
 
 class NextCommand(BaseModel):
-    """One runnable next step for the row as it stands."""
+    """One runnable next step for the row as it stands.
+
+    ``operator_only`` is the machine-readable form of the purpose's
+    ``operator-only human gate`` label (#2760): true iff the purpose starts
+    with that label.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     command: str
     purpose: str
+    operator_only: bool = Field(
+        default=False,
+        description=(
+            "True when the command belongs to a human-kept gate the operator"
+            " opted into: only the human operator runs it, never an agent or a"
+            " script."
+        ),
+    )
 
 
 class SessionView(BaseModel):

@@ -36,12 +36,17 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from cw.dev_queue import _find_ticket
-from cw.dev_queue.next_commands import next_commands
+from cw.dev_queue.next_commands import (
+    human_gate_attention_command,
+    is_human_gate_command,
+    next_commands,
+)
 from cw.dispatch import BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
 from cw.dispatch.regress_repeat import _FINALIZE_REGRESS_REPEAT_REASON
 from cw.exceptions import CwError
 from cw.focus import get_focus
 from cw.models import LivenessBucket, OrchestratorEventType
+from cw.models.enums import PipelinePosition
 from cw.reconcile._shared import (
     SENTINEL_STAGE_MISMATCH_DEAD_SESSION_REASON,
     SENTINEL_STAGE_MISMATCH_LIVE_SESSION_REASON,
@@ -362,17 +367,31 @@ def first_next_command(
     *,
     skip_reason: str | None = None,
     lane_resume_command: str | None = None,
+    operator_opt_in: bool = False,
+    pipeline_position: PipelinePosition = PipelinePosition.INTERIOR,
 ) -> str | None:
-    """The first legal next command for *row*, or None when there is no row."""
+    """The first legal next command for *row*, or None when there is no row.
+
+    The stream drops ``purpose``, so a human-kept gate's command (the
+    state-derived ``is_human_gate_command``) is withheld and
+    ``human_gate_attention_command`` (``HUMAN GATE: cw dev-queue show ...``)
+    is returned instead (#2760). *operator_opt_in* and *pipeline_position*
+    are the caller-resolved facts ``show`` passes too.
+    """
     if row is None:
         return None
     # Every rule of the next-command table yields at least one command.
-    return next_commands(
+    first = next_commands(
         row,
         session=session,
+        operator_opt_in=operator_opt_in,
         skip_reason=skip_reason,
         lane_resume_command=lane_resume_command,
-    )[0].command
+        pipeline_position=pipeline_position,
+    )[0]
+    if is_human_gate_command(row, first):
+        return human_gate_attention_command(row)
+    return first.command
 
 
 def _why(payload: dict[str, object]) -> str:

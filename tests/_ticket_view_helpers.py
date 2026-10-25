@@ -43,7 +43,7 @@ from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import _make_daemon_session, _make_ticket_task, _seed_sessions
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     import pytest
@@ -84,12 +84,15 @@ def write_lane_client(
     paused: bool = False,
     signoff: str | None = None,
     finalize_gate: str | None = None,
+    lane_stages: Mapping[str, Sequence[str]] | None = None,
+    client_stages: Sequence[str] | None = None,
 ) -> None:
     """Write a one-client ``clients.yaml`` whose lanes carry the given settings.
 
     ``attempt_ceiling``, ``paused``, ``signoff`` and ``finalize_gate`` apply to
     every lane in *lanes*; ``attempt_ceiling=False`` is the lane's explicit
-    "no ceiling".
+    "no ceiling". *lane_stages* maps a lane name to its ``pipeline.stages``
+    override; *client_stages* sets the client-level ``pipeline.stages`` (#2760).
     """
     lane_entries: list[dict[str, object]] = []
     for name in lanes:
@@ -102,10 +105,20 @@ def write_lane_client(
             entry["signoff"] = signoff
         if finalize_gate is not None:
             entry["finalize_gate"] = finalize_gate
+        if lane_stages is not None and name in lane_stages:
+            entry["pipeline"] = {"stages": list(lane_stages[name])}
         lane_entries.append(entry)
-    write_clients_yaml(
-        ClientSpec(client, workspace, lanes=lane_entries), ensure_workspaces=True
+    spec = (
+        ClientSpec(client, workspace, lanes=lane_entries)
+        if client_stages is None
+        else ClientSpec(
+            client,
+            workspace,
+            lanes=lane_entries,
+            extra={"pipeline": {"stages": list(client_stages)}},
+        )
     )
+    write_clients_yaml(spec, ensure_workspaces=True)
 
 
 def patch_roster(
@@ -250,9 +263,11 @@ CASES: dict[str, Case] = {
         expected=[cmd("approve")],
     ),
     "rule0_finalize_held_no_session": Case(
+        # Rule 0a (#2760): approve refuses at session-not-found, so the
+        # operator's labelled requeue is listed instead.
         make_blocked(stage=Stage.REVIEW, disposition=FINALIZE_GATE_HELD_DISPOSITION),
         with_session=False,
-        expected=[cmd("approve")],
+        expected=[cmd("requeue", "--stage review")],
     ),
     "rule0_scope_hint_large_approval_gate": Case(
         make_blocked(
@@ -272,7 +287,7 @@ CASES: dict[str, Case] = {
             stage=Stage.REVIEW, scope_hint="large", disposition="approval_gate"
         ),
         with_session=False,
-        expected=[cmd("approve")],
+        expected=[cmd("requeue", "--stage review")],
     ),
     "rule2_pending": Case(
         make_task(status=QueueItemStatus.PENDING),

@@ -56,6 +56,7 @@ from cw.models import (
     QueueItemStatus,
     Stage,
 )
+from cw.models.enums import PipelinePosition, stage_position
 from cw.plan_fingerprint import (
     PLAN_DRAFT_RELATIVE_PATH,
     compute_body_sha,
@@ -537,20 +538,23 @@ def _raise_stage_not_in_pipeline(
         f"Cannot approve ticket '{ticket_id}':"
         f" stage {task.stage!r} not in pipeline for lane {task.lane!r} of"
         f" client {client_name!r}. Lane pipeline stages: {stages}."
-        " No approve or requeue can act on it until the lane pipeline includes"
-        " that stage; fix the lane's pipeline.stages, or run"
-        f" `{dev_queue_command('remove', task)}` and re-add the ticket."
+        " No approve or `requeue --stage` can act on it until the lane pipeline"
+        " includes that stage; fix the lane's pipeline.stages, or run"
+        f" `{dev_queue_command('remove', task)}` and re-add the ticket. A plain"
+        " `requeue` re-runs the current stage."
     )
     raise ApproveGateError(msg)
 
 
 def _raise_if_not_at_approval_gate(
-    ticket_id: str, session: Session, task: TicketTask
+    ticket_id: str, session: Session, task: TicketTask, position: PipelinePosition
 ) -> None:
     """Raise ``ApproveGateError`` unless *task* is at an approval gate.
 
     Extracted to keep ``_approve_ticket_locked`` under ruff's PLR0915
     statement-count gate, like ``_raise_stage_not_in_pipeline`` above.
+    *position* is the row's pipeline position: the refusal's human-gate
+    command reads "release ... and ship" at the terminal stage (#2760).
     """
     if not _not_at_approval_gate(session, task):
         return
@@ -561,7 +565,27 @@ def _raise_if_not_at_approval_gate(
         " Expected disposition 'approval_gate' or 'finalize_gate_held', or"
         " last_result status one of: plan_pending_approval,"
         " review_pending_approval."
-        f"{refusal_suffix(task, session=session)}"
+        f"{refusal_suffix(task, session=session, pipeline_position=position)}"
+    )
+    raise ApproveGateError(msg)
+
+
+def _raise_if_terminal_stage(
+    ticket_id: str, session: Session, task: TicketTask, position: PipelinePosition
+) -> None:
+    """Raise ``ApproveGateError`` when *task* is at its pipeline's last stage.
+
+    Shared by ``approve`` and ``--approve`` plan resolution; the refusal names
+    the requeue ``show`` lists there (#2760).
+    """
+    if position is not PipelinePosition.TERMINAL:
+        return
+    suffix = refusal_suffix(
+        task, session=session, skip="approve", pipeline_position=position
+    )
+    msg = (
+        f"Cannot approve ticket '{ticket_id}':"
+        f" already at terminal stage {task.stage!r}.{suffix}"
     )
     raise ApproveGateError(msg)
 
@@ -667,6 +691,7 @@ def _approve_ticket_locked(
 
     if task.stage not in stages:
         _raise_stage_not_in_pipeline(ticket_id, task, stages, client_name)
+    position = stage_position(task.stage, stages)
 
     if task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF:
         from_stage = task.stage.value
@@ -708,19 +733,12 @@ def _approve_ticket_locked(
                 if is_human_kept_gate(task)
                 else " Use 'requeue' to re-run the stage."
             )
-            + refusal_suffix(task, session=None)
+            + refusal_suffix(task, session=None, pipeline_position=position)
         )
         raise ApproveGateError(msg)
 
-    _raise_if_not_at_approval_gate(ticket_id, session, task)
-
-    if task.stage == stages[-1]:
-        msg = (
-            f"Cannot approve ticket '{ticket_id}':"
-            f" already at terminal stage {task.stage!r}."
-            f"{refusal_suffix(task, session=session, skip='approve')}"
-        )
-        raise ApproveGateError(msg)
+    _raise_if_not_at_approval_gate(ticket_id, session, task, position)
+    _raise_if_terminal_stage(ticket_id, session, task, position)
 
     from_stage = task.stage.value
     # Stamped before the branch chain (which never touches these fields) so

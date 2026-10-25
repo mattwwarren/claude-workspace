@@ -11688,7 +11688,7 @@ class TestDevQueueTasksNextColumn:
         [
             ("rule0_signoff", _HUMAN),
             ("rule0_finalize_gate_held", _HUMAN),
-            ("rule0_finalize_held_no_session", _HUMAN),
+            ("rule0_finalize_held_no_session", "HUMAN GATE: requeue --stage review"),
             ("rule0_scope_hint_large_approval_gate", _HUMAN),
             ("rule9_review_gate", "approve"),
             ("rule9_approval_gate_disposition", "approve"),
@@ -11751,23 +11751,140 @@ class TestDevQueueTasksNextColumn:
         result = CliRunner().invoke(main, ["dev-queue", "tasks"])
         assert _next_cells(result.output) == ["requeue --stage finalize"]
 
-    def test_every_first_command_fits_the_column(self) -> None:
+    def test_every_first_command_fits_the_column(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.cli.dev_queue.tasks import _next_cell
         from cw.dev_queue.next_commands import (
             HUMAN_GATE_CELL_LABEL,
             compact_command,
-            is_human_kept_gate,
+            is_human_gate_command,
             next_commands,
         )
-        from tests._ticket_view_helpers import CASES
+        from cw.ticket_view import ViewSources
+        from tests._ticket_view_helpers import CASES, write_lane_client
 
-        for case in CASES.values():
-            first = next_commands(case.task, session=case.session())[0]
-            cell = compact_command(case.task, first.command)
-            if is_human_kept_gate(case.task):
-                cell = f"{HUMAN_GATE_CELL_LABEL}{cell}"
-                assert cell == _HUMAN
-            assert not cell.startswith("requeue") or not is_human_kept_gate(case.task)
-            assert len(cell) <= _NEXT_WIDTH
+        # Every stage a CASES row sits at is in the pipeline, so each row's
+        # position is interior or terminal and case.expected[0] is the cell.
+        write_lane_client(
+            "acme",
+            tmp_path / "ws",
+            client_stages=["plan", "harden", "impl", "review", "finalize"],
+        )
+        for case_id, case in CASES.items():
+            session = case.session()
+            sessions_by_id = {session.id: session} if session is not None else {}
+            cell = _next_cell(case.task, sessions_by_id, ViewSources())
+            first = next_commands(case.task, session=session)[0]
+            bare = compact_command(case.task, case.expected[0])
+            expected = (
+                f"{HUMAN_GATE_CELL_LABEL}{bare}"
+                if is_human_gate_command(case.task, first)
+                else bare
+            )
+            assert cell == expected, case_id
+            assert len(cell) <= _NEXT_WIDTH, case_id
+
+    @pytest.mark.parametrize(
+        ("overrides", "last_result", "cell"),
+        [
+            ({}, {"status": "review_pending_approval"}, "requeue --stage finalize"),
+            (
+                {"scope_hint": "large"},
+                {"status": "review_pending_approval"},
+                "HUMAN GATE: requeue --stage finalize",
+            ),
+            (
+                {"scope_hint": "large", "stage": "review"},
+                {"status": "stage_complete"},
+                "HUMAN GATE: requeue --stage review",
+            ),
+            ({"stage": "harden"}, {"status": "review_pending_approval"}, "show"),
+        ],
+    )
+    def test_position_resolved_cells(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        overrides: dict[str, object],
+        last_result: dict[str, object],
+        cell: str,
+    ) -> None:
+        """#2760: the cell matches what the verbs accept at the resolved position."""
+        from tests._ticket_view_helpers import (
+            bound_session_for,
+            make_blocked,
+            seed_queue,
+            write_lane_client,
+        )
+
+        write_lane_client("acme", tmp_path / "ws")
+        kwargs: dict[str, object] = {
+            "stage": "finalize",
+            "disposition": "review_pending_approval",
+        }
+        kwargs.update(overrides)
+        task = make_blocked(**kwargs)
+        seed_queue([task], [bound_session_for(task, last_result=last_result)])
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        assert _next_cells(result.output) == [cell]
+        assert len(cell) <= _NEXT_WIDTH
+
+    def test_unreadable_client_config_falls_back(self, tmp_config_dir: Path) -> None:
+        from tests._ticket_view_helpers import (
+            bound_session_for,
+            make_blocked,
+            seed_queue,
+        )
+
+        clients_file().parent.mkdir(parents=True, exist_ok=True)
+        clients_file().write_text("clients: [not, valid\n")
+        task = make_blocked(stage="finalize")
+        seed_queue(
+            [task],
+            [
+                bound_session_for(
+                    task, last_result={"status": "review_pending_approval"}
+                )
+            ],
+        )
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        assert _next_cells(result.output) == ["approve"]
+
+    def test_raising_client_read_is_armed_and_interior(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests._ticket_view_helpers import (
+            CASES,
+            bound_session_for,
+            make_blocked,
+            seed_queue,
+            write_lane_client,
+        )
+
+        write_lane_client("acme", tmp_path / "ws")
+
+        def _fail(_name: str) -> object:
+            msg = "disk"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.ticket_view.get_effective_client", _fail)
+        must_fix = CASES["rule6a_must_fix_override_recorded"].task
+        gate = make_blocked(ticket_id="ACM-2", stage="finalize")
+        seed_queue(
+            [must_fix, gate],
+            [
+                bound_session_for(
+                    gate, last_result={"status": "review_pending_approval"}
+                )
+            ],
+        )
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        # Opt-in fails closed (armed: no finalize jump); position fails soft.
+        assert sorted(_next_cells(result.output)) == sorted([_OVERRIDE_CELL, "approve"])
 
     def test_json_is_unchanged_and_reads_no_config(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch

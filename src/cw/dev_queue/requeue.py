@@ -48,7 +48,7 @@ from cw.dev_queue.lifecycle import (
     transition_task_status,
 )
 from cw.dev_queue.next_commands import dev_queue_command, refusal_suffix
-from cw.dev_queue.refusal import refusal_hint
+from cw.dev_queue.refusal import bound_session, refusal_hint, row_pipeline_position
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import (
@@ -65,6 +65,7 @@ from cw.models import (
     QueueItemStatus,
     Stage,
 )
+from cw.models.enums import stage_position
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import (
@@ -206,8 +207,8 @@ def _validate_requeue_stages(
         )
     except RequeueStageError as exc:
         msg = (
-            f"{exc} No requeue can act on a row whose stage is not in its lane"
-            " pipeline; fix the lane's pipeline.stages, or run"
+            f"{exc} No --stage requeue can act on a row whose stage is not in its"
+            " lane pipeline; fix the lane's pipeline.stages, or run"
             f" `{dev_queue_command('remove', task)}` and re-add the ticket."
         )
         raise RequeueStageError(msg) from exc
@@ -247,7 +248,13 @@ def _classify_requeue_move(
     _validate_requeue_stages(task, stages, target_stage)
     if stages.index(target_stage) >= stages.index(task.stage):
         return "forward"
-    hint = f"{refusal_hint(task)}{_pending_restage_hint(task, target_stage.value)}"
+    # Both stages are proven in the pipeline: the position needs no config read.
+    suffix = refusal_suffix(
+        task,
+        session=bound_session(task),
+        pipeline_position=stage_position(task.stage, stages),
+    )
+    hint = f"{suffix}{_pending_restage_hint(task, target_stage.value)}"
     if not (allow_regress or infer_regress):
         msg = (
             f"Cannot requeue ticket '{task.ticket_id}'"
@@ -932,6 +939,8 @@ def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
         raise UnblockStateError(msg)
 
     session_id = task.session_id
+    # Resolved before sessions_lock: the refusals below read no config under it.
+    position = row_pipeline_position(task)
 
     # Why: sessions_lock outer, dev_queue_lock inner — canonical dual-lock ordering.
     # Both saves happen under the outer lock so sessions.json is never written unless
@@ -959,7 +968,8 @@ def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
                 )
             # Pure suffix from the already-loaded session: no state read under
             # sessions_lock (#2692).
-            msg += f"{_UNBLOCK_SALVAGE_ONLY}{refusal_suffix(task, session=session)}"
+            suffix = refusal_suffix(task, session=session, pipeline_position=position)
+            msg += f"{_UNBLOCK_SALVAGE_ONLY}{suffix}"
             raise UnblockStateError(msg)
 
         # bounded=True (#2501): explicit operator command (the orchestrator
@@ -971,10 +981,13 @@ def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
             store = load_dev_queue()
             task = _find_ticket(store, ticket_id, client_name)
             if task.status != QueueItemStatus.BLOCKED_ON_USER:
+                suffix = refusal_suffix(
+                    task, session=session, pipeline_position=position
+                )
                 msg = (
                     f"Cannot unblock ticket '{ticket_id}': status changed to"
                     f" {task.status.value!r} concurrently. Re-check and retry."
-                    f"{_UNBLOCK_SALVAGE_ONLY}{refusal_suffix(task, session=session)}"
+                    f"{_UNBLOCK_SALVAGE_ONLY}{suffix}"
                 )
                 raise UnblockStateError(msg)
             transition_task_status(task, QueueItemStatus.PENDING)
