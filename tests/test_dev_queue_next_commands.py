@@ -1513,10 +1513,18 @@ def _assert_complete(task: TicketTask, cmds: list[NextCommand], refusal: str) ->
     """Completeness where ``approve`` refuses: what replaces it is listed."""
     verbs = [_verb(c.command) for c in cmds]
     # Rules 6/6a outrank rule 9 and are unchanged at the terminal stage: they
-    # never list a plain approve, a human opt-in drops their ship step by
-    # design (R5), and that ship step is E1 (#2765) when FINALIZE is absent.
-    if "terminal stage" in refusal and task.blocked_reason != CODEX_MUST_FIX_FINDINGS:
-        assert "requeue" in verbs
+    # never list a plain approve. The one named carve-out is a MUST_FIX row
+    # whose human opt-in drops the ship step by design (R5, rules 6/6a): it may
+    # list `approve --override-must-fix` instead of a requeue. E1 (#2765) is
+    # no completeness gap (the ship-step requeue is still listed there), so
+    # `_is_e1` excuses it in the legality walk only.
+    if "terminal stage" in refusal:
+        opt_in_must_fix = (
+            task.blocked_reason == CODEX_MUST_FIX_FINDINGS
+            and row_carries_human_opt_in(task)
+        )
+        listed_override = any("--override-must-fix" in c.command for c in cmds)
+        assert "requeue" in verbs or (opt_in_must_fix and listed_override)
     if "not in pipeline" in refusal:
         assert [c.command for c in cmds] == [cmd("show"), cmd("requeue")]
         assert cmds[1].operator_only is is_human_kept_gate(task)
