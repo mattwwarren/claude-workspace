@@ -396,7 +396,8 @@ Fields worth knowing:
 
 `cw dev-queue tasks` shows the first of those commands in its trailing `NEXT`
 column, without the `cw dev-queue` prefix and the row's ticket and client; a
-gate the human opted into reads `HUMAN GATE: approve` (#2692). Every
+gate the human opted into reads `HUMAN GATE: approve` (#2692), and one that
+`approve` cannot take reads `HUMAN GATE: requeue --stage <stage>` (#2760). Every
 `approve`, `requeue`, `unblock` and `move` refusal ends with the same
 information: the row's status, stage and disposition, why it is parked when
 that is known, and `Run: <command>` for the legal next step (see "Which verb
@@ -416,8 +417,10 @@ no ceiling), `session` (null, or `id`/`status`/`liveness_bucket`/
 `auto_resume_enabled` and `resume_command`, #2696), `lane_stats`,
 `lane_occupants`), `approval` (null = none on
 the row; no approver field), `other_rows`, `created_at`, `completed_at`,
-`next` (`command`, `purpose`). Compatibility rule: fields may be added
-without a version change; renaming or removing one bumps `schema_version`.
+`next` (`command`, `purpose`, `operator_only`: true for a human-kept gate's
+command, which only the human operator runs, #2760). Compatibility rule:
+fields may be added without a version change; renaming or removing one bumps
+`schema_version`.
 
 ---
 
@@ -693,10 +696,18 @@ every refusal names the right one for the row (`Run: ...`), and
   finalize hold (`finalize_gate_held`: `hold_finalize` /
   `finalize_gate: manual`), a `scope_hint: large` approval gate: the
   operator runs `approve`; an agent notifies the human. `show` and every
-  refusal label the row's only command `operator-only human gate; not for
-  an agent to run`, never suggest a `requeue`, and `tasks` shows
-  `HUMAN GATE: approve`. A sessionless one is refused by `approve` itself
-  until the operator resolves it (#2718).
+  refusal label the row's command `operator-only human gate; not for an
+  agent to run`, `show --json` flags it `operator_only: true`, and `tasks`
+  shows `HUMAN GATE: approve`. When `approve` cannot take the gate, the
+  labelled command is a `requeue --stage <stage>` instead (`tasks` shows
+  `HUMAN GATE: requeue --stage <stage>`): at the terminal stage of the lane
+  pipeline it releases the gate and ships; when no bound session is at the
+  gate (none recorded, or a `scope_hint: large` approval whose session is
+  not at the gate) it re-runs the stage. An agent runs neither (#2718,
+  #2760).
+- A row whose stage is missing from its lane pipeline: `show` lists `show`
+  and a plain `requeue` (`approve` and `requeue --stage` refuse it); the
+  requeue is labelled operator-only for a human-kept gate (#2760).
 - `review_health_gate`, `review_artifacts_stale`, `awaiting_operator`,
   `codex_must_fix_mechanically_rejected`: `requeue` (re-runs the stage), or
   `drain --held` for every such park of the client. `approve` never releases
