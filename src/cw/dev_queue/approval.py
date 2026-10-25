@@ -289,15 +289,16 @@ def _record_approve_scope_routing_decision(
     finalize_held: bool,
     awaiting_signoff: bool,
     plan_requeued: bool,
-    review_stamp: tuple[str, str | None] | None,
+    review_stamp: tuple[str, str | None, dict[str, str | None]] | None,
 ) -> None:
     """Emit the #1617 scope-routing audit event for the gate-release site (D4).
 
-    ``review_stamp`` (#2767) is the ``(approver_kind, reviewed_sha)`` pair
-    :func:`_stamp_review_approval` recorded in this call, or None. It lands in
-    the payload as ``approver_kind`` / ``reviewed_sha`` on every emission (both
-    null when nothing was stamped). ``_stage_regress`` clears the row's record,
-    so this event is the durable trace of who approved which reviewed head.
+    ``review_stamp`` (#2767) is the ``(approver_kind, reviewed_sha, before)``
+    tuple :func:`_stamp_review_approval` recorded in this call, or None. It
+    lands in the payload as the approval's before/after values, with the
+    compact ``approver_kind`` / ``reviewed_sha`` fields retained for consumers.
+    ``_stage_regress`` clears the row's record, so this event is the durable
+    trace of who approved which reviewed head.
 
     Extracted from ``_approve_ticket_locked`` to keep that function under the
     PLR0912/PLR0915 branch/statement ceilings. This site has no ``last_result``
@@ -341,8 +342,56 @@ def _record_approve_scope_routing_decision(
             "disposition": disposition,
             "approver_kind": review_stamp[0] if review_stamp else None,
             "reviewed_sha": review_stamp[1] if review_stamp else None,
+            "review_approval_before": (
+                review_stamp[2] if review_stamp else _review_approval_snapshot(task)
+            ),
+            "review_approval_after": _review_approval_snapshot(task),
         },
         correlation_id=ticket_id,
+    )
+
+
+def _save_approval_and_audit(
+    store: DevQueueStore,
+    ticket_id: str,
+    client_name: str,
+    task: TicketTask,
+    session: Session,
+    *,
+    finalize_held: bool,
+    awaiting_signoff: bool,
+    plan_requeued: bool,
+    review_stamp: tuple[str, str | None, dict[str, str | None]] | None,
+) -> None:
+    """Persist an approval and its gate-release audit in safe order.
+
+    Review approvals record the audit first, so an event-inbox failure refuses
+    the approval before the row can become durable. Other approval paths retain
+    the established save-first ordering.
+    """
+    if review_stamp is not None:
+        _record_approve_scope_routing_decision(
+            ticket_id,
+            client_name,
+            task,
+            session,
+            finalize_held=finalize_held,
+            awaiting_signoff=awaiting_signoff,
+            plan_requeued=plan_requeued,
+            review_stamp=review_stamp,
+        )
+        save_dev_queue(store)
+        return
+    save_dev_queue(store)
+    _record_approve_scope_routing_decision(
+        ticket_id,
+        client_name,
+        task,
+        session,
+        finalize_held=finalize_held,
+        awaiting_signoff=awaiting_signoff,
+        plan_requeued=plan_requeued,
+        review_stamp=review_stamp,
     )
 
 
@@ -403,7 +452,7 @@ def _stamp_review_approval(
     *,
     operator_initiated: bool,
     finalize_held: bool,
-) -> tuple[ReviewApproverKind, str | None] | None:
+) -> tuple[ReviewApproverKind, str | None, dict[str, str | None]] | None:
     """Record the v48 review-approval fact on a REVIEW-stage release (#2767).
 
     Runs after the branch chain, on both the direct advance and the signoff
@@ -417,17 +466,32 @@ def _stamp_review_approval(
     ``review.reviewed_sha`` (the tree the review actually saw), None when it
     carried none: recorded absence, which finalize Step 4.0 parks on.
 
-    Returns what THIS call stamped, for the return dict and the audit event.
+    Returns what THIS call stamped, plus the previous record, for the return
+    dict and the audit event.
     """
     from cw.dispatch import _resolve_review_reviewed_sha
 
     if from_stage != Stage.REVIEW.value or finalize_held:
         return None
+    before = _review_approval_snapshot(task)
     kind: ReviewApproverKind = "operator" if operator_initiated else "recipe"
     task.review_approved_at = datetime.now(UTC)
     task.review_approver_kind = kind
     task.review_approved_sha = _resolve_review_reviewed_sha(session.last_result)
-    return kind, task.review_approved_sha
+    return kind, task.review_approved_sha, before
+
+
+def _review_approval_snapshot(task: TicketTask) -> dict[str, str | None]:
+    """Return the persisted review-approval fields in event-safe form."""
+    return {
+        "approved_at": (
+            task.review_approved_at.isoformat()
+            if task.review_approved_at is not None
+            else None
+        ),
+        "approver_kind": task.review_approver_kind,
+        "reviewed_sha": task.review_approved_sha,
+    }
 
 
 def _promote_plan_draft_on_direct_advance(
@@ -873,16 +937,10 @@ def _approve_ticket_locked(
     )
     to_stage = task.stage.value
 
-    # #1617 (D4): _approve_ticket_locked is a gate-release site, excluded from
-    # the scope_hint park-decision gate (Scope item 1) but still covered by
-    # the scope-routing audit trail (Scope item 2). save_dev_queue runs first
-    # so the audit event never durably claims a disposition that did not
-    # actually land in the dev-queue store (Checkpoint 3a review, #1617): if
-    # save_dev_queue raises or the process dies between the two calls, no
-    # audit event is emitted for a mutation that never persisted.
-    save_dev_queue(store)
-
-    _record_approve_scope_routing_decision(
+    # #1617 (D4): review approvals use event-first ordering so an audit failure
+    # cannot leave a durable review approval without its audit trail.
+    _save_approval_and_audit(
+            store,
         ticket_id,
         client_name,
         task,
@@ -892,6 +950,7 @@ def _approve_ticket_locked(
         plan_requeued=plan_requeued,
         review_stamp=review_stamp,
     )
+    save_dev_queue(store)
 
     return {
         "from_stage": from_stage,

@@ -2187,7 +2187,17 @@ fires from all four call sites; only the Stop-hook one currently acts on
   "rule": "Rule 1 | Rule 3 | stage_walk | gate_release",
   "disposition": "<str | null>",
   "approver_kind": "operator | recipe | null",
-  "reviewed_sha": "<str | null>"
+  "reviewed_sha": "<str | null>",
+  "review_approval_before": {
+    "approved_at": "<ISO timestamp | null>",
+    "approver_kind": "operator | recipe | null",
+    "reviewed_sha": "<str | null>"
+  },
+  "review_approval_after": {
+    "approved_at": "<ISO timestamp | null>",
+    "approver_kind": "operator | recipe | null",
+    "reviewed_sha": "<str | null>"
+  }
 }
 ```
 `approver_kind` and `reviewed_sha` (GitHub #2767) are present only on the
@@ -2198,6 +2208,11 @@ call stamped none: a PLAN approve and the `finalize_hold_branch` and
 `plan_requeued` branches (the `signoff_branch` re-route carries what it just
 stamped; the later approve that clears the signoff gate emits no event).
 `reviewed_sha` is also null when the review sentinel carried no reviewed head.
+`review_approval_before` and `review_approval_after` preserve the complete
+approval record around the mutation, including its timestamp. The gate-release
+event for a REVIEW approval is written before the queue row, so a failed audit
+write refuses the approval rather than leaving a durable review approval without
+its audit trail.
 `_stage_regress` clears the row's record, so this event is the record of who
 approved which reviewed head that survives a regress. The three
 `cw.dispatch.routing` emitters do not carry these keys.

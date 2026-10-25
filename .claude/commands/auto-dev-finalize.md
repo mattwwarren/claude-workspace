@@ -113,6 +113,11 @@ Substitute `<resolved scope.tier>` with exactly the lowercase `small` or `large`
 
 The recorded approval counts for the current HEAD only when its `reviewed_sha` is an ancestor of HEAD, no non-merge commit landed after it (other than commits already on `origin/<default-branch>`), and every merge commit after it has its non-first parents on `origin/<default-branch>`. That accepts finalize's own pushed sync merge (Step 4c) so a re-run after that merge alone is idempotent, and rejects any new work (finalize's own `/prep-pr` commits and Step 4c.5 rebase included, A10) or a merge of any other ref. `<default-branch>` is cw-context `world_state_snapshot.origin_main_branch`.
 
+Because this decision is HEAD-sensitive, the exact fence must also be run after
+any `/prep-pr` or Step 4c.5 branch mutation and immediately before each
+auto-merge arm. A delegated `/prep-pr`/`ship-it` arm is subject to the same
+rule; a failing re-check parks before auto-merge is enabled.
+
 ```bash
 GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
@@ -241,6 +246,14 @@ not improvise the prompt from memory.
 **If no open PR from this pipeline:** Proceed immediately.
 
 **Headless:** Step 4a runs for small tickets and for large tickets whose Step 4.0 check printed REVIEW_APPROVAL_RECORDED.
+
+**Headless re-check before auto-merge:** Step 4.0 is a required, repeatable
+fence, not a one-time admission check. Re-run the same fence immediately before
+every auto-merge arm, after `/prep-pr` returns and after any Step 4c.5 rebase or
+semantic-resolution mutation. This includes the existing-OPEN-PR path and the
+no-PR path's final Step 4d arm. If the re-check does not print
+`REVIEW_APPROVAL_NOT_REQUIRED` or `REVIEW_APPROVAL_RECORDED`, park with the
+Step 4.0 `review_pending_approval` sentinel and do not enable auto-merge.
 
 The gate is content-aware (#2431): a file this branch shares with another open pipeline PR blocks only when the two heads genuinely conflict. Two layers, both run by the single fence below:
 
@@ -839,7 +852,7 @@ After `/prep-pr` returns with a PR number:
 
    Omit the section for `"clean"`. The section is idempotent across restarts: replace an existing `## Operator override` section rather than appending a second one.
 
-3. **Enable auto-merge:** Precondition: if the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless, skip this entire item — do not run the seam check or `arm-automerge`, set the sentinel's `pr.auto_merge` to `false`, and continue to step 4. Otherwise, first check the shared seam — `~/.claude/scripts/prep_pr_finalize.py check-automerge-allowed` — and record its exit status. Exit `0` permits the arm; exit `1` means `.claude/project-config.yaml` sets `pr.auto_merge: false`, so skip this step, set the sentinel's `pr.auto_merge` to `false`, leave the PR open for the orchestrator to merge, and skip the verification below. Any other exit status is an unexpected gate failure: BLOCK. Exit `2` can also mean `.claude/project-config.yaml` exists but `pr.auto_merge` cannot be determined (fail closed, #2581); the stderr names the reason, so carry it in the BLOCK. When the seam permits it, arm with the bounded-retry `arm-automerge` (#2576), run from the impl worktree and resolving the script in the same Bash call (the reuse path skips Step 4c, so this item cannot rely on a `FINALIZE` defined there):
+3. **Enable auto-merge:** **Headless:** immediately before this item, re-run Step 4.0 after all `/prep-pr` and Step 4c.5 mutations; only its two continue tokens permit the arm. If that re-check parks, emit the Step 4.0 `review_pending_approval` sentinel and stop. Precondition: if the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless, skip this entire item — do not run the seam check or `arm-automerge`, set the sentinel's `pr.auto_merge` to `false`, and continue to step 4. Otherwise, first check the shared seam — `~/.claude/scripts/prep_pr_finalize.py check-automerge-allowed` — and record its exit status. Exit `0` permits the arm; exit `1` means `.claude/project-config.yaml` sets `pr.auto_merge: false`, so skip this step, set the sentinel's `pr.auto_merge` to `false`, leave the PR open for the orchestrator to merge, and skip the verification below. Any other exit status is an unexpected gate failure: BLOCK. Exit `2` can also mean `.claude/project-config.yaml` exists but `pr.auto_merge` cannot be determined (fail closed, #2581); the stderr names the reason, so carry it in the BLOCK. When the seam permits it, arm with the bounded-retry `arm-automerge` (#2576), run from the impl worktree and resolving the script in the same Bash call (the reuse path skips Step 4c, so this item cannot rely on a `FINALIZE` defined there):
 
    ```bash
    cd <worktree>

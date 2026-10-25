@@ -1671,6 +1671,15 @@ class TestStep40DocPins:
         )
         assert "large already exited at S3" not in content
 
+    def test_step40_is_rechecked_after_branch_mutations_before_automerge(self) -> None:
+        content = _cmd(_FINALIZE_DOC)
+        step40 = content.index(_STEP40_HEADING)
+        recheck = content.index("Headless re-check before auto-merge", step40)
+        arm = content.index("3. **Enable auto-merge:**", recheck)
+        assert "after `/prep-pr` returns" in content[recheck:arm]
+        assert "Step 4c.5" in content[recheck:arm]
+        assert "review_pending_approval" in content[recheck:arm]
+
     def test_completion_template_lists_the_step40_status(self) -> None:
         content = _cmd(_FINALIZE_DOC)
         completion = content[content.index("## Stage 4+5 Completion (headless only)") :]

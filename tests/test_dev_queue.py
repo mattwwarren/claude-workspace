@@ -9368,6 +9368,13 @@ class TestApproveTicketLockedForceHold:
         # fixture sentinel carries no review.reviewed_sha, so the head is None.
         assert payload["approver_kind"] == "operator"
         assert payload["reviewed_sha"] is None
+        assert payload["review_approval_before"] == {
+            "approved_at": None,
+            "approver_kind": None,
+            "reviewed_sha": None,
+        }
+        assert payload["review_approval_after"]["approver_kind"] == "operator"
+        assert payload["review_approval_after"]["reviewed_sha"] is None
         assert correlation_id == "GEN-500"
 
     def test_approve_locked_finalize_hold_branch_event_carries_null_stamp(
@@ -9607,6 +9614,34 @@ class TestReviewApprovalRecord:
         assert t.review_approver_kind == "operator"
         assert t.review_approved_sha == _HEAD_SHA
         assert t.review_approved_at is not None
+
+    def test_audit_failure_refuses_review_approval_before_persistence(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A review approval never persists without its scope audit event."""
+        from cw.dev_queue import approve_ticket
+        from cw.models import OrchestratorEventType
+
+        _seed_gate_row(tmp_config_dir, tmp_path)
+        before = load_dev_queue().model_dump()
+
+        def _raise_event(
+            event_type: OrchestratorEventType,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            if event_type == OrchestratorEventType.SCOPE_ROUTING_DECISION:
+                raise OSError("event inbox unavailable")
+
+        monkeypatch.setattr("cw.dev_queue.approval.record_event", _raise_event)
+
+        with pytest.raises(OSError, match="event inbox unavailable"):
+            approve_ticket("GEN-500", "genhealth")
+
+        assert load_dev_queue().model_dump() == before
 
     def test_sentinel_without_reviewed_sha_stamps_none_sha(
         self, tmp_config_dir: Path, tmp_path: Path
