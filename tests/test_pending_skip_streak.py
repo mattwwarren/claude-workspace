@@ -117,6 +117,21 @@ class TestLeadingRun:
         assert streak.skip_reason == "tracker_mcp_gate_blocked"
         assert streak.consecutive == len(newest)
 
+    def test_identical_timestamps_resolve_independent_of_input_order(self) -> None:
+        at = _T0
+        events = [
+            _raw_tick(
+                {"client": ACME, "ticket_id": ACME_TICKET, "skip_reason": reason}, at
+            )
+            for reason in (_OCCUPIED, "tracker_mcp_gate_blocked")
+        ]
+        now = _now_after(events)
+
+        forward = pending_skip_streaks([_row()], events, now=now)
+        backward = pending_skip_streaks([_row()], list(reversed(events)), now=now)
+
+        assert forward == backward
+
     def test_gap_over_max_ends_the_run(self) -> None:
         older = _occupied(3)
         gap = timedelta(seconds=STREAK_MAX_GAP_SECONDS + 1)

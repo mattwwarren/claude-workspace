@@ -95,7 +95,8 @@ def _events_by_key(
             key, skip = parsed
             grouped.setdefault(key, []).append(skip)
     for skips in grouped.values():
-        skips.sort(key=lambda s: s.at, reverse=True)
+        # Reason breaks timestamp ties: newest reason never depends on input order.
+        skips.sort(key=lambda s: (s.at, s.reason), reverse=True)
     return grouped
 
 
