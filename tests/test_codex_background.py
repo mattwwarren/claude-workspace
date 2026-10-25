@@ -1840,9 +1840,16 @@ class TestStampSessionIdOnRunningTaskDuplicateRunning:
 def _clean_result(
     worktree: Path, ticket_id: str
 ) -> tuple[AutoDevResult, ReviewVerdict]:
-    """A real stage_complete result + verdict, as a converged fix loop returns."""
+    """A real stage_complete result + verdict, as a converged fix loop returns.
+
+    ``scope_hint="small"`` (#2767) gives the clean tail a tier source when the
+    worktree cannot be measured (the detached-HEAD case); without one it would
+    block as ``scope_tier_unresolvable``.
+    """
     result, verdict = synthesize_codex_review_result(
-        task=TicketTask(ticket_id=ticket_id, client="test", stage=Stage.REVIEW),
+        task=TicketTask(
+            ticket_id=ticket_id, client="test", stage=Stage.REVIEW, scope_hint="small"
+        ),
         worktree=worktree,
         documents=[_make_reviewer_doc(reviewer_role="Code Quality Reviewer")],
         failures=[],

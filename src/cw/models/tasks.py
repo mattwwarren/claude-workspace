@@ -227,7 +227,14 @@ from cw.review_finding_dispositions import FindingDisposition
 # v47: added TicketTask.gate_block (GitHub #2717) — the consecutive
 #      gate-block backoff record. ``| None`` with a ``None`` default, so no
 #      migration filler is needed; a pre-v47 row recorded no gate-block run.
-DEV_QUEUE_SCHEMA_VERSION = 47
+# v48: added TicketTask.review_approved_at / review_approver_kind /
+#      review_approved_sha (GitHub #2767) — the REVIEW-stage approval record
+#      finalize Step 4.0 requires before a large ticket ships. ``| None`` with
+#      a ``None`` default, so no migration filler is needed; a pre-v48 row
+#      recorded no review approval.
+DEV_QUEUE_SCHEMA_VERSION = 48
+# Provenance of a v48 review approval: the human `approve` or the gate recipe.
+ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -648,6 +655,19 @@ class TicketTask(BaseModel):
     # FINALIZE's check_must_fix_override.py. Cleared only by _stage_regress
     # into Stage.REVIEW: a re-review supersedes the verdict it was bound to.
     must_fix_override: MustFixOverride | None = None
+    # The REVIEW-stage approval record (v48, #2767), stamped by
+    # dev_queue/approval.py's _stamp_review_approval when `approve` (or the
+    # auto_approve_clean_review recipe) releases a review gate. approver_kind
+    # is the provenance ("operator" for the human approve, "recipe" for the
+    # gate recipe); approved_sha is the sentinel's review.reviewed_sha, None
+    # when it carried none (recorded absence, never a wildcard). Threaded into
+    # cw-context.json queue_metadata.review_approval at spawn; finalize Step
+    # 4.0 ships a large ticket only while that SHA is an ancestor of HEAD with
+    # nothing but default-branch merges after it. Cleared by every
+    # _stage_regress and by a same-stage REVIEW requeue.
+    review_approved_at: datetime | None = None
+    review_approver_kind: ReviewApproverKind | None = None
+    review_approved_sha: str | None = None
     # DEPRECATED — inert since the process-kill-timeout removal. Formerly the
     # per-ticket wall-clock budget override (#265); nothing consults it now.
     # Kept only so persisted dev-queue rows that carry the field keep loading.

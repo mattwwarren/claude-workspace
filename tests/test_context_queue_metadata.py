@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 
 from cw.context_queue_metadata import (
     OPERATOR_RESOLUTIONS_SOURCE_KEY,
+    REVIEW_APPROVAL_KEY,
     build_queue_metadata,
     operator_resolutions_source,
 )
@@ -54,6 +55,7 @@ def test_key_set_is_the_old_one_plus_operator_resolutions() -> None:
     assert set(metadata) == _PRE_EXISTING_KEYS | {
         OPERATOR_RESOLUTIONS_KEY,
         OPERATOR_RESOLUTIONS_SOURCE_KEY,
+        REVIEW_APPROVAL_KEY,
     }
 
 
@@ -91,6 +93,7 @@ def test_populated_task_values_match_the_old_inline_dict() -> None:
         MUST_FIX_OVERRIDE_KEY: override.model_dump(mode="json"),
         OPERATOR_RESOLUTIONS_KEY: [],
         OPERATOR_RESOLUTIONS_SOURCE_KEY: None,
+        REVIEW_APPROVAL_KEY: None,
     }
 
 
@@ -98,6 +101,34 @@ def test_unset_task_threads_nulls() -> None:
     metadata = build_queue_metadata(_make_ticket_task())
     assert metadata["plan_approved_at"] is None
     assert metadata[MUST_FIX_OVERRIDE_KEY] is None
+    assert metadata[REVIEW_APPROVAL_KEY] is None
+
+
+def test_review_approval_is_an_iso_record_when_stamped() -> None:
+    """#2767 (v14): the row's v48 record rides as one object for Step 4.0."""
+    task = _make_ticket_task(
+        review_approved_at=_APPROVED_AT,
+        review_approver_kind="recipe",
+        review_approved_sha="c" * 40,
+    )
+    assert build_queue_metadata(task)[REVIEW_APPROVAL_KEY] == {
+        "approved_at": _APPROVED_AT.isoformat(),
+        "approver_kind": "recipe",
+        "reviewed_sha": "c" * 40,
+    }
+
+
+def test_review_approval_keeps_a_none_reviewed_sha() -> None:
+    """A stamped kind with no head is threaded as-is (recorded absence)."""
+    task = _make_ticket_task(
+        review_approved_at=_APPROVED_AT, review_approver_kind="operator"
+    )
+    record = build_queue_metadata(task)[REVIEW_APPROVAL_KEY]
+    assert record == {
+        "approved_at": _APPROVED_AT.isoformat(),
+        "approver_kind": "operator",
+        "reviewed_sha": None,
+    }
 
 
 def test_resolutions_are_a_list_of_dicts_in_round_order() -> None:

@@ -147,7 +147,8 @@ The rows below define the deterministic headless action for every interactive ga
 | S3 fix-loop cycle 3+ OR scope growth at any cycle | Append to `friction_highlights`, set `health.fix_loop_escalated: true`, continue |
 | Any other agent BLOCK (Plan / prep-pr / etc.) | EXIT `blocked` with `blocker.reason: "agent_block"` |
 | Tool call denied by auto-mode classifier (any stage) | EXIT `blocked` with `blocker.reason: "tool_denied"`, `retry_eligible: true`, `next_actions: ["redispatch_ticket"]` (see Tool-Use Denial Exit section) (except a denied `cw signal-park`, see the *Park-comment stamp rule*; and a denied `prep_pr_finalize.py arm-automerge` on an open PR, see *Exception (#2625)*) |
-| S4a merge gate (small only — large already exited) | EXIT `merge_gate_blocked` if prior pipeline PR open |
+| S4.0 large-tier review approval check (headless, before S4a or the reuse path's S4d): approval missing, stale or unreadable, cw-context below v14, or a tier that is not exactly `small`/`large` (`unresolved_tier`) | EXIT `review_pending_approval` with `stage_reached: "stage4a_merge_gate"`, `scope.tier: "large"`, `pr: null`, `next_actions: ["requeue_stage_review"]`; never `agent_block`. The operator releases it with `cw dev-queue requeue <T> -c <C> --stage review`; `approve` is refused at the terminal stage |
+| S4a merge gate (small, or large whose S4.0 check printed `REVIEW_APPROVAL_RECORDED`) | EXIT `merge_gate_blocked` if prior pipeline PR open |
 | S4b PR creation, small | AUTO-CREATE with auto-merge |
 | S4d UI Evidence Gate, no UI files OR media present in body | AUTO-CONTINUE — enable auto-merge |
 | S4d UI Evidence Gate, UI files present + body missing media | Skip auto-merge enable; append `"ui_evidence_missing"` to `friction_highlights`; set `pr.auto_merge: false`; set `next_actions: ["attach_ui_evidence_and_enable_automerge"]`; continue to Post-to-Linear |
@@ -1278,7 +1279,7 @@ Applies to: `no_op`, `plan_pending_approval`, `ambiguities_pending_resolution`, 
 | `plan_pending_approval` | Large scope — plan generated and posted to Linear; no branch created; awaiting orchestrator approval |
 | `ambiguities_pending_resolution` | Plan was clear enough to proceed by tier rules, but the Step 1c ambiguity scan surfaced clarifying questions; posted to Linear; no branch created; awaiting answers from the orchestrator (a genuine product/scope fork goes on to the human) |
 | `premises_pending_verification` | The Step 1c ambiguity scan surfaced one or more unverified premises — factual claims about an external system the plan's correctness depends on; posted to Linear; no branch created; awaiting orchestrator verification (not a plan revision) |
-| `review_pending_approval` | Large scope — fix loop complete, branch pushed, no PR; awaiting orchestrator review approval |
+| `review_pending_approval` | Large scope — fix loop complete, branch pushed, no PR; awaiting orchestrator review approval. Also the finalize Step 4.0 park (`stage_reached: "stage4a_merge_gate"`, possibly with a PR already open): the row's recorded review approval is missing or not valid for the head about to ship, so nothing ships; released by `requeue --stage review`, never by `approve` |
 | `merge_gate_blocked` | Small scope — prior pipeline PR still open; cannot create next PR until gate clears |
 | `scope_exceeded` | `--scope-limit small` rejected a Large ticket before impl started |
 | `forbidden_area` | `--forbidden` constraint matched a planned file; ticket rejected before impl started |
@@ -1332,7 +1333,7 @@ Optional keys (some `reason` values require them):
 - `shipped` → `"stage5_post_create"`
 - `no_op` → `"stage1_pre_flight"`
 - `plan_pending_approval` → `"stage1_plan"`
-- `review_pending_approval` → `"stage3_review"`
+- `review_pending_approval` → `"stage3_review"`, or `stage4a_merge_gate` for the finalize Step 4.0 park
 - `merge_gate_blocked` → `"stage4a_merge_gate"`
 - `scope_exceeded` / `forbidden_area` → whichever stage detected the violation (`"stage1_plan"` at planning, or the impl stage if later); mirror in `blocker.stage`
 - `empty_diff_blocked` → `"stage2_impl"` or `"stage3_review"` — whichever stage measured the empty branch; both are legal. Mirror it in `blocker.stage`
@@ -1352,6 +1353,7 @@ A `worktree_path` ending in `dev-proj-1234-fix-login` is wrong — that pattern 
 - `"user_approve_plan"` — large scope plan posted to Linear; the orchestrator adjudicates it and approves (`cw dev-queue approve`)
 - `"resolve_merge_gate"` — prior PR must merge before this ticket can ship
 - `"user_approve_review"` — large scope branch pushed; the orchestrator reviews the diff and approves (escalating only a product/scope fork)
+- `"requeue_stage_review"` — emitted only by the finalize Step 4.0 park. The operator releases it with the labelled, operator-only `cw dev-queue requeue <T> -c <C> --stage review`, which re-runs review so `approve` records the large-tier approval at REVIEW; `approve` is refused at the finalize park itself (terminal stage)
 - `"user_resolve_ambiguities"` — Step 1c surfaced ambiguities; the orchestrator resolves them against the ticket's sources of truth (escalating only genuine product/scope forks); answers belong on the Linear ticket before re-invoking
 - `"close_issue_as_completed"` — `no_op` outcome: the targeted change was already in place; the orchestrator closes the ticket as completed with a citation (the skill does not auto-close)
 - `"attach_ui_evidence"` — Stage 4d UI Evidence Gate "Hold" branch (interactive only): PR was created with frontend file changes but the body has no screenshots/video, the human chose to hold rather than ship-anyway or capture-now; auto-merge was NOT enabled

@@ -21,9 +21,38 @@ fixture builder (``tests/conftest.py::_plan_text``) so drift shows up as a
 failing test in one suite but not the other. As of #1917, both copies are
 code-fence-aware (``` and ~~~, including indented fence markers) — keep them
 in lockstep by hand going forward.
+
+SCOPE TIER (#2767). The module also parses the plan's ``**Scope tier:**``
+marker (:func:`parse_plan_scope_tier`) and resolves the tier a review sentinel
+carries (:func:`resolve_review_scope_tier`). The marker has one writer and
+several readers, all kept in lockstep by hand: ``auto-dev-plan.md`` Step 1g
+writes it; ``auto-dev-impl.md``, ``auto-dev-review.md`` and
+``auto-dev-finalize.md`` read it as agent prose; and this parser reads it for
+the codex review clean tail and the gate recipe's tier check. A change to the
+marker's wording must move all of them together.
 """
 
 from __future__ import annotations
+
+import re
+from typing import TYPE_CHECKING
+
+from cw.auto_dev_result import SCOPE_TIER_LARGE, SCOPE_TIER_SMALL
+
+if TYPE_CHECKING:
+    from cw.auto_dev_result import ScopeTier
+
+# The Claude review's diff-stat fallback (``auto-dev-review.md``): a branch is
+# small iff it touches at most this many files AND at most this many lines.
+SMALL_TIER_MAX_FILES = 10
+SMALL_TIER_MAX_LINES = 500
+
+# The canonical Stage 1g marker line. Looser phrasings (``tier: small``,
+# ``**Scope:** Small``) are deliberately not matched: they fall through to the
+# later tier sources, which is the conservative direction.
+_SCOPE_TIER_MARKER = re.compile(
+    r"^\s*\*\*Scope tier:\*\*\s*(small|large)\b", re.IGNORECASE
+)
 
 # The canonical heading is "## Files Modified", but real plans have used
 # variant wording (e.g. "## Files touched, with estimated line deltas", #1784),
@@ -140,3 +169,57 @@ def parse_plan_files_modified(plan_text: str) -> list[str]:
         if candidate and candidate not in paths:
             paths.append(candidate)
     return paths
+
+
+def parse_plan_scope_tier(plan_text: str) -> ScopeTier | None:
+    """Return the tier named by the plan's ``**Scope tier:**`` marker (#2767).
+
+    Fence-aware like :func:`parse_plan_files_modified`: a marker inside a ```
+    or ~~~ fence is an illustration and is skipped. The match is
+    case-insensitive and the value is returned lowercase; anything after the
+    value (a ``(N files, ~M lines, ...)`` measurement or a ``*(downgraded at
+    Stage 3 ...)*`` note) is ignored. The first matching line wins. ``None``
+    when no line carries a ``small`` or ``large`` marker.
+    """
+    for line in _strip_fenced_lines(plan_text.splitlines()):
+        match = _SCOPE_TIER_MARKER.match(line)
+        if match is not None:
+            if match.group(1).lower() == SCOPE_TIER_LARGE:
+                return SCOPE_TIER_LARGE
+            return SCOPE_TIER_SMALL
+    return None
+
+
+def resolve_review_scope_tier(
+    plan_text: str | None,
+    scope_hint: str | None,
+    measured: tuple[int, int] | None,
+) -> ScopeTier | None:
+    """Resolve a review sentinel's tier in the Claude review's order (#2767).
+
+    1. The plan's ``**Scope tier:**`` marker (skipped when *plan_text* is
+       ``None``, i.e. no ``.cw/plan.md``).
+    2. *scope_hint*, only when it is exactly ``small`` or ``large``.
+    3. *measured* ``(files, lines)`` diff stat: small iff files <=
+       :data:`SMALL_TIER_MAX_FILES` and lines <= :data:`SMALL_TIER_MAX_LINES`.
+
+    ``None`` when every source is absent; the ship-path caller blocks on that
+    rather than defaulting to small. The Claude review's Step 1.5 (an agent's
+    forbidden-area downgrade) and its "no forbidden-area touches" clause in the
+    diff-stat rule have no equivalent here: forbidden-area touches cannot be
+    seen from Python, so the diff stat is judged on its numbers alone.
+    """
+    if plan_text is not None:
+        marker = parse_plan_scope_tier(plan_text)
+        if marker is not None:
+            return marker
+    if scope_hint == SCOPE_TIER_LARGE:
+        return SCOPE_TIER_LARGE
+    if scope_hint == SCOPE_TIER_SMALL:
+        return SCOPE_TIER_SMALL
+    if measured is None:
+        return None
+    files, lines = measured
+    if files <= SMALL_TIER_MAX_FILES and lines <= SMALL_TIER_MAX_LINES:
+        return SCOPE_TIER_SMALL
+    return SCOPE_TIER_LARGE

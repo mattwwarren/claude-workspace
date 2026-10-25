@@ -108,6 +108,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
+    from cw.models import TicketTask
     from cw.review_findings import Finding, ReviewerFindingsDocument
 
 
@@ -352,6 +353,8 @@ class TestSynthesizeCodexReviewResult:
     def test_stage_complete_non_blocking(
         self, make_git_repo: Callable[[str], Path]
     ) -> None:
+        # #2767: stage_complete here comes through _task()'s scope_hint="small"
+        # (the origin-less worktree is unmeasurable), not an implicit default.
         worktree = make_git_repo("wt-synth-ok")
         doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
         result, verdict = synthesize_codex_review_result(
@@ -3362,7 +3365,12 @@ class TestCleanReviewScopeMeasurement:
     def test_unmeasurable_worktree_falls_back_to_zero(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
-        """No origin/<default_branch> ref → today's 0/0 behavior is preserved."""
+        """No origin/<default_branch> ref → the scope still reports 0/0.
+
+        #2767: an unmeasurable worktree no longer completes on its own -- a
+        tier source is now required, here the ``scope_hint="small"`` that
+        ``_task()`` defaults to. Without one it blocks (see
+        ``TestReviewScopeTierGate``)."""
         worktree = make_git_repo("wt-verdict-noorigin")
         doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
 
@@ -3386,7 +3394,10 @@ class TestCleanReviewScopeMeasurement:
     ) -> None:
         """#1487 fix loop: the 0/0 fallback now warns, distinguishing it from a
         genuine zero-diff clean review — previously silent, unlike the other
-        two ingestion families' scope_verification_unavailable WARNING."""
+        two ingestion families' scope_verification_unavailable WARNING.
+
+        #2767: still true with a tier source (``_task()``'s default hint);
+        without one the run blocks instead of completing."""
         worktree = make_git_repo("wt-verdict-noorigin-warns")
         doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
 
@@ -3521,8 +3532,11 @@ class TestEmptyDiffCleanReview:
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         """``None`` from compute_branch_diff_scope means "could not measure",
-        never "measured zero" -- it must keep its pre-#1870 stage_complete
-        fallback, warning included, rather than being parked."""
+        never "measured zero" -- it is never parked as ``empty_diff_blocked``.
+
+        #2767: it completes only because ``_task()`` supplies a tier source
+        (``scope_hint="small"``); with none it blocks as
+        ``scope_tier_unresolvable``, which is still not the empty-diff park."""
         worktree = make_git_repo("wt-verdict-unmeasurable-empty")
         doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
 
@@ -3541,6 +3555,153 @@ class TestEmptyDiffCleanReview:
         assert result.status == "stage_complete"
         assert result.scope.files == 0
         assert result.scope.lines_actual == 0
+
+
+# ---------------------------------------------------------------------------
+# #2767 — the codex clean tail resolves its tier (plan marker, then
+# scope_hint, then the measured diff) and parks large for approval
+# ---------------------------------------------------------------------------
+
+_LARGE_FILE_COUNT = 11
+
+
+def _synthesize_clean(
+    worktree: Path, task: TicketTask, session_id: str
+) -> tuple[AutoDevResult, ReviewVerdict | None]:
+    return synthesize_codex_review_result(
+        task=task,
+        worktree=worktree,
+        documents=[_make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))],
+        failures=[],
+        diff=_make_diff(),
+        reviewed_sha="sha",
+        session_id=session_id,
+        default_branch="main",
+        fix_loop_enabled=False,
+    )
+
+
+def _write_plan(worktree: Path, tier_line: str) -> None:
+    (worktree / ".cw").mkdir(exist_ok=True)
+    (worktree / ".cw" / "plan.md").write_text(f"# Plan\n\n{tier_line}\n")
+
+
+class TestReviewScopeTierGate:
+    def test_unmeasurable_without_tier_source_blocks_scope_tier_unresolvable(
+        self, make_git_repo: Callable[..., Path], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """No marker, no hint and no measurement: block, never a silent small."""
+        worktree = make_git_repo("wt-tier-unresolvable")
+
+        with caplog.at_level(logging.WARNING, logger="cw.codex_review._verdict"):
+            result, verdict = _synthesize_clean(
+                worktree, _task(scope_hint=None), "s-tier-none"
+            )
+
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == "scope_tier_unresolvable"
+        assert result.scope.tier == "small"
+        assert result.blocker.retry_eligible is True
+        assert result.blocker.recovery_hint
+        assert "**Scope tier:**" in result.blocker.recovery_hint
+        assert "--stage review" in result.blocker.recovery_hint
+        assert result.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
+        assert verdict is not None
+        assert result.review == verdict.review
+        messages = [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith("scope_tier_unresolvable")
+        ]
+        assert len(messages) == 1
+        assert "ticket=T-1" in messages[0]
+        assert f"worktree={worktree}" in messages[0]
+        assert "plan_marker=None" in messages[0]
+        assert "scope_hint=None" in messages[0]
+        assert "measured=None" in messages[0]
+        assert "origin/main" in messages[0]
+
+    def test_measured_diff_resolves_tier_when_no_marker_or_hint(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """Source 3: small numbers complete, large numbers park for approval."""
+        small_wt = _make_stale_base_repo(make_git_repo, "wt-tier-measured-small")
+        small, _ = _synthesize_clean(small_wt, _task(scope_hint=None), "s-m-small")
+        assert small.status == "stage_complete"
+        assert small.scope.tier == "small"
+
+        large_wt = _make_empty_diff_repo(make_git_repo, "wt-tier-measured-large")
+        for i in range(_LARGE_FILE_COUNT):
+            commit_tracked_file(large_wt, f"work_{i}.py")
+        large, _ = _synthesize_clean(large_wt, _task(scope_hint=None), "s-m-large")
+        assert large.status == "review_pending_approval"
+        assert large.scope.tier == "large"
+        assert large.scope.files == _LARGE_FILE_COUNT
+
+    def test_plan_marker_large_parks_for_review_approval(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """Source 1 beats the helper's small hint; the result is a valid park."""
+        from cw.auto_dev_result import AutoDevResult
+
+        worktree = make_git_repo("wt-tier-marker-large")
+        _write_plan(
+            worktree,
+            "**Scope tier:** large (17 files, ~1280 lines, forbidden_touched=false)",
+        )
+
+        result, verdict = _synthesize_clean(worktree, _task(), "s-marker-large")
+
+        assert result.status == "review_pending_approval"
+        assert result.stage_reached == "stage3_review"
+        assert result.scope.tier == "large"
+        assert result.blocker is None
+        assert result.pr is None
+        assert verdict is not None
+        assert result.review == verdict.review
+        AutoDevResult.model_validate(result.model_dump(mode="json"))
+
+    def test_plan_marker_small_beats_large_hint(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """The marker outranks ``scope_hint`` for the codex sentinel."""
+        worktree = make_git_repo("wt-tier-marker-small")
+        _write_plan(worktree, "**Scope tier:** small")
+
+        result, _ = _synthesize_clean(
+            worktree, _task(scope_hint="large"), "s-marker-small"
+        )
+
+        assert result.status == "stage_complete"
+        assert result.scope.tier == "small"
+
+    def test_large_hint_without_marker_parks_for_review_approval(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """Source 2: a ``scope_hint: large`` row parks over an unmeasurable diff."""
+        worktree = make_git_repo("wt-tier-hint-large")
+
+        result, _ = _synthesize_clean(
+            worktree, _task(scope_hint="large"), "s-hint-large"
+        )
+
+        assert result.status == "review_pending_approval"
+        assert result.scope.tier == "large"
+
+    def test_measured_empty_diff_still_precedes_tier_resolution(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """A measured 0/0 stays ``empty_diff_blocked`` even with no tier source."""
+        from cw.auto_dev_result import EMPTY_DIFF_BLOCKER_REASON
+
+        worktree = _make_empty_diff_repo(make_git_repo, "wt-tier-empty")
+
+        result, _ = _synthesize_clean(worktree, _task(scope_hint=None), "s-t-empty")
+
+        assert result.status == "empty_diff_blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == EMPTY_DIFF_BLOCKER_REASON
 
 
 def _synthesize_empty(worktree: Path, session_id: str) -> AutoDevResult:

@@ -4537,11 +4537,11 @@ class TestCwContextWorkspacePath:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (13 after the
-        queue_metadata.operator_resolutions_source addition)."""
+        """cw-context.json schema_version is current (14 after the
+        queue_metadata.review_approval addition, #2767)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 13
+        assert CW_CONTEXT_SCHEMA_VERSION == 14
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -4556,7 +4556,7 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 13
+        assert context["schema_version"] == 14
 
 
 class TestCwContextMergeGateIgnorePaths:

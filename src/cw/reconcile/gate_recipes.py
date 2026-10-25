@@ -106,6 +106,7 @@ from cw.reconcile.gate_predicates import (
     _plan_gate_snapshot,
     _plan_predicate_holds,
     _predicate_holds,
+    _review_tier_verified,
     _row_eligible,
 )
 from cw.reconcile.gate_recipe_comments import (
@@ -289,6 +290,7 @@ def gate_recipe_will_release(
             review_snapshot is not None
             and _row_eligible(task, Stage.REVIEW)
             and _predicate_holds(review_snapshot)
+            and _review_tier_verified(last_result, task)
             and _recipe_gate_open(config, task, clients, RECIPE_AUTO_APPROVE_REVIEW)
             and not _finalize_hold_armed(task, clients, config)
         )
@@ -394,7 +396,8 @@ def _detect_auto_approve_review(
 
     A row parked by the #1823 branch-staleness gate or the #2123
     review-staleness gate is excluded outright, however clean its sentinel
-    reads — see the inline notes at those guards.
+    reads — see the inline notes at those guards. So is a sentinel whose large
+    tier :func:`_review_tier_verified` cannot re-derive (#2767).
     """
     candidates: list[GateRecipeCandidate] = []
     for task in tasks:
@@ -429,7 +432,11 @@ def _detect_auto_approve_review(
         if session is None:
             continue
         snapshot = _clean_review_snapshot(session.last_result)
-        if snapshot is None or not _predicate_holds(snapshot):
+        if (
+            snapshot is None
+            or not _predicate_holds(snapshot)
+            or not _review_tier_verified(session.last_result, task)
+        ):
             continue
         if not _recipe_gate_open(config, task, clients, RECIPE_AUTO_APPROVE_REVIEW):
             continue
@@ -713,7 +720,8 @@ def _act_auto_approve_review(
     """Act phase: re-validate under lock, emit, then approve via the primitive.
 
     For each candidate the row + session are re-loaded fresh under
-    ``dev_queue_lock()`` and the five-field predicate re-checked — a concurrent
+    ``dev_queue_lock()`` and the five-field predicate and the #2767 tier
+    check (:func:`_review_tier_verified`) re-checked — a concurrent
     human approve, re-dispatch, or new sentinel between detect and act can have
     invalidated it (the re-check race). Only a still-valid candidate fires:
     :class:`OrchestratorEventType.GATE_AUTO_APPROVED` is emitted BEFORE the
@@ -768,7 +776,11 @@ def _act_auto_approve_review(
             if session is None:
                 continue
             snapshot = _clean_review_snapshot(session.last_result)
-            if snapshot is None or not _predicate_holds(snapshot):
+            if (
+                snapshot is None
+                or not _predicate_holds(snapshot)
+                or not _review_tier_verified(session.last_result, task)
+            ):
                 continue
             record_event(
                 OrchestratorEventType.GATE_AUTO_APPROVED,

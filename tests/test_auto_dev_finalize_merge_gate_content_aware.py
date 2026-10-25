@@ -52,7 +52,7 @@ _SCRIPT_SOURCE = Path(__file__).resolve().parents[1] / ".claude" / "scripts" / _
 
 _STEP4A = "### Step 4a: Merge Gate Check"
 _STEP4B = "### Step 4b: Pipeline-Level PR Approval"
-_HEADLESS = "**Headless:** (Small only"
+_HEADLESS = "**Headless:** Step 4a runs for small tickets and for"
 
 _BLOCKED_PREFIX = "MERGE_GATE_BLOCKED: "
 _CLEAR_MARKER = "MERGE_GATE_CLEAR"

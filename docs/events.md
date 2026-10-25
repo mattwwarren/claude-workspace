@@ -2185,9 +2185,37 @@ fires from all four call sites; only the Stop-hook one currently acts on
   "sentinel_tier": "<str | null>",
   "resolved_tier": "<str | null>",
   "rule": "Rule 1 | Rule 3 | stage_walk | gate_release",
-  "disposition": "<str | null>"
+  "disposition": "<str | null>",
+  "approver_kind": "operator | recipe | null",
+  "reviewed_sha": "<str | null>",
+  "review_approval_before": {
+    "approved_at": "<ISO timestamp | null>",
+    "approver_kind": "operator | recipe | null",
+    "reviewed_sha": "<str | null>"
+  },
+  "review_approval_after": {
+    "approved_at": "<ISO timestamp | null>",
+    "approver_kind": "operator | recipe | null",
+    "reviewed_sha": "<str | null>"
+  }
 }
 ```
+`approver_kind` and `reviewed_sha` (GitHub #2767) are present only on the
+`"gate_release"` emissions. They carry the review approval that this
+`_approve_ticket_locked` call stamped on the row (`operator` for
+`cw dev-queue approve`, `recipe` for a gate recipe), and both are null when the
+call stamped none: a PLAN approve and the `finalize_hold_branch` and
+`plan_requeued` branches (the `signoff_branch` re-route carries what it just
+stamped; the later approve that clears the signoff gate emits no event).
+`reviewed_sha` is also null when the review sentinel carried no reviewed head.
+`review_approval_before` and `review_approval_after` preserve the complete
+approval record around the mutation, including its timestamp. The gate-release
+event for a REVIEW approval is written before the queue row, so a failed audit
+write refuses the approval rather than leaving a durable review approval without
+its audit trail.
+`_stage_regress` clears the row's record, so this event is the record of who
+approved which reviewed head that survives a regress. The three
+`cw.dispatch.routing` emitters do not carry these keys.
 **Semantics:** GitHub #1617. An operator/queue-set `scope_hint` of `"large"`
 is meant to force an approval gate at the REVIEW->FINALIZE boundary
 regardless of which sentinel status a worker emits, but nothing recorded
@@ -2218,7 +2246,7 @@ or `null` on an ordinary unparked advance (a non-terminal
 `transition_task_status` call clears disposition). For the `"gate_release"`
 site, `disposition` is instead a literal naming which of
 `_approve_ticket_locked`'s four branches fired --
-`"finalize_held"` | `"awaiting_signoff"` | `"plan_requeued"` | `"advanced"` --
+`"finalize_hold_branch"` | `"signoff_branch"` | `"plan_requeued"` | `"advanced"` --
 because that function's force-hold branch performs **no mutation at all**
 (the row stays parked exactly as it is), so `task.disposition` would not
 reflect it there.

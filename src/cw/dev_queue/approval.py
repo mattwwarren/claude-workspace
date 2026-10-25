@@ -46,7 +46,7 @@ from cw.dev_queue.plan_promotion import DEV_QUEUE_APPROVE_ACTOR, promote_plan_dr
 from cw.dev_queue.refusal import refusal_hint
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
-from cw.exceptions import ApproveGateError
+from cw.exceptions import ApproveGateError, CwError
 from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_body
 from cw.models import (
     PLAN_APPROVED_FINGERPRINT_KEY,
@@ -67,6 +67,7 @@ from cw.worktree import _git_dir, resolve_task_worktree
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, DevQueueStore, Session, TicketTask
+    from cw.models.tasks import ReviewApproverKind
 
 
 _log = logging.getLogger(__name__)
@@ -81,6 +82,14 @@ None. Not a persisted ``TicketTask`` field, so it lives here rather than in
 ``cw.models.tasks`` beside ``PLAN_APPROVED_FINGERPRINT_KEY``.
 """
 _BODY_SHA_DISPLAY_LEN = 12
+
+# :func:`approve_ticket` result keys (#2767): the review approval THIS call
+# recorded (``_stamp_review_approval``), both None when it recorded none.
+REVIEW_APPROVER_KIND_KEY = "review_approver_kind"
+REVIEW_APPROVED_SHA_KEY = "review_approved_sha"
+# False iff the approval persisted but its gate-release audit event did not
+# (#2767): the row is the authority finalize reads, the event is best-effort.
+AUDIT_EVENT_RECORDED_KEY = "audit_event_recorded"
 
 
 def approve_ticket(
@@ -119,13 +128,19 @@ def approve_ticket(
     never mutates the row; on a mismatch the
     ``PLAN_APPROVAL_BODY_DRIFT_WARNED`` audit event is recorded before
     anything is persisted -- None on every other path and whenever there is
-    nothing to compare).
+    nothing to compare), and review_approver_kind / review_approved_sha
+    (#2767, ``REVIEW_APPROVER_KIND_KEY`` / ``REVIEW_APPROVED_SHA_KEY``; the
+    review approval *this* call recorded on the row -- ``"operator"`` here and
+    the sentinel's ``review.reviewed_sha`` on a REVIEW-stage advance or
+    signoff re-route, the SHA None when the sentinel carried none; both None
+    on every other path, the signoff clear included).
 
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
             last_result is absent, last_result status is not an approval gate,
-            promoting the plan draft failed on I/O, or recording the
-            body-drift audit event failed (nothing is recorded).
+            the row is at its pipeline's terminal stage, promoting the plan
+            draft failed on I/O, or recording the body-drift audit event
+            failed (nothing is recorded).
         CwError: if no matching task is found.
     """
     with _lock(bounded=bounded):
@@ -277,8 +292,16 @@ def _record_approve_scope_routing_decision(
     finalize_held: bool,
     awaiting_signoff: bool,
     plan_requeued: bool,
+    review_stamp: tuple[str, str | None, dict[str, str | None]] | None,
 ) -> None:
     """Emit the #1617 scope-routing audit event for the gate-release site (D4).
+
+    ``review_stamp`` (#2767) is the ``(approver_kind, reviewed_sha, before)``
+    tuple :func:`_stamp_review_approval` recorded in this call, or None. It
+    lands in the payload as the approval's before/after values, with the
+    compact ``approver_kind`` / ``reviewed_sha`` fields retained for consumers.
+    ``_stage_regress`` clears the row's record, so this event is the durable
+    trace of who approved which reviewed head.
 
     Extracted from ``_approve_ticket_locked`` to keep that function under the
     PLR0912/PLR0915 branch/statement ceilings. This site has no ``last_result``
@@ -320,9 +343,62 @@ def _record_approve_scope_routing_decision(
             "resolved_tier": _resolve_scope_tier(session.last_result, task),
             "rule": _RULE_GATE_RELEASE,
             "disposition": disposition,
+            "approver_kind": review_stamp[0] if review_stamp else None,
+            "reviewed_sha": review_stamp[1] if review_stamp else None,
+            "review_approval_before": (
+                review_stamp[2] if review_stamp else _review_approval_snapshot(task)
+            ),
+            "review_approval_after": _review_approval_snapshot(task),
         },
         correlation_id=ticket_id,
     )
+
+
+def _save_approval_and_audit(
+    store: DevQueueStore,
+    ticket_id: str,
+    client_name: str,
+    task: TicketTask,
+    session: Session,
+    *,
+    finalize_held: bool,
+    awaiting_signoff: bool,
+    plan_requeued: bool,
+    review_stamp: tuple[str, str | None, dict[str, str | None]] | None,
+) -> bool:
+    """Persist an approval, then emit its gate-release audit event best-effort.
+
+    The queue row's recorded approval is the authority finalize reads; the
+    audit event is secondary and follows the state change, like
+    ``lane.config_changed``. A failed emission is logged and reported through
+    the return value (False) -- a persisted approval is never undone because
+    its event could not be written.
+
+    Returns:
+        True when the audit event was recorded, False when it was not.
+    """
+    save_dev_queue(store)
+    try:
+        _record_approve_scope_routing_decision(
+            ticket_id,
+            client_name,
+            task,
+            session,
+            finalize_held=finalize_held,
+            awaiting_signoff=awaiting_signoff,
+            plan_requeued=plan_requeued,
+            review_stamp=review_stamp,
+        )
+    except (OSError, ValueError, CwError):
+        _log.warning(
+            "approve: approval recorded but the gate-release audit event failed"
+            " for %s/%s",
+            client_name,
+            ticket_id,
+            exc_info=True,
+        )
+        return False
+    return True
 
 
 def _stamp_plan_approval(
@@ -373,6 +449,55 @@ def _stamp_plan_approval(
         fingerprint if isinstance(fingerprint, str) else None
     )
     return task.plan_approved_fingerprint
+
+
+def _stamp_review_approval(
+    task: TicketTask,
+    from_stage: str,
+    session: Session,
+    *,
+    operator_initiated: bool,
+    finalize_held: bool,
+) -> tuple[ReviewApproverKind, str | None, dict[str, str | None]] | None:
+    """Record the v48 review-approval fact on a REVIEW-stage release (#2767).
+
+    Runs after the branch chain, on both the direct advance and the signoff
+    re-route; it stamps nothing for any other stage or on the
+    ``finalize_held`` path (which mutates nothing). The guard lives here, not
+    at the call site, so ``_approve_ticket_locked`` pays one statement against
+    the PLR0915 ceiling.
+
+    ``approver_kind`` is ``"operator"`` for the human ``approve`` and
+    ``"recipe"`` for the automatic caller. The head is the sentinel's
+    ``review.reviewed_sha`` (the tree the review actually saw), None when it
+    carried none: recorded absence, which finalize Step 4.0 parks on.
+
+    Returns what THIS call stamped, plus the previous record, for the return
+    dict and the audit event.
+    """
+    from cw.dispatch import _resolve_review_reviewed_sha
+
+    if from_stage != Stage.REVIEW.value or finalize_held:
+        return None
+    before = _review_approval_snapshot(task)
+    kind: ReviewApproverKind = "operator" if operator_initiated else "recipe"
+    task.review_approved_at = datetime.now(UTC)
+    task.review_approver_kind = kind
+    task.review_approved_sha = _resolve_review_reviewed_sha(session.last_result)
+    return kind, task.review_approved_sha, before
+
+
+def _review_approval_snapshot(task: TicketTask) -> dict[str, str | None]:
+    """Return the persisted review-approval fields in event-safe form."""
+    return {
+        "approved_at": (
+            task.review_approved_at.isoformat()
+            if task.review_approved_at is not None
+            else None
+        ),
+        "approver_kind": task.review_approver_kind,
+        "reviewed_sha": task.review_approved_sha,
+    }
 
 
 def _promote_plan_draft_on_direct_advance(
@@ -658,6 +783,16 @@ def _approve_ticket_locked(
     The drift never blocks and never mutates the row; automatic callers always
     get None.
 
+    A REVIEW-stage release (direct advance or signoff re-route, never the
+    ``finalize_held`` no-op) stamps the v48 review-approval record (#2767,
+    :func:`_stamp_review_approval`): ``approver_kind`` follows
+    ``operator_initiated`` (``"operator"`` / ``"recipe"``), bound to the
+    sentinel's reviewed head. The result reports it under
+    ``review_approver_kind`` / ``review_approved_sha`` (both None when this
+    call stamped nothing) and the scope-routing event carries it. The row is
+    saved first and the event is best-effort: ``audit_event_recorded`` is False
+    when the event failed after the approval persisted (never rolled back).
+
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
             last_result is absent, last_result status is not an approval gate,
@@ -715,6 +850,10 @@ def _approve_ticket_locked(
             PLAN_PROMOTED_KEY: False,
             # No plan approval, so no ticket-body drift to warn about.
             BODY_DRIFT_WARNING_KEY: None,
+            # The signoff clear stamps no review approval (#2767): a re-routed
+            # row was stamped by the approve that parked it here.
+            REVIEW_APPROVER_KIND_KEY: None,
+            REVIEW_APPROVED_SHA_KEY: None,
         }
 
     state = load_state()
@@ -797,18 +936,18 @@ def _approve_ticket_locked(
             session=session,
         )
         _advance_task_pointer(task, stages)
+    review_stamp = _stamp_review_approval(
+        task,
+        from_stage,
+        session,
+        operator_initiated=operator_initiated,
+        finalize_held=finalize_held,
+    )
     to_stage = task.stage.value
 
-    # #1617 (D4): _approve_ticket_locked is a gate-release site, excluded from
-    # the scope_hint park-decision gate (Scope item 1) but still covered by
-    # the scope-routing audit trail (Scope item 2). save_dev_queue runs first
-    # so the audit event never durably claims a disposition that did not
-    # actually land in the dev-queue store (Checkpoint 3a review, #1617): if
-    # save_dev_queue raises or the process dies between the two calls, no
-    # audit event is emitted for a mutation that never persisted.
-    save_dev_queue(store)
-
-    _record_approve_scope_routing_decision(
+    # #1617 (D4): persist the row and its gate-release audit through one helper.
+    audit_event_recorded = _save_approval_and_audit(
+        store,
         ticket_id,
         client_name,
         task,
@@ -816,6 +955,7 @@ def _approve_ticket_locked(
         finalize_held=finalize_held,
         awaiting_signoff=awaiting_signoff,
         plan_requeued=plan_requeued,
+        review_stamp=review_stamp,
     )
 
     return {
@@ -832,4 +972,8 @@ def _approve_ticket_locked(
         BODY_DRIFT_WARNING_KEY: (
             _body_drift_message(task, *body_drift) if body_drift else None
         ),
+        # #2767: what THIS call stamped, never the row's stored record.
+        REVIEW_APPROVER_KIND_KEY: review_stamp[0] if review_stamp else None,
+        REVIEW_APPROVED_SHA_KEY: review_stamp[1] if review_stamp else None,
+        AUDIT_EVENT_RECORDED_KEY: audit_event_recorded,
     }

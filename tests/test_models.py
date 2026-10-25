@@ -1264,7 +1264,24 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 47
+        assert DEV_QUEUE_SCHEMA_VERSION == 48
+
+    def test_ticket_task_review_approval_fields_default_none(self) -> None:
+        """#2767 (v48): a row with no review approval carries none of the
+        three nullable fields, and a pre-v48 blob without them loads unset."""
+        assert TicketTask(ticket_id="GEN-1", client="acme").review_approved_at is None
+        blob = {"ticket_id": "T-48", "client": "client-a", "stage": "review"}
+        task = TicketTask.model_validate(blob)
+        assert task.review_approved_at is None
+        assert task.review_approver_kind is None
+        assert task.review_approved_sha is None
+
+    def test_ticket_task_review_approver_kind_rejects_unknown(self) -> None:
+        """Only ``operator`` and ``recipe`` are recorded approver kinds."""
+        with pytest.raises(ValidationError):
+            TicketTask.model_validate(
+                {"ticket_id": "GEN-1", "client": "acme", "review_approver_kind": "bot"}
+            )
 
     def test_ticket_task_old_row_without_codex_orphan_fields_defaults_none(
         self,

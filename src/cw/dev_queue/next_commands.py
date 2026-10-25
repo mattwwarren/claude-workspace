@@ -24,8 +24,12 @@ Human-kept gates (an operator-signoff park, a finalize hold, a
 ``approve`` when a bound session is at the gate, otherwise
 ``requeue --stage <stage>`` -- at the terminal stage it releases the gate and
 ships, and when no bound session is at the gate it re-runs the stage. Each is
-labelled operator-only and flagged ``operator_only``. A row whose stage is
-missing from its lane pipeline lists ``show`` plus the plain ``requeue``. cw
+labelled operator-only and flagged ``operator_only``. A finalize Step 4.0
+park (rule 0c, #2767: a FINALIZE ``review_pending_approval`` sentinel stamped
+``stage4a_merge_gate``) lists the operator's labelled ``requeue --stage
+review`` instead, since its approval is recorded only at REVIEW. A row whose
+stage is missing from its lane pipeline lists ``show`` plus the plain
+``requeue``. cw
 never recommends that an agent run a human gate's command: ``show``, ``tasks``
 and refusals carry the label, and the attention stream withholds it
 (:func:`human_gate_attention_command`) on the state-derived
@@ -93,6 +97,13 @@ _NO_GATE_SESSION = (
 )
 _RERUN_CURRENT = "re-run the current stage"
 _FINALIZE_HOLD_GATE = "finalize-hold"
+# Rule 0c (#2767): the finalize Step 4.0 park.
+_REVIEW_PENDING = "review_pending_approval"
+_FINALIZE_PARK_STAGE_REACHED = "stage4a_merge_gate"
+_FINALIZE_APPROVAL_PARK_PURPOSE = (
+    "returns the ticket to review to obtain the large-tier approval; approve"
+    " refuses at the terminal stage and a finalize re-run would only park again"
+)
 # A human gate's releasing verbs (R15): the row-state half of
 # is_human_gate_command.
 _RELEASE_VERBS: frozenset[str] = frozenset({"approve", "requeue"})
@@ -351,6 +362,27 @@ def _human_gate(task: TicketTask, _session: Session | None) -> bool:
     return is_human_kept_gate(task)
 
 
+def _finalize_approval_park(task: TicketTask, session: Session | None) -> bool:
+    """A FINALIZE ``review_pending_approval`` park stamped ``stage4a_merge_gate``.
+
+    That is the finalize Step 4.0 park (#2767). The match is on the stamp, so
+    any FINALIZE sentinel carrying it qualifies (A18).
+    """
+    if not (
+        _is_blocked(task)
+        and task.stage == Stage.FINALIZE
+        and task.disposition == _REVIEW_PENDING
+        and session is not None
+    ):
+        return False
+    result = session.last_result
+    return (
+        isinstance(result, dict)
+        and result.get("status") == _REVIEW_PENDING
+        and result.get("stage_reached") == _FINALIZE_PARK_STAGE_REACHED
+    )
+
+
 def _pending(task: TicketTask, _session: Session | None) -> bool:
     return task.status == QueueItemStatus.PENDING
 
@@ -442,6 +474,15 @@ def _human_release_and_ship(task: TicketTask, reason: str) -> list[NextCommand]:
 
 def _human_gate_terminal_commands(task: TicketTask) -> list[NextCommand]:
     return _human_release_and_ship(task, _TERMINAL_REFUSES)
+
+
+def _finalize_approval_park_commands(task: TicketTask) -> list[NextCommand]:
+    """The operator's ``requeue --stage review`` (R18): approval lives at REVIEW."""
+    return [
+        _human_requeue(
+            task, _FINALIZE_APPROVAL_PARK_PURPOSE, "--stage", Stage.REVIEW.value
+        )
+    ]
 
 
 def _human_gate_off_gate_commands(task: TicketTask) -> list[NextCommand]:
@@ -614,7 +655,10 @@ class _Rule(NamedTuple):
     terminal_commands: Callable[[TicketTask], list[NextCommand]] | None = None
 
 
-# First match wins. Rules 0a/0b run first and cover every human-kept gate:
+# First match wins. Rule 0c (#2767) runs first: a finalize Step 4.0 park is
+# released only through REVIEW, whatever the row's opt-in, so it outranks the
+# human-gate rules' `requeue --stage finalize`. Rules 0a/0b then cover every
+# human-kept gate:
 # 0a is a BLOCKED one ``approve`` cannot take (no bound session at the gate),
 # 0b every other one. Rules 5-11 are BLOCKED_ON_USER only; 2-4 cover the other
 # statuses. Scope-drift and must-fix approvals never consult the session, so
@@ -624,9 +668,14 @@ class _Rule(NamedTuple):
 # re-park it. Rule 8 runs before 9 so an availability hold is released by
 # requeue/drain, and DRAIN_DISPOSITIONS deliberately excludes
 # branch_behind_main (#1823), which falls to the generic requeue. Rules
-# 0a/0b/9 carry ``terminal_commands`` (#2760); rules 5-8 outrank 9 and are
+# 0c/0a/0b/9 carry ``terminal_commands`` (#2760); rules 5-8 outrank 9 and are
 # unchanged at the terminal stage.
 _RULES: tuple[_Rule, ...] = (
+    _Rule(
+        _finalize_approval_park,
+        _finalize_approval_park_commands,
+        terminal_commands=_finalize_approval_park_commands,
+    ),  # 0c
     _Rule(
         _human_gate_off_gate,
         _human_gate_off_gate_commands,

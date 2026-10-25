@@ -123,7 +123,13 @@ _log = logging.getLogger(__name__)
 #     null when the list is empty. cw computes it so the plan stage never
 #     hashes; auto-dev-plan-appendix.md Step 1a.0b reads it as the row's
 #     resolutions source identity.)
-CW_CONTEXT_SCHEMA_VERSION = 13
+# v14: added `queue_metadata.review_approval` (dev-queue schema v48 — GitHub
+#     #2767 — the row's REVIEW-stage approval record `{approved_at,
+#     approver_kind, reviewed_sha}`, or null. auto-dev-finalize.md Step 4.0
+#     ships a large ticket only while `reviewed_sha` is an ancestor of HEAD
+#     with nothing but merges of `world_state_snapshot.origin_main_branch`
+#     after it; a context below 14 is no approval.)
+CW_CONTEXT_SCHEMA_VERSION = 14
 
 
 def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:
