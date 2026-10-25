@@ -23,7 +23,10 @@ from cw.attention_stream import (
     EXIT_SIGTERM,
     AttentionStream,
 )
-from cw.attention_watch import ScopeSource, WatchScope
+from cw.attention_watch import ScopeSource, WatchScope, first_next_command
+from cw.codex_review import CODEX_MUST_FIX_FINDINGS
+from cw.config import orchestrator_config_file
+from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION
 from cw.events import prune_events, record_event
 from cw.events_follow import load_cursor_record, save_cursor_record
 from cw.models import (
@@ -32,13 +35,21 @@ from cw.models import (
     OrchestratorEvent,
     OrchestratorEventType,
     QueueItemStatus,
+    Stage,
 )
+from cw.models.enums import PipelinePosition
+from cw.models.ticket_view import NextCommand
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
+    CASES,
+    bound_session_for,
     install_acme_client,
+    make_blocked,
+    make_override,
     make_task,
     seed_queue,
+    write_lane_client,
     write_lane_override,
 )
 from tests.conftest import _FakeClock
@@ -46,6 +57,11 @@ from tests.conftest import _FakeClock
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from cw.models import Session, TicketTask
+
+_TERMINAL = PipelinePosition.TERMINAL
+_OFF = PipelinePosition.OFF_PIPELINE
 
 _NOW = datetime(2026, 10, 18, 14, 3, 0, tzinfo=UTC)
 _NA = OrchestratorEventType.SESSION_NEEDS_ATTENTION
@@ -587,3 +603,188 @@ def test_stuck_line_timestamp_uses_now_fn() -> None:
     )
 
     assert "STUCK | 2026-10-18T15:03:00 |" in out.getvalue()
+
+
+# --- #2760: the stream never surfaces a human gate's releasing verb ----------
+
+_WITHHELD = f"HUMAN GATE: cw dev-queue show {ACME_TICKET} -c {ACME}"
+_SHOW = f"cw dev-queue show {ACME_TICKET} -c {ACME}"
+_SHIP = f"cw dev-queue requeue {ACME_TICKET} -c {ACME} --stage finalize"
+_OVERRIDE = (
+    f'cw dev-queue approve {ACME_TICKET} -c {ACME} --override-must-fix --reason "<why>"'
+)
+_REVIEW_PENDING: dict[str, object] = {"status": "review_pending_approval"}
+_HUMAN_CASE_IDS = sorted(c for c in CASES if c.startswith("rule0_"))
+
+
+def _large_final(**overrides: object) -> TicketTask:
+    kwargs: dict[str, object] = {
+        "stage": Stage.FINALIZE,
+        "scope_hint": "large",
+        "disposition": "review_pending_approval",
+    }
+    kwargs.update(overrides)
+    return make_blocked(**kwargs)
+
+
+def _gate(task: TicketTask) -> Session:
+    return bound_session_for(task, last_result=_REVIEW_PENDING)
+
+
+def _bare(verb: str) -> Callable[..., list[NextCommand]]:
+    command = NextCommand(
+        command=f"cw dev-queue {verb} {ACME_TICKET} -c {ACME}", purpose="x"
+    )
+    return lambda *_a, **_kw: [command]
+
+
+class TestFirstNextCommandFacts:
+    def test_rule9_terminal_is_the_plain_requeue(self) -> None:
+        task = make_blocked(stage=Stage.FINALIZE)
+        session = bound_session_for(task, last_result=_REVIEW_PENDING)
+        assert first_next_command(task, session, pipeline_position=_TERMINAL) == _SHIP
+
+    @pytest.mark.parametrize("case_id", _HUMAN_CASE_IDS)
+    def test_human_cases_are_withheld(self, case_id: str) -> None:
+        case = CASES[case_id]
+        got = first_next_command(case.task, case.session())
+        assert got == _WITHHELD
+        assert " approve " not in f"{got} "
+        assert " requeue " not in f"{got} "
+
+    def test_terminal_and_off_gate_rows_are_withheld(self) -> None:
+        large = _large_final()
+        gate = bound_session_for(large, last_result=_REVIEW_PENDING)
+        assert first_next_command(large, gate, pipeline_position=_TERMINAL) == _WITHHELD
+        review = _large_final(stage=Stage.REVIEW)
+        off_gate = bound_session_for(review, last_result={"status": "stage_complete"})
+        assert first_next_command(review, off_gate) == _WITHHELD
+
+    def test_off_pipeline_rows_lead_with_show(self) -> None:
+        held = make_blocked(
+            stage=Stage.FINALIZE, disposition=FINALIZE_GATE_HELD_DISPOSITION
+        )
+        plain = make_blocked(stage=Stage.FINALIZE)
+        for task in (held, plain):
+            assert first_next_command(task, None, pipeline_position=_OFF) == _SHOW
+
+    @pytest.mark.parametrize(
+        ("verb", "withheld"), [("approve", True), ("requeue", True), ("show", False)]
+    )
+    def test_state_derived_withhold_without_the_flag(
+        self, monkeypatch: pytest.MonkeyPatch, verb: str, withheld: bool
+    ) -> None:
+        monkeypatch.setattr("cw.attention_watch.next_commands", _bare(verb))
+        human = CASES["rule0_finalize_gate_held"]
+        got = first_next_command(human.task, human.session())
+        bare = f"cw dev-queue {verb} {ACME_TICKET} -c {ACME}"
+        assert got == (_WITHHELD if withheld else bare)
+
+    def test_bare_approve_on_a_plain_row_passes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.attention_watch.next_commands", _bare("approve"))
+        plain = CASES["rule9_review_gate"]
+        got = first_next_command(plain.task, plain.session())
+        assert got == f"cw dev-queue approve {ACME_TICKET} -c {ACME}"
+
+    def test_must_fix_override_follows_the_opt_in(self) -> None:
+        task = make_blocked(
+            stage=Stage.REVIEW,
+            blocked_reason=CODEX_MUST_FIX_FINDINGS,
+            must_fix_override=make_override(),
+        )
+        assert first_next_command(task, None, operator_opt_in=False) == _SHIP
+        assert first_next_command(task, None, operator_opt_in=True) == _OVERRIDE
+
+
+def _stream_line(task: TicketTask, session: Session | None = None) -> str:
+    seed_queue([task], [session] if session is not None else [])
+    _arm()
+    _page()
+    run = _run(_stream())
+    assert len(run.body) == 1
+    return run.body[0]
+
+
+def _must_fix_rows() -> list[TicketTask]:
+    overridden = make_blocked(
+        stage=Stage.REVIEW,
+        blocked_reason=CODEX_MUST_FIX_FINDINGS,
+        must_fix_override=make_override(),
+    )
+    plain = make_blocked(stage=Stage.REVIEW, blocked_reason=CODEX_MUST_FIX_FINDINGS)
+    return [overridden, plain]
+
+
+class TestStreamHumanGate:
+    def test_human_gate_row_is_withheld(self) -> None:
+        case = CASES["rule0_finalize_gate_held"]
+        line = _stream_line(case.task, case.session())
+        assert line.endswith(f"| next: {_WITHHELD}")
+
+    def test_large_finalize_row_is_withheld(self) -> None:
+        task = _large_final()
+        line = _stream_line(task, _gate(task))
+        assert line.endswith(f"| next: {_WITHHELD}")
+
+    def test_rule9_finalize_row_gets_the_plain_requeue(self) -> None:
+        task = make_blocked(stage=Stage.FINALIZE)
+        line = _stream_line(task, _gate(task))
+        assert line.endswith(f"| next: {_SHIP}")
+
+    def test_state_derived_withhold_through_the_stream(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.attention_watch.next_commands", _bare("approve"))
+        line = _stream_line(CASES["rule0_finalize_gate_held"].task)
+        assert line.endswith(f"| next: {_WITHHELD}")
+
+    @pytest.mark.parametrize(
+        "arm", ["lane_finalize_gate", "lane_signoff", "global", "malformed"]
+    )
+    @pytest.mark.parametrize("row", [0, 1])
+    def test_armed_opt_in_drops_the_ship_step(
+        self, tmp_path: Path, arm: str, row: int
+    ) -> None:
+        if arm == "lane_finalize_gate":
+            write_lane_client(
+                ACME,
+                tmp_path / "ws",
+                lanes=(DEFAULT_LANE, _FAST),
+                finalize_gate="manual",
+            )
+        elif arm == "lane_signoff":
+            write_lane_client(
+                ACME, tmp_path / "ws", lanes=(DEFAULT_LANE, _FAST), signoff="operator"
+            )
+        else:
+            orchestrator_config_file().parent.mkdir(parents=True, exist_ok=True)
+            orchestrator_config_file().write_text(
+                "default_finalize_gate: manual\n"
+                if arm == "global"
+                else "default_finalize_gate: [not, valid\n"
+            )
+        line = _stream_line(_must_fix_rows()[row])
+        assert line.endswith(f"| next: {_OVERRIDE}")
+        assert "--stage finalize" not in line
+
+    def test_nothing_armed_keeps_the_ship_step(self) -> None:
+        overridden = _must_fix_rows()[0]
+        assert _stream_line(overridden).endswith(f"| next: {_SHIP}")
+
+    def test_nothing_armed_plain_must_fix_leads_with_override(self) -> None:
+        plain = _must_fix_rows()[1]
+        assert _stream_line(plain).endswith(f"| next: {_OVERRIDE}")
+
+    def test_unreadable_client_config_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _fail(_name: str) -> object:
+            msg = "disk"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.ticket_view.get_effective_client", _fail)
+        task = make_blocked(stage=Stage.FINALIZE)
+        line = _stream_line(task, _gate(task))
+        assert line.endswith(f"| next: cw dev-queue approve {ACME_TICKET} -c {ACME}")

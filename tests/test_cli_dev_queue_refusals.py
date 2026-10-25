@@ -8,6 +8,7 @@ and the ``unblock``/``move`` refusals.
 
 from __future__ import annotations
 
+import shlex
 from typing import TYPE_CHECKING
 
 import pytest
@@ -15,13 +16,14 @@ import pytest
 from cw.cli.dev_queue._settle import SettleOutcome
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS
 from cw.config import load_state
-from cw.dev_queue import load_dev_queue
+from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION, load_dev_queue
 from cw.events import read_events
 from cw.models import OrchestratorEventType, QueueItemStatus, SessionStatus, Stage
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
     CASES,
+    REVIEW_PENDING,
     bound_session_for,
     install_acme_client,
     invoke_dev_queue,
@@ -48,6 +50,41 @@ _ROSTER_NOTE = (
     "note: the daemon roster could not be read, so a live session for this"
     " ticket cannot be ruled out; this no-op stopped nothing. If one is known,"
     " close it with `cw spawn close <sid> --requeue`."
+)
+_HUMAN_TAIL = (
+    " This is a human-kept gate the operator opted into: an agent must not"
+    " approve, release or requeue it. Notify the human operator."
+)
+# #2760 refusal suffixes S1-S5, verbatim.
+_S1 = (
+    " This row is blocked_on_user at stage finalize (disposition"
+    " 'review_pending_approval'). Run: `cw dev-queue requeue ACM-1 -c acme"
+    " --stage finalize` (re-run the finalize stage; approve refuses at the"
+    " terminal stage)."
+)
+_S2 = (
+    " This row is blocked_on_user at stage finalize (disposition"
+    f" 'review_pending_approval').{_HUMAN_TAIL} The operator's release command"
+    " is `cw dev-queue requeue ACM-1 -c acme --stage finalize` (operator-only;"
+    " not for an agent to run)."
+)
+_S3 = (
+    " This row is blocked_on_user at stage review (disposition"
+    f" 'review_pending_approval').{_HUMAN_TAIL} The operator's re-run command"
+    " is `cw dev-queue requeue ACM-1 -c acme --stage review` (operator-only;"
+    " not for an agent to run)."
+)
+_S4 = (
+    " This row is blocked_on_user at stage review (disposition"
+    f" 'finalize_gate_held').{_HUMAN_TAIL} The operator's re-run command is"
+    " `cw dev-queue requeue ACM-1 -c acme --stage review` (operator-only; not"
+    " for an agent to run)."
+)
+_S5 = (
+    " This row is blocked_on_user at stage finalize (disposition"
+    f" 'finalize_gate_held').{_HUMAN_TAIL} The operator's release command is"
+    " `cw dev-queue requeue ACM-1 -c acme --stage finalize` (operator-only; not"
+    " for an agent to run)."
 )
 _REFUSED_BY_APPROVE = tuple(
     sorted(
@@ -82,10 +119,67 @@ class TestApproveRefusals:
         seed_queue([CASES["rule0_finalize_held_no_session"].task])
         result = invoke_dev_queue("approve", ACME_TICKET, "-c", ACME)
         assert result.exit_code == 1
+        assert "session not found" in result.stderr
         assert "human-kept gate" in result.stderr
+        assert _S4 in result.stderr
+        assert "cw dev-queue requeue ACM-1 -c acme --stage review" in result.stderr
         assert "operator-only; not for an agent to run" in result.stderr
-        assert "cw dev-queue requeue" not in result.stderr
+        assert "Run:" not in result.stderr
         assert "Use 'requeue'" not in result.stderr
+
+    def test_terminal_finalize_names_the_requeue(self) -> None:
+        task = make_blocked(stage=Stage.FINALIZE, disposition="review_pending_approval")
+        seed_queue([task], [bound_session_for(task, last_result=REVIEW_PENDING)])
+        result = invoke_dev_queue("approve", ACME_TICKET, "-c", ACME)
+        assert result.exit_code == 1
+        assert "already at terminal stage" in result.stderr
+        assert _S1 in result.stderr
+        after_run = result.stderr.split("Run:", 1)[1]
+        assert all(
+            shlex.split(span)[2] != "approve" for span in after_run.split("`")[1::2]
+        )
+
+    def test_human_terminal_names_the_labelled_requeue(self) -> None:
+        task = make_blocked(
+            stage=Stage.FINALIZE,
+            scope_hint="large",
+            disposition="review_pending_approval",
+        )
+        seed_queue([task], [bound_session_for(task, last_result=REVIEW_PENDING)])
+        result = invoke_dev_queue("approve", ACME_TICKET, "-c", ACME)
+        assert result.exit_code == 1
+        assert _S2 in result.stderr
+        assert "operator-only" in result.stderr
+        assert "release command" in result.stderr
+        assert "cw dev-queue requeue ACM-1 -c acme --stage finalize" in result.stderr
+        assert "Run:" not in result.stderr
+
+    def test_off_gate_names_the_labelled_requeue(self) -> None:
+        task = make_blocked(
+            stage=Stage.REVIEW,
+            scope_hint="large",
+            disposition="review_pending_approval",
+        )
+        seed_queue(
+            [task], [bound_session_for(task, last_result={"status": "stage_complete"})]
+        )
+        result = invoke_dev_queue("approve", ACME_TICKET, "-c", ACME)
+        assert result.exit_code == 1
+        assert "not at an approval gate" in result.stderr
+        assert _S3 in result.stderr
+
+    def test_sessionless_terminal_hold_names_the_release(self) -> None:
+        seed_queue(
+            [
+                make_blocked(
+                    stage=Stage.FINALIZE, disposition=FINALIZE_GATE_HELD_DISPOSITION
+                )
+            ]
+        )
+        result = invoke_dev_queue("approve", ACME_TICKET, "-c", ACME)
+        assert result.exit_code == 1
+        assert "session not found" in result.stderr
+        assert _S5 in result.stderr
 
     def test_override_success_echo_carries_the_human_caveat(
         self, monkeypatch: pytest.MonkeyPatch

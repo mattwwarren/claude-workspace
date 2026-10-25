@@ -17024,19 +17024,14 @@ _ACME_REVIEW_RERUN = (
     "Re-run review to produce a current verdict:"
     " `cw dev-queue requeue ACM-1 -c acme --stage review`."
 )
-# Rows whose plain approve the verb refuses: no plain approve offered, plus the
-# sessionless human-kept gates (labelled approve listed, refused, #2718). The
+# Rows whose plain approve the verb refuses: no plain approve offered. The
 # order_* rows sit at a releasable gate behind a higher-priority rule, so
 # approve succeeds on them.
 _APPROVE_REFUSED_CASES = tuple(
     sorted(
         case_id
         for case_id, case in CASES.items()
-        if (_ACME_APPROVE not in case.expected and not case_id.startswith("order_"))
-        or (
-            case.task.status == QueueItemStatus.BLOCKED_ON_USER
-            and not case.with_session
-        )
+        if _ACME_APPROVE not in case.expected and not case_id.startswith("order_")
     )
 )
 
@@ -17075,14 +17070,19 @@ class TestApproveRefusalsNameNextCommand:
         "case_id",
         ["rule0_finalize_held_no_session", "rule0_scope_hint_large_no_session"],
     )
-    def test_sessionless_human_gate_never_suggests_requeue(self, case_id: str) -> None:
+    def test_sessionless_human_gate_names_the_labelled_requeue(
+        self, case_id: str
+    ) -> None:
+        from cw.dev_queue.next_commands import refusal_suffix
+
         msg = self._refusal(case_id)
         assert "session not found" in msg
         assert "human-kept gate" in msg
         assert "operator-only; not for an agent to run" in msg
-        assert _ACME_APPROVE in msg
-        assert "cw dev-queue requeue" not in msg
+        assert "cw dev-queue requeue ACM-1 -c acme --stage review" in msg
+        assert _ACME_APPROVE not in msg
         assert "Use 'requeue'" not in msg
+        assert msg.endswith(refusal_suffix(CASES[case_id].task, session=None))
 
     def test_ordinary_sessionless_row_keeps_the_requeue_sentence(self) -> None:
         msg = self._refusal("rule10_plain_blocked_no_session")
@@ -17129,9 +17129,10 @@ class TestApproveRefusalsNameNextCommand:
         with pytest.raises(ApproveGateError, match="not in pipeline") as excinfo:
             approve_ticket("ACM-1", "acme")
         assert str(excinfo.value).endswith(
-            " No approve or requeue can act on it until the lane pipeline includes"
-            " that stage; fix the lane's pipeline.stages, or run"
-            " `cw dev-queue remove ACM-1 -c acme` and re-add the ticket."
+            " No approve or `requeue --stage` can act on it until the lane pipeline"
+            " includes that stage; fix the lane's pipeline.stages, or run"
+            " `cw dev-queue remove ACM-1 -c acme` and re-add the ticket. A plain"
+            " `requeue` re-runs the current stage."
         )
 
 
@@ -17521,8 +17522,8 @@ class TestRequeueRefusalsNameNextCommand:
         with pytest.raises(RequeueStageError, match="is not in the pipeline") as exc:
             requeue_ticket("ACM-1", "acme", "review", native_daemon=self.fake)
         assert str(exc.value).endswith(
-            " No requeue can act on a row whose stage is not in its lane pipeline;"
-            " fix the lane's pipeline.stages, or run"
+            " No --stage requeue can act on a row whose stage is not in its lane"
+            " pipeline; fix the lane's pipeline.stages, or run"
             " `cw dev-queue remove ACM-1 -c acme` and re-add the ticket."
         )
 
