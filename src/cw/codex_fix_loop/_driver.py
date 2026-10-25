@@ -429,6 +429,7 @@ def run_review_with_fix_loop(
     cycle0_review = verdict.review
     _, _, cycle0_changed = _capture_diff(worktree, default_branch)
     cycle0_files = frozenset(cycle0_changed)
+    # #2767 non-ship-path: hint-only tier kept; ship gates use the new resolver
     scope_tier = resolve_tier(task.scope_hint)
     plan_text, ticket_text = _load_ticket_context(worktree)
     constraints = _load_constraints(worktree, task, operator_login, ticket_text)

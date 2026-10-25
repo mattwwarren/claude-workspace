@@ -560,6 +560,7 @@ def _prepare_review_pass(
         diff = delta_diff
     else:
         diff, reviewed_sha, changed_files = _capture_diff(worktree, default_branch)
+    # #2767 non-ship-path: hint-only tier kept; ship gates use the new resolver
     scope_tier = resolve_tier(task.scope_hint)
     categories = _categorize_changed_files(changed_files)
     sensitive_hits = _load_sensitive_hits(worktree, changed_files, scope_tier)

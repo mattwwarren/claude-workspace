@@ -582,7 +582,11 @@ def git_facts(
 
 
 def resolve_tier(scope_hint: str | None) -> ScopeTier:
-    """Map task.scope_hint to a valid ScopeTier, defaulting to 'small'."""
+    """Map task.scope_hint to a valid ScopeTier, defaulting to 'small'.
+
+    Non-ship-path callers only; ship-path gates use
+    ``plan_files.resolve_review_scope_tier``.
+    """
     if scope_hint == "large":
         return "large"
     return "small"
@@ -762,6 +766,7 @@ def synthesize_git_result(
         status="stage_complete",
         stage_reached="stage2_impl",
         scope=Scope(
+            # #2767 non-ship-path (IMPL sentinel): hint-only tier kept
             tier=resolve_tier(task.scope_hint),
             files=facts["files"],
             lines_estimate=0,  # plan/scope_hint line-count mapping is a follow-on
