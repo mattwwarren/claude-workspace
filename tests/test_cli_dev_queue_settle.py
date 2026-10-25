@@ -24,6 +24,7 @@ from cw.dev_queue.next_commands import human_gate_settled_notice
 from cw.events import load_cursor, read_events, record_event
 from cw.exceptions import LockTimeoutError
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from tests._cli_review_helpers import _enter_operator_machine
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -48,6 +49,7 @@ _REVIEW_PENDING = {"status": "review_pending_approval"}
 @pytest.fixture(autouse=True)
 def _acme(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     install_acme_client(tmp_path, monkeypatch)
+    _enter_operator_machine(monkeypatch, tmp_path)
 
 
 class _Clock:

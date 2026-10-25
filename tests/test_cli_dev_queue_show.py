@@ -30,6 +30,7 @@ from cw.models import (
     Stage,
 )
 from cw.models.ticket_view import NextCommand, TicketView
+from tests._cli_review_helpers import _enter_operator_machine
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -62,6 +63,7 @@ _SHOW_LOGGER = "cw.cli.dev_queue.show"
 @pytest.fixture(autouse=True)
 def _acme(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     install_acme_client(tmp_path, monkeypatch)
+    _enter_operator_machine(monkeypatch, tmp_path)
 
 
 def _ticket_lines(result: Result) -> list[str]:

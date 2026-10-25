@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import click
 
 from cw.cli._base import handle_errors
+from cw.cli._worker_guard import refuse_inside_dispatch_worker
 from cw.cli.routed_orphan_close import close_routed_result_sessions_for_ticket
 from cw.config import get_client, load_orchestrator_config
 from cw.dev_queue import (
@@ -73,6 +74,14 @@ def revoke_plan_approval_command(ticket_id: str, client: str | None) -> None:
 # alongside their shape validator -- and are distinct from lifecycle.py's
 # `_PLAN_SPEC_MARKER`/`_PLAN_SOUNDNESS_MARKER` pair (the coded
 # plan-quality-review gate). See GitHub #1419.
+
+# Refusal shown when `approve` runs inside a headless dispatch worker (#2776).
+_APPROVE_IN_WORKER_MSG = (
+    "Refusing to approve a gate from inside a dispatch worker "
+    "(.claude/cw-context.json reports headless). An approval is the evidence "
+    "a downstream plan or ship gate trusts, so a worker must not mint its "
+    "own. Run `cw dev-queue approve` from the orchestrator session."
+)
 
 # How much of the bound head SHA the --scope-drift success message shows.
 _HEAD_SHA_DISPLAY_LEN = 12
@@ -361,9 +370,14 @@ def dev_queue_approve(
     so do not re-run `approve` (the row is already PENDING and a retry never
     reaches the close); close the session with the `cw spawn close
     --confirmed-dead <id>` line the message prints once the worker is gone.
-    Any caller of this command, including an agent session, closes such a
-    session; the unattended approvals (auto-adopt gate recipe, `drain`,
-    `auto_fix_ci`) do not.
+    Any caller that is not a dispatch worker -- the orchestrator session
+    included -- closes such a session; the unattended approvals (auto-adopt
+    gate recipe, `drain`, `auto_fix_ci`) do not.
+
+    Refused inside a dispatch worker (the check `cw dev-queue resolve` and
+    `cw review settle` apply): an approval is evidence a worker must not mint
+    for its own run (#2776). `revoke-plan-approval` stays callable by the
+    plan-stage worker.
 
     Pass --post-marker to also post the plan-approved audit marker on a
     PLAN-stage ticket (unrelated to the operator-signoff gate above or to
@@ -394,6 +408,7 @@ def dev_queue_approve(
     moved HEAD no longer matches. Distinct from `cw review settle`, which only
     suppresses a finding in a future review round.
     """
+    refuse_inside_dispatch_worker(_APPROVE_IN_WORKER_MSG)
     if scope_drift is not None and post_marker:
         msg = "--scope-drift and --post-marker are mutually exclusive"
         raise click.UsageError(msg)

@@ -77,6 +77,7 @@ from cw.models import (
 from cw.plan_fingerprint import compute_body_sha
 from cw.reconcile.liveness_page import close_command
 from cw.worktree import is_genuinely_live_home_reason, worktree_path_for
+from tests._cli_review_helpers import _enter_operator_machine
 from tests._reconcile_helpers import (
     _routed_last_result,
     _write_agent_spawn_stamp,
@@ -8792,6 +8793,12 @@ class TestApproveTicketLockedResolved:
 class TestApproveScopeHintGateRelease:
     """Adjacent to TestApproveTicket (#1640 regression coverage)."""
 
+    @pytest.fixture(autouse=True)
+    def _operator_machine(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _enter_operator_machine(monkeypatch, tmp_path)
+
     def test_approve_scope_hint_gated_park_releases_via_disposition(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
@@ -12688,6 +12695,12 @@ class TestUnblockTicket:
 class TestCLIApprove:
     """CLI tests for `cw dev-queue approve`."""
 
+    @pytest.fixture(autouse=True)
+    def _operator_machine(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _enter_operator_machine(monkeypatch, tmp_path)
+
     def test_approve_happy_path(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -13758,6 +13771,12 @@ _STOP_FAILURE_SHAPES = pytest.mark.parametrize(
 
 class TestCLIApproveRoutedOrphan:
     """`cw dev-queue approve` closes the orphan AFTER the transition (#2517)."""
+
+    @pytest.fixture(autouse=True)
+    def _operator_machine(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _enter_operator_machine(monkeypatch, tmp_path)
 
     def test_acceptance_approve_frees_the_worktree_for_the_next_tick(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

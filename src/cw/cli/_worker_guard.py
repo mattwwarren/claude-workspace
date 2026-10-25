@@ -1,9 +1,10 @@
 """Refuse an operator-only command inside a headless dispatch worker.
 
-Shared by ``cw review settle`` (#2210) and ``cw dev-queue resolve`` (#2702):
-both record an operator decision the pipeline must never mint for itself.
-Moved out of ``cw.cli.review.commands``; each caller passes its own refusal
-message.
+Shared by ``cw review settle`` (#2210), ``cw dev-queue resolve`` (#2702),
+``cw dev-queue approve`` (#2776), ``cw lane set`` and
+``cw config concurrency set``: each records an operator decision the pipeline
+must never mint for itself. Moved out of ``cw.cli.review.commands``; each
+caller passes its own refusal message.
 
 ``find_cw_context`` is looked up on its module at call time rather than bound
 at import, as the function-local import it replaces did, so a test that

@@ -69,6 +69,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.sprint import AppliedBuildout, BuildoutPlan
+from tests._cli_review_helpers import _enter_operator_machine
 from tests._clients_yaml import ClientSpec, staged_client, write_clients_yaml
 from tests._reconcile_helpers import (
     SCOPE_GUARD_FILES,
@@ -12360,6 +12361,12 @@ class TestDevQueueWait:
 
 class TestDevQueueApproveCli:
     """CLI-level stdout messaging for ``cw dev-queue approve`` (#990)."""
+
+    @pytest.fixture(autouse=True)
+    def _operator_machine(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _enter_operator_machine(monkeypatch, tmp_path)
 
     def _seed_review_pending(
         self, tmp_config_dir: Path, tmp_path: Path, *, signoff: bool
