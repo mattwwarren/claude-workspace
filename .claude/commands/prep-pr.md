@@ -255,6 +255,7 @@ For each gate, first check whether it already passed at this exact commit:
 "$PREP_PR_STATE" gate-pass check <gate-name>
 ```
 `<gate-name>` is the name exactly as `detect-gates` printed it; the script looks the gate's command up itself, so do not pass the command. If the JSON has `skip: true`, do not run the gate and do not fetch its ceiling: treat it as passed, quote the printed `message` (it carries the SHA the skip relied on) in your reply, and go to the next gate; the script has already recorded the skip in `.claude/prep-pr-state.json` and Step 10 reports it. If `skip` is `false` (any `reason`), or the subcommand errors (for example a stale installed script without `gate-pass`), run the gate normally as described below.
+Dependency-sync gates that mutate the environment (for example `uv sync`) are never eligible for a skip; the script reports `reason: "environment-mutating"` for them, so run them normally.
 
 Before running each gate, fetch its timeout ceiling:
 ```bash
@@ -303,7 +304,7 @@ For each gate:
 ```bash
 "$PREP_PR_STATE" gate-pass record <gate-name>
 ```
-It stamps the gate as passed at the current `HEAD` only if the worktree is clean; `recorded: false` is not a failure, just continue. Record only a gate that actually exited 0 in this step. Never record a failed or timed-out gate, and do not re-record a gate you skipped via `gate-pass check` (it is already stamped).
+It stamps the gate as passed at the current `HEAD` only if the worktree is clean; `recorded: false` is not a failure, just continue. Environment-mutating dependency-sync gates such as `uv sync` are never stamped, so they run on every pass. Record only a gate that actually exited 0 in this step. Never record a failed or timed-out gate, and do not re-record a gate you skipped via `gate-pass check` (it is already stamped).
 
 ### Loop Control
 

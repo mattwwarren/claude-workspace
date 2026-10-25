@@ -1423,6 +1423,27 @@ class TestGatePass:
         }
         assert not (gate_repo / _STATE_REL).exists()
 
+    def test_environment_mutating_gate_is_never_stamped_or_skipped(
+        self,
+        gate_repo: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        name = _gate_names()[0]
+        monkeypatch.setattr(
+            _mod, "_gate_command", lambda _name: "uv sync --locked --dev"
+        )
+        assert _gate_pass(capsys, "record", name) == {
+            "gate": name,
+            "recorded": False,
+            "reason": "environment-mutating",
+        }
+        assert not (gate_repo / _STATE_REL).exists()
+        checked = _gate_pass(capsys, "check", name)
+        assert checked["skip"] is False
+        assert checked["reason"] == "environment-mutating"
+        assert not (gate_repo / _STATE_REL).exists()
+
     def test_edited_stamp_command_is_command_changed(
         self, gate_repo: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
