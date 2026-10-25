@@ -19,6 +19,7 @@ from cw.models import (
     StagePipelineConfig,
     TicketTask,
 )
+from cw.models.enums import PipelinePosition, stage_position
 
 if TYPE_CHECKING:
     from cw.executor.core import StageExecutor
@@ -73,6 +74,20 @@ def resolve_pipeline_stages(task: TicketTask, client: ClientConfig) -> list[Stag
     if lane_pipeline is not None and "stages" in lane_pipeline.model_fields_set:
         return lane_pipeline.stages
     return client.pipeline.stages
+
+
+def pipeline_position(
+    task: TicketTask, client: ClientConfig | None
+) -> PipelinePosition:
+    """*task*'s stage position in its resolved lane pipeline (#2760).
+
+    The caller-resolved fact ``next_commands`` takes as ``pipeline_position``.
+    A ``None`` client (unconfigured or unreadable) gives ``INTERIOR``, the
+    pre-#2760 behaviour; ``approve`` itself fails on such a client.
+    """
+    if client is None:
+        return PipelinePosition.INTERIOR
+    return stage_position(task.stage, resolve_pipeline_stages(task, client))
 
 
 def resolve_executor(
