@@ -255,7 +255,16 @@ def _reap_wedge_findings(
     pending_worktree_occupied_keys: set[tuple[str, str]] = {
         (f.client, f.ticket_id)
         for f in findings
-        if isinstance(f, PendingWorktreeOccupiedFinding) and f.ticket_id
+        if isinstance(f, PendingWorktreeOccupiedFinding)
+        and f.client
+        and f.ticket_id
+    }
+    pending_worktree_occupied_ticket_ids: set[str] = {
+        f.ticket_id
+        for f in findings
+        if f.wedge_class == WEDGE_PENDING_WORKTREE_OCCUPIED
+        and f.ticket_id
+        and not getattr(f, "client", None)
     }
     blocked_ticket_ids: set[str] = {
         f.ticket_id
@@ -316,6 +325,7 @@ def _reap_wedge_findings(
             if (
                 task.ticket_id in running_ticket_ids
                 and (task.client, task.ticket_id) not in pending_worktree_occupied_keys
+                and task.ticket_id not in pending_worktree_occupied_ticket_ids
                 and task.status == QueueItemStatus.RUNNING
             ):
                 transition_task_status(task, QueueItemStatus.PENDING)

@@ -9688,3 +9688,52 @@ class TestPendingWorktreeOccupiedWedge:
         rows = {(t.client, t.ticket_id): t.status for t in load_dev_queue().tasks}
         assert rows[("client-a", "TST-X")] == QueueItemStatus.RUNNING
         assert rows[("client-b", "TST-X")] == QueueItemStatus.PENDING
+
+    def test_reap_base_pending_worktree_finding_falls_back_to_ticket_scope(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A base pending finding excludes same-ticket rows across clients."""
+        from cw.config import state_file as _sf
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.doctor import WedgeFinding, _reap_wedge_findings
+        from cw.doctor.pending_skip_wedge import WEDGE_PENDING_WORKTREE_OCCUPIED
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="TST-X",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                    ),
+                    TicketTask(
+                        ticket_id="TST-X",
+                        client="client-b",
+                        status=QueueItemStatus.RUNNING,
+                    ),
+                ]
+            )
+        )
+        findings = [
+            WedgeFinding(
+                wedge_class=WEDGE_PENDING_WORKTREE_OCCUPIED,
+                session_id=None,
+                ticket_id="TST-X",
+                recipe="inspect",
+                state_file=str(_sf()),
+            ),
+            WedgeFinding(
+                wedge_class="wedge/task-running-no-session",
+                session_id=None,
+                ticket_id="TST-X",
+                recipe="fix",
+                state_file=str(_sf()),
+            ),
+        ]
+
+        assert _reap_wedge_findings(findings) is None
+
+        rows = {(t.client, t.ticket_id): t.status for t in load_dev_queue().tasks}
+        assert rows[("client-a", "TST-X")] == QueueItemStatus.RUNNING
+        assert rows[("client-b", "TST-X")] == QueueItemStatus.RUNNING
