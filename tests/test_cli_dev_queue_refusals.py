@@ -25,6 +25,7 @@ from cw.events import read_events
 from cw.exceptions import RequeueStageError
 from cw.models import OrchestratorEventType, QueueItemStatus, SessionStatus, Stage
 from cw.native_daemon import FakeNativeDaemonClient
+from tests._cli_review_helpers import _enter_operator_machine
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -101,7 +102,9 @@ _REFUSED_BY_APPROVE = tuple(
 
 @pytest.fixture(autouse=True)
 def _acme(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeNativeDaemonClient:
-    return install_acme_client(tmp_path, monkeypatch)
+    fake = install_acme_client(tmp_path, monkeypatch)
+    _enter_operator_machine(monkeypatch, tmp_path)
+    return fake
 
 
 def _requeued_events() -> list[object]:
