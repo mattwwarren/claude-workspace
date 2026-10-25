@@ -85,6 +85,7 @@ from tests._ticket_view_helpers import (
     make_blocked,
     make_task,
     seed_queue,
+    write_lane_client,
 )
 from tests._worktree_helpers import patch_worktree
 from tests.conftest import (
@@ -17134,6 +17135,39 @@ class TestApproveRefusalsNameNextCommand:
             " `cw dev-queue remove ACM-1 -c acme` and re-add the ticket. A plain"
             " `requeue` re-runs the current stage."
         )
+
+
+class TestResolveApproveTerminalRefusal:
+    """``resolve --approve`` refuses at a pipeline's last stage (#2760).
+
+    ``record_operator_resolution`` only accepts a plan-stage row, so the
+    terminal position here comes from a plan-only pipeline.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _plan_only_acme(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        install_acme_client(tmp_path, monkeypatch)
+        write_lane_client(
+            "acme", tmp_path / "ws", lanes=("default", "fast"), client_stages=["plan"]
+        )
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: "alice")
+
+    def test_names_the_terminal_stage_and_records_nothing(self) -> None:
+        from cw.dev_queue import load_dev_queue, record_operator_resolution
+        from cw.exceptions import ApproveGateError
+
+        task = make_blocked(stage=Stage.PLAN, disposition="approval_gate")
+        seed_queue(
+            [task],
+            [bound_session_for(task, last_result={"status": "plan_pending_approval"})],
+        )
+        with pytest.raises(ApproveGateError, match="already at terminal stage"):
+            record_operator_resolution(
+                "ACM-1", "acme", "1. Keep it.", approve=True, operator_initiated=True
+            )
+        (row,) = load_dev_queue().tasks
+        assert row.operator_resolutions == []
+        assert row.plan_approved_at is None
 
 
 class TestScopeDriftRefusalsNameNextCommand:

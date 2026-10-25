@@ -16,9 +16,15 @@ import pytest
 from cw.cli.dev_queue._settle import SettleOutcome
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS
 from cw.config import load_state
-from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION, load_dev_queue
+from cw.dev_queue import (
+    FINALIZE_GATE_HELD_DISPOSITION,
+    load_dev_queue,
+    precheck_requeue,
+)
 from cw.events import read_events
+from cw.exceptions import RequeueStageError
 from cw.models import OrchestratorEventType, QueueItemStatus, SessionStatus, Stage
+from cw.native_daemon import FakeNativeDaemonClient
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -36,8 +42,6 @@ from tests._ticket_view_helpers import (
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from cw.native_daemon import FakeNativeDaemonClient
 
 _APPROVE = "cw dev-queue approve ACM-1 -c acme"
 _NOOP_LINE = "Ticket ACM-1 (acme) is already PENDING at {stage}; nothing to requeue."
@@ -488,6 +492,25 @@ class TestRequeueResetAttempts:
 
 
 class TestUnblockAndMoveRefusals:
+    def test_unblock_at_the_terminal_stage_names_the_requeue(self) -> None:
+        task = make_blocked(stage=Stage.FINALIZE, disposition="review_pending_approval")
+        seed_queue([task], [bound_session_for(task, last_result=REVIEW_PENDING)])
+        result = invoke_dev_queue("unblock", ACME_TICKET, "-c", ACME)
+        assert result.exit_code == 1
+        assert "unblock applies to salvage parks only" in result.stderr
+        assert result.stderr.rstrip().endswith(_S1)
+        assert f"Run: `{_APPROVE}`" not in result.stderr
+
+    def test_regress_at_the_terminal_stage_names_the_requeue(self) -> None:
+        task = make_blocked(stage=Stage.FINALIZE, disposition="review_pending_approval")
+        seed_queue([task], [bound_session_for(task, last_result=REVIEW_PENDING)])
+        with pytest.raises(RequeueStageError, match="would regress") as excinfo:
+            precheck_requeue(
+                ACME_TICKET, ACME, "review", native_daemon=FakeNativeDaemonClient()
+            )
+        assert _S1 in str(excinfo.value)
+        assert f"Run: `{_APPROVE}`" not in str(excinfo.value)
+
     def test_unblock_on_a_gate_names_approve(self) -> None:
         case = CASES["rule9_review_gate"]
         seed_queue(
