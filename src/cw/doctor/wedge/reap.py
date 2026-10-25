@@ -23,7 +23,10 @@ from cw.dev_queue import dev_queue_lock, save_dev_queue, transition_task_status
 from cw.doctor import _deps
 from cw.doctor._shared import CheckResult, WedgeFinding
 from cw.doctor.loop_health import _reap_session_by_selector
-from cw.doctor.pending_skip_wedge import WEDGE_PENDING_WORKTREE_OCCUPIED
+from cw.doctor.pending_skip_wedge import (
+    WEDGE_PENDING_WORKTREE_OCCUPIED,
+    PendingWorktreeOccupiedFinding,
+)
 from cw.doctor.routed_result_wedge import (
     WEDGE_ROUTED_RESULT_STRANDED,
     has_pending_routed_result_audits,
@@ -249,6 +252,11 @@ def _reap_wedge_findings(
             WEDGE_ROUTED_RESULT_STRANDED,
         }
     }
+    pending_worktree_occupied_keys: set[tuple[str, str]] = {
+        (f.client, f.ticket_id)
+        for f in findings
+        if isinstance(f, PendingWorktreeOccupiedFinding) and f.ticket_id
+    }
     blocked_ticket_ids: set[str] = {
         f.ticket_id
         for f in findings
@@ -307,6 +315,7 @@ def _reap_wedge_findings(
         for task in queue.tasks:
             if (
                 task.ticket_id in running_ticket_ids
+                and (task.client, task.ticket_id) not in pending_worktree_occupied_keys
                 and task.status == QueueItemStatus.RUNNING
             ):
                 transition_task_status(task, QueueItemStatus.PENDING)
