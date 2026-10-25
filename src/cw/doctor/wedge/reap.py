@@ -47,6 +47,19 @@ from cw.native_daemon import get_native_daemon_client
 from cw.reconcile.leaked_workers import sweep_leaked_daemon_workers
 
 _REAP_CHECK_NAME = "wedge-reap"
+_NON_REAP_WEDGE_CLASSES: frozenset[str] = frozenset(
+    {
+        "wedge/repo-ahead-of-queue",
+        _WEDGE_BLOCKED_DEAD_SESSION,
+        _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
+        _WEDGE_TERMINAL_SIBLING,
+        _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL,
+        _WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN,
+        _WEDGE_LEAKED_DAEMON_WORKER,
+        WEDGE_ROUTED_RESULT_STRANDED,
+        WEDGE_PENDING_WORKTREE_OCCUPIED,
+    }
+)
 
 
 def _reap_daemon_sessions(
@@ -238,18 +251,7 @@ def _reap_wedge_findings(
         for f in findings
         if f.ticket_id
         and (client := getattr(f, "client", None)) is not None
-        and f.wedge_class
-        not in {
-            "wedge/repo-ahead-of-queue",
-            _WEDGE_BLOCKED_DEAD_SESSION,
-            _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
-            _WEDGE_TERMINAL_SIBLING,
-            _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL,
-            _WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN,
-            _WEDGE_LEAKED_DAEMON_WORKER,
-            WEDGE_ROUTED_RESULT_STRANDED,
-            WEDGE_PENDING_WORKTREE_OCCUPIED,
-        }
+        and f.wedge_class not in _NON_REAP_WEDGE_CLASSES
     }
     # Older actionable findings have no client identity and remain explicitly
     # global by ticket id.  A class-12 finding is client-scoped, so preserve
@@ -260,18 +262,7 @@ def _reap_wedge_findings(
         for f in findings
         if f.ticket_id
         and getattr(f, "client", None) is None
-        and f.wedge_class
-        not in {
-            "wedge/repo-ahead-of-queue",
-            _WEDGE_BLOCKED_DEAD_SESSION,
-            _WEDGE_ACTIVE_NO_DAEMON_ENTRY,
-            _WEDGE_TERMINAL_SIBLING,
-            _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL,
-            _WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN,
-            _WEDGE_LEAKED_DAEMON_WORKER,
-            WEDGE_ROUTED_RESULT_STRANDED,
-            WEDGE_PENDING_WORKTREE_OCCUPIED,
-        }
+        and f.wedge_class not in _NON_REAP_WEDGE_CLASSES
     }
     pending_worktree_keys: set[tuple[str, str]] = {
         (client, f.ticket_id)
