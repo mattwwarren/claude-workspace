@@ -186,6 +186,10 @@ def _gate_block_breadcrumb_note(
     status: str,
     blocker_reason: str | None,
     blocker: object | None,
+    *,
+    enabled: bool,
+    fingerprint_stage: str,
+    fingerprint_stage_base_ref: str | None,
 ) -> str:
     """Stamp the #2717 gate-block backoff and return its breadcrumb note.
 
@@ -195,7 +199,7 @@ def _gate_block_breadcrumb_note(
     Runs before the page and the transition, while ``task.stage_base_ref`` is
     still the spawn-time HEAD the fingerprint keys on.
     """
-    if not is_gate_block(status, blocker_reason):
+    if not enabled or not is_gate_block(status, blocker_reason):
         return ""
     details = blocker.get("details") if isinstance(blocker, dict) else None
     return record_gate_block(
@@ -204,6 +208,8 @@ def _gate_block_breadcrumb_note(
         blocker_reason=blocker_reason,
         blocking_pr=_extract_blocked_on_pr(details),
         now=datetime.now(UTC),
+        fingerprint_stage=fingerprint_stage,
+        fingerprint_stage_base_ref=fingerprint_stage_base_ref,
     )
 
 
@@ -271,6 +277,10 @@ def _route_stage_failure(
     blocker_reason: str | None,
     disposition: str | None,
     claim_unproductive: bool,
+    *,
+    gate_backoff_enabled: bool = True,
+    gate_fingerprint_stage: str | None = None,
+    gate_fingerprint_stage_base_ref: str | None = None,
 ) -> None:
     """Rule 5 body: blocked/merge_gate_blocked/scope_exceeded/forbidden_area.
 
@@ -399,7 +409,23 @@ def _route_stage_failure(
     # #2717: a gate-block park appends `occurrence=N next_eligible_at=<iso>`
     # (and stamps the backoff); a bare note when there is no blocker reason.
     base = _breadcrumb_for_reason(blocker_reason, blocker)
-    note = _gate_block_breadcrumb_note(task, status, blocker_reason, blocker)
+    note = _gate_block_breadcrumb_note(
+        task,
+        status,
+        blocker_reason,
+        blocker,
+        enabled=gate_backoff_enabled,
+        fingerprint_stage=(
+            task.stage.value
+            if gate_fingerprint_stage is None
+            else gate_fingerprint_stage
+        ),
+        fingerprint_stage_base_ref=(
+            task.stage_base_ref
+            if gate_fingerprint_stage is None
+            else gate_fingerprint_stage_base_ref
+        ),
+    )
     breadcrumbs = " ".join(part for part in (base, note) if part)
     record_event(
         OrchestratorEventType.SESSION_NEEDS_ATTENTION,

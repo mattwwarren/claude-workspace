@@ -51,6 +51,7 @@ assertions.
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import (
@@ -67,7 +68,10 @@ from cw.dev_queue import (
     _hold_aware_disposition,
     transition_task_status,
 )
-from cw.dev_queue.gate_backoff import reset_gate_block_unless_gate
+from cw.dev_queue.gate_backoff import (
+    is_gate_block,
+    reset_gate_block_unless_gate,
+)
 from cw.dispatch.impl_gates import (
     _park_unconcluded_finalize_regress_merge_gate,
     _should_gate_for_unconcluded_finalize_regress_merge,
@@ -172,6 +176,29 @@ __all__ = [
 ]
 
 _log = logging.getLogger("cw.dispatch")
+
+_GATE_BLOCK_BACKOFF_DISABLED_CLIENTS_ENV = (
+    "CW_GATE_BLOCK_BACKOFF_DISABLED_CLIENTS"
+)
+
+
+def _gate_block_backoff_enabled(client: str) -> bool:
+    """Return the operator-controlled per-client rollout state (#2717)."""
+    disabled = {
+        name.strip()
+        for name in os.environ.get(
+            _GATE_BLOCK_BACKOFF_DISABLED_CLIENTS_ENV, ""
+        ).split(",")
+        if name.strip()
+    }
+    enabled = client not in disabled
+    if not enabled:
+        _log.warning(
+            "gate-block backoff disabled for client %r via %s",
+            client,
+            _GATE_BLOCK_BACKOFF_DISABLED_CLIENTS_ENV,
+        )
+    return enabled
 
 
 # ``rule`` values stamped onto the #1617 ``dispatch.scope_routing_decision``
@@ -668,6 +695,10 @@ def _route_staged_decision(
     Same-stage and no-``stage_reached`` sentinels route through Rule 1-6 exactly
     as before. Returns ``False`` on refusal, ``True`` for every routed path.
     """
+    # Keep the spawn-time fingerprint inputs stable across any stage-pointer
+    # walk performed while classifying this sentinel.
+    gate_fingerprint_stage = task.stage.value
+    gate_fingerprint_stage_base_ref = task.stage_base_ref
     walk_outcome = _resolve_stage_walk(task, last_result, clients)
     if walk_outcome == "refuse":
         stage_reached = (
@@ -800,6 +831,12 @@ def _route_staged_decision(
             blocker_reason,
             disposition,
             claim_unproductive,
+            gate_backoff_enabled=(
+                not is_gate_block(status, blocker_reason)
+                or _gate_block_backoff_enabled(task.client)
+            ),
+            gate_fingerprint_stage=gate_fingerprint_stage,
+            gate_fingerprint_stage_base_ref=gate_fingerprint_stage_base_ref,
         )
     else:
         # Rule 6: None/not dict/missing status -- conservative fallback

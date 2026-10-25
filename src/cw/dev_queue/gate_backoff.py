@@ -67,14 +67,16 @@ def _fingerprint(
     status: str | None,
     blocker_reason: str | None,
     blocking_pr: int | None,
+    stage: str | None = None,
+    stage_base_ref: str | None = None,
 ) -> str:
     """The key two parks must share to count as consecutive. Pure."""
     parts = (
         status,
         blocker_reason,
         None if blocking_pr is None else str(blocking_pr),
-        task.stage.value,
-        task.stage_base_ref,
+        task.stage.value if stage is None else stage,
+        task.stage_base_ref if stage is None else stage_base_ref,
     )
     return _FINGERPRINT_SEPARATOR.join("" if part is None else part for part in parts)
 
@@ -96,6 +98,8 @@ def record_gate_block(
     blocker_reason: str | None,
     blocking_pr: int | None,
     now: datetime,
+    fingerprint_stage: str | None = None,
+    fingerprint_stage_base_ref: str | None = None,
 ) -> str:
     """Stamp a gate-block park on *task* and return its page note.
 
@@ -108,7 +112,12 @@ def record_gate_block(
     touched.
     """
     fingerprint = _fingerprint(
-        task, status=status, blocker_reason=blocker_reason, blocking_pr=blocking_pr
+        task,
+        status=status,
+        blocker_reason=blocker_reason,
+        blocking_pr=blocking_pr,
+        stage=fingerprint_stage,
+        stage_base_ref=fingerprint_stage_base_ref,
     )
     prior = task.gate_block
     count = prior.count + 1 if prior and prior.fingerprint == fingerprint else 1
