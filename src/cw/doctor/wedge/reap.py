@@ -255,9 +255,7 @@ def _reap_wedge_findings(
     pending_worktree_occupied_keys: set[tuple[str, str]] = {
         (f.client, f.ticket_id)
         for f in findings
-        if isinstance(f, PendingWorktreeOccupiedFinding)
-        and f.client
-        and f.ticket_id
+        if isinstance(f, PendingWorktreeOccupiedFinding) and f.client and f.ticket_id
     }
     pending_worktree_occupied_ticket_ids: set[str] = {
         f.ticket_id
