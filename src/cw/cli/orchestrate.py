@@ -422,7 +422,7 @@ def orchestrate_start(lane: str, client_name: str | None, as_json: bool) -> None
         msg = (
             f"An ORCHESTRATE session for lane '{lane}' already exists: "
             f"{existing.id!r} (status: {existing.status.value}). "
-            f"Clear it first with: cw spawn complete {existing.id} --status completed"
+            f"Clear it first with: cw spawn close {existing.id}"
         )
         raise CwError(msg)
 

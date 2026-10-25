@@ -9048,6 +9048,8 @@ class TestPeek:
         result = runner.invoke(main, ["peek", session.name])
         assert result.exit_code == 1
         assert "completed" in result.output
+        assert f"cw session result {session.id}" in result.output
+        assert "post-mortem" not in result.output
 
     def test_peek_no_claude_session_id_exits_1(self, tmp_path: Path) -> None:
         session = self._make_session(tmp_path, claude_session_id=None)
@@ -9065,7 +9067,8 @@ class TestPeek:
         runner = CliRunner()
         result = runner.invoke(main, ["peek", session.name])
         assert result.exit_code == 1
-        assert "post-mortem" in result.output
+        assert f"cw session show {session.id}" in result.output
+        assert "post-mortem" not in result.output
 
     def test_peek_default_lines_tails_50(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

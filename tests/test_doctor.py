@@ -2103,7 +2103,9 @@ class TestWedgeRepoAheadOfQueue:
         from cw.doctor import _check_wedge_repo_ahead
         from cw.models import CwState, DevQueueStore
 
-        task = self._make_running_task(tmp_path, ticket_id="TST-R1")
+        task = self._make_running_task(
+            tmp_path, ticket_id="TST-R1", session_id="sess-r1"
+        )
         state = CwState(sessions=[])
         queue = DevQueueStore(tasks=[task])
 
@@ -2130,7 +2132,9 @@ class TestWedgeRepoAheadOfQueue:
         assert len(findings) == 1
         f = findings[0]
         assert f.wedge_class == "wedge/repo-ahead-of-queue"
-        assert "no open PR" in f.recipe or "cw spawn-complete" in f.recipe
+        assert "no open PR" in f.recipe
+        assert "cw spawn complete sess-r1 --status shipped" in f.recipe
+        assert "cw spawn-complete" not in f.recipe
 
     def test_ahead_open_pr_emits_shipped_recipe(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
@@ -2140,7 +2144,9 @@ class TestWedgeRepoAheadOfQueue:
         from cw.doctor import _check_wedge_repo_ahead
         from cw.models import CwState, DevQueueStore
 
-        task = self._make_running_task(tmp_path, ticket_id="TST-R2")
+        task = self._make_running_task(
+            tmp_path, ticket_id="TST-R2", session_id="sess-r2"
+        )
         state = CwState(sessions=[])
         queue = DevQueueStore(tasks=[task])
 
@@ -2162,7 +2168,8 @@ class TestWedgeRepoAheadOfQueue:
         monkeypatch.setattr("cw.doctor.loop_health._sp.run", fake_run)
         findings = _check_wedge_repo_ahead(state, queue)
         assert len(findings) == 1
-        assert "cw spawn-complete" in findings[0].recipe
+        assert "cw spawn complete sess-r2 --status shipped" in findings[0].recipe
+        assert "cw spawn-complete" not in findings[0].recipe
 
     def test_not_ahead_no_finding(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
@@ -2354,10 +2361,9 @@ class TestWedgeRepoAheadOfQueue:
         # TimeoutExpired on gh pr list → treated as no PRs → recipe mentions no open PR
         findings = _check_wedge_repo_ahead(state, queue)
         assert len(findings) == 1
-        assert (
-            "no open PR" in findings[0].recipe
-            or "cw spawn-complete" in findings[0].recipe
-        )
+        assert "no open PR" in findings[0].recipe
+        # No session_id on the task -> the recipe keeps a fillable placeholder.
+        assert "cw spawn complete <session_id> --status shipped" in findings[0].recipe
 
     def test_load_clients_raising_degrades_to_no_findings(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
