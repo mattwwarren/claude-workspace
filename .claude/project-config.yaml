@@ -30,6 +30,17 @@ pr:
   auto_create: false
   branch_pattern: "{type}/{plan_id}"
 
+# Per-gate foreground ceilings for /prep-pr Step 7 (#2758), read by
+# .claude/scripts/prep_pr_state.py `gate-timeout`. Keys match gate names by
+# longest hyphen prefix, so `pre-commit` covers `pre-commit-run` and
+# `pre-commit-run-2` (the full hook suite, whose bundled pytest outran the
+# built-in 480s). Values above the Bash tool's 600s foreground cap are clamped.
+# Keep this block-style: it is also read without PyYAML. See
+# config/CONFIG_REFERENCE.md "Quality Gate Timeouts".
+quality_gates:
+  timeouts:
+    pre-commit: 600
+
 plan_exit:
   mode: suggest
 

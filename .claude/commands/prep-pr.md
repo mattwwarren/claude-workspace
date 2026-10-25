@@ -250,11 +250,17 @@ Spawn parallel subagents via the Task tool (`subagent_type: "general-purpose"`),
 
 Run each gate detected in Step 2, in order.
 
+For each gate, first check whether it already passed at this exact commit:
+```bash
+"$PREP_PR_STATE" gate-pass check <gate-name>
+```
+`<gate-name>` is the name exactly as `detect-gates` printed it; the script looks the gate's command up itself, so do not pass the command. If the JSON has `skip: true`, do not run the gate and do not fetch its ceiling: treat it as passed, quote the printed `message` (it carries the SHA the skip relied on) in your reply, and go to the next gate; the script has already recorded the skip in `.claude/prep-pr-state.json` and Step 10 reports it. If `skip` is `false` (any `reason`), or the subcommand errors (for example a stale installed script without `gate-pass`), run the gate normally as described below.
+
 Before running each gate, fetch its timeout ceiling:
 ```bash
 "$PREP_PR_STATE" gate-timeout <gate-name>
 ```
-Pass `<gate-name>` exactly as `detect-gates` printed it; names derived from a shared executable (e.g. `pytest-integration`) resolve to the base tool's ceiling by longest hyphen-delimited prefix. This returns `foreground_ceiling_s` (when to switch this gate to background interactively; in headless mode, the gate's total budget) and `poll_ceiling_s` (interactive only: total wall-clock budget once backgrounded before declaring the result lost).
+Pass `<gate-name>` exactly as `detect-gates` printed it; names derived from a shared executable (e.g. `pytest-integration`) resolve to the base tool's ceiling by longest hyphen-delimited prefix. This returns `foreground_ceiling_s` (when to switch this gate to background interactively; in headless mode, the gate's total budget) and `poll_ceiling_s` (interactive only: total wall-clock budget once backgrounded before declaring the result lost). The call also returns `source` (`project-config` or `default`), `configured_s`, `clamped` and `note`. A repo can raise a gate's ceiling with `quality_gates.timeouts.<gate-name>: <seconds>` in `.claude/project-config.yaml` (longest hyphen-prefix match, like the defaults), but never above the Bash tool's 600 s cap: if `clamped` is `true`, `foreground_ceiling_s` is already 600 and `note` says why. Headless: include `note` in the friction report; interactive: tell the user.
 
 For each gate:
 1. Record the start time: capture `date -u +%Y-%m-%dT%H:%M:%SZ` as `<started>`.
@@ -292,6 +298,12 @@ For each gate:
    (`gate: "Step 7 quality gate"`, `details:` the verbatim failing gate output).
    NEVER "ship anyway" — shipping past a failing quality gate violates the
    quality floor and is exactly the silent-degradation this mode forbids.
+
+**Recording a pass.** When a gate passes (exit 0; for an autofix gate, after the autofix commit leaves the tree clean), immediately run:
+```bash
+"$PREP_PR_STATE" gate-pass record <gate-name>
+```
+It stamps the gate as passed at the current `HEAD` only if the worktree is clean; `recorded: false` is not a failure, just continue. Record only a gate that actually exited 0 in this step. Never record a failed or timed-out gate, and do not re-record a gate you skipped via `gate-pass check` (it is already stamped).
 
 ### Loop Control
 
@@ -420,6 +432,11 @@ Then re-run finalize with `--require-monitor` as the final contract check.
 
 ## Step 10: Clean Up
 
+Before removing the state file, read any recorded gate skips:
+```bash
+"$PREP_PR_STATE" status
+```
+
 Remove the state file:
 ```bash
 "$PREP_PR_STATE" clean
@@ -429,6 +446,7 @@ Print the Ship Summary from Step 9 as the final message. Add cycle-level context
 - Total review-fix cycles completed
 - Findings found and fixed
 - Quality gate results (all pass / with exceptions)
+- Gate skips: for each entry in `gate_skips` from `status`, one line `<gate> skipped: already passed at <sha> (<count>x)`; omit when the list is empty
 
 ---
 
@@ -443,7 +461,7 @@ Print the Ship Summary from Step 9 as the final message. Add cycle-level context
 
 ## Notes
 
-- State persists in `.claude/prep-pr-state.json` — cleaned up in Step 10
+- State persists in `.claude/prep-pr-state.json` (scope snapshots, gate-pass stamps and recorded gate skips) — cleaned up in Step 10
 - This skill is ecosystem-agnostic: gate detection adapts to Python, Node, Rust, and Go projects
 - Each review-fix cycle captures a scope snapshot for creep monitoring
 - Never amend commits. Each fix gets its own commit.
