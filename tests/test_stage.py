@@ -2,22 +2,46 @@
 
 Decision table unit tests for _apply_events_to_store + _stage_advance,
 and an E2E acceptance test for the full staged pipeline.
+
+#2767 adds the large-tier review approval path end to end: the codex review
+parks a large ticket for approval, ``approve`` records the approval on the row,
+and finalize's Step 4.0 fence (executed here against real git repos) is the
+gate that lets it ship.
 """
 
 from __future__ import annotations
 
+import json
+import re
+import shutil
 import subprocess
-from datetime import UTC, datetime
+import textwrap
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 import yaml
 
-from cw.config import save_state
-from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
-from cw.dispatch import _apply_events_to_store, consume_completed_sessions
+from cw.auto_dev_result import AutoDevResult
+from cw.auto_dev_result.schema._vocab import FINALIZE_REGRESS_CAP
+from cw.codex_review import synthesize_codex_review_result
+from cw.config import load_effective_clients, save_state
+from cw.context_queue_metadata import REVIEW_APPROVAL_KEY, build_queue_metadata
+from cw.dev_queue import (
+    approve_ticket,
+    dev_queue_lock,
+    load_dev_queue,
+    requeue_ticket,
+    save_dev_queue,
+)
+from cw.dispatch import (
+    _apply_events_to_store,
+    apply_staged_decision,
+    consume_completed_sessions,
+)
 from cw.events import record_event
+from cw.exceptions import ApproveGateError
 from cw.models import (
     ClientConfig,
     CwState,
@@ -34,9 +58,23 @@ from cw.models import (
     StagePipelineConfig,
     TicketTask,
 )
+from cw.models.gate_block import GateBlockBackoff
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.spawn import CW_CONTEXT_SCHEMA_VERSION
 from tests._clients_yaml import write_clients_yaml
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests.conftest import (
+    _bash_fences,
+    _clean_git_env,
+    _cmd,
+    _make_daemon_session,
+    _make_diff,
+    _make_reviewer_doc,
+    _make_ticket_task,
+    commit_tracked_file,
+    git_in,
+    push_commit_to_origin,
+    substitute_fence_placeholders,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1039,3 +1077,874 @@ class TestFullStagedPipelineE2E:
         assert len(mock_native_daemon.spawn_calls) == 4, (
             f"Expected 4 total spawns, got {len(mock_native_daemon.spawn_calls)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# #2767 — finalize Step 4.0: the large-tier review approval check
+# ---------------------------------------------------------------------------
+
+_FINALIZE_DOC = "auto-dev-finalize.md"
+_GUARD_HEADING = "### Pre-Stage Detector Guard"
+_STEP40_HEADING = "### Step 4.0: Large-Tier Review Approval Check (headless only)"
+_STEP4A_HEADING = "### Step 4a: Merge Gate Check"
+_TIER_PLACEHOLDER = "resolved scope.tier"
+_RECORDED = "REVIEW_APPROVAL_RECORDED"
+_NOT_REQUIRED = "REVIEW_APPROVAL_NOT_REQUIRED"
+_PARK = "REVIEW_APPROVAL_PARK: "
+_NUMSTAT = '"<N from git diff --numstat>"'
+_REVIEW_RELEASE = "cw dev-queue requeue <ticket-id> -c <client> --stage review"
+_LARGE_MARKER = "**Scope tier:** large (17 files, ~1280 lines, forbidden_touched=false)"
+_SHORT_SHA_LEN = 7
+_ABSENT_SHA = "deadbeef" * 5
+_PARK_TICKET = "T-2767"
+
+
+def _step40_section() -> str:
+    content = _cmd(_FINALIZE_DOC)
+    start = content.index(_STEP40_HEADING)
+    return content[start : content.index(_STEP4A_HEADING, start)]
+
+
+def _guard_section() -> str:
+    content = _cmd(_FINALIZE_DOC)
+    start = content.index(_GUARD_HEADING)
+    return content[start : content.index(_STEP40_HEADING, start)]
+
+
+def _guard_bullet(marker: str) -> str:
+    bullets = [
+        line
+        for line in _guard_section().splitlines()
+        if line.startswith(f"- **{marker}")
+    ]
+    assert len(bullets) == 1, f"expected one Guard bullet for {marker!r}: {bullets}"
+    return bullets[0]
+
+
+def _step40_fence() -> str:
+    fences = [fence for fence in _bash_fences(_step40_section()) if _RECORDED in fence]
+    assert len(fences) == 1, f"expected one Step 4.0 fence, got {len(fences)}"
+    return fences[0]
+
+
+def _park_template() -> str:
+    """The park sentinel JSON template (the one ```json fence in Step 4.0)."""
+    match = re.search(r"```json\n(.*?)\n\s*```", _step40_section(), re.DOTALL)
+    assert match is not None, "Step 4.0 carries no ```json park template"
+    return textwrap.dedent(match.group(1))
+
+
+def _run_step40_fence(
+    worktree: Path, tier: str | None, *, env: dict[str, str] | None = None
+) -> str:
+    """Run the Step 4.0 fence from *worktree*; return its one verdict line.
+
+    ``tier=None`` leaves ``<resolved scope.tier>`` unsubstituted, the shape a
+    worker that skipped the substitution would run. The substitution goes
+    through ``substitute_fence_placeholders``, so every other byte of the fence
+    is the doc's own.
+    """
+    placeholders = {} if tier is None else {_TIER_PLACEHOLDER: tier}
+    fence = substitute_fence_placeholders(_step40_fence(), placeholders)
+    bash = shutil.which("bash")
+    assert bash is not None
+    proc = subprocess.run(
+        [bash, "-c", fence],
+        cwd=worktree,
+        env=env if env is not None else _clean_git_env(),
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def _assert_park(output: str, token: str) -> None:
+    assert output.startswith(f"{_PARK}{token} — "), output
+    assert _RECORDED not in output
+    assert _NOT_REQUIRED not in output
+
+
+def _head(worktree: Path) -> str:
+    return git_in(worktree, "rev-parse", "HEAD")
+
+
+def _approval_task(sha: str | None, kind: str = "operator") -> TicketTask:
+    return _make_ticket_task(
+        stage=Stage.FINALIZE,
+        review_approved_at=datetime.now(UTC),
+        review_approver_kind=kind,
+        review_approved_sha=sha,
+    )
+
+
+def _context(
+    worktree: Path, task: TicketTask, **overrides: object
+) -> dict[str, object]:
+    """A cw-context payload as spawn writes it, with *task*'s queue metadata."""
+    payload: dict[str, object] = {
+        "schema_version": CW_CONTEXT_SCHEMA_VERSION,
+        "worktree_path": str(worktree),
+        "queue_metadata": build_queue_metadata(task),
+        "world_state_snapshot": {"origin_main_branch": "main"},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _write_context(worktree: Path, payload: dict[str, object] | str) -> None:
+    path = worktree / ".claude" / "cw-context.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = payload if isinstance(payload, str) else json.dumps(payload)
+    path.write_text(text, encoding="utf-8")
+
+
+def _approve_at(worktree: Path, sha: str | None, kind: str = "operator") -> None:
+    _write_context(worktree, _context(worktree, _approval_task(sha, kind)))
+
+
+def _merge_commit(worktree: Path, *parents: str) -> str:
+    """Commit a merge of *parents* (first parent's tree) and move HEAD to it."""
+    parent_args = [arg for parent in parents for arg in ("-p", parent)]
+    sha = git_in(
+        worktree, "commit-tree", f"{parents[0]}^{{tree}}", *parent_args, "-m", "merge"
+    )
+    git_in(worktree, "reset", "--hard", sha)
+    return sha
+
+
+def _advance_main(origin: Path, worktree: Path, side: Path, filename: str) -> str:
+    """Land one commit on ``origin/main`` and fetch it into *worktree*."""
+    sha = push_commit_to_origin(origin, "main", side, filename)
+    git_in(worktree, "fetch", "origin")
+    return sha
+
+
+def _sync_merge(worktree: Path) -> None:
+    """Finalize's own Step 4c sync merge of the default branch."""
+    git_in(worktree, "merge", "--no-ff", "--no-edit", "origin/main")
+
+
+@pytest.fixture
+def approval_repo(
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> tuple[Path, Path]:
+    """A feature branch pushed to a bare origin, approved at its HEAD."""
+    worktree, origin = make_git_repo_with_origin("wt-step40")
+    _approve_at(worktree, _head(worktree))
+    return worktree, origin
+
+
+class TestStep40TierBranch:
+    """R12: only an exact ``small`` or ``large`` tier gets past the tier branch.
+
+    Every non-exact case runs on a repo whose large approval is valid, so a
+    fail-open fence would print ``RECORDED`` or ``NOT_REQUIRED`` here.
+    """
+
+    def test_valid_large_approval_records(
+        self, approval_repo: tuple[Path, Path]
+    ) -> None:
+        worktree, _ = approval_repo
+        assert _run_step40_fence(worktree, "large") == _RECORDED
+
+    @pytest.mark.parametrize(
+        "tier",
+        [
+            None,
+            "",
+            "Large",
+            "SMALL",
+            "Small",
+            "scope_tier_unresolvable",
+            "null",
+            "x; echo REVIEW_APPROVAL_NOT_REQUIRED",
+        ],
+        ids=[
+            "unsubstituted",
+            "empty",
+            "Large",
+            "SMALL",
+            "Small",
+            "scope_tier_unresolvable",
+            "null",
+            "garbage",
+        ],
+    )
+    def test_non_exact_tier_parks_unresolved_tier(
+        self, approval_repo: tuple[Path, Path], tier: str | None
+    ) -> None:
+        worktree, _ = approval_repo
+        _assert_park(_run_step40_fence(worktree, tier), "unresolved_tier")
+
+    def test_exact_small_needs_no_approval_or_context(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-step40-small")
+        assert not (worktree / ".claude" / "cw-context.json").exists()
+        assert _run_step40_fence(worktree, "small") == _NOT_REQUIRED
+
+
+class TestStep40ApprovalRule:
+    """R11 on real git history: the approval holds for the head about to ship
+    only if nothing but merges of the default branch landed after it."""
+
+    @pytest.mark.parametrize(
+        ("sha_len", "kind"),
+        [(None, "operator"), (_SHORT_SHA_LEN, "operator"), (None, "recipe")],
+        ids=["full", "abbreviated", "recipe"],
+    )
+    def test_approval_at_head_records(
+        self, approval_repo: tuple[Path, Path], sha_len: int | None, kind: str
+    ) -> None:
+        worktree, _ = approval_repo
+        _approve_at(worktree, _head(worktree)[:sha_len], kind)
+        assert _run_step40_fence(worktree, "large") == _RECORDED
+
+    @pytest.mark.parametrize(
+        "sha_len", [None, _SHORT_SHA_LEN], ids=["full", "abbreviated"]
+    )
+    def test_successive_sync_merges_of_default_branch_record(
+        self, approval_repo: tuple[Path, Path], tmp_path: Path, sha_len: int | None
+    ) -> None:
+        worktree, origin = approval_repo
+        _approve_at(worktree, _head(worktree)[:sha_len])
+        for filename in ("main-1.txt", "main-2.txt"):
+            _advance_main(origin, worktree, tmp_path / "side", filename)
+            _sync_merge(worktree)
+            assert _run_step40_fence(worktree, "large") == _RECORDED
+
+    def test_rerun_after_own_pushed_sync_merge_records(
+        self, approval_repo: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """A1: a crashed run already pushed finalize's sync merge (and maybe
+        opened the PR). Both Guard ship bullets route the re-run through Step
+        4.0, which sees exactly this state and lets it continue."""
+        worktree, origin = approval_repo
+        _advance_main(origin, worktree, tmp_path / "side", "main-1.txt")
+        _sync_merge(worktree)
+        git_in(worktree, "push", "origin", "HEAD:refs/heads/feature")
+
+        for marker in ("PR exists and is OPEN", "No PR exists"):
+            assert "Step 4.0" in _guard_bullet(marker)
+        assert _run_step40_fence(worktree, "large") == _RECORDED
+
+    def test_fix_commit_after_approval_is_stale(
+        self, approval_repo: tuple[Path, Path]
+    ) -> None:
+        worktree, _ = approval_repo
+        commit_tracked_file(worktree, "fix.py")
+        output = _run_step40_fence(worktree, "large")
+        _assert_park(output, "stale")
+        assert "non-merge commit(s) landed after the approval" in output
+
+    def test_fix_commit_after_sync_merge_is_stale(
+        self, approval_repo: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        worktree, origin = approval_repo
+        _advance_main(origin, worktree, tmp_path / "side", "main-1.txt")
+        _sync_merge(worktree)
+        commit_tracked_file(worktree, "fix.py")
+        _assert_park(_run_step40_fence(worktree, "large"), "stale")
+
+    def test_merge_of_non_default_branch_with_its_own_commit_is_stale(
+        self, approval_repo: tuple[Path, Path]
+    ) -> None:
+        worktree, _ = approval_repo
+        git_in(worktree, "checkout", "-b", "side", "origin/main")
+        commit_tracked_file(worktree, "side.py")
+        git_in(worktree, "checkout", "feature")
+        git_in(worktree, "merge", "--no-ff", "--no-edit", "side")
+        _assert_park(_run_step40_fence(worktree, "large"), "stale")
+
+    def test_merge_of_merge_only_foreign_ref_is_stale(
+        self, approval_repo: tuple[Path, Path]
+    ) -> None:
+        """No non-merge commit lands, so only the merge-parent rule sees it."""
+        worktree, _ = approval_repo
+        approved = _head(worktree)
+        main = git_in(worktree, "rev-parse", "origin/main")
+        foreign = git_in(
+            worktree,
+            "commit-tree",
+            f"{approved}^{{tree}}",
+            "-p",
+            main,
+            "-p",
+            approved,
+            "-m",
+            "foreign",
+        )
+        _merge_commit(worktree, approved, foreign)
+        assert not git_in(worktree, "rev-list", "--no-merges", f"{approved}..HEAD")
+
+        output = _run_step40_fence(worktree, "large")
+        _assert_park(output, "stale")
+        assert foreign in output
+
+    def test_octopus_with_foreign_parent_last_is_stale(
+        self, approval_repo: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        worktree, origin = approval_repo
+        approved = _head(worktree)
+        main = _advance_main(origin, worktree, tmp_path / "side", "main-1.txt")
+        foreign = git_in(
+            worktree,
+            "commit-tree",
+            f"{approved}^{{tree}}",
+            "-p",
+            main,
+            "-p",
+            approved,
+            "-m",
+            "foreign",
+        )
+        _merge_commit(worktree, approved, main, foreign)
+
+        output = _run_step40_fence(worktree, "large")
+        _assert_park(output, "stale")
+        assert foreign in output
+
+    def test_rewritten_history_is_stale(self, approval_repo: tuple[Path, Path]) -> None:
+        """The approved head survives in the object store but left history."""
+        worktree, _ = approval_repo
+        approved = _head(worktree)
+        git_in(worktree, "reset", "--hard", "HEAD~1")
+        commit_tracked_file(worktree, "rewritten.py")
+        assert git_in(worktree, "cat-file", "-t", approved) == "commit"
+
+        output = _run_step40_fence(worktree, "large")
+        _assert_park(output, "stale")
+        assert "is not an ancestor of head" in output
+
+    def test_reviewed_head_ahead_of_head_is_stale(
+        self, approval_repo: tuple[Path, Path]
+    ) -> None:
+        worktree, _ = approval_repo
+        commit_tracked_file(worktree, "ahead.py")
+        _approve_at(worktree, _head(worktree))
+        git_in(worktree, "reset", "--hard", "HEAD~1")
+
+        output = _run_step40_fence(worktree, "large")
+        _assert_park(output, "stale")
+        assert "is not an ancestor of head" in output
+
+    def test_reviewed_sha_not_in_repository_is_stale(
+        self, approval_repo: tuple[Path, Path]
+    ) -> None:
+        worktree, _ = approval_repo
+        _approve_at(worktree, _ABSENT_SHA)
+        output = _run_step40_fence(worktree, "large")
+        _assert_park(output, "stale")
+        assert "is not a commit in this repository" in output
+
+    def test_open_pr_without_approval_parks_missing(
+        self, approval_repo: tuple[Path, Path]
+    ) -> None:
+        """The branch is pushed (the state an open PR leaves) and no approval is
+        recorded: an existing PR is never a reason to ship a large ticket."""
+        worktree, _ = approval_repo
+        assert git_in(worktree, "rev-parse", "origin/feature") == _head(worktree)
+        payload = _context(worktree, _make_ticket_task(stage=Stage.FINALIZE))
+        _write_context(worktree, payload)
+
+        _assert_park(_run_step40_fence(worktree, "large"), "missing")
+
+
+class TestStep40ChannelAndTooling:
+    """R5: a missing or unreadable approval channel, or missing tooling, parks."""
+
+    def test_no_approval_recorded_parks_missing(
+        self, approval_repo: tuple[Path, Path]
+    ) -> None:
+        worktree, _ = approval_repo
+        _write_context(worktree, _context(worktree, _make_ticket_task()))
+        _assert_park(_run_step40_fence(worktree, "large"), "missing")
+
+    def test_unknown_approver_kind_parks_missing(
+        self, approval_repo: tuple[Path, Path]
+    ) -> None:
+        worktree, _ = approval_repo
+        metadata = build_queue_metadata(_approval_task(_head(worktree)))
+        metadata[REVIEW_APPROVAL_KEY] = {
+            "approved_at": datetime.now(UTC).isoformat(),
+            "approver_kind": "robot",
+            "reviewed_sha": _head(worktree),
+        }
+        _write_context(
+            worktree, _context(worktree, _make_ticket_task(), queue_metadata=metadata)
+        )
+        _assert_park(_run_step40_fence(worktree, "large"), "missing")
+
+    @pytest.mark.parametrize("sha", [None, "not-a-sha"], ids=["null", "malformed"])
+    def test_unusable_reviewed_sha_parks_stale(
+        self, approval_repo: tuple[Path, Path], sha: str | None
+    ) -> None:
+        worktree, _ = approval_repo
+        _approve_at(worktree, sha)
+        output = _run_step40_fence(worktree, "large")
+        _assert_park(output, "stale")
+        assert "carries no usable reviewed head" in output
+
+    @pytest.mark.parametrize(
+        "schema_version",
+        [CW_CONTEXT_SCHEMA_VERSION - 1, str(CW_CONTEXT_SCHEMA_VERSION)],
+        ids=["v13", "string"],
+    )
+    def test_old_or_malformed_schema_parks_channel_absent(
+        self, approval_repo: tuple[Path, Path], schema_version: object
+    ) -> None:
+        worktree, _ = approval_repo
+        task = _approval_task(_head(worktree))
+        _write_context(
+            worktree, _context(worktree, task, schema_version=schema_version)
+        )
+        _assert_park(_run_step40_fence(worktree, "large"), "channel_absent")
+
+    def test_missing_context_parks_unreadable(
+        self, approval_repo: tuple[Path, Path]
+    ) -> None:
+        worktree, _ = approval_repo
+        (worktree / ".claude" / "cw-context.json").unlink()
+        _assert_park(_run_step40_fence(worktree, "large"), "unreadable")
+
+    def test_invalid_json_context_parks_unreadable(
+        self, approval_repo: tuple[Path, Path]
+    ) -> None:
+        worktree, _ = approval_repo
+        _write_context(worktree, "{not json")
+        _assert_park(_run_step40_fence(worktree, "large"), "unreadable")
+
+    def test_missing_jq_parks_unreadable(
+        self, approval_repo: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        worktree, _ = approval_repo
+        bin_dir = tmp_path / "bin-without-jq"
+        bin_dir.mkdir()
+        for tool in ("git", "grep", "tr", "cut"):
+            found = shutil.which(tool)
+            assert found is not None
+            (bin_dir / tool).symlink_to(found)
+        env = {**_clean_git_env(), "PATH": str(bin_dir)}
+
+        output = _run_step40_fence(worktree, "large", env=env)
+        _assert_park(output, "unreadable")
+        assert "jq is not installed" in output
+
+    def test_unreadable_head_parks_unreadable(self, tmp_path: Path) -> None:
+        worktree = tmp_path / "wt-step40-unborn"
+        worktree.mkdir()
+        subprocess.run(
+            ["git", "init", "-b", "main", str(worktree)],
+            capture_output=True,
+            check=True,
+            env=_clean_git_env(),
+        )
+        _approve_at(worktree, _ABSENT_SHA)
+
+        output = _run_step40_fence(worktree, "large")
+        _assert_park(output, "unreadable")
+        assert "HEAD is not readable" in output
+
+    @pytest.mark.parametrize(
+        "snapshot",
+        [{}, {"origin_main_branch": ""}, {"origin_main_branch": "bad..ref"}],
+        ids=["absent", "empty", "invalid-ref"],
+    )
+    def test_bad_default_branch_parks_unreadable(
+        self, approval_repo: tuple[Path, Path], snapshot: dict[str, str]
+    ) -> None:
+        worktree, _ = approval_repo
+        task = _approval_task(_head(worktree))
+        _write_context(
+            worktree, _context(worktree, task, world_state_snapshot=snapshot)
+        )
+        output = _run_step40_fence(worktree, "large")
+        _assert_park(output, "unreadable")
+        assert "origin_main_branch is missing or invalid" in output
+
+    def test_unresolvable_default_branch_parks_unreadable(
+        self, approval_repo: tuple[Path, Path]
+    ) -> None:
+        worktree, _ = approval_repo
+        task = _approval_task(_head(worktree))
+        snapshot = {"origin_main_branch": "develop"}
+        _write_context(
+            worktree, _context(worktree, task, world_state_snapshot=snapshot)
+        )
+        output = _run_step40_fence(worktree, "large")
+        _assert_park(output, "unreadable")
+        assert "origin/develop is not resolvable" in output
+
+
+class TestStep40DocPins:
+    """Prose pins on ``auto-dev-finalize.md`` around the Step 4.0 fence."""
+
+    def test_step40_sits_after_the_guard_and_before_step4a(self) -> None:
+        content = _cmd(_FINALIZE_DOC)
+        guard = content.index(_GUARD_HEADING)
+        step40 = content.index(_STEP40_HEADING)
+        assert guard < step40 < content.index(_STEP4A_HEADING)
+
+    def test_guard_ship_bullets_route_headless_runs_through_step40(self) -> None:
+        """R11, A13: both ship outcomes pass Step 4.0 on a headless run."""
+        open_pr = _guard_bullet("PR exists and is OPEN")
+        assert open_pr.index("Step 4.0") < open_pr.index("Step 4d")
+        for bullet in (open_pr, _guard_bullet("No PR exists")):
+            headless, _, interactive = bullet.partition("**Interactive:**")
+            assert "**Headless:**" in headless
+            assert "Step 4.0" in headless
+            assert "Step 4.0 does not run" in interactive or (
+                "skip Step 4.0" in interactive
+            )
+
+    def test_guard_terminal_bullets_ship_nothing(self) -> None:
+        for marker in ("PR exists and is MERGED", "PR exists and is CLOSED"):
+            bullet = _guard_bullet(marker)
+            assert "Step 4.0 does not run: nothing ships." in bullet
+            assert "**Headless:**" not in bullet
+
+    def test_step40_is_headless_only(self) -> None:
+        section = _step40_section()
+        assert "An interactive run skips this step" in section
+        assert '`--headless` in "$ARGUMENTS"' in section
+
+    def test_step40_prose_states_the_exact_tier_rule(self) -> None:
+        section = _step40_section()
+        assert "unresolved_tier" in section
+        assert "exactly the lowercase `small` or `large`" in section
+        assert "Never normalize or guess a tier" in section
+
+    def test_fence_branches_on_the_exact_tier(self) -> None:
+        fence = _step40_fence()
+        assert 'case "$SCOPE_TIER" in' in fence
+        lines = fence.splitlines()
+        assert any(line.startswith("  small) ") for line in lines)
+        assert "  large)" in lines
+        assert any(
+            line.startswith("  *) ") and "unresolved_tier" in line for line in lines
+        )
+
+    def test_fence_names_fail_closed_ancestor_and_merge_parent_rules(self) -> None:
+        section = _step40_section()
+        fence = _step40_fence()
+        assert "This check fails closed" in section
+        assert "merge-base --is-ancestor" in fence
+        assert '"refs/remotes/origin/$DEFAULT_BRANCH^{commit}"' in fence
+        assert '"^$MAIN_SHA"' in fence
+        assert "rev-list --merges" in fence
+
+    def test_park_is_review_pending_approval_at_stage4a(self) -> None:
+        template = _park_template()
+        assert _NUMSTAT in template
+        for absent in ('"files": 0', '"lines_actual": 0', '"reviewed_sha"'):
+            assert absent not in template
+        assert "agent_block" not in template
+        assert "(never `agent_block`)" in _step40_section()
+        park = json.loads(template.replace(_NUMSTAT, "1"))
+        assert park["status"] == "review_pending_approval"
+        assert park["stage_reached"] == "stage4a_merge_gate"
+        assert park["scope"]["tier"] == "large"
+        assert park["pr"] is None
+        assert park["blocker"] is None
+        assert park["next_actions"] == ["requeue_stage_review"]
+
+    def test_park_hint_names_the_review_requeue_for_every_token(self) -> None:
+        """A11, A16: one labelled release; environment faults are fixed first."""
+        park = json.loads(_park_template().replace(_NUMSTAT, "1"))
+        hint = park["friction_highlights"][0]
+        assert _REVIEW_RELEASE in hint
+        assert "first fix the tier source" in hint
+        for fault in ("jq", "HEAD", "origin_main_branch", "origin/<default-branch>"):
+            assert fault in hint
+        assert "first fix that environment fault" in hint
+        section = _step40_section()
+        assert "--stage finalize" not in section
+        assert "to record approval for the current head" not in section
+
+    def test_step4a_headless_line_admits_a_recorded_large_ticket(self) -> None:
+        content = _cmd(_FINALIZE_DOC)
+        assert (
+            "**Headless:** Step 4a runs for small tickets and for large tickets"
+            " whose Step 4.0 check printed REVIEW_APPROVAL_RECORDED." in content
+        )
+        assert "large already exited at S3" not in content
+
+    def test_completion_template_lists_the_step40_status(self) -> None:
+        content = _cmd(_FINALIZE_DOC)
+        completion = content[content.index("## Stage 4+5 Completion (headless only)") :]
+        assert (
+            '"status": "<shipped | merge_gate_blocked | blocked'
+            ' | review_pending_approval>"' in completion
+        )
+        assert "emitted only by Step 4.0" in completion
+
+    def test_resolve_scope_tier_feeds_step40_verbatim(self) -> None:
+        content = _cmd(_FINALIZE_DOC)
+        start = content.index("**Resolve `scope.tier`:**")
+        section = content[start : content.index("## Stage 4: PR Creation", start)]
+        assert "Step 4.0" in section
+        assert "exact lowercase" in section
+        assert "unresolved_tier" in section
+
+    def test_auto_dev_stage_reached_names_the_step40_park(self) -> None:
+        """Round 5: the canonical ``stage_reached`` bullet agrees with the park."""
+        content = _cmd("auto-dev.md")
+        start = content.index("**`stage_reached`** — canonical values")
+        bullet = next(
+            line
+            for line in content[start:].splitlines()
+            if line.startswith("- `review_pending_approval` →")
+        )
+        assert '"stage3_review"' in bullet
+        assert "stage4a_merge_gate" in bullet
+        assert "Step 4.0" in bullet
+
+
+# ---------------------------------------------------------------------------
+# #2767 — end to end: codex review park, approve, finalize Step 4.0
+# ---------------------------------------------------------------------------
+
+
+def _write_plan_marker(worktree: Path, marker: str) -> None:
+    plan = worktree / ".cw" / "plan.md"
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text(f"# Plan\n\n{marker}\n", encoding="utf-8")
+
+
+def _codex_review_sentinel(task: TicketTask, worktree: Path) -> dict[str, object]:
+    """Run the real codex synthesis on a clean verdict at the worktree's HEAD."""
+    assert task.session_id is not None
+    result, verdict = synthesize_codex_review_result(
+        task=task,
+        worktree=worktree,
+        documents=[_make_reviewer_doc()],
+        failures=[],
+        diff=_make_diff(),
+        reviewed_sha=_head(worktree),
+        session_id=task.session_id,
+        default_branch="main",
+        fix_loop_enabled=False,
+    )
+    assert verdict is not None
+    return result.model_dump(mode="json")
+
+
+def _ticket_row(
+    worktree: Path, client: str, stage: Stage, **overrides: object
+) -> TicketTask:
+    return _make_ticket_task(
+        ticket_id=_PARK_TICKET,
+        client=client,
+        status=QueueItemStatus.RUNNING,
+        stage=stage,
+        worktree_path=worktree,
+        **overrides,
+    )
+
+
+def _persist(task: TicketTask, worktree: Path, last_result: dict[str, object]) -> None:
+    """Save *task* and its bound session, as dispatch leaves a parked row."""
+    assert task.session_id is not None
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    session = _make_session(
+        task.session_id, task.ticket_id, task.client, worktree, last_result
+    )
+    save_state(CwState(sessions=[session]))
+
+
+def _queued_row() -> TicketTask:
+    return next(t for t in load_dev_queue().tasks if t.ticket_id == _PARK_TICKET)
+
+
+def _assert_no_review_approval(task: TicketTask) -> None:
+    assert task.review_approved_at is None
+    assert task.review_approver_kind is None
+    assert task.review_approved_sha is None
+
+
+def _park_sentinel(worktree: Path, client: str) -> dict[str, object]:
+    """Fill the doc's park template the way the finalize worker would."""
+    head = _head(worktree)
+    text = substitute_fence_placeholders(
+        _park_template().replace(_NUMSTAT, "1"),
+        {
+            "ticket-id": _PARK_TICKET,
+            "client": client,
+            "resolved plan_source": "github_issue_existing",
+            "branch-name": "feature",
+            "session worktree path": str(worktree),
+            "fork point sha": git_in(worktree, "merge-base", "HEAD", "origin/main"),
+            "sha1": head,
+        },
+    )
+    payload: dict[str, object] = json.loads(text)
+    return payload
+
+
+class TestCodexLargeReviewApprovalE2E:
+    """R4: a large codex review parks at REVIEW, ``approve`` records the
+    approval, and finalize's Step 4.0 (the only executable finalize gate)
+    lets the ticket ship. The recipe is never run here, by construction."""
+
+    def test_large_codex_review_parks_approves_and_finalize_records(
+        self,
+        tmp_stage_dirs: Path,
+        client_with_pipeline: ClientConfig,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    ) -> None:
+        write_clients_yaml(client_with_pipeline)
+        clients = load_effective_clients()
+        client = client_with_pipeline.name
+        worktree, _ = make_git_repo_with_origin("wt-e2e-large")
+        _write_plan_marker(worktree, _LARGE_MARKER)
+        task = _ticket_row(worktree, client, Stage.REVIEW, session_id="sess-large")
+
+        sentinel = _codex_review_sentinel(task, worktree)
+        assert sentinel["status"] == "review_pending_approval"
+        assert apply_staged_decision(task, "review_pending_approval", sentinel, clients)
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.REVIEW
+        assert task.disposition == "review_pending_approval"
+
+        _persist(task, worktree, sentinel)
+        result = approve_ticket(_PARK_TICKET, client)
+
+        head = _head(worktree)
+        assert result["review_approved_sha"] == head
+        row = _queued_row()
+        assert row.status == QueueItemStatus.PENDING
+        assert row.stage == Stage.FINALIZE
+        assert row.review_approver_kind == "operator"
+        assert row.review_approved_sha == head
+
+        _write_context(worktree, _context(worktree, row))
+        assert _run_step40_fence(worktree, "large") == _RECORDED
+
+    def test_small_codex_review_advances_without_park(
+        self,
+        tmp_stage_dirs: Path,
+        client_with_pipeline: ClientConfig,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        write_clients_yaml(client_with_pipeline)
+        clients = load_effective_clients()
+        worktree = make_git_repo("wt-e2e-small")
+        _write_plan_marker(worktree, "**Scope tier:** small")
+        task = _ticket_row(
+            worktree, client_with_pipeline.name, Stage.REVIEW, session_id="sess-sm"
+        )
+
+        sentinel = _codex_review_sentinel(task, worktree)
+        assert sentinel["status"] == "stage_complete"
+        assert apply_staged_decision(task, "stage_complete", sentinel, clients)
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.FINALIZE
+        _assert_no_review_approval(task)
+
+
+class TestFinalizeStep40ParkRelease:
+    """R18, R20, A10: a large row at FINALIZE with no approval parks at Step
+    4.0, ``approve`` stays refused, and the operator's review requeue is the
+    release that records a fresh approval."""
+
+    @pytest.mark.parametrize(
+        "seeded_regress", [0, FINALIZE_REGRESS_CAP - 1], ids=["fresh", "one-prior"]
+    )
+    def test_unapproved_large_parks_and_releases_through_review(
+        self,
+        tmp_stage_dirs: Path,
+        client_with_pipeline: ClientConfig,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+        seeded_regress: int,
+    ) -> None:
+        write_clients_yaml(client_with_pipeline)
+        clients = load_effective_clients()
+        client = client_with_pipeline.name
+        worktree, _ = make_git_repo_with_origin("wt-e2e-park")
+        _write_plan_marker(worktree, _LARGE_MARKER)
+        task = _ticket_row(
+            worktree,
+            client,
+            Stage.FINALIZE,
+            session_id="sess-fin",
+            regress_attempts=seeded_regress,
+            gate_block=GateBlockBackoff(
+                count=2, fingerprint="x", until=datetime.now(UTC) + timedelta(hours=1)
+            ),
+            next_eligible_at=None,
+        )
+
+        # Finalize with no approval recorded: Step 4.0 parks.
+        _write_context(worktree, _context(worktree, task))
+        _assert_park(_run_step40_fence(worktree, "large"), "missing")
+        park = _park_sentinel(worktree, client)
+        AutoDevResult.model_validate(park)
+        assert park["next_actions"] == ["requeue_stage_review"]
+        review = park["review"]
+        assert isinstance(review, dict)
+        assert "reviewed_sha" not in review
+
+        assert apply_staged_decision(task, "review_pending_approval", park, clients)
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.FINALIZE
+        assert task.disposition == "review_pending_approval"
+        assert park["blocker"] is None
+        # #2717 (R20): Rule 1 cleared the gate-block run and stamped no wait.
+        assert task.gate_block is None
+        assert task.next_eligible_at is None
+
+        # approve stays refused at the terminal stage and names the release.
+        _persist(task, worktree, park)
+        with pytest.raises(ApproveGateError, match="terminal stage") as refused:
+            approve_ticket(_PARK_TICKET, client)
+        assert f"requeue {_PARK_TICKET} -c {client} --stage review" in str(
+            refused.value
+        )
+        parked = _queued_row()
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.stage == Stage.FINALIZE
+        _assert_no_review_approval(parked)
+
+        # The operator's labelled release: a regress back to REVIEW.
+        requeue_ticket(
+            _PARK_TICKET,
+            client,
+            "review",
+            infer_regress=True,
+            native_daemon=FakeNativeDaemonClient(),
+        )
+        released = _queued_row()
+        assert released.status == QueueItemStatus.PENDING
+        assert released.stage == Stage.REVIEW
+        assert released.regress_attempts == seeded_regress + 1
+        _assert_no_review_approval(released)
+
+        # Review re-runs on the current head, parks large, approve records it.
+        rerun = released.model_copy(
+            update={"status": QueueItemStatus.RUNNING, "session_id": "sess-rv2"}
+        )
+        sentinel = _codex_review_sentinel(rerun, worktree)
+        assert apply_staged_decision(
+            rerun, "review_pending_approval", sentinel, clients
+        )
+        assert rerun.status == QueueItemStatus.BLOCKED_ON_USER
+        _persist(rerun, worktree, sentinel)
+        approve_ticket(_PARK_TICKET, client)
+
+        approved = _queued_row()
+        assert approved.stage == Stage.FINALIZE
+        assert approved.review_approved_sha == _head(worktree)
+        # A10: approve does not reset the regress count, so the second release
+        # on one ticket leaves Rule 5a's FINALIZE self-heal exhausted.
+        assert approved.regress_attempts == seeded_regress + 1
+        assert (approved.regress_attempts < FINALIZE_REGRESS_CAP) is (
+            seeded_regress + 1 < FINALIZE_REGRESS_CAP
+        )
+
+        _write_context(worktree, _context(worktree, approved))
+        assert _run_step40_fence(worktree, "large") == _RECORDED
+        commit_tracked_file(worktree, "fix.py")
+        _assert_park(_run_step40_fence(worktree, "large"), "stale")

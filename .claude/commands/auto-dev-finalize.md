@@ -37,6 +37,8 @@ Use the resolved value in every sentinel `plan_source` field below.
 
 `scope.tier` must always be a concrete value (`"small"` or `"large"`) in the emitted sentinel.
 
+This section also feeds Step 4.0 (Large-Tier Review Approval Check): substitute there only the exact lowercase `small` or `large` it yields, never a normalized one. Anything else (a `Small` marker, a blank, `scope_tier_unresolvable`) is substituted verbatim, or the placeholder is left as is, because Step 4.0 parks it as `unresolved_tier`.
+
 **R3 edge case:** `.cw/plan.md` and `.cw/deferred-findings.md` persist across a normal requeue (`allow_dirty_reuse=True`); the only loss path is a `StaleWorktreeError` rebuild, where the plan-marker step falls through to re-derivation and the deferred-findings section is legitimately omitted.
 
 ## Stage 4: PR Creation (Merge-Gated)
@@ -94,12 +96,121 @@ Before invoking Step 4a, check for an existing PR on **this ticket's branch** (d
 gh pr view <branch-name> --json number,state,url 2>/dev/null
 ```
 
-- **PR exists and is OPEN** → reuse it. Skip the `/prep-pr` create-step (Step 4c); proceed directly to Step 4d (auto-merge enablement + Linear comment if not already posted) and then Stage 5.
-- **PR exists and is MERGED** → detector should have returned `merged`; surface as already-done and exit successfully with `status: shipped`.
-- **PR exists and is CLOSED (not merged)** → EXIT `blocked` with `blocker.reason: "pr_already_terminal"`. Do not create a duplicate — the closed PR is a human decision the pipeline must not work around.
-- **No PR exists** → proceed with normal Step 4a (Merge Gate Check) → Step 4b → Step 4c flow.
+- **PR exists and is OPEN** → **Headless:** first run Step 4.0. Only after it passes: reuse the PR, skip the `/prep-pr` create-step (Step 4c), and proceed directly to Step 4d (auto-merge enablement + Linear comment if not already posted) and then Stage 5. **Interactive:** Step 4.0 does not run; reuse the PR, skip Step 4c, and proceed to Step 4d and then Stage 5.
+- **PR exists and is MERGED** → detector should have returned `merged`; surface as already-done and exit successfully with `status: shipped`. Step 4.0 does not run: nothing ships.
+- **PR exists and is CLOSED (not merged)** → EXIT `blocked` with `blocker.reason: "pr_already_terminal"`. Do not create a duplicate — the closed PR is a human decision the pipeline must not work around. Step 4.0 does not run: nothing ships.
+- **No PR exists** → **Headless:** run Step 4.0, then proceed with normal Step 4a (Merge Gate Check) → Step 4b → Step 4c flow. **Interactive:** skip Step 4.0 and proceed with Step 4a → 4b → 4c.
 
 This guard makes Stage 4 idempotent across session restarts.
+
+### Step 4.0: Large-Tier Review Approval Check (headless only)
+
+**Headless only.** Headless means `--headless` in "$ARGUMENTS" (the same test the `/prep-pr` invocation in Step 4c uses). An interactive run skips this step: its approver is the human in the session, and an interactive hand-run has no dev-queue row and no cw-context approval record to read.
+
+Run this on BOTH ship outcomes of the Pre-Stage Detector Guard — **PR exists and is OPEN** and **No PR exists** — before Step 4a (no PR) or Step 4d (open PR), that is, before anything creates a PR, reuses one, or enables auto-merge. It does not run on the guard's **MERGED** or **CLOSED** outcomes: those exit without shipping anything. A large ticket ships only when its review approval is recorded on the row and is still valid for the head about to ship. This check fails closed: a missing, unreadable or schema-old (< 14) `.claude/cw-context.json` is never approval, and only an exact `small` or `large` tier is accepted. Only `REVIEW_APPROVAL_NOT_REQUIRED` and `REVIEW_APPROVAL_RECORDED` continue. Every other output, including no output at all, is a park.
+
+Substitute `<resolved scope.tier>` with exactly the lowercase `small` or `large` that "Resolve `scope.tier`" above yielded. If that section yielded anything else (a marker such as `Small`, a blank, `scope_tier_unresolvable`), substitute that value verbatim, or leave the placeholder unchanged. Never normalize or guess a tier: the fence parks it as `unresolved_tier`.
+
+The recorded approval counts for the current HEAD only when its `reviewed_sha` is an ancestor of HEAD, no non-merge commit landed after it (other than commits already on `origin/<default-branch>`), and every merge commit after it has its non-first parents on `origin/<default-branch>`. That accepts finalize's own pushed sync merge (Step 4c) so a re-run after that merge alone is idempotent, and rejects any new work (finalize's own `/prep-pr` commits and Step 4c.5 rebase included, A10) or a merge of any other ref. `<default-branch>` is cw-context `world_state_snapshot.origin_main_branch`.
+
+```bash
+GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
+  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+[ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
+CTX="$GUARD_ROOT/.claude/cw-context.json"
+SCOPE_TIER="<resolved scope.tier>"
+RESULT=""
+case "$SCOPE_TIER" in
+  small) RESULT="REVIEW_APPROVAL_NOT_REQUIRED" ;;
+  large)
+    # One-pass block: each failed check sets RESULT and breaks; the last
+    # line records the approval and breaks, so the loop never repeats.
+    while :; do
+      if ! command -v jq >/dev/null 2>&1; then
+        RESULT="REVIEW_APPROVAL_PARK: unreadable — jq is not installed"; break
+      fi
+      if ! jq -e . "$CTX" >/dev/null 2>&1; then
+        RESULT="REVIEW_APPROVAL_PARK: unreadable — $CTX is missing, unreadable or not valid JSON"; break
+      fi
+      if ! jq -e '(.schema_version | type == "number") and .schema_version >= 14' "$CTX" >/dev/null 2>&1; then
+        RESULT="REVIEW_APPROVAL_PARK: channel_absent — cw-context schema_version is below 14 or malformed"; break
+      fi
+      APPROVER_KIND=$(jq -r '.queue_metadata.review_approval.approver_kind? // empty | strings' "$CTX" 2>/dev/null)
+      REVIEWED_SHA=$(jq -r '.queue_metadata.review_approval.reviewed_sha? // empty | strings' "$CTX" 2>/dev/null)
+      DEFAULT_BRANCH=$(jq -r '.world_state_snapshot.origin_main_branch? // empty | strings' "$CTX" 2>/dev/null)
+      case "$APPROVER_KIND" in
+        operator | recipe) ;;
+        *) RESULT="REVIEW_APPROVAL_PARK: missing — no review approval is recorded in cw-context"; break ;;
+      esac
+      HEAD_SHA=$(git -C "$GUARD_ROOT" rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null)
+      if [ -z "$HEAD_SHA" ]; then
+        RESULT="REVIEW_APPROVAL_PARK: unreadable — HEAD is not readable in $GUARD_ROOT"; break
+      fi
+      if ! printf '%s' "$REVIEWED_SHA" | grep -Eq '^[0-9a-f]{7,40}$'; then
+        RESULT="REVIEW_APPROVAL_PARK: stale — the recorded approval carries no usable reviewed head (head $HEAD_SHA)"; break
+      fi
+      if [ -z "$DEFAULT_BRANCH" ] || ! git check-ref-format "refs/heads/$DEFAULT_BRANCH" 2>/dev/null; then
+        RESULT="REVIEW_APPROVAL_PARK: unreadable — cw-context world_state_snapshot.origin_main_branch is missing or invalid"; break
+      fi
+      MAIN_SHA=$(git -C "$GUARD_ROOT" rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT_BRANCH^{commit}" 2>/dev/null)
+      if [ -z "$MAIN_SHA" ]; then
+        RESULT="REVIEW_APPROVAL_PARK: unreadable — origin/$DEFAULT_BRANCH is not resolvable in $GUARD_ROOT"; break
+      fi
+      # A verified rev-parse resolves an abbreviated sha; the full sha must
+      # still start with what was recorded (an ambiguous prefix fails).
+      FULL_SHA=$(git -C "$GUARD_ROOT" rev-parse --verify --quiet "$REVIEWED_SHA^{commit}" 2>/dev/null)
+      case "$FULL_SHA" in
+        "$REVIEWED_SHA"*) ;;
+        *) RESULT="REVIEW_APPROVAL_PARK: stale — reviewed head $REVIEWED_SHA is not a commit in this repository (head $HEAD_SHA)"; break ;;
+      esac
+      if ! git -C "$GUARD_ROOT" merge-base --is-ancestor "$FULL_SHA" "$HEAD_SHA" 2>/dev/null; then
+        RESULT="REVIEW_APPROVAL_PARK: stale — reviewed head $FULL_SHA is not an ancestor of head $HEAD_SHA"; break
+      fi
+      # Commits since the approval that are not already on the default branch
+      # must all be merges (a non-merge one is new work).
+      NEW_WORK=$(git -C "$GUARD_ROOT" rev-list --no-merges "$FULL_SHA..$HEAD_SHA" "^$MAIN_SHA" 2>/dev/null) \
+        || { RESULT="REVIEW_APPROVAL_PARK: unreadable — git rev-list failed for $FULL_SHA..$HEAD_SHA"; break; }
+      if [ -n "$NEW_WORK" ]; then
+        RESULT="REVIEW_APPROVAL_PARK: stale — non-merge commit(s) landed after the approval: $(printf '%s' "$NEW_WORK" | tr '\n' ' ')"; break
+      fi
+      MERGES=$(git -C "$GUARD_ROOT" rev-list --merges "$FULL_SHA..$HEAD_SHA" 2>/dev/null) \
+        || { RESULT="REVIEW_APPROVAL_PARK: unreadable — git rev-list --merges failed for $FULL_SHA..$HEAD_SHA"; break; }
+      for MERGE_SHA in $MERGES; do
+        PARENTS=$(git -C "$GUARD_ROOT" rev-list --parents -n 1 "$MERGE_SHA" 2>/dev/null) \
+          || { RESULT="REVIEW_APPROVAL_PARK: unreadable — cannot read the parents of merge $MERGE_SHA"; break 2; }
+        # Fields: <merge> <first parent> <other parent>... — every parent after
+        # the first (octopus merges included) must already be on the default branch.
+        for PARENT in $(printf '%s' "$PARENTS" | cut -d' ' -f3-); do
+          if ! git -C "$GUARD_ROOT" merge-base --is-ancestor "$PARENT" "$MAIN_SHA" 2>/dev/null; then
+            RESULT="REVIEW_APPROVAL_PARK: stale — merge $MERGE_SHA brought in $PARENT, which is not on origin/$DEFAULT_BRANCH"; break 3
+          fi
+        done
+      done
+      RESULT="REVIEW_APPROVAL_RECORDED"; break
+    done ;;
+  *) RESULT="REVIEW_APPROVAL_PARK: unresolved_tier — scope.tier is not exactly small or large" ;;
+esac
+echo "${RESULT:-REVIEW_APPROVAL_PARK: unreadable — no verdict}"
+```
+
+- **`REVIEW_APPROVAL_NOT_REQUIRED` or `REVIEW_APPROVAL_RECORDED`** → continue: to Step 4a on the **No PR exists** path, or to Step 4d (skipping Step 4c) on the **PR exists and is OPEN** path.
+- **Anything else** (`REVIEW_APPROVAL_PARK: <missing|stale|channel_absent|unreadable|unresolved_tier>`, or no output) → do NOT create a PR, reuse an existing one, or enable auto-merge. EXIT `review_pending_approval` (never `agent_block`) with `scope.tier` `"large"` for every token (fail closed; a `small` tier would let dispatch Rule 1 auto-advance the park):
+  ```json
+  {
+    "schema_version": 4, "ticket_id": "<ticket-id>", "status": "review_pending_approval",
+    "stage_reached": "stage4a_merge_gate",
+    "scope": {"tier": "large", "files": "<N from git diff --numstat>", "lines_estimate": "<N from git diff --numstat>", "lines_actual": "<N from git diff --numstat>", "forbidden_touched": false},
+    "plan_source": "<resolved plan_source>", "branch": "<branch-name>", "worktree_path": "<session worktree path>",
+    "fork_point_sha": "<fork point sha>", "commits": ["<sha1>"], "pr": null,
+    "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+    "health": {"lowest_agent_confidence": "HIGH", "any_incomplete_risk": false, "shortcuts": [], "recommendation": "PROCEED", "downgrade_applied": false, "fix_loop_escalated": false},
+    "friction_highlights": ["review_approval_park: <token> — the large-tier review approval is not valid for this head, and `cw dev-queue approve` is refused at the terminal stage. The operator releases this park with `cw dev-queue requeue <ticket-id> -c <client> --stage review`, which returns the ticket to review to obtain the large-tier approval; review parks it for approval and `cw dev-queue approve <ticket-id> -c <client>` then records that approval at review. `stale` means the recorded head is not an ancestor of HEAD or work other than a merge of origin/<default-branch> landed after it. For unresolved_tier, first fix the tier source (a `**Scope tier:** small|large` line in .cw/plan.md, or scope_hint). For unreadable because jq is not installed, HEAD is not readable, `world_state_snapshot.origin_main_branch` is missing or invalid, or `origin/<default-branch>` is not resolvable, first fix that environment fault: the review round trip alone does not clear it. Do not re-run finalize to release this park: with no approval recorded this check parks it again"],
+    "blocker": null, "next_actions": ["requeue_stage_review"]
+  }
+  ```
+  The three `"<N from git diff --numstat>"` placeholders are replaced by the real integer counts from `git diff --numstat`; never emit a hard-coded 0. The park carries no `review.reviewed_sha`: nothing reads it, because `approve` is refused at the terminal stage (R18). Every token is released the same way, by the operator's labelled `requeue --stage review`; `approve` cannot release it (the row sits at the terminal stage) and a plain finalize re-run only re-evaluates this check. For a `channel_absent` park, and for an `unreadable` park whose cause is a missing or invalid cw-context, the review round trip is the whole fix (the next finalize spawn re-materializes cw-context). For `unresolved_tier`, and for an `unreadable` park caused by a missing `jq`, an unreadable HEAD, a missing or invalid `origin_main_branch`, or an unresolvable `origin/<default-branch>`, the fault is fixed first, because the review round trip cannot repair it (A11, A16).
+- Log `"review_approval_check: <token>"` in `friction_highlights` on every run.
 
 ### Step 4a: Merge Gate Check
 
@@ -129,7 +240,7 @@ not improvise the prompt from memory.
 
 **If no open PR from this pipeline:** Proceed immediately.
 
-**Headless:** (Small only — large already exited at S3.)
+**Headless:** Step 4a runs for small tickets and for large tickets whose Step 4.0 check printed REVIEW_APPROVAL_RECORDED.
 
 The gate is content-aware (#2431): a file this branch shares with another open pipeline PR blocks only when the two heads genuinely conflict. Two layers, both run by the single fence below:
 
@@ -840,7 +951,7 @@ printf '%s' "$SENTINEL_JSON" | cw result emit -
 {
   "schema_version": 4,
   "ticket_id": "<ticket-id>",
-  "status": "<shipped | merge_gate_blocked | blocked>",
+  "status": "<shipped | merge_gate_blocked | blocked | review_pending_approval>",
   "stage_reached": "stage5_post_create",
   "scope": {"tier": "<resolved scope.tier — see 'Resolve carried-through context' above>", "files": 0, "lines_estimate": 0, "lines_actual": 0, "forbidden_touched": false},
   "plan_source": "<resolved plan_source (github_issue_existing | generated | free_text | none) — see 'Resolve carried-through context' above>",
@@ -871,6 +982,8 @@ printf '%s' "$SENTINEL_JSON" | cw result emit -
 }
 AUTO_DEV_RESULT>>>
 ```
+
+Note: `review_pending_approval` is emitted only by Step 4.0, as that step's own park sentinel (`stage_reached: "stage4a_merge_gate"`, `pr: null`, `next_actions: ["requeue_stage_review"]`); this template's other fields do not apply to it.
 
 Note: when `status` is `merge_gate_blocked` due to file overlap with an open pipeline PR, `blocker` may be non-null:
 ```json
