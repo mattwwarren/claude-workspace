@@ -208,6 +208,22 @@ ignore = [
     # other `Severity` site, moved to the sibling `_deferred_md`).
     "TC001",
 ]
+"src/cw/review_convergence/_models.py" = [
+    # `RoundInput.verdict: ReviewVerdict`, `RoundFinding.outcome:
+    # AdjudicationOutcome` and the `FindingIdentity` fields of the ledger
+    # entries are pydantic field annotations, so those imports must be
+    # importable at runtime for pydantic to resolve them at class-build time —
+    # a TYPE_CHECKING-only import raises PydanticUndefinedAnnotation. Exactly
+    # the `src/cw/review_adjudication/_models.py` and
+    # `src/cw/review_findings/_models.py` TC001 case above.
+    "TC001",
+]
+"src/cw/review_convergence/_identity.py" = [
+    # `FindingIdentity.severity: Severity` is a pydantic field annotation, so
+    # `cw.review_findings.Severity` must be importable at runtime for pydantic
+    # to resolve it at class-build time. Same case as the block above.
+    "TC001",
+]
 "src/cw/auto_dev_result/schema/_result.py" = [
     # `AutoDevResult.scope/pr/pr_created/review/health/blocker` are pydantic
     # field annotations, so `Scope`, `PrInfo`, `PrCreated`, `Review`, `Health`
