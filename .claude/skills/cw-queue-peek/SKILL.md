@@ -129,6 +129,18 @@ The command's recommendation is computed from this ladder. Higher rules win:
     all; rule 4's pre-#2044 form only checked subagent activity, not the
     main session's own `idle_min`).
 
+**Clean-mode convergence exemption (#2787).** A ticket on a client configured
+`review.convergence: clean` runs a review stage that is long by design: full
+re-review after every fix cycle, then an independent confirmation round. The
+age rules (3 and 7) therefore do not apply while the new-finding curve falls
+and the session is demonstrably live (idle at or below the peek idle threshold,
+7 minutes). The exemption mirrors `queue_peek_convergence` in the code and is
+restricted to the age-based verdicts: the idle-stall rules (5 and 6) and the
+retry-loop rule (4) still fire, and the liveness gate in rule 10 is kept. A long
+review stage with a falling new-finding count is healthy; a stalled or idle one
+is still a PEEK or STOP signal. A stalled confirmation round is a peek signal,
+never a cw-imposed timeout.
+
 Rule 3's STOP reason text says "approaches" when `age_min` is still below
 the referenced 60-min ceiling and "exceeded" once it's at or past it — same
 rule, wording reflects how far past the trigger the session actually is.

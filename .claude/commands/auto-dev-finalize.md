@@ -118,7 +118,9 @@ any `/prep-pr` or Step 4c.5 branch mutation and immediately before each
 auto-merge arm. A delegated `/prep-pr`/`ship-it` arm is subject to the same
 rule and MUST run this exact fence after its final branch mutation and
 immediately before its own auto-merge arm; a failing re-check parks before
-auto-merge is enabled.
+auto-merge is enabled. In clean mode (`cw review converge config` reports
+`clean`, headless only), "the exact fence" is Step 4.0 and then Step 4.0b
+`verify-tip`.
 
 ```bash
 GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
@@ -219,6 +221,18 @@ echo "${RESULT:-REVIEW_APPROVAL_PARK: unreadable — no verdict}"
   The three `"<N from git diff --numstat>"` placeholders are replaced by the real integer counts from `git diff --numstat`; never emit a hard-coded 0. The park carries no `review.reviewed_sha`: nothing reads it, because `approve` is refused at the terminal stage (R18). Every token is released the same way, by the operator's labelled `requeue --stage review`; `approve` cannot release it (the row sits at the terminal stage) and a plain finalize re-run only re-evaluates this check. For a `channel_absent` park, and for an `unreadable` park whose cause is a missing or invalid cw-context, the review round trip is the whole fix (the next finalize spawn re-materializes cw-context). For `unresolved_tier`, and for an `unreadable` park caused by a missing `jq`, an unreadable HEAD, a missing or invalid `origin_main_branch`, or an unresolvable `origin/<default-branch>`, the fault is fixed first, because the review round trip cannot repair it (A11, A16).
 - Log `"review_approval_check: <token>"` in `friction_highlights` on every run.
 
+### Step 4.0b: Clean-Mode Final-Tip Check (headless only, clean mode only) (#2787)
+
+**Gate.** Headless only, like Step 4.0, and only when `cw review converge config` reports `clean`. An error from that call follows the `converge config` error rule in `.claude/commands/auto-dev-review.md`, except that here the fail-closed outcome is a park with the `review_tip_check: stale` token below (the same park, never `agent_block`). When it reports `blocking`, this step does not exist and Step 4.0 above governs alone, unchanged, including its tolerance for commits already on `origin/<default-branch>` and for merges whose non-first parents are on it.
+
+**Where it runs.** After Step 4.0 passes, before Step 4a (no PR) or Step 4d (open PR), and again before each auto-merge arm and after any `/prep-pr` or Step 4c.5 branch mutation. It applies to small tier too, where Step 4.0 reports `REVIEW_APPROVAL_NOT_REQUIRED`.
+
+**What it runs.** `cw review converge verify-tip`. In clean mode the tip rule is strict: any commit after the last clean round, a merge of `origin/<default-branch>` included, is stale, so it passes no `--default-branch` (a usage error if given). `verify-tip` runs the fetch of `origin/<branch>` itself, before it reads that ref, and fails closed when the fetch fails (the same `review_tip_check: stale` park, with the failure in the JSON `detail`). This step runs in a separate finalize session and cannot rely on the REVIEW session's earlier fetch, so it contains no fetch command of its own. `verify-tip` never writes: a missing ledger, an origin tip that could not be verified and a branch pushed behind HEAD (`head_not_origin_tip`) are the same stale token.
+
+**On failure** (`verify-tip` exits 1), park with Step 4.0's `review_pending_approval` JSON shape above, reusing its park template by reference: `stage_reached: "stage4a_merge_gate"`, `scope.tier: "large"` for every token, `pr: null`, `next_actions: ["requeue_stage_review"]`, and the friction token `review_tip_check: stale`. Log `review_tip_check: <token>` in `friction_highlights` on every run. After the requeue the ledger is still `converged` at `last_clean_sha == HEAD`, so the REVIEW session meets Step 3c's `head_not_origin_tip` handling (fix the push, re-run `converge finalize`) rather than a needless full round. Only a commit after the last clean round reopens the ledger. The operator releases the park with `cw dev-queue requeue <T> -c <C> --stage review`.
+
+**Accepted cost.** Finalize's own Step 4c sync merge and a Step 4c.5 rebase or semantic merge are commits after the last clean round, so when either creates a commit the pre-arm re-check parks as `review_tip_check: stale` and the requeue runs another full round. A sync merge that reports "Already up to date" creates no commit.
+
 ### Step 4a: Merge Gate Check
 
 Before creating any PR, check for open PRs from this pipeline:
@@ -255,7 +269,10 @@ every auto-merge arm, after `/prep-pr` returns and after any Step 4c.5 rebase or
 semantic-resolution mutation. This includes the existing-OPEN-PR path and the
 no-PR path's final Step 4d arm. If the re-check does not print
 `REVIEW_APPROVAL_NOT_REQUIRED` or `REVIEW_APPROVAL_RECORDED`, park with the
-Step 4.0 `review_pending_approval` sentinel and do not enable auto-merge.
+Step 4.0 `review_pending_approval` sentinel and do not enable auto-merge. In clean
+mode (`cw review converge config` reports `clean`) this re-check also runs Step 4.0b
+`verify-tip`, and a Step 4.0b failure parks with the same `review_pending_approval`
+sentinel and the `review_tip_check: stale` token.
 
 The gate is content-aware (#2431): a file this branch shares with another open pipeline PR blocks only when the two heads genuinely conflict. Two layers, both run by the single fence below:
 
@@ -535,7 +552,7 @@ result per the two cases below:
   This `git push` has no `timeout` wrapper — no push site in this file family does (#1414 R9: accepted residual risk, consistent with `ship-it.md`'s push and `prep-pr.md`'s own Step 1 push).
 - The concrete, shell-quoted `PR_TITLE` literal composed above, and an instruction to invoke `/prep-pr --skip-review --base main --title "<the exact rendered PR_TITLE literal>"` via the Skill tool. Replace the angle-bracket notation with that literal before sending the prompt — never send an unresolved title variable. **If the user chose Force at Step 4a (stacking onto an open pipeline PR), append `--draft`** so `/prep-pr` passes it through to the project's `/ship-it` (its Step 8 supports `--draft` pass-through). The PR must stay a draft until the parent merges. `--skip-review` is required: Stage 3 already ran the full scope-aware review set, and `/prep-pr`'s thinner pass would double up.
 
-  **Headless delegated fence (mandatory):** after the delegated chain's final branch mutation, the child MUST execute the exact Step 4.0 fence above immediately before its project `/ship-it` auto-merge arm. Only `REVIEW_APPROVAL_NOT_REQUIRED` or `REVIEW_APPROVAL_RECORDED` permits that arm; on any other output, it MUST NOT invoke `arm-automerge` or `gh pr merge --auto`, and must return a `review_pending_approval`/`HEADLESS BLOCK` to finalize. The parent re-verification after the child returns is additional defense, not a substitute for this pre-arm fence.
+  **Headless delegated fence (mandatory):** after the delegated chain's final branch mutation, the child MUST execute the exact Step 4.0 fence above immediately before its project `/ship-it` auto-merge arm. Only `REVIEW_APPROVAL_NOT_REQUIRED` or `REVIEW_APPROVAL_RECORDED` permits that arm; on any other output, it MUST NOT invoke `arm-automerge` or `gh pr merge --auto`, and must return a `review_pending_approval`/`HEADLESS BLOCK` to finalize. In clean mode (`cw review converge config` reports `clean`), the child also runs Step 4.0b `verify-tip` right after the 4.0 fence and before its own `/ship-it` auto-merge arm, and returns a `review_pending_approval`/`HEADLESS BLOCK` on a non-zero exit exactly as for a failing 4.0; a child running without the ledger (an isolated worktree) gets exit 1, which fails closed. The parent re-verification after the child returns is additional defense, not a substitute for this pre-arm fence.
 
   **Headless:** when finalize itself runs headless (`--headless` in "$ARGUMENTS"), the `/prep-pr` invocation MUST include `--headless` so the flag propagates down the `prep-pr` → `ship-it` chain and every interactive gate collapses per the gate-collapse table:
   - Plain case: `/prep-pr --skip-review --base main --headless --title "<the exact rendered PR_TITLE literal>"`

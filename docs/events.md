@@ -1199,7 +1199,7 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `disposition="abandoned"`). See #1117.
 - `"awaiting_operator_availability"` — Rule 5's `blocked` status carries a
   blocker reason in `OPERATOR_UNAVAILABLE_BLOCKER_REASONS`
-  (`push_auth_failed`, `operator_unavailable`, `dependency_unmerged`) — an operator/dependency
+  (`push_auth_failed`, `operator_unavailable`, `dependency_unmerged`, `confirm_backend_unavailable`) — an operator/dependency
   unavailability, not a broken leg (RFC 0011 A1). Overrides the generic
   `"blocked"` paused_status for this park only; `breadcrumbs` still carries
   the specific `blocker.reason` verbatim. The task is BLOCKED_ON_USER.
@@ -2890,7 +2890,7 @@ not an interrupt.
 
 ### `review.finding_settled`
 
-**Emitter:** `cw review settle` (`cw.cli.review.commands`)
+**Emitter:** `cw review settle` (`cw.cli.review.commands`); also `cw review converge operator-settle` (#2787), which emits the same event with the same eight payload keys, except that `key` is the finding identity `<severity>::<file>::<normalized summary>` (not the digest-suffixed disposition key) and `file` may be the literal `N/A` for a finding with no diff anchor. It is not a new event type.
 **Payload:**
 ```json
 {

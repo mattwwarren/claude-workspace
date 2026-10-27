@@ -62,7 +62,7 @@ Check that we're ready to prepare a PR:
 
 2. **Parse arguments:**
    - `--base <branch>` → base branch for diff comparison (default: `main`)
-   - `--max-cycles N` → maximum review-fix cycles (default: 3)
+   - `--max-cycles N` → maximum review-fix cycles (default: 3). Clean-mode precedence (#2787): the explicit `--max-cycles` flag if given, otherwise `cw review converge config`'s clean-mode `max_cycles`, otherwise 3. Resolve it once here and pass the resolved value to `snapshot` in Step 3.
    - `--skip-review` → skip self-review, jump straight to quality gates
    - `--headless` → non-interactive mode. See **Headless Mode** below. Every
      gate that would otherwise call `AskUserQuestion` collapses to a
@@ -323,6 +323,15 @@ After all gates pass:
   **Headless:** emit a `HEADLESS BLOCK` (`gate: "Step 7 max review cycles"`,
   `details:` the remaining-issues summary). Do NOT "ship anyway" past unresolved
   MUST_FIX issues and do NOT proceed to Step 8.
+
+### Clean-mode convergence (#2787)
+
+Only when `cw review converge config` reports `clean`; when it reports `blocking` nothing above changes. An error from the `config` call itself follows the `converge config` error rule in `.claude/commands/auto-dev-review.md` (a context that says `clean` fails closed with a `HEADLESS BLOCK`; anything else reads as `blocking`). `/prep-pr` ignores `converge config`'s `dispatch_refusal`: it needs no ticket id or dev-queue row (its ledger is keyed by branch and it runs no confirm round), so only `/auto-dev` and `/auto-dev-review` refuse an interactive run.
+- **Loop control:** the Step 7 loop continues until a clean round instead of stopping at a fixed cycle count; the resolved `--max-cycles` is a backstop only.
+- **Ledger:** use `cw review converge init --no-confirm --ledger .cw/prep-pr-convergence.json --ticket-id "prep-pr:$(git branch --show-current)" ...`, with `record-round` fed the `findings` payload shape (a list of round findings, not a verdict), `--ledger .cw/prep-pr-convergence.json` on every converge call, and obey its `decision`. On `stop_not_converging` emit a `HEADLESS BLOCK` (`gate: "Step 7 review not converging"`).
+- **No confirm round:** `/prep-pr` runs none (`--no-confirm`). `/auto-dev` finalize calls `/prep-pr --skip-review`, so the self-review loop and its clean mode are not engaged there at all.
+- **Releasing a stop:** a `/prep-pr` stop is released by the user re-running `/prep-pr` after a change. `cw review converge operator-settle` is the dispatch orchestrator's ingress and is not part of the standalone path.
+- **Final SHA:** run `cw review converge verify-tip --ledger .cw/prep-pr-convergence.json` before Step 8 ship; a non-zero exit means another round, not a ship.
 
 ## Step 8: Ship
 

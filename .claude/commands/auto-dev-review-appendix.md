@@ -236,3 +236,43 @@ git checkout <original-branch>   # restore main session state
 ```
 
 The Pre-exit invariant in the core doc still applies after this path runs.
+
+## Clean-mode convergence: ledger, rounds, and stop conditions
+
+Reached from the Step 3a head of the core doc, and only when `cw review converge config` reports `clean` (a client configured `review.convergence: clean` in `clients.yaml`). A blocking-mode run never reads this section. Clean mode replaces "stop after N fix cycles" with "stop when a full review round returns no new accepted findings", then confirms that with one independent round.
+
+**What is clean.** A round is clean when, after settled-suppression, it has zero NEW accepted findings. A finding is new-accepted when its adjudicated outcome is `fix` or `operator_action` and its identity (severity, file, whitespace-normalized summary) is not already settled. A new `reject` or `defer` is settled, is recorded and shown, and does not count. NIT, PRINCIPLE and DEBT never count. Every re-review round is a full diff from `$FORK_POINT` with the full roster; the sparse-feedback skip never fires in clean mode.
+
+**The ledger.** Round state lives in `<worktree>/.cw/review-convergence.json` (plus `.cw/review-convergence/round-<n>-verdict.json`), not in session memory, because the fix loop hands off across sessions. It is keyed by `(ticket_id, fork_point)`, and `converge init` reconciles it on every session start: a new fork point resets it, a requeue on the same tip reopens it, and `init` refreshes `max_cycles` from the current config. `converge status` reports `next_action` (`loop_round`, `confirm`, `fix`, `done`, `stopped`); a resumed session obeys it rather than assuming where it left off.
+
+**Settled memory.** Findings the adjudication rejected or deferred, and findings an operator settled with `cw review converge operator-settle`, are suppressed on a re-raise: they count toward neither oscillation nor the new-accepted total. An operator-origin settle records the actor, the reason and the sha, is refused inside a headless worker, and can only name an identity the ledger already recorded (a mis-copied anchor exits 1 with the nearest recorded identity and the `stop.settle_payload` to copy). A voided finding reaches the loop through `check-voided`, which runs before `converge suppress`.
+
+**Confirm round.** After a clean loop round, `record-round` answers `confirm_required` and one independent full round runs through `cw review confirm` (default backend `codex`). `review.confirm_backend: none` is the only opt-out, and the sentinel records the choice. The call is a foreground Bash call at the 600000 ms tool cap with the `timeout 600` shell wrapper, never backgrounded (Worker Execution Discipline rules 1 and 3). The confirm round has no cw-imposed deadline (ADR-0014); a stall is a queue-peek signal. The full branch table is in the core doc's "Clean-mode confirm round and exits"; in brief:
+
+| Exit | Disposition |
+|---|---|
+| 0 | a verdict, never a clean signal by itself; `result_blocker_reason` decides what is recorded |
+| 3 | backend down: `confirm_backend_unavailable`, uncharged; the fourth same-cause failure at one sha escalates to `agent_block` |
+| 4 | content-level failure on a healthy backend: `agent_block` naming the cause |
+| 2 | usage error: fix and re-run once; never an outage |
+| 124 or no exit status | the foreground ceiling: `agent_block`, "diff too large for one foreground round", never `confirm_backend_unavailable` |
+| other | `agent_block` with `confirm_invocation_error` |
+
+The engine is the choke point for unread findings: `record-round` refuses to record any round as clean while the verdict carries a mechanically rejected MUST_FIX, a reviewer failure that discarded MUST_FIX or SHOULD_FIX findings (`unread_findings:`), or a role that failed entirely (`failed_role:`). Those refusals exit `agent_block` with nothing recorded.
+
+**Stop priority and the no-progress window.** A stop is evaluated when a round is recorded. Oscillation (a finding fixed, then back) stops immediately. No-progress stops when the last three rounds of the current window are all non-clean and the new-accepted count failed to fall in two consecutive comparisons; the window starts at the later of the epoch start and the last release. `max_cycles` counts fix cycles dispatched in the current epoch and is a backstop, not the goal. `operator_action` stops when an accepted finding needs an act outside the diff. A long review stage with a falling new-finding count is healthy.
+
+**Stale ledgers and the final tip.** A ledger whose fork point differs, or whose last round sha is not an ancestor of HEAD, is discarded and the review restarts at round 1 (every failure direction costs an extra review, never a skipped one). The tip check is strict in clean mode: any commit after the last clean round, a merge of `origin/<default>` included, forces another full round, and `verify-tip` and `finalize` fetch the origin branch themselves before they read it. `head_not_origin_tip` is a push-state defect and is never cured by a review round.
+
+**Resume across sessions.** A session resumed after a fix cycle, a confirm park or a stop re-runs the Step 3a head: `init`, then `status`, then the matching branch. A same-tip requeue never replays a persisted verdict; a release re-reviews at the same tip.
+
+**Stop-release table.** Each stop exits with the reason in the second column and is released as shown. The `cw dev-queue` commands are run by the orchestrator, and raising `review.max_cycles` is an operator-only `clients.yaml` edit.
+
+| Stop | Exit reason | Released by | Without a release |
+|---|---|---|---|
+| `max_cycles` | `review_blocked` | operator raises `review.max_cycles`, then `cw dev-queue requeue <T> -c <C>` | terminal: re-emitted until a commit lands |
+| `operator_action` | `review_operator_actionable` | orchestrator runs the checklist, then `cw dev-queue requeue <T> -c <C>` | not applicable (the requeue is the signal) |
+| `oscillation` | `review_not_converging` | `cw review converge operator-settle` for every recurring finding, then `cw dev-queue requeue <T> -c <C>`; or a commit | terminal while any recurring finding is unsettled |
+| `no_progress` | `review_not_converging` | a commit (`cw dev-queue requeue <T> -c <C> --stage impl --regress`) | terminal, no other release |
+
+Only a commit releases `no_progress`: a same-tip requeue re-emits the stop (`convergence_stop_reemitted: no_progress`).
