@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `cw-smoke-test` Step 3 completion poll no longer fails on its first empty read (#1119).** `cw event tail --json` prints the literal `[]` when no event matches yet, which is the normal state while the worker runs, and the skill's `jq -r 'select(.payload.session_id == ...)'` exited 5 (`Cannot index array with string "payload"`). The filter now starts with `objects |`, which skips the `[]` and still returns the matching event. A new test runs the filter from the skill file through `jq` for the empty, matching and non-matching cases. Reported with a reproduction by an outside contributor on #1119.
+
 ## [1.78.1] - 2026-10-25
 
 ### Fixed

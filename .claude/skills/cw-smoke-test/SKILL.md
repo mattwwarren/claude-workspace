@@ -73,8 +73,10 @@ Resolve the spawned worker's cw session id from the first `session.spawned` even
 
 ```bash
 cw event tail --since <DISPATCH_TS> --type session.completed --json | \
-  jq -r 'select(.payload.session_id == "<WORKER_ID>")'
+  jq -r 'objects | select(.payload.session_id == "<WORKER_ID>")'
 ```
+
+`--json` prints the literal `[]` when no event matches yet (the normal state while the worker runs) and one JSON object per line otherwise. The `objects |` guard skips the `[]`; without it `jq` exits 5 (`Cannot index array with string "payload"`) on the first empty poll.
 
 Until that returns a row, or a reasonable timeout (default 30 minutes — match the Layer 1 backstop in `signal-stop`).
 
