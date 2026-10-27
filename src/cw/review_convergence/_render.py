@@ -15,6 +15,9 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from cw.auto_dev_result.schema._vocab import (
+    CONFIRM_BACKEND_UNAVAILABLE_BLOCKER_REASON,
+)
 from cw.gh import AGENT_COMMENT_MARKER
 from cw.review_convergence._models import (
     STOP_MAX_CYCLES,
@@ -209,7 +212,7 @@ def confirm_blocker_fragment(
     if not escalated:
         return {
             "stage": "stage3_review",
-            "reason": "confirm_backend_unavailable",
+            "reason": CONFIRM_BACKEND_UNAVAILABLE_BLOCKER_REASON,
             "details": f"{failure.cause}: {failure.detail}",
             "recovery_hint": f"restore the confirm backend, then {requeue}",
             "retry_eligible": True,

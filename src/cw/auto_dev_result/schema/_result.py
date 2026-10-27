@@ -44,6 +44,8 @@ from cw.auto_dev_result.schema._vocab import (
     _STAGE_REACHED_CANONICAL,
     _V2_STATUSES,
     _V4_STATUSES,
+    CONFIRM_BACKEND_UNAVAILABLE_BLOCKER_REASON,
+    REVIEW_NOT_CONVERGING_BLOCKER_REASON,
     PlanSource,
     SchemaVersion,
     StageReached,
@@ -519,7 +521,10 @@ class AutoDevResult(BaseModel):
         if (
             self.blocker is not None
             and self.blocker.reason
-            in ("review_not_converging", "confirm_backend_unavailable")
+            in (
+                REVIEW_NOT_CONVERGING_BLOCKER_REASON,
+                CONFIRM_BACKEND_UNAVAILABLE_BLOCKER_REASON,
+            )
             and self.review.converged is True
         ):
             msg = (

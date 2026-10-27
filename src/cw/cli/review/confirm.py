@@ -41,6 +41,7 @@ from cw.dev_queue import load_dev_queue
 from cw.dev_queue.crud import _find_ticket
 from cw.exceptions import CwError
 from cw.models.orchestrator_config.stage import StageExecutorConfig
+from cw.worktree import resolve_task_worktree
 
 from ._group import review
 
@@ -271,6 +272,16 @@ def review_confirm(
     """
     client_config = get_client(client)
     task = _find_ticket(load_dev_queue(), ticket_id, client)
+    expected_worktree = resolve_task_worktree(task, client_config)
+    if expected_worktree is None:
+        msg = f"Cannot resolve the worktree for ticket '{ticket_id}'"
+        raise CwError(msg)
+    if worktree.resolve() != expected_worktree.resolve():
+        msg = (
+            f"Worktree '{worktree}' does not belong to ticket '{ticket_id}'; "
+            f"expected '{expected_worktree}'"
+        )
+        raise CwError(msg)
     if shutil.which(_BACKEND) is None:
         _unavailable("binary_missing", f"{_BACKEND} executable not found on PATH")
     before = _worktree_state(worktree)

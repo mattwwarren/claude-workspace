@@ -75,6 +75,7 @@ SOURCE_CONTEXT = "context"
 #: The first ``.claude/cw-context.json`` schema that carries a ``review`` object.
 _REVIEW_CONTEXT_SCHEMA = 15
 _DEFAULT_LOOP_BACKEND = "claude-native"
+_PREP_PR_LEDGER_RELATIVE_PATH = Path(".cw/prep-pr-convergence.json")
 _REPORT_REASON_LIMIT = 300
 
 DISPATCH_REFUSAL = (
@@ -436,6 +437,9 @@ def converge_init(
         emit_json({"convergence": "blocking", "status": "noop"})
         return
     path = worktree / ledger_rel
+    if no_confirm and ledger_rel != _PREP_PR_LEDGER_RELATIVE_PATH:
+        msg = "--no-confirm is only valid with --ledger .cw/prep-pr-convergence.json"
+        raise CwError(msg)
     existing = load_ledger_or_none(path)
     confirm = (
         ResolvedBackend("none", False)

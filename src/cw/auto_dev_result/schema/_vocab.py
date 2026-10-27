@@ -109,6 +109,14 @@ STAGE_FAILURE_STATUSES: frozenset[str] = frozenset(
 # codex-review synthesis path and the auto-dev-review producer skill -- and a
 # typo in either would be invisible to the closed-enum status check. See #1870.
 EMPTY_DIFF_BLOCKER_REASON: Literal["empty_diff_no_commits"] = "empty_diff_no_commits"
+# Clean-mode convergence blockers (#2787). Keep the wire identifiers named so
+# validators, routing sets and renderers cannot drift apart.
+REVIEW_NOT_CONVERGING_BLOCKER_REASON: Literal["review_not_converging"] = (
+    "review_not_converging"
+)
+CONFIRM_BACKEND_UNAVAILABLE_BLOCKER_REASON: Literal["confirm_backend_unavailable"] = (
+    "confirm_backend_unavailable"
+)
 # blocker.reason (open enum, §4.2) paired with the stale_dispatch status above.
 # Named for the same reason EMPTY_DIFF_BLOCKER_REASON is: two producers write
 # it (the auto-dev-intake Stage 0 self-check and the auto-dev-plan Stage 1
@@ -146,7 +154,7 @@ OPERATOR_UNAVAILABLE_BLOCKER_REASONS: frozenset[str] = frozenset(
         IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
         # #2787: converge-to-clean confirm round could not run (backend
         # unavailable) -- an operator-recoverable park, not a broken leg.
-        "confirm_backend_unavailable",
+        CONFIRM_BACKEND_UNAVAILABLE_BLOCKER_REASON,
     }
 )
 # blocker.reason emitted when a stage finds a destructive directive (delete a
@@ -195,7 +203,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "impl_not_pushed",
             "impl_failed",
             "review_blocked",
-            "review_not_converging",
+            REVIEW_NOT_CONVERGING_BLOCKER_REASON,
             "plan_deviation",
             "review_operator_actionable",
             PLAN_SCOPE_DRIFT_BLOCKER_REASON,

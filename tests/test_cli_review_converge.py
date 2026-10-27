@@ -511,8 +511,26 @@ class TestInit:
     def test_no_confirm_records_no_confirm_round(
         self, runner: CliRunner, wt: Path, ctx: Path
     ) -> None:
-        assert _init(runner, wt, ctx, "--no-confirm").exit_code == 0
-        assert _stored(wt).confirm_backend == "none"
+        result = _init(
+            runner,
+            wt,
+            ctx,
+            "--no-confirm",
+            "--ledger",
+            ".cw/prep-pr-convergence.json",
+        )
+        assert result.exit_code == 0, result.output
+        ledger = load_ledger(wt / ".cw/prep-pr-convergence.json")
+        assert ledger is not None
+        assert ledger.confirm_backend == "none"
+
+    def test_no_confirm_on_the_default_ledger_is_refused(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        result = _init(runner, wt, ctx, "--no-confirm")
+        assert result.exit_code != 0
+        assert "--no-confirm is only valid" in result.output
+        assert not _ledger_path(wt).exists()
 
     def test_is_idempotent(self, runner: CliRunner, wt: Path, ctx: Path) -> None:
         _init(runner, wt, ctx)

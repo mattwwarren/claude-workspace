@@ -188,6 +188,7 @@ def harness(
         stage=Stage.REVIEW,
         status=QueueItemStatus.RUNNING,
         session_id=_SESSION,
+        worktree_path=repo,
         scope_hint="small",
     )
     add_ticket(task)
@@ -581,6 +582,39 @@ def test_unreadable_worktree_is_a_cwerror_not_an_outage(
     result = harness.cli.invoke(main, [*harness.args(), "--worktree", str(not_a_repo)])
 
     assert result.exit_code == 1
+    assert calls == []
+    _assert_not_outage(result)
+
+
+@needs_codex
+def test_worktree_of_another_ticket_is_refused_before_run_review(
+    harness: Harness,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> None:
+    other_repo, _origin = make_git_repo_with_origin("wt-other-ticket")
+    calls = harness.spy_run_review()
+
+    result = harness.cli.invoke(main, [*harness.args(), "--worktree", str(other_repo)])
+
+    assert result.exit_code == 1
+    assert "does not belong to ticket" in result.output
+    assert calls == []
+    _assert_not_outage(result)
+
+
+@needs_codex
+def test_unresolvable_ticket_worktree_is_refused_before_run_review(
+    harness: Harness,
+) -> None:
+    calls = harness.spy_run_review()
+    harness.monkeypatch.setattr(
+        "cw.cli.review.confirm.resolve_task_worktree", lambda *_a, **_k: None
+    )
+
+    result = harness.cli.invoke(main, harness.args())
+
+    assert result.exit_code == 1
+    assert "Cannot resolve the worktree" in result.output
     assert calls == []
     _assert_not_outage(result)
 
