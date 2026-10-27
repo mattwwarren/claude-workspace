@@ -10,19 +10,26 @@ the normal state while the worker is still running -- exited 5 with
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
 
 import pytest
 
+from cw.models.enums import OrchestratorEventType
+from cw.models.events import OrchestratorEvent
 from tests.conftest import _REPO_ROOT
 
 _SKILL = _REPO_ROOT / ".claude" / "skills" / "cw-smoke-test" / "SKILL.md"
 _WORKER_ID = "probe-session"
 _JQ_FILTER = re.compile(r"jq -r '(?P<filter>[^']*<WORKER_ID>[^']*)'")
 
-requires_jq = pytest.mark.skipif(shutil.which("jq") is None, reason="jq not installed")
+# Skip only off CI: a CI runner without jq must fail, not silently pass unrun.
+requires_jq = pytest.mark.skipif(
+    shutil.which("jq") is None and not os.environ.get("CI"),
+    reason="jq not installed",
+)
 
 
 def _poll_filter() -> str:
@@ -43,9 +50,10 @@ def _run_jq(stdin: str) -> subprocess.CompletedProcess[str]:
 
 
 def _completed_event(session_id: str) -> str:
-    return json.dumps(
-        {"type": "session.completed", "payload": {"session_id": session_id}}
-    )
+    return OrchestratorEvent(
+        type=OrchestratorEventType.SESSION_COMPLETED,
+        payload={"session_id": session_id},
+    ).model_dump_json()
 
 
 @requires_jq
@@ -59,7 +67,7 @@ def test_poll_filter_exits_zero_on_empty_tail() -> None:
 def test_poll_filter_returns_row_for_matching_worker() -> None:
     result = _run_jq(_completed_event(_WORKER_ID) + "\n")
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() != ""
+    assert json.loads(result.stdout)["payload"]["session_id"] == _WORKER_ID
 
 
 @requires_jq
@@ -67,3 +75,11 @@ def test_poll_filter_ignores_other_workers() -> None:
     result = _run_jq(_completed_event("someone-else") + "\n")
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
+
+
+@requires_jq
+def test_poll_filter_finds_match_after_other_events() -> None:
+    stream = _completed_event("someone-else") + "\n" + _completed_event(_WORKER_ID)
+    result = _run_jq(stream + "\n")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["payload"]["session_id"] == _WORKER_ID
