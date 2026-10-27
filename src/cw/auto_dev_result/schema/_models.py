@@ -141,6 +141,55 @@ class Review(BaseModel):
     # it and it does not feed `Health.recommendation` — so no `schema_version`
     # bump (docs/headless-contract.md §8, Note A15).
     downgraded_disposition_count: int | None = None
+    # #2787 converge-to-clean review mode. All five follow the #2098 precedent:
+    # `None` means "the producer did not report this", so a blocking-mode
+    # sentinel omits them and stays byte-identical. Additive, no
+    # `schema_version` bump.
+    #   - `convergence_mode`: the mode the review ran in.
+    #   - `rounds_run`: total recorded rounds in the ledger, loop and confirm.
+    #   - `converged`: the loop reached a clean round AND the confirm round
+    #     agreed. The validator below is a self-consistency check on the
+    #     payload, not proof that `converge finalize` ran -- the real guarantee
+    #     is `evaluate_tip` at Stage 3 exit and finalize Step 4.0b.
+    #   - `final_round_clean_sha`: the sha the last clean round reviewed.
+    #   - `confirm_backend`: the RESOLVED confirm choice, so the explicit
+    #     `none` opt-out and an independent codex round are distinguishable.
+    convergence_mode: Literal["blocking", "clean"] | None = None
+    rounds_run: int | None = None
+    converged: bool | None = None
+    final_round_clean_sha: str | None = None
+    confirm_backend: Literal["codex", "claude", "none"] | None = None
+
+    @model_validator(mode="after")
+    def _check_convergence_fields(self) -> Review:
+        if self.converged is True:
+            self._check_converged_true()
+        if self.rounds_run is not None and self.rounds_run < 1:
+            msg = f"review.rounds_run must be >= 1 when set (got {self.rounds_run})"
+            raise ValueError(msg)
+        if self.confirm_backend is not None and self.convergence_mode != "clean":
+            msg = "review.confirm_backend requires review.convergence_mode='clean'"
+            raise ValueError(msg)
+        if (
+            self.final_round_clean_sha is not None
+            and self.reviewed_sha is not None
+            and self.final_round_clean_sha != self.reviewed_sha
+        ):
+            msg = "review.final_round_clean_sha must equal review.reviewed_sha"
+            raise ValueError(msg)
+        return self
+
+    def _check_converged_true(self) -> None:
+        """``converged: true`` needs clean mode, a clean sha and a confirm choice."""
+        if self.convergence_mode != "clean":
+            msg = "review.converged=true requires review.convergence_mode='clean'"
+            raise ValueError(msg)
+        if self.final_round_clean_sha is None or _is_blank(self.final_round_clean_sha):
+            msg = "review.converged=true requires a non-blank final_round_clean_sha"
+            raise ValueError(msg)
+        if self.confirm_backend is None:
+            msg = "review.converged=true requires review.confirm_backend"
+            raise ValueError(msg)
 
 
 class AgentHealthEntry(BaseModel):

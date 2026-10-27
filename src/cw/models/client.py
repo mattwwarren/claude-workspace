@@ -7,6 +7,7 @@ Depends on ``cw.models.enums``, ``cw.models.tasks`` (for ``DEFAULT_LANE``), and
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -41,6 +42,48 @@ class TrackerMcpGateConfig(BaseModel):
     enabled: bool = False
     plugin_id: str
     settings_path: str = ".claude/settings.json"
+
+
+DEFAULT_BLOCKING_MAX_CYCLES = 5
+DEFAULT_CLEAN_MAX_CYCLES = 8
+
+
+class ReviewConfig(BaseModel):
+    """Per-client Stage 3 review settings (#2787 converge-to-clean mode).
+
+    ``convergence="blocking"`` (the default) keeps the historical loop that
+    stops once no MUST_FIX survives. ``"clean"`` keeps cycling until a full
+    round is clean at the reviewed sha and an independent confirm round agrees.
+
+    ``max_cycles`` caps clean-mode rounds only; ``None`` resolves to
+    ``DEFAULT_CLEAN_MAX_CYCLES`` there, and the configured value is inert in
+    blocking mode. ``confirm_backend`` is the raw configured choice (``None``
+    when unset); the resolved backend is picked at convergence time.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    convergence: Literal["blocking", "clean"] = "blocking"
+    max_cycles: int | None = Field(default=None, ge=1)
+    confirm_backend: Literal["codex", "claude", "none"] | None = None
+
+    @property
+    def effective_max_cycles(self) -> int:
+        """Cycle ceiling: the configured value, else the mode's default."""
+        if self.max_cycles is not None:
+            return self.max_cycles
+        if self.convergence == "clean":
+            return DEFAULT_CLEAN_MAX_CYCLES
+        return DEFAULT_BLOCKING_MAX_CYCLES
+
+    def to_context(self) -> dict[str, object]:
+        """The ``review`` object stamped into ``.claude/cw-context.json``."""
+        clean = self.convergence == "clean"
+        return {
+            "convergence": self.convergence,
+            "max_cycles": self.effective_max_cycles if clean else None,
+            "confirm_backend": self.confirm_backend,
+        }
 
 
 class ClientConfig(BaseModel):
@@ -142,6 +185,11 @@ class ClientConfig(BaseModel):
     # OrchestratorConfig companion toggle: per-client opt-in IS the rollout
     # control. See TrackerMcpGateConfig above.
     tracker_mcp_gate: TrackerMcpGateConfig | None = None
+    # #2787 converge-to-clean review mode; the default block is blocking mode,
+    # byte-identical to pre-#2787 behavior. Delivered to headless workers via
+    # `.claude/cw-context.json` (schema v15), never read from clients.yaml
+    # inside an agent's own bash.
+    review: ReviewConfig = Field(default_factory=ReviewConfig)
     auto_background_threshold: int | None = None
     notifications: bool = False
     lanes: list[LaneConfig] = Field(default_factory=list)

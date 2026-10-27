@@ -85,6 +85,7 @@ def _opencode_preflight(
         workspace_path=client.workspace_path,
         lane=task.lane,
         merge_gate_ignore_paths=client.merge_gate_ignore_paths,
+        review_config=client.review,
         write_stop_hook=False,
         daemon=daemon,
     )

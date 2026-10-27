@@ -17,6 +17,7 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
 )
+from cw.models.client import ReviewConfig
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.session import (
     _resolve_resume_cwd,
@@ -199,6 +200,36 @@ class TestStartSession:
         start_session("test-client", "impl", native_daemon=mock_native_daemon)
 
         assert hook_calls[0]["merge_gate_ignore_paths"] == ["uv.lock"]
+
+    def test_new_session_forwards_review_config(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2787: the client's review block reaches cw-context.json."""
+        write_clients_yaml(sample_client)
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            clients_file.read_text()
+            + "    review:\n      convergence: clean\n      max_cycles: 3\n"
+        )
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        hook_calls: list[dict[str, object]] = []
+
+        def capture_hook(path: object, **kwargs: object) -> None:
+            hook_calls.append({"path": path, **kwargs})
+
+        monkeypatch.setattr("cw.session._write_hook_context", capture_hook)
+
+        start_session("test-client", "impl", native_daemon=mock_native_daemon)
+
+        review = hook_calls[0]["review_config"]
+        assert isinstance(review, ReviewConfig)
+        assert review.convergence == "clean"
+        assert review.max_cycles == 3
 
     def test_start_debt_purpose_hook_context_omits_workspace_path(
         self,

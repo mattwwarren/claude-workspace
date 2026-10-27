@@ -144,6 +144,9 @@ OPERATOR_UNAVAILABLE_BLOCKER_REASONS: frozenset[str] = frozenset(
         "operator_unavailable",
         "dependency_unmerged",
         IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
+        # #2787: converge-to-clean confirm round could not run (backend
+        # unavailable) -- an operator-recoverable park, not a broken leg.
+        "confirm_backend_unavailable",
     }
 )
 # blocker.reason emitted when a stage finds a destructive directive (delete a
@@ -192,6 +195,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "impl_not_pushed",
             "impl_failed",
             "review_blocked",
+            "review_not_converging",
             "plan_deviation",
             "review_operator_actionable",
             PLAN_SCOPE_DRIFT_BLOCKER_REASON,

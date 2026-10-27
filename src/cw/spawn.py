@@ -42,6 +42,7 @@ from cw.models import (
     SessionPurpose,
     TicketTask,
 )
+from cw.models.client import ReviewConfig
 from cw.native_daemon import (
     daemon_worker_tmpdir_env,
     get_native_daemon_client,
@@ -129,7 +130,10 @@ _log = logging.getLogger(__name__)
 #     ships a large ticket only while `reviewed_sha` is an ancestor of HEAD
 #     with nothing but merges of `world_state_snapshot.origin_main_branch`
 #     after it; a context below 14 is no approval.)
-CW_CONTEXT_SCHEMA_VERSION = 14
+# v15: added `review` (GitHub #2787 — the client's ReviewConfig as
+#     `{convergence, max_cycles, confirm_backend}`; `max_cycles` is the clean
+#     mode ceiling, null in blocking mode. Read by `cw review converge config`.)
+CW_CONTEXT_SCHEMA_VERSION = 15
 
 
 def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:
@@ -619,6 +623,7 @@ def _write_hook_context(
     workspace_path: Path | None = None,
     lane: str | None = None,
     merge_gate_ignore_paths: list[str] | None = None,
+    review_config: ReviewConfig | None = None,
     write_stop_hook: bool = True,
     daemon: NativeDaemonClient | None = None,
 ) -> None:
@@ -754,6 +759,7 @@ def _write_hook_context(
         # resolvable at all. Null for USER-origin sessions, which have no lane.
         "lane": lane,
         "merge_gate_ignore_paths": merge_gate_ignore_paths or [],
+        "review": (review_config or ReviewConfig()).to_context(),
         "purpose": purpose,
         "ticket_id": ticket_id,
         "headless": headless,
@@ -915,6 +921,7 @@ def spawn_create_impl(
         workspace_path=client.workspace_path,
         lane=lane,
         merge_gate_ignore_paths=client.merge_gate_ignore_paths,
+        review_config=client.review,
         daemon=daemon,
     )
 

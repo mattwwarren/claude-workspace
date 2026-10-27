@@ -502,11 +502,38 @@ class AutoDevResult(BaseModel):
             )
             raise ValueError(msg)
 
+    def _check_review_convergence(self) -> None:
+        """#2787: clean-mode Stage 3 success needs ``converged``; the two
+        convergence blockers forbid it."""
+        if (
+            self.stage_reached == "stage3_review"
+            and self.status in ("review_pending_approval", "stage_complete")
+            and self.review.convergence_mode == "clean"
+            and self.review.converged is not True
+        ):
+            msg = (
+                "review.converged must be true when a clean-mode stage3_review "
+                f"result has status={self.status!r}"
+            )
+            raise ValueError(msg)
+        if (
+            self.blocker is not None
+            and self.blocker.reason
+            in ("review_not_converging", "confirm_backend_unavailable")
+            and self.review.converged is True
+        ):
+            msg = (
+                f"review.converged must not be true when blocker.reason="
+                f"{self.blocker.reason!r}"
+            )
+            raise ValueError(msg)
+
     @model_validator(mode="after")
     def _check_invariants(self) -> AutoDevResult:
         self._check_status_pairings()
         self._check_stage_invariants()
         self._check_next_actions_invariants()
+        self._check_review_convergence()
         return self
 
 

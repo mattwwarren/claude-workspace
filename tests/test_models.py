@@ -405,6 +405,118 @@ class TestClientConfig:
         assert restored.tracker_mcp_gate.plugin_id == "linear@acme"
         assert restored.tracker_mcp_gate.settings_path == ".claude/settings.json"
 
+    def test_review_config_defaults(self) -> None:
+        """#2787: omitted -> blocking mode, no ceiling or backend override."""
+        from cw.models.client import ReviewConfig
+
+        review = ReviewConfig()
+        assert review.convergence == "blocking"
+        assert review.max_cycles is None
+        assert review.confirm_backend is None
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.review == ReviewConfig()
+
+    @pytest.mark.parametrize("bad", [0, -1])
+    def test_review_config_max_cycles_must_be_positive(self, bad: int) -> None:
+        from cw.models.client import ReviewConfig
+
+        with pytest.raises(ValidationError):
+            ReviewConfig(max_cycles=bad)
+
+    def test_review_config_rejects_unknown_key(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        with pytest.raises(ValidationError):
+            ReviewConfig.model_validate({"bogus": 1})
+
+    @pytest.mark.parametrize(
+        "payload",
+        [{"convergence": "strict"}, {"confirm_backend": "gemini"}],
+    )
+    def test_review_config_rejects_unknown_literals(
+        self, payload: dict[str, str]
+    ) -> None:
+        from cw.models.client import ReviewConfig
+
+        with pytest.raises(ValidationError):
+            ReviewConfig.model_validate(payload)
+
+    @pytest.mark.parametrize("backend", ["codex", "claude", "none"])
+    def test_review_config_accepts_confirm_backends(self, backend: str) -> None:
+        from cw.models.client import ReviewConfig
+
+        review = ReviewConfig.model_validate({"confirm_backend": backend})
+        assert review.confirm_backend == backend
+
+    def test_review_config_effective_max_cycles(self) -> None:
+        from cw.models.client import (
+            DEFAULT_BLOCKING_MAX_CYCLES,
+            DEFAULT_CLEAN_MAX_CYCLES,
+            ReviewConfig,
+        )
+
+        assert DEFAULT_BLOCKING_MAX_CYCLES == 5
+        assert DEFAULT_CLEAN_MAX_CYCLES == 8
+        assert ReviewConfig().effective_max_cycles == 5
+        assert ReviewConfig(convergence="clean").effective_max_cycles == 8
+        assert ReviewConfig(max_cycles=3).effective_max_cycles == 3
+        assert (
+            ReviewConfig(convergence="clean", max_cycles=12).effective_max_cycles == 12
+        )
+
+    def test_review_config_to_context_blocking_ignores_max_cycles(self) -> None:
+        """Blocking mode: the configured max_cycles is inert -> null."""
+        from cw.models.client import ReviewConfig
+
+        assert ReviewConfig().to_context() == {
+            "convergence": "blocking",
+            "max_cycles": None,
+            "confirm_backend": None,
+        }
+        assert ReviewConfig(max_cycles=3).to_context()["max_cycles"] is None
+
+    def test_review_config_to_context_clean_resolves_ceiling(self) -> None:
+        from cw.models.client import ReviewConfig
+
+        assert ReviewConfig(convergence="clean").to_context() == {
+            "convergence": "clean",
+            "max_cycles": 8,
+            "confirm_backend": None,
+        }
+        assert ReviewConfig(
+            convergence="clean", max_cycles=4, confirm_backend="none"
+        ).to_context() == {
+            "convergence": "clean",
+            "max_cycles": 4,
+            "confirm_backend": "none",
+        }
+
+    def test_review_round_trip_from_yaml_shape(self) -> None:
+        original = ClientConfig.model_validate(
+            {
+                "name": "test",
+                "workspace_path": "/dev/null",
+                "review": {
+                    "convergence": "clean",
+                    "max_cycles": 6,
+                    "confirm_backend": "claude",
+                },
+            }
+        )
+        restored = ClientConfig.model_validate(original.model_dump(mode="json"))
+        assert restored.review.convergence == "clean"
+        assert restored.review.max_cycles == 6
+        assert restored.review.confirm_backend == "claude"
+
+    def test_review_omitted_leaves_dump_default(self) -> None:
+        """Omitting ``review`` yields the all-default block in the dump."""
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.model_dump(mode="json")["review"] == {
+            "convergence": "blocking",
+            "max_cycles": None,
+            "confirm_backend": None,
+        }
+
     def test_unknown_key_raises(self) -> None:
         """extra='forbid' rejects an unrecognized top-level key (#1200)."""
         with pytest.raises(ValidationError):

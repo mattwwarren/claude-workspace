@@ -4537,11 +4537,11 @@ class TestCwContextWorkspacePath:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (14 after the
-        queue_metadata.review_approval addition, #2767)."""
+        """cw-context.json schema_version is current (15 after the
+        ``review`` object addition, #2787)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 14
+        assert CW_CONTEXT_SCHEMA_VERSION == 15
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -4556,7 +4556,88 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 14
+        assert context["schema_version"] == 15
+
+
+class TestCwContextReviewStamp:
+    """_write_hook_context stamps the #2787 ``review`` object that
+    ``cw review converge config`` reads."""
+
+    def test_write_hook_context_stamps_blocking_default(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.spawn import _write_hook_context
+
+        worktree = tmp_path / "wt-review-default"
+        worktree.mkdir()
+        _write_hook_context(
+            worktree,
+            session_id="s1",
+            session_name="acme/impl",
+            client="acme",
+            purpose="impl",
+            ticket_id=None,
+            origin=SessionOrigin.USER,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["review"] == {
+            "convergence": "blocking",
+            "max_cycles": None,
+            "confirm_backend": None,
+        }
+
+    def test_write_hook_context_stamps_provided_review_config(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.models.client import ReviewConfig
+        from cw.spawn import _write_hook_context
+
+        worktree = tmp_path / "wt-review-set"
+        worktree.mkdir()
+        _write_hook_context(
+            worktree,
+            session_id="s1",
+            session_name="acme/impl",
+            client="acme",
+            purpose="impl",
+            ticket_id=None,
+            origin=SessionOrigin.DAEMON,
+            review_config=ReviewConfig(convergence="clean", confirm_backend="none"),
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["review"] == {
+            "convergence": "clean",
+            "max_cycles": 8,
+            "confirm_backend": "none",
+        }
+
+    def test_spawn_create_impl_forwards_client_review(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        from cw.models.client import ReviewConfig
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path, name="review-client").model_copy(
+            update={"review": ReviewConfig(convergence="clean", max_cycles=4)}
+        )
+        worktree = make_git_repo("wt-2787-review")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-2787 --headless",
+            label="auto-dev/GEN-2787",
+            native_daemon=FakeNativeDaemonClient(),
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["review"]["convergence"] == "clean"
+        assert context["review"]["max_cycles"] == 4
 
 
 class TestCwContextMergeGateIgnorePaths:
