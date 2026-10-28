@@ -426,24 +426,8 @@ class TestReviewConsolidateCommand:
             # #2009: stamped by `cw review verify-fixes`, not by consolidate,
             # so it is emitted as null (not reported) here.
             "downgraded_disposition_count",
-            # #2787: the clean-mode convergence fields. Only the clean-mode
-            # `cw review converge` path sets them, so consolidate emits them
-            # as null (not reported).
-            "convergence_mode",
-            "rounds_run",
-            "converged",
-            "final_round_clean_sha",
-            "confirm_backend",
         }
         assert verdict["review"]["downgraded_disposition_count"] is None
-        for field in (
-            "convergence_mode",
-            "rounds_run",
-            "converged",
-            "final_round_clean_sha",
-            "confirm_backend",
-        ):
-            assert verdict["review"][field] is None
 
     def test_empty_documents_all_failed_yields_zero_agents_run(
         self, runner: CliRunner

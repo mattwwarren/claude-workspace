@@ -5884,6 +5884,20 @@ class TestReviewConvergenceFields:
         restored = Review.model_validate_json(review.model_dump_json())
         assert restored == review
 
+    def test_clean_payload_dump_carries_all_convergence_fields(self) -> None:
+        """A clean-mode review serializes all five fields, null ones included."""
+        review = Review.model_validate(
+            _clean_review(
+                confirm_backend=None, final_round_clean_sha=None, converged=False
+            )
+        )
+        dumped = review.model_dump()
+        assert set(_CONVERGENCE_FIELDS) <= set(dumped)
+        assert dumped["convergence_mode"] == "clean"
+        assert dumped["confirm_backend"] is None
+        assert dumped["final_round_clean_sha"] is None
+        assert set(_CONVERGENCE_FIELDS) <= set(json.loads(review.model_dump_json()))
+
     def test_converged_clean_review_round_trips(self) -> None:
         review = Review.model_validate(_clean_review())
         restored = Review.model_validate_json(review.model_dump_json())
