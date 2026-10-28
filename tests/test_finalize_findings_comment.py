@@ -570,6 +570,44 @@ def test_headless_contract_rows_mention_blocking_findings_comment() -> None:
     assert "| Any other agent BLOCK (Plan / prep-pr / etc.) |" in content
 
 
+LINEAR_QUALIFIER = "on Linear the carve-out withholds"
+GITHUB_QUALIFIER = "on `github-issues`"
+NOT_PASSED = "not passed to the regressed IMPL run"
+
+
+def _row(content: str) -> str:
+    return next(
+        line for line in content.splitlines() if ROW_FINALIZE_FINDINGS_ANCHOR in line
+    )
+
+
+@pytest.mark.parametrize(
+    "content", [_cmd("auto-dev.md"), _doc("headless-contract.md")], ids=["cmd", "doc"]
+)
+def test_contract_row_qualifies_delivery_by_tracker(content: str) -> None:
+    """Linear always withholds (G3), so no row may say the run "receives" it flat."""
+    row = _row(content)
+    assert GITHUB_QUALIFIER in row
+    assert LINEAR_QUALIFIER in row
+    assert "`identity_unresolved`" in row
+    assert NOT_PASSED in row
+    assert "stay in the tracker comment" in row
+
+
+def test_finalize_sentinel_paragraph_qualifies_delivery_by_tracker() -> None:
+    paragraph = _section_paragraph("**Sentinel.**")
+    assert "on `github-issues` the regressed run receives this comment" in paragraph
+    assert "On Linear the carve-out withholds with `identity_unresolved`" in paragraph
+    assert "not passed to the regressed IMPL run" in paragraph
+
+
+def test_finalize_core_paragraph_qualifies_delivery_by_tracker() -> None:
+    assert (
+        "where, on `github-issues`, the regressed run receives the comment as "
+        "evidence (on Linear the carve-out withholds it with `identity_unresolved`)"
+    ) in _core_paragraph()
+
+
 # ---------------------------------------------------------------------------
 # Regression pins: nothing on the routing side moves
 # ---------------------------------------------------------------------------
