@@ -210,8 +210,8 @@ def _automatic_candidates(
         candidates.append(session.worktree_path)
     if client_cfg is None:
         notes.append(
-            f"client '{task.client}' is not configured; its derived worktree "
-            "path was not tried"
+            f"client '{task.client}' is not configured or its config is "
+            "unreadable; its derived worktree path was not tried"
         )
     else:
         branch = f"{client_cfg.feature_branch_prefix}/{task.ticket_id}"

@@ -932,7 +932,7 @@ def test_first_ticket_matching_ledger_wins(tmp_path: Path) -> None:
 def test_unconfigured_client_with_no_worktree_is_noted(tmp_path: Path) -> None:
     history = _history(_task(), tmp_path, configured=False)
 
-    assert _notes_with(history, "not configured")
+    assert _notes_with(history, "not configured or its config is unreadable")
     assert _notes_with(history, "no worktree")
 
 

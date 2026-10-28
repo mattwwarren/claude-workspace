@@ -355,7 +355,7 @@ def test_unreadable_state_and_config_are_notes(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "Traceback" not in result.output
     assert "session state unreadable" in result.output
-    assert "is not configured" in result.output
+    assert "is not configured or its config is unreadable" in result.output
     assert "round 5 (confirm):" in result.output
 
 
