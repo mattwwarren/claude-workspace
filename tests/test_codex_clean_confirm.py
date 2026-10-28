@@ -10,6 +10,7 @@ so no real ``claude`` binary is ever reached.
 from __future__ import annotations
 
 import time
+from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
@@ -946,29 +947,29 @@ class TestHealthyBackendFailures:
     # cause stays in details. A reviewer whose findings were discarded unread
     # is only called out as such when other roles still produced documents.
     @pytest.mark.parametrize(
-        ("respond", "reason", "retry_eligible", "role_cause"),
+        ("make_respond", "reason", "retry_eligible", "role_cause"),
         [
-            (_timeout_role, CODEX_REVIEW_UNPARSEABLE, True, "codex_timeout"),
+            (lambda: _timeout_role, CODEX_REVIEW_UNPARSEABLE, True, "codex_timeout"),
             (
-                _discarding_role,
+                lambda: _discarding_role,
                 CODEX_REVIEW_UNPARSEABLE,
                 None,
                 "codex_review_unparseable",
             ),
             (
-                _first_role_fails(_discarding_role),
+                partial(_first_role_fails, _discarding_role),
                 CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
                 None,
                 "codex_review_unparseable",
             ),
             (
-                _first_role_fails(_error_role),
+                partial(_first_role_fails, _error_role),
                 CODEX_REVIEW_PARTIAL,
                 None,
                 "codex_error",
             ),
             (
-                _first_role_fails(_timeout_role),
+                partial(_first_role_fails, _timeout_role),
                 CODEX_REVIEW_PARTIAL,
                 True,
                 "codex_timeout",
@@ -985,12 +986,14 @@ class TestHealthyBackendFailures:
     def test_the_round_is_returned_unchanged(
         self,
         wt: Path,
-        respond: Callable[[str], ClaudeRunResult],
+        make_respond: Callable[[], Callable[[str], ClaudeRunResult]],
         reason: str,
         retry_eligible: bool | None,
         role_cause: str,
     ) -> None:
-        outcome = _apply(wt, _client(wt), RoleAwareClaudeRunner(respond))
+        # Built per run: ``_first_role_fails`` keeps call state, which must not
+        # outlive one run of the case.
+        outcome = _apply(wt, _client(wt), RoleAwareClaudeRunner(make_respond()))
         blocker = outcome.result.blocker
         assert blocker is not None
         assert blocker.reason == reason
