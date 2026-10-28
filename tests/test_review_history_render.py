@@ -9,11 +9,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from cw.review_history import build_review_history, collect_history_inputs
-from cw.review_history_render import render_review_history
 
 from cw.models import CwState, QueueItemStatus, Stage
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
+from cw.review_history import build_review_history, collect_history_inputs
+from cw.review_history_render import render_review_history
 from tests._review_history_helpers import (
     ACME_SESSION,
     DEFER_RATIONALE,
@@ -32,9 +32,8 @@ from tests._ticket_view_helpers import bound_session_for, make_task
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.models.review_history import ReviewHistory
-
     from cw.models import Session, TicketTask
+    from cw.models.review_history import ReviewHistory
 
 
 def _render(

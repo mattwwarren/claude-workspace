@@ -6,13 +6,15 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
+import yaml
 from click.testing import CliRunner, Result
-from cw.models.review_history import ReviewHistory
 
 from cw.cli import main
 from cw.config import dev_queue_file
 from cw.events import inbox_path
+from cw.exceptions import CwError
 from cw.models import QueueItemStatus
+from cw.models.review_history import ReviewHistory
 from cw.review_convergence import LEDGER_RELATIVE_PATH
 from tests._cli_review_helpers import _enter_operator_machine, _seed_review_row
 from tests._review_convergence_helpers import (
@@ -261,3 +263,29 @@ def test_review_help_lists_history() -> None:
 
     assert result.exit_code == 0
     assert "history" in result.output
+
+
+def test_unreadable_state_and_config_are_notes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_with_ledger(tmp_path, fixture_converged)
+
+    def _bad_state() -> None:
+        msg = "sessions.json is corrupt"
+        raise CwError(msg)
+
+    def _bad_config(_self: object, _name: str) -> None:
+        msg = "clients.yaml is corrupt"
+        raise yaml.YAMLError(msg)
+
+    monkeypatch.setattr("cw.cli.review.history.load_state", _bad_state)
+    monkeypatch.setattr(
+        "cw.cli.review.history.ViewSources.effective_client", _bad_config
+    )
+
+    result = _invoke(ACME_TICKET, "-c", ACME)
+
+    assert result.exit_code == 0, result.output
+    assert "session state unreadable" in result.output
+    assert "is not configured" in result.output
+    assert "round 5 (confirm):" in result.output

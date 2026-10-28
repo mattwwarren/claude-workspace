@@ -13,21 +13,21 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+
+from cw.events import record_event
+from cw.exceptions import CwError
+from cw.models import CwState, OrchestratorEventType, QueueItemStatus, Stage
 from cw.models.review_history import ReviewHistory
+from cw.review_adjudication import VoidedFinding
+from cw.review_adjudication._voided import _voided_rationale
+from cw.review_convergence import LEDGER_RELATIVE_PATH, friction_lines
+from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from cw.review_history import (
     _VOIDED_RATIONALE_PREFIX,
     _parse_friction_lines,
     build_review_history,
     collect_history_inputs,
 )
-
-from cw.events import record_event
-from cw.exceptions import CwError
-from cw.models import CwState, OrchestratorEventType, QueueItemStatus, Stage
-from cw.review_adjudication import VoidedFinding
-from cw.review_adjudication._voided import _voided_rationale
-from cw.review_convergence import LEDGER_RELATIVE_PATH, friction_lines
-from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from tests._review_convergence_helpers import (
     LOOP_BACKEND,
     ROSTER,
