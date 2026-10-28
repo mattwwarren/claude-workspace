@@ -100,8 +100,9 @@ def _fix_cycles(history: ReviewHistory) -> str:
 
 def _deferred(history: ReviewHistory) -> str:
     """The deferred count; a sentinel-only count has no finding text behind it."""
-    count = history.summary.deferred_count
-    if count is None or "ledger" in history.sources:
+    summary = history.summary
+    count = summary.deferred_count
+    if count is None or count == len(summary.deferred):
         return _count(count)
     return f"{count} (text not recorded)"
 

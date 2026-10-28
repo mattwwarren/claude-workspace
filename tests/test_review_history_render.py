@@ -272,6 +272,27 @@ def test_deferred_header_says_where_the_count_came_from(tmp_path: Path) -> None:
     assert "deferred: not recorded" in bare_text.splitlines()
 
 
+def test_deferred_header_reads_the_model_not_the_provenance_list(
+    tmp_path: Path,
+) -> None:
+    fixture_stopped().write(derived_worktree(tmp_path))
+    ledger_history, _ = _render(tmp_path, review_task())
+    blocking_history, _ = _blocking(tmp_path / "blocking")
+    task = review_task(session_id=ACME_SESSION)
+    bare = bound_session_for(task, last_result=sentinel_review({"fix_cycles_used": 1}))
+    bare_history, _ = _render(tmp_path / "bare", task, (bare,))
+
+    def header(history: ReviewHistory) -> list[str]:
+        unrelated = history.model_copy(update={"sources": ["unrelated"]})
+        return render_review_history(unrelated).splitlines()
+
+    count = ledger_history.summary.deferred_count
+    assert count
+    assert f"deferred: {count}" in header(ledger_history)
+    assert "deferred: 1 (text not recorded)" in header(blocking_history)
+    assert "deferred: not recorded" in header(bare_history)
+
+
 def test_empty_history_prints_one_clear_line_then_notes(tmp_path: Path) -> None:
     _, text = _render(tmp_path, review_task())
 
