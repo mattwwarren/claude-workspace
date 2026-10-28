@@ -650,6 +650,65 @@ class TestResume:
         assert outcome.reviewer_label == "Claude"
 
 
+class TestResumeNonSuccess:
+    """A resumed confirm that does not converge: same contracts as the loop path."""
+
+    def test_a_missing_binary_counts_an_outage_and_escalates_at_the_cap(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.codex_clean_confirm._which_claude", lambda: None)
+        write_ledger(wt, _awaiting_at(wt, _head(wt)))
+        runner = RoleAwareClaudeRunner(_clean_role)
+
+        first = _resume(wt, _client(wt), runner)
+        assert first is not None
+        blocker = first.result.blocker
+        assert blocker is not None
+        assert blocker.reason == "confirm_backend_unavailable"
+        assert blocker.retry_eligible is True
+        assert first.verdict is None
+        assert first.reviewer_label == "Claude"
+        ledger = _ledger(wt)
+        assert len(ledger.confirm_failures) == 1
+        assert ledger.status == "awaiting_confirm"
+
+        outcomes = [first, *(_resume(wt, _client(wt), runner) for _ in range(3))]
+        reasons = [o.result.blocker.reason for o in outcomes if o and o.result.blocker]
+        assert reasons == ["confirm_backend_unavailable"] * 3 + ["agent_block"]
+        assert runner.roles == []
+        assert len(_ledger(wt).confirm_failures) == 4
+
+    def test_every_role_timing_out_is_not_an_outage(self, wt: Path) -> None:
+        write_ledger(wt, _awaiting_at(wt, _head(wt)))
+        outcome = _resume(wt, _client(wt), RoleAwareClaudeRunner(_timeout_role))
+        assert outcome is not None
+        blocker = outcome.result.blocker
+        assert blocker is not None
+        assert blocker.reason == CODEX_REVIEW_UNPARSEABLE
+        assert blocker.retry_eligible is True
+        assert "codex_timeout" in blocker.details
+        assert blocker.details.startswith(CLAUDE_BACKEND_DETAILS_PREFIX)
+        assert outcome.reviewer_label == "Claude"
+        ledger = _ledger(wt)
+        assert ledger.confirm_failures == []
+        assert ledger.status == "awaiting_confirm"
+
+    def test_a_must_fix_parks_with_the_claude_verdict(self, wt: Path) -> None:
+        write_ledger(wt, _awaiting_at(wt, _head(wt)))
+        outcome = _resume(wt, _client(wt), RoleAwareClaudeRunner(_must_fix_role))
+        assert outcome is not None
+        blocker = outcome.result.blocker
+        assert blocker is not None
+        assert blocker.reason == CODEX_MUST_FIX_FINDINGS
+        assert outcome.reviewer_label == "Claude"
+        assert outcome.verdict is not None
+        assert outcome.verdict.blocking is True
+        summaries = {item.finding.summary for item in outcome.verdict.accepted}
+        assert _MUST_FIX_SUMMARY in summaries
+        assert outcome.result.review.converged is False
+        assert _ledger(wt).status != "awaiting_confirm"
+
+
 # ---------------------------------------------------------------------------
 # Claude unreachable: confirm_backend_unavailable, escalating at the cap
 # ---------------------------------------------------------------------------
