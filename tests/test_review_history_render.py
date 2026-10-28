@@ -20,6 +20,7 @@ from tests._review_convergence_helpers import (
 from tests._review_history_helpers import (
     ACME_SESSION,
     COMMENT_ID,
+    CONFIRM_FAILURE_CAUSES,
     DEFER_RATIONALE,
     OPERATOR_REASON,
     ORIGINAL_RATIONALE,
@@ -32,6 +33,7 @@ from tests._review_history_helpers import (
     derived_worktree,
     fixture_awaiting_confirm,
     fixture_blocking_sentinel,
+    fixture_confirm_failed,
     fixture_converged,
     fixture_stopped,
     review_task,
@@ -137,6 +139,18 @@ def _voided_ledger_with_dispositions(tmp_path: Path) -> dict[str, FindingDisposi
     legacy_key = _disposition_key("src/cw/legacy.py", "no summary") or ""
     dispositions[legacy_key] = FindingDisposition(outcome="REJECTED", rationale="old")
     return dispositions
+
+
+def test_confirm_failures_render_the_whole_life_count(tmp_path: Path) -> None:
+    fixture_confirm_failed().write(derived_worktree(tmp_path))
+
+    history, text = _render(tmp_path, review_task())
+
+    lines = text.splitlines()
+    assert history.summary.confirm_failures == len(CONFIRM_FAILURE_CAUSES)
+    assert "confirm_failures: 4" in lines
+    assert "confirm_failures: 0" not in lines
+    _assert_invariants(text)
 
 
 def test_voided_and_disposition_lines_carry_every_field(tmp_path: Path) -> None:

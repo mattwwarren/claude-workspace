@@ -29,6 +29,7 @@ from cw.review_convergence import (
     from_verdict,
     operator_settle,
     reconcile_ledger_for_init,
+    record_confirm_failure,
     record_round,
     save_round_verdict,
 )
@@ -39,6 +40,7 @@ from tests._review_convergence_helpers import (
     ROSTER,
     consolidated_verdict,
     fresh_ledger,
+    operator_finding,
     record,
     round_finding,
     write_ledger,
@@ -364,6 +366,46 @@ def fixture_awaiting_confirm(ticket: str = ACME_TICKET) -> LedgerFixture:
     )
     ledger, _ = record(ledger, sha="sha-0002")
     assert ledger.status == "awaiting_confirm"
+    return LedgerFixture(timed(ledger, *STAMPS))
+
+
+#: Distinct causes, so the engine records each failure rather than one run.
+CONFIRM_FAILURE_CAUSES = ("timeout", "auth", "rate_limited", "timeout")
+
+
+def fixture_confirm_failed(ticket: str = ACME_TICKET) -> LedgerFixture:
+    """An awaiting-confirm ledger with four confirm-backend outages on record.
+
+    Built through the real ``record_confirm_failure``, which adds no round and
+    leaves the ledger ``awaiting_confirm``.
+    """
+    ledger = fixture_awaiting_confirm(ticket).ledger
+    for cause in CONFIRM_FAILURE_CAUSES:
+        ledger, _ = record_confirm_failure(
+            ledger, cause=cause, detail=f"{cause} from codex", now=NOW
+        )
+    assert ledger.status == "awaiting_confirm"
+    assert len(ledger.confirm_failures) == len(CONFIRM_FAILURE_CAUSES)
+    return LedgerFixture(ledger)
+
+
+def fixture_operator_action(ticket: str = ACME_TICKET) -> LedgerFixture:
+    """One loop round with two fix findings and one ``operator_action`` finding.
+
+    ``new_accepted`` is 3 while ``new_fix`` is 2: the round's fix dispatch
+    excludes the finding only an operator can act on.
+    """
+    ledger = fresh_ledger(ticket_id=ticket)
+    ledger, _ = record(
+        ledger,
+        round_finding(summary="a"),
+        round_finding(summary="b"),
+        operator_finding(),
+        sha="sha-0001",
+    )
+    record_view = ledger.rounds[0]
+    assert (record_view.new_accepted, record_view.new_fix) == (3, 2)
+    assert record_view.new_operator_action == 1
     return LedgerFixture(timed(ledger, *STAMPS))
 
 

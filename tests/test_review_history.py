@@ -48,6 +48,7 @@ from tests._review_convergence_helpers import (
 from tests._review_history_helpers import (
     ACME_SESSION,
     COMMENT_ID,
+    CONFIRM_FAILURE_CAUSES,
     DEFER_RATIONALE,
     OPERATOR_REASON,
     ORIGINAL_RATIONALE,
@@ -68,8 +69,10 @@ from tests._review_history_helpers import (
     derived_worktree,
     fixture_awaiting_confirm,
     fixture_blocking_sentinel,
+    fixture_confirm_failed,
     fixture_converged,
     fixture_in_progress,
+    fixture_operator_action,
     fixture_stopped,
     fixture_zero_round,
     foreign_voided_event,
@@ -286,6 +289,41 @@ def test_resurfaced_settled_finding_is_not_new(tmp_path: Path) -> None:
     assert split is not None
     assert split.model_dump() == {"must_fix": 1, "should_fix": 0}
     assert history.rounds[1].resurfaced_settled == 1
+    # round 1 settles ``b`` anew; round 2 only sees it again, settled
+    assert (history.rounds[0].new_settled, history.rounds[0].resurfaced_settled) == (
+        1,
+        0,
+    )
+    assert history.rounds[0].settled_total == 1
+    assert (history.rounds[1].new_settled, history.rounds[1].resurfaced_settled) == (
+        0,
+        1,
+    )
+    assert history.rounds[1].settled_total == 1
+
+
+def test_fix_dispatched_excludes_operator_action_findings(tmp_path: Path) -> None:
+    ledger = fixture_operator_action().ledger
+    write_ledger(derived_worktree(tmp_path), ledger)
+
+    history = _history(review_task(), tmp_path)
+
+    (round_one,) = history.rounds
+    assert round_one.new_accepted == 3
+    assert round_one.new_operator_action == 1
+    assert round_one.fix_dispatched == ledger.rounds[0].new_fix == 2
+    assert round_one.fix_dispatched != round_one.new_accepted
+
+
+def test_confirm_failures_count_the_whole_life_of_the_ledger(tmp_path: Path) -> None:
+    ledger = fixture_confirm_failed().ledger
+    write_ledger(derived_worktree(tmp_path), ledger)
+
+    history = _history(_running(), tmp_path)
+
+    assert history.summary.ledger_status == "awaiting_confirm"
+    assert history.summary.confirm_failures == len(CONFIRM_FAILURE_CAUSES) == 4
+    assert len(history.rounds) == 2
 
 
 def test_later_operator_settle_does_not_hide_the_rounds_own_finding(
