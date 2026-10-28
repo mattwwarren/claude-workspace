@@ -1435,8 +1435,9 @@ class TestFixLoopDivergence:
 
 
 class TestRealCommitTracking:
-    """``Review.had_real_commit`` — true iff at least one fix cycle produced a
-    real commit (OR'd across cycles), so a no-op/flaked fix-loop convergence
+    """``Review.had_real_commit`` — ``"committed"`` iff at least one fix cycle
+    produced a real commit (OR'd across cycles), else ``"no_op"`` (#1745), so
+    a no-op/flaked fix-loop convergence
     is positively distinguishable from a genuine fix (#1723)."""
 
     def test_clean_exit_with_editor_fix_marks_had_real_commit_true(
@@ -1457,9 +1458,9 @@ class TestRealCommitTracking:
         )
 
         assert out.status == "stage_complete"
-        assert out.review.had_real_commit is True
+        assert out.review.had_real_commit == "committed"
         assert verdict is not None
-        assert verdict.review.had_real_commit is True
+        assert verdict.review.had_real_commit == "committed"
 
     def test_clean_exit_with_default_noop_fix_marks_had_real_commit_false(
         self, make_git_repo: Callable[..., Path]
@@ -1477,7 +1478,7 @@ class TestRealCommitTracking:
             session_id="s-had-commit-false",
         )
 
-        assert out.review.had_real_commit is False
+        assert out.review.had_real_commit == "no_op"
         assert out.status == "stage_complete"
         assert out.review.fix_cycles_used == 1
 
@@ -1499,7 +1500,7 @@ class TestRealCommitTracking:
             session_id="s-had-commit-or",
         )
 
-        assert out.review.had_real_commit is True
+        assert out.review.had_real_commit == "committed"
 
     def test_capped_park_reports_had_real_commit_false_when_every_cycle_is_noop(
         self, make_git_repo: Callable[..., Path]
@@ -1516,7 +1517,7 @@ class TestRealCommitTracking:
         )
 
         assert out.status == "blocked"
-        assert out.review.had_real_commit is False
+        assert out.review.had_real_commit == "no_op"
 
 
 # ---------------------------------------------------------------------------
@@ -2066,7 +2067,7 @@ class TestFixFence:
         assert out.blocker.recovery_hint is not None
         assert "git reset --hard HEAD" in out.blocker.recovery_hint
         assert out.review.fix_cycles_used == 1
-        assert out.review.had_real_commit is False
+        assert out.review.had_real_commit == "no_op"
         assert verdict is not None
         # No commit landed, and the loop stopped after the one fix cycle.
         assert git_in(worktree, "rev-parse", "HEAD") == head_before
@@ -2105,7 +2106,7 @@ class TestFixFence:
         out, _ = _run_loop(runner, worktree, session_id="s-fence-ok")
 
         assert out.status == "stage_complete"
-        assert out.review.had_real_commit is True
+        assert out.review.had_real_commit == "committed"
 
     def test_fix_prompt_carries_the_fence(
         self, make_git_repo: Callable[..., Path]
@@ -2408,11 +2409,12 @@ class TestTerminalSnapshotMarker:
         rebinds ``verdict.review`` to the reconstructed cross-cycle ``Review``.
 
         Mutation-proof by construction: the pre-rebind cycle-1 verdict carries
-        the rereview pass's own ``fix_cycles_used=0``/``had_real_commit=None``,
-        while the post-rebind value carries the loop's finalized
-        ``fix_cycles_used=2``/``had_real_commit=True``. Moving the finalize call
-        after the rebind rewrites the persisted file with the latter and fails
-        these assertions.
+        the rereview pass's own ``fix_cycles_used=0`` /
+        ``had_real_commit="unknown"``, while the post-rebind value carries the
+        loop's finalized ``fix_cycles_used=2`` /
+        ``had_real_commit="committed"``. Moving the finalize call after the
+        rebind rewrites the persisted file with the latter and fails these
+        assertions.
         """
         worktree = _worktree(
             make_git_repo,
@@ -2440,13 +2442,13 @@ class TestTerminalSnapshotMarker:
         assert out.blocker is not None
         assert out.blocker.reason == CODEX_FIX_SCOPE_VIOLATION
         assert out.review.fix_cycles_used == 2
-        assert out.review.had_real_commit is True
+        assert out.review.had_real_commit == "committed"
 
         cycle1 = _load_snapshot("s-term-scope-order", 1)
         assert cycle1.is_terminal_snapshot is True
         # Pre-rebind values — the rereview pass's own review block.
         assert cycle1.review.fix_cycles_used == 0
-        assert cycle1.review.had_real_commit is None
+        assert cycle1.review.had_real_commit == "unknown"
         assert _load_snapshot("s-term-scope-order", 0).is_terminal_snapshot is False
         assert any("cycle1-review-verdict.json" in h for h in out.friction_highlights)
 
@@ -2776,7 +2778,7 @@ class TestGrowthBudgetThroughLoop:
         assert out.blocker.reason == CODEX_FIX_GROWTH_BUDGET
         assert "new.py:2 new lock" in out.blocker.details
         assert git_in(worktree, "rev-parse", "HEAD") == head_before
-        assert out.review.had_real_commit is False
+        assert out.review.had_real_commit == "no_op"
 
     def test_no_manifest_means_no_growth_guard(
         self, make_git_repo: Callable[..., Path]
@@ -2789,7 +2791,7 @@ class TestGrowthBudgetThroughLoop:
         out, _ = _run_loop(runner, worktree, session_id="s-growth-noplan")
 
         assert out.status == "stage_complete"
-        assert out.review.had_real_commit is True
+        assert out.review.had_real_commit == "committed"
 
     def test_five_small_cycles_park_at_cumulative_budget(
         self, make_git_repo: Callable[..., Path]
@@ -2807,7 +2809,7 @@ class TestGrowthBudgetThroughLoop:
         assert "cumulative" in out.blocker.details
         assert runner.fix_calls == 4
         assert git_in(worktree, "rev-list", "--count", f"{start}..HEAD") == "3"
-        assert out.review.had_real_commit is True
+        assert out.review.had_real_commit == "committed"
 
     def test_single_small_corrective_cycle_unaffected(
         self, make_git_repo: Callable[..., Path]
@@ -2886,7 +2888,7 @@ class TestGuardSwitch:
         )
 
         assert out.status == "stage_complete"
-        assert out.review.had_real_commit is True
+        assert out.review.had_real_commit == "committed"
         assert _CONSTRAINTS_HEADING in _fix_prompts(runner)[0]
 
     def test_switch_off_keeps_dirty_start_refusal_and_fences_always_on(

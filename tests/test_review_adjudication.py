@@ -339,7 +339,7 @@ class TestApplyAdjudicationRecomputesVerdict:
             fix_cycles_used=3,
             deferred=0,
             agents_run=4,
-            had_real_commit=True,
+            had_real_commit="committed",
         )
         verdict = _verdict(
             _accepted(must_fix_finding),
@@ -366,7 +366,7 @@ class TestApplyAdjudicationRecomputesVerdict:
         assert result.review.should_fix == 5
         assert result.review.fix_cycles_used == 3
         assert result.review.agents_run == 4
-        assert result.review.had_real_commit is True
+        assert result.review.had_real_commit == "committed"
         # Only `deferred` may change.
         assert result.review.deferred == 1
 
