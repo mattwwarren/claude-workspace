@@ -43,13 +43,13 @@ from tests._review_convergence_helpers import (
     round_finding,
     write_ledger,
 )
-from tests._ticket_view_helpers import ACME, ACME_TICKET
+from tests._ticket_view_helpers import ACME, ACME_TICKET, bound_session_for
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
 
-    from cw.models import OrchestratorEvent
+    from cw.models import OrchestratorEvent, Session, TicketTask
     from cw.review_convergence import RoundKind
     from cw.review_findings import ReviewVerdict, Severity
 
@@ -390,3 +390,33 @@ def blocking_dispositions() -> dict[str, FindingDisposition]:
 def fixture_blocking_sentinel() -> dict[str, object]:
     """A blocking-mode sentinel: cycle-0 counts, no clean-mode fields."""
     return sentinel_review(BLOCKING_REVIEW)
+
+
+def clean_sentinel_session(task: TicketTask, worktree: Path) -> Session:
+    """A clean-mode session whose result carries two ``review_round_<n>`` lines.
+
+    Its worktree is *worktree*, so with a corrupt ledger there the history is
+    rebuilt from these friction lines (``sentinel_friction`` rounds, which
+    record a settled total but no new/resurfaced split).
+    """
+    review = {"convergence_mode": "clean", "rounds_run": 2, "converged": True}
+    friction = (
+        "review_round_1: kind=loop backend=claude-native sha=abc1234 "
+        "new_accepted=2 settled=1",
+        "review_round_2: kind=loop backend=claude-native sha=def5678 "
+        "new_accepted=0 settled=0",
+    )
+    return bound_session_for(
+        task,
+        id="sess-s",
+        worktree_path=worktree,
+        last_result=sentinel_review(review, friction=friction),
+    )
+
+
+def write_corrupt_ledger(worktree: Path) -> Path:
+    """An unreadable ``.cw/review-convergence.json`` in *worktree*."""
+    path = worktree / LEDGER_RELATIVE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+    return path

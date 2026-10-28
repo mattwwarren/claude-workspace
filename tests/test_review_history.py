@@ -53,6 +53,7 @@ from tests._review_history_helpers import (
     VOIDED_AT,
     VOIDED_SUMMARY,
     blocking_dispositions,
+    clean_sentinel_session,
     client_config,
     derived_worktree,
     fixture_awaiting_confirm,
@@ -258,6 +259,17 @@ def test_wall_time_is_the_delta_between_rounds(tmp_path: Path) -> None:
     walls = [r.wall_seconds for r in history.rounds]
     assert walls == [None, 724.0, 476.0, 600.0, 300.0]
     assert _notes_with(history, "round 1 wall time")
+
+
+def test_naive_recorded_at_reads_as_utc(tmp_path: Path) -> None:
+    ledger = timed(
+        fixture_converged().ledger, "2026-10-27T12:00:00", "2026-10-27T12:12:04+00:00"
+    )
+    write_ledger(derived_worktree(tmp_path), ledger)
+
+    history = _history(_task(), tmp_path)
+
+    assert history.rounds[1].wall_seconds == 724.0
 
 
 def test_unparseable_recorded_at_gives_null_wall_time(tmp_path: Path) -> None:
@@ -624,6 +636,7 @@ def test_in_flight_without_a_ledger_reads_the_row(tmp_path: Path) -> None:
 def test_in_flight_ledger_beats_a_running_row(tmp_path: Path) -> None:
     fixture_converged().write(derived_worktree(tmp_path))
 
+    history = _history(_running(), tmp_path)
 
     assert history.row_status == "running"
     assert history.in_flight is False
@@ -651,7 +664,9 @@ def test_corrupt_ledger_falls_back_to_the_sentinel(
     task = _task()
 
     history = _history(
-        task, tmp_path, sessions=[_clean_sentinel_session(task, tmp_path)]
+        task,
+        tmp_path,
+        sessions=[clean_sentinel_session(task, derived_worktree(tmp_path))],
     )
 
     assert _notes_with(history, "unreadable")
