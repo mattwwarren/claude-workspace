@@ -21,7 +21,9 @@ composed from layers: the documented body shape, the unchanged
 IMPL carve-out's verbatim-delivery clause.
 """
 
+import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -386,6 +388,8 @@ def test_free_text_ticket_posts_nothing() -> None:
 def test_long_findings_split_into_parts_never_truncated() -> None:
     paragraph = _section_paragraph("**Step 3 — measure and split.**")
     assert GITHUB_PART_LIMIT in paragraph
+    assert "Reserve 1,000 characters for that wrapper" in paragraph
+    assert "at most 59,000" in paragraph
     assert "on line boundaries" in paragraph
     assert PART_LABEL in paragraph
     assert "header, sub-heading, label line, fence and marker included" in paragraph
@@ -429,15 +433,33 @@ def test_read_back_names_the_non_empty_guard() -> None:
 
 # The read-back fence is the control that decides whether a public post is
 # stamped as verified, so it is run, not just text-asserted: `gh` is a stub on
-# PATH that serves a planted body, and the fence's own bash does the rest.
-_READBACK_PLACEHOLDERS = {"i": "1", "ticket": "42", "label": "(part 1 of 2)"}
+# PATH that honours `--jq` by running the real `jq` over a planted
+# `{"comments": [...]}` document (gh's `--json comments` shape), so the fence's
+# own comment-selection filter executes; the fence's bash does the rest.
+_READBACK_TICKET = "42"
+_READBACK_LABEL = "(part 1 of 2)"
+_READBACK_PLACEHOLDERS = {
+    "i": "1",
+    "ticket": _READBACK_TICKET,
+    "label": _READBACK_LABEL,
+}
+requires_jq = pytest.mark.skipif(
+    shutil.which("jq") is None,
+    reason="jq is not installed; the read-back selection filter needs the real binary",
+)
 _READBACK_OK = "READBACK_OK"
 _READBACK_MISMATCH = "READBACK_MISMATCH"
 _READBACK_MISSING = "READBACK_MISSING"
 _READBACK_FETCH_FAILED = "READBACK_FETCH_FAILED"
 _GH_STUB = """#!/bin/sh
+printf '%s\\n' "$@" > "$GH_STUB_ARGV"
 [ -n "$GH_STUB_FAIL" ] && exit 1
-cat "$GH_STUB_BODY"
+filter=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--jq" ]; then filter="$2"; shift; fi
+  shift
+done
+exec jq -r "$filter" "$GH_STUB_COMMENTS"
 """
 
 
@@ -455,10 +477,16 @@ def _run_read_back_fence(
     tmp_path: Path,
     *,
     posted: bytes | None,
-    served: bytes,
+    served: bytes | list[bytes],
     gh_fails: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    """Run the read-back fence with *posted* on disk and *served* from `gh`."""
+    """Run the read-back fence with *posted* on disk and *served* from `gh`.
+
+    *served* is one comment body or the ticket's comment list, oldest first;
+    the stub writes the bodies as ``{"comments": [...]}`` and the fence's own
+    ``--jq`` filter picks among them. The stub records its argv to
+    ``tmp_path / "gh-argv.txt"`` (one argument per line).
+    """
     cw_dir = tmp_path / "repo" / ".cw"
     cw_dir.mkdir(parents=True)
     if posted is not None:
@@ -468,12 +496,17 @@ def _run_read_back_fence(
     gh = bin_dir / "gh"
     gh.write_text(_GH_STUB, encoding="utf-8")
     gh.chmod(0o755)
-    body = tmp_path / "served.md"
-    body.write_bytes(served)
+    bodies = [served] if isinstance(served, bytes) else served
+    comments = tmp_path / "comments.json"
+    comments.write_text(
+        json.dumps({"comments": [{"body": body.decode("utf-8")} for body in bodies]}),
+        encoding="utf-8",
+    )
     env = {
         **os.environ,
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-        "GH_STUB_BODY": str(body),
+        "GH_STUB_COMMENTS": str(comments),
+        "GH_STUB_ARGV": str(tmp_path / "gh-argv.txt"),
         "GIT_CEILING_DIRECTORIES": str(tmp_path),
     }
     if gh_fails:
@@ -488,15 +521,21 @@ def _run_read_back_fence(
     )
 
 
-COMMENT = b"## Blocking Review Findings\n\n### Finalize ship-it gate findings\nbody\n"
+COMMENT = (
+    b"## Blocking Review Findings\n\n### Finalize ship-it gate findings\n"
+    b"(part 1 of 2)\nbody\n"
+)
+PART_TWO = COMMENT.replace(b"(part 1 of 2)", b"(part 2 of 2)")
 
 
+@requires_jq
 def test_read_back_fence_matching_body_is_ok(tmp_path: Path) -> None:
     result = _run_read_back_fence(tmp_path, posted=COMMENT, served=COMMENT)
     assert result.returncode == 0, result.stderr
     assert _READBACK_OK in result.stdout
 
 
+@requires_jq
 @pytest.mark.parametrize(
     "served",
     [
@@ -514,10 +553,15 @@ def test_read_back_fence_normalizes_crlf_and_trailing_whitespace(
     assert _READBACK_OK in result.stdout
 
 
+@requires_jq
 @pytest.mark.parametrize(
     "served",
-    [COMMENT.replace(b"body", b"b0dy"), b" " + COMMENT, COMMENT + b"extra\n"],
-    ids=["changed-byte", "leading-space", "appended-text"],
+    [
+        COMMENT.replace(b"body", b"b0dy"),
+        COMMENT.replace(b"body", b"extra\nbody"),
+        COMMENT + b"extra\n",
+    ],
+    ids=["changed-byte", "inserted-line", "appended-text"],
 )
 def test_read_back_fence_differing_body_is_a_mismatch(
     tmp_path: Path, served: bytes
@@ -537,6 +581,7 @@ def test_read_back_fence_failing_gh_is_fetch_failed(tmp_path: Path) -> None:
     assert _READBACK_OK not in result.stdout
 
 
+@requires_jq
 @pytest.mark.parametrize(
     ("posted", "served"),
     [
@@ -572,6 +617,95 @@ def test_read_back_fence_empty_side_is_never_ok(
     assert result.returncode != 0
     assert _READBACK_OK not in result.stdout
     assert _READBACK_MISSING in result.stdout
+
+
+# The cases below execute the fence's own `--jq` selection filter (header and
+# sub-heading regex, `contains(<label>)` part match, `last`, the `// ""`
+# fallback). Kill-checks: changing `last` to `first`, or dropping the
+# `select(.body | contains(...))`, or dropping the header+sub-heading `test(...)`
+# select, each turns at least one test below red.
+OLD_COMMENT = COMMENT.replace(b"body", b"older body")
+REVIEW_COMMENT = (
+    b"## Blocking Review Findings\n\n### reviewer \xe2\x80\x94 MUST_FIX\n"
+    b"(part 1 of 2)\nbody\n"
+)
+CHATTER = b"quoting (part 1 of 2) in unrelated chatter\n"
+
+
+@requires_jq
+def test_read_back_selects_only_the_matching_part_comment(tmp_path: Path) -> None:
+    """Part 2 is the newest comment, but the fence reads back part 1."""
+    result = _run_read_back_fence(
+        tmp_path, posted=COMMENT, served=[CHATTER, COMMENT, PART_TWO]
+    )
+    assert result.returncode == 0, result.stderr
+    assert _READBACK_OK in result.stdout
+
+
+@requires_jq
+@pytest.mark.parametrize(
+    "decoy",
+    [CHATTER, REVIEW_COMMENT, b" " + COMMENT],
+    ids=["label-in-chatter", "wrong-sub-heading", "leading-space-before-header"],
+)
+def test_read_back_ignores_a_comment_that_only_carries_the_label(
+    tmp_path: Path, decoy: bytes
+) -> None:
+    """A newer comment with the label but not header+sub-heading never wins."""
+    result = _run_read_back_fence(tmp_path, posted=COMMENT, served=[COMMENT, decoy])
+    assert result.returncode == 0, result.stderr
+    assert _READBACK_OK in result.stdout
+
+
+@requires_jq
+@pytest.mark.parametrize(
+    ("served", "posted", "ok"),
+    [
+        ([OLD_COMMENT, COMMENT], COMMENT, True),
+        ([COMMENT, OLD_COMMENT], OLD_COMMENT, True),
+        ([OLD_COMMENT, COMMENT], OLD_COMMENT, False),
+        ([COMMENT, OLD_COMMENT], COMMENT, False),
+    ],
+    ids=["newest-last", "newest-is-old-body", "stale-posted", "newer-posted-loses"],
+)
+def test_read_back_compares_against_the_newest_matching_comment(
+    tmp_path: Path, served: list[bytes], posted: bytes, ok: bool
+) -> None:
+    """Two matching comments: the last (newest) one is the read-back."""
+    result = _run_read_back_fence(tmp_path, posted=posted, served=served)
+    if ok:
+        assert result.returncode == 0, result.stderr
+        assert _READBACK_OK in result.stdout
+    else:
+        assert result.returncode == 1
+        assert _READBACK_MISMATCH in result.stdout
+        assert _READBACK_OK not in result.stdout
+
+
+@requires_jq
+@pytest.mark.parametrize(
+    "served",
+    [[], [CHATTER], [REVIEW_COMMENT, PART_TWO], [b"## Blocking Review Findings\n"]],
+    ids=["no-comments", "chatter-only", "other-label-and-sub-heading", "header-only"],
+)
+def test_read_back_with_no_matching_comment_is_missing_never_ok(
+    tmp_path: Path, served: list[bytes]
+) -> None:
+    result = _run_read_back_fence(tmp_path, posted=COMMENT, served=served)
+    assert result.returncode != 0
+    assert _READBACK_MISSING in result.stdout
+    assert _READBACK_OK not in result.stdout
+
+
+@requires_jq
+def test_read_back_fetches_the_ticket_comments_as_json(tmp_path: Path) -> None:
+    """Pins the exact `gh` invocation the fence makes for ticket 42."""
+    _run_read_back_fence(tmp_path, posted=COMMENT, served=COMMENT)
+    argv = (tmp_path / "gh-argv.txt").read_text(encoding="utf-8").splitlines()
+    assert argv[:5] == ["issue", "view", _READBACK_TICKET, "--json", "comments"]
+    assert argv[5] == "--jq"
+    assert len(argv) == 7
+    assert f'contains("{_READBACK_LABEL}")' in argv[6]
 
 
 def test_read_back_mismatch_records_urls_and_asks_for_human_deletion() -> None:
@@ -725,7 +859,8 @@ def _acceptance_details() -> str:
 
 
 def test_acceptance_body_shape_posts_long_details_verbatim() -> None:
-    _acceptance_details()
+    details = _acceptance_details()
+    assert len(details) > _PRIOR_ATTEMPT_DETAILS_MAX_LEN
     paragraph = _section_paragraph("**Body shape.**")
     assert "posted verbatim, not truncated" in paragraph
 
