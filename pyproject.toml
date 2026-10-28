@@ -208,6 +208,37 @@ ignore = [
     # other `Severity` site, moved to the sibling `_deferred_md`).
     "TC001",
 ]
+"src/cw/review_convergence/_models.py" = [
+    # `RoundInput.verdict: ReviewVerdict`, `RoundFinding.outcome:
+    # AdjudicationOutcome` and the `FindingIdentity` fields of the ledger
+    # entries are pydantic field annotations, so those imports must be
+    # importable at runtime for pydantic to resolve them at class-build time —
+    # a TYPE_CHECKING-only import raises PydanticUndefinedAnnotation. Exactly
+    # the `src/cw/review_adjudication/_models.py` and
+    # `src/cw/review_findings/_models.py` TC001 case above.
+    "TC001",
+]
+"src/cw/review_convergence/_identity.py" = [
+    # `FindingIdentity.severity: Severity` is a pydantic field annotation, so
+    # `cw.review_findings.Severity` must be importable at runtime for pydantic
+    # to resolve it at class-build time. Same case as the block above.
+    "TC001",
+]
+"src/cw/cli/review/operator_settle.py" = [
+    # `cw.events` is imported inside `_emit_operator_settle_events`:
+    # `cli/review/` is eagerly imported by `cli/__init__.py` on every `cw`
+    # invocation, so the heavier imports stay function-local -- the third
+    # sanctioned reason in the comment above `cli/review/_group.py`, the same
+    # shape as `_emit_settle_events` in `commands.py`.
+    "PLC0415",
+]
+"src/cw/cli/review/converge.py" = [
+    # `_SuppressInput.verdict: ReviewVerdict` is a pydantic field annotation,
+    # so the import must be importable at runtime for pydantic to resolve it
+    # at class-build time -- the `src/cw/cli/review/commands.py` request
+    # envelope case.
+    "TC001",
+]
 "src/cw/auto_dev_result/schema/_result.py" = [
     # `AutoDevResult.scope/pr/pr_created/review/health/blocker` are pydantic
     # field annotations, so `Scope`, `PrInfo`, `PrCreated`, `Review`, `Health`
@@ -374,6 +405,10 @@ ignore = [
 # cli/__init__.py on every ``cw`` invocation. Inline imports at function level
 # are the sanctioned mechanism, not a workaround.
 "src/cw/cli/review/_group.py" = ["PLC0415"]
+# confirm defers cw.codex_review and cw.codex_runner.RealCodexRunner (#2787) for
+# startup cost (reason 3 above) and so tests can monkeypatch the names at their
+# source (reason 2 above).
+"src/cw/cli/review/confirm.py" = ["PLC0415"]
 "src/cw/cli/review/commands.py" = [
     "PLC0415",
     # `_AdjudicateInput.verdict`, `_VerifyFixesInput.verdict`,

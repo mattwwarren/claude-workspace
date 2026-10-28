@@ -520,6 +520,12 @@ queue peek` remains valuable as a **confirmation** step — and it still covers
 the narrower residual window before the first `stale_30m` crossing — but it
 is no longer the only line of defense.
 
+A long clean-mode review stage (a client configured `review.convergence:
+clean`, #2787) is not a stalled worker while its new-finding count keeps
+falling: `peek` exempts a live session from the age-only `PEEK` and `STOP`
+verdicts there (see "Clean-mode review convergence" under "Review Finding Dispositions"). A stalled
+confirmation round is still a `peek` signal, never a cw-imposed timeout.
+
 > **Do not hand-roll a liveness check.** `peek` already computes `idle_m`
 > correctly from parsed transcript records. Substitutes based on file mtimes
 > are wrong in two ways that both fail *silently*: a file's `mtime` can advance
@@ -1520,6 +1526,47 @@ adjudicated. It is gated by `disposition_drift_check_enabled` — global default
 `true`, per-lane override — and turning it off for a lane refuses to arm that
 lane's claim tier. `cw review dispositions --worktree` is not gated by it.
 
+### Clean-mode review convergence
+
+A client configured `review.convergence: clean` (`clients.yaml`, #2787) runs the
+Claude-native `/auto-dev-review` until a full review round returns no new
+accepted findings, then one independent confirmation round (`cw review
+confirm`, default backend `codex`), instead of stopping after a fixed number of
+fix cycles. An interactive run on a `review.convergence: clean` client refuses,
+so dispatch the ticket through `cw dev-queue` (`cw dev-queue add <T> -c <C>
+--lane <lane>`); a headless run without a ticket id is refused the same way,
+with a `blocked` / `agent_block` sentinel whose `details` carry that
+instruction. A long review stage with a falling new-finding count is healthy;
+the peek ladder does not apply its age-only verdicts to a live session there.
+
+A clean-mode stop is terminal until released. Each stop, the reason it exits
+with, and its release:
+
+| Stop | Exit reason | Released by | Without a release |
+|---|---|---|---|
+| `max_cycles` | `review_blocked` | operator raises `review.max_cycles`, then `cw dev-queue requeue <T> -c <C>` | terminal: re-emitted until a commit lands |
+| `operator_action` | `review_operator_actionable` | orchestrator runs the checklist, then `cw dev-queue requeue <T> -c <C>` | not applicable (the requeue is the signal) |
+| `oscillation` | `review_not_converging` | `cw review converge operator-settle` for every recurring finding, then `cw dev-queue requeue <T> -c <C>`; or a commit | terminal while any recurring finding is unsettled |
+| `no_progress` | `review_not_converging` | a commit (`cw dev-queue requeue <T> -c <C> --stage impl --regress`) | terminal, no other release |
+
+Only a commit releases `no_progress`: a same-tip requeue re-emits it. The
+`operator-settle` payload is printed ready to paste in the convergence history
+comment and in `cw review converge status` (`stop.settle_payload`); it records
+who settled the finding and why, is refused inside a headless worker, and can
+only name a finding the ledger already recorded.
+
+**Requeue procedure for `confirm_backend_unavailable`.** The independent
+confirmation round could not run because its backend is down (codex missing, an
+auth failure or another non-zero exit from the backend, a crash). Read the cause
+from `cw dev-queue show <T> -c <C>`, restore the backend (installing or logging
+in to codex is a host-level action the human may have to do), then run `cw
+dev-queue requeue <T> -c <C>`; the ledger resumes at the confirm step with no
+new fix cycle. `confirm_backend_unavailable` is uncharged, so verify the backend is restored before requeueing or draining.
+Three same-cause parks at one sha are the cap; the next failure escalates to an
+`agent_block`. A confirm round that outlasts the 600 s foreground Bash ceiling,
+or fails on content on a healthy backend, surfaces as `agent_block`, not as
+this reason.
+
 ### Spec-driven subagent escape hatch
 
 When the pipeline bounces on an intricate cross-module ticket (repeated
@@ -1870,7 +1917,7 @@ alive silently loses the edit to a tick's read-modify-write (observed twice,
 What does not charge the counter (#2695): `ambiguities_pending_resolution`,
 `premises_pending_verification` and `review_pending_approval` parks; a
 `blocked` result whose `blocker.reason` is `push_auth_failed`,
-`operator_unavailable`, `dependency_unmerged` or
+`operator_unavailable`, `dependency_unmerged`, `confirm_backend_unavailable` or
 `impl_comments_unreadable_after_regress`; and a no-worker spawn failure that is
 a raw `OSError`. Residuals the ceiling still owns or no longer bounds:
 

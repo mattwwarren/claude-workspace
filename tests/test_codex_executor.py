@@ -57,6 +57,7 @@ from cw.models import (
     StagePipelineConfig,
     TicketTask,
 )
+from cw.models.client import ReviewConfig
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.worktree import resolve_worker_tmpdir
 from tests._codex_review_helpers import _mk_codex_proc
@@ -727,6 +728,36 @@ def test_codex_executor_threads_merge_gate_ignore_paths_into_write_hook_context(
         )
 
     assert calls[0]["merge_gate_ignore_paths"] == ["mypy-baseline.txt"]
+
+
+def test_codex_executor_threads_review_config_into_write_hook_context(
+    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+) -> None:
+    """#2787: the codex spawn path stamps the client's review block too."""
+    worktree = make_git_repo("wt-codex-review-config")
+    executor = _codex_executor()
+    review = ReviewConfig(convergence="clean", max_cycles=3)
+    client = ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        default_branch="main",
+        review=review,
+    )
+
+    calls: list[dict[str, object]] = []
+
+    def _capture(*_args: object, **kwargs: object) -> None:
+        calls.append(kwargs)
+
+    with patch("cw.executor.codex._write_hook_context", _capture):
+        executor.spawn(
+            stage=Stage.REVIEW,
+            task=_review_task("T-rc"),
+            worktree=worktree,
+            client=client,
+        )
+
+    assert calls[0]["review_config"] == review
 
 
 def test_resolve_executor_threads_native_daemon_into_codex_executor(

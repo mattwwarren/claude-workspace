@@ -30,6 +30,7 @@ from cw.models import (
     StagePipelineConfig,
     TicketTask,
 )
+from cw.models.client import ReviewConfig
 from cw.opencode_runner import (
     OPENCODE_NOT_FOUND,
     STAGE4A_MERGE_GATE,
@@ -144,6 +145,34 @@ def test_opencode_executor_blocked_binary_missing_plan_stage_marker(
     assert result.blocker.reason == OPENCODE_NOT_FOUND
     assert result.stage_reached == "stage1_plan"
     assert result.blocker.stage == "stage1_plan"
+
+
+def test_opencode_executor_threads_review_config_into_write_hook_context(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#2787: the opencode spawn path stamps the client's review block too."""
+    worktree = make_git_repo("wt-opencode-review-config")
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    executor = OpencodeExecutor(config=config, runner=FakeFireAndForgetRunner())
+    review = ReviewConfig(convergence="clean", confirm_backend="none")
+    client = ClientConfig(name="test", workspace_path=worktree, review=review)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.FINALIZE)
+
+    calls: list[dict[str, object]] = []
+
+    def _capture(*_args: object, **kwargs: object) -> None:
+        calls.append(kwargs)
+
+    with (
+        patch("cw.executor.opencode._write_hook_context", _capture),
+        patch("cw.executor.opencode.opencode_available", return_value=False),
+    ):
+        executor.spawn(
+            stage=Stage.FINALIZE, task=task, worktree=worktree, client=client
+        )
+
+    assert calls[0]["review_config"] == review
 
 
 def test_opencode_executor_spawn_runner_path(

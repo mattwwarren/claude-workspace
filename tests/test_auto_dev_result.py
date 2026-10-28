@@ -4793,6 +4793,7 @@ class TestOperatorUnavailableBlockerReasons:
                     "operator_unavailable",
                     "dependency_unmerged",
                     IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
+                    "confirm_backend_unavailable",
                 }
             )
             == OPERATOR_UNAVAILABLE_BLOCKER_REASONS
@@ -5821,3 +5822,282 @@ def test_per_chunk_forwards_warned_blocks(
         parse_last_block_per_chunk([_MALFORMED_BLOCK], warned_blocks=warned)
 
     assert len(_json_parse_warnings(caplog)) == 1
+
+
+# ---------------------------------------------------------------------------
+# #2787 -- converge-to-clean review mode: Review fields + sentinel invariants
+# ---------------------------------------------------------------------------
+
+_CLEAN_SHA = "a" * 40
+_CONVERGENCE_FIELDS = (
+    "convergence_mode",
+    "rounds_run",
+    "converged",
+    "final_round_clean_sha",
+    "confirm_backend",
+)
+
+
+def _clean_review(**overrides: object) -> dict[str, object]:
+    """A fully converged clean-mode ``review`` fragment, with overrides."""
+    review: dict[str, object] = {
+        "must_fix_initial": 1,
+        "should_fix": 0,
+        "fix_cycles_used": 2,
+        "reviewed_sha": _CLEAN_SHA,
+        "convergence_mode": "clean",
+        "rounds_run": 3,
+        "converged": True,
+        "final_round_clean_sha": _CLEAN_SHA,
+        "confirm_backend": "codex",
+    }
+    review.update(overrides)
+    return review
+
+
+class TestReviewConvergenceFields:
+    """Review.convergence_mode / rounds_run / converged / final_round_clean_sha
+    / confirm_backend: all None-means-not-reported (the #2098 precedent)."""
+
+    def test_new_fields_default_to_none(self) -> None:
+        review = Review(must_fix_initial=0, should_fix=0, fix_cycles_used=0)
+        for name in _CONVERGENCE_FIELDS:
+            assert getattr(review, name) is None
+
+    def test_blocking_payload_dump_is_unchanged_in_meaning(self) -> None:
+        """A blocking-mode review omits the fields; they round-trip as None."""
+        review = Review.model_validate(
+            {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0}
+        )
+        assert set(review.model_dump()) == {
+            "must_fix_initial",
+            "should_fix",
+            "fix_cycles_used",
+            "deferred",
+            "agents_run",
+            "had_real_commit",
+            "rejected_count",
+            "rejected_count_by_severity",
+            "reviewed_sha",
+            "downgraded_disposition_count",
+        }
+        restored = Review.model_validate_json(review.model_dump_json())
+        assert restored == review
+
+    def test_clean_payload_dump_carries_all_convergence_fields(self) -> None:
+        """A clean-mode review serializes all five fields, null ones included."""
+        review = Review.model_validate(
+            _clean_review(
+                confirm_backend=None, final_round_clean_sha=None, converged=False
+            )
+        )
+        dumped = review.model_dump()
+        assert set(_CONVERGENCE_FIELDS) <= set(dumped)
+        assert dumped["convergence_mode"] == "clean"
+        assert dumped["confirm_backend"] is None
+        assert dumped["final_round_clean_sha"] is None
+        assert set(_CONVERGENCE_FIELDS) <= set(json.loads(review.model_dump_json()))
+
+    def test_converged_clean_review_round_trips(self) -> None:
+        review = Review.model_validate(_clean_review())
+        restored = Review.model_validate_json(review.model_dump_json())
+        assert restored.converged is True
+        assert restored.convergence_mode == "clean"
+        assert restored.rounds_run == 3
+        assert restored.final_round_clean_sha == _CLEAN_SHA
+        assert restored.confirm_backend == "codex"
+
+    def test_confirm_backend_none_opt_out_round_trips(self) -> None:
+        """The explicit ``none`` opt-out stays visible on the sentinel."""
+        review = Review.model_validate(_clean_review(confirm_backend="none"))
+        restored = Review.model_validate_json(review.model_dump_json())
+        assert restored.confirm_backend == "none"
+
+    def test_converged_requires_clean_mode(self) -> None:
+        with pytest.raises(ValidationError, match="converged"):
+            Review.model_validate(_clean_review(convergence_mode="blocking"))
+
+    def test_converged_requires_convergence_mode_present(self) -> None:
+        with pytest.raises(ValidationError, match="converged"):
+            Review.model_validate(_clean_review(convergence_mode=None))
+
+    @pytest.mark.parametrize("sha", [None, "", "   "])
+    def test_converged_requires_non_blank_final_round_clean_sha(
+        self, sha: str | None
+    ) -> None:
+        with pytest.raises(ValidationError, match="final_round_clean_sha"):
+            Review.model_validate(_clean_review(final_round_clean_sha=sha))
+
+    def test_converged_requires_confirm_backend(self) -> None:
+        with pytest.raises(ValidationError, match="confirm_backend"):
+            Review.model_validate(_clean_review(confirm_backend=None))
+
+    def test_final_round_clean_sha_must_equal_reviewed_sha(self) -> None:
+        with pytest.raises(ValidationError, match="reviewed_sha"):
+            Review.model_validate(_clean_review(final_round_clean_sha="b" * 40))
+
+    def test_final_round_clean_sha_without_reviewed_sha_is_allowed(self) -> None:
+        review = Review.model_validate(_clean_review(reviewed_sha=None))
+        assert review.final_round_clean_sha == _CLEAN_SHA
+
+    def test_sha_mismatch_rejected_even_when_not_converged(self) -> None:
+        with pytest.raises(ValidationError, match="reviewed_sha"):
+            Review.model_validate(
+                _clean_review(converged=False, final_round_clean_sha="b" * 40)
+            )
+
+    @pytest.mark.parametrize("mode", ["blocking", None])
+    def test_confirm_backend_requires_clean_mode(self, mode: str | None) -> None:
+        with pytest.raises(ValidationError, match="confirm_backend"):
+            Review.model_validate(
+                {
+                    "must_fix_initial": 0,
+                    "should_fix": 0,
+                    "fix_cycles_used": 0,
+                    "convergence_mode": mode,
+                    "confirm_backend": "claude",
+                }
+            )
+
+    @pytest.mark.parametrize("rounds", [0, -1])
+    def test_rounds_run_must_be_at_least_one(self, rounds: int) -> None:
+        with pytest.raises(ValidationError, match="rounds_run"):
+            Review.model_validate(_clean_review(rounds_run=rounds))
+
+    def test_unconverged_clean_review_is_valid(self) -> None:
+        review = Review.model_validate(
+            _clean_review(
+                converged=False, final_round_clean_sha=None, confirm_backend=None
+            )
+        )
+        assert review.converged is False
+
+
+def _stage3_blocked_payload(reason: str, review: dict[str, object]) -> dict[str, Any]:
+    p = _blocked_payload(reason)
+    p["stage_reached"] = "stage3_review"
+    p["blocker"]["stage"] = "stage3_review"
+    p["review"] = review
+    return p
+
+
+def _stage3_success_payload(status: str, review: dict[str, object]) -> dict[str, Any]:
+    p = (
+        _review_pending_payload()
+        if status == "review_pending_approval"
+        else (_stage_complete_payload())
+    )
+    p["stage_reached"] = "stage3_review"
+    p["review"] = review
+    return p
+
+
+class TestReviewConvergenceInvariants:
+    """AutoDevResult._check_review_convergence (#2787)."""
+
+    @pytest.mark.parametrize("status", ["review_pending_approval", "stage_complete"])
+    @pytest.mark.parametrize("converged", [False, None])
+    def test_clean_stage3_success_requires_converged_true(
+        self, status: str, converged: bool | None
+    ) -> None:
+        review = _clean_review(
+            converged=converged, final_round_clean_sha=None, confirm_backend=None
+        )
+        with pytest.raises(ValidationError, match="converged"):
+            AutoDevResult.model_validate(_stage3_success_payload(status, review))
+
+    @pytest.mark.parametrize("status", ["review_pending_approval", "stage_complete"])
+    def test_clean_stage3_success_accepts_converged_true(self, status: str) -> None:
+        result = AutoDevResult.model_validate(
+            _stage3_success_payload(status, _clean_review())
+        )
+        assert result.review.converged is True
+
+    @pytest.mark.parametrize("status", ["review_pending_approval", "stage_complete"])
+    def test_blocking_stage3_success_unaffected(self, status: str) -> None:
+        review = {"must_fix_initial": 1, "should_fix": 0, "fix_cycles_used": 1}
+        result = AutoDevResult.model_validate(_stage3_success_payload(status, review))
+        assert result.review.convergence_mode is None
+
+    @pytest.mark.parametrize(
+        "reason", ["review_not_converging", "confirm_backend_unavailable"]
+    )
+    @pytest.mark.parametrize("converged", [False, None])
+    def test_convergence_blockers_accept_unconverged(
+        self,
+        reason: str,
+        converged: bool | None,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        review = _clean_review(
+            converged=converged, final_round_clean_sha=None, confirm_backend=None
+        )
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            result = AutoDevResult.model_validate(
+                _stage3_blocked_payload(reason, review)
+            )
+        assert result.blocker is not None
+        assert result.blocker.reason == reason
+        assert "blocker_reason_unknown" not in caplog.text
+
+    @pytest.mark.parametrize(
+        "reason", ["review_not_converging", "confirm_backend_unavailable"]
+    )
+    def test_convergence_blockers_reject_converged_true(self, reason: str) -> None:
+        with pytest.raises(ValidationError, match="converged"):
+            AutoDevResult.model_validate(
+                _stage3_blocked_payload(reason, _clean_review())
+            )
+
+    def test_escalated_agent_block_from_confirm_failed_is_accepted(self) -> None:
+        """``converge confirm-failed`` escalation: a stage3_review agent_block
+        fragment with ``converged`` false."""
+        review = _clean_review(
+            converged=False, final_round_clean_sha=None, confirm_backend="codex"
+        )
+        result = AutoDevResult.model_validate(
+            _stage3_blocked_payload("agent_block", review)
+        )
+        assert result.blocker is not None
+        assert result.blocker.reason == "agent_block"
+        assert result.review.converged is False
+
+    def test_other_blocker_with_converged_true_is_not_rejected(self) -> None:
+        """Only the two convergence blockers forbid ``converged: true``."""
+        result = AutoDevResult.model_validate(
+            _stage3_blocked_payload("review_blocked", _clean_review())
+        )
+        assert result.review.converged is True
+
+    @pytest.mark.parametrize(
+        "reason", ["review_not_converging", "confirm_backend_unavailable"]
+    )
+    def test_convergence_blocker_accepts_retry_eligible_without_delay(
+        self, reason: str
+    ) -> None:
+        review = _clean_review(
+            converged=False, final_round_clean_sha=None, confirm_backend=None
+        )
+        p = _stage3_blocked_payload(reason, review)
+        p["blocker"]["retry_eligible"] = True
+        p["blocker"]["retry_delay_seconds"] = None
+        result = AutoDevResult.model_validate(p)
+        assert result.blocker is not None
+        assert result.blocker.retry_eligible is True
+        assert result.blocker.retry_delay_seconds is None
+
+
+class TestConvergenceBlockerVocabulary:
+    def test_both_reasons_are_known(self) -> None:
+        assert "review_not_converging" in KNOWN_BLOCKER_REASONS
+        assert "confirm_backend_unavailable" in KNOWN_BLOCKER_REASONS
+        assert is_known_blocker_reason("review_not_converging")
+        assert is_known_blocker_reason("confirm_backend_unavailable")
+
+    def test_confirm_backend_unavailable_is_operator_unavailable(self) -> None:
+        assert "confirm_backend_unavailable" in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+        assert "confirm_backend_unavailable" not in FINALIZE_REGRESS_BLOCKER_REASONS
+
+    def test_review_not_converging_is_in_neither_set(self) -> None:
+        assert "review_not_converging" not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+        assert "review_not_converging" not in FINALIZE_REGRESS_BLOCKER_REASONS

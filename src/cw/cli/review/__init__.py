@@ -13,6 +13,15 @@ grown to 951 lines, into focused submodules:
 - ``commands`` — ``register``, ``adjudicate``, ``settle`` (#2210, plus
   #2232's ``REVERSED`` rollback outcome), and ``verify-fixes``, plus the
   ``check-voided`` request/response envelopes.
+- ``confirm`` — the ``cw review confirm`` command (#2787): one independent
+  codex review round for converge-to-clean mode, with its own exit-code
+  contract (0 verdict, 3 backend down, 4 round failed on a healthy backend).
+- ``converge`` — the ``cw review converge`` group (#2787) and its ledger
+  subcommands (``config``, ``init``, ``suppress``, ``record-round``,
+  ``confirm-failed``, ``status``, ``history-comment``), plus the shared
+  ledger/git helpers. ``converge_tip`` holds ``verify-tip`` and ``finalize``
+  (the strict, fetching tip check) and ``operator_settle`` holds
+  ``operator-settle``; both import the group from ``converge``.
 - ``_settle_store`` — ``settle``'s tracker-aware row write (#2701): record
   the ledger on the dev-queue row, degrade to mirror-only on a GitHub-tracked
   client when the row cannot be recorded, fail on every other tracker. No
@@ -36,8 +45,12 @@ from __future__ import annotations
 from cw.cli.review import (  # noqa: F401  (command registration side effects)
     _diff_integrity,
     commands,
+    confirm,
     consolidate,
+    converge,
+    converge_tip,
     dispositions,
+    operator_settle,
     voided,
 )
 from cw.cli.review._group import _build_captured_diff

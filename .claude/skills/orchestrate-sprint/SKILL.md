@@ -436,6 +436,19 @@ be read in light of that arithmetic — it is not evidence of "N real failures."
   clears dead sessions, after the same liveness evidence, but will *not*
   auto-revert a BLOCKED_ON_USER task — for those, run the close+remove
   yourself.)
+- **Long review stage on a clean-mode client** (`review.convergence: clean`,
+  #2787) → a long review stage with a falling new-finding count is healthy:
+  `/cw-queue-peek`'s clean-mode convergence exemption stops the age rules from
+  flagging a live session, so do not stop it for age alone. A stalled or idle
+  one is still a peek signal. A clean-mode ticket must be dispatched through
+  `cw dev-queue` (`cw dev-queue add <T> -c <C> --lane <lane>`): an interactive
+  `/auto-dev` or `/auto-dev-review` on that client refuses. The parks it can
+  land on each have a release command in the `cw-orchestration` skill's state
+  map: `confirm_backend_unavailable` (restore the backend, then requeue),
+  `review_not_converging` (a commit releases `no_progress`; an operator settle
+  then a requeue releases `oscillation`), `review_blocked` (the operator raises
+  `review.max_cycles`, then a requeue) and `review_operator_actionable` (run
+  the checklist, settle any re-raised finding, then a requeue).
 - **Shipped / merge-gate** → `/cw-followup`.
 
 Use `/cw-followup`, `/cw-validate-result`, and `/cw-queue-peek` as the actual

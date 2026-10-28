@@ -1489,7 +1489,7 @@ class TestStep40ChannelAndTooling:
 
     @pytest.mark.parametrize(
         "schema_version",
-        [CW_CONTEXT_SCHEMA_VERSION - 1, str(CW_CONTEXT_SCHEMA_VERSION)],
+        [13, str(CW_CONTEXT_SCHEMA_VERSION)],
         ids=["v13", "string"],
     )
     def test_old_or_malformed_schema_parks_channel_absent(

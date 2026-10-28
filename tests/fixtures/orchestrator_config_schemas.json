@@ -1956,6 +1956,53 @@
      "title": "ReasoningEffort",
      "type": "string"
     },
+    "ReviewConfig": {
+     "additionalProperties": false,
+     "description": "Per-client Stage 3 review settings (#2787 converge-to-clean mode).\n\n``convergence=\"blocking\"`` (the default) keeps the historical loop that\nstops once no MUST_FIX survives. ``\"clean\"`` keeps cycling until a full\nround is clean at the reviewed sha and an independent confirm round agrees.\n\n``max_cycles`` caps clean-mode rounds only; ``None`` resolves to\n``DEFAULT_CLEAN_MAX_CYCLES`` there, and the configured value is inert in\nblocking mode. ``confirm_backend`` is the raw configured choice (``None``\nwhen unset); the resolved backend is picked at convergence time.",
+     "properties": {
+      "convergence": {
+       "default": "blocking",
+       "enum": [
+        "blocking",
+        "clean"
+       ],
+       "title": "Convergence",
+       "type": "string"
+      },
+      "max_cycles": {
+       "anyOf": [
+        {
+         "minimum": 1,
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Max Cycles"
+      },
+      "confirm_backend": {
+       "anyOf": [
+        {
+         "enum": [
+          "codex",
+          "claude",
+          "none"
+         ],
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Confirm Backend"
+      }
+     },
+     "title": "ReviewConfig",
+     "type": "object"
+    },
     "SessionPurpose": {
      "enum": [
       "impl",
@@ -2233,6 +2280,9 @@
       }
      ],
      "default": null
+    },
+    "review": {
+     "$ref": "#/$defs/ReviewConfig"
     },
     "auto_background_threshold": {
      "anyOf": [

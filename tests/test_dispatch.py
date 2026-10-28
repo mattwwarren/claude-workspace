@@ -10822,6 +10822,34 @@ class TestApplyStagedDecision:
         assert task.disposition == "awaiting_operator"
         assert task.blocked_reason == "dependency_unmerged"
 
+    def test_stage_failure_confirm_backend_unavailable_stamps_awaiting_operator(
+        self, tmp_path: Path
+    ) -> None:
+        """#2787: a REVIEW-stage blocked + confirm_backend_unavailable result
+        parks BLOCKED_ON_USER as awaiting_operator without charging either the
+        unproductive or the regress counter."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("HOLD-4", stage=Stage.REVIEW)
+        assert task.unproductive_attempts == 0
+        assert task.regress_attempts == 0
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "stage_reached": "stage3_review",
+            "blocker": {
+                "stage": "stage3_review",
+                "reason": "confirm_backend_unavailable",
+            },
+            "review": {"converged": False, "convergence_mode": "clean"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "awaiting_operator"
+        assert task.blocked_reason == "confirm_backend_unavailable"
+        assert task.unproductive_attempts == 0
+        assert task.regress_attempts == 0
+
     def test_stage_failure_impl_comments_unreadable_regress_stamps_awaiting_operator(
         self, tmp_path: Path
     ) -> None:

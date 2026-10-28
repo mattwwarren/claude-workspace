@@ -100,12 +100,15 @@ def _seed_review_row(
     *,
     ledger: dict[str, FindingDisposition] | None = None,
     status: QueueItemStatus = QueueItemStatus.PENDING,
+    worktree_path: Path | None = None,
 ) -> TicketTask:
     """Enqueue a REVIEW-stage row for *ticket_id* carrying *ledger* (#2701).
 
     Idempotent: ``add_ticket`` declines a second live row for the same
     ``(client, ticket_id)``, so a test may seed before every invoke. Returns
-    the task it asked to enqueue.
+    the task it asked to enqueue. *worktree_path* (#2787) is where the row's
+    worktree lives, for ``converge operator-settle`` tests that reach a ledger
+    through the row.
     """
     task = TicketTask(
         ticket_id=ticket_id,
@@ -113,6 +116,7 @@ def _seed_review_row(
         stage=Stage.REVIEW,
         status=status,
         finding_dispositions=ledger or {},
+        worktree_path=worktree_path,
     )
     add_ticket(task)
     return task

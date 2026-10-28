@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Converge-to-clean review mode for the Claude-native review stage (#2787).** A client can set `review: {convergence: clean}` in `clients.yaml` (default `blocking`, which is unchanged byte for byte) so `/auto-dev-review` and `/prep-pr` re-review the full diff after every fix cycle until a round returns no new accepted findings, instead of stopping after a fixed cycle count. A new `cw review converge` command group (`config`, `init`, `suppress`, `record-round`, `confirm-failed`, `status`, `history-comment`, `verify-tip`, `finalize`, `operator-settle`) keeps round state in a durable per-worktree ledger, and `cw review confirm` runs one independent codex confirmation round before the stage can report converged. Two new `blocker.reason` values: `review_not_converging` (a `no_progress` or `oscillation` stop, released per stop as documented in the dispatch runbook) and `confirm_backend_unavailable` (the confirmation backend is down: an uncharged, requeueable park). The sentinel's `review` object gains five optional fields (`convergence_mode`, `rounds_run`, `converged`, `final_round_clean_sha`, `confirm_backend`), and finalize gains a strict Step 4.0b final-tip check. `.claude/cw-context.json` is now schema v15 and carries the client's `review` settings.
+
 ## [1.78.2] - 2026-10-27
 
 ### Fixed

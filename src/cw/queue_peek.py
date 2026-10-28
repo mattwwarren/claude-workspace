@@ -47,6 +47,7 @@ from cw.opencode_runner import (
     parse_last_sentinel,
 )
 from cw.pr_hydrate import _PR_URL_RE
+from cw.queue_peek_convergence import convergence_peek_override
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -885,6 +886,13 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
         usage_limit_detected=info.get("usage_limit_detected", False),
         child_active=child_active,
     )
+    # Clean-mode convergence exemption (#2787): sees the bare ladder reason,
+    # before the child suffix below is appended to whatever results.
+    override = convergence_peek_override(
+        t, rec, reason, idle_min=idle, idle_live_max_min=IDLE_PEEK_MIN
+    )
+    if override is not None:
+        rec, reason = override
     if child_active:
         reason = (
             f"{reason}; child subagent active {child_idle:.1f}m ago — "

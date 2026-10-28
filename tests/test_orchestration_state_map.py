@@ -358,6 +358,100 @@ def test_resolve_entry_matches_resolve_command(key: str) -> None:
     assert f"--{flag_part.split()[0]}" in entry.text
 
 
+CLEAN_MODE_KEYS = (
+    "review_not_converging",
+    "confirm_backend_unavailable",
+    "review_blocked",
+    "review_operator_actionable",
+)
+SETTLE_COMMAND = "cw review converge operator-settle"
+REQUEUE_COMMAND = "cw dev-queue requeue <T> -c <C>"
+
+
+@pytest.mark.parametrize("key", CLEAN_MODE_KEYS)
+def test_clean_mode_entries_exist_once_and_are_orchestrator_run(key: str) -> None:
+    entry = _entry_for(key)
+    assert _WHO_RE.findall(entry.text) == [WHO_ORCHESTRATOR], entry.text
+
+
+def test_confirm_backend_unavailable_entry_requeues_and_bounds_the_reason() -> None:
+    entry = _entry_for("confirm_backend_unavailable")
+    # Membership, not position: `show` is named first, `requeue` later.
+    assert REQUEUE_COMMAND in entry.commands
+    assert SHOW_COMMAND in entry.commands
+    text = " ".join(entry.text.split())
+    assert "backend is down, and only that" in text
+    for cause in ("codex missing", "auth failure", "crash"):
+        assert cause in text, cause
+    assert "Three such parks with the same cause at the same sha" in text
+    assert "escalates to an `agent_block`" in text
+    assert "outside the uncharged class" in text
+    assert "claim evidence" in text
+    assert (
+        "the real bound is the `blocked` park plus an explicit operator requeue" in text
+    )
+    assert "is charged only when the claim evidence" in text
+    for content_failure in ("partial review", "unparseable output", "discarded unread"):
+        assert content_failure in text, content_failure
+    assert "surfaces as `agent_block` with the cause in `details`" in text
+    assert '"diff too large for one foreground round"' in text
+    assert 'NOT "restore the backend"' in text
+    assert "600 s" in text
+
+
+def test_review_not_converging_entry_releases_per_stop() -> None:
+    entry = _entry_for("review_not_converging")
+    assert SETTLE_COMMAND in " ".join(entry.text.split())
+    assert any(c.startswith(SETTLE_COMMAND) for c in entry.commands)
+    text = " ".join(entry.text.split())
+    assert "A `no_progress` stop is terminal until a commit lands" in text
+    assert "only re-emits it" in text
+    assert "--regress" in text
+
+
+def test_review_operator_actionable_entry_names_the_settle_flags_and_na_payload() -> (
+    None
+):
+    entry = _entry_for("review_operator_actionable")
+    settle = [c for c in entry.commands if c.startswith(SETTLE_COMMAND)]
+    assert settle, entry.text
+    for flag in ("--ticket-id", "-c", "--reason"):
+        assert flag in settle[0].split(), settle[0]
+    assert '"file":"N/A"' in entry.text
+    assert REQUEUE_COMMAND in entry.commands
+
+
+def test_review_blocked_entry_says_raising_max_cycles_releases_a_clean_cap_stop() -> (
+    None
+):
+    text = " ".join(_entry_for("review_blocked").text.split())
+    assert "raises `review.max_cycles`" in text
+    assert "re-reviews the same tip under the new cap" in text
+    assert REQUEUE_COMMAND in _entry_for("review_blocked").commands
+
+
+def test_catch_all_row_names_the_unread_findings_agent_block() -> None:
+    entry = next(e for e in _entries() if e.prefix == CATCH_ALL_PREFIX)
+    text = " ".join(entry.text.split())
+    assert "`agent_block`" in text
+    assert "`unread_findings:`" in text
+    assert "`failed_role:`" in text
+    assert "same-tip `cw dev-queue requeue <T> -c <C>`" in text
+    assert "NOT `--regress`" in text
+    assert REQUEUE_COMMAND in entry.commands
+
+
+def test_clean_mode_dispatch_sentences_are_in_command_semantics() -> None:
+    semantics = " ".join(_section(_content(), SEMANTICS_HEADING).split())
+    assert (
+        "refuses with a dispatch message instead of falling back to `blocking`"
+        in semantics
+    )
+    assert "`cw dev-queue add <T> -c <C> --lane <lane>`" in semantics
+    assert "`cw review converge operator-settle`" in semantics
+    assert '`file: "N/A"`' in semantics
+
+
 def test_version_pin_well_formed_and_not_ahead() -> None:
     section = _section(_content(), VERSION_HEADING)
     pins = _VERSION_RE.findall(section)
