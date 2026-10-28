@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`cw review history` replays a ticket's review rounds (#2790).** A read-only view of one ticket's review, round by round: reviewers, reviewed sha, new findings with their MUST_FIX/SHOULD_FIX split, fixes dispatched, findings settled with their rationale, and wall time, plus the stop, releases, row disposition records and voided findings. It reads only existing records (the converge ledger and its per-round verdict files, else the session's `AUTO_DEV_RESULT`), never fails on bad data (every degradation is a note), and shows an event only when it can be tied to the row, since ticket ids are unique per client, not globally. `--json` emits the new `review-history` schema (`cw schema show review-history`).
+
 ## [1.79.0] - 2026-10-28
 
 ### Added

@@ -1567,6 +1567,89 @@ Three same-cause parks at one sha are the cap; the next failure escalates to an
 or fails on content on a healthy backend, surfaces as `agent_block`, not as
 this reason.
 
+### Reading a review's history (cw review history, #2790)
+
+`cw review history <T> -c <C>` replays one ticket's review round by round. Read
+it before adjudicating a `review_not_converging` park, or whenever a review ran
+long and you want to know where the rounds went. It is read-only: no state
+lock, no subprocess, no event recorded (the event inbox is read under its own
+short leaf lock, as every inbox reader does). `-c` may be omitted when only one
+client queues the ticket.
+
+The text form prints a header (`state`, `mode`, `rounds`, `converged`,
+`final_clean_sha`, `stop`, `new_accepted_by_round`, `fix_cycles`,
+`confirm_backend`, `deferred`, `confirm_failures`, `sources`), one indented
+block per round (reviewers, reviewed sha, new findings with their
+MUST_FIX/SHOULD_FIX split, fixes dispatched, findings settled that round with
+their rationale, wall time), then `settled_other` (operator settles, and any
+settled entry whose round has no block), `dispositions`, `voided`, `releases`
+and `notes`. Every key is printed, `-` when absent; nothing is truncated.
+
+Reading the trend: `new_accepted_by_round` falling toward 0 is a review that is
+converging. A series that stalls or comes back up, together with the ledger's
+own `stop` (`oscillation`, `no_progress`, `max_cycles`, `operator_action`), is
+a review that is not; the view adds no classifier of its own. "Fixes
+dispatched" is what the ledger records: a fix cycle was dispatched for those
+findings, not that each fix was verified. Wall time runs from the previous
+round's record to this one, so it includes the fix cycle in between; round 1
+runs from this row's own `s3_review_started` event, or is not recorded.
+
+Sources, in precedence order: the converge ledger in the ticket's worktree
+(`--worktree PATH` overrides the lookup of the row's worktree, its bound
+session's worktree, then the derived path), with each round's verdict file for
+the severity split; when the ledger is absent, unreadable or owned by another
+ticket (for example a worktree GC already removed it), the newest session
+`AUTO_DEV_RESULT` of the row (its `review` block and `review_round_<n>` friction
+lines); the row's `finding_dispositions` are always listed on their own. A
+blocking-mode review records no per-round data, so it shows one `initial` entry
+from its cycle-0 counts and a `rounds_unrecorded` note.
+
+Events are shown only when they can be tied to this row. A ticket id is unique
+per client, not globally, and the event inbox is global, so a
+`stage.entered` event is used only when its `session_id` names one of the row's
+sessions, and a `review.finding_voided` event only when its finding is already
+in the row's ledger `settled` or `finding_dispositions` (and, for a
+voided-suppression rationale, that rationale names the event's operator
+comment). Its `file`, `summary` and `severity` are then taken from the row's
+record, not the event. Every other event of the ticket id appears only as a
+count in `notes`.
+
+`--json` emits the `ReviewHistory` model (`cw schema show review-history`):
+`schema_version`, `ticket_id`, `client`, `row_status` (the row's status
+value), `row_stage` (the row's stage value), `in_flight` (ledger `in_progress`
+or `awaiting_confirm`; with no usable ledger, a RUNNING row at the REVIEW
+stage), `rounds` (each with `round`, `kind` of `loop`/`confirm`/`initial`,
+`source` of `ledger`/`sentinel_friction`/`sentinel_cycle0`, `backend`,
+`reviewed_sha`, `roster`, the ledger counts, `settled_total`,
+`new_by_severity` (null when no verdict file was recorded or it disagrees with
+the ledger), `fix_dispatched`, `clean`, `recorded_at`, `wall_seconds`, and
+`settled`), `summary` (`convergence_mode`: `clean` with a usable ledger or a
+clean sentinel, `blocking` with no usable ledger and a sentinel `review` block
+that is blocking or omits the mode, `unknown` with neither; `rounds_run`,
+`converged`, `final_clean_sha`, `ledger_status`, `stop_reason`,
+`stop_identities` as `<severity>::<file>::<summary>` keys, `fix_cycles_used`,
+`max_cycles`, `confirm_backend`, `new_accepted_series`, `deferred`,
+`releases` (`at`, `round` = rounds recorded at the release, `reason`, `cause`,
+`sha`), and `confirm_failures`: every confirm-backend outage the ledger ever
+recorded, null when no ledger was read), `settled`, `dispositions` (`key`,
+`file`, verbatim `summary`, `outcome` of `ACCEPTED`/`REJECTED`/`REVERSED`,
+`rationale`, `actor`, `recorded_at`, `reviewed_sha`, `""` meaning not
+recorded), `voided` (`severity`, `file`, `summary`, `original_rationale`,
+`voided_at`, `operator_comment_id`, `event_at`), `sources` (the sources that
+contributed, each once, in the order `ledger`, `verdict_files`, `sentinel`,
+`row_dispositions`, `events`; `[]` means nothing was readable) and `notes`
+(every degradation and every unattributed event count). Settled placement:
+top-level `settled` lists every ledger entry once, in ledger order; a round's
+`settled` lists only the adjudication-origin entries of that round (an
+operator settle carries the number of rounds recorded when it was made, not a
+round that settled it); `summary.deferred` is the `defer` subset of the
+top-level `settled`. Null means the source holding that value was not read or
+does not record it. Adding a field is allowed; renaming or removing one bumps
+`schema_version`.
+
+There is no `--watch`: nothing emits an event per recorded round yet, so
+re-run the command to see new rounds.
+
 ### Spec-driven subagent escape hatch
 
 When the pipeline bounces on an intricate cross-module ticket (repeated
@@ -2238,6 +2321,7 @@ state.
 - `Bash(cw event tail:*)`
 - `Bash(cw orchestrate watch:*)`
 - `Bash(cw review dispositions:*)`
+- `Bash(cw review history:*)`
 - `Bash(cw lane ls:*)`
 - `Bash(cw config show:*)`
 - `Bash(cw config concurrency get:*)`
