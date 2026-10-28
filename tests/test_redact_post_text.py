@@ -234,6 +234,19 @@ def test_main_unset_home_falls_back_to_tilde_expansion(
     assert out == "<home>/f"
 
 
+def test_main_unresolvable_home_keeps_the_user_home_patterns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _no_home(_self: Path) -> Path:
+        message = "Could not determine home directory."
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(Path, "expanduser", _no_home)
+    code, out = _main("/home/alice/x abc", [], environ={})
+    assert code == 0
+    assert out == "<home>/x abc"
+
+
 def test_main_unknown_flag_is_a_usage_error() -> None:
     with pytest.raises(SystemExit) as excinfo:
         _main("", ["--bogus"])
