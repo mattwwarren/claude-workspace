@@ -47,6 +47,7 @@ from cw.review_convergence import (
     next_action,
     operator_settle,
     operator_settle_event_payload,
+    reconcile_for_init,
     reconcile_ledger_for_init,
     record_confirm_failure,
     record_round,
@@ -70,6 +71,7 @@ from tests._codex_review_helpers import _task
 from tests._review_convergence_helpers import (
     DEFAULT_SHA,
     FORK_POINT,
+    LOOP_BACKEND,
     NOW,
     ROSTER,
     TICKET_ID,
@@ -1812,6 +1814,95 @@ class TestHistoryRewritten:
     def test_git_that_cannot_run_raises_cw_error(self, tmp_path: Path) -> None:
         with pytest.raises(CwError, match="could not run"):
             history_rewritten(self._ledger_at("a" * 40), tmp_path / "gone", "HEAD")
+
+
+class TestReconcileForInitEntryPoint:
+    """``reconcile_for_init``, the one reconcile both review lanes call (#2791)."""
+
+    @staticmethod
+    def _reconcile(
+        existing: ConvergenceLedger | None,
+        worktree: Path,
+        *,
+        head: str,
+        ticket_id: str = TICKET_ID,
+        fork_point: str = FORK_POINT,
+        max_cycles: int = 5,
+    ) -> Reconciled:
+        return reconcile_for_init(
+            existing,
+            worktree=worktree,
+            ticket_id=ticket_id,
+            fork_point=fork_point,
+            head_sha=head,
+            max_cycles=max_cycles,
+            loop_backend=LOOP_BACKEND,
+            confirm=resolve_confirm_backend("none", LOOP_BACKEND),
+            now=LATER,
+        )
+
+    def test_no_ledger_starts_fresh_from_the_arguments(self, tmp_path: Path) -> None:
+        result = self._reconcile(None, tmp_path, head="s1", max_cycles=5)
+        assert result.ledger == fresh_ledger(max_cycles=5, checkpoint_3a_sha="s1")
+        assert (result.reset_reason, result.released) == (None, None)
+
+    @pytest.mark.parametrize(
+        ("ticket_id", "fork_point", "reason"),
+        [
+            ("T-2", FORK_POINT, "ticket_mismatch"),
+            (TICKET_ID, "other", "fork_point_mismatch"),
+        ],
+    )
+    def test_a_foreign_ledger_is_reset_without_consulting_git(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        ticket_id: str,
+        fork_point: str,
+        reason: str,
+    ) -> None:
+        def _unexpected(*_args: object, **_kwargs: object) -> bool:
+            pytest.fail("history_rewritten must not run for a foreign ledger")
+
+        monkeypatch.setattr(
+            "cw.review_convergence._release.history_rewritten", _unexpected
+        )
+        existing = ledger_with_rounds(_distinct(0, 1), shas=["s1"])
+        result = self._reconcile(
+            existing,
+            tmp_path / "not-a-repo",
+            head="s1",
+            ticket_id=ticket_id,
+            fork_point=fork_point,
+        )
+        assert result.reset_reason == reason
+        assert result.ledger.rounds == []
+        assert result.ledger.ticket_id == ticket_id
+        assert result.ledger.fork_point == fork_point
+
+    def test_an_owned_ledger_with_rewritten_history_is_reset(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("init-rewritten")
+        commit_tracked_file(repo, "a.py")
+        dropped = git_in(repo, "rev-parse", "HEAD")
+        git_in(repo, "reset", "--hard", "HEAD~1")
+        head = git_in(repo, "rev-parse", "HEAD")
+        existing = ledger_with_rounds(_distinct(0, 1), shas=[dropped])
+        result = self._reconcile(existing, repo, head=head)
+        assert result.reset_reason == "history_rewritten"
+        assert result.ledger.rounds == []
+        assert result.released is None
+
+    def test_an_owned_ledger_is_resumed_with_the_refreshed_cap(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("init-resumed")
+        base = git_in(repo, "rev-parse", "HEAD")
+        existing = ledger_with_rounds(_distinct(0, 1), shas=[base])
+        result = self._reconcile(existing, repo, head=base, max_cycles=11)
+        assert result.ledger == existing.model_copy(update={"max_cycles": 11})
+        assert (result.reset_reason, result.released) == (None, None)
 
 
 class TestWorktreeState:

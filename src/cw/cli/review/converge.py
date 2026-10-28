@@ -46,11 +46,9 @@ from cw.review_convergence import (
     confirm_blocker_fragment,
     consecutive_confirm_failures,
     frozen_counts_from_verdict,
-    history_rewritten,
     load_ledger,
-    new_ledger,
     one_line,
-    reconcile_ledger_for_init,
+    reconcile_for_init,
     record_confirm_failure,
     record_round,
     render_history_comment,
@@ -418,31 +416,15 @@ def converge_init(
         if no_confirm
         else resolve_confirm_backend(config.confirm_backend_configured, loop_backend)
     )
-    fresh = new_ledger(
+    reconciled = reconcile_for_init(
+        existing,
+        worktree=worktree,
         ticket_id=ticket_id,
         fork_point=fork_point,
-        checkpoint_3a_sha=reviewed_sha,
+        head_sha=reviewed_sha,
         max_cycles=config.max_cycles,
         loop_backend=loop_backend,
         confirm=confirm,
-    )
-    ownership_matches = (
-        existing is not None
-        and existing.ticket_id == ticket_id
-        and existing.fork_point == fork_point
-    )
-    reconciled = reconcile_ledger_for_init(
-        existing,
-        fresh=fresh,
-        ticket_id=ticket_id,
-        fork_point=fork_point,
-        history_rewritten=(
-            history_rewritten(existing, worktree, reviewed_sha)
-            if ownership_matches
-            else False
-        ),
-        head_sha=reviewed_sha,
-        max_cycles=config.max_cycles,
         now=_utc_now_iso(),
     )
     if reconciled.ledger != existing:

@@ -1,8 +1,11 @@
 """Reconciling a persisted ledger with the world at ``init`` time (#2787).
 
 ``converge init`` runs at the start of every REVIEW session, including the
-session a requeue resumes after a stop. :func:`reconcile_ledger_for_init`
-decides whether the existing ledger is discarded (it belongs to another
+session a requeue resumes after a stop. :func:`reconcile_for_init` is the one
+entry point both lanes call (``cw review converge init`` and the codex-lane
+clean-mode gate): it builds the fresh ledger, evaluates the ownership guard and
+the git history check, then hands off to :func:`reconcile_ledger_for_init`,
+which decides whether the existing ledger is discarded (it belongs to another
 ticket, fork point or rewritten branch), reopened as a new epoch (a stop with
 new commits), released without a commit (the three operator-resolvable stops),
 kept terminal (every other stop), or simply resumed.
@@ -26,6 +29,7 @@ from typing import TYPE_CHECKING
 
 from cw._git import git_output, run_git
 from cw.exceptions import CwError
+from cw.review_convergence._engine import new_ledger
 from cw.review_convergence._models import (
     LEDGER_STATUS_CONVERGED,
     LEDGER_STATUS_IN_PROGRESS,
@@ -41,6 +45,7 @@ from cw.review_convergence._tip import demote_for_rereview
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from cw.review_convergence._backend import ResolvedBackend
     from cw.review_convergence._models import ConvergenceLedger, ReleaseCause
 
 _UNKNOWN_STOP = "unknown"
@@ -234,3 +239,50 @@ def reconcile_ledger_for_init(
     if ledger.status == LEDGER_STATUS_CONVERGED:
         return Reconciled(demote_for_rereview(ledger), None, None)
     return Reconciled(ledger, None, None)
+
+
+def reconcile_for_init(
+    existing: ConvergenceLedger | None,
+    *,
+    worktree: Path,
+    ticket_id: str,
+    fork_point: str,
+    head_sha: str,
+    max_cycles: int,
+    loop_backend: str,
+    confirm: ResolvedBackend,
+    now: str,
+) -> Reconciled:
+    """The whole ``converge init`` reconcile, shared by both review lanes (#2791).
+
+    Builds the *fresh* ledger from ``ticket_id`` / ``fork_point`` / ``head_sha``
+    (the checkpoint) / ``max_cycles`` / ``loop_backend`` / ``confirm``, then
+    consults git (:func:`history_rewritten`) only when *existing* already
+    belongs to this ticket and fork point, since a foreign ledger is replaced
+    whatever its history. :func:`reconcile_ledger_for_init` does the rest.
+    """
+    fresh = new_ledger(
+        ticket_id=ticket_id,
+        fork_point=fork_point,
+        checkpoint_3a_sha=head_sha,
+        max_cycles=max_cycles,
+        loop_backend=loop_backend,
+        confirm=confirm,
+    )
+    owned = (
+        existing is not None
+        and existing.ticket_id == ticket_id
+        and existing.fork_point == fork_point
+    )
+    return reconcile_ledger_for_init(
+        existing,
+        fresh=fresh,
+        ticket_id=ticket_id,
+        fork_point=fork_point,
+        history_rewritten=(
+            history_rewritten(existing, worktree, head_sha) if owned else False
+        ),
+        head_sha=head_sha,
+        max_cycles=max_cycles,
+        now=now,
+    )

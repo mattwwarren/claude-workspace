@@ -78,6 +78,7 @@ EXPECTED_EXPORTS = {
     "one_line",
     "operator_settle",
     "operator_settle_event_payload",
+    "reconcile_for_init",
     "reconcile_ledger_for_init",
     "record_confirm_failure",
     "record_round",

@@ -79,11 +79,9 @@ from cw.review_convergence import (
     friction_lines,
     from_verdict,
     frozen_counts_from_verdict,
-    history_rewritten,
     load_ledger,
-    new_ledger,
     one_line,
-    reconcile_ledger_for_init,
+    reconcile_for_init,
     record_confirm_failure,
     record_round,
     resolve_confirm_backend,
@@ -216,29 +214,15 @@ def _load_reconciled_ledger(gate: _Gate, head: str) -> ConvergenceLedger:
     client = gate.client
     max_cycles = client.review.effective_max_cycles
     resolved = _resolved_confirm(client)
-    fresh = new_ledger(
+    reconciled = reconcile_for_init(
+        existing,
+        worktree=gate.worktree,
         ticket_id=gate.task.ticket_id,
         fork_point=fork_point,
-        checkpoint_3a_sha=head,
+        head_sha=head,
         max_cycles=max_cycles,
         loop_backend=CODEX_BACKEND,
         confirm=resolved,
-    )
-    owned = (
-        existing is not None
-        and existing.ticket_id == gate.task.ticket_id
-        and existing.fork_point == fork_point
-    )
-    reconciled = reconcile_ledger_for_init(
-        existing,
-        fresh=fresh,
-        ticket_id=gate.task.ticket_id,
-        fork_point=fork_point,
-        history_rewritten=(
-            history_rewritten(existing, gate.worktree, head) if owned else False
-        ),
-        head_sha=head,
-        max_cycles=max_cycles,
         now=_now(),
     )
     if reconciled.reset_reason is not None:

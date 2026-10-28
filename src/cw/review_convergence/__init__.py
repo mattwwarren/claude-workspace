@@ -32,7 +32,9 @@ Submodules, each importing only the ones above it:
   final-sha rule), :func:`demote_for_rereview`.
 - ``_render`` -- history comment, friction lines, stop summary, sentinel and
   blocker fragments, audit-event payload.
-- ``_release`` -- :func:`reconcile_ledger_for_init`, and the git readers
+- ``_release`` -- :func:`reconcile_for_init` (the shared ``init`` entry point,
+  which builds the fresh ledger with ``_engine``'s :func:`new_ledger`),
+  :func:`reconcile_ledger_for_init`, and the git readers
   :func:`history_rewritten` and :func:`worktree_state` (#2791).
 - ``_store`` -- atomic ledger and per-round verdict persistence.
 - ``_status`` -- :func:`next_action` and :func:`status_summary`.
@@ -110,6 +112,7 @@ from cw.review_convergence._policy import (
 )
 from cw.review_convergence._release import (
     history_rewritten,
+    reconcile_for_init,
     reconcile_ledger_for_init,
     worktree_state,
 )
@@ -198,6 +201,7 @@ __all__ = [
     "one_line",
     "operator_settle",
     "operator_settle_event_payload",
+    "reconcile_for_init",
     "reconcile_ledger_for_init",
     "record_confirm_failure",
     "record_round",
