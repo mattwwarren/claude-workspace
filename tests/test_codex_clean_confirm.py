@@ -40,9 +40,11 @@ from cw.models.client import ReviewConfig
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     ConvergenceLedger,
+    SettleTarget,
     frozen_counts_from_verdict,
     load_ledger,
     one_line,
+    operator_settle,
     round_verdict_path,
 )
 from tests._claude_review_helpers import (
@@ -52,6 +54,7 @@ from tests._claude_review_helpers import (
 )
 from tests._codex_review_helpers import _doc_json, _finding_payload, _task
 from tests._review_convergence_helpers import (
+    NOW,
     consolidated_verdict,
     fresh_ledger,
     operator_finding,
@@ -623,6 +626,42 @@ class TestResume:
         assert outcome is not None
         assert runner.roles
         _assert_converged_on_sub_must_fix(outcome, wt, severity)
+
+    def test_a_resumed_confirm_resurfacing_a_settled_finding_converges_unblocked(
+        self, wt: Path
+    ) -> None:
+        """An operator-settled MUST_FIX the confirm re-reports is not a blocker.
+
+        The engine classifies the resurfaced identity as settled and converges
+        the ledger; the result must agree with it. With no codex result on the
+        resume path, a blocked Claude result would otherwise be paired with a
+        converged ledger.
+        """
+        fixed = round_finding("MUST_FIX", _MUST_FIX_SUMMARY, file="feature.py")
+        ledger = _codex_ledger(wt, (_fork(wt), [fixed]), (_head(wt), []))
+        assert ledger.awaiting_confirm_sha == _head(wt)
+        target = SettleTarget(
+            severity="MUST_FIX", file="feature.py", summary=_MUST_FIX_SUMMARY
+        )
+        ledger, report = operator_settle(
+            ledger, [target], actor="operator", reason="false positive", now=NOW
+        )
+        assert len(report.settled) == 1
+        write_ledger(wt, ledger)
+        runner = RoleAwareClaudeRunner(_only_role("MUST_FIX", _MUST_FIX_SUMMARY))
+
+        outcome = _resume(wt, _client(wt), runner)
+
+        assert outcome is not None
+        assert runner.roles
+        assert _ledger(wt).status == "converged"
+        assert outcome.result.blocker is None
+        assert outcome.result.status == "stage_complete"
+        assert outcome.result.review.converged is True
+        assert outcome.verdict is not None
+        assert outcome.verdict.blocking is False
+        assert outcome.verdict.must_fix == []
+        assert [item.disposition for item in outcome.verdict.accepted] == ["rejected"]
 
     def test_awaiting_at_head_runs_only_the_confirm(self, wt: Path) -> None:
         write_ledger(wt, _awaiting_at(wt, _head(wt)))

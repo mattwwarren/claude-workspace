@@ -91,10 +91,12 @@ from cw.review_convergence import (
     save_round_verdict,
     sentinel_review_fragment,
     stop_summary,
+    suppress_settled,
     unread_from_verdict,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from cw.claude_review import ClaudeReviewRound, ClaudeRunner
@@ -569,6 +571,27 @@ def _record_confirm_round(
     )
 
 
+def _settled_against(
+    ledger: ConvergenceLedger,
+) -> Callable[[ReviewVerdict], ReviewVerdict]:
+    """The Claude round's ``suppress_settled`` seam for *ledger*.
+
+    The Claude-native prose runs ``converge suppress`` before
+    ``record-round``; this is the same step for the codex lane, applied before
+    the round's result is synthesized. A finding the ledger already settled
+    (adjudication or ``operator-settle``) is stamped ``rejected``/``deferred``,
+    so a confirm that only resurfaces settled findings yields a blocker-free
+    result to match the clean decision the engine records. The adjudications
+    are not needed: the stamp carries the stored outcome and rationale.
+    """
+
+    def _suppress(verdict: ReviewVerdict) -> ReviewVerdict:
+        suppressed, _adjudications = suppress_settled(ledger, verdict)
+        return suppressed
+
+    return _suppress
+
+
 def _remaining_budget(gate: _Gate) -> int | None:
     """Seconds left of the thread's single deadline (``None``: no deadline)."""
     if gate.deadline is None:
@@ -652,6 +675,7 @@ def _run_confirm(
             model=client.worker_model,
             wall_clock_budget_seconds=_remaining_budget(gate),
             session_id=f"{CONFIRM_SESSION_ID_PREFIX}{gate.sid}",
+            settled_suppression=_settled_against(ledger),
         )
     except (OSError, CwError) as exc:
         return _unavailable_outcome(

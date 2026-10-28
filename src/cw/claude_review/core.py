@@ -35,6 +35,7 @@ from cw.codex_review._context import _prepare_review_pass
 from cw.codex_review._verdict import make_codex_blocked, synthesize_codex_review_result
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
@@ -113,8 +114,14 @@ def run_claude_review(
     model: str | None,
     wall_clock_budget_seconds: int | None,
     session_id: str,
+    settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None = None,
 ) -> ClaudeReviewRound:
     """Run one full Claude review pass (no fix loop) and synthesize the result.
+
+    *settled_suppression* is forwarded to
+    :func:`synthesize_codex_review_result`: the codex-lane gate passes the
+    convergence ledger's ``suppress_settled`` so the round's result and verdict
+    agree with the ledger's settled findings. ``None`` changes nothing.
 
     A role that mutated the worktree (G4) short-circuits synthesis: the round
     is a ``CODEX_REVIEW_WORKTREE_MUTATED`` block with ``retry_eligible=False``,
@@ -168,5 +175,6 @@ def run_claude_review(
         refused_dispositions=prepared.refused_dispositions,
         pre_validation_rejected=outcome.pre_validation_rejected,
         reviewer_label=CLAUDE_REVIEWER_LABEL,
+        settled_suppression=settled_suppression,
     )
     return ClaudeReviewRound(_with_backend_prefix(result), verdict, backend_down)
