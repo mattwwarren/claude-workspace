@@ -66,10 +66,13 @@ from cw.dispatch_state import ExecutorBlockedMarker, save_executor_blocked_marke
 from cw.exceptions import CwError
 from cw.models import CODEX_BACKEND
 from cw.review_convergence import (
+    DECISION_CLEAN,
+    DECISION_STOP_CONFIRM_ESCALATED,
     LEDGER_RELATIVE_PATH,
     LEDGER_STATUS_AWAITING_CONFIRM,
     LEDGER_STATUS_CONVERGED,
     LEDGER_STATUS_STOPPED,
+    STOP_DECISIONS,
     confirm_blocker_fragment,
     friction_lines,
     from_verdict,
@@ -77,6 +80,7 @@ from cw.review_convergence import (
     history_rewritten,
     load_ledger,
     new_ledger,
+    one_line,
     reconcile_ledger_for_init,
     record_confirm_failure,
     record_round,
@@ -128,7 +132,6 @@ _CONVERGENCE_KEYS = (
 _CONFIRM_DEFER_RATIONALE = (
     "SHOULD_FIX from the Claude confirm round; non-gating on the codex lane"
 )
-_DETAIL_LIMIT = 300
 
 
 class CleanConfirmOutcome(NamedTuple):
@@ -164,13 +167,6 @@ class _Gate:
 def _now() -> str:
     """ISO-8601 UTC, the format ``cw review converge`` stamps."""
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _one_line(text: str) -> str:
-    collapsed = " ".join(text.split())
-    if len(collapsed) <= _DETAIL_LIMIT:
-        return collapsed
-    return collapsed[:_DETAIL_LIMIT] + "..."
 
 
 def _head(worktree: Path) -> str:
@@ -342,7 +338,7 @@ def _ledger_error_outcome(
     blocker = Blocker(
         stage="stage3_review",
         reason=CODEX_CONVERGENCE_LEDGER_ERROR,
-        details=f"{type(exc).__name__}: {_one_line(str(exc))}",
+        details=f"{type(exc).__name__}: {one_line(str(exc))}",
         retry_eligible=True,
     )
     return _parked(gate, base, blocker)
@@ -391,7 +387,7 @@ def _unavailable_outcome(
 ) -> CleanConfirmOutcome:
     """Claude unreachable: count the outage and park on the ledger's blocker."""
     ledger, report = record_confirm_failure(
-        ledger, cause=cause, detail=_one_line(detail), now=_now()
+        ledger, cause=cause, detail=one_line(detail), now=_now()
     )
     save_ledger(gate.ledger_path, ledger)
     gate.ledger = ledger
@@ -407,7 +403,7 @@ def _unavailable_outcome(
     gate.tokens.append(f"clean_confirm_backend_unavailable: cause={cause}")
     fragment = confirm_blocker_fragment(
         ledger,
-        escalated=report.decision == "stop_confirm_escalated",
+        escalated=report.decision == DECISION_STOP_CONFIRM_ESCALATED,
         client=gate.client.name,
     )
     fragment["details"] = f"{CLAUDE_BACKEND_DETAILS_PREFIX}{fragment['details']}"
@@ -466,11 +462,11 @@ def _record_confirm_round(
     save_ledger(gate.ledger_path, ledger)
     gate.ledger = ledger
     claude = CleanConfirmOutcome(round_.result, claude_verdict, CLAUDE_REVIEWER_LABEL)
-    if report.decision == "clean":
+    if report.decision == DECISION_CLEAN:
         return _converged_outcome(gate, base or claude)
     result = round_.result
     blocker = result.blocker
-    if blocker is not None and report.decision.startswith("stop_"):
+    if blocker is not None and report.decision in STOP_DECISIONS:
         summary = stop_summary(ledger) or {}
         hinted = blocker.model_copy(
             update={
@@ -608,7 +604,7 @@ def _gate_after_loop(
         or ledger.awaiting_confirm_sha != head
     ):
         ledger, report = _record_loop_round(gate, ledger, verdict)
-        if report.decision == "clean":
+        if report.decision == DECISION_CLEAN:
             return _converged_outcome(gate, base)
     return _run_confirm(gate, ledger, base)
 

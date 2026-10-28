@@ -37,6 +37,18 @@ from cw.review_markers import escape_angle_brackets_in_json, neutralise_marker_s
 if TYPE_CHECKING:
     from cw.review_convergence._models import ConvergenceLedger, SettledEntry
 
+#: Longest text :func:`one_line` returns before the ellipsis.
+ONE_LINE_LIMIT = 300
+
+
+def one_line(text: str, limit: int = ONE_LINE_LIMIT) -> str:
+    """*text* with whitespace collapsed to single spaces, capped at *limit*."""
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[:limit] + "..."
+
+
 _REQUEUE = "cw dev-queue requeue <T> -c <C>"
 _REGRESS_REQUEUE = f"{_REQUEUE} --stage impl --regress"
 _TERMINAL_HINT = (

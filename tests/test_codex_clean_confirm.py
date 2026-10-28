@@ -20,7 +20,6 @@ from cw.codex_clean_confirm import (
     CODEX_REVIEWER_LABEL,
     CleanConfirmOutcome,
     _decided,
-    _one_line,
     apply_clean_confirm,
     resume_pending_confirm,
 )
@@ -40,6 +39,7 @@ from cw.review_convergence import (
     ConvergenceLedger,
     frozen_counts_from_verdict,
     load_ledger,
+    one_line,
     round_verdict_path,
 )
 from tests._claude_review_helpers import (
@@ -812,10 +812,12 @@ def test_both_new_reasons_are_registered() -> None:
 
 
 def test_a_long_failure_detail_is_capped_to_one_line() -> None:
-    capped = _one_line("word\n" * 200)
+    capped = one_line("word\n" * 200)
     assert "\n" not in capped
     assert capped.endswith("...")
     assert len(capped) == 303
+    assert one_line("a\n  b", limit=3) == "a b"
+    assert one_line("abcdef", limit=3) == "abc..."
 
 
 def test_an_undecided_must_fix_is_recorded_as_a_fix() -> None:

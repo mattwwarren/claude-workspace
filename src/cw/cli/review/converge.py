@@ -37,6 +37,7 @@ from cw.exceptions import CwError
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
 from cw.models.client import DEFAULT_BLOCKING_MAX_CYCLES, DEFAULT_CLEAN_MAX_CYCLES
 from cw.review_convergence import (
+    DECISION_STOP_CONFIRM_ESCALATED,
     LEDGER_RELATIVE_PATH,
     LEDGER_STATUS_STOPPED,
     ResolvedBackend,
@@ -48,6 +49,7 @@ from cw.review_convergence import (
     history_rewritten,
     load_ledger,
     new_ledger,
+    one_line,
     reconcile_ledger_for_init,
     record_confirm_failure,
     record_round,
@@ -61,7 +63,6 @@ from cw.review_convergence import (
     stop_summary,
     suppress_settled,
 )
-from cw.review_convergence._models import DECISION_STOP_CONFIRM_ESCALATED
 from cw.review_findings import ReviewVerdict
 
 if TYPE_CHECKING:
@@ -79,7 +80,6 @@ SOURCE_CONTEXT = "context"
 _REVIEW_CONTEXT_SCHEMA = 15
 _DEFAULT_LOOP_BACKEND = "claude-native"
 _PREP_PR_LEDGER_RELATIVE_PATH = Path(".cw/prep-pr-convergence.json")
-_REPORT_REASON_LIMIT = 300
 
 DISPATCH_REFUSAL = (
     "clean-mode review runs only on a ticket dispatched through cw dev-queue "
@@ -132,13 +132,6 @@ def emit_json(body: object) -> None:
     click.echo(json.dumps(body, indent=2))
 
 
-def _one_line(text: str) -> str:
-    collapsed = " ".join(text.split())
-    if len(collapsed) <= _REPORT_REASON_LIMIT:
-        return collapsed
-    return collapsed[:_REPORT_REASON_LIMIT] + "..."
-
-
 def load_ledger_or_none(path: Path) -> ConvergenceLedger | None:
     """The ledger at *path*, ``None`` when absent, a ``CwError`` when unreadable.
 
@@ -152,7 +145,7 @@ def load_ledger_or_none(path: Path) -> ConvergenceLedger | None:
     except (OSError, ValueError) as exc:
         msg = (
             f"cannot read the convergence ledger at {path}: "
-            f"{type(exc).__name__}: {_one_line(str(exc))}"
+            f"{type(exc).__name__}: {one_line(str(exc))}"
         )
         raise CwError(msg) from exc
 
@@ -175,7 +168,7 @@ def git_stdout(argv: Sequence[str], worktree: Path) -> str:
         msg = f"{command} could not run in {worktree}: {exc}"
         raise CwError(msg) from exc
     if result.returncode != 0:
-        msg = f"{command} failed in {worktree}: {_one_line(result.stderr)}"
+        msg = f"{command} failed in {worktree}: {one_line(result.stderr)}"
         raise CwError(msg)
     return result.stdout.strip()
 

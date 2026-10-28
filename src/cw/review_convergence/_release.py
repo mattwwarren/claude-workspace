@@ -34,6 +34,7 @@ from cw.review_convergence._models import (
     StopRelease,
 )
 from cw.review_convergence._policy import release_cause
+from cw.review_convergence._render import one_line
 from cw.review_convergence._tip import demote_for_rereview
 
 if TYPE_CHECKING:
@@ -44,14 +45,6 @@ if TYPE_CHECKING:
 _UNKNOWN_STOP = "unknown"
 #: ``git merge-base --is-ancestor`` exit for the confirmed "not an ancestor".
 _NOT_ANCESTOR_EXIT = 1
-_STDERR_LIMIT = 300
-
-
-def _one_line(text: str) -> str:
-    collapsed = " ".join(text.split())
-    if len(collapsed) <= _STDERR_LIMIT:
-        return collapsed
-    return collapsed[:_STDERR_LIMIT] + "..."
 
 
 def history_rewritten(
@@ -85,7 +78,7 @@ def history_rewritten(
         return True
     msg = (
         f"git merge-base --is-ancestor failed in {worktree} with exit "
-        f"{result.returncode}: {_one_line(result.stderr)}"
+        f"{result.returncode}: {one_line(result.stderr)}"
     )
     raise CwError(msg)
 
