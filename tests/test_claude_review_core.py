@@ -7,6 +7,7 @@ envelope built from ``tests/_claude_review_helpers``.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import pytest
@@ -24,12 +25,18 @@ from cw.codex_review import (
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEW_WORKTREE_MUTATED,
 )
+from cw.codex_review._context._agent_spec import _REVIEWER_ROLE_AGENT_FILES
+from cw.gh import AGENT_COMMENT_MARKER
+from cw.local_runner import TICKET_BODY_KEY, TICKET_TITLE_KEY
+from cw.models import CONTEXT_JSON_RELATIVE_PATH
 from tests._claude_review_helpers import (
     RoleAwareClaudeRunner as _RoleAwareRunner,
 )
 from tests._claude_review_helpers import error_envelope, review_envelope
-from tests._codex_review_helpers import _doc_json, _finding_payload, _task
+from tests._codex_review_helpers import _doc_json, _finding_payload, _task, _write
 from tests.conftest import git_in
+from tests.test_codex_review_context import _disposition_ledger
+from tests.test_review_convergence_docs import CONFIRM_PROMPT_PAYLOAD
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -229,3 +236,112 @@ class TestRunClaudeReview:
         )
         # Left as found for the operator to inspect.
         assert (wt / "hook.txt").exists()
+
+
+#: The ``CONFIRM_PROMPT_PAYLOAD`` items (the operator-facing egress disclosure),
+#: each with the markers seeded for it below. The test rebuilds the constant from
+#: these keys, so an item added to or reworded in the disclosure fails here until
+#: this table and the prompt builder agree with it.
+_PLAN_ITEM = "the approved plan (`.cw/plan.md`)"
+_TICKET_ITEM = "the ticket title and body"
+_COMMENTS_ITEM = (
+    "the ticket's comments (every comment the pipeline did not post itself, "
+    "fetched live from the tracker)"
+)
+_DISPOSITIONS_ITEM = "the finding dispositions an operator already settled"
+_CONFIG_ITEM = (
+    "the repo's review configuration (reviewer agent specs, "
+    "`.claude/review-extras.md`, the `CLAUDE.md` quality gates and ruff settings)"
+)
+_PAYLOAD_ITEMS = (
+    _PLAN_ITEM,
+    _TICKET_ITEM,
+    _COMMENTS_ITEM,
+    _DISPOSITIONS_ITEM,
+    _CONFIG_ITEM,
+)
+_PAYLOAD_MARKERS = {
+    _PLAN_ITEM: ("PLAN-MARKER-7f3a",),
+    _TICKET_ITEM: ("TICKET-TITLE-MARKER-7f3a", "TICKET-BODY-MARKER-7f3a"),
+    _COMMENTS_ITEM: ("OPERATOR-COMMENT-MARKER-7f3a",),
+    _DISPOSITIONS_ITEM: ("SETTLED-RATIONALE-MARKER-7f3a",),
+    _CONFIG_ITEM: (
+        "REVIEW-EXTRAS-MARKER-7f3a",
+        "QUALITY-GATES-MARKER-7f3a",
+        "RUFF-IGNORE-MARKER-ZZ9",
+    ),
+}
+_PIPELINE_COMMENT_MARKER = "PIPELINE-COMMENT-MARKER-7f3a"
+
+
+class TestConfirmPromptPayload:
+    """#2791: ``CONFIRM_PROMPT_PAYLOAD`` matches what the Claude prompt carries."""
+
+    def test_the_disclosed_items_are_exactly_what_the_role_prompts_carry(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert (
+            ", ".join(_PAYLOAD_ITEMS[:-1]) + ", and " + _PAYLOAD_ITEMS[-1]
+            == CONFIRM_PROMPT_PAYLOAD
+        )
+        assert set(_PAYLOAD_MARKERS) == set(_PAYLOAD_ITEMS)
+        _write(wt / ".cw" / "plan.md", "# Plan\nPLAN-MARKER-7f3a\n")
+        _write(
+            wt / CONTEXT_JSON_RELATIVE_PATH,
+            json.dumps(
+                {
+                    TICKET_TITLE_KEY: "TICKET-TITLE-MARKER-7f3a",
+                    TICKET_BODY_KEY: "TICKET-BODY-MARKER-7f3a",
+                }
+            ),
+        )
+        _write(
+            wt / ".claude" / "project-config.yaml",
+            "tracking:\n  primary:\n    system: github-issues\n",
+        )
+        _write(wt / ".claude" / "review-extras.md", "REVIEW-EXTRAS-MARKER-7f3a\n")
+        _write(wt / "CLAUDE.md", "## Quality Gates\nQUALITY-GATES-MARKER-7f3a\n")
+        _write(
+            wt / "pyproject.toml",
+            '[tool.ruff.lint]\nignore = ["RUFF-IGNORE-MARKER-ZZ9"]\n',
+        )
+        for filename in _REVIEWER_ROLE_AGENT_FILES.values():
+            _write(wt / ".claude" / "agents" / filename, f"AGENT-SPEC-{filename}\n")
+        monkeypatch.setattr(
+            "cw.codex_review._context.core.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {
+                    "author": {"login": "operator"},
+                    "body": "OPERATOR-COMMENT-MARKER-7f3a",
+                },
+                {
+                    "author": {"login": "operator"},
+                    "body": f"{_PIPELINE_COMMENT_MARKER}\n{AGENT_COMMENT_MARKER}",
+                },
+            ],
+        )
+        task = _task().model_copy(
+            update={
+                "finding_dispositions": _disposition_ledger(
+                    rationale="SETTLED-RATIONALE-MARKER-7f3a"
+                )
+            }
+        )
+        runner = _RoleAwareRunner(_clean)
+        run_claude_review(
+            runner=runner,
+            task=task,
+            worktree=wt,
+            default_branch="main",
+            base_ref=None,
+            model=None,
+            wall_clock_budget_seconds=None,
+            session_id="confirm-T-1",
+        )
+        assert runner.prompts
+        for role, prompt in zip(runner.roles, runner.prompts, strict=True):
+            for markers in _PAYLOAD_MARKERS.values():
+                for marker in markers:
+                    assert marker in prompt, (role, marker)
+            assert f"AGENT-SPEC-{_REVIEWER_ROLE_AGENT_FILES[role]}" in prompt
+            assert _PIPELINE_COMMENT_MARKER not in prompt
