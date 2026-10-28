@@ -90,6 +90,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from cw.models import ClientConfig, OrchestratorEvent, Session, TicketTask
+    from tests._review_history_helpers import LedgerFixture
 
 _RUNBOOK = Path(__file__).resolve().parent.parent / "docs" / "dispatch-runbook.md"
 _STAGE_NOTE = (
@@ -965,8 +966,13 @@ def test_friction_line_parser() -> None:
     )
 
 
-def test_friction_lines_round_trip_through_the_parser() -> None:
-    ledger = fixture_stopped().ledger
+@pytest.mark.parametrize(
+    "build", [fixture_converged, fixture_stopped], ids=["converged", "stopped"]
+)
+def test_friction_lines_round_trip_through_the_parser(
+    build: Callable[[], LedgerFixture],
+) -> None:
+    ledger = build().ledger
 
     views = _parse_friction_lines(friction_lines(ledger))
 
@@ -984,6 +990,19 @@ def test_friction_lines_round_trip_through_the_parser() -> None:
         )
         for r in ledger.rounds
     ]
+
+
+def test_friction_round_trip_parses_the_confirm_round_as_confirm() -> None:
+    ledger = fixture_converged().ledger
+    confirm = ledger.rounds[-1]
+    assert confirm.kind == "confirm"
+
+    views = _parse_friction_lines(friction_lines(ledger))
+
+    assert [(v.round, v.kind, v.backend) for v in views if v.kind == "confirm"] == [
+        (confirm.round, "confirm", "codex")
+    ]
+    assert [v.kind for v in views[:-1]] == ["loop"] * (len(views) - 1)
 
 
 def test_sentinel_review_block_maps_to_the_summary(tmp_path: Path) -> None:
