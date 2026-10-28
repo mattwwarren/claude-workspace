@@ -138,6 +138,14 @@ _ASSIGNED_VALUE = r"""(?:"[^"]*"|'[^']*'|\S+)"""
 _IDENT_START = r"(?<![\w-])[\w-]*"
 _IDENT_SUFFIX_MAX = 128
 _IDENT_SUFFIX = rf"[\w-]{{0,{_IDENT_SUFFIX_MAX}}}"
+# The credential keywords shared by the `=`/`:` assignment form and the
+# space-separated flag form, defined once so the two cannot drift. `token`,
+# `authorization` and `cookie` have their own assignment patterns (they take a
+# scheme word or a whole header line) and join the keywords only for the flag form.
+_CREDENTIAL_KEYWORDS = (
+    r"password|passwd|passphrase|secret|credential|bearer|api[_-]?key|[_-]key"
+)
+_FLAG_KEYWORDS = rf"{_CREDENTIAL_KEYWORDS}|token|authorization|cookie"
 
 # Shapes beyond cw._text, for a public and irreversible sink: a review finding
 # often quotes the very secret it flags. Over-redaction is tolerated. These run
@@ -182,7 +190,7 @@ _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
         rf"(?:(?:Basic|Bearer|Token)\s+)?{_ASSIGNED_VALUE}"
     ),
     re.compile(
-        rf"(?i)[\"']?{_IDENT_START}(?:password|passwd|secret|api[_-]?key|[_-]key)"
+        rf"(?i)[\"']?{_IDENT_START}(?:{_CREDENTIAL_KEYWORDS})"
         rf"{_IDENT_SUFFIX}[\"']?\s*[:=]\s*{_ASSIGNED_VALUE}"
     ),
     # A space-separated flag: `--password hunter2`, `--token abc`, `-api-key k`. The
@@ -192,8 +200,7 @@ _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     # with "-" (`--token --verbose` keeps `--verbose`). The identifier suffix cap
     # is shared with the patterns above, so a run of hits stays linear.
     re.compile(
-        rf"(?i)(?<![\w-])-{{1,2}}[\w-]*"
-        r"(?:password|passwd|secret|api[_-]?key|[_-]key|token|authorization|cookie)"
+        rf"(?i)(?<![\w-])-{{1,2}}[\w-]*(?:{_FLAG_KEYWORDS})"
         rf"{_IDENT_SUFFIX}[ \t]+(?!-){_ASSIGNED_VALUE}"
     ),
     # `Cookie: a=1; b=2` / `Set-Cookie: sid=...; Path=/`: a header value runs to

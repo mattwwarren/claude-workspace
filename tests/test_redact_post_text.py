@@ -438,6 +438,11 @@ _EXTRA_SHAPES = (
         None,
     ),
     ("single-quoted-multi-word", "secret = 'hunter2 two'", "<redacted>", None),
+    ("keyword-passphrase", "passphrase=hunter2", "<redacted>", None),
+    ("keyword-env-passphrase", "GPG_PASSPHRASE=hunter2", "<redacted>", None),
+    ("keyword-credential", "credential: hunter2", "<redacted>", None),
+    ("keyword-bearer", "bearer=hunter2", "<redacted>", None),
+    ("flag-passphrase-space", "--passphrase hunter2", "<redacted>", None),
     ("flag-password-space", "--password hunter2", "<redacted>", None),
     ("flag-token-space", "--token abc123", "<redacted>", None),
     ("flag-password-equals", "--password=hunter2", "<redacted>", None),
@@ -617,6 +622,9 @@ def test_long_keyword_run_redacts_in_bounded_time(keyword: str) -> None:
 _FLAG_NAMES = (
     "password",
     "passwd",
+    "passphrase",
+    "credential",
+    "bearer",
     "secret",
     "client-secret",
     "api-key",
@@ -670,6 +678,10 @@ def test_secret_flag_value_boundaries(text: str, expected: str) -> None:
         "the password reset flow needs a token before login",
         "set the api key in the settings page",
         "use --no-verify and --keep-going",
+        "pass the test and check the credentials page",
+        "pass --passphrase",
+        "pass --passphrase --verbose next",
+        "the bearer of the token passes through",
     ],
 )
 def test_secret_flag_form_leaves_prose_and_valueless_flags_alone(text: str) -> None:
@@ -677,7 +689,9 @@ def test_secret_flag_form_leaves_prose_and_valueless_flags_alone(text: str) -> N
     assert _redact(text) == text
 
 
-@pytest.mark.parametrize("keyword", ["--password", "--token", "--api-key", "-key"])
+@pytest.mark.parametrize(
+    "keyword", ["--password", "--token", "--api-key", "-key", "--passphrase"]
+)
 def test_long_flag_keyword_run_redacts_in_bounded_time(keyword: str) -> None:
     """The flag form shares the identifier cap: a run of hits must stay linear."""
     text = keyword * (LONG_TARGET_CHARS // len(keyword))
