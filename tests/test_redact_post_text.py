@@ -16,6 +16,7 @@ from __future__ import annotations
 import io
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,7 @@ BEARER_SHAPE = "Bearer abc.def"
 AUTH_SHAPE = "Authorization: xyz"
 
 LONG_TARGET_CHARS = 70_000
+LONG_RUN_MAX_SECONDS = 2.0
 
 
 def _redact(text: str, *, home: str = HOME, worktrees: tuple[str, ...] = ()) -> str:
@@ -481,10 +483,24 @@ def test_cookie_header_is_redacted_to_the_end_of_its_line(
         assert fragment not in result
 
 
-def test_long_unbroken_word_run_redacts_in_linear_time() -> None:
-    """The identifier prefix of the keyword shapes must not go quadratic."""
-    text = "a" * LONG_TARGET_CHARS
-    assert _redact(text) == text
+@pytest.mark.parametrize("keyword", ["password", "_key", "cookie"])
+def test_long_keyword_run_redacts_in_bounded_time(keyword: str) -> None:
+    """A run of keyword hits with no `:`/`=` must not go quadratic.
+
+    Every hit used to scan to the end of the run and backtrack, so N hits cost
+    O(N^2): 4-8 s at 48 KB, 6-11 s at this size. Capped, the same input takes
+    well under 0.1 s. The bound is an absolute wall-clock limit, not an n-vs-2n
+    ratio: a ratio of two sub-0.1 s timings swings on a loaded runner, while a
+    2 s ceiling sits ~20x above the capped time and 3-5x below the quadratic
+    one, so only an algorithmic regression crosses it. No freezegun: it would
+    freeze the clock.
+    """
+    text = keyword * (LONG_TARGET_CHARS // len(keyword))
+    start = time.perf_counter()
+    result = _redact(text)
+    elapsed = time.perf_counter() - start
+    assert result == text
+    assert elapsed < LONG_RUN_MAX_SECONDS, elapsed
 
 
 def test_url_userinfo_keeps_the_host() -> None:
