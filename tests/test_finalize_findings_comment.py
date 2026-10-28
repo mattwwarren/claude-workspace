@@ -21,12 +21,22 @@ composed from layers: the documented body shape, the unchanged
 IMPL carve-out's verbatim-delivery clause.
 """
 
+import os
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from cw.auto_dev_result.schema import FINALIZE_REGRESS_BLOCKER_REASONS
 from cw.gh import AGENT_COMMENT_MARKER
 from cw.spawn import _PRIOR_ATTEMPT_DETAILS_MAX_LEN
-from tests.conftest import _appendix, _cmd, load_guard_script_module
+from tests.conftest import (
+    _appendix,
+    _bash_fences,
+    _cmd,
+    load_guard_script_module,
+    substitute_fence_placeholders,
+)
 from tests.test_agent_comment_provenance import PIPELINE_HEADERS
 from tests.test_auto_dev_finalize_automerge_verification import _ORDER_OF_EVALUATION
 from tests.test_auto_dev_preflight_resolutions import _after
@@ -324,6 +334,165 @@ def test_read_back_compares_bytes_and_fails_closed() -> None:
     assert FAILED_FRICTION in paragraph
     assert "naming the parts already posted" in paragraph
     assert "CRLF becomes LF" in paragraph
+
+
+def test_read_back_names_the_non_empty_guard() -> None:
+    """Two empty sides must never compare equal (round 2): the prose says so."""
+    paragraph = _section_paragraph(READ_BACK)
+    assert "Before the `cmp`" in paragraph
+    assert "non-empty after normalization" in paragraph
+    assert "`READBACK_MISSING`" in paragraph
+    assert "two empty sides never compare equal" in paragraph
+    fence = _read_back_fence()
+    assert '[ -s "$POSTED" ] && [ -s "$READBACK" ]' in fence
+    assert fence.index("READBACK_MISSING") < fence.index("cmp -s")
+
+
+# The read-back fence is the control that decides whether a public post is
+# stamped as verified, so it is run, not just text-asserted: `gh` is a stub on
+# PATH that serves a planted body, and the fence's own bash does the rest.
+_READBACK_PLACEHOLDERS = {"i": "1", "ticket": "42", "label": "(part 1 of 2)"}
+_READBACK_OK = "READBACK_OK"
+_READBACK_MISMATCH = "READBACK_MISMATCH"
+_READBACK_MISSING = "READBACK_MISSING"
+_READBACK_FETCH_FAILED = "READBACK_FETCH_FAILED"
+_GH_STUB = """#!/bin/sh
+[ -n "$GH_STUB_FAIL" ] && exit 1
+cat "$GH_STUB_BODY"
+"""
+
+
+def _read_back_fence() -> str:
+    fences = [
+        fence
+        for fence in _bash_fences(_finalize_findings_section())
+        if "READBACK=" in fence
+    ]
+    assert len(fences) == 1
+    return substitute_fence_placeholders(fences[0], _READBACK_PLACEHOLDERS)
+
+
+def _run_read_back_fence(
+    tmp_path: Path,
+    *,
+    posted: bytes | None,
+    served: bytes,
+    gh_fails: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Run the read-back fence with *posted* on disk and *served* from `gh`."""
+    cw_dir = tmp_path / "repo" / ".cw"
+    cw_dir.mkdir(parents=True)
+    if posted is not None:
+        (cw_dir / "finalize-findings-part-1.md").write_bytes(posted)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text(_GH_STUB, encoding="utf-8")
+    gh.chmod(0o755)
+    body = tmp_path / "served.md"
+    body.write_bytes(served)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "GH_STUB_BODY": str(body),
+        "GIT_CEILING_DIRECTORIES": str(tmp_path),
+    }
+    if gh_fails:
+        env["GH_STUB_FAIL"] = "1"
+    return subprocess.run(
+        ["bash", "-c", _read_back_fence()],
+        cwd=tmp_path / "repo",
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+COMMENT = b"## Blocking Review Findings\n\n### Finalize ship-it gate findings\nbody\n"
+
+
+def test_read_back_fence_matching_body_is_ok(tmp_path: Path) -> None:
+    result = _run_read_back_fence(tmp_path, posted=COMMENT, served=COMMENT)
+    assert result.returncode == 0, result.stderr
+    assert _READBACK_OK in result.stdout
+
+
+@pytest.mark.parametrize(
+    "served",
+    [
+        COMMENT.replace(b"\n", b"\r\n"),
+        COMMENT + b"   \n\n",
+        COMMENT.rstrip(b"\n"),
+    ],
+    ids=["crlf", "trailing-whitespace", "no-final-newline"],
+)
+def test_read_back_fence_normalizes_crlf_and_trailing_whitespace(
+    tmp_path: Path, served: bytes
+) -> None:
+    result = _run_read_back_fence(tmp_path, posted=COMMENT, served=served)
+    assert result.returncode == 0, result.stderr
+    assert _READBACK_OK in result.stdout
+
+
+@pytest.mark.parametrize(
+    "served",
+    [COMMENT.replace(b"body", b"b0dy"), b" " + COMMENT, COMMENT + b"extra\n"],
+    ids=["changed-byte", "leading-space", "appended-text"],
+)
+def test_read_back_fence_differing_body_is_a_mismatch(
+    tmp_path: Path, served: bytes
+) -> None:
+    result = _run_read_back_fence(tmp_path, posted=COMMENT, served=served)
+    assert result.returncode == 1
+    assert _READBACK_MISMATCH in result.stdout
+    assert _READBACK_OK not in result.stdout
+
+
+def test_read_back_fence_failing_gh_is_fetch_failed(tmp_path: Path) -> None:
+    result = _run_read_back_fence(
+        tmp_path, posted=COMMENT, served=COMMENT, gh_fails=True
+    )
+    assert result.returncode == 1
+    assert _READBACK_FETCH_FAILED in result.stdout
+    assert _READBACK_OK not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("posted", "served"),
+    [
+        (COMMENT, b""),
+        (COMMENT, b"\n"),
+        (COMMENT, b"  \r\n\n"),
+        (None, b""),
+        (None, b"\n"),
+        (None, COMMENT),
+        (b"", b""),
+        (b"", b"\n"),
+        (b"  \n", b"\n"),
+        (b"", COMMENT),
+    ],
+    ids=[
+        "readback-empty",
+        "readback-bare-newline",
+        "readback-blank-crlf",
+        "part-missing-readback-empty",
+        "part-missing-readback-bare-newline",
+        "part-missing-readback-present",
+        "both-empty",
+        "part-empty-readback-newline",
+        "both-blank",
+        "part-empty-readback-present",
+    ],
+)
+def test_read_back_fence_empty_side_is_never_ok(
+    tmp_path: Path, posted: bytes | None, served: bytes
+) -> None:
+    """A comment that never landed, or a part never written, is not a match."""
+    result = _run_read_back_fence(tmp_path, posted=posted, served=served)
+    assert result.returncode != 0
+    assert _READBACK_OK not in result.stdout
+    assert _READBACK_MISSING in result.stdout
 
 
 def test_read_back_mismatch_records_urls_and_asks_for_human_deletion() -> None:
