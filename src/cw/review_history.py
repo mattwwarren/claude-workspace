@@ -508,11 +508,12 @@ def _severity_split(
 def _ledger_summary(
     ledger: ConvergenceLedger, rounds: list[RoundView], settled: list[SettledView]
 ) -> HistorySummary:
+    converged = ledger.status == LEDGER_STATUS_CONVERGED
     return HistorySummary(
         convergence_mode="clean",
         rounds_run=len(ledger.rounds),
-        converged=ledger.status == LEDGER_STATUS_CONVERGED,
-        final_clean_sha=ledger.last_clean_sha,
+        converged=converged,
+        final_clean_sha=ledger.last_clean_sha if converged else None,
         ledger_status=ledger.status,
         stop_reason=ledger.stop_reason,
         stop_identities=[i.audit_key() for i in ledger.stop_identities],

@@ -20,7 +20,11 @@ from cw.models import CwState, OrchestratorEventType, QueueItemStatus, Stage
 from cw.models.review_history import ReviewHistory
 from cw.review_adjudication import VoidedFinding
 from cw.review_adjudication._voided import _voided_rationale
-from cw.review_convergence import LEDGER_RELATIVE_PATH, friction_lines
+from cw.review_convergence import (
+    LEDGER_RELATIVE_PATH,
+    demote_for_rereview,
+    friction_lines,
+)
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from cw.review_history import (
     _VOIDED_RATIONALE_PREFIX,
@@ -152,6 +156,24 @@ def test_converged_rounds_summary_and_sources(tmp_path: Path) -> None:
     assert history.in_flight is False
     assert history.sources == ["ledger", "verdict_files"]
     assert (history.row_status, history.row_stage) == ("completed", "review")
+
+
+def test_final_clean_sha_is_reported_only_while_converged(tmp_path: Path) -> None:
+    """A converged ledger demoted for re-review keeps its sha but is not final."""
+    fixture = fixture_converged()
+    worktree = derived_worktree(tmp_path)
+    write_ledger(worktree, fixture.ledger)
+    converged = _history(_task(), tmp_path).summary
+    assert (converged.converged, converged.final_clean_sha) == (True, "sha-0004")
+
+    demoted = demote_for_rereview(fixture.ledger)
+    assert demoted.last_clean_sha == "sha-0004"
+    write_ledger(worktree, demoted)
+    reopened = _history(_task(), tmp_path).summary
+
+    assert reopened.converged is False
+    assert reopened.ledger_status == "in_progress"
+    assert reopened.final_clean_sha is None
 
 
 def test_severity_split_from_verdict_files(tmp_path: Path) -> None:
