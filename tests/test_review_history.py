@@ -989,6 +989,23 @@ def test_sentinel_rounds_run_mismatch_keeps_the_ledger(tmp_path: Path) -> None:
     assert _notes_with(history, "rounds_run=4")
 
 
+def test_sentinel_rounds_run_agreeing_with_the_ledger_adds_no_note(
+    tmp_path: Path,
+) -> None:
+    fixture_converged().write(derived_worktree(tmp_path))
+    task = review_task(session_id=ACME_SESSION)
+    session = _session(
+        task,
+        ACME_SESSION,
+        last_result=sentinel_review({"convergence_mode": "clean", "rounds_run": 5}),
+    )
+
+    history = _history(task, tmp_path, sessions=[session])
+
+    assert history.summary.rounds_run == 5
+    assert not _notes_with(history, "disagrees")
+
+
 _ROUND_LINE = "review_round_1: kind=loop backend=b sha=a new_accepted=1 settled=0"
 
 
