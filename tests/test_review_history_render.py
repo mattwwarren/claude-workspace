@@ -172,6 +172,7 @@ def test_stopped_text_prints_each_rationale_once(tmp_path: Path) -> None:
     history, text = _render(tmp_path, review_task())
 
     lines = text.splitlines()
+    assert "state: row completed at review; ledger stopped; finished" in lines
     assert "stop: oscillation (MUST_FIX::src/cw/foo.py::Other bug)" in lines
     assert f"deferred: {len(history.summary.deferred)}" in lines
     assert "  new_findings: 2 (severity split not recorded)" in lines

@@ -84,7 +84,7 @@ from tests._review_history_helpers import (
 from tests._ticket_view_helpers import ACME_TICKET, bound_session_for
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from cw.models import ClientConfig, OrchestratorEvent, Session, TicketTask
 
@@ -742,6 +742,21 @@ def test_stopped_ledger_summary_and_releases(tmp_path: Path) -> None:
         "sha-0002",
     )
     assert release.reason == "oscillation"
+
+
+@pytest.mark.parametrize(
+    "task_factory", [_running, review_task], ids=["running_row", "completed_row"]
+)
+def test_stopped_ledger_is_not_in_flight(
+    tmp_path: Path, task_factory: Callable[[], TicketTask]
+) -> None:
+    """``review_not_converging`` is a finished review: a stop is not a live loop."""
+    fixture_stopped().write(derived_worktree(tmp_path))
+
+    history = _history(task_factory(), tmp_path)
+
+    assert history.summary.ledger_status == "stopped"
+    assert history.in_flight is False
 
 
 def test_settled_entries_are_placed_once(tmp_path: Path) -> None:
