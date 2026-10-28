@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`cw.queue_peek` is now a package: module split, no behavior change (#2793).** The 1012-line `src/cw/queue_peek.py` becomes `src/cw/queue_peek/` with one submodule per concern (`locate`, `parse`, `ladder`, `rows`, `render`). Code moves verbatim and every `cw.queue_peek.<name>` import path still resolves. Tests that patch `CW_STATE` / `CLAUDE_PROJECTS` now patch `cw.queue_peek.locate`, and patches on names `build_peek_rows` / `format_row` look up now target `cw.queue_peek.rows`.
+
 ## [1.79.0] - 2026-10-28
 
 ### Added

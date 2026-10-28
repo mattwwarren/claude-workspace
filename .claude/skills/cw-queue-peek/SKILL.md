@@ -183,7 +183,7 @@ Do not default to "wedge" on the mismatch alone. Corroborate with the SAME
 liveness signals `cw queue peek` and `cw doctor`'s wedge detector already
 compute:
 
-- `idle_m` at or below `IDLE_LIVE_MAX_MIN` (`src/cw/queue_peek.py`,
+- `idle_m` at or below `IDLE_LIVE_MAX_MIN` (`src/cw/queue_peek/ladder.py`,
   "demonstrably writing," #2044) — the session is actively producing.
 - The session's `surface_ref` present in the daemon roster, and/or
   `Session.liveness_bucket` (`cw.reconcile.liveness._classify_liveness_bucket`,

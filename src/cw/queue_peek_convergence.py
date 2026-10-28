@@ -8,9 +8,9 @@ the session persists (``<worktree>/.cw/review-convergence.json``) and, for
 age-based verdicts on a demonstrably live REVIEW session, replaces them with
 the convergence signal: WAIT while the curve falls, PEEK when it has stalled.
 
-It lives beside ``cw.queue_peek`` rather than inside it (that module is over
-the size ceiling, split tracked as #2793) and imports nothing from it, so the
-hook in ``format_row`` creates no import cycle. Every failure to read the
+It lives beside the ``cw.queue_peek`` package rather than inside it and imports
+nothing from it, so the hook in ``cw.queue_peek.rows.format_row`` creates no
+import cycle. Every failure to read the
 ledger fails open: no override, the bare ladder verdict stands.
 """
 
@@ -34,10 +34,11 @@ from cw.spawn import CW_CONTEXT_SCHEMA_VERSION
 if TYPE_CHECKING:
     from cw.models import TicketTask
 
-#: Every age-arm reason in ``queue_peek._score_session`` / ``_stall_check``
-#: starts with this (``age 70min exceeded ...``), and ``_gate_stop_on_liveness``
-#: only appends to it. ``tests/test_queue_peek_convergence.py`` pins it against
-#: the real ``recommend()`` output, so a reworded ladder string fails a test.
+#: Every age-arm reason in ``queue_peek.ladder._score_session`` /
+#: ``_stall_check`` starts with this (``age 70min exceeded ...``), and
+#: ``_gate_stop_on_liveness`` only appends to it.
+#: ``tests/test_queue_peek_convergence.py`` pins it against the real
+#: ``recommend()`` output, so a reworded ladder string fails a test.
 AGE_REASON_PREFIX = "age "
 
 #: Ledger statuses of a review that is still running. ``converged`` is waiting

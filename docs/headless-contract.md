@@ -926,7 +926,7 @@ From RFC 0012's Summary (`docs/rfcs/0012-unified-result-publishing.md`):
 Three surfaces re-parse or re-display transcript/sentinel data for the operator without ever writing `Session.last_result`:
 
 - **`cw dev-queue wait`** (`src/cw/cli/dev_queue/wait.py`) — blessed by a zero-hit scan: `tests/test_result_door_guard.py::TestReadOnlySurfacesNeverWrite` asserts no `last_result` assignment exists in this file. It re-parses transcripts for display only.
-- **`queue_peek`** (`src/cw/queue_peek.py`) — same zero-hit scan coverage; re-parses transcripts for display only, never writes `Session.last_result`.
+- **`queue_peek`** (`src/cw/queue_peek/`) — same zero-hit scan coverage; re-parses transcripts for display only, never writes `Session.last_result`.
 - **`.claude/skills/cw-followup/scripts/parse_sentinel.py`** — outside `src/cw/`, so the enforcement test structurally cannot cover it. Its blessing is doc-prose only, stated here: it parses a completed session's sentinel for the `/cw-followup` skill's disposition logic and never writes back to `Session.last_result`.
 
 ### 11.6 Audit Trail for Every Accepted Emit (#2439)
