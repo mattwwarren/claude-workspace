@@ -100,10 +100,16 @@ _MIRRORED_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 # An assignment value: a whole quoted string (spaces included), else one token.
 _ASSIGNED_VALUE = r"""(?:"[^"]*"|'[^']*'|\S+)"""
-# An identifier around a keyword (`DB_PASSWORD`, `AWS_SECRET_ACCESS_KEY`). It
-# starts only where a word run starts, so scanning a long unbroken run stays
-# linear instead of retrying the prefix from every offset inside it.
+# An identifier around a keyword (`DB_PASSWORD`, `AWS_SECRET_ACCESS_KEY`). The
+# prefix starts only where a word run starts, so a run is tried from one offset,
+# not from every offset inside it; the suffix is capped. Without the cap, a run
+# holding N keyword hits (`passwordpassword...`, no `:`/`=`) scanned to the end
+# of the run and backtracked from every hit: O(N^2), seconds at 48 KB. With it,
+# each hit costs at most `_IDENT_SUFFIX_MAX` steps. An identifier tail longer
+# than the cap is not a real variable name; its value is left in place.
 _IDENT_START = r"(?<![\w-])[\w-]*"
+_IDENT_SUFFIX_MAX = 128
+_IDENT_SUFFIX = rf"[\w-]{{0,{_IDENT_SUFFIX_MAX}}}"
 
 # Shapes beyond cw._text, for a public and irreversible sink: a review finding
 # often quotes the very secret it flags. Over-redaction is tolerated. These run
@@ -142,12 +148,12 @@ _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
     re.compile(
         rf"(?i)[\"']?{_IDENT_START}(?:password|passwd|secret|api[_-]?key|[_-]key)"
-        rf"[\w-]*[\"']?\s*[:=]\s*{_ASSIGNED_VALUE}"
+        rf"{_IDENT_SUFFIX}[\"']?\s*[:=]\s*{_ASSIGNED_VALUE}"
     ),
     # `Cookie: a=1; b=2` / `Set-Cookie: sid=...; Path=/`: a header value runs to
     # the end of the line and holds spaces and `;`, so one token would leak the rest.
     re.compile(
-        rf"(?i)[\"']?{_IDENT_START}cookie[\w-]*[\"']?\s*[:=]\s*"
+        rf"(?i)[\"']?{_IDENT_START}cookie{_IDENT_SUFFIX}[\"']?\s*[:=]\s*"
         r"""(?:"[^"]*"|'[^']*'|[^\r\n]+)"""
     ),
 )
