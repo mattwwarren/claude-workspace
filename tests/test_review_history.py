@@ -621,23 +621,24 @@ def test_in_flight_without_a_ledger_reads_the_row(tmp_path: Path) -> None:
     assert _history(_task(), tmp_path).in_flight is False
 
 
+def test_in_flight_ledger_beats_a_running_row(tmp_path: Path) -> None:
+    fixture_converged().write(derived_worktree(tmp_path))
+
+
+    assert history.row_status == "running"
+    assert history.in_flight is False
+
+
+def test_in_flight_ledger_beats_a_completed_row(tmp_path: Path) -> None:
+    fixture_in_progress().write(derived_worktree(tmp_path))
+
+    history = _history(_task(), tmp_path)
+
+    assert history.row_status == "completed"
+    assert history.in_flight is True
+
+
 # --- ledger degradation ----------------------------------------------------------
-
-
-def _clean_sentinel_session(task: TicketTask, tmp_path: Path) -> Session:
-    review = {"convergence_mode": "clean", "rounds_run": 2, "converged": True}
-    friction = (
-        "review_round_1: kind=loop backend=claude-native sha=abc1234 "
-        "new_accepted=2 settled=1",
-        "review_round_2: kind=loop backend=claude-native sha=def5678 "
-        "new_accepted=0 settled=0",
-    )
-    return _session(
-        task,
-        "sess-s",
-        worktree_path=derived_worktree(tmp_path),
-        last_result=sentinel_review(review, friction=friction),
-    )
 
 
 @pytest.mark.parametrize("content", [b"{not json", b"\xff\xfe\x00"])
