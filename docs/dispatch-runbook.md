@@ -1580,8 +1580,13 @@ REVIEW lane still ignores clean mode.
   tools `Read,Grep,Glob` only, `--permission-mode dontAsk`, empty settings
   sources (no operator or project hooks), no MCP servers, under the operator's
   own Claude login. The prompt carries the diff from the ledger's fork point,
-  and the file tools can read any file under the task worktree, untracked and
-  gitignored files included. Claude Code (not cw) enforces the worktree
+  the approved plan (`.cw/plan.md`), the ticket title and body, the ticket's
+  comments (every comment the pipeline did not post itself, fetched live from
+  the tracker), the finding dispositions an operator already settled, and the
+  repo's review configuration (reviewer agent specs, `.claude/review-extras.md`,
+  the `CLAUDE.md` quality gates and ruff settings). The file tools can also
+  read any file under the task worktree, untracked and gitignored files
+  included. Claude Code (not cw) enforces the worktree
   boundary: a direct read of a path outside the worktree was denied on the
   `claude` version where the envelope was captured, but symlinks inside the
   worktree that point outside it were not exercised, so their targets are not
