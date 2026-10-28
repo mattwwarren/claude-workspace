@@ -410,8 +410,67 @@ def test_config_reference_documents_review_and_the_max_cycles_release() -> None:
         in row
     )
     assert "`confirm_backend`" in row
-    assert "codex and opencode REVIEW lanes keep their own fix-loop machinery" in row
+    assert (
+        "the opencode REVIEW lane keeps its own fix-loop machinery and ignores it"
+        in row
+    )
+    assert "and to the codex REVIEW lane (#2791" in row
+    assert "`claude -p`" in row
     assert "`none`" in row
+
+
+def test_config_reference_states_the_codex_lane_default_on_egress() -> None:
+    """#2791 G6: the unset default, both opt-outs and the reachable set."""
+    content = _read("config/CONFIG_REFERENCE.md")
+    row = content[content.index("| `review` | ReviewConfig |") :].split("\n", 1)[0]
+    egress = _after(row, "**Default-on egress on codex lanes:**", span=1400)
+    assert "with `confirm_backend` unset sends its diff to Claude" in egress
+    assert (
+        "`confirm_backend: none` or `confirm_backend: codex` is the opt-out" in egress
+    )
+    assert "empty settings sources (no operator or project hooks)" in egress
+    assert "untracked and gitignored files included" in egress
+
+
+def test_codex_lane_clean_mode_is_documented() -> None:
+    """#2791: the runbook subsection and the headless-contract rows (G2)."""
+    runbook = _read("docs/dispatch-runbook.md")
+    assert runbook.count("#### Codex-lane clean mode (#2791)") == 1
+    section = _after(runbook, "#### Codex-lane clean mode (#2791)", span=4000)
+    assert "`review.confirm_backend: none` or `codex`" in section
+    assert "skips the codex loop and runs only the Claude confirm" in section
+    assert "`codex_convergence_ledger_error`" in section
+    assert "`--override-must-fix` is refused" in section
+    assert BACKEND_UNAVAILABLE_HEADLINE not in section
+
+    contract = _read("docs/headless-contract.md")
+    backend_row = _row(contract, "| `review.confirm_backend` |")
+    assert 'an unset `review.confirm_backend` resolves to `"claude"`' in backend_row
+    unavailable_row = _row(contract, "| `confirm_backend_unavailable` |")
+    assert "`blocker.details` then starts with `backend=claude;`" in unavailable_row
+
+    assert contract.count("| `codex_convergence_ledger_error` |") == 1
+    ledger_row = _row(contract, "| `codex_convergence_ledger_error` |")
+    assert '`blocker.stage: "stage3_review"`, `retry_eligible: true`' in ledger_row
+    assert "BLOCKED_ON_USER" in ledger_row
+    assert "dispatch never reads `retry_eligible`" in ledger_row
+    assert "nothing auto-retries" in ledger_row
+    assert "a failed save is transient" in ledger_row
+    assert "repeats identically" in ledger_row
+    assert "The park is charged" in ledger_row
+
+    assert contract.count("| `codex_review_worktree_mutated` |") == 1
+    mutated_row = _row(contract, "| `codex_review_worktree_mutated` |")
+    assert '`blocker.stage: "stage3_review"`, `retry_eligible: false`' in mutated_row
+    assert "BLOCKED_ON_USER" in mutated_row
+    assert "nothing auto-retries" in mutated_row
+    assert "cw dev-queue requeue <T> -c <C> --stage review" in mutated_row
+    for token in FORBIDDEN_TOKENS:
+        assert token not in ledger_row + mutated_row, token
+
+
+def _row(text: str, prefix: str) -> str:
+    return text[text.index(prefix) :].split("\n", 1)[0]
 
 
 # --- interactive refusal (R24) ------------------------------------------------

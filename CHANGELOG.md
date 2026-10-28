@@ -6,8 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Claude-side confirm round for codex-lane fix loops (#2791).** Under `review: {convergence: clean}`, a codex REVIEW lane now writes the convergence ledger: the detached `cw codex run` driver records the clean codex loop round, then runs an independent confirm round on Claude (one `claude -p` call per reviewer role, read-only `Read,Grep,Glob` tools, `--permission-mode dontAsk`, empty settings sources so no operator or project hooks run, `cwd` at the task worktree), so finalize's `verify-tip` finds a converged ledger instead of failing closed. A requeue after a Claude outage resumes at the confirm without re-running the codex loop. The same runner is exposed as `cw review confirm --backend claude` (the default stays `codex`). Two new `blocker.reason` values: `codex_convergence_ledger_error` (a ledger, git or file step failed after a completed codex review; retry-eligible, charged) and `codex_review_worktree_mutated` (a Claude reviewer changed the worktree; not retry-eligible). A Claude-built verdict is posted under `## Claude Review Verdict`, and a Claude blocker's `details` start with `backend=claude;`. Under clean mode, `cw dev-queue approve --override-must-fix` is refused until the worktree holds a converged ledger for the ticket. The opencode REVIEW lane still ignores clean mode (#2806), and Claude confirm findings are not yet fed back into the codex fix loop (#2807).
+
 ### Changed
 
+- **Codex-lane clean clients now send their diff to Claude by default (#2791).** A codex-lane client already on `review.convergence: clean` with `review.confirm_backend` unset starts running the Claude confirm round on upgrade, under the operator's own Claude login. The prompt carries the diff, and the reviewer's file tools can read any file under the task worktree, untracked and gitignored files included. Opt out with `review.confirm_backend: none` or `codex`. With the codex fix loop disabled, a clean-mode codex lane now also runs the unpushed-HEAD guard (one self-heal push, else a `codex_unpushed_at_exit` park) before it reports clean.
 - **`cw.queue_peek` is now a package: module split, no behavior change (#2793).** The 1012-line `src/cw/queue_peek.py` becomes `src/cw/queue_peek/` with one submodule per concern (`locate`, `parse`, `ladder`, `rows`, `render`). Code moves verbatim and every `cw.queue_peek.<name>` import path still resolves. Tests that patch `CW_STATE` / `CLAUDE_PROJECTS` now patch `cw.queue_peek.locate`, and patches on names `build_peek_rows` / `format_row` look up now target `cw.queue_peek.rows`.
 
 ## [1.79.0] - 2026-10-28
