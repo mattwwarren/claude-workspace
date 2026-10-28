@@ -277,7 +277,9 @@ def test_carve_out_requires_all_four_conditions() -> None:
             "`REGRESSED_INTO_STAGE` is non-empty",
             "single newest finalize-findings post",
             f"begins with the exact header line `{FINDINGS_HEADER}`",
-            f"exact sub-heading line `{FINDINGS_SUBHEADING}`",
+            "the first non-blank line after that header is exactly "
+            f"`{FINDINGS_SUBHEADING}`",
+            "a sub-heading line quoted mid-body does not count",
             f"carries the marker `{AGENT_COMMENT_MARKER}`",
             "its `author`",
             "all four",
@@ -405,13 +407,20 @@ def _instant(timestamp: str) -> datetime:
 
 
 def _is_findings_shape(entry: dict[str, str]) -> bool:
-    """Header, sub-heading and marker: the first three documented conditions."""
+    """Header, adjacent sub-heading and marker: the first three conditions.
+
+    The sub-heading must be the first non-blank line after the header, the
+    shape the finalize read-back regex (``^## Blocking Review Findings\\s+###
+    Finalize ship-it gate findings``) matches; a quoted mid-body line is not.
+    """
     body = entry.get("body", "")
     lines = body.splitlines()
+    after_header = [line for line in lines[1:] if line.strip()]
     return (
         bool(lines)
         and lines[0] == FINDINGS_HEADER
-        and FINDINGS_SUBHEADING in lines
+        and bool(after_header)
+        and after_header[0] == FINDINGS_SUBHEADING
         and AGENT_COMMENT_MARKER in body
     )
 
@@ -518,6 +527,42 @@ def test_forged_author_never_displaces_the_genuine_post() -> None:
     assert _select_regress_findings([genuine, forged], ME) == [genuine]
     assert _select_regress_findings([forged], ME) == []
     assert _select_regress_findings([genuine, forged], "") == []
+
+
+def _quoting_comment(author: str, created_at: str) -> dict[str, str]:
+    """Right header and marker, but the sub-heading only quoted mid-body.
+
+    The shape of a #1815 ``review_blocked`` post that cites the finalize
+    sub-heading in its prose.
+    """
+    return {
+        "author": author,
+        "created_at": created_at,
+        "body": (
+            f"{FINDINGS_HEADER}\n### reviewer — MUST_FIX\n"
+            f"see the earlier post under:\n{FINDINGS_SUBHEADING}\n\n"
+            f"{AGENT_COMMENT_MARKER}"
+        ),
+    }
+
+
+def test_sub_heading_quoted_mid_body_never_displaces_the_genuine_post() -> None:
+    """Kill-check: a "contains the sub-heading line" match turns this red."""
+    genuine = _findings_comment(ME, "2026-10-28T10:00:00Z")
+    quoting = _quoting_comment(ME, "2026-10-28T11:00:00Z")
+
+    assert _select_regress_findings([genuine, quoting], ME) == [genuine]
+    assert _select_regress_findings([quoting], ME) == []
+    assert _withheld_reason([quoting], ME) == "no_matching_comment"
+
+
+def test_blank_lines_between_header_and_sub_heading_still_qualify() -> None:
+    """The read-back regex uses ``\\s+``, so blank lines are allowed."""
+    spaced = _findings_comment(ME, "2026-10-28T10:00:00Z")
+    spaced["body"] = spaced["body"].replace(
+        f"{FINDINGS_HEADER}\n", f"{FINDINGS_HEADER}\n\n", 1
+    )
+    assert _select_regress_findings([spaced], ME) == [spaced]
 
 
 def test_unrelated_agent_comments_are_never_selected() -> None:
