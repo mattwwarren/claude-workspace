@@ -124,6 +124,16 @@ class StopRelease(BaseModel):
     sha: str
 
 
+class LedgerReset(BaseModel):
+    """A recoverable snapshot retained when init replaces a stale ledger."""
+
+    model_config = ConfigDict(frozen=True)
+
+    at: str
+    reason: str
+    previous_ledger: dict[str, object]
+
+
 class ConfirmFailure(BaseModel):
     """One confirm-backend outage recorded against a candidate sha.
 
@@ -244,6 +254,7 @@ class ConvergenceLedger(BaseModel):
     stop_reason: str | None = None
     stop_identities: list[FindingIdentity] = Field(default_factory=list)
     releases: list[StopRelease] = Field(default_factory=list)
+    reset_history: list[LedgerReset] = Field(default_factory=list)
 
 
 class RoundInput(BaseModel):

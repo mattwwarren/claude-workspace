@@ -5869,6 +5869,18 @@ class TestReviewConvergenceFields:
         review = Review.model_validate(
             {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0}
         )
+        assert set(review.model_dump()) == {
+            "must_fix_initial",
+            "should_fix",
+            "fix_cycles_used",
+            "deferred",
+            "agents_run",
+            "had_real_commit",
+            "rejected_count",
+            "rejected_count_by_severity",
+            "reviewed_sha",
+            "downgraded_disposition_count",
+        }
         restored = Review.model_validate_json(review.model_dump_json())
         assert restored == review
 

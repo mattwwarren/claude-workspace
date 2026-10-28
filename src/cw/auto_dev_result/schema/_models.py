@@ -16,7 +16,14 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from cw.auto_dev_result.schema._validators import (
     _is_blank,
@@ -159,6 +166,26 @@ class Review(BaseModel):
     converged: bool | None = None
     final_round_clean_sha: str | None = None
     confirm_backend: Literal["codex", "claude", "none"] | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_without_blocking_fields(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        """Keep the pre-#2787 shape for blocking-mode sentinels."""
+        serialized = handler(self)
+        if not isinstance(serialized, dict):
+            raise TypeError
+        data: dict[str, object] = {str(key): value for key, value in serialized.items()}
+        if self.convergence_mode != "clean":
+            for field_name in (
+                "convergence_mode",
+                "rounds_run",
+                "converged",
+                "final_round_clean_sha",
+                "confirm_backend",
+            ):
+                data.pop(field_name, None)
+        return data
 
     @model_validator(mode="after")
     def _check_convergence_fields(self) -> Review:

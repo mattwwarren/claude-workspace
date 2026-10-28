@@ -9,6 +9,7 @@ that routes through the override before the child-active suffix.
 from __future__ import annotations
 
 import datetime as dt
+import json
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -72,6 +73,19 @@ def _stalled_in_progress_ledger() -> ConvergenceLedger:
 
 
 def _review_task(worktree: Path, **overrides: object) -> TicketTask:
+    context_path = worktree / ".claude" / "cw-context.json"
+    if not context_path.exists():
+        context_path.parent.mkdir(parents=True, exist_ok=True)
+        context_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 15,
+                    "ticket_id": "T-1",
+                    "review": {"convergence": "clean"},
+                }
+            ),
+            encoding="utf-8",
+        )
     fields: dict[str, object] = {
         "stage": Stage.REVIEW,
         "worktree_path": worktree,
@@ -453,3 +467,18 @@ class TestFormatRowHook:
         row = queue_peek.format_row(task, _row_info(age=70, idle=20), _NOW)
         assert row["recommend"] == "STOP"
         assert "3→2→1" not in row["reason"]
+
+    def test_ledger_for_another_ticket_is_not_trusted(self, tmp_path: Path) -> None:
+        ledger = _falling_ledger().model_copy(update={"ticket_id": "T-2"})
+        write_ledger(tmp_path, ledger)
+        assert _override(_review_task(tmp_path), _AGE_STOP) is None
+
+    def test_non_clean_context_is_not_trusted(self, tmp_path: Path) -> None:
+        write_ledger(tmp_path, _falling_ledger())
+        context_path = tmp_path / ".claude" / "cw-context.json"
+        context_path.parent.mkdir(parents=True, exist_ok=True)
+        context_path.write_text(
+            json.dumps({"schema_version": 15, "review": {"convergence": "blocking"}}),
+            encoding="utf-8",
+        )
+        assert _override(_review_task(tmp_path), _AGE_STOP) is None

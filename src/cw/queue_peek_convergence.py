@@ -17,6 +17,7 @@ ledger fails open: no override, the bare ladder verdict stands.
 from __future__ import annotations
 
 import itertools
+import json
 from typing import TYPE_CHECKING
 
 from cw.models import Stage
@@ -53,13 +54,30 @@ def _read_ledger(task: TicketTask) -> ConvergenceLedger | None:
     """The task's in-flight ledger, or ``None`` (absent, corrupt, unreadable, done)."""
     if task.worktree_path is None:
         return None
+    if not _clean_mode_context(task):
+        return None
     try:
         ledger = load_ledger(task.worktree_path / LEDGER_RELATIVE_PATH)
     except (OSError, ValueError):
         return None
     if ledger is None or ledger.status not in _IN_FLIGHT_STATUSES:
         return None
+    if ledger.ticket_id != task.ticket_id:
+        return None
     return ledger
+
+
+def _clean_mode_context(task: TicketTask) -> bool:
+    """Require the current worktree context to opt into clean mode."""
+    if task.worktree_path is None:
+        return False
+    context_path = task.worktree_path / ".claude" / "cw-context.json"
+    try:
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return False
+    review = context.get("review") if isinstance(context, dict) else None
+    return isinstance(review, dict) and review.get("convergence") == "clean"
 
 
 def _is_falling(counts: list[int]) -> bool:

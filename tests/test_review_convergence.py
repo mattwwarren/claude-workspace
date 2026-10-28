@@ -1224,6 +1224,13 @@ class TestReconcileForInit:
         assert result.ledger.rounds == []
         assert result.released is None
 
+    def test_stale_reset_keeps_a_recoverable_snapshot(self) -> None:
+        existing = ledger_with_rounds(_distinct(0, 1), shas=["s1"])
+        result = _reconcile(existing, ticket_id="T-2", head="s1")
+        (reset,) = result.ledger.reset_history
+        assert reset.reason == "ticket_mismatch"
+        assert reset.previous_ledger == existing.model_dump(mode="json")
+
     def test_matching_in_progress_ledger_is_resumed(self) -> None:
         existing = ledger_with_rounds(_distinct(0, 1), shas=["s1"])
         result = _reconcile(existing, head="s1")

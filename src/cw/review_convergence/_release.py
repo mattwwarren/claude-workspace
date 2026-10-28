@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cw.review_convergence._models import Reconciled, StopRelease
+from cw.review_convergence._models import LedgerReset, Reconciled, StopRelease
 from cw.review_convergence._policy import release_cause
 from cw.review_convergence._tip import demote_for_rereview
 
@@ -130,7 +130,13 @@ def reconcile_ledger_for_init(
         history_rewritten=history_rewritten,
     )
     if reset is not None:
-        return Reconciled(fresh, reset, None)
+        reset_entry = LedgerReset(
+            at=now,
+            reason=reset,
+            previous_ledger=existing.model_dump(mode="json"),
+        )
+        reset_ledger = fresh.model_copy(update={"reset_history": [reset_entry]})
+        return Reconciled(reset_ledger, reset, None)
     ledger = existing.model_copy(update={"max_cycles": max_cycles})
     if ledger.status == "stopped":
         return _reconcile_stopped(ledger, head_sha=head_sha, now=now)
