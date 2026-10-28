@@ -336,8 +336,9 @@ def _render_clean_headline(review: Review, *, fix_loop_enabled: bool) -> str:
     Within the ``fix_cycles_used > 0`` (genuine fix-loop engagement) branch,
     ``Review.had_real_commit`` (#1723) further discriminates a converged loop
     that actually committed a change from one that converged purely because
-    every fix cycle was a tolerated no-op — the latter renders an UNVERIFIED
-    headline rather than claiming findings were resolved.
+    every fix cycle was a tolerated no-op — only ``"no_op"`` renders an
+    UNVERIFIED headline rather than claiming findings were resolved;
+    ``"committed"`` and ``"unknown"`` keep the resolved wording (#1745).
     """
     if review.fix_cycles_used > 0:
         # `_clean_exit` (the sole caller reaching this branch) is only invoked
@@ -345,7 +346,7 @@ def _render_clean_headline(review: Review, *, fix_loop_enabled: bool) -> str:
         # here — this formula's overflow guard (#2352) lives in
         # `_render_history_note`, not here.
         resolved = review.must_fix_initial - review.deferred
-        if review.had_real_commit is False:
+        if review.had_real_commit == "no_op":
             return (
                 f"**UNVERIFIED** — the fix loop converged without changing "
                 f"any file: {resolved} of {review.must_fix_initial} "
