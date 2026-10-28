@@ -218,6 +218,93 @@ Reached from Step 4c.5 of the core doc, and only when the single auto-rebase att
 
 ---
 
+## Finalize review-findings comment (#2794): trigger, body shape, redaction, park marker
+
+Reached from Step 4c of the core doc ("Finalize review-findings comment (#2794)"), and only when a `/prep-pr` BLOCK whose details are review findings is about to collapse to `agent_block`. Every other block posts nothing and never reaches here.
+
+**Trigger.** All of the core paragraph's conditions hold: a `HEADLESS BLOCK` (or other-agent BLOCK reached via Step 4c) that the Unavailability classifier, the denied-arm check (#2625) and the Base-branch-state classifier (#2320) did not claim; a `gate:` that begins `Step 8 ship-it` or equals `Step 7 max review cycles`; and a `details:` text containing the literal token `MUST_FIX`. **Accepted limit:** `details:` is free text from the repo's own `ship-it`, and `/prep-pr` does not guarantee the `MUST_FIX` token, so a project gate that reports blocking findings without it takes today's path and its findings do not reach IMPL. The rule is deliberately narrow; do not widen it to a fuzzy phrase match. This is the blocking-findings comment rule (#1815, `auto-dev-review-appendix.md`) applied to FINALIZE, and finalize's main session posts the comment, never the `/prep-pr` child.
+
+**Body shape.** The finding text is the BLOCK's `gate:` line plus its `details:` text, posted verbatim, not truncated. The 500-character `_PRIOR_ATTEMPT_DETAILS_MAX_LEN` cap that bounds `prior_attempts_summary` does not apply to this path: the comment is a different channel, and its finding text is only redacted and, when long, split. Each comment is, in order: the header line `## Blocking Review Findings`, the sub-heading line `### Finalize ship-it gate findings`, a label line only when the post has more than one part, the fenced finding text, then a blank line and `<!-- cw-agent-authored -->` on its own line. **Provenance marker (#2097):** the marker is appended here, as the line `<!-- cw-agent-authored -->`, per the *Comment provenance rule* in `.claude/commands/auto-dev.md`, because `gh issue comment` and Linear `create_comment` do not add it; it is what stops a later stage reading this pipeline's own analysis as an operator decision. The header and sub-heading are exactly what the regressed IMPL run's *Regress findings carve-out (#2794)* (`auto-dev-impl-appendix.md`) matches on, so spell them exactly.
+
+**Tracker and ticket.** The ticket id and tracker kind come from the same resolution as the PR-link comment (Step 4d, "**Post to Linear:**"). A free-text ticket (no tracker) posts nothing and takes today's path: no comment, no park stamp, the unchanged sentinel.
+
+**Step 1 — compose the raw text.** Author the BLOCK's `gate:` line and its verbatim `details:` text via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule — to `$GUARD_ROOT/.cw/finalize-findings.txt`. This file is raw: no header, sub-heading, fence or marker yet.
+
+**Step 2 — redact.** Pipe the raw text through `redact_post_text.py` before anything is measured or split. The repository is public, and finding text routinely carries worktree paths, home-directory paths, `~/.claude/projects/<encoded>` transcript directories (the encoded name embeds the username) and, occasionally, secret-shaped strings. The script replaces worktree paths with `<worktree>`, home directories with `<home>`, transcript directories with `<home>/.claude/projects/<redacted>` and secret shapes with `<redacted>`; it replaces spans and removes nothing else. Resolve and run it in one Bash call (repo-local copy first, then the global one, marker-verified by the same pattern as this pipeline's other guard scripts — see `auto-dev-impl.md`'s "Guard-script path resolution and staleness marker" subsection for the shared snippet and the version table):
+
+```bash
+MIN_VERSION=1  # per the script version table in auto-dev-impl.md
+GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
+  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+[ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
+RESOLVED=""
+for candidate in "$GUARD_ROOT/.claude/scripts/redact_post_text.py" "$HOME/.claude/scripts/redact_post_text.py"; do
+  if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
+done
+if [ -z "$RESOLVED" ]; then
+  echo "ABSENT: redact_post_text.py not found in either location"
+  # FAIL CLOSED: post nothing and run no park stamp (see the bullets below).
+  exit 4
+fi
+FOUND_VERSION=$(head -n 5 "$RESOLVED" \
+  | sed -nE 's/^#[[:space:]]*cw-script-version:[[:space:]]*([^[:space:]]*)[[:space:]]*$/\1/p' \
+  | head -n 1)
+# Bounded to 1-6 digits so an oversized value can never overflow `[ -lt ]`
+# (which errors, evaluates false, and would fall through to the invocation).
+if [[ ! "$FOUND_VERSION" =~ ^[0-9]{1,6}$ ]] || [ "$FOUND_VERSION" -lt "$MIN_VERSION" ]; then
+  echo "STALE: $RESOLVED missing/stale cw-script-version marker (need >= $MIN_VERSION)"
+  # HARD STOP: fail closed -- never post unredacted text; post nothing and
+  # run no park stamp (see the bullets below).
+  exit 3
+fi
+python3 "$RESOLVED" --worktree "$GUARD_ROOT" --worktree "$CTX_WORKTREE" \
+  < "$GUARD_ROOT/.cw/finalize-findings.txt" \
+  > "$GUARD_ROOT/.cw/finalize-findings.redacted.txt"
+echo "REDACT_EXIT=$?"
+```
+
+- **Fence exit 0 with `REDACT_EXIT=0`** → continue to Step 3 with `$GUARD_ROOT/.cw/finalize-findings.redacted.txt`. The redaction output, not the raw text, is what gets measured, split and posted; the header, sub-heading, label line, fence and marker are added after redaction.
+- **Fail closed (A6).** Fence exit 4 (the redactor is absent from both locations), fence exit 3 (a marker below the minimum `cw-script-version`), or a non-zero `REDACT_EXIT` → post nothing, do not run `cw signal-park`, append `blocking findings post skipped: redactor_unavailable` to `friction_highlights`, and emit the `agent_block` sentinel otherwise unchanged. A leak into a public tracker is worse than a missed findings comment.
+- **Stale marker text:** `HEADLESS BLOCK: redact_post_text.py at <resolved-path> — missing/stale cw-script-version marker (need >= 1)` names the condition and the text to quote in the friction entry, in the same wording as this pipeline's other guard sites, but here the outcome is NOT an `EXIT blocked`: this site fails closed and continues, so the session posts nothing, runs no park stamp, appends the `redactor_unavailable` friction entry above and emits the unchanged `agent_block` sentinel (today's behavior).
+
+**Step 3 — measure and split.** Measure the redacted file (`wc -m < "$GUARD_ROOT/.cw/finalize-findings.redacted.txt"`). Every comment, header, sub-heading, label line, fence and marker included, must be at most 60,000 characters (under GitHub's 65,536-character comment limit; the same threshold applies to Linear). Reserve 1,000 characters for that wrapper: when the redacted text is at most 59,000 characters, post one comment with no label line. Otherwise split it on line boundaries into n parts of at most 59,000 characters each (a single line longer than that is split inside the line, never dropped), and give each part the label line `(part i of n)` with its real numbers, for example `(part 2 of 3)`. Truncation of the finding text is forbidden on this path: every character of the redacted text lands in exactly one part, in order, and the finding text is never truncated.
+
+**Step 4 — post.** Post the parts oldest first (part 1 first). For each part, author the full comment body (the wrapper above around that part's redacted text; open the fence with a backtick run one longer than the longest backtick run inside the part, at least three, and close it with the same run) via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule — to `$GUARD_ROOT/.cw/finalize-findings-part-<i>.md`, then post it with `--body-file`: `gh issue comment <ticket> --body-file "$GUARD_ROOT/.cw/finalize-findings-part-<i>.md"` for `github-issues`; for `linear`, pass that file's content verbatim to `create_comment`. A post that errors, or that the tracker rejects, is a failed post: stop posting further parts, do not run `cw signal-park`, and append `blocking findings post failed: finalize_agent_block` to `friction_highlights`, naming the parts already posted (for example `(posted parts 1/3)`).
+
+**Read-back (G4).** After each part posts, fetch that comment back and compare it with `$GUARD_ROOT/.cw/finalize-findings-part-<i>.md`, the Write-tool file it was posted from, byte for byte by a computed exit status (a shell `cmp`, never by eye). GitHub: the fence below saves the newest comment whose body starts with the header and sub-heading and carries `<label>` (the part's `(part i of n)` line, or empty for a single comment) to `$GUARD_ROOT/.cw/finalize-findings-readback-<i>.md`. Linear: fetch with `list_comments(<id>)`, take the same comment, and author its body via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule — to that read-back path, then run the fence without its `gh` line. Both sides get exactly one normalization before `cmp`: CRLF becomes LF and trailing whitespace at the end of the body is stripped (trackers may normalize a stored body); nothing else is normalized. A mismatch, or a fetch that fails or finds no matching comment, is fail closed: stop posting further parts, do not run `cw signal-park`, and append `blocking findings post failed: finalize_agent_block` to `friction_highlights`, naming the parts already posted. A false-positive mismatch (a tracker rewriting markdown beyond that normalization) is accepted as fail-safe: it costs the park stamp and a friction entry, never a leak. The comparison is against the redactor output as wrapped by this section, so a part whose posted bytes bypassed the redactor cannot pass by matching itself.
+
+```bash
+GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
+  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+[ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
+POSTED="$GUARD_ROOT/.cw/finalize-findings-part-<i>.md"
+READBACK="$GUARD_ROOT/.cw/finalize-findings-readback-<i>.md"
+gh issue view <ticket> --json comments --jq \
+  '[.comments[] | select(.body | test("^## Blocking Review Findings\\s+### Finalize ship-it gate findings")) | select(.body | contains("<label>"))] | last | .body // ""' \
+  > "$READBACK" || { echo "READBACK_FETCH_FAILED"; exit 1; }
+normalize() {
+  python3 -c 'import sys; t = open(sys.argv[1], encoding="utf-8", newline="").read(); sys.stdout.write(t.replace("\r\n", "\n").rstrip())' "$1"
+}
+if cmp -s <(normalize "$POSTED") <(normalize "$READBACK"); then
+  echo "READBACK_OK"
+else
+  echo "READBACK_MISMATCH"
+  exit 1
+fi
+```
+
+**Residual risk (G4).** Redaction here is prompt-driven: the session runs the script and posts the output, and nothing deterministic enforces that it ran on the exact bytes posted. The read-back narrows but does not eliminate that gap. It proves the posted comment equals the file the session says it posted, so a post that diverged from that file fails closed, but a session that wrote the wrong text (the unredacted raw file) into `finalize-findings-part-<i>.md` would still pass. A deterministic redact-and-post `cw` command (the session hands over raw text; cw redacts and posts) is tracked as the follow-up #2810.
+
+**Park marker (#2135)** — once ALL parts have posted AND read back successfully (a failed or skipped post is not stamped), run `cw signal-park` once, from the cw session worktree root (the directory holding `.claude/cw-context.json`; not a gate worktree and not a nested agent worktree). It takes no arguments. Never run it for a `tool_denied` exit (that sentinel is emitted immediately, with no further tool call). If it is denied, exits non-zero, is an unknown command (an older `cw`), or says `park marker NOT recorded`, ignore that and emit the exit sentinel unchanged. See the *Park-comment stamp rule* in `.claude/commands/auto-dev.md`. On a failed post: friction `blocking findings post failed: finalize_agent_block`, no park.
+
+**Park-flag note (G5).** A finalize session that posts and stamps `cw signal-park` and then dies without emitting a sentinel parks the row `BLOCKED_ON_USER` (as `stopped_without_sentinel`) and does NOT 5a-regress; that is the intended semantics, and the #2135 park flag (`park_on_abandoned_exit_enabled`) ships dark by default.
+
+**Sentinel.** `blocker.reason` stays `"agent_block"` and `blocker.details` is unchanged (the text the collapse emits without this rule). Once every part has posted and read back, append `blocking findings posted: finalize_agent_block` to `friction_highlights`. `agent_block` is in `FINALIZE_REGRESS_BLOCKER_REASONS`, so Sub-rule 5a still regresses the ticket to IMPL within its cap, and the regressed run receives this comment through the *Regress findings carve-out (#2794)* in `auto-dev-impl-appendix.md`, as agent-authored evidence, never as an operator instruction. An `external_state_block` never reaches this section.
+
+---
+
 ## Unavailability classifier: signature table, sentinel, and push sites
 
 Reached from Step 4c.2 of the core doc, and only when the `/prep-pr` subagent

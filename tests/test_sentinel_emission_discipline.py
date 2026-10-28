@@ -212,14 +212,18 @@ def test_plan_doc_every_exit_names_a_status_and_registered_reason() -> None:
 
 PARK_STAMP_COMMAND = "cw signal-park"
 PARK_STAMP_RULE_REF = "*Park-comment stamp rule* in `.claude/commands/auto-dev.md`"
-# The stage docs this ticket wires. An INVENTORY, deliberately not a
-# completeness scan -- see test_park_stamp_is_wired_only_where_registered.
+# The stage docs this ticket wires, plus the finalize appendix's review-findings
+# comment rule (#2794). An INVENTORY, deliberately not a completeness scan --
+# see test_park_stamp_is_wired_only_where_registered. The core
+# auto-dev-finalize.md is absent by design: its pointer paragraph defers to the
+# appendix's Park marker clause and never names the command.
 PARK_STAMP_WIRED_DOCS = frozenset(
     {
         "auto-dev-plan.md",
         "auto-dev-plan-appendix.md",
         "auto-dev-review.md",
         "auto-dev-review-appendix.md",
+        "auto-dev-finalize-appendix.md",
     }
 )
 
@@ -367,9 +371,10 @@ def test_allowlisted_posts_are_never_stamped(doc: str, anchor: str) -> None:
 def test_park_stamp_is_wired_only_where_registered() -> None:
     """F4: an INVENTORY pin, not a completeness scan.
 
-    It proves this ticket wired exactly the plan stage's consolidated park and
+    It proves this ticket wired exactly the plan stage's consolidated park,
     (per #2228) the review stage's blocking-findings and operator-actionable
-    comment rules -- nothing else. It does NOT prove every park path is
+    comment rules, and (per #2794) the finalize appendix's review-findings
+    comment rule -- nothing else. It does NOT prove every park path is
     stamped: a new park path added to another stage doc is not caught, and it
     does not scan ``.claude/skills/**``, ``.claude/agents/**`` or sibling
     command docs such as ``prep-pr.md``. A future wiring ticket extends the
@@ -521,3 +526,43 @@ def test_review_operator_action_override_notes_the_prior_stamp() -> None:
     assert PARK_STAMP_RULE_REF in override
     assert "already ran at Checkpoint 3a" in override
     assert "does not run it again" in override
+
+
+# ---------------------------------------------------------------------------
+# #2794: the finalize appendix's review-findings comment rule carries the
+# third stage wiring of the #2135 park-comment stamp.
+# ---------------------------------------------------------------------------
+
+FINALIZE_FINDINGS_SECTION = "## Finalize review-findings comment (#2794)"
+FINALIZE_PARK_MARKER = "**Park marker (#2135)**"
+
+
+def _finalize_findings_section() -> str:
+    appendix = _appendix("finalize")
+    start = appendix.index(FINALIZE_FINDINGS_SECTION)
+    end = appendix.index("\n## ", start + len(FINALIZE_FINDINGS_SECTION))
+    return appendix[start:end]
+
+
+def test_finalize_findings_rule_stamps_after_the_post() -> None:
+    """F5 (#2794): the stamp follows the post (and its read-back), a failed or
+    skipped post is not stamped, and a failed stamp is ignored."""
+    section = _finalize_findings_section()
+    clause = _paragraph_containing(section, FINALIZE_PARK_MARKER)
+
+    assert PARK_STAMP_COMMAND in clause
+    assert PARK_STAMP_RULE_REF in clause
+    assert "a failed or skipped post is not stamped" in clause
+    assert "Never run it for a `tool_denied` exit" in clause
+    assert "ignore that and emit the exit sentinel unchanged" in clause
+    assert section.index("**Step 4 — post.**") < section.index(FINALIZE_PARK_MARKER)
+
+
+def test_finalize_core_pointer_does_not_name_the_stamp() -> None:
+    """The core paragraph points at the appendix clause instead (#2794)."""
+    pointer = _paragraph_containing(
+        _cmd("auto-dev-finalize.md"), "**Finalize review-findings comment (#2794):**"
+    )
+
+    assert PARK_STAMP_COMMAND not in pointer
+    assert "Park marker clause" in pointer
