@@ -438,6 +438,10 @@ _EXTRA_SHAPES = (
         None,
     ),
     ("single-quoted-multi-word", "secret = 'hunter2 two'", "<redacted>", None),
+    ("flag-password-space", "--password hunter2", "<redacted>", None),
+    ("flag-token-space", "--token abc123", "<redacted>", None),
+    ("flag-password-equals", "--password=hunter2", "<redacted>", None),
+    ("flag-api-key-space-quoted", '--api-key "correct horse hunter2"', "<redacted>", None),
 )
 _LEAKED_FRAGMENTS = (
     "hunter2",
@@ -592,6 +596,139 @@ def test_long_keyword_run_redacts_in_bounded_time(keyword: str) -> None:
     elapsed = time.perf_counter() - start
     assert result == text
     assert elapsed < LONG_RUN_MAX_SECONDS, elapsed
+
+
+_FLAG_NAMES = (
+    "password",
+    "passwd",
+    "secret",
+    "client-secret",
+    "api-key",
+    "api_key",
+    "apikey",
+    "access-key",
+    "token",
+    "auth-token",
+    "authorization",
+)
+
+
+@pytest.mark.parametrize("name", _FLAG_NAMES)
+@pytest.mark.parametrize("dashes", ["--", "-"])
+@pytest.mark.parametrize("separator", [" ", "=", "  ", "\t"])
+def test_secret_flag_value_is_redacted_in_every_separator_form(
+    name: str, dashes: str, separator: str
+) -> None:
+    """`--password VALUE` and `--password=VALUE` both drop the value."""
+    text = f"run tool {dashes}{name}{separator}hunter2 --verbose"
+    result = _redact(text)
+    assert "hunter2" not in result, result
+    assert result == "run tool <redacted> --verbose"
+    assert _redact(result) == result
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('login --password "correct horse" now', "login <redacted> now"),
+        ("login --password 'correct horse' now", "login <redacted> now"),
+        ("x --token abc123\nnext line stays", "x <redacted>\nnext line stays"),
+        ("x --token abc123\r\nnext", "x <redacted>\r\nnext"),
+        ("--DB-PASSWORD hunter2", "<redacted>"),
+        ("--password hunter2", "<redacted>"),
+        # A cookie header value runs to the end of its line (see the cookie
+        # pattern), so the flag form takes one value and no more.
+        ("curl --cookie sid=abc123 --verbose", "curl <redacted> --verbose"),
+    ],
+)
+def test_secret_flag_value_boundaries(text: str, expected: str) -> None:
+    assert _redact(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "pass --password --verbose next",
+        "pass --token",
+        "pass --token\nnext line",
+        "the password reset flow needs a token before login",
+        "set the api key in the settings page",
+        "use --no-verify and --keep-going",
+    ],
+)
+def test_secret_flag_form_leaves_prose_and_valueless_flags_alone(text: str) -> None:
+    """Only a dash-led flag word followed by a value on the same line is redacted."""
+    assert _redact(text) == text
+
+
+@pytest.mark.parametrize("keyword", ["--password", "--token", "--api-key", "-key"])
+def test_long_flag_keyword_run_redacts_in_bounded_time(keyword: str) -> None:
+    """The flag form shares the identifier cap: a run of hits must stay linear."""
+    text = keyword * (LONG_TARGET_CHARS // len(keyword))
+    start = time.perf_counter()
+    result = _redact(text)
+    elapsed = time.perf_counter() - start
+    assert result == text
+    assert elapsed < LONG_RUN_MAX_SECONDS, elapsed
+
+
+_PEM_BEGIN = "-----BEGIN PRIVATE KEY-----"
+_PEM_END = "-----END PRIVATE KEY-----"
+# The old pattern scanned from every BEGIN marker to the end of the text looking
+# for an END line, so N unterminated markers cost O(N^2): 0.24 s at 49 KB, 22 s at
+# 493 KB. The marker inputs are sized so the quadratic form crosses the bound.
+_PEM_MARKER_CHARS = 420_000
+_PEM_ADVERSARIAL = {
+    "markers-blank-line-separated": (_PEM_BEGIN + "\n\n") * (_PEM_MARKER_CHARS // 28),
+    "markers-newline-separated": (_PEM_BEGIN + "\n") * (_PEM_MARKER_CHARS // 27),
+    "markers-same-line": (_PEM_BEGIN + " ") * (_PEM_MARKER_CHARS // 27),
+    "unterminated-with-long-body": _PEM_BEGIN + "\n" + "A" * LONG_TARGET_CHARS * 4,
+    "markers-then-long-body": (_PEM_BEGIN + "\n\n") * 200
+    + _PEM_BEGIN
+    + "\n"
+    + "B" * LONG_TARGET_CHARS,
+}
+
+
+@pytest.mark.parametrize("name", sorted(_PEM_ADVERSARIAL))
+def test_pem_marker_runs_redact_in_bounded_time(name: str) -> None:
+    """Repeated or unterminated PEM markers must not go quadratic.
+
+    Absolute wall-clock ceiling for the same reason as the keyword-run test.
+    """
+    text = _PEM_ADVERSARIAL[name]
+    start = time.perf_counter()
+    result = _redact(text)
+    elapsed = time.perf_counter() - start
+    assert elapsed < LONG_RUN_MAX_SECONDS, elapsed
+    assert _PEM_BEGIN not in result
+    assert "AAAA" not in result
+    assert "BBBB" not in result
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # A well-formed block is consumed whole, END line included, even with a
+        # blank line inside its body.
+        (f"{_PEM_BEGIN}\nMIIEow\n\nabcd\n{_PEM_END}\ntail", "<redacted>\ntail"),
+        # The END line closes the block it belongs to; the second block is its own.
+        (
+            f"{_PEM_BEGIN}\nAAAA\n{_PEM_END}\nkeep\n{_PEM_BEGIN}\nBBBB\n{_PEM_END}",
+            "<redacted>\nkeep\n<redacted>",
+        ),
+        # An unterminated block followed by a complete one: the first runs to its
+        # blank line, the second is still consumed whole.
+        (
+            f"{_PEM_BEGIN}\nAAAA\n\n{_PEM_BEGIN}\nBBBB\n{_PEM_END}",
+            "<redacted>\n\n<redacted>",
+        ),
+    ],
+)
+def test_pem_pattern_still_consumes_well_formed_blocks(
+    text: str, expected: str
+) -> None:
+    assert _redact(text) == expected
 
 
 def test_url_userinfo_keeps_the_host() -> None:

@@ -147,10 +147,16 @@ _IDENT_SUFFIX = rf"[\w-]{{0,{_IDENT_SUFFIX_MAX}}}"
 # behind it (`<redacted>-tail`).
 _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     # A PEM private key, END line included; a clipped block with no END line
-    # runs to the next blank line (left in place) or the end of the text.
+    # runs to the next blank line (left in place) or the end of the text. The
+    # END search stops at the next `-----BEGIN ` marker: unbounded, it scanned to
+    # the end of the text from every unterminated marker, O(N^2) in the number of
+    # markers (22 s at 493 KB). Bounded, each marker scans only up to the next
+    # one, so the whole text is scanned O(1) times; a well-formed block holds no
+    # second BEGIN line, so it still matches whole.
     re.compile(
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"
-        r"|-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?=\r?\n[ \t]*\r?\n|\Z)",
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
+        r"(?:(?:(?!-----BEGIN ).)*?-----END [A-Z ]*PRIVATE KEY-----"
+        r"|.*?(?=\r?\n[ \t]*\r?\n|\Z))",
         re.DOTALL,
     ),
     re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
@@ -177,6 +183,17 @@ _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         rf"(?i)[\"']?{_IDENT_START}(?:password|passwd|secret|api[_-]?key|[_-]key)"
         rf"{_IDENT_SUFFIX}[\"']?\s*[:=]\s*{_ASSIGNED_VALUE}"
+    ),
+    # A space-separated flag: `--password hunter2`, `--token abc`, `-api-key k`. The
+    # `=` form is the keyword pattern above. A dash-led word only (prose such as
+    # "password reset" is left alone), a value on the SAME line (`[ \t]+`, so a
+    # bare flag never takes the next line), and a value that does not itself begin
+    # with "-" (`--token --verbose` keeps `--verbose`). The identifier suffix cap
+    # is shared with the patterns above, so a run of hits stays linear.
+    re.compile(
+        rf"(?i)(?<![\w-])-{{1,2}}[\w-]*"
+        r"(?:password|passwd|secret|api[_-]?key|[_-]key|token|authorization|cookie)"
+        rf"{_IDENT_SUFFIX}[ \t]+(?!-){_ASSIGNED_VALUE}"
     ),
     # `Cookie: a=1; b=2` / `Set-Cookie: sid=...; Path=/`: a header value runs to
     # the end of the line and holds spaces and `;`, so one token would leak the rest.
