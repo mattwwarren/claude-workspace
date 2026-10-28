@@ -542,6 +542,11 @@ def test_wide_shapes_win_over_the_narrow_mirrored_ones(
         ("PGPASSWORD=hunter2 psql", "<redacted> psql"),
         ('{"token": "abcd1234efgh5678", "ok": 1}', '{<redacted>, "ok": 1}'),
         ("password = 'correct horse' next", "<redacted> next"),
+        # A backslash-escaped quote does not end a quoted value.
+        ('{"password": "ab\\"cdSECRETTAIL"}', "{<redacted>}"),
+        ("password = 'it\\'s SECRETTAIL' next", "<redacted> next"),
+        ('--password "esc\\" aped SECRETTAIL" next', "<redacted> next"),
+        ('x --token "a\\\\" next', "x <redacted> next"),
     ],
 )
 def test_credential_assignments_are_consumed_whole(text: str, expected: str) -> None:
@@ -629,6 +634,42 @@ def test_long_keyword_run_redacts_in_bounded_time(keyword: str) -> None:
     elapsed = time.perf_counter() - start
     assert result == text
     assert elapsed < LONG_RUN_MAX_SECONDS, elapsed
+
+
+_ESCAPE_RUN_UNITS = LONG_TARGET_CHARS // 2
+_ESCAPED_QUOTE_ADVERSARIAL = {
+    # Unterminated quoted values: the quoted branch scans to the end of the text
+    # once, then the bare-token fallback takes the run.
+    "json-escaped-quote-run": 'password="' + '\\"' * _ESCAPE_RUN_UNITS,
+    "json-backslash-run": 'password="' + "\\" * LONG_TARGET_CHARS,
+    "flag-escaped-quote-run": '--password "' + '\\"' * _ESCAPE_RUN_UNITS,
+    "flag-backslash-run": "--token '" + "\\" * LONG_TARGET_CHARS,
+    "single-quote-escaped-run": "secret='" + "\\'" * _ESCAPE_RUN_UNITS,
+}
+
+
+@pytest.mark.parametrize("name", sorted(_ESCAPED_QUOTE_ADVERSARIAL))
+def test_escaped_quote_runs_redact_in_bounded_time(name: str) -> None:
+    """Escapes inside a quoted value must not reintroduce backtracking.
+
+    Absolute ceiling, as in the keyword-run test.
+    """
+    text = _ESCAPED_QUOTE_ADVERSARIAL[name]
+    start = time.perf_counter()
+    result = _redact(text)
+    elapsed = time.perf_counter() - start
+    assert result == "<redacted>"
+    assert elapsed < LONG_RUN_MAX_SECONDS, elapsed
+
+
+def test_repeated_escaped_quote_assignments_redact_in_bounded_time() -> None:
+    """Many starts, each with escaped quotes before its closing quote."""
+    text = 'password="\\"x ' * (LONG_TARGET_CHARS // 14)
+    start = time.perf_counter()
+    result = _redact(text)
+    elapsed = time.perf_counter() - start
+    assert elapsed < LONG_RUN_MAX_SECONDS, elapsed
+    assert "password" not in result
 
 
 _FLAG_NAMES = (

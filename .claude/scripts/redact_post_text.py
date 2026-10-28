@@ -129,7 +129,10 @@ _MIRRORED_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 # An assignment value: a whole quoted string (spaces included), else one token.
-_ASSIGNED_VALUE = r"""(?:"[^"]*"|'[^']*'|\S+)"""
+# A backslash escapes the next character inside the quotes, so `"ab\"cd"` is one
+# value. The two branches of each loop are disjoint (`[^"\\]` never matches a
+# backslash), so a quoted value is scanned once, without backtracking.
+_ASSIGNED_VALUE = r"""(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)"""
 # An identifier around a keyword (`DB_PASSWORD`, `AWS_SECRET_ACCESS_KEY`). The
 # prefix starts only where a word run starts, so a run is tried from one offset,
 # not from every offset inside it; the suffix is capped. Without the cap, a run
