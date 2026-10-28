@@ -51,6 +51,7 @@ from cw.review_convergence._engine import (
     record_round,
 )
 from cw.review_convergence._findings import (
+    classify_findings,
     from_verdict,
     frozen_counts_from_verdict,
     round_input_findings,
@@ -162,6 +163,7 @@ __all__ = [
     "TipVerdict",
     "UnmatchedTarget",
     "UnreadFindings",
+    "classify_findings",
     "confirm_blocker_fragment",
     "consecutive_confirm_failures",
     "demote_for_rereview",
