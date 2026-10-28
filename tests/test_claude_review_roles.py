@@ -15,6 +15,7 @@ from cw.claude_review import (
     ClaudeRunResult,
     FakeClaudeRunner,
     WorktreeMutation,
+    build_claude_review_argv,
     run_claude_roles,
 )
 from cw.codex_review import (
@@ -114,8 +115,12 @@ class TestDocuments:
         argv = call["argv"]
         assert isinstance(argv, list)
         assert f"prompt for {_ROLE}" not in argv
-        schema = json.loads(argv[argv.index("--json-schema") + 1])
-        assert schema == ReviewerFindingsDocument.model_json_schema()
+        # The whole confinement contract, on the argv run_claude_roles really
+        # builds: an appended --add-dir or a widened --tools would differ here.
+        assert argv == build_claude_review_argv(
+            model=None,
+            schema=json.dumps(ReviewerFindingsDocument.model_json_schema()),
+        )
 
 
 class TestFailures:
