@@ -10,6 +10,7 @@ and the two helpers that unit of work is the sole consumer of —
 
 from __future__ import annotations
 
+import itertools
 import subprocess
 import threading
 import time
@@ -2309,14 +2310,17 @@ def test_thread_budget_becomes_one_monotonic_deadline_for_both_gate_calls(
     """#2791: the budget becomes ``monotonic() + budget`` at both gate calls.
 
     The pre-loop resume and the post-loop confirm share the review thread's
-    single deadline; ``None`` (no wall-clock budget) stays ``None``.
+    single deadline; ``None`` (no wall-clock budget) stays ``None``. The clock
+    advances on every ``monotonic()`` reading, so a gate call that recomputed
+    its own ``monotonic() + budget`` would see a later deadline than the first
+    reading's and fail the equality below.
     """
     worktree, _origin = make_git_repo_with_origin(f"wt-bg-deadline-{budget}")
     returned = _clean_result(
         worktree, "T-deadline", sha=git_in(worktree, "rev-parse", "HEAD")
     )
     clock = MagicMock()
-    clock.monotonic.return_value = 1000.0
+    clock.monotonic.side_effect = itertools.count(1000.0, 10.0)
     with (
         patch("cw.codex_background.time", clock),
         patch(
@@ -2338,6 +2342,10 @@ def test_thread_budget_becomes_one_monotonic_deadline_for_both_gate_calls(
     assert gate_mock.call_count == 1
     assert resume_mock.call_args.kwargs["deadline"] == expected_deadline
     assert gate_mock.call_args.kwargs["deadline"] == expected_deadline
+    assert (
+        resume_mock.call_args.kwargs["deadline"]
+        == gate_mock.call_args.kwargs["deadline"]
+    )
     assert persisted == returned[0]
 
 
