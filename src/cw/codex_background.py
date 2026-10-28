@@ -34,6 +34,12 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from cw._git import capture_head_sha
 from cw.atomic import atomic_write_text
+from cw.claude_review import RealClaudeRunner
+from cw.codex_clean_confirm import (
+    CODEX_REVIEWER_LABEL,
+    apply_clean_confirm,
+    resume_pending_confirm,
+)
 from cw.codex_fix_loop import run_review_with_fix_loop
 from cw.codex_fix_loop.push import push_and_verify_head, remote_branch_tip
 from cw.codex_review import (
@@ -558,7 +564,12 @@ REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH = (
 
 
 def _persist_unparseable_artifact(
-    worktree: Path, blocker: Blocker, *, ticket_id: str, reviewed_sha: str
+    worktree: Path,
+    blocker: Blocker,
+    *,
+    ticket_id: str,
+    reviewed_sha: str,
+    reviewer_label: str = CODEX_REVIEWER_LABEL,
 ) -> Path | None:
     """Write *blocker*'s reason/details to the worktree, best-effort (#2280).
 
@@ -567,9 +578,12 @@ def _persist_unparseable_artifact(
     the actual write -- mkdir, ownership stamp, atomic write, never-raises
     logging -- to :func:`_persist_review_verdict`, pointed at this artifact's
     own path, so the two callers share one writer instead of two.
+    *reviewer_label* (#2791) names the backend in the header, so a Claude
+    confirm failure is never filed as a codex one.
     """
     text = (
-        f"# Codex review unparseable\n\nreason: {blocker.reason}\n\n{blocker.details}\n"
+        f"# {reviewer_label} review unparseable\n\n"
+        f"reason: {blocker.reason}\n\n{blocker.details}\n"
     )
     return _persist_review_verdict(
         worktree,
@@ -715,6 +729,113 @@ def _refuse_unpushed_clean_exit(
     return result, verdict
 
 
+class _ReviewOutcome(NamedTuple):
+    """Step 3's answer: what to persist, its verdict, the gate, and its label."""
+
+    result: AutoDevResult
+    verdict: ReviewVerdict | None
+    fix_loop_enabled: bool
+    reviewer_label: str
+
+
+def _review_and_confirm(
+    *,
+    runner: CodexRunner,
+    task: TicketTask,
+    worktree: Path,
+    client: ClientConfig,
+    wall_clock_budget_seconds: int | None,
+    deadline: float | None,
+    sid: str,
+    config_model: str | None,
+    config_reasoning_effort: str | None,
+) -> _ReviewOutcome:
+    """Step 3: codex review + fix loop (#1392), then the clean-mode gate (#2791).
+
+    fix_loop_enabled (#1553) resolves here, not through the StageExecutor
+    Protocol. A clean-mode ledger awaiting a confirm at HEAD skips the loop
+    (:func:`resume_pending_confirm`). The unpushed-HEAD guard runs before the
+    gate on the loop path, and on the resumed result, for the fix loop and
+    for every clean-mode client (G1); blocking mode is unchanged.
+    """
+    config = load_effective_config()
+    fix_loop_enabled = _resolve_codex_fix_loop_enabled(client, task, config)
+    # #2210: the ledger's fuzzy claim tier resolves from the same three
+    # already-loaded objects, on the same hop, and is threaded as one
+    # keyword defaulting to False all the way down to the backstop.
+    claim_tier_enabled = _resolve_claim_tier_enabled(client, task, config)
+    # #2232: resolved on the same hop, from the same three objects, so
+    # this is the one point in the codebase where both gates are in hand
+    # for the SAME task and lane — the earliest a refusal can compare
+    # them, and before either reaches the review.
+    disposition_drift_check_enabled = _resolve_disposition_drift_check_enabled(
+        client, task, config
+    )
+    _refuse_unguarded_claim_tier(
+        lane=task.lane,
+        claim_tier_enabled=claim_tier_enabled,
+        drift_check_enabled=disposition_drift_check_enabled,
+    )
+    resumed = resume_pending_confirm(
+        task=task,
+        worktree=worktree,
+        client=client,
+        sid=sid,
+        runner=RealClaudeRunner(),
+        deadline=deadline,
+    )
+    if resumed is not None:
+        result, verdict = resumed.result, resumed.verdict
+        if result.blocker is None:
+            result, verdict = _refuse_unpushed_clean_exit(
+                task=task, worktree=worktree, result=result, verdict=verdict
+            )
+        return _ReviewOutcome(result, verdict, fix_loop_enabled, resumed.reviewer_label)
+    result, verdict = run_review_with_fix_loop(
+        runner=runner,
+        task=task,
+        worktree=worktree,
+        default_branch=client.default_branch,
+        model=config_model,
+        reasoning_effort=config_reasoning_effort,
+        wall_clock_budget_seconds=wall_clock_budget_seconds,
+        session_id=sid,
+        fix_loop_enabled=fix_loop_enabled,
+        claim_tier_enabled=claim_tier_enabled,
+        disposition_drift_check_enabled=disposition_drift_check_enabled,
+        stall_cycles=_resolve_codex_fix_loop_stall_cycles(client, task, config),
+        growth_budget_lines=config.codex_fix_loop_growth_budget_lines,
+        cumulative_growth_budget_lines=(
+            config.codex_fix_loop_cumulative_growth_budget_lines
+        ),
+        growth_guard_enabled=_resolve_codex_fix_loop_growth_guard_enabled(
+            client, task, config
+        ),
+        # #2633: resolved only when the loop runs (gh api user otherwise
+        # never needs to run); outside every lock.
+        operator_login=resolve_operator_login(client) if fix_loop_enabled else None,
+    )
+    if result.blocker is None and (
+        fix_loop_enabled or client.review.convergence == "clean"
+    ):
+        result, verdict = _refuse_unpushed_clean_exit(
+            task=task, worktree=worktree, result=result, verdict=verdict
+        )
+    gated = apply_clean_confirm(
+        task=task,
+        worktree=worktree,
+        client=client,
+        sid=sid,
+        runner=RealClaudeRunner(),
+        deadline=deadline,
+        result=result,
+        verdict=verdict,
+    )
+    return _ReviewOutcome(
+        gated.result, gated.verdict, fix_loop_enabled, gated.reviewer_label
+    )
+
+
 def _run_codex_review_and_complete(
     *,
     runner: CodexRunner,
@@ -752,6 +873,13 @@ def _run_codex_review_and_complete(
     # pre-flight-failure branch.
     from cw.executor import _complete_session_via_door
 
+    # #2791: one deadline for the whole thread, shared by the codex loop and
+    # the clean-mode Claude confirm (None stays None: no wall-clock budget).
+    deadline = (
+        None
+        if wall_clock_budget_seconds is None
+        else time.monotonic() + wall_clock_budget_seconds
+    )
     try:
         # #1742: mark the loop as legitimately busy for the whole review. Set
         # outside any sessions_lock() block, honouring dispatch_state_lock()'s
@@ -767,55 +895,19 @@ def _run_codex_review_and_complete(
             )
         )
 
-        # Step 3: per-role review pass + bounded fix loop (#1392). The
-        # lane-scoped fix_loop_enabled gate (#1553) resolves here rather than
-        # being threaded through the StageExecutor Protocol.
-        config = load_effective_config()
-        fix_loop_enabled = _resolve_codex_fix_loop_enabled(client, task, config)
-        # #2210: the ledger's fuzzy claim tier resolves from the same three
-        # already-loaded objects, on the same hop, and is threaded as one
-        # keyword defaulting to False all the way down to the backstop.
-        claim_tier_enabled = _resolve_claim_tier_enabled(client, task, config)
-        # #2232: resolved on the same hop, from the same three objects, so
-        # this is the one point in the codebase where both gates are in hand
-        # for the SAME task and lane — the earliest a refusal can compare
-        # them, and before either reaches the review.
-        disposition_drift_check_enabled = _resolve_disposition_drift_check_enabled(
-            client, task, config
-        )
-        _refuse_unguarded_claim_tier(
-            lane=task.lane,
-            claim_tier_enabled=claim_tier_enabled,
-            drift_check_enabled=disposition_drift_check_enabled,
-        )
-        result, verdict = run_review_with_fix_loop(
+        # Step 3: per-role review pass + bounded fix loop (#1392), then the
+        # clean-mode confirm gate (#2791).
+        result, verdict, fix_loop_enabled, reviewer_label = _review_and_confirm(
             runner=runner,
             task=task,
             worktree=worktree,
-            default_branch=client.default_branch,
-            model=config_model,
-            reasoning_effort=config_reasoning_effort,
+            client=client,
             wall_clock_budget_seconds=wall_clock_budget_seconds,
-            session_id=sid,
-            fix_loop_enabled=fix_loop_enabled,
-            claim_tier_enabled=claim_tier_enabled,
-            disposition_drift_check_enabled=disposition_drift_check_enabled,
-            stall_cycles=_resolve_codex_fix_loop_stall_cycles(client, task, config),
-            growth_budget_lines=config.codex_fix_loop_growth_budget_lines,
-            cumulative_growth_budget_lines=(
-                config.codex_fix_loop_cumulative_growth_budget_lines
-            ),
-            growth_guard_enabled=_resolve_codex_fix_loop_growth_guard_enabled(
-                client, task, config
-            ),
-            # #2633: resolved only when the loop runs (gh api user otherwise
-            # never needs to run); outside every lock.
-            operator_login=resolve_operator_login(client) if fix_loop_enabled else None,
+            deadline=deadline,
+            sid=sid,
+            config_model=config_model,
+            config_reasoning_effort=config_reasoning_effort,
         )
-        if fix_loop_enabled and result.blocker is None:
-            result, verdict = _refuse_unpushed_clean_exit(
-                task=task, worktree=worktree, result=result, verdict=verdict
-            )
 
         # Step 4: persist result under sessions_lock.
         with sessions_lock():
@@ -825,8 +917,14 @@ def _run_codex_review_and_complete(
         # a retry on a persist failure cannot post a duplicate comment. verdict
         # is None only when every reviewer failed (no documents to render).
         if verdict is not None:
+            # #2791: a Claude-built verdict is titled Claude, and the codex fix
+            # loop's footer never applies to it.
             review_text = render_verdict_comment(
-                verdict, fix_loop_enabled=fix_loop_enabled
+                verdict,
+                fix_loop_enabled=(
+                    fix_loop_enabled and reviewer_label == CODEX_REVIEWER_LABEL
+                ),
+                reviewer_label=reviewer_label,
             )
             # #2095: the durable copy is written first, unconditionally, so a
             # tracker the daemon cannot post to still leaves a record.
@@ -858,6 +956,7 @@ def _run_codex_review_and_complete(
                 result.blocker,
                 ticket_id=task.ticket_id,
                 reviewed_sha=capture_head_sha(worktree, strict=False),
+                reviewer_label=reviewer_label,
             )
             _post_review_comment(
                 task.ticket_id,
