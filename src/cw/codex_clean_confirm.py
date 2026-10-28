@@ -248,10 +248,6 @@ def _load_reconciled_ledger(gate: _Gate, head: str) -> ConvergenceLedger:
         )
         gate.tokens.append(f"convergence_ledger_reset: {reconciled.reset_reason}")
     ledger = reconciled.ledger
-    gate.ledger = ledger
-    gate.confirm_refreshed = existing is not None and _confirm_choice_differs(
-        existing, resolved
-    )
     if ledger.loop_backend != CODEX_BACKEND:
         msg = (
             f"foreign convergence ledger: {LEDGER_RELATIVE_PATH} was written by "
@@ -261,6 +257,10 @@ def _load_reconciled_ledger(gate: _Gate, head: str) -> ConvergenceLedger:
             "--stage review)"
         )
         raise CwError(msg)
+    gate.ledger = ledger
+    gate.confirm_refreshed = existing is not None and _confirm_choice_differs(
+        existing, resolved
+    )
     return ledger
 
 

@@ -575,13 +575,36 @@ class TestLedgerStates:
 
     def test_a_foreign_loop_backend_parks_as_a_ledger_error(self, wt: Path) -> None:
         foreign = fresh_ledger(loop_backend="claude-native", fork_point=_fork(wt))
+        for n in range(2):
+            foreign, _ = record(
+                foreign,
+                round_finding(summary=f"foreign {n}"),
+                sha=_fork(wt),
+                backend="claude-native",
+            )
+        assert len(foreign.rounds) == 2
         write_ledger(wt, foreign)
-        outcome = _apply(wt, _client(wt), RoleAwareClaudeRunner(_clean_role))
+        client = _client(wt)
+        codex = _codex(wt)
+        outcome = _apply(wt, client, RoleAwareClaudeRunner(_clean_role), codex=codex)
         blocker = outcome.result.blocker
         assert blocker is not None
         assert blocker.reason == CODEX_CONVERGENCE_LEDGER_ERROR
         assert "foreign convergence ledger" in blocker.details
         assert "--stage review" in blocker.details
+        # The rejected ledger is the other loop's: its rounds, confirm backend
+        # and friction must not leak onto this lane's park result.
+        review = outcome.result.review
+        assert review.rounds_run == codex[0].review.rounds_run
+        assert review.rounds_run != len(foreign.rounds)
+        assert (
+            review.confirm_backend == codex_clean_confirm._resolved_confirm(client).name
+        )
+        assert review.confirm_backend != foreign.confirm_backend
+        assert not any(
+            line.startswith("review_round_")
+            for line in outcome.result.friction_highlights
+        )
 
 
 # ---------------------------------------------------------------------------
