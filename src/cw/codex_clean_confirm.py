@@ -98,7 +98,7 @@ if TYPE_CHECKING:
 
     from cw.claude_review import ClaudeReviewRound, ClaudeRunner
     from cw.models import ClientConfig, TicketTask
-    from cw.review_convergence import ConvergenceLedger, RoundReport
+    from cw.review_convergence import ConvergenceLedger, ResolvedBackend, RoundReport
     from cw.review_findings import AcceptedFinding, ReviewVerdict
 
 _log = logging.getLogger(__name__)
@@ -162,6 +162,9 @@ class _Gate:
     deadline: float | None
     ledger: ConvergenceLedger | None = None
     tokens: list[str] = field(default_factory=list)
+    #: The reconcile changed the ledger's confirm choice to the client's
+    #: current one, so an ``awaiting_confirm`` ledger is not resumed as-is.
+    confirm_refreshed: bool = False
 
     @property
     def ledger_path(self) -> Path:
@@ -189,19 +192,34 @@ def _is_clean_client(client: ClientConfig) -> bool:
     return client.review.convergence == "clean"
 
 
+def _resolved_confirm(client: ClientConfig) -> ResolvedBackend:
+    return resolve_confirm_backend(client.review.confirm_backend, CODEX_BACKEND)
+
+
+def _confirm_choice_differs(
+    ledger: ConvergenceLedger, resolved: ResolvedBackend
+) -> bool:
+    """The client's current confirm choice is not the one stamped on *ledger*."""
+    return (
+        ledger.confirm_backend != resolved.name
+        or ledger.confirm_not_independent != resolved.not_independent
+    )
+
+
 def _load_reconciled_ledger(gate: _Gate, head: str) -> ConvergenceLedger:
     """The existing ledger reconciled exactly as ``converge init`` would."""
     existing = load_ledger(gate.ledger_path)
     fork_point = _fork_point(gate)
     client = gate.client
     max_cycles = client.review.effective_max_cycles
+    resolved = _resolved_confirm(client)
     fresh = new_ledger(
         ticket_id=gate.task.ticket_id,
         fork_point=fork_point,
         checkpoint_3a_sha=head,
         max_cycles=max_cycles,
         loop_backend=CODEX_BACKEND,
-        confirm=resolve_confirm_backend(client.review.confirm_backend, CODEX_BACKEND),
+        confirm=resolved,
     )
     owned = (
         existing is not None
@@ -230,6 +248,9 @@ def _load_reconciled_ledger(gate: _Gate, head: str) -> ConvergenceLedger:
         gate.tokens.append(f"convergence_ledger_reset: {reconciled.reset_reason}")
     ledger = reconciled.ledger
     gate.ledger = ledger
+    gate.confirm_refreshed = existing is not None and _confirm_choice_differs(
+        existing, resolved
+    )
     if ledger.loop_backend != CODEX_BACKEND:
         msg = (
             f"foreign convergence ledger: {LEDGER_RELATIVE_PATH} was written by "
@@ -275,9 +296,7 @@ def _finish(gate: _Gate, result: AutoDevResult, *, park: bool) -> AutoDevResult:
     ledger = gate.ledger
     update: dict[str, object]
     if ledger is None:
-        resolved = resolve_confirm_backend(
-            gate.client.review.confirm_backend, CODEX_BACKEND
-        )
+        resolved = _resolved_confirm(gate.client)
         update = {
             "convergence_mode": "clean",
             "converged": False,
@@ -641,6 +660,7 @@ def _gate_after_loop(
     if (
         ledger.status != LEDGER_STATUS_AWAITING_CONFIRM
         or ledger.awaiting_confirm_sha != head
+        or gate.confirm_refreshed
     ):
         ledger, report = _record_loop_round(gate, ledger, verdict)
         if report.decision == DECISION_CLEAN:
@@ -722,6 +742,19 @@ def resume_pending_confirm(
         )
         return None
     if ledger is None or not _resumable(ledger, task, head, fork_point):
+        return None
+    if _confirm_choice_differs(ledger, _resolved_confirm(client)):
+        # The operator changed review.confirm_backend after the ledger was
+        # created (typically an opt-out after an outage). The stamped choice
+        # must not run a claude -p call the client no longer consents to: let
+        # the codex loop run, and the post-loop gate reconciles the ledger to
+        # the current choice and converges or confirms accordingly.
+        _log.info(
+            "clean-mode confirm resume: confirm_backend changed since the "
+            "ledger was created, running the codex loop ticket=%s client=%s",
+            task.ticket_id,
+            client.name,
+        )
         return None
     _log.info(
         "clean-mode confirm resume: skipping codex fix loop ticket=%s client=%s "

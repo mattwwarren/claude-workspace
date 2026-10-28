@@ -184,7 +184,10 @@ def reconcile_ledger_for_init(
        HEAD): return *fresh* with a ``reset_reason`` (``None`` when there was
        no ledger).
     2. Otherwise ``max_cycles`` is refreshed from the argument on every path
-       below, and ``confirm_failures`` is carried unchanged.
+       below, ``confirm_backend`` and ``confirm_not_independent`` are refreshed
+       from *fresh* on every path except a ``converged`` ledger already clean
+       at *head_sha* (it records no further round), and ``confirm_failures`` is
+       carried unchanged.
     3. A ``converged`` ledger whose *head_sha* is not its ``last_clean_sha`` is
        reopened as ``in_progress`` with no :class:`StopRelease` (it was not a
        stop): a commit landed after the last clean round, so another full
@@ -214,8 +217,19 @@ def reconcile_ledger_for_init(
         reset_ledger = fresh.model_copy(update={"reset_history": [reset_entry]})
         return Reconciled(reset_ledger, reset, None)
     ledger = existing.model_copy(update={"max_cycles": max_cycles})
+    if ledger.status == LEDGER_STATUS_CONVERGED and head_sha == ledger.last_clean_sha:
+        return Reconciled(ledger, None, None)
+    # A ledger that can still record a round follows the operator's current
+    # confirm choice, not the one stamped when it was created (an opt-out set
+    # after an outage must be honoured by the requeue).
+    ledger = ledger.model_copy(
+        update={
+            "confirm_backend": fresh.confirm_backend,
+            "confirm_not_independent": fresh.confirm_not_independent,
+        }
+    )
     if ledger.status == LEDGER_STATUS_STOPPED:
         return _reconcile_stopped(ledger, head_sha=head_sha, now=now)
-    if ledger.status == LEDGER_STATUS_CONVERGED and head_sha != ledger.last_clean_sha:
+    if ledger.status == LEDGER_STATUS_CONVERGED:
         return Reconciled(demote_for_rereview(ledger), None, None)
     return Reconciled(ledger, None, None)

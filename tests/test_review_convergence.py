@@ -134,10 +134,11 @@ def _reconcile(
     history_rewritten: bool = False,
     ticket_id: str = TICKET_ID,
     fork_point: str = FORK_POINT,
+    confirm: ConfirmBackend | None = "none",
 ) -> Reconciled:
     return reconcile_ledger_for_init(
         existing,
-        fresh=fresh_ledger(ticket_id=ticket_id, fork_point=fork_point),
+        fresh=fresh_ledger(ticket_id=ticket_id, fork_point=fork_point, confirm=confirm),
         ticket_id=ticket_id,
         fork_point=fork_point,
         history_rewritten=history_rewritten,
@@ -1369,6 +1370,34 @@ class TestReconcileForInit:
         unknown = no_progress.model_copy(update={"stop_reason": "mystery"})
         assert _reconcile(unknown, head="np").released is None
         assert release_cause(unknown) is None
+
+    def test_an_open_ledger_follows_the_current_confirm_choice(self) -> None:
+        awaiting = _awaiting()
+        assert awaiting.confirm_backend == "codex"
+        result = _reconcile(awaiting, head=DEFAULT_SHA, confirm="none")
+        assert result.ledger.confirm_backend == "none"
+        assert result.ledger.status == "awaiting_confirm"
+        assert result.ledger.awaiting_confirm_sha == awaiting.awaiting_confirm_sha
+
+    def test_the_not_independent_flag_is_refreshed_with_the_backend(self) -> None:
+        existing = ledger_with_rounds(_distinct(0, 1), shas=["s1"])
+        assert existing.confirm_not_independent is False
+        refreshed = _reconcile(existing, head="s1", confirm="claude").ledger
+        assert refreshed.confirm_backend == "claude"
+        # The helper loop backend is claude-native, so claude is not independent.
+        assert refreshed.confirm_not_independent is True
+
+    def test_a_converged_ledger_clean_at_head_keeps_its_stamped_choice(self) -> None:
+        converged = confirmed_ledger(sha="S", confirm="codex")
+        result = _reconcile(converged, head="S", confirm="none")
+        assert result.ledger.confirm_backend == "codex"
+        assert result.ledger.status == "converged"
+
+    def test_a_demoted_converged_ledger_follows_the_current_choice(self) -> None:
+        converged = confirmed_ledger(sha="S", confirm="codex")
+        result = _reconcile(converged, head="S+1", confirm="none")
+        assert result.ledger.status == "in_progress"
+        assert result.ledger.confirm_backend == "none"
 
     def test_fixture_d_converged_ledger_on_a_moved_tip_is_reopened(self) -> None:
         converged = confirmed_ledger(sha="S")

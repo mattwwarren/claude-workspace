@@ -551,6 +551,38 @@ class TestResume:
         assert _resume(wt, _client(wt), runner) is None
         assert runner.roles == []
 
+    @pytest.mark.parametrize(
+        ("choice", "friction"),
+        [
+            ("none", "confirm_round_opt_out: review.confirm_backend=none"),
+            (
+                "codex",
+                "confirm_not_independent: confirm_backend=codex equals loop "
+                "backend codex; no independent round ran",
+            ),
+        ],
+    )
+    def test_a_changed_confirm_backend_is_honoured_on_requeue(
+        self, wt: Path, choice: ConfirmBackend, friction: str
+    ) -> None:
+        # The ledger was created while the client resolved to claude.
+        write_ledger(wt, _awaiting_at(wt, _head(wt)))
+        client = _client(wt, confirm=choice)
+        runner = RoleAwareClaudeRunner(_clean_role)
+
+        assert _resume(wt, client, runner) is None
+        outcome = _apply(wt, client, runner)
+
+        assert runner.roles == []
+        assert outcome.result.blocker is None
+        assert outcome.result.review.converged is True
+        assert outcome.result.review.confirm_backend == choice
+        assert friction in outcome.result.friction_highlights
+        ledger = _ledger(wt)
+        assert ledger.status == "converged"
+        assert ledger.confirm_backend == choice
+        assert ledger.confirm_failures == []
+
     def test_a_dirty_confirm_reruns_the_loop_on_requeue(self, wt: Path) -> None:
         _apply(wt, _client(wt), RoleAwareClaudeRunner(_must_fix_role))
         assert _ledger(wt).status != "awaiting_confirm"
