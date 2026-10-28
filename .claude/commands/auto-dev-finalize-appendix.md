@@ -228,6 +228,19 @@ Reached from Step 4c of the core doc ("Finalize review-findings comment (#2794)"
 
 **Tracker and ticket.** The ticket id and tracker kind come from the same resolution as the PR-link comment (Step 4d, "**Post to Linear:**"). A free-text ticket (no tracker) posts nothing and takes today's path: no comment, no park stamp, the unchanged sentinel.
 
+**Step 0 — clear leftovers.** Finalize re-runs in the same worktree on a regress attempt, so files from an earlier attempt can still be on disk, and a skipped Write step would then post or compare a stale part. Remove every file this section writes before composing anything:
+
+```bash
+GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
+  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+[ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
+rm -f "$GUARD_ROOT/.cw/finalize-findings.txt" \
+  "$GUARD_ROOT/.cw/finalize-findings.redacted.txt" \
+  "$GUARD_ROOT"/.cw/finalize-findings-part-*.md \
+  "$GUARD_ROOT"/.cw/finalize-findings-readback-*.md
+```
+
 **Step 1 — compose the raw text.** Author the BLOCK's `gate:` line and its verbatim `details:` text via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule — to `$GUARD_ROOT/.cw/finalize-findings.txt`. This file is raw: no header, sub-heading, fence or marker yet.
 
 **Step 2 — redact.** Pipe the raw text through `redact_post_text.py` before anything is measured or split. The repository is public, and finding text routinely carries worktree paths, home-directory paths, `~/.claude/projects/<encoded>` transcript directories (the encoded name embeds the username) and, occasionally, secret-shaped strings. The script replaces worktree paths with `<worktree>`, home directories with `<home>`, transcript directories with `<home>/.claude/projects/<redacted>` and secret shapes with `<redacted>`; it replaces spans and removes nothing else. Resolve and run it in one Bash call (repo-local copy first, then the global one, marker-verified by the same pattern as this pipeline's other guard scripts — see `auto-dev-impl.md`'s "Guard-script path resolution and staleness marker" subsection for the shared snippet and the version table):
@@ -238,6 +251,9 @@ GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
   "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
 [ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
+# The raw text holds exactly the paths and secrets the redactor strips; it never
+# outlives this fence, on success or on either fail-closed exit.
+trap 'rm -f "$GUARD_ROOT/.cw/finalize-findings.txt"' EXIT
 RESOLVED=""
 for candidate in "$GUARD_ROOT/.claude/scripts/redact_post_text.py" "$HOME/.claude/scripts/redact_post_text.py"; do
   if [ -f "$candidate" ]; then RESOLVED="$candidate"; break; fi
@@ -264,7 +280,7 @@ python3 "$RESOLVED" --worktree "$GUARD_ROOT" --worktree "$CTX_WORKTREE" \
 echo "REDACT_EXIT=$?"
 ```
 
-- **Fence exit 0 with `REDACT_EXIT=0`** → continue to Step 3 with `$GUARD_ROOT/.cw/finalize-findings.redacted.txt`. The redaction output, not the raw text, is what gets measured, split and posted; the header, sub-heading, label line, fence and marker are added after redaction.
+- **Fence exit 0 with `REDACT_EXIT=0`** → continue to Step 3 with `$GUARD_ROOT/.cw/finalize-findings.redacted.txt`. The fence's `EXIT` trap has already removed the raw `finalize-findings.txt` (it also does on every fail-closed path below); the part and readback files stay for the operator to inspect, but the raw file never does. The redaction output, not the raw text, is what gets measured, split and posted; the header, sub-heading, label line, fence and marker are added after redaction.
 - **Fail closed (A6).** Fence exit 4 (the redactor is absent from both locations), fence exit 3 (a marker below the minimum `cw-script-version`), or a non-zero `REDACT_EXIT` → post nothing, do not run `cw signal-park`, append `blocking findings post skipped: redactor_unavailable` to `friction_highlights`, and emit the `agent_block` sentinel otherwise unchanged. A leak into a public tracker is worse than a missed findings comment.
 - **Stale marker text:** `HEADLESS BLOCK: redact_post_text.py at <resolved-path> — missing/stale cw-script-version marker (need >= 1)` names the condition and the text to quote in the friction entry, in the same wording as this pipeline's other guard sites, but here the outcome is NOT an `EXIT blocked`: this site fails closed and continues, so the session posts nothing, runs no park stamp, appends the `redactor_unavailable` friction entry above and emits the unchanged `agent_block` sentinel (today's behavior).
 

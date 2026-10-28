@@ -263,6 +263,85 @@ def test_headless_block_bullet_reconciles_with_fail_closed_outcome() -> None:
     assert "`redactor_unavailable`" in bullet
 
 
+SCRATCH_FILES = (
+    "finalize-findings.txt",
+    "finalize-findings.redacted.txt",
+    "finalize-findings-part-*.md",
+    "finalize-findings-readback-*.md",
+)
+
+
+def _pre_clean_fence() -> str:
+    fences = [
+        fence
+        for fence in _bash_fences(_finalize_findings_section())
+        if "rm -f" in fence and "redact_post_text.py" not in fence
+    ]
+    assert len(fences) == 1
+    return fences[0]
+
+
+def test_leftover_scratch_files_are_cleared_before_the_raw_text_is_composed() -> None:
+    """Finalize re-runs in the same worktree on a regress attempt: attempt 1's
+    part and readback files must not be posted or compared by attempt 2."""
+    section = _finalize_findings_section()
+    assert section.index("**Step 0 — clear leftovers.**") < section.index(
+        "**Step 1 — compose the raw text.**"
+    )
+    paragraph = _section_paragraph("**Step 0 — clear leftovers.**")
+    assert "on a regress attempt" in paragraph
+    fence = _pre_clean_fence()
+    assert fence.count("GUARD_ROOT=$(git rev-parse --show-toplevel") == 1
+    for name in SCRATCH_FILES:
+        assert f"/.cw/{name}" in fence, name
+
+
+def test_pre_clean_fence_removes_only_the_four_scratch_families(
+    tmp_path: Path,
+) -> None:
+    cw_dir = tmp_path / "repo" / ".cw"
+    cw_dir.mkdir(parents=True)
+    planted = [
+        "finalize-findings.txt",
+        "finalize-findings.redacted.txt",
+        "finalize-findings-part-1.md",
+        "finalize-findings-part-2.md",
+        "finalize-findings-readback-1.md",
+    ]
+    kept = ["impl-comments.json", "plan.md"]
+    for name in (*planted, *kept):
+        (cw_dir / name).write_text("x", encoding="utf-8")
+    env = {**os.environ, "GIT_CEILING_DIRECTORIES": str(tmp_path)}
+
+    result = subprocess.run(
+        ["bash", "-c", _pre_clean_fence()],
+        cwd=tmp_path / "repo",
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert sorted(path.name for path in cw_dir.iterdir()) == sorted(kept)
+
+
+def test_raw_findings_file_is_removed_on_every_path_out_of_the_redactor_fence() -> None:
+    """The raw text holds what the redactor strips; the part and readback files
+    may stay for inspection, the raw file may not. The trap is executed in
+    tests/test_scope_conformance_gate_docs.py's redactor-fence cases."""
+    section = _finalize_findings_section()
+    assert "trap 'rm -f \"$GUARD_ROOT/.cw/finalize-findings.txt\"' EXIT" in section
+    bullet = next(
+        line
+        for line in section.splitlines()
+        if line.startswith("- **Fence exit 0 with `REDACT_EXIT=0`**")
+    )
+    assert "removed the raw `finalize-findings.txt`" in bullet
+    assert "every fail-closed path" in bullet
+    assert "the raw file never does" in bullet
+
+
 def test_redactor_fence_passes_both_worktree_anchors() -> None:
     section = _finalize_findings_section()
     assert '--worktree "$GUARD_ROOT" --worktree "$CTX_WORKTREE"' in section

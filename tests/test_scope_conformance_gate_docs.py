@@ -968,6 +968,12 @@ def _run_redactor_fence(
     return result, cw_dir / "finalize-findings.redacted.txt"
 
 
+def _assert_raw_findings_removed(tmp_path: Path) -> None:
+    """The raw text never outlives the fence, on success or either fail-closed exit."""
+    raw = tmp_path / "repo" / ".cw" / "finalize-findings.txt"
+    assert not raw.exists(), "raw finalize-findings.txt outlived the redactor fence"
+
+
 @pytest.mark.parametrize("location", _LOCATIONS)
 @pytest.mark.parametrize(("label", "script_body"), GUARD_MARKER_BAD_CASES)
 def test_redactor_fence_stale_marker_exits_3_without_reaching_python(
@@ -981,6 +987,7 @@ def test_redactor_fence_stale_marker_exits_3_without_reaching_python(
     assert "STALE:" in result.stdout
     assert "REDACT_EXIT" not in result.stdout
     assert not redacted.exists(), f"{location}/{label}: python3 was reached anyway"
+    _assert_raw_findings_removed(tmp_path)
 
 
 def test_redactor_fence_absent_from_both_locations_exits_4(tmp_path: Path) -> None:
@@ -990,6 +997,7 @@ def test_redactor_fence_absent_from_both_locations_exits_4(tmp_path: Path) -> No
     assert "ABSENT" in result.stdout
     assert "REDACT_EXIT" not in result.stdout
     assert not redacted.exists()
+    _assert_raw_findings_removed(tmp_path)
 
 
 @pytest.mark.parametrize("location", _LOCATIONS)
@@ -1009,6 +1017,7 @@ def test_redactor_fence_current_marker_reaches_the_invocation(
     assert _INVOKED in invoked
     assert guard_candidate_path(tmp_path, location, _REDACTOR_SCRIPT) in invoked
     assert f"--worktree {tmp_path / 'repo'} --worktree" in invoked
+    _assert_raw_findings_removed(tmp_path)
 
 
 def test_redactor_fence_stale_repo_local_copy_is_not_rescued_by_global(
