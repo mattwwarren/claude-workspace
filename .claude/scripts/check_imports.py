@@ -20,6 +20,7 @@ GROUPS: list[tuple[str, list[str]]] = [
             "post_review",
             "prep_pr_finalize",
             "prep_pr_state",
+            "redact_post_text",
             "review_monitor",
             "review_monitor_lib.attention",
             "review_monitor_lib.check",

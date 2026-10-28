@@ -180,6 +180,22 @@ class TestSignalParkStamps:
         assert marker is not None
         assert marker.stage is Stage.REVIEW
 
+    def test_stage_is_finalize_for_a_finalize_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The finalize findings post (#2794) stamps from a FINALIZE row."""
+        from cw.models import read_park_comment_marker
+
+        worktree = _seeded_worktree(tmp_path)
+        _seed_running_row(worktree, stage=Stage.FINALIZE)
+
+        result = _invoke_signal_park(worktree, monkeypatch)
+
+        assert result.exit_code == 0
+        marker = read_park_comment_marker(_read_context(worktree))
+        assert marker is not None
+        assert marker.stage is Stage.FINALIZE
+
     def test_the_stop_hooks_own_context_write_keeps_the_marker(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
