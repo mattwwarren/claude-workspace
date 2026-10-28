@@ -641,6 +641,25 @@ def test_same_content_and_comment_at_another_severity_is_not_shown(
     assert _VOIDED_NOTE in history.notes
 
 
+def test_same_content_and_comment_in_another_file_is_not_shown(
+    tmp_path: Path,
+) -> None:
+    write_voided_ledger(derived_worktree(tmp_path))
+    foreign_voided_event(
+        ACME_TICKET,
+        file="src/cw/other.py",
+        summary=VOIDED_SUMMARY,
+        operator_comment_id=COMMENT_ID,
+    )
+
+    history = _history(review_task(), tmp_path)
+
+    assert [(v.operator_comment_id, v.file) for v in history.voided] == [
+        (COMMENT_ID, "src/cw/foo.py")
+    ]
+    assert _VOIDED_NOTE in history.notes
+
+
 def test_voided_event_for_no_row_record_is_counted(tmp_path: Path) -> None:
     write_voided_ledger(derived_worktree(tmp_path))
     foreign_voided_event(ACME_TICKET)
