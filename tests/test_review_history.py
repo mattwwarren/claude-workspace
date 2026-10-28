@@ -17,7 +17,7 @@ import pytest
 
 from cw.events import record_event
 from cw.exceptions import CwError
-from cw.models import CwState, OrchestratorEventType, QueueItemStatus, Stage
+from cw.models import CwState, OrchestratorEventType, QueueItemStatus
 from cw.models.review_history import ReviewHistory
 from cw.review_adjudication import VoidedFinding
 from cw.review_adjudication._voided import _voided_rationale
@@ -69,13 +69,14 @@ from tests._review_history_helpers import (
     fixture_zero_round,
     foreign_voided_event,
     record_verdict_round,
+    review_task,
     sentinel_review,
     stage_entered_event,
     timed,
-    voided_suppression,
     write_round_verdict,
+    write_voided_ledger,
 )
-from tests._ticket_view_helpers import ACME_TICKET, bound_session_for, make_task
+from tests._ticket_view_helpers import ACME_TICKET, bound_session_for
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -91,15 +92,6 @@ _VOIDED_NOTE = (
     "1 review.finding_voided event(s) for ticket id 'ACM-1' could not be tied "
     "to this row; not shown"
 )
-
-
-def _task(**overrides: object) -> TicketTask:
-    kwargs: dict[str, object] = {
-        "stage": Stage.REVIEW,
-        "status": QueueItemStatus.COMPLETED,
-    }
-    kwargs.update(overrides)
-    return make_task(**kwargs)
 
 
 def _history(
@@ -132,7 +124,7 @@ def _notes_with(history: ReviewHistory, needle: str) -> list[str]:
 def test_converged_rounds_summary_and_sources(tmp_path: Path) -> None:
     fixture_converged().write(derived_worktree(tmp_path))
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert [r.round for r in history.rounds] == [1, 2, 3, 4, 5]
     first, last = history.rounds[0], history.rounds[-1]
@@ -164,13 +156,13 @@ def test_final_clean_sha_is_reported_only_while_converged(tmp_path: Path) -> Non
     fixture = fixture_converged()
     worktree = derived_worktree(tmp_path)
     write_ledger(worktree, fixture.ledger)
-    converged = _history(_task(), tmp_path).summary
+    converged = _history(review_task(), tmp_path).summary
     assert (converged.converged, converged.final_clean_sha) == (True, "sha-0004")
 
     demoted = demote_for_rereview(fixture.ledger)
     assert demoted.last_clean_sha == "sha-0004"
     write_ledger(worktree, demoted)
-    reopened = _history(_task(), tmp_path).summary
+    reopened = _history(review_task(), tmp_path).summary
 
     assert reopened.converged is False
     assert reopened.ledger_status == "in_progress"
@@ -180,7 +172,7 @@ def test_final_clean_sha_is_reported_only_while_converged(tmp_path: Path) -> Non
 def test_severity_split_from_verdict_files(tmp_path: Path) -> None:
     fixture_converged().write(derived_worktree(tmp_path))
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     splits = [
         None if r.new_by_severity is None else r.new_by_severity.model_dump()
@@ -197,7 +189,7 @@ def test_disagreeing_verdict_file_gives_null_split_and_note(tmp_path: Path) -> N
     fixture.write(worktree)
     write_round_verdict(worktree, 2, fixture.verdicts[1])
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert history.rounds[1].new_by_severity is None
     assert _notes_with(history, "round 2: verdict file")
@@ -206,7 +198,7 @@ def test_disagreeing_verdict_file_gives_null_split_and_note(tmp_path: Path) -> N
 def test_missing_verdict_files_give_null_split_and_one_note(tmp_path: Path) -> None:
     fixture_converged().write(derived_worktree(tmp_path), with_verdicts=False)
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert all(r.new_by_severity is None for r in history.rounds)
     assert len(_notes_with(history, "no per-round verdict file")) == 1
@@ -219,7 +211,7 @@ def test_corrupt_verdict_file_gives_null_split_and_note(tmp_path: Path) -> None:
     path = write_round_verdict(worktree, 3, consolidated_verdict())
     path.write_text("{not json", encoding="utf-8")
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert history.rounds[2].new_by_severity is None
     assert _notes_with(history, "round 3 verdict file")
@@ -234,7 +226,7 @@ def test_unreadable_verdict_directory_is_a_note_not_a_traceback(
     verdict_dir = (worktree / LEDGER_RELATIVE_PATH).with_suffix("")
     verdict_dir.chmod(0o000)
     try:
-        history = _history(_task(), tmp_path)
+        history = _history(review_task(), tmp_path)
     finally:
         verdict_dir.chmod(0o700)
 
@@ -252,7 +244,7 @@ def test_undecided_verdict_file_gives_null_split_and_note(tmp_path: Path) -> Non
     dropped = stamp_dispositions(fixture.verdicts[1], {"r1 must 0": ("dropped", "")})
     write_round_verdict(worktree, 1, dropped)
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert history.rounds[0].new_by_severity is None
     assert _notes_with(history, "undecided")
@@ -261,7 +253,7 @@ def test_undecided_verdict_file_gives_null_split_and_note(tmp_path: Path) -> Non
 def test_findings_form_rounds_have_no_split(tmp_path: Path) -> None:
     fixture_stopped().write(derived_worktree(tmp_path))
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert all(r.new_by_severity is None for r in history.rounds)
     assert _notes_with(history, "no per-round verdict file")
@@ -283,7 +275,7 @@ def test_resurfaced_settled_finding_is_not_new(tmp_path: Path) -> None:
     write_round_verdict(worktree, 1, first)
     write_round_verdict(worktree, 2, second)
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     split = history.rounds[1].new_by_severity
     assert split is not None
@@ -297,7 +289,7 @@ def test_resurfaced_settled_finding_is_not_new(tmp_path: Path) -> None:
 def test_wall_time_is_the_delta_between_rounds(tmp_path: Path) -> None:
     fixture_converged().write(derived_worktree(tmp_path))
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     walls = [r.wall_seconds for r in history.rounds]
     assert walls == [None, 724.0, 476.0, 600.0, 300.0]
@@ -310,7 +302,7 @@ def test_naive_recorded_at_reads_as_utc(tmp_path: Path) -> None:
     )
     write_ledger(derived_worktree(tmp_path), ledger)
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert history.rounds[1].wall_seconds == 724.0
 
@@ -319,7 +311,7 @@ def test_unparseable_recorded_at_gives_null_wall_time(tmp_path: Path) -> None:
     fixture = fixture_in_progress()
     write_ledger(derived_worktree(tmp_path), timed(fixture.ledger, "not a time"))
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert history.rounds[0].wall_seconds is None
 
@@ -331,7 +323,7 @@ def test_unreadable_event_inbox_is_a_note(tmp_path: Path) -> None:
         msg = "inbox locked"
         raise CwError(msg)
 
-    task = _task()
+    task = review_task()
     inputs = collect_history_inputs(
         task, client_config(tmp_path), CwState(), read_events_fn=_boom
     )
@@ -345,7 +337,7 @@ def test_unreadable_event_inbox_is_a_note(tmp_path: Path) -> None:
 
 
 def _running(**overrides: object) -> TicketTask:
-    return _task(status=QueueItemStatus.RUNNING, **overrides)
+    return review_task(status=QueueItemStatus.RUNNING, **overrides)
 
 
 def test_stage_event_of_the_bound_session_sets_round_one(tmp_path: Path) -> None:
@@ -365,7 +357,7 @@ def test_stage_event_of_a_worktree_session_of_this_client_is_used(
     worktree = derived_worktree(tmp_path)
     fixture_converged().write(worktree)
     stage_entered_event(ACME_TICKET, "sess-wt", REVIEW_START)
-    task = _task()
+    task = review_task()
 
     history = _history(
         task, tmp_path, sessions=[_session(task, "sess-wt", worktree_path=worktree)]
@@ -378,7 +370,7 @@ def test_stage_event_of_another_clients_session_is_not_used(tmp_path: Path) -> N
     worktree = derived_worktree(tmp_path)
     fixture_converged().write(worktree)
     stage_entered_event(ACME_TICKET, "sess-y", REVIEW_START)
-    task = _task()
+    task = review_task()
     stranger = _session(task, "sess-y", client=OTHER, worktree_path=worktree)
 
     history = _history(task, tmp_path, sessions=[stranger])
@@ -456,24 +448,10 @@ def test_another_tickets_stage_event_is_ignored(tmp_path: Path) -> None:
 # --- review.finding_voided attribution ----------------------------------------
 
 
-def _voided_ledger_worktree(tmp_path: Path) -> Path:
-    """A one-round ledger whose SHOULD_FIX finding was voided by the operator."""
-    verdict = consolidated_verdict(
-        accepted=[("MUST_FIX", "Real bug"), ("SHOULD_FIX", VOIDED_SUMMARY)]
-    )
-    stamped = voided_suppression(ACME_TICKET, verdict)
-    ledger, _ = record_verdict_round(
-        fresh_ledger(ticket_id=ACME_TICKET), stamped, "sha-0001"
-    )
-    worktree = derived_worktree(tmp_path)
-    write_ledger(worktree, ledger)
-    return worktree
-
-
 def test_voided_event_matched_through_the_ledger(tmp_path: Path) -> None:
-    _voided_ledger_worktree(tmp_path)
+    write_voided_ledger(derived_worktree(tmp_path))
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert len(history.voided) == 1
     voided = history.voided[0]
@@ -488,7 +466,7 @@ def test_voided_event_matched_through_the_ledger(tmp_path: Path) -> None:
 
 def test_voided_event_matched_through_a_row_disposition(tmp_path: Path) -> None:
     key = _disposition_key("src/cw/foo.py", "Some finding") or ""
-    task = _task(
+    task = review_task(
         finding_dispositions={
             key: FindingDisposition(
                 outcome="REJECTED", rationale="nope", summary="Some finding"
@@ -518,7 +496,7 @@ def test_voided_event_matched_through_a_row_disposition(tmp_path: Path) -> None:
 def test_newline_wrapped_disposition_summary_still_attributes(tmp_path: Path) -> None:
     wrapped = "Some   finding\n  wrapped over\tlines"
     key = _disposition_key("src/cw/foo.py", wrapped) or ""
-    task = _task(
+    task = review_task(
         finding_dispositions={
             key: FindingDisposition(
                 outcome="REJECTED", rationale="nope", summary=wrapped
@@ -539,7 +517,7 @@ def test_newline_wrapped_disposition_summary_still_attributes(tmp_path: Path) ->
 
 
 def test_same_content_but_foreign_comment_id_is_not_shown(tmp_path: Path) -> None:
-    _voided_ledger_worktree(tmp_path)
+    write_voided_ledger(derived_worktree(tmp_path))
     foreign_voided_event(
         ACME_TICKET,
         file="src/cw/foo.py",
@@ -547,17 +525,17 @@ def test_same_content_but_foreign_comment_id_is_not_shown(tmp_path: Path) -> Non
         operator_comment_id=OTHER_COMMENT,
     )
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert [v.operator_comment_id for v in history.voided] == [COMMENT_ID]
     assert _VOIDED_NOTE in history.notes
 
 
 def test_voided_event_for_no_row_record_is_counted(tmp_path: Path) -> None:
-    _voided_ledger_worktree(tmp_path)
+    write_voided_ledger(derived_worktree(tmp_path))
     foreign_voided_event(ACME_TICKET)
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert len(history.voided) == 1
     assert _VOIDED_NOTE in history.notes
@@ -570,7 +548,7 @@ def test_malformed_voided_payload_is_counted(tmp_path: Path) -> None:
         correlation_id=ACME_TICKET,
     )
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert history.voided == []
     assert _VOIDED_NOTE in history.notes
@@ -581,7 +559,9 @@ def test_blocking_row_without_a_matching_disposition_counts_it(
 ) -> None:
     foreign_voided_event(ACME_TICKET)
 
-    history = _history(_task(finding_dispositions=blocking_dispositions()), tmp_path)
+    history = _history(
+        review_task(finding_dispositions=blocking_dispositions()), tmp_path
+    )
 
     assert history.voided == []
     assert _VOIDED_NOTE in history.notes
@@ -590,7 +570,7 @@ def test_blocking_row_without_a_matching_disposition_counts_it(
 def test_another_tickets_voided_event_is_ignored(tmp_path: Path) -> None:
     foreign_voided_event("ACM-2")
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert not _notes_with(history, "review.finding_voided")
 
@@ -608,7 +588,7 @@ def test_voided_rationale_prefix_pins_the_producer() -> None:
 
 
 def test_another_clients_events_never_leak(tmp_path: Path) -> None:
-    _voided_ledger_worktree(tmp_path)
+    write_voided_ledger(derived_worktree(tmp_path))
     stage_entered_event(ACME_TICKET, OTHER_SESSION, REVIEW_START)
     foreign_voided_event(ACME_TICKET)
     task = _running(session_id=ACME_SESSION)
@@ -632,7 +612,7 @@ def test_another_clients_events_never_leak(tmp_path: Path) -> None:
 def test_stopped_ledger_summary_and_releases(tmp_path: Path) -> None:
     fixture_stopped().write(derived_worktree(tmp_path))
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     summary = history.summary
     assert (summary.ledger_status, summary.stop_reason) == ("stopped", "oscillation")
@@ -651,7 +631,7 @@ def test_stopped_ledger_summary_and_releases(tmp_path: Path) -> None:
 def test_settled_entries_are_placed_once(tmp_path: Path) -> None:
     fixture_stopped().write(derived_worktree(tmp_path))
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert [(s.summary, s.origin) for s in history.settled] == [
         ("False alarm", "adjudication"),
@@ -679,7 +659,7 @@ def test_settled_entry_with_no_round_view_gets_a_note(tmp_path: Path) -> None:
         ledger.model_copy(update={"rounds": ledger.rounds[1:]}),
     )
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert len(history.settled) == 3
     assert _notes_with(history, "has no recorded round")
@@ -707,7 +687,7 @@ def test_in_flight_ledgers_show_rounds_so_far(
 
 def test_in_flight_without_a_ledger_reads_the_row(tmp_path: Path) -> None:
     assert _history(_running(), tmp_path).in_flight is True
-    assert _history(_task(), tmp_path).in_flight is False
+    assert _history(review_task(), tmp_path).in_flight is False
 
 
 def test_in_flight_ledger_beats_a_running_row(tmp_path: Path) -> None:
@@ -722,7 +702,7 @@ def test_in_flight_ledger_beats_a_running_row(tmp_path: Path) -> None:
 def test_in_flight_ledger_beats_a_completed_row(tmp_path: Path) -> None:
     fixture_in_progress().write(derived_worktree(tmp_path))
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert history.row_status == "completed"
     assert history.in_flight is True
@@ -738,7 +718,7 @@ def test_corrupt_ledger_falls_back_to_the_sentinel(
     path = derived_worktree(tmp_path) / LEDGER_RELATIVE_PATH
     path.parent.mkdir(parents=True)
     path.write_bytes(content)
-    task = _task()
+    task = review_task()
 
     history = _history(
         task,
@@ -766,7 +746,7 @@ def test_ledger_oserror_is_a_note(
 
     monkeypatch.setattr("cw.review_history.load_ledger", _denied)
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert _notes_with(history, "unreadable")
     assert history.rounds == []
@@ -777,7 +757,7 @@ def test_corrupt_ledger_without_sentinel_is_unknown_mode(tmp_path: Path) -> None
     path.parent.mkdir(parents=True)
     path.write_text("{", encoding="utf-8")
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert history.summary.convergence_mode == "unknown"
     assert history.sources == []
@@ -786,7 +766,7 @@ def test_corrupt_ledger_without_sentinel_is_unknown_mode(tmp_path: Path) -> None
 def test_foreign_ticket_ledger_is_skipped(tmp_path: Path) -> None:
     fixture_converged(ticket="ACM-9").write(derived_worktree(tmp_path))
 
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert history.rounds == []
     assert _notes_with(history, "foreign ticket 'ACM-9'")
@@ -848,7 +828,7 @@ def test_sentinel_review_block_maps_to_the_summary(tmp_path: Path) -> None:
         "must_fix_initial": 1,
         "should_fix": 0,
     }
-    task = _task(session_id=ACME_SESSION)
+    task = review_task(session_id=ACME_SESSION)
     session = _session(task, ACME_SESSION, last_result=sentinel_review(review))
 
     history = _history(task, tmp_path, sessions=[session])
@@ -865,7 +845,7 @@ def test_sentinel_review_block_maps_to_the_summary(tmp_path: Path) -> None:
 
 def test_sentinel_rounds_run_mismatch_keeps_the_ledger(tmp_path: Path) -> None:
     fixture_converged().write(derived_worktree(tmp_path))
-    task = _task(session_id=ACME_SESSION)
+    task = review_task(session_id=ACME_SESSION)
     session = _session(
         task,
         ACME_SESSION,
@@ -882,7 +862,7 @@ def test_sentinel_rounds_run_mismatch_keeps_the_ledger(tmp_path: Path) -> None:
 
 
 def test_blocking_sentinel_without_counts_has_no_rounds(tmp_path: Path) -> None:
-    task = _task(session_id=ACME_SESSION)
+    task = review_task(session_id=ACME_SESSION)
     session = _session(
         task, ACME_SESSION, last_result=sentinel_review({"fix_cycles_used": 1})
     )
@@ -899,7 +879,7 @@ def test_deferred_count_comes_from_the_ledger_when_one_was_read(
 ) -> None:
     fixture_stopped().write(derived_worktree(tmp_path))
 
-    summary = _history(_task(), tmp_path).summary
+    summary = _history(review_task(), tmp_path).summary
 
     assert summary.deferred
     assert summary.deferred_count == len(summary.deferred)
@@ -908,7 +888,7 @@ def test_deferred_count_comes_from_the_ledger_when_one_was_read(
 def test_deferred_count_comes_from_the_sentinel_without_a_ledger(
     tmp_path: Path,
 ) -> None:
-    task = _task(session_id=ACME_SESSION)
+    task = review_task(session_id=ACME_SESSION)
     session = _session(task, ACME_SESSION, last_result=fixture_blocking_sentinel())
 
     summary = _history(task, tmp_path, sessions=[session]).summary
@@ -918,17 +898,19 @@ def test_deferred_count_comes_from_the_sentinel_without_a_ledger(
 
 
 def test_deferred_count_is_null_when_nothing_records_it(tmp_path: Path) -> None:
-    task = _task(session_id=ACME_SESSION)
+    task = review_task(session_id=ACME_SESSION)
     session = _session(
         task, ACME_SESSION, last_result=sentinel_review({"fix_cycles_used": 1})
     )
 
     assert _history(task, tmp_path, sessions=[session]).summary.deferred_count is None
-    assert _history(_task(), tmp_path).summary.deferred_count is None
+    assert _history(review_task(), tmp_path).summary.deferred_count is None
 
 
 def test_blocking_mode_degraded_view(tmp_path: Path) -> None:
-    task = _task(session_id=ACME_SESSION, finding_dispositions=blocking_dispositions())
+    task = review_task(
+        session_id=ACME_SESSION, finding_dispositions=blocking_dispositions()
+    )
     session = _session(task, ACME_SESSION, last_result=fixture_blocking_sentinel())
 
     history = _history(task, tmp_path, sessions=[session])
@@ -964,7 +946,9 @@ def test_override_beats_the_row_worktree(tmp_path: Path) -> None:
     fixture_in_progress().write(tmp_path / "row")
 
     history = _history(
-        _task(worktree_path=tmp_path / "row"), tmp_path, worktree=tmp_path / "override"
+        review_task(worktree_path=tmp_path / "row"),
+        tmp_path,
+        worktree=tmp_path / "override",
     )
 
     assert len(history.rounds) == 5
@@ -973,7 +957,7 @@ def test_override_beats_the_row_worktree(tmp_path: Path) -> None:
 def test_row_worktree_beats_the_bound_session(tmp_path: Path) -> None:
     fixture_converged().write(tmp_path / "row")
     fixture_in_progress().write(tmp_path / "sess")
-    task = _task(worktree_path=tmp_path / "row", session_id=ACME_SESSION)
+    task = review_task(worktree_path=tmp_path / "row", session_id=ACME_SESSION)
 
     history = _history(
         task,
@@ -987,7 +971,7 @@ def test_row_worktree_beats_the_bound_session(tmp_path: Path) -> None:
 def test_bound_session_beats_the_derived_path(tmp_path: Path) -> None:
     fixture_converged().write(tmp_path / "sess")
     fixture_in_progress().write(derived_worktree(tmp_path))
-    task = _task(session_id=ACME_SESSION)
+    task = review_task(session_id=ACME_SESSION)
 
     history = _history(
         task,
@@ -1002,14 +986,14 @@ def test_first_ticket_matching_ledger_wins(tmp_path: Path) -> None:
     fixture_converged(ticket="ACM-9").write(tmp_path / "row")
     fixture_in_progress().write(derived_worktree(tmp_path))
 
-    history = _history(_task(worktree_path=tmp_path / "row"), tmp_path)
+    history = _history(review_task(worktree_path=tmp_path / "row"), tmp_path)
 
     assert len(history.rounds) == 1
     assert _notes_with(history, "foreign ticket")
 
 
 def test_unconfigured_client_with_no_worktree_is_noted(tmp_path: Path) -> None:
-    history = _history(_task(), tmp_path, configured=False)
+    history = _history(review_task(), tmp_path, configured=False)
 
     assert _notes_with(history, "not configured or its config is unreadable")
     assert _notes_with(history, "no worktree")
@@ -1017,7 +1001,7 @@ def test_unconfigured_client_with_no_worktree_is_noted(tmp_path: Path) -> None:
 
 def test_newest_review_session_of_this_client_is_the_sentinel(tmp_path: Path) -> None:
     worktree = derived_worktree(tmp_path)
-    task = _task()
+    task = review_task()
 
     def _with(
         sid: str, day: int, review: dict[str, object] | None, **kw: object
@@ -1046,7 +1030,7 @@ def test_newest_review_session_of_this_client_is_the_sentinel(tmp_path: Path) ->
 
 
 def test_missing_everything_gives_an_empty_history(tmp_path: Path) -> None:
-    history = _history(_task(), tmp_path)
+    history = _history(review_task(), tmp_path)
 
     assert (history.rounds, history.settled, history.dispositions) == ([], [], [])
     assert (history.voided, history.sources) == ([], [])
@@ -1056,7 +1040,7 @@ def test_missing_everything_gives_an_empty_history(tmp_path: Path) -> None:
 
 
 def test_unreadable_state_is_a_note(tmp_path: Path) -> None:
-    inputs = collect_history_inputs(_task(), client_config(tmp_path), None)
+    inputs = collect_history_inputs(review_task(), client_config(tmp_path), None)
 
     assert _notes_with(build_review_history(inputs), "session state unreadable")
 
@@ -1065,8 +1049,8 @@ def test_other_rows_are_noted_when_above_zero(tmp_path: Path) -> None:
     cfg = client_config(tmp_path)
     state = CwState(sessions=[])
 
-    many = collect_history_inputs(_task(), cfg, state, other_rows=2)
-    none = collect_history_inputs(_task(), cfg, state, other_rows=0)
+    many = collect_history_inputs(review_task(), cfg, state, other_rows=2)
+    none = collect_history_inputs(review_task(), cfg, state, other_rows=0)
 
     note = "2 other dev-queue row(s) for this ticket and client"
     assert [n for n in many.notes if n.startswith(note)]

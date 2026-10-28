@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 from freezegun import freeze_time
 
 from cw.events import record_event
-from cw.models import ClientConfig, OrchestratorEventType
+from cw.models import ClientConfig, OrchestratorEventType, QueueItemStatus, Stage
 from cw.models.enums import StageIdentifier
 from cw.review_adjudication import VoidedFinding, apply_voided_suppression
 from cw.review_convergence import (
@@ -43,7 +43,7 @@ from tests._review_convergence_helpers import (
     round_finding,
     write_ledger,
 )
-from tests._ticket_view_helpers import ACME, ACME_TICKET, bound_session_for
+from tests._ticket_view_helpers import ACME, ACME_TICKET, bound_session_for, make_task
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -199,6 +199,29 @@ def voided_suppression(
     stamped, adjudications = apply_voided_suppression(verdict, [void], ticket_id=ticket)
     assert len(adjudications) == 1
     return stamped
+
+
+def write_voided_ledger(worktree: Path, ticket: str = ACME_TICKET) -> None:
+    """Write *ticket*'s one-round ledger to *worktree*, a SHOULD_FIX voided in it."""
+    verdict = consolidated_verdict(
+        accepted=[("MUST_FIX", "Real bug"), ("SHOULD_FIX", VOIDED_SUMMARY)]
+    )
+    ledger, _ = record_verdict_round(
+        fresh_ledger(ticket_id=ticket),
+        voided_suppression(ticket, verdict),
+        "sha-0001",
+    )
+    write_ledger(worktree, ledger)
+
+
+def review_task(**overrides: object) -> TicketTask:
+    """A completed row at the review stage; *overrides* go to ``make_task``."""
+    kwargs: dict[str, object] = {
+        "stage": Stage.REVIEW,
+        "status": QueueItemStatus.COMPLETED,
+    }
+    kwargs.update(overrides)
+    return make_task(**kwargs)
 
 
 def foreign_voided_event(ticket: str, **payload: str) -> OrchestratorEvent:

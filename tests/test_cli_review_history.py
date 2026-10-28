@@ -15,11 +15,6 @@ from cw.models import QueueItemStatus, Stage
 from cw.models.review_history import ReviewHistory
 from cw.review_convergence import LEDGER_RELATIVE_PATH
 from tests._cli_review_helpers import _enter_operator_machine, _seed_review_row
-from tests._review_convergence_helpers import (
-    consolidated_verdict,
-    fresh_ledger,
-    write_ledger,
-)
 from tests._review_history_helpers import (
     ACME_SESSION,
     DEFER_RATIONALE,
@@ -39,11 +34,10 @@ from tests._review_history_helpers import (
     fixture_converged,
     fixture_stopped,
     foreign_voided_event,
-    record_verdict_round,
     sentinel_review,
     stage_entered_event,
-    voided_suppression,
     write_corrupt_ledger,
+    write_voided_ledger,
 )
 from tests._ticket_view_helpers import (
     ACME,
@@ -228,16 +222,8 @@ def test_ticket_under_two_clients_needs_c() -> None:
 
 
 def test_another_clients_events_never_reach_the_output(tmp_path: Path) -> None:
-    verdict = consolidated_verdict(
-        accepted=[("MUST_FIX", "Real bug"), ("SHOULD_FIX", VOIDED_SUMMARY)]
-    )
-    ledger, _ = record_verdict_round(
-        fresh_ledger(ticket_id=ACME_TICKET),
-        voided_suppression(ACME_TICKET, verdict),
-        "sha-0001",
-    )
     worktree = tmp_path / "acme-wt"
-    write_ledger(worktree, ledger)
+    write_voided_ledger(worktree)
     _seed_review_row(ACME_TICKET, ACME, worktree_path=worktree)
     other_session = bound_session_for(
         make_task(client=OTHER, session_id=OTHER_SESSION),

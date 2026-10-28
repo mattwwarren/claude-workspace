@@ -10,13 +10,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.models import CwState, QueueItemStatus, Stage
+from cw.models import CwState, QueueItemStatus
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from cw.review_history import build_review_history, collect_history_inputs
 from cw.review_history_render import render_review_history
 from tests._review_convergence_helpers import (
-    consolidated_verdict,
-    fresh_ledger,
     write_ledger,
 )
 from tests._review_history_helpers import (
@@ -36,12 +34,12 @@ from tests._review_history_helpers import (
     fixture_blocking_sentinel,
     fixture_converged,
     fixture_stopped,
-    record_verdict_round,
+    review_task,
     sentinel_review,
-    voided_suppression,
     write_corrupt_ledger,
+    write_voided_ledger,
 )
-from tests._ticket_view_helpers import ACME_TICKET, bound_session_for, make_task
+from tests._ticket_view_helpers import bound_session_for
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -60,17 +58,10 @@ def _render(
     return history, render_review_history(history)
 
 
-def _task(**overrides: object) -> TicketTask:
-    kwargs: dict[str, object] = {
-        "stage": Stage.REVIEW,
-        "status": QueueItemStatus.COMPLETED,
-    }
-    kwargs.update(overrides)
-    return make_task(**kwargs)
-
-
 def _blocking(tmp_path: Path) -> tuple[ReviewHistory, str]:
-    task = _task(session_id=ACME_SESSION, finding_dispositions=blocking_dispositions())
+    task = review_task(
+        session_id=ACME_SESSION, finding_dispositions=blocking_dispositions()
+    )
     session = bound_session_for(task, last_result=fixture_blocking_sentinel())
     return _render(tmp_path, task, (session,))
 
@@ -85,7 +76,7 @@ def _assert_invariants(text: str) -> None:
 def test_converged_text(tmp_path: Path) -> None:
     fixture_converged().write(derived_worktree(tmp_path))
 
-    _, text = _render(tmp_path, _task())
+    _, text = _render(tmp_path, review_task())
 
     lines = text.splitlines()
     assert lines[0] == "review_history: ACM-1 (client acme)"
@@ -106,7 +97,7 @@ def test_converged_text(tmp_path: Path) -> None:
 def test_converged_header_and_round_block_keys_in_fixed_order(tmp_path: Path) -> None:
     fixture_converged().write(derived_worktree(tmp_path))
 
-    _, text = _render(tmp_path, _task())
+    _, text = _render(tmp_path, review_task())
 
     lines = text.splitlines()
     assert lines[:13] == [
@@ -141,15 +132,7 @@ def test_converged_header_and_round_block_keys_in_fixed_order(tmp_path: Path) ->
 
 def _voided_ledger_with_dispositions(tmp_path: Path) -> dict[str, FindingDisposition]:
     """A voided ledger finding plus two live row dispositions and a legacy one."""
-    verdict = consolidated_verdict(
-        accepted=[("MUST_FIX", "Real bug"), ("SHOULD_FIX", VOIDED_SUMMARY)]
-    )
-    ledger, _ = record_verdict_round(
-        fresh_ledger(ticket_id=ACME_TICKET),
-        voided_suppression(ACME_TICKET, verdict),
-        "sha-0001",
-    )
-    write_ledger(derived_worktree(tmp_path), ledger)
+    write_voided_ledger(derived_worktree(tmp_path))
     dispositions = blocking_dispositions()
     legacy_key = _disposition_key("src/cw/legacy.py", "no summary") or ""
     dispositions[legacy_key] = FindingDisposition(outcome="REJECTED", rationale="old")
@@ -159,7 +142,7 @@ def _voided_ledger_with_dispositions(tmp_path: Path) -> dict[str, FindingDisposi
 def test_voided_and_disposition_lines_carry_every_field(tmp_path: Path) -> None:
     dispositions = _voided_ledger_with_dispositions(tmp_path)
 
-    history, text = _render(tmp_path, _task(finding_dispositions=dispositions))
+    history, text = _render(tmp_path, review_task(finding_dispositions=dispositions))
 
     lines = text.splitlines()
     event_at = history.voided[0].event_at
@@ -186,7 +169,7 @@ def test_voided_and_disposition_lines_carry_every_field(tmp_path: Path) -> None:
 def test_stopped_text_prints_each_rationale_once(tmp_path: Path) -> None:
     fixture_stopped().write(derived_worktree(tmp_path))
 
-    history, text = _render(tmp_path, _task())
+    history, text = _render(tmp_path, review_task())
 
     lines = text.splitlines()
     assert "stop: oscillation (MUST_FIX::src/cw/foo.py::Other bug)" in lines
@@ -216,7 +199,7 @@ def test_settled_entries_with_no_round_block_render_under_settled_other(
         ledger.model_copy(update={"rounds": ledger.rounds[1:]}),
     )
 
-    _, text = _render(tmp_path, _task())
+    _, text = _render(tmp_path, review_task())
 
     lines = text.splitlines()
     other = lines[lines.index("settled_other:") + 1 : lines.index("dispositions: -")]
@@ -234,7 +217,7 @@ def test_sentinel_friction_round_renders_the_unsplit_settled_total(
     tmp_path: Path,
 ) -> None:
     write_corrupt_ledger(derived_worktree(tmp_path))
-    task = _task()
+    task = review_task()
 
     session = clean_sentinel_session(task, derived_worktree(tmp_path))
     _, text = _render(tmp_path, task, (session,))
@@ -250,7 +233,7 @@ def test_sentinel_friction_round_renders_the_unsplit_settled_total(
 def test_in_flight_text_says_rounds_so_far(tmp_path: Path) -> None:
     fixture_awaiting_confirm().write(derived_worktree(tmp_path))
 
-    _, text = _render(tmp_path, _task(status=QueueItemStatus.RUNNING))
+    _, text = _render(tmp_path, review_task(status=QueueItemStatus.RUNNING))
 
     assert "rounds so far" in text
     assert "converged: no" in text
@@ -276,9 +259,9 @@ def test_blocking_degraded_text(tmp_path: Path) -> None:
 
 def test_deferred_header_says_where_the_count_came_from(tmp_path: Path) -> None:
     fixture_stopped().write(derived_worktree(tmp_path))
-    ledger_history, ledger_text = _render(tmp_path, _task())
+    ledger_history, ledger_text = _render(tmp_path, review_task())
     _, blocking_text = _blocking(tmp_path / "blocking")
-    task = _task(session_id=ACME_SESSION)
+    task = review_task(session_id=ACME_SESSION)
     bare = bound_session_for(task, last_result=sentinel_review({"fix_cycles_used": 1}))
     _, bare_text = _render(tmp_path / "bare", task, (bare,))
 
@@ -290,7 +273,7 @@ def test_deferred_header_says_where_the_count_came_from(tmp_path: Path) -> None:
 
 
 def test_empty_history_prints_one_clear_line_then_notes(tmp_path: Path) -> None:
-    _, text = _render(tmp_path, _task())
+    _, text = _render(tmp_path, review_task())
 
     lines = text.splitlines()
     assert lines[0].startswith("No review data recorded for ticket 'ACM-1'")
@@ -302,7 +285,7 @@ def test_empty_history_prints_one_clear_line_then_notes(tmp_path: Path) -> None:
 def test_text_is_single_line_and_never_truncated(tmp_path: Path) -> None:
     long_rationale = "because " + "very " * 80 + "long"
     key = _disposition_key("src/cw/foo.py", "multi line") or ""
-    task = _task(
+    task = review_task(
         finding_dispositions={
             key: FindingDisposition(
                 outcome="REJECTED",
@@ -322,7 +305,7 @@ def test_text_is_single_line_and_never_truncated(tmp_path: Path) -> None:
 
 def test_unrecorded_values_and_long_walls_render(tmp_path: Path) -> None:
     fixture_stopped().write(derived_worktree(tmp_path))
-    history, _ = _render(tmp_path, _task())
+    history, _ = _render(tmp_path, review_task())
     bare = history.rounds[0].model_copy(
         update={
             "new_accepted": None,
@@ -356,7 +339,7 @@ def test_unrecorded_values_and_long_walls_render(tmp_path: Path) -> None:
 @pytest.mark.parametrize("notes_present", [True, False])
 def test_notes_block_is_always_printed(tmp_path: Path, notes_present: bool) -> None:
     fixture_converged().write(derived_worktree(tmp_path))
-    history, _ = _render(tmp_path, _task())
+    history, _ = _render(tmp_path, review_task())
     if not notes_present:
         history = history.model_copy(update={"notes": []})
 
