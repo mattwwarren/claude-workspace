@@ -403,6 +403,17 @@ def test_nearer_foreign_event_does_not_beat_an_attributable_one(
     assert _STAGE_NOTE in history.notes
 
 
+def test_latest_attributable_start_before_round_one_wins(tmp_path: Path) -> None:
+    """A re-run review records a second start; round 1 is timed from the latest."""
+    fixture_converged().write(derived_worktree(tmp_path))
+    stage_entered_event(ACME_TICKET, ACME_SESSION, "2026-10-27T11:30:00+00:00")
+    stage_entered_event(ACME_TICKET, ACME_SESSION, REVIEW_START)
+
+    history = _history(_running(session_id=ACME_SESSION), tmp_path)
+
+    assert history.rounds[0].wall_seconds == 600.0
+
+
 def test_stage_event_after_round_one_is_not_a_start(tmp_path: Path) -> None:
     fixture_converged().write(derived_worktree(tmp_path))
     stage_entered_event(ACME_TICKET, ACME_SESSION, STAMPS[2])
