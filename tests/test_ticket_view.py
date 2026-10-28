@@ -43,6 +43,7 @@ from cw.ticket_view import (
     ViewSources,
     build_ticket_view,
     find_ticket_clients,
+    other_row_count,
     render_ticket_view,
     resolve_human_opt_in,
     resolve_view_client,
@@ -635,6 +636,18 @@ class TestClientResolution:
     def test_find_ticket_clients(self) -> None:
         assert find_ticket_clients(self._store(), "ACM-2") == [_C, "beta"]
         assert find_ticket_clients(self._store(), "nope") == []
+
+    def test_other_row_count_counts_same_client_rows_beyond_the_first(self) -> None:
+        store = self._store()
+        assert other_row_count(store, _T, _C) == 0
+        assert other_row_count(store, "ACM-2", "beta") == 1
+        triple = DevQueueStore(tasks=[make_task() for _ in range(3)])
+        assert other_row_count(triple, _T, _C) == 2
+
+    def test_other_row_count_ignores_other_clients_and_missing_rows(self) -> None:
+        store = self._store()
+        assert other_row_count(store, "ACM-2", _C) == 0
+        assert other_row_count(store, "nope", _C) == 0
 
     def test_single_client_auto_selected(self) -> None:
         assert resolve_view_client(self._store(), _T, None) == _C

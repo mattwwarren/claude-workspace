@@ -26,7 +26,7 @@ from cw.dev_queue import _find_ticket, load_dev_queue
 from cw.exceptions import CwError
 from cw.review_history import build_review_history, collect_history_inputs
 from cw.review_history_render import render_review_history
-from cw.ticket_view import ViewSources, resolve_view_client
+from cw.ticket_view import ViewSources, other_row_count, resolve_view_client
 
 from ._group import review
 
@@ -112,15 +112,12 @@ def review_history(
     store = load_dev_queue()
     resolved = resolve_view_client(store, ticket_id, client)
     task = _find_ticket(store, ticket_id, resolved, warn=False)
-    same_row = sum(
-        1 for t in store.tasks if t.ticket_id == ticket_id and t.client == resolved
-    )
     inputs = collect_history_inputs(
         task,
         _client_config(resolved),
         _state_or_none(),
         worktree_override=worktree,
-        other_rows=same_row - 1,
+        other_rows=other_row_count(store, ticket_id, resolved),
     )
     history = build_review_history(inputs)
     if output_json:
