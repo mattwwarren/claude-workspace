@@ -6,13 +6,11 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
-import yaml
 from click.testing import CliRunner, Result
 
 from cw.cli import main
-from cw.config import dev_queue_file
+from cw.config import clients_file, dev_queue_file, state_file
 from cw.events import inbox_path
-from cw.exceptions import CwError
 from cw.models import QueueItemStatus
 from cw.models.review_history import ReviewHistory
 from cw.review_convergence import LEDGER_RELATIVE_PATH
@@ -35,15 +33,17 @@ from tests._review_history_helpers import (
     REVIEW_START,
     VOIDED_SUMMARY,
     blocking_dispositions,
+    clean_sentinel_session,
     fixture_awaiting_confirm,
     fixture_blocking_sentinel,
     fixture_converged,
     fixture_stopped,
     foreign_voided_event,
-    sentinel_review,
     record_verdict_round,
+    sentinel_review,
     stage_entered_event,
     voided_suppression,
+    write_corrupt_ledger,
 )
 from tests._ticket_view_helpers import (
     ACME,
@@ -311,27 +311,33 @@ def test_review_help_lists_history() -> None:
     assert "history" in result.output
 
 
-def test_unreadable_state_and_config_are_notes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_unreadable_state_and_config_are_notes(tmp_path: Path) -> None:
     _seed_with_ledger(tmp_path, fixture_converged)
-
-    def _bad_state() -> None:
-        msg = "sessions.json is corrupt"
-        raise CwError(msg)
-
-    def _bad_config(_self: object, _name: str) -> None:
-        msg = "clients.yaml is corrupt"
-        raise yaml.YAMLError(msg)
-
-    monkeypatch.setattr("cw.cli.review.history.load_state", _bad_state)
-    monkeypatch.setattr(
-        "cw.cli.review.history.ViewSources.effective_client", _bad_config
-    )
+    state_file().write_text("{not json", encoding="utf-8")
+    clients_file().write_text("clients: [unclosed", encoding="utf-8")
 
     result = _invoke(ACME_TICKET, "-c", ACME)
 
     assert result.exit_code == 0, result.output
+    assert "Traceback" not in result.output
     assert "session state unreadable" in result.output
     assert "is not configured" in result.output
     assert "round 5 (confirm):" in result.output
+
+
+def test_sentinel_fallback_round_renders_the_unsplit_settled_total(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "acme-wt"
+    write_corrupt_ledger(worktree)
+    session = clean_sentinel_session(make_task(), worktree)
+    _seed_review_row(ACME_TICKET, ACME, worktree_path=worktree, sessions=[session])
+
+    result = _invoke(ACME_TICKET, "-c", ACME)
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert "  source: sentinel_friction" in lines
+    assert "  sha: abc1234" in lines
+    assert "  settled: 1 (new/resurfaced split not recorded)" in lines
+    assert "  wall_time: not recorded" in lines
