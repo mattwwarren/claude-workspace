@@ -1611,8 +1611,9 @@ REVIEW lane still ignores clean mode.
   foreign ledger, move `.cw/review-convergence.json` aside), then `cw dev-queue
   requeue <T> -c <C> --stage review`. The park is charged.
 - **`--override-must-fix` is refused** on a clean client unless the worktree
-  holds a converged ledger for the ticket (a missing, unreadable, foreign or
-  non-converged ledger refuses before any write): `verify-tip` would still park
+  holds a converged ledger for the ticket that is clean at the verdict's
+  reviewed commit (a missing, unreadable, foreign, non-converged or
+  other-tip ledger refuses before any write): `verify-tip` would still park
   after the override. Exits: `cw dev-queue requeue <T> -c <C> --stage review`,
   `cw review converge operator-settle` for a stopped ledger, or switching the
   client to `review.convergence: blocking`. `cw review settle` records finding

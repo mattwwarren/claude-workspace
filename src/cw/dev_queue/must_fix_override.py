@@ -18,11 +18,12 @@ the finalize jump or the override flag). Split out of ``approval.py`` beside
 ``plan_promotion``/``requeue`` to keep that module under the size ceiling.
 
 Under ``review.convergence: clean`` (#2791 G3) the override also needs a
-converged convergence ledger for this ticket in the worktree: finalize's
-``cw review converge verify-tip`` parks on anything less, so stamping the row
-would change nothing. A missing (the codex loop parked before any ledger was
-written), unreadable, foreign or non-converged ledger is refused before any
-write, naming the review requeue and the ledger-side exits.
+converged convergence ledger for this ticket in the worktree, clean at the
+verdict's ``reviewed_sha``: finalize's ``cw review converge verify-tip`` parks
+on anything less, so stamping the row would change nothing. A missing (the
+codex loop parked before any ledger was written), unreadable, foreign,
+non-converged or other-tip ledger is refused before any write, naming the
+review requeue and the ledger-side exits.
 """
 
 from __future__ import annotations
@@ -124,7 +125,7 @@ def _approve_must_fix_override_locked(
     task = _find_ticket(store, ticket_id, client_name)
     _require_codex_must_fix_park(task)
     verdict = _load_owned_verdict(task, client_name)
-    _require_converged_ledger_when_clean(task, client_name)
+    _require_converged_ledger_when_clean(task, client_name, verdict)
     finding_ids = _finding_ids(task, verdict)
 
     client_cfg = get_client(client_name)
@@ -291,13 +292,19 @@ def _ledger_exits(task: TicketTask) -> str:
     )
 
 
-def _require_converged_ledger_when_clean(task: TicketTask, client_name: str) -> None:
-    """Under clean mode, refuse unless this ticket's ledger has converged (G3).
+def _require_converged_ledger_when_clean(
+    task: TicketTask, client_name: str, verdict: ReviewVerdict
+) -> None:
+    """Under clean mode, refuse unless this ticket's ledger converged at the tip (G3).
 
-    ``verify-tip`` in finalize needs a converged ledger, so an override on a
-    missing, unreadable, foreign or non-converged one would stamp the row and
-    still park. Blocking-mode clients pass through untouched. Runs before any
-    write, like every other refusal here.
+    ``verify-tip`` in finalize needs a converged ledger clean at the tip being
+    shipped, so an override on a missing, unreadable, foreign or non-converged
+    one, or one converged at another sha, would stamp the row and still park.
+    The overridden tip is the verdict's ``reviewed_sha`` (what the override
+    binds to; FINALIZE separately requires HEAD to still equal it), which this
+    module already holds, so no git subprocess runs under the dev-queue lock.
+    Blocking-mode clients pass through untouched. Runs before any write, like
+    every other refusal here.
     """
     client_cfg = get_client(client_name)
     if client_cfg.review.convergence != "clean":
@@ -331,5 +338,13 @@ def _require_converged_ledger_when_clean(task: TicketTask, client_name: str) -> 
             " converged, so finalize's verify-tip would still park. For a"
             " stopped ledger, `cw review converge operator-settle` settles the"
             f" recurring findings first.{_ledger_exits(task)}"
+        )
+        raise ApproveGateError(msg)
+    if ledger.last_clean_sha != verdict.reviewed_sha:
+        msg = (
+            f"{prefix} the convergence ledger {path} converged at"
+            f" {ledger.last_clean_sha!r}, not at the overridden verdict's"
+            f" reviewed commit {verdict.reviewed_sha!r}, so finalize's"
+            f" verify-tip would still park.{_ledger_exits(task)}"
         )
         raise ApproveGateError(msg)

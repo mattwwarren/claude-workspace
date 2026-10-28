@@ -8788,11 +8788,32 @@ class TestApproveMustFixOverride:
         )
         write_ledger(
             verdict_path.parent.parent,
-            confirmed_ledger().model_copy(update={"ticket_id": "GEN-500"}),
+            confirmed_ledger(sha=_REVIEWED_SHA).model_copy(
+                update={"ticket_id": "GEN-500"}
+            ),
         )
         result = approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
         assert result["reviewed_sha"] == _REVIEWED_SHA
         assert len(events) == 1
+
+    def test_clean_client_with_a_ledger_converged_at_another_tip_is_refused(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests._review_convergence_helpers import confirmed_ledger, write_ledger
+
+        verdict_path, events = self._seed(
+            tmp_config_dir, tmp_path, monkeypatch, clean=True
+        )
+        stale = confirmed_ledger(sha="1111111111111111111111111111111111111111")
+        write_ledger(
+            verdict_path.parent.parent,
+            stale.model_copy(update={"ticket_id": "GEN-500"}),
+        )
+        message = self._assert_refused(
+            events, load_dev_queue().model_dump(), "converged at '1111"
+        )
+        assert _REVIEWED_SHA in message
+        assert "verify-tip would still park" in message
 
     @pytest.mark.parametrize("with_ledger", [False, True])
     def test_blocking_client_ignores_the_ledger(
