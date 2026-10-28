@@ -194,6 +194,97 @@ def test_username_path_shapes_leave_lookalikes_alone(text: str) -> None:
     assert _redact(text, home="/srv/other") == text
 
 
+ENCODED_CWD = "-home-alice--cw-wt-abcd1234-dev-2794"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            f"see /tmp/claude-1000/{ENCODED_CWD}/tasks/b1.output",
+            "see /tmp/claude-<redacted>/<redacted>/tasks/b1.output",
+        ),
+        (
+            "/private/tmp/claude-501/-Users-bob-src/tasks/x.output",
+            "/private/tmp/claude-<redacted>/<redacted>/tasks/x.output",
+        ),
+        ("cat /tmp/claude-1000.", "cat /tmp/claude-<redacted>."),
+        ("/tmp/claude-1000/", "/tmp/claude-<redacted>/"),
+    ],
+)
+def test_claude_tmp_dir_hides_the_uid_and_encoded_cwd(text: str, expected: str) -> None:
+    """The uid dir and its encoded-cwd child go even when HOME is unknown."""
+    assert _redact(text, home="/srv/other") == expected
+    assert _redact(text, home=HOME, worktrees=(WORKTREE,)) == expected
+    assert _redact(expected, home="/srv/other") == expected
+
+
+def test_claude_tmp_lookalikes_pass_through() -> None:
+    text = "/tmp/claude-abc/x and /tmp/claudette-1000/x and claude-1000/x"
+    assert _redact(text, home="/srv/other") == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (f"cwd {ENCODED_CWD} now", "cwd <worktree> now"),
+        (f"{ENCODED_CWD}/x", "<worktree>/x"),
+        ("-home-alice-projects-foo", "<home>-projects-foo"),
+        ("'-home-alice'", "'<home>'"),
+        ("at -srv-wt-7 now", "at <worktree> now"),
+    ],
+)
+def test_encoded_home_and_worktree_names_are_redacted(text: str, expected: str) -> None:
+    result = _redact(text, home=HOME, worktrees=("/srv/wt-7",))
+    assert result == expected
+    assert _redact(result, home=HOME, worktrees=("/srv/wt-7",)) == result
+
+
+def test_encoded_worktree_value_replaces_with_the_worktree_placeholder() -> None:
+    result = _redact(f"x {ENCODED_CWD}", home="/srv/other", worktrees=(WORKTREE,))
+    assert result == "x <worktree>"
+    assert "alice" not in result
+
+
+@pytest.mark.parametrize(
+    "text", ["-home-alice2-x", "x-home-alice-y", "a.-home-alice", "-srv-wt-70"]
+)
+def test_encoded_names_leave_lookalikes_alone(text: str) -> None:
+    assert _redact(text, home=HOME, worktrees=("/srv/wt-7",)) == text
+
+
+def test_single_segment_encoded_home_is_not_treated_as_a_path() -> None:
+    """HOME=/root encodes to `-root`, which is also a CLI flag."""
+    assert _redact("run -root now", home="/root") == "run -root now"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("file:///home/alice/x", "file://<home>/x"),
+        ("file:///home/jane.doe/x.py", "file://<home>/x.py"),
+        ("see file:///Users/bob/src.", "see file://<home>/src."),
+        ("file:///home/alice/.cw/wt/ab12/dev-1/y", "file://<worktree>/y"),
+        (
+            "file:///home/bob/.claude/projects/-a/b.jsonl",
+            f"file://{TRANSCRIPT_REDACTED}",
+        ),
+        ("file:///var/lib/dave/notes", "file://<home>/notes"),
+        ("file:///srv/wt-7/x.py", "file://<worktree>/x.py"),
+    ],
+)
+def test_file_url_home_paths_are_redacted(text: str, expected: str) -> None:
+    """`file://` is a path start; the scheme stays and the path part goes."""
+    result = _redact(text, home="/var/lib/dave", worktrees=("/srv/wt-7",))
+    assert result == expected
+    assert _redact(result, home="/var/lib/dave", worktrees=("/srv/wt-7",)) == result
+
+
+def test_file_url_lookalikes_pass_through() -> None:
+    for text in ("file:///srv/other/x", "http://x.io/home/alice/x", "xfile:///home/a"):
+        assert _redact(text, home="/srv/none") == text
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [

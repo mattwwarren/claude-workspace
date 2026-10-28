@@ -21,13 +21,19 @@ Shapes replaced, paths first, then secrets:
                                      -> `<home>/.claude/projects/<redacted>`
     4. the `$HOME` value, `/home/<u>`, `/Users/<u>` and `~<u>/` -> `<home>`
     5. the user segment of pytest's tmp root `pytest-of-<u>`  -> `pytest-of-<redacted>`
-    6. secret shapes (a superset of `cw._text._SECRET_PATTERNS`) -> `<redacted>`
+    6. `/tmp/claude-<uid>/<encoded cwd>` (Claude Code's task output dir)
+                                     -> `/tmp/claude-<redacted>/<redacted>`
+    7. the encoded cwd name (`/` and `.` made `-`: `-home-<u>--cw-wt-<hash>-<n>`)
+       of each `--worktree` value -> `<worktree>`, of `$HOME` -> `<home>`
+    8. secret shapes (a superset of `cw._text._SECRET_PATTERNS`) -> `<redacted>`
 
 The `/home/<u>`, `/Users/<u>`, `~<u>` and `~` shapes, and the literal `$HOME` and
 `--worktree` values, only match at the start of a path
-(start of text, or after a character other than a word character, `.`, `/` or
-`-`), so a repo-relative `web/src/home/Hero.tsx` or a URL path `/Users/guide` is
-left alone.
+(start of text, after `file://`, or after a character other than a word
+character, `.`, `/` or `-`), so a repo-relative `web/src/home/Hero.tsx` or a URL
+path `/Users/guide` is left alone while `file:///home/<u>/x` becomes
+`file://<home>/x`. An encoded name matches where a name starts and not before a
+word character, so `-home-alice2` is not `-home-alice`.
 
 Redaction replaces spans and never truncates: the output differs from the
 input only inside replaced spans, a missing trailing newline stays missing,
@@ -77,12 +83,34 @@ _ERRORS = "surrogateescape"
 _SEGMENT = r"[\w-]+(?:\.[\w-]+)*"
 # A user-home shape starts a path: it is not preceded by a word character, ".",
 # "/" or "-", so `src/home/x.tsx` and `https://x.io/Users/guide` are not homes.
-_PATH_START = r"(?<![\w./-])"
+# A `file://` scheme is the one exception: `file:///home/<u>/x` is a home path,
+# and the scheme stays in the output (`file://<home>/x`).
+_PATH_START = r"(?:(?<![\w./-])|(?<=(?<!\w)file://))"
 # `~user/` is a tilde-user home; a bare `~3 files` or `~/x` is not.
 _TILDE_USER = rf"~(?=[A-Za-z_]){_SEGMENT}(?=/)"
 _USER_HOMES = rf"{_PATH_START}(?:/home/{_SEGMENT}|/Users/{_SEGMENT}|{_TILDE_USER})"
 # A replaced value must not be the prefix of a longer name ("wt-7" in "wt-70").
 _NOT_MID_NAME = r"(?![\w-])"
+
+# Claude Code names a project directory after its cwd with every "/" and "." made
+# a "-": `/home/u/.cw/wt/h/n` is `-home-u--cw-wt-h-n`. That name also appears
+# outside `~/.claude/projects/`, e.g. in `/tmp/claude-<uid>/<name>/tasks/<id>.output`.
+# An encoded value starts a name (the "-" it begins with must not follow a word
+# character, "." or "-") and ends before a word character; a "-" may follow,
+# since it continues the encoded path (`-home-u-src`).
+_ENCODED_START = r"(?<![\w.-])"
+_ENCODED_END = r"(?!\w)"
+# An encoded value with fewer interior dashes (`-root` for HOME=/root) is too
+# common a token to treat as a path.
+_MIN_ENCODED_DASHES = 2
+
+# `<tmp>/claude-<uid>/<encoded cwd>`: the uid and the cwd name both identify the
+# user, and they survive even when HOME and `--worktree` were not supplied. The
+# `tmp/` stays (it also covers macOS `/private/tmp`); only the two names go.
+CLAUDE_TMP_ROOT_PLACEHOLDER = f"claude-{REDACTION_PLACEHOLDER}"
+CLAUDE_TMP_PLACEHOLDER = f"{CLAUDE_TMP_ROOT_PLACEHOLDER}/{REDACTION_PLACEHOLDER}"
+_CLAUDE_TMP_CWD = re.compile(r"(?<=/tmp/)claude-\d+/[\w-]+")
+_CLAUDE_TMP_ROOT = re.compile(r"(?<=/tmp/)claude-\d+(?![\w-])")
 
 # pytest's per-user tmp root (`/tmp/pytest-of-<username>/pytest-3/...`): the
 # most common path shape in test-failure findings, and it embeds the OS username.
@@ -182,10 +210,48 @@ def _home_prefixes(home: str) -> str:
     return "|".join(alternatives)
 
 
+def _encoded_forms(value: str) -> list[str]:
+    """Claude Code's directory-name encodings of *value*, longest first.
+
+    "/" and "." become "-"; the other spelling, every non-alphanumeric becomes
+    "-", differs only for names holding "_" or similar, and both are replaced.
+    """
+    forms = {re.sub(r"[/.]", "-", value), re.sub(r"[^A-Za-z0-9]", "-", value)}
+    kept = [f for f in forms if f.count("-") >= _MIN_ENCODED_DASHES]
+    return sorted(kept, key=len, reverse=True)
+
+
+def _redact_encoded(text: str, *, home: str, worktrees: Sequence[str]) -> str:
+    """Replace the encoded-cwd spelling of each worktree and of *home*."""
+    for worktree in sorted(worktrees, key=len, reverse=True):
+        for encoded in _encoded_forms(worktree):
+            text = re.sub(
+                _ENCODED_START + re.escape(encoded) + _ENCODED_END,
+                WORKTREE_PLACEHOLDER,
+                text,
+            )
+    for encoded in _encoded_forms(home):
+        # A worktree under HOME that `--worktree` did not name: swallow its
+        # whole `--cw-wt-<hash>-<name>` tail, not just the HOME prefix.
+        text = re.sub(
+            _ENCODED_START + re.escape(encoded) + r"--cw-wt-[\w-]+",
+            WORKTREE_PLACEHOLDER,
+            text,
+        )
+        text = re.sub(
+            _ENCODED_START + re.escape(encoded) + _ENCODED_END,
+            HOME_PLACEHOLDER,
+            text,
+        )
+    return text
+
+
 def redact_paths(text: str, *, home: str, worktrees: Sequence[str]) -> str:
     """Replace worktree, transcript-dir and home paths in *text* with placeholders."""
     usable_home = _normalize_path_value(home)
     usable_worktrees = {_normalize_path_value(w) for w in worktrees} - {""}
+    text = _CLAUDE_TMP_CWD.sub(CLAUDE_TMP_PLACEHOLDER, text)
+    text = _CLAUDE_TMP_ROOT.sub(CLAUDE_TMP_ROOT_PLACEHOLDER, text)
     for worktree in sorted(usable_worktrees, key=len, reverse=True):
         text = re.sub(
             _PATH_START + re.escape(worktree) + _NOT_MID_NAME,
@@ -203,6 +269,7 @@ def redact_paths(text: str, *, home: str, worktrees: Sequence[str]) -> str:
         TRANSCRIPT_PLACEHOLDER,
         text,
     )
+    text = _redact_encoded(text, home=usable_home, worktrees=sorted(usable_worktrees))
     if usable_home:
         text = re.sub(
             _PATH_START + re.escape(usable_home) + _NOT_MID_NAME,
