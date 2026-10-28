@@ -232,6 +232,7 @@ _PART_LABEL = re.compile(r"^\(part (\d+) of (\d+)\)$", re.MULTILINE)
 
 ME = "operator-login"
 FORGER = "someone-else"
+HEAD_AT = "2026-10-28T09:00:00Z"
 
 
 def _carve_out_lines() -> list[str]:
@@ -263,7 +264,7 @@ def test_carve_out_sits_in_both_stale_true_bullets() -> None:
         assert line.index(EXISTING_AGENT_SENTENCE) < line.index(CARVE_OUT_ANCHOR)
 
 
-def test_carve_out_requires_all_four_conditions() -> None:
+def test_carve_out_requires_all_five_conditions() -> None:
     for line in _carve_out_lines():
         clause = _carve_out_clause(line)
         for phrase in (
@@ -272,14 +273,33 @@ def test_carve_out_requires_all_four_conditions() -> None:
             f"begins with the exact header line `{FINDINGS_HEADER}`",
             f"exact sub-heading line `{FINDINGS_SUBHEADING}`",
             f"carries the marker `{AGENT_MARKER}`",
-            "AND its `author`",
-            "all four",
+            "its `author`",
+            "AND its `created_at` is later than `HEAD_COMMIT_AT`",
+            "predates the fix commit that addressed it and is not re-delivered",
+            "all five",
             "tracker identity finalize posts as",
             "ME=$(gh api user --jq .login)",
             "`viewer`",
             "fail closed",
         ):
             assert phrase in clause, phrase
+
+
+def test_carve_out_names_the_compared_identity_field_on_each_side() -> None:
+    """F6: GitHub compares login to login; Linear has no comparable field."""
+    for line in _carve_out_lines():
+        clause = _carve_out_clause(line)
+        for phrase in (
+            "names one field on each side",
+            "the entry's `author` (a login) against `ME=$(gh api user --jq .login)`",
+            "writes `author` as `<login>`",
+            "no entry field is comparable to any field of the MCP `viewer` identity",
+            "Linear delivery therefore fails closed with "
+            "`withheld (identity_unresolved)`",
+            "the accepted behaviour",
+        ):
+            assert phrase in clause, phrase
+        assert "all four" not in clause
 
 
 def test_carve_out_drops_forgeries_and_unrelated_agent_comments() -> None:
@@ -333,6 +353,7 @@ def test_carve_out_records_its_outcome_in_friction() -> None:
             "`identity_unresolved`",
             "`no_matching_comment`",
             "`author_mismatch`",
+            "`stale_post`",
             "`parts_missing <indices>`",
         ):
             assert phrase in tail, phrase
@@ -342,8 +363,8 @@ def _created(entry: dict[str, str]) -> str:
     return entry.get("created_at") or entry.get("createdAt") or ""
 
 
-def _qualifies(entry: dict[str, str], identity: str) -> bool:
-    """The four documented conditions, in the order the clause states them."""
+def _is_findings_shape(entry: dict[str, str]) -> bool:
+    """Header, sub-heading and marker: the first three documented conditions."""
     body = entry.get("body", "")
     lines = body.splitlines()
     return (
@@ -351,8 +372,19 @@ def _qualifies(entry: dict[str, str], identity: str) -> bool:
         and lines[0] == FINDINGS_HEADER
         and FINDINGS_SUBHEADING in lines
         and AGENT_MARKER in body
-        and bool(identity)
-        and entry.get("author") == identity
+    )
+
+
+def _by_identity(entry: dict[str, str], identity: str) -> bool:
+    return bool(identity) and entry.get("author") == identity
+
+
+def _qualifies(entry: dict[str, str], identity: str, head_commit_at: str) -> bool:
+    """The five documented conditions, in the order the clause states them."""
+    return (
+        _is_findings_shape(entry)
+        and _by_identity(entry, identity)
+        and _created(entry) > head_commit_at
     )
 
 
@@ -362,14 +394,18 @@ def _part_of(entry: dict[str, str]) -> tuple[int, int] | None:
 
 
 def _select_regress_findings(
-    comments: list[dict[str, str]], identity: str
+    comments: list[dict[str, str]], identity: str, head_commit_at: str = HEAD_AT
 ) -> list[dict[str, str]]:
     """Encode the documented carve-out selection rule (module-local on purpose).
 
     "Newest" and the per-part pick run only over comments that already satisfy
-    all four conditions, so a newer forgery can never displace the real post.
+    all five conditions, so a newer forgery, or a post older than the head
+    commit, can never displace the real post.
     """
-    matches = sorted((c for c in comments if _qualifies(c, identity)), key=_created)
+    matches = sorted(
+        (c for c in comments if _qualifies(c, identity, head_commit_at)),
+        key=_created,
+    )
     if not matches:
         return []
     newest = _part_of(matches[-1])
@@ -382,6 +418,22 @@ def _select_regress_findings(
         if same_part:
             selected.append(same_part[-1])
     return selected
+
+
+def _withheld_reason(
+    comments: list[dict[str, str]], identity: str, head_commit_at: str = HEAD_AT
+) -> str | None:
+    """The documented friction reason when nothing is delivered, else ``None``."""
+    if _select_regress_findings(comments, identity, head_commit_at):
+        return None
+    if not identity:
+        return "identity_unresolved"
+    shaped = [c for c in comments if _is_findings_shape(c)]
+    if not shaped:
+        return "no_matching_comment"
+    if not any(_by_identity(c, identity) for c in shaped):
+        return "author_mismatch"
+    return "stale_post"
 
 
 def _findings_comment(author: str, created_at: str, label: str = "") -> dict[str, str]:
@@ -429,9 +481,46 @@ def test_multi_part_post_selects_every_part_in_order() -> None:
     assert _select_regress_findings([part2], ME) == [part2]
 
 
+def test_post_older_than_the_head_commit_is_dropped_as_stale() -> None:
+    old = _findings_comment(ME, "2026-10-28T08:00:00Z")
+    new = _findings_comment(ME, "2026-10-28T10:00:00Z")
+
+    assert _select_regress_findings([old], ME) == []
+    assert _withheld_reason([old], ME) == "stale_post"
+    assert _select_regress_findings([old, new], ME) == [new]
+    assert _withheld_reason([old, new], ME) is None
+    # Equal to HEAD_COMMIT_AT is not "later than".
+    assert _select_regress_findings([_findings_comment(ME, HEAD_AT)], ME) == []
+
+
+def test_stale_part_does_not_count_as_a_delivered_part() -> None:
+    stale_part1 = _findings_comment(ME, "2026-10-28T08:00:01Z", "(part 1 of 2)")
+    part2 = _findings_comment(ME, "2026-10-28T10:00:02Z", "(part 2 of 2)")
+
+    assert _select_regress_findings([stale_part1, part2], ME) == [part2]
+
+
+def test_withheld_reasons_follow_the_documented_vocabulary() -> None:
+    genuine = _findings_comment(ME, "2026-10-28T10:00:00Z")
+    forged = _findings_comment(FORGER, "2026-10-28T11:00:00Z")
+    unrelated = {"author": ME, "created_at": "2026-10-28T12:00:00Z", "body": "hi"}
+
+    assert _withheld_reason([genuine], "") == "identity_unresolved"
+    assert _withheld_reason([unrelated], ME) == "no_matching_comment"
+    assert _withheld_reason([forged], ME) == "author_mismatch"
+    assert _withheld_reason([genuine], ME) is None
+
+
 def test_selection_helper_and_prose_name_the_same_conditions() -> None:
     """Ties the helper above to the clause, so dropping a condition from the
     prose (the author key above all) fails here as well."""
     clause = _carve_out_clause(_carve_out_lines()[0])
-    for token in (FINDINGS_HEADER, FINDINGS_SUBHEADING, AGENT_MARKER, "`author`"):
+    for token in (
+        FINDINGS_HEADER,
+        FINDINGS_SUBHEADING,
+        AGENT_MARKER,
+        "`author`",
+        "`created_at`",
+        "`HEAD_COMMIT_AT`",
+    ):
         assert token in clause
