@@ -939,6 +939,84 @@ class TestBookkeeping:
         assert "OSError: disk full" in (outcome.result.blocker.details or "")
         assert outcome.result.review.rounds_run is None
 
+    @staticmethod
+    def _fail_round_verdict_save(monkeypatch: pytest.MonkeyPatch) -> None:
+        def _fail(*_args: object, **_kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.codex_clean_confirm.save_round_verdict", _fail)
+
+    @staticmethod
+    def _assert_findings_survive(
+        blocker: Blocker | None, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        assert blocker is not None
+        assert blocker.reason == CODEX_CONVERGENCE_LEDGER_ERROR
+        assert blocker.retry_eligible is True
+        assert "OSError: disk full" in blocker.details
+        assert f"MUST_FIX feature.py:1 {_MUST_FIX_SUMMARY}" in blocker.details
+        assert f"SHOULD_FIX feature.py:1 {_SHOULD_FIX_SUMMARY}" in blocker.details
+        logged = [r.getMessage() for r in caplog.records]
+        assert any(_MUST_FIX_SUMMARY in message for message in logged)
+
+    def test_a_failed_round_verdict_save_keeps_the_claude_findings(
+        self,
+        wt: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        self._fail_round_verdict_save(monkeypatch)
+        codex = _codex(wt)
+        with caplog.at_level("INFO", logger="cw.codex_clean_confirm"):
+            outcome = _apply(
+                wt, _client(wt), RoleAwareClaudeRunner(_must_fix_role), codex=codex
+            )
+        self._assert_findings_survive(outcome.result.blocker, caplog)
+        assert outcome.verdict is codex[1]
+        assert outcome.result.review.converged is False
+
+    def test_a_failed_round_verdict_save_on_resume_keeps_the_claude_findings(
+        self,
+        wt: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        write_ledger(wt, _awaiting_at(wt, _head(wt)))
+        self._fail_round_verdict_save(monkeypatch)
+        with caplog.at_level("INFO", logger="cw.codex_clean_confirm"):
+            outcome = _resume(wt, _client(wt), RoleAwareClaudeRunner(_must_fix_role))
+        assert outcome is not None
+        self._assert_findings_survive(outcome.result.blocker, caplog)
+        assert outcome.verdict is None
+        assert outcome.reviewer_label == "Claude"
+
+    def test_a_failure_after_the_ledger_is_saved_carries_no_findings(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Once persisted the findings live in the ledger, not in the blocker."""
+
+        real = codex_clean_confirm._finish
+        calls: list[int] = []
+
+        def _finish_once_fails(*args: object, **kwargs: object) -> AutoDevResult:
+            calls.append(1)
+            if len(calls) == 1:
+                msg = "finalize failed"
+                raise ValueError(msg)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr("cw.codex_clean_confirm._finish", _finish_once_fails)
+        write_ledger(wt, _awaiting_at(wt, _head(wt)))
+        outcome = _resume(wt, _client(wt), RoleAwareClaudeRunner(_must_fix_role))
+        assert outcome is not None
+        blocker = outcome.result.blocker
+        assert blocker is not None
+        assert blocker.reason == CODEX_CONVERGENCE_LEDGER_ERROR
+        assert _MUST_FIX_SUMMARY not in blocker.details
+        assert "finalize failed" in blocker.details
+        assert len(calls) == 2
+
     def test_an_unreadable_ledger(self, wt: Path) -> None:
         path = wt / LEDGER_RELATIVE_PATH
         path.parent.mkdir(parents=True, exist_ok=True)

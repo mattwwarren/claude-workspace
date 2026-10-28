@@ -165,6 +165,10 @@ class _Gate:
     #: The reconcile changed the ledger's confirm choice to the client's
     #: current one, so an ``awaiting_confirm`` ledger is not resumed as-is.
     confirm_refreshed: bool = False
+    #: One line per MUST_FIX/SHOULD_FIX finding of a completed Claude round
+    #: that is not yet persisted to the ledger: a bookkeeping failure in that
+    #: window parks with these in ``details`` rather than losing them.
+    pending_findings: list[str] = field(default_factory=list)
 
     @property
     def ledger_path(self) -> Path:
@@ -367,10 +371,14 @@ def _ledger_error_outcome(
         gate.sid,
     )
     gate.tokens.append(f"convergence_bookkeeping_failed: {type(exc).__name__}")
+    details = f"{type(exc).__name__}: {one_line(str(exc))}"
+    if gate.pending_findings:
+        lost = "\n".join(f"- {line}" for line in gate.pending_findings)
+        details += f"\n\nClaude confirm findings not persisted to the ledger:\n{lost}"
     blocker = Blocker(
         stage="stage3_review",
         reason=CODEX_CONVERGENCE_LEDGER_ERROR,
-        details=f"{type(exc).__name__}: {one_line(str(exc))}",
+        details=details,
         retry_eligible=True,
     )
     try:
@@ -483,6 +491,20 @@ def _decided(item: AcceptedFinding) -> AcceptedFinding:
     return item
 
 
+def _pending_lines(verdict: ReviewVerdict) -> list[str]:
+    """``SEVERITY file:line summary`` for each accepted MUST_FIX/SHOULD_FIX."""
+    lines: list[str] = []
+    for item in verdict.accepted:
+        finding = item.finding
+        if finding.severity not in ("MUST_FIX", "SHOULD_FIX"):
+            continue
+        where = finding.file
+        if finding.line_start is not None:
+            where = f"{where}:{finding.line_start}"
+        lines.append(f"{finding.severity} {where} {one_line(finding.summary)}")
+    return lines
+
+
 def _record_confirm_round(
     gate: _Gate,
     ledger: ConvergenceLedger,
@@ -501,6 +523,17 @@ def _record_confirm_round(
     decided = claude_verdict.model_copy(
         update={"accepted": [_decided(item) for item in claude_verdict.accepted]}
     )
+    # The paid round has returned: keep its findings reachable if bookkeeping
+    # fails before they reach the ledger (see _ledger_error_outcome).
+    gate.pending_findings = _pending_lines(claude_verdict)
+    for line in gate.pending_findings:
+        _log.info(
+            "claude confirm finding ticket=%s client=%s session=%s %s",
+            gate.task.ticket_id,
+            gate.client.name,
+            gate.sid,
+            line,
+        )
     findings, unread = from_verdict(decided)
     ledger, report = record_round(
         ledger,
@@ -514,6 +547,7 @@ def _record_confirm_round(
     )
     save_round_verdict(gate.ledger_path, report.round, claude_verdict)
     save_ledger(gate.ledger_path, ledger)
+    gate.pending_findings = []
     gate.ledger = ledger
     claude = CleanConfirmOutcome(
         round_.result, claude_verdict, CLAUDE_REVIEWER_LABEL, False
