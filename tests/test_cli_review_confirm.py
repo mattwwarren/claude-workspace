@@ -753,7 +753,7 @@ def test_arguments_to_run_review(harness: Harness) -> None:
 
 
 @needs_codex
-def test_ledger_fork_point_overrides_divergent_default_branch(
+def test_ledger_fork_point_is_diff_base_not_scope_branch(
     harness: Harness,
 ) -> None:
     ledger_path = write_ledger(
@@ -778,7 +778,7 @@ def test_ledger_fork_point_overrides_divergent_default_branch(
     result, _runner = harness.invoke([], "--default-branch", "develop")
 
     assert result.exit_code == _UNAVAILABLE
-    assert seen[0]["default_branch"] == "main"
+    assert seen[0]["default_branch"] == "develop"
 
 
 @needs_codex

@@ -60,6 +60,7 @@ from cw.review_convergence import (
     stop_summary,
     suppress_settled,
 )
+from cw.review_convergence._models import DECISION_STOP_CONFIRM_ESCALATED
 from cw.review_findings import ReviewVerdict
 
 if TYPE_CHECKING:
@@ -467,12 +468,21 @@ def converge_init(
         loop_backend=loop_backend,
         confirm=confirm,
     )
+    ownership_matches = (
+        existing is not None
+        and existing.ticket_id == ticket_id
+        and existing.fork_point == fork_point
+    )
     reconciled = reconcile_ledger_for_init(
         existing,
         fresh=fresh,
         ticket_id=ticket_id,
         fork_point=fork_point,
-        history_rewritten=_history_rewritten(existing, worktree, reviewed_sha),
+        history_rewritten=(
+            _history_rewritten(existing, worktree, reviewed_sha)
+            if ownership_matches
+            else False
+        ),
         head_sha=reviewed_sha,
         max_cycles=config.max_cycles,
         now=_utc_now_iso(),
@@ -651,7 +661,7 @@ def converge_confirm_failed(
     updated, report = record_confirm_failure(
         ledger, cause=cause, detail=detail, now=_utc_now_iso()
     )
-    escalated = report.decision == "stop_confirm_escalated"
+    escalated = report.decision == DECISION_STOP_CONFIRM_ESCALATED
     save_ledger(ledger_rel, updated)
     emit_json(
         {

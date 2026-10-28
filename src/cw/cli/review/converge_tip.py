@@ -48,6 +48,7 @@ from cw.review_convergence import (
     save_ledger,
     sentinel_review_fragment,
 )
+from cw.review_convergence._models import DECISION_CONFIRM_REQUIRED
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -208,7 +209,7 @@ def converge_finalize(worktree: Path, branch: str | None, ledger_rel: Path) -> N
     if ledger is None:
         _refuse(_decision_body(verdict.decision, verdict.reason))
     if not finalize_ready(ledger):
-        _refuse(_decision_body("confirm_required", None))
+        _refuse(_decision_body(DECISION_CONFIRM_REQUIRED, None))
     if verdict.decision != "accepted":
         if verdict.reason == "commits_after_clean_round":
             save_ledger(worktree / ledger_rel, demote_for_rereview(ledger))

@@ -11,7 +11,7 @@ submodule.
 
 from __future__ import annotations
 
-from typing import Literal, NamedTuple
+from typing import Final, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -38,6 +38,14 @@ Decision = Literal[
     "stop_confirm_unavailable",
     "stop_confirm_escalated",
 ]
+DECISION_CLEAN: Final = "clean"
+DECISION_CONTINUE: Final = "continue"
+DECISION_CONFIRM_REQUIRED: Final = "confirm_required"
+DECISION_STOP_NOT_CONVERGING: Final = "stop_not_converging"
+DECISION_STOP_MAX_CYCLES: Final = "stop_max_cycles"
+DECISION_STOP_OPERATOR_ACTION: Final = "stop_operator_action"
+DECISION_STOP_CONFIRM_UNAVAILABLE: Final = "stop_confirm_unavailable"
+DECISION_STOP_CONFIRM_ESCALATED: Final = "stop_confirm_escalated"
 ReleaseCause = Literal[
     "new_commits", "max_cycles_raised", "operator_action_done", "identities_settled"
 ]

@@ -24,6 +24,14 @@ from typing import TYPE_CHECKING
 from cw.review_convergence._findings import classify_findings
 from cw.review_convergence._identity import FindingIdentity, finding_identity
 from cw.review_convergence._models import (
+    DECISION_CLEAN,
+    DECISION_CONFIRM_REQUIRED,
+    DECISION_CONTINUE,
+    DECISION_STOP_CONFIRM_ESCALATED,
+    DECISION_STOP_CONFIRM_UNAVAILABLE,
+    DECISION_STOP_MAX_CYCLES,
+    DECISION_STOP_NOT_CONVERGING,
+    DECISION_STOP_OPERATOR_ACTION,
     LEDGER_STATUS_AWAITING_CONFIRM,
     LEDGER_STATUS_CONVERGED,
     LEDGER_STATUS_IN_PROGRESS,
@@ -163,7 +171,7 @@ def _clean_decision(ledger: ConvergenceLedger, kind: RoundKind) -> Decision:
         and ledger.confirm_backend != "none"
         and not ledger.confirm_not_independent
     )
-    return "confirm_required" if needs_confirm else "clean"
+    return DECISION_CONFIRM_REQUIRED if needs_confirm else DECISION_CLEAN
 
 
 def _decide(
@@ -177,20 +185,20 @@ def _decide(
     accepted = [*classified.new_fix, *classified.new_operator]
     recurring = detect_oscillation(ledger, accepted, record.reviewed_sha)
     if recurring:
-        return _Outcome("stop_not_converging", STOP_OSCILLATION, recurring)
+        return _Outcome(DECISION_STOP_NOT_CONVERGING, STOP_OSCILLATION, recurring)
     if classified.new_operator:
         identities: list[FindingIdentity] = []
         for finding in classified.new_operator:
             identity = finding_identity(finding.severity, finding.file, finding.summary)
             if identity not in identities:
                 identities.append(identity)
-        return _Outcome("stop_operator_action", STOP_OPERATOR_ACTION, identities)
+        return _Outcome(DECISION_STOP_OPERATOR_ACTION, STOP_OPERATOR_ACTION, identities)
     start = max(ledger.epoch_start_round, ledger.window_start_round)
     if detect_no_progress(rounds, window=ledger.stall_window, start=start):
-        return _Outcome("stop_not_converging", STOP_NO_PROGRESS)
+        return _Outcome(DECISION_STOP_NOT_CONVERGING, STOP_NO_PROGRESS)
     if max_cycles_exhausted(ledger):
-        return _Outcome("stop_max_cycles", STOP_MAX_CYCLES)
-    return _Outcome("continue")
+        return _Outcome(DECISION_STOP_MAX_CYCLES, STOP_MAX_CYCLES)
+    return _Outcome(DECISION_CONTINUE)
 
 
 def _fixed_after_continue(
@@ -221,17 +229,17 @@ def _transition(
 ) -> dict[str, object]:
     """The ledger fields a decision changes."""
     decision = outcome.decision
-    if decision == "clean":
+    if decision == DECISION_CLEAN:
         return {
             "status": LEDGER_STATUS_CONVERGED,
             "last_clean_sha": record.reviewed_sha,
         }
-    if decision == "confirm_required":
+    if decision == DECISION_CONFIRM_REQUIRED:
         return {
             "status": LEDGER_STATUS_AWAITING_CONFIRM,
             "awaiting_confirm_sha": record.reviewed_sha,
         }
-    if decision == "continue":
+    if decision == DECISION_CONTINUE:
         return {
             "status": LEDGER_STATUS_IN_PROGRESS,
             "fix_cycles_used": ledger.fix_cycles_used + 1,
@@ -308,7 +316,7 @@ def record_round(
 def _report(
     ledger: ConvergenceLedger, outcome: _Outcome, record: RoundRecord
 ) -> RoundReport:
-    dispatched = outcome.decision == "continue"
+    dispatched = outcome.decision == DECISION_CONTINUE
     return RoundReport(
         decision=outcome.decision,
         reason=outcome.reason,
@@ -355,9 +363,9 @@ def record_confirm_failure(
         update={"confirm_failures": [*ledger.confirm_failures, entry]}
     )
     decision: Decision = (
-        "stop_confirm_escalated"
+        DECISION_STOP_CONFIRM_ESCALATED
         if prior >= CONFIRM_UNAVAILABLE_CAP
-        else "stop_confirm_unavailable"
+        else DECISION_STOP_CONFIRM_UNAVAILABLE
     )
     report = RoundReport(
         decision=decision,
@@ -372,9 +380,11 @@ def record_confirm_failure(
     return updated, report
 
 
-def _recorded_identities(ledger: ConvergenceLedger) -> dict[str, FindingIdentity]:
-    """Every identity the ledger has seen, keyed by audit key, in a stable order."""
-    seen: dict[str, FindingIdentity] = {}
+def _recorded_identities(
+    ledger: ConvergenceLedger,
+) -> dict[FindingIdentity, FindingIdentity]:
+    """Every identity the ledger has seen, keyed by its structured identity."""
+    seen: dict[FindingIdentity, FindingIdentity] = {}
     sources = (
         ledger.stop_identities,
         [entry.identity for entry in ledger.fixed],
@@ -382,17 +392,18 @@ def _recorded_identities(ledger: ConvergenceLedger) -> dict[str, FindingIdentity
     )
     for identities in sources:
         for identity in identities:
-            seen.setdefault(identity.audit_key(), identity)
+            seen.setdefault(identity, identity)
     return seen
 
 
 def _nearest(
-    identity: FindingIdentity, recorded: dict[str, FindingIdentity]
+    identity: FindingIdentity, recorded: dict[FindingIdentity, FindingIdentity]
 ) -> FindingIdentity | None:
+    by_audit_key = {item.audit_key(): item for item in recorded}
     close = difflib.get_close_matches(
-        identity.audit_key(), list(recorded), n=1, cutoff=_NEAREST_CUTOFF
+        identity.audit_key(), list(by_audit_key), n=1, cutoff=_NEAREST_CUTOFF
     )
-    return recorded[close[0]] if close else None
+    return by_audit_key[close[0]] if close else None
 
 
 def operator_settle(
@@ -424,7 +435,7 @@ def operator_settle(
     unmatched: list[UnmatchedTarget] = []
     for target in targets:
         identity = finding_identity(target.severity, target.file, target.summary)
-        if identity.audit_key() in recorded:
+        if identity in recorded:
             matched[identity] = SettledEntry(
                 identity=identity,
                 outcome="reject",

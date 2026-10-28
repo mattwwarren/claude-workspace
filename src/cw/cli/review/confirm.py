@@ -49,7 +49,7 @@ from ._group import review
 if TYPE_CHECKING:
     from cw.auto_dev_result import AutoDevResult
     from cw.models import TicketTask
-    from cw.review_findings import ReviewVerdict
+    from cw.review_findings import CapturedDiff, ReviewVerdict
 
 #: Exit code of a confirm round whose backend is down (R19). A code of its own:
 #: exit 1 is shared with ``handle_errors`` and Python's uncaught-exception exit.
@@ -145,6 +145,7 @@ def _run_round(
     task: TicketTask,
     worktree: Path,
     default_branch: str,
+    base_ref: str,
     model: str | None,
     reasoning_effort: str | None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
@@ -157,9 +158,26 @@ def _run_round(
     construction sit outside it, so none of them can be reported as an outage.
     """
     from cw.codex_review import run_review
+    from cw.codex_review._diff import _capture_diff
     from cw.codex_runner import RealCodexRunner
 
     runner = RealCodexRunner()
+    # ``run_review`` uses its branch argument both for the review diff and for
+    # origin/<branch> scope measurement. Keep those concerns separate here:
+    # capture the confirmation diff from the convergence ledger's fork point,
+    # while the review pipeline still receives the real client branch name for
+    # scope and diagnostics. The shared pipeline has no separate base-ref
+    # parameter yet, so this narrow command-boundary adapter supplies it.
+    from cw.codex_review._context import core as review_context
+
+    capture_diff = _capture_diff
+
+    def capture_from_base(
+        capture_worktree: Path, _ignored_branch: str
+    ) -> tuple[CapturedDiff, str, list[str]]:
+        return capture_diff(capture_worktree, base_ref)
+
+    review_context.__dict__["_capture_diff"] = capture_from_base
     try:
         return run_review(
             runner=runner,
@@ -174,6 +192,8 @@ def _run_round(
         )
     except (OSError, CwError) as exc:
         _unavailable("crash", f"{type(exc).__name__}: {exc}")
+    finally:
+        review_context.__dict__["_capture_diff"] = capture_diff
 
 
 def _failure_reasons(details: str) -> set[str]:
@@ -320,7 +340,8 @@ def review_confirm(
     result, verdict = _run_round(
         task=task,
         worktree=worktree,
-        default_branch=confirmation_base,
+        default_branch=configured_base,
+        base_ref=confirmation_base,
         model=model,
         reasoning_effort=(
             reasoning_effort
