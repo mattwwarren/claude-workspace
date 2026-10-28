@@ -152,10 +152,11 @@ _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     # the end of the text from every unterminated marker, O(N^2) in the number of
     # markers (22 s at 493 KB). Bounded, each marker scans only up to the next
     # one, so the whole text is scanned O(1) times; a well-formed block holds no
-    # second BEGIN line, so it still matches whole.
+    # second BEGIN line, so it still matches whole. An armored PGP key closes its
+    # marker with ` BLOCK` (`PGP PRIVATE KEY BLOCK`), hence the optional suffix.
     re.compile(
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
-        r"(?:(?:(?!-----BEGIN ).)*?-----END [A-Z ]*PRIVATE KEY-----"
+        r"-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----"
+        r"(?:(?:(?!-----BEGIN ).)*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----"
         r"|.*?(?=\r?\n[ \t]*\r?\n|\Z))",
         re.DOTALL,
     ),

@@ -549,6 +549,17 @@ def test_credential_assignments_are_consumed_whole(text: str, expected: str) -> 
         ),
         ("-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\nabcd", "<redacted>"),
         ("key: -----BEGIN PRIVATE KEY-----\nMII", "key: <redacted>"),
+        # An armored PGP secret key closes its markers with ` BLOCK`.
+        (
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBF\n=abcd\n"
+            "-----END PGP PRIVATE KEY BLOCK-----\ntail",
+            "<redacted>\ntail",
+        ),
+        (
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBFabcd\n\nnext paragraph",
+            "<redacted>\n\nnext paragraph",
+        ),
+        ("-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBFabcd", "<redacted>"),
     ],
 )
 def test_pem_block_ends_at_its_end_line_or_the_next_blank_line(
@@ -679,6 +690,7 @@ def test_long_flag_keyword_run_redacts_in_bounded_time(keyword: str) -> None:
 
 _PEM_BEGIN = "-----BEGIN PRIVATE KEY-----"
 _PEM_END = "-----END PRIVATE KEY-----"
+_PGP_BEGIN = "-----BEGIN PGP PRIVATE KEY BLOCK-----"
 # The old pattern scanned from every BEGIN marker to the end of the text looking
 # for an END line, so N unterminated markers cost O(N^2): 0.24 s at 49 KB, 22 s at
 # 493 KB. The marker inputs are sized so the quadratic form crosses the bound.
@@ -687,6 +699,9 @@ _PEM_ADVERSARIAL = {
     "markers-blank-line-separated": (_PEM_BEGIN + "\n\n") * (_PEM_MARKER_CHARS // 28),
     "markers-newline-separated": (_PEM_BEGIN + "\n") * (_PEM_MARKER_CHARS // 27),
     "markers-same-line": (_PEM_BEGIN + " ") * (_PEM_MARKER_CHARS // 27),
+    "pgp-markers-blank-line-separated": (_PGP_BEGIN + "\n\n")
+    * (_PEM_MARKER_CHARS // 40),
+    "pgp-markers-same-line": (_PGP_BEGIN + " ") * (_PEM_MARKER_CHARS // 39),
     "unterminated-with-long-body": _PEM_BEGIN + "\n" + "A" * LONG_TARGET_CHARS * 4,
     "markers-then-long-body": (_PEM_BEGIN + "\n\n") * 200
     + _PEM_BEGIN
@@ -707,6 +722,7 @@ def test_pem_marker_runs_redact_in_bounded_time(name: str) -> None:
     elapsed = time.perf_counter() - start
     assert elapsed < LONG_RUN_MAX_SECONDS, elapsed
     assert _PEM_BEGIN not in result
+    assert _PGP_BEGIN not in result
     assert "AAAA" not in result
     assert "BBBB" not in result
 
