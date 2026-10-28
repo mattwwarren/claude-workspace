@@ -8,6 +8,7 @@ the producer would emit.
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -222,6 +223,26 @@ def test_corrupt_verdict_file_gives_null_split_and_note(tmp_path: Path) -> None:
 
     assert history.rounds[2].new_by_severity is None
     assert _notes_with(history, "round 3 verdict file")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the directory mode")
+def test_unreadable_verdict_directory_is_a_note_not_a_traceback(
+    tmp_path: Path,
+) -> None:
+    worktree = derived_worktree(tmp_path)
+    fixture_converged().write(worktree)
+    verdict_dir = (worktree / LEDGER_RELATIVE_PATH).with_suffix("")
+    verdict_dir.chmod(0o000)
+    try:
+        history = _history(_task(), tmp_path)
+    finally:
+        verdict_dir.chmod(0o700)
+
+    assert len(history.rounds) == 5
+    assert all(r.new_by_severity is None for r in history.rounds)
+    assert len(_notes_with(history, "verdict file")) == 5
+    assert _notes_with(history, "unreadable (PermissionError)")
+    assert not _notes_with(history, "no per-round verdict file")
 
 
 def test_undecided_verdict_file_gives_null_split_and_note(tmp_path: Path) -> None:

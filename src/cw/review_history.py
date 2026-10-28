@@ -257,13 +257,12 @@ def _read_verdicts(
     missing: list[int] = []
     for record in ledger.rounds:
         path = round_verdict_path(ledger_path, record.round)
-        if not path.exists():
-            missing.append(record.round)
-            continue
         try:
             verdicts[record.round] = ReviewVerdict.model_validate_json(
                 path.read_text(encoding="utf-8")
             )
+        except FileNotFoundError:
+            missing.append(record.round)
         except (OSError, ValueError) as exc:
             notes.append(
                 f"round {record.round} verdict file {path} unreadable "
