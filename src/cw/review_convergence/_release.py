@@ -7,8 +7,9 @@ ticket, fork point or rewritten branch), reopened as a new epoch (a stop with
 new commits), released without a commit (the three operator-resolvable stops),
 kept terminal (every other stop), or simply resumed.
 
-The two git-reading functions live here too, beside ``_store`` (the package's
-other I/O): :func:`history_rewritten` (the ``history_rewritten`` input
+The two git-reading functions live here too; they are the package's only git
+I/O, alongside the ledger-file I/O confined to ``_store``:
+:func:`history_rewritten` (the ``history_rewritten`` input
 :func:`reconcile_ledger_for_init` takes) and :func:`worktree_state` (the
 ``(HEAD, git status)`` snapshot a confirm round compares before and after, #2791
 G4). Both were CLI-private; they moved here so core code (the codex-lane

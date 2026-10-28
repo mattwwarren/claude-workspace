@@ -30,11 +30,11 @@ Submodules, each importing only the ones above it:
   :func:`operator_settle`, :func:`new_ledger`.
 - ``_tip`` -- :func:`finalize_ready`, :func:`evaluate_tip` (the strict
   final-sha rule), :func:`demote_for_rereview`.
+- ``_render`` -- history comment, friction lines, stop summary, sentinel and
+  blocker fragments, audit-event payload.
 - ``_release`` -- :func:`reconcile_ledger_for_init`, and the git readers
   :func:`history_rewritten` and :func:`worktree_state` (#2791).
 - ``_store`` -- atomic ledger and per-round verdict persistence.
-- ``_render`` -- history comment, friction lines, stop summary, sentinel and
-  blocker fragments, audit-event payload.
 - ``_status`` -- :func:`next_action` and :func:`status_summary`.
 
 ``load_ledger`` raises :class:`ValueError` subclasses (``pydantic
