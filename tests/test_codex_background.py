@@ -319,13 +319,14 @@ def _run(
     task: TicketTask,
     worktree: Path,
     client: ClientConfig,
+    wall_clock_budget_seconds: int | None = None,
 ) -> None:
     _run_codex_review_and_complete(
         runner=_UnusedRunner(),
         task=task,
         worktree=worktree,
         client=client,
-        wall_clock_budget_seconds=None,
+        wall_clock_budget_seconds=wall_clock_budget_seconds,
         sid=sid,
         sess_name=f"{client.name}/auto-dev/{task.ticket_id}",
         config_model=None,
@@ -1881,6 +1882,7 @@ def _run_guarded(
     returned: tuple[AutoDevResult, ReviewVerdict | None],
     fix_loop_enabled: bool = True,
     client: ClientConfig | None = None,
+    wall_clock_budget_seconds: int | None = None,
 ) -> tuple[AutoDevResult, MagicMock]:
     """Run the review unit with the fix loop mocked to return *returned*.
 
@@ -1900,7 +1902,13 @@ def _run_guarded(
         patch("cw.codex_background.run_review_with_fix_loop", return_value=returned),
         patch("cw.codex_background._post_review_comment") as post_mock,
     ):
-        _run(sid=sid, task=task, worktree=worktree, client=client or _client(worktree))
+        _run(
+            sid=sid,
+            task=task,
+            worktree=worktree,
+            client=client or _client(worktree),
+            wall_clock_budget_seconds=wall_clock_budget_seconds,
+        )
     persisted = AutoDevResult.model_validate(load_state().sessions[0].last_result)
     return persisted, post_mock
 
@@ -2284,6 +2292,52 @@ def test_clean_client_runs_the_gate_once_after_the_guard(
             client=_clean_client(worktree),
         )
     assert [name for name, _args, _kwargs in manager.mock_calls] == ["guard", "gate"]
+    assert persisted == returned[0]
+
+
+@pytest.mark.parametrize(
+    ("budget", "expected_deadline"),
+    [(600, 1600.0), (None, None)],
+    ids=["budget", "no-budget"],
+)
+def test_thread_budget_becomes_one_monotonic_deadline_for_both_gate_calls(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    budget: int | None,
+    expected_deadline: float | None,
+) -> None:
+    """#2791: the budget becomes ``monotonic() + budget`` at both gate calls.
+
+    The pre-loop resume and the post-loop confirm share the review thread's
+    single deadline; ``None`` (no wall-clock budget) stays ``None``.
+    """
+    worktree, _origin = make_git_repo_with_origin(f"wt-bg-deadline-{budget}")
+    returned = _clean_result(
+        worktree, "T-deadline", sha=git_in(worktree, "rev-parse", "HEAD")
+    )
+    clock = MagicMock()
+    clock.monotonic.return_value = 1000.0
+    with (
+        patch("cw.codex_background.time", clock),
+        patch(
+            "cw.codex_background.resume_pending_confirm", return_value=None
+        ) as resume_mock,
+        patch(
+            "cw.codex_background.apply_clean_confirm",
+            return_value=CleanConfirmOutcome(returned[0], returned[1], "Codex", True),
+        ) as gate_mock,
+    ):
+        persisted, _ = _run_guarded(
+            worktree,
+            sid="bg-deadline",
+            returned=returned,
+            client=_clean_client(worktree),
+            wall_clock_budget_seconds=budget,
+        )
+    assert resume_mock.call_count == 1
+    assert gate_mock.call_count == 1
+    assert resume_mock.call_args.kwargs["deadline"] == expected_deadline
+    assert gate_mock.call_args.kwargs["deadline"] == expected_deadline
     assert persisted == returned[0]
 
 
