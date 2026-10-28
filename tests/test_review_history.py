@@ -860,6 +860,7 @@ def test_sentinel_review_block_maps_to_the_summary(tmp_path: Path) -> None:
     assert summary.confirm_backend == "codex"
     assert summary.confirm_failures is None
     assert history.sources == ["sentinel"]
+    assert _notes_with(history, "carries no review_round_<n> friction lines")
 
 
 def test_sentinel_rounds_run_mismatch_keeps_the_ledger(tmp_path: Path) -> None:
@@ -945,6 +946,7 @@ def test_blocking_mode_degraded_view(tmp_path: Path) -> None:
     assert (summary.convergence_mode, summary.fix_cycles_used) == ("blocking", 2)
     assert summary.confirm_failures is None
     assert _notes_with(history, "rounds_unrecorded")
+    assert _notes_with(history, "sentinel reports 1 deferred finding(s)")
     assert [(d.file, d.outcome) for d in history.dispositions] == [
         ("src/cw/bar.py", "REVERSED"),
         ("src/cw/foo.py", "REJECTED"),

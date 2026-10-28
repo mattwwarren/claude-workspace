@@ -265,6 +265,7 @@ def test_blocking_degraded_text(tmp_path: Path) -> None:
     assert "round 1 (initial):" in lines
     assert "  new_findings: 5 (MUST_FIX 3, SHOULD_FIX 2)" in lines
     assert "confirm_failures: not recorded" in lines
+    assert "deferred: 1 (text not recorded)" in lines
     assert "converged: unknown" in lines
     dispositions = lines[lines.index("dispositions:") + 1 :]
     assert dispositions[0].startswith("  - REVERSED src/cw/bar.py:")
