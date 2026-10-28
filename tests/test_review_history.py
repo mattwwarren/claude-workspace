@@ -974,6 +974,51 @@ def test_sentinel_rounds_run_mismatch_keeps_the_ledger(tmp_path: Path) -> None:
     assert _notes_with(history, "rounds_run=4")
 
 
+_ROUND_LINE = "review_round_1: kind=loop backend=b sha=a new_accepted=1 settled=0"
+
+
+@pytest.mark.parametrize(
+    "last_result",
+    [
+        pytest.param(
+            {"review": "oops", "friction_highlights": "nope"}, id="non-container"
+        ),
+        pytest.param(
+            {
+                "review": {
+                    "rounds_run": True,
+                    "converged": "yes",
+                    "final_round_clean_sha": 7,
+                    "confirm_backend": 3,
+                },
+                "friction_highlights": [None, 3, _ROUND_LINE],
+            },
+            id="mistyped-fields",
+        ),
+    ],
+)
+def test_malformed_sentinel_degrades_to_a_message(
+    tmp_path: Path, last_result: dict[str, object]
+) -> None:
+    task = review_task(session_id=ACME_SESSION)
+    session = _session(task, ACME_SESSION, last_result=last_result)
+
+    history = _history(task, tmp_path, sessions=[session])
+
+    summary = history.summary
+    assert summary.rounds_run is None
+    assert summary.converged is None
+    assert summary.final_clean_sha is None
+    assert summary.confirm_backend is None
+    if isinstance(last_result["review"], dict):
+        assert [(r.round, r.source) for r in history.rounds] == [
+            (1, "sentinel_friction")
+        ]
+    else:
+        assert history.rounds == []
+        assert _notes_with(history, "no session AUTO_DEV_RESULT with a review block")
+
+
 # --- blocking mode ---------------------------------------------------------------
 
 
