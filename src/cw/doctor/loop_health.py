@@ -2,9 +2,8 @@
 
 Split out of ``cw.doctor.core`` (#1314, part 2). Holds the dispatch-loop
 forensic checks (:func:`_check_loop_health`, :func:`_check_loop_liveness`),
-the TIMED_OUT-with-merged-PR detector (:func:`_check_timed_out_merged`), the
-``gh pr list`` helper (:func:`_gh_pr_states`), and the targeted single-session
-reap (:func:`_reap_session_by_selector`).
+the TIMED_OUT-with-merged-PR detector (:func:`_check_timed_out_merged`), and
+the targeted single-session reap (:func:`_reap_session_by_selector`).
 
 ``_reap_session_by_selector`` mutates state directly (``save_state``,
 ``save_dev_queue``) outside ``mutate_state()`` by design — it is kept colocated
@@ -24,8 +23,6 @@ tracked by #2219; that import is top-level (``cw.dispatch`` never imports
 from __future__ import annotations
 
 import contextlib
-import json
-import subprocess as _sp
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING
@@ -184,32 +181,6 @@ def _check_loop_liveness() -> list[CheckResult]:
             )
         )
     return results
-
-
-def _gh_pr_states(branch: str) -> tuple[list[dict[str, Any]], bool]:
-    """Return (pr_list, gh_missing) for the given branch.
-
-    Returns ([], False) on empty result or non-zero exit.
-    Returns ([], True) if gh binary is not found.
-    Swallows OSError, ValueError, TimeoutExpired.
-    """
-    try:
-        pr_result = _sp.run(
-            ["gh", "pr", "list", "--head", branch, "--json", "state", "--limit", "1"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=10,
-        )
-        prs: list[dict[str, Any]] = (
-            json.loads(pr_result.stdout) if pr_result.returncode == 0 else []
-        )
-    except FileNotFoundError:
-        return [], True
-    except (OSError, ValueError, _sp.TimeoutExpired):
-        return [], False
-    else:
-        return prs, False
 
 
 def _check_timed_out_merged(
@@ -376,8 +347,8 @@ def _reap_session_by_selector(
                 # concurrent session is an unusual race; _reap_wedge_findings checks
                 # liveness before routing ticket_ids to this helper.
                 # Deferred import: breaks the wedge ↔ loop_health circular dependency
-                # (#1314) — wedge imports _gh_pr_states/_reap_session_by_selector from
-                # this module at top level, so this reach back into wedge is
+                # (#1314) — wedge imports _reap_session_by_selector from this
+                # module at top level, so this reach back into wedge is
                 # function-level (see pyproject.toml PLC0415 per-file-ignore).
                 from cw.doctor.wedge import _collapse_blocked_on_user_tasks
 

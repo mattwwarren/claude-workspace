@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import enum
-import json
 import logging
 import os
 import subprocess as _sp
@@ -11,7 +10,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from cw.dev_queue import load_dev_queue
-from cw.gh import _GH_PR_STATE_CLOSED, _GH_PR_STATE_MERGED, _GH_PR_STATE_OPEN
+from cw.gh import (
+    _GH_PR_STATE_CLOSED,
+    _GH_PR_STATE_MERGED,
+    _GH_PR_STATE_OPEN,
+    fetch_branch_prs,
+)
 from cw.models import QueueItemStatus
 from cw.worktree import live_session_worktree_paths
 
@@ -34,10 +38,6 @@ _GIT_PORCELAIN_PATH_OFFSET = 3
 # Mirrors worktree._CW_SCRATCH_PREFIX; duplicated per D5 to avoid importing
 # the private name cross-module.
 _CW_SCRATCH_PREFIX = ".claude/"
-
-# gh CLI subcommand args
-_GH_PR_LIST_STATE_ALL = "all"
-_GH_PR_LIST_LIMIT = "1"
 
 # Why -D not -d: squash-merged branches are never ancestors of main, so -d
 # (safe delete) always refuses them. We verify PR state and check for unsaved
@@ -221,7 +221,9 @@ def check_pr_state(
 ) -> tuple[str | None, int | None, bool]:
     """Return (state, pr_number, gh_available) for the most recent PR on *branch*.
 
-    Calls ``gh pr list --head <branch> --state all --json state,number --limit 1``.
+    Delegates to :func:`cw.gh.fetch_branch_prs` (every PR for the head branch,
+    any state, newest first) and projects its first PR onto the tuple the GC
+    classifier consumes.
 
     Args:
         branch: The branch name to look up.
@@ -235,55 +237,15 @@ def check_pr_state(
       (None, None, True)        on transient error (timeout, non-zero exit, bad JSON)
       (None, None, False)       when gh binary is not found
     """
-    try:
-        result = _sp.run(
-            [
-                "gh",
-                "pr",
-                "list",
-                "--head",
-                branch,
-                "--state",
-                _GH_PR_LIST_STATE_ALL,
-                "--json",
-                "state,number",
-                "--limit",
-                _GH_PR_LIST_LIMIT,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-            cwd=str(cwd) if cwd is not None else None,
-        )
-    except FileNotFoundError:
+    prs, gh_available = fetch_branch_prs(branch, timeout, cwd=cwd)
+    if not gh_available:
         return None, None, False
-    except (OSError, _sp.TimeoutExpired) as exc:
-        _log.warning("check_pr_state: gh call failed for %s: %s", branch, exc)
+    if prs is None:
+        _log.warning("check_pr_state: gh lookup failed for %s", branch)
         return None, None, True
-
-    if result.returncode != 0:
-        _log.warning(
-            "check_pr_state: gh exited %d for %s: %s",
-            result.returncode,
-            branch,
-            result.stderr.strip(),
-        )
-        return None, None, True
-
-    try:
-        data: list[dict[str, object]] = json.loads(result.stdout)
-    except (ValueError, AttributeError) as exc:
-        _log.warning("check_pr_state: JSON parse error for %s: %s", branch, exc)
-        return None, None, True
-
-    if not data:
+    if not prs:
         return "", None, True
-
-    state = str(data[0].get("state", ""))
-    raw_number = data[0].get("number")
-    pr_number: int | None = int(str(raw_number)) if raw_number is not None else None
-    return state, pr_number, True
+    return prs[0].state, prs[0].number, True
 
 
 def _git_stdout(wt_path: Path, *args: str) -> str | None:

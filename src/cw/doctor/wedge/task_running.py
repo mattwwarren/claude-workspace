@@ -3,8 +3,8 @@
 RUNNING queue tasks with no live session (class-2), with an already
 COMPLETED session (class-3), and whose branch is pushed while the queue still
 says RUNNING (class-4, ``wedge/repo-ahead-of-queue``, advisory only). The only
-submodule that reads ``run_git``; imports :func:`_gh_pr_states` from
-``loop_health`` at top level. Imports no sibling. Split out of the flat
+submodule that reads ``run_git``; reaches GitHub through
+:func:`cw.gh.pr_exists_for_branch`. Imports no sibling. Split out of the flat
 ``doctor/wedge.py`` (#2164).
 """
 
@@ -21,8 +21,8 @@ from cw._git import run_git
 from cw.config import state_file
 from cw.doctor import _deps
 from cw.doctor._shared import WedgeFinding
-from cw.doctor.loop_health import _gh_pr_states
 from cw.exceptions import CwError
+from cw.gh import pr_exists_for_branch
 from cw.models import QueueItemStatus, SessionStatus
 from cw.reconcile import SPAWN_GRACE_SECONDS, feature_branch_key
 
@@ -188,20 +188,19 @@ def _check_wedge_repo_ahead(
             continue
         # Check PR status via gh CLI
         recipe: str
-        prs, _ = _gh_pr_states(branch)
+        open_pr, _ = pr_exists_for_branch(branch)
         # ``cw spawn complete`` takes a session id, not a ticket id; a RUNNING
         # task may legally have none recorded, so leave a fillable placeholder.
         sid = task.session_id or "<session_id>"
-        if not prs:
+        if not open_pr:
             recipe = (
                 f"Branch {branch} is ahead of main with no open PR. "
                 f"Suggested: open the PR, then cw spawn complete {sid} "
                 "--status shipped."
             )
         else:
-            pr_state = prs[0].get("state", "OPEN")
             recipe = (
-                f"Branch {branch} has {pr_state} PR but queue still RUNNING. "
+                f"Branch {branch} has OPEN PR but queue still RUNNING. "
                 f"Suggested: cw spawn complete {sid} --status shipped."
             )
         findings.append(

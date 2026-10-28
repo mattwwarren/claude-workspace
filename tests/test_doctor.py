@@ -2127,7 +2127,7 @@ class TestWedgeRepoAheadOfQueue:
             return _Proc(0, "")
 
         monkeypatch.setattr("cw.doctor.wedge.task_running.run_git", fake_run)
-        monkeypatch.setattr("cw.doctor.loop_health._sp.run", fake_run)
+        monkeypatch.setattr("cw.gh._sp.run", fake_run)
         findings = _check_wedge_repo_ahead(state, queue)
         assert len(findings) == 1
         f = findings[0]
@@ -2161,13 +2161,14 @@ class TestWedgeRepoAheadOfQueue:
             if "ls-remote" in args:
                 return _Proc(0, "abc123\trefs/heads/auto-dev/TST-R2\n")
             if "pr" in args and "list" in args:
-                return _Proc(0, json.dumps([{"state": "OPEN"}]))
+                return _Proc(0, json.dumps([{"number": 1666}]))
             return _Proc(0, "")
 
         monkeypatch.setattr("cw.doctor.wedge.task_running.run_git", fake_run)
-        monkeypatch.setattr("cw.doctor.loop_health._sp.run", fake_run)
+        monkeypatch.setattr("cw.gh._sp.run", fake_run)
         findings = _check_wedge_repo_ahead(state, queue)
         assert len(findings) == 1
+        assert "has OPEN PR" in findings[0].recipe
         assert "cw spawn complete sess-r2 --status shipped" in findings[0].recipe
         assert "cw spawn-complete" not in findings[0].recipe
 
@@ -2194,7 +2195,7 @@ class TestWedgeRepoAheadOfQueue:
             return _Proc(0, "")
 
         monkeypatch.setattr("cw.doctor.wedge.task_running.run_git", fake_run)
-        monkeypatch.setattr("cw.doctor.loop_health._sp.run", fake_run)
+        monkeypatch.setattr("cw.gh._sp.run", fake_run)
         findings = _check_wedge_repo_ahead(state, queue)
         assert findings == []
 
@@ -2221,7 +2222,7 @@ class TestWedgeRepoAheadOfQueue:
             return _Proc(0, "")
 
         monkeypatch.setattr("cw.doctor.wedge.task_running.run_git", fake_run)
-        monkeypatch.setattr("cw.doctor.loop_health._sp.run", fake_run)
+        monkeypatch.setattr("cw.gh._sp.run", fake_run)
         findings = _check_wedge_repo_ahead(state, queue)
         assert findings == []
 
@@ -2296,7 +2297,7 @@ class TestWedgeRepoAheadOfQueue:
             return _Proc(0, "")
 
         monkeypatch.setattr("cw.doctor.wedge.task_running.run_git", fake_run)
-        monkeypatch.setattr("cw.doctor.loop_health._sp.run", fake_run)
+        monkeypatch.setattr("cw.gh._sp.run", fake_run)
         _check_wedge_repo_ahead(state, queue)
         # The ls-remote call must reference my-branch, not auto-dev/TST-R6
         assert any("my-branch" in str(a) for a in ls_remote_args_seen)
@@ -2326,7 +2327,7 @@ class TestWedgeRepoAheadOfQueue:
             return _Proc(0, "")
 
         monkeypatch.setattr("cw.doctor.wedge.task_running.run_git", fake_run)
-        monkeypatch.setattr("cw.doctor.loop_health._sp.run", fake_run)
+        monkeypatch.setattr("cw.gh._sp.run", fake_run)
         findings = _check_wedge_repo_ahead(state, queue)
         assert findings == []
 
@@ -2357,13 +2358,44 @@ class TestWedgeRepoAheadOfQueue:
             return _Proc(0, "")
 
         monkeypatch.setattr("cw.doctor.wedge.task_running.run_git", fake_run)
-        monkeypatch.setattr("cw.doctor.loop_health._sp.run", fake_run)
+        monkeypatch.setattr("cw.gh._sp.run", fake_run)
         # TimeoutExpired on gh pr list → treated as no PRs → recipe mentions no open PR
         findings = _check_wedge_repo_ahead(state, queue)
         assert len(findings) == 1
         assert "no open PR" in findings[0].recipe
         # No session_id on the task -> the recipe keeps a fillable placeholder.
         assert "cw spawn complete <session_id> --status shipped" in findings[0].recipe
+
+    def test_gh_missing_emits_finding_as_no_open_pr(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        from cw.doctor import _check_wedge_repo_ahead
+        from cw.models import CwState, DevQueueStore
+
+        task = self._make_running_task(tmp_path, ticket_id="TST-RT3")
+        state = CwState(sessions=[])
+        queue = DevQueueStore(tasks=[task])
+
+        class _Proc:
+            def __init__(self, rc: int, out: str) -> None:
+                self.returncode = rc
+                self.stdout = out
+
+        def fake_run(args: list[str], **_kw: object) -> _Proc:
+            if "remote" in args and "get-url" in args:
+                return _Proc(0, "https://github.com/org/repo.git\n")
+            if "ls-remote" in args:
+                return _Proc(0, "abc123\trefs/heads/auto-dev/TST-RT3\n")
+            if "pr" in args and "list" in args:
+                raise FileNotFoundError(args[0])
+            return _Proc(0, "")
+
+        monkeypatch.setattr("cw.doctor.wedge.task_running.run_git", fake_run)
+        monkeypatch.setattr("cw.gh._sp.run", fake_run)
+        # gh missing folds into the no-open-PR branch, as the old helper did.
+        findings = _check_wedge_repo_ahead(state, queue)
+        assert len(findings) == 1
+        assert "no open PR" in findings[0].recipe
 
     def test_load_clients_raising_degrades_to_no_findings(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_config_dir: Path
@@ -2392,7 +2424,7 @@ class TestWedgeRepoAheadOfQueue:
 
         monkeypatch.setattr("cw.doctor._deps.load_clients", _raise)
         monkeypatch.setattr("cw.doctor.wedge.task_running.run_git", fake_run)
-        monkeypatch.setattr("cw.doctor.loop_health._sp.run", fake_run)
+        monkeypatch.setattr("cw.gh._sp.run", fake_run)
         # The CwError from load_clients must be swallowed (degrade to no
         # clients), not propagate out of the wedge check.
         assert _check_wedge_repo_ahead(state, queue) == []

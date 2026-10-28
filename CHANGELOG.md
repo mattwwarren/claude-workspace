@@ -13,6 +13,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **`review.had_real_commit` is now a named tri-state, and the sentinel contract is `schema_version: 9` (#1745).** The field changes from `bool | null` to `"committed" | "no_op" | "unknown"` (default `"unknown"`), so an unknown commit outcome can no longer be read as "no commit" through truthiness; the codex verdict renderer now shows its UNVERIFIED headline only for `"no_op"`. Retyping an existing field is a §8 bump in `docs/headless-contract.md`, so the parser accepts versions 1 through 9 and dispatched workers are told to stamp 9. Legacy `true`/`false`/`null` values, in stored sentinels and in `.claude/review-verdict.json` files written before the upgrade, are still accepted on read and mapped to `committed`/`no_op`/`unknown`. Upgrade note: restart `cw dev-queue serve` immediately after merge, before further worker sessions complete. A loop still running the old parser rejects the new string values: a sentinel parses as `validation_failed`, and a MUST_FIX override refuses the review verdict.
+- **Direct `gh` callers consolidated into `gh.py` (#1284).** `cw doctor`'s repo-ahead-of-queue check now uses `gh.pr_exists_for_branch`, and worktree GC's PR lookup now uses `gh.fetch_branch_prs`. The architecture test's allowlist of direct `gh` subprocess callers is now `cw/gh.py` only. Worktree GC now requires `url` in the PR payload (a payload without it is treated as a transient error and the worktree is kept) and asks gh for 5 PRs instead of 1.
 
 ## [1.78.2] - 2026-10-27
 

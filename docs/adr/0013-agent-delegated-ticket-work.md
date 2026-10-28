@@ -117,6 +117,13 @@ superseded by the rescope this ADR records.
   boundary-freezing decision. A genuine future need for cw Python to
   perform provider-portable ticket I/O requires a new ADR that
   explicitly supersedes this one.
+- **Update (2026-10-27): #1284 landed.** The allowlist is now `{gh.py}`
+  alone. `doctor/loop_health.py` and `worktree_gc.py` were consolidated
+  into `gh.py` (`pr_exists_for_branch` and `fetch_branch_prs`), and each
+  dropped its direct `["gh", ...]` argv literal. `reconcile/salvage.py`
+  had already left the list earlier, when the process-kill-timeout
+  removal deleted the module. The passages above stay as the record of
+  the original decision; a new allowlist entry now needs a new ADR.
 
 ## Alternatives considered
 
