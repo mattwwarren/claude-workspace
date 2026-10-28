@@ -13,9 +13,12 @@ import cw.review_convergence as rc
 EXPECTED_EXPORTS = {
     # Constants
     "CONFIRM_UNAVAILABLE_CAP",
+    "DECISION_CLEAN",
+    "DECISION_STOP_CONFIRM_ESCALATED",
     "LEDGER_RELATIVE_PATH",
     "ROUND_VERDICT_DIR_RELATIVE_PATH",
     "STALL_WINDOW",
+    "STOP_DECISIONS",
     "STOP_MAX_CYCLES",
     "STOP_NO_PROGRESS",
     "STOP_OPERATOR_ACTION",
@@ -67,12 +70,15 @@ EXPECTED_EXPORTS = {
     "friction_lines",
     "frozen_counts_from_verdict",
     "from_verdict",
+    "history_rewritten",
     "load_ledger",
     "max_cycles_exhausted",
     "new_ledger",
     "next_action",
+    "one_line",
     "operator_settle",
     "operator_settle_event_payload",
+    "reconcile_for_init",
     "reconcile_ledger_for_init",
     "record_confirm_failure",
     "record_round",
@@ -88,6 +94,8 @@ EXPECTED_EXPORTS = {
     "status_summary",
     "stop_summary",
     "suppress_settled",
+    "unread_from_verdict",
+    "worktree_state",
 }
 
 

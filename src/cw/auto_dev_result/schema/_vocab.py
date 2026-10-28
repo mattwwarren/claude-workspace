@@ -252,6 +252,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
     # tests/test_auto_dev_result.py pins the parse-side copies in lockstep.
     | frozenset(
         {
+            "codex_convergence_ledger_error",
             "codex_fix_constraint_violation",
             "codex_fix_dirty_start",
             "codex_fix_growth_budget_exceeded",
@@ -263,6 +264,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "codex_must_fix_mechanically_rejected",
             "codex_review_partial",
             "codex_review_unparseable",
+            "codex_review_worktree_mutated",
             "fix_loop_diverging",
             "multiple_result_blocks",
             "no_result_emitted",

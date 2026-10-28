@@ -10,6 +10,7 @@ and the two helpers that unit of work is the sole consumer of —
 
 from __future__ import annotations
 
+import itertools
 import subprocess
 import threading
 import time
@@ -22,6 +23,7 @@ import pytest
 
 from cw import codex_background
 from cw.auto_dev_result import AutoDevResult, Blocker
+from cw.claude_review import ClaudeRunResult
 from cw.codex_background import (
     _DEFAULT_CODEX_REVIEW_TIER_ENABLED,
     REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH,
@@ -42,6 +44,7 @@ from cw.codex_background import (
     _sync_finding_dispositions_to_running_task,
     join_outstanding_codex_threads,
 )
+from cw.codex_clean_confirm import CleanConfirmOutcome
 from cw.codex_fix_loop.divergence import _DIVERGENCE_STALL_CYCLES
 from cw.codex_fix_loop.growth import (
     DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES,
@@ -49,13 +52,16 @@ from cw.codex_fix_loop.growth import (
 )
 from cw.codex_review import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
+    CODEX_CONVERGENCE_LEDGER_ERROR,
     CODEX_MUST_FIX_FINDINGS,
     CODEX_REVIEW_UNPARSEABLE,
+    CODEX_REVIEW_WORKTREE_MUTATED,
     CODEX_UNPUSHED_AT_EXIT,
     synthesize_codex_review_result,
 )
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue
+from cw.dispatch_state import load_executor_blocked_markers
 from cw.local_runner import UNEXPECTED_ERROR, make_blocked
 from cw.models import (
     ClientConfig,
@@ -69,12 +75,17 @@ from cw.models import (
     Stage,
     TicketTask,
 )
+from cw.models.client import ReviewConfig
+from cw.review_convergence import LEDGER_RELATIVE_PATH, load_ledger
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from cw.review_findings import (
     REVIEW_VERDICT_JSON_RELATIVE_PATH,
     ReviewVerdictEnvelope,
     consolidate_verdict,
 )
+from tests._claude_review_helpers import RoleAwareClaudeRunner, review_envelope
+from tests._codex_review_helpers import _doc_json, _finding_payload
+from tests._review_convergence_helpers import fresh_ledger, record, write_ledger
 from tests.conftest import (
     _make_daemon_session,
     _make_diff,
@@ -309,13 +320,14 @@ def _run(
     task: TicketTask,
     worktree: Path,
     client: ClientConfig,
+    wall_clock_budget_seconds: int | None = None,
 ) -> None:
     _run_codex_review_and_complete(
         runner=_UnusedRunner(),
         task=task,
         worktree=worktree,
         client=client,
-        wall_clock_budget_seconds=None,
+        wall_clock_budget_seconds=wall_clock_budget_seconds,
         sid=sid,
         sess_name=f"{client.name}/auto-dev/{task.ticket_id}",
         config_model=None,
@@ -1838,7 +1850,7 @@ class TestStampSessionIdOnRunningTaskDuplicateRunning:
 
 
 def _clean_result(
-    worktree: Path, ticket_id: str
+    worktree: Path, ticket_id: str, *, sha: str = "sha-clean"
 ) -> tuple[AutoDevResult, ReviewVerdict]:
     """A real stage_complete result + verdict, as a converged fix loop returns.
 
@@ -1854,7 +1866,7 @@ def _clean_result(
         documents=[_make_reviewer_doc(reviewer_role="Code Quality Reviewer")],
         failures=[],
         diff=_make_diff("def broken():", files={"new.py": [1]}),
-        reviewed_sha="sha-clean",
+        reviewed_sha=sha,
         session_id="s-guard",
         default_branch="main",
         fix_loop_enabled=True,
@@ -1870,6 +1882,8 @@ def _run_guarded(
     sid: str,
     returned: tuple[AutoDevResult, ReviewVerdict | None],
     fix_loop_enabled: bool = True,
+    client: ClientConfig | None = None,
+    wall_clock_budget_seconds: int | None = None,
 ) -> tuple[AutoDevResult, MagicMock]:
     """Run the review unit with the fix loop mocked to return *returned*.
 
@@ -1889,7 +1903,13 @@ def _run_guarded(
         patch("cw.codex_background.run_review_with_fix_loop", return_value=returned),
         patch("cw.codex_background._post_review_comment") as post_mock,
     ):
-        _run(sid=sid, task=task, worktree=worktree, client=_client(worktree))
+        _run(
+            sid=sid,
+            task=task,
+            worktree=worktree,
+            client=client or _client(worktree),
+            wall_clock_budget_seconds=wall_clock_budget_seconds,
+        )
     persisted = AutoDevResult.model_validate(load_state().sessions[0].last_result)
     return persisted, post_mock
 
@@ -2167,3 +2187,437 @@ def test_resolve_codex_fix_loop_growth_guard_enabled_table(
     )
 
     assert resolved is expected
+
+
+# ---------------------------------------------------------------------------
+# #2791: the clean-mode gate wiring (_review_and_confirm)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def claude_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``claude`` resolves on PATH without a real binary being reached."""
+    monkeypatch.setattr("cw.codex_clean_confirm._which_claude", lambda: "/x/claude")
+
+
+def _clean_client(worktree: Path) -> ClientConfig:
+    return ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        default_branch="main",
+        review=ReviewConfig(convergence="clean"),
+    )
+
+
+def _claude_clean(role: str) -> ClaudeRunResult:
+    return ClaudeRunResult(0, review_envelope(_doc_json(role=role)), "")
+
+
+def _claude_must_fix(role: str) -> ClaudeRunResult:
+    finding = _finding_payload(
+        severity="MUST_FIX",
+        file="feature.py",
+        line_start=1,
+        line_end=1,
+        summary="feature constant is wrong",
+        evidence="x = 1",
+    )
+    return ClaudeRunResult(
+        0, review_envelope(_doc_json(role=role, findings=[finding])), ""
+    )
+
+
+def _patch_claude(
+    respond: Callable[[str], ClaudeRunResult],
+    side_effect: Callable[[Path], None] | None = None,
+) -> tuple[RoleAwareClaudeRunner, object]:
+    runner = RoleAwareClaudeRunner(respond, side_effect=side_effect)
+    return runner, patch("cw.codex_background.RealClaudeRunner", return_value=runner)
+
+
+def _awaiting_ledger_at_head(worktree: Path, ticket_id: str) -> None:
+    head = git_in(worktree, "rev-parse", "HEAD")
+    ledger = fresh_ledger(
+        confirm=None,
+        loop_backend="codex",
+        ticket_id=ticket_id,
+        fork_point=git_in(worktree, "merge-base", "origin/main", "HEAD"),
+    )
+    ledger, report = record(ledger, sha=head, backend="codex")
+    assert report.decision == "confirm_required"
+    write_ledger(worktree, ledger)
+
+
+def test_blocking_client_writes_no_ledger_and_persists_the_codex_result(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-blocking")
+    returned = _clean_result(
+        worktree, "T-blk", sha=git_in(worktree, "rev-parse", "HEAD")
+    )
+    runner, claude_patch = _patch_claude(_claude_clean)
+    with claude_patch:
+        persisted, post_mock = _run_guarded(worktree, sid="bg-blk", returned=returned)
+    assert persisted == returned[0]
+    assert not (worktree / LEDGER_RELATIVE_PATH).exists()
+    assert runner.roles == []
+    assert post_mock.call_args.args[1].startswith("## Codex Review Verdict")
+
+
+def test_clean_client_runs_the_gate_once_after_the_guard(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-gate-order")
+    returned = _clean_result(
+        worktree, "T-order", sha=git_in(worktree, "rev-parse", "HEAD")
+    )
+    manager = MagicMock()
+    with (
+        patch(
+            "cw.codex_background._refuse_unpushed_clean_exit",
+            wraps=codex_background._refuse_unpushed_clean_exit,
+        ) as guard_mock,
+        patch(
+            "cw.codex_background.apply_clean_confirm",
+            return_value=CleanConfirmOutcome(returned[0], returned[1], "Codex", True),
+        ) as gate_mock,
+    ):
+        manager.attach_mock(guard_mock, "guard")
+        manager.attach_mock(gate_mock, "gate")
+        persisted, _ = _run_guarded(
+            worktree,
+            sid="bg-order",
+            returned=returned,
+            client=_clean_client(worktree),
+        )
+    assert [name for name, _args, _kwargs in manager.mock_calls] == ["guard", "gate"]
+    assert persisted == returned[0]
+
+
+@pytest.mark.parametrize(
+    ("budget", "expected_deadline"),
+    [(600, 1600.0), (None, None)],
+    ids=["budget", "no-budget"],
+)
+def test_thread_budget_becomes_one_monotonic_deadline_for_both_gate_calls(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    budget: int | None,
+    expected_deadline: float | None,
+) -> None:
+    """#2791: the budget becomes ``monotonic() + budget`` at both gate calls.
+
+    The pre-loop resume and the post-loop confirm share the review thread's
+    single deadline; ``None`` (no wall-clock budget) stays ``None``. The clock
+    advances on every ``monotonic()`` reading, so a gate call that recomputed
+    its own ``monotonic() + budget`` would see a later deadline than the first
+    reading's and fail the equality below.
+    """
+    worktree, _origin = make_git_repo_with_origin(f"wt-bg-deadline-{budget}")
+    returned = _clean_result(
+        worktree, "T-deadline", sha=git_in(worktree, "rev-parse", "HEAD")
+    )
+    clock = MagicMock()
+    clock.monotonic.side_effect = itertools.count(1000.0, 10.0)
+    with (
+        patch("cw.codex_background.time", clock),
+        patch(
+            "cw.codex_background.resume_pending_confirm", return_value=None
+        ) as resume_mock,
+        patch(
+            "cw.codex_background.apply_clean_confirm",
+            return_value=CleanConfirmOutcome(returned[0], returned[1], "Codex", True),
+        ) as gate_mock,
+    ):
+        persisted, _ = _run_guarded(
+            worktree,
+            sid="bg-deadline",
+            returned=returned,
+            client=_clean_client(worktree),
+            wall_clock_budget_seconds=budget,
+        )
+    assert resume_mock.call_count == 1
+    assert gate_mock.call_count == 1
+    assert resume_mock.call_args.kwargs["deadline"] == expected_deadline
+    assert gate_mock.call_args.kwargs["deadline"] == expected_deadline
+    assert (
+        resume_mock.call_args.kwargs["deadline"]
+        == gate_mock.call_args.kwargs["deadline"]
+    )
+    assert persisted == returned[0]
+
+
+def test_pre_loop_resume_runs_only_the_confirm(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-resume")
+    _awaiting_ledger_at_head(worktree, "T-resume")
+    _seed_session("bg-resume")
+    task = TicketTask(ticket_id="T-resume", client="test", stage=Stage.REVIEW)
+    runner, claude_patch = _patch_claude(_claude_clean)
+    with (
+        claude_patch,
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            side_effect=AssertionError("the codex loop must not run"),
+        ),
+        patch("cw.codex_background._post_review_comment") as post_mock,
+    ):
+        _run(
+            sid="bg-resume",
+            task=task,
+            worktree=worktree,
+            client=_clean_client(worktree),
+        )
+    persisted = AutoDevResult.model_validate(load_state().sessions[0].last_result)
+    assert runner.roles
+    assert persisted.blocker is None
+    assert persisted.review.converged is True
+    assert "clean_confirm_resumed" in persisted.friction_highlights
+    assert post_mock.call_args.args[1].startswith("## Claude Review Verdict")
+    assert load_executor_blocked_markers() == {}
+
+
+def test_clean_client_with_fix_loop_off_self_heals_then_gates(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+) -> None:
+    worktree, origin = make_git_repo_with_origin("wt-bg-clean-heal")
+    commit_tracked_file(worktree, "late.py")
+    head = git_in(worktree, "rev-parse", "HEAD")
+    returned = _clean_result(worktree, "T-cheal", sha=head)
+    _runner, claude_patch = _patch_claude(_claude_clean)
+    with claude_patch:
+        persisted, _ = _run_guarded(
+            worktree,
+            sid="bg-cheal",
+            returned=returned,
+            fix_loop_enabled=False,
+            client=_clean_client(worktree),
+        )
+    assert git_in(origin, "rev-parse", "refs/heads/feature") == head
+    assert persisted.review.converged is True
+
+
+def test_clean_client_with_fix_loop_off_parks_unpushed_before_the_gate(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-clean-park")
+    commit_tracked_file(worktree, "late.py")
+    git_in(worktree, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    returned = _clean_result(
+        worktree, "T-cpark", sha=git_in(worktree, "rev-parse", "HEAD")
+    )
+    runner, claude_patch = _patch_claude(_claude_clean)
+    with claude_patch:
+        persisted, _ = _run_guarded(
+            worktree,
+            sid="bg-cpark",
+            returned=returned,
+            fix_loop_enabled=False,
+            client=_clean_client(worktree),
+        )
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == CODEX_UNPUSHED_AT_EXIT
+    assert persisted.blocker.retry_eligible is True
+    assert runner.roles == []
+    assert not (worktree / LEDGER_RELATIVE_PATH).exists()
+
+
+def test_resumed_confirm_on_an_unpushed_head_parks_and_stays_converged(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-resume-park")
+    commit_tracked_file(worktree, "late.py")
+    head = git_in(worktree, "rev-parse", "HEAD")
+    git_in(worktree, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    _awaiting_ledger_at_head(worktree, "T-rpark")
+    task = TicketTask(ticket_id="T-rpark", client="test", stage=Stage.REVIEW)
+    client = _clean_client(worktree)
+    _runner, claude_patch = _patch_claude(_claude_clean)
+
+    _seed_session("bg-rpark-1")
+    with (
+        claude_patch,
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            side_effect=AssertionError("the codex loop must not run"),
+        ),
+        patch("cw.codex_background._post_review_comment"),
+    ):
+        _run(sid="bg-rpark-1", task=task, worktree=worktree, client=client)
+    first = AutoDevResult.model_validate(load_state().sessions[0].last_result)
+    assert first.blocker is not None
+    assert first.blocker.reason == CODEX_UNPUSHED_AT_EXIT
+    ledger = load_ledger(worktree / LEDGER_RELATIVE_PATH)
+    assert ledger is not None
+    assert ledger.status == "converged"
+    assert ledger.last_clean_sha == head
+    rounds = len(ledger.rounds)
+
+    returned = _clean_result(worktree, "T-rpark", sha=head)
+    second, _ = _run_guarded(
+        worktree, sid="bg-rpark-2", returned=returned, client=client
+    )
+    assert second.blocker is not None
+    assert second.blocker.reason == CODEX_UNPUSHED_AT_EXIT
+    again = load_ledger(worktree / LEDGER_RELATIVE_PATH)
+    assert again is not None
+    assert again.status == "converged"
+    assert len(again.rounds) == rounds
+
+
+def test_a_bookkeeping_error_persists_the_typed_park(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-ledger-error")
+    returned = _clean_result(
+        worktree, "T-lerr", sha=git_in(worktree, "rev-parse", "HEAD")
+    )
+    _runner, claude_patch = _patch_claude(_claude_clean)
+    with (
+        claude_patch,
+        patch("cw.codex_clean_confirm.save_ledger", side_effect=OSError("disk full")),
+        patch(
+            "cw.codex_background._complete_session_as_unexpected_error"
+        ) as unexpected_mock,
+        patch("cw.dispatch.claim._revert_claimed_task_to_pending") as revert_mock,
+    ):
+        persisted, post_mock = _run_guarded(
+            worktree,
+            sid="bg-lerr",
+            returned=returned,
+            client=_clean_client(worktree),
+        )
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == CODEX_CONVERGENCE_LEDGER_ERROR
+    assert persisted.blocker.retry_eligible is True
+    unexpected_mock.assert_not_called()
+    revert_mock.assert_not_called()
+    assert post_mock.call_args.args[1].startswith("## Codex Review Verdict")
+
+
+def test_a_claude_must_fix_is_posted_under_a_claude_title(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-claude-mf")
+    returned = _clean_result(
+        worktree, "T-cmf", sha=git_in(worktree, "rev-parse", "HEAD")
+    )
+    _runner, claude_patch = _patch_claude(_claude_must_fix)
+    with claude_patch:
+        persisted, post_mock = _run_guarded(
+            worktree,
+            sid="bg-cmf",
+            returned=returned,
+            client=_clean_client(worktree),
+        )
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == CODEX_MUST_FIX_FINDINGS
+    text = post_mock.call_args.args[1]
+    assert text.startswith("## Claude Review Verdict")
+    assert "Codex Review Verdict" not in text
+    # The lane's fix loop is on (the default), but the Claude round never ran
+    # it: the typed fix_loop_footer, not the label, selects the single-pass
+    # wording over the fix-loop-available one.
+    assert "_Single-pass review — fix loop disabled for this lane._" in text
+    assert "The fix loop was available" not in text
+    envelope = ReviewVerdictEnvelope.model_validate_json(
+        (worktree / REVIEW_VERDICT_JSON_RELATIVE_PATH).read_text(encoding="utf-8")
+    )
+    assert envelope.verdict.blocking is True
+    assert envelope.verdict.must_fix[0].summary == "feature constant is wrong"
+    assert load_executor_blocked_markers() == {}
+
+
+def test_a_claude_failure_without_a_verdict_is_filed_as_claude(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    claude_on_path: None,
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-claude-mut")
+    returned = _clean_result(
+        worktree, "T-cmut", sha=git_in(worktree, "rev-parse", "HEAD")
+    )
+
+    def _hook(tree: Path) -> None:
+        (tree / "hook.txt").write_text("x\n", encoding="utf-8")
+
+    _runner, claude_patch = _patch_claude(_claude_clean, side_effect=_hook)
+    with claude_patch:
+        persisted, _ = _run_guarded(
+            worktree,
+            sid="bg-cmut",
+            returned=returned,
+            client=_clean_client(worktree),
+        )
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == CODEX_REVIEW_WORKTREE_MUTATED
+    artifact = worktree / REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH
+    assert "# Claude review unparseable" in artifact.read_text(encoding="utf-8")
+
+
+def test_an_outage_blocks_then_the_requeue_converges_without_the_codex_loop(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance 2: blocked while Claude is missing, requeueable once restored."""
+    worktree, _origin = make_git_repo_with_origin("wt-bg-outage-seq")
+    returned = _clean_result(
+        worktree, "T-seq", sha=git_in(worktree, "rev-parse", "HEAD")
+    )
+    client = _clean_client(worktree)
+    runner, claude_patch = _patch_claude(_claude_clean)
+
+    monkeypatch.setattr("cw.codex_clean_confirm._which_claude", lambda: None)
+    with claude_patch:
+        first, _ = _run_guarded(
+            worktree, sid="bg-seq-1", returned=returned, client=client
+        )
+    assert first.status == "blocked"
+    assert first.blocker is not None
+    assert first.blocker.reason == "confirm_backend_unavailable"
+    assert first.blocker.retry_eligible is True
+    assert load_executor_blocked_markers() == {}
+    ledger = load_ledger(worktree / LEDGER_RELATIVE_PATH)
+    assert ledger is not None
+    assert ledger.status == "awaiting_confirm"
+    assert runner.roles == []
+
+    monkeypatch.setattr("cw.codex_clean_confirm._which_claude", lambda: "/x/claude")
+    _seed_session("bg-seq-2")
+    task = TicketTask(ticket_id="T-seq", client="test", stage=Stage.REVIEW)
+    with (
+        claude_patch,
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            side_effect=AssertionError("the codex loop must not run again"),
+        ),
+        patch("cw.codex_background._post_review_comment"),
+    ):
+        _run(sid="bg-seq-2", task=task, worktree=worktree, client=client)
+    second = AutoDevResult.model_validate(load_state().sessions[0].last_result)
+    assert second.status != "blocked"
+    assert second.blocker is None
+    assert second.review.converged is True
+    assert runner.roles
+    done = load_ledger(worktree / LEDGER_RELATIVE_PATH)
+    assert done is not None
+    assert done.status == "converged"
+    assert load_executor_blocked_markers() == {}

@@ -25,12 +25,16 @@ from typing import TYPE_CHECKING
 import pytest
 from click.testing import CliRunner
 
-from cw import codex_review
+from cw import claude_review, codex_review
+from cw.claude_review import ClaudeReviewRound, ClaudeRunResult, FakeClaudeRunner
 from cw.cli import main
 from cw.codex_review import (
+    CODEX_BUDGET_EXHAUSTED,
     CODEX_REVIEW_UNPARSEABLE,
+    CODEX_REVIEW_WORKTREE_MUTATED,
     CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
     _prepare_review_pass,
+    make_codex_blocked,
 )
 from cw.codex_runner import CodexRunResult, FakeCodexRunner
 from cw.dev_queue import add_ticket, load_dev_queue
@@ -39,8 +43,14 @@ from cw.exceptions import CwError
 from cw.models import QueueItemStatus, Stage
 from cw.models.orchestrator_config.stage import StageExecutorConfig
 from cw.review_findings import ReviewVerdict
+from tests._claude_review_helpers import (
+    error_envelope,
+    review_envelope,
+    truncated_envelope,
+)
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._codex_review_helpers import (
+    _doc_json,
     _finding_payload,
     _ok_result,
     _SequencedRunner,
@@ -60,6 +70,7 @@ if TYPE_CHECKING:
 
     from click.testing import Result
 
+    from cw.auto_dev_result import AutoDevResult
     from cw.models import TicketTask
 
 _CLIENT = "acme"
@@ -171,6 +182,38 @@ class Harness:
     def head(self) -> str:
         return git_in(self.repo, "rev-parse", "HEAD")
 
+    def invoke_claude(
+        self, results: Sequence[ClaudeRunResult], *extra: str
+    ) -> tuple[Result, FakeClaudeRunner]:
+        """Run ``confirm --backend claude`` against a ``FakeClaudeRunner`` (#2791).
+
+        ``claude`` is not in the optional-binary denylist, so the binary check
+        is the ``_which_claude`` seam, patched to a deterministic path.
+        """
+        runner = FakeClaudeRunner(results=list(results))
+        self.monkeypatch.setattr("cw.claude_review.RealClaudeRunner", lambda: runner)
+        self.monkeypatch.setattr(
+            "cw.claude_review._which_claude", lambda: "/usr/bin/claude"
+        )
+        return self.cli.invoke(main, self.args("--backend", "claude", *extra)), runner
+
+    def spy_claude_review(
+        self, *, after: Callable[[Path], None] | None = None
+    ) -> list[dict[str, object]]:
+        """Wrap the real ``run_claude_review``, recording each call's kwargs."""
+        real = claude_review.run_claude_review
+        calls: list[dict[str, object]] = []
+
+        def _spy(**kwargs: object) -> object:
+            calls.append(dict(kwargs))
+            outcome = real(**kwargs)
+            if after is not None:
+                after(self.repo)
+            return outcome
+
+        self.monkeypatch.setattr("cw.claude_review.run_claude_review", _spy)
+        return calls
+
 
 @pytest.fixture
 def harness(
@@ -216,21 +259,25 @@ def _detail(result: Result) -> str:
     return detail
 
 
-def _assert_unavailable(result: Result, cause: str) -> dict[str, object]:
+def _assert_unavailable(
+    result: Result, cause: str, backend: str = "codex"
+) -> dict[str, object]:
     assert result.exit_code == _UNAVAILABLE, result.output
     payload = _payload(result)
     assert payload["available"] is False
-    assert payload["backend"] == "codex"
+    assert payload["backend"] == backend
     assert payload["cause"] == cause
     assert "detail" in payload
     return payload
 
 
-def _assert_round_failed(result: Result, cause: str) -> dict[str, object]:
+def _assert_round_failed(
+    result: Result, cause: str, backend: str = "codex"
+) -> dict[str, object]:
     assert result.exit_code == _ROUND_FAILED, result.output
     payload = _payload(result)
     assert payload["available"] is True
-    assert payload["backend"] == "codex"
+    assert payload["backend"] == backend
     assert payload["round_failed"] is True
     assert payload["cause"] == cause
     assert "verdict" not in payload
@@ -911,3 +958,288 @@ def test_confirm_leaves_the_row_alone_and_posts_nothing(harness: Harness) -> Non
     assert result.exit_code == 0, result.output
     assert _row_snapshot() == before
     assert read_events() == []
+
+
+# ---------------------------------------------------------------------------
+# --backend claude (#2791): the same contract on a claude -p reviewer
+# ---------------------------------------------------------------------------
+
+
+def _claude_ok() -> ClaudeRunResult:
+    return ClaudeRunResult(returncode=0, stdout=review_envelope(_doc_json()), stderr="")
+
+
+def _claude_error() -> ClaudeRunResult:
+    return ClaudeRunResult(returncode=0, stdout=error_envelope(), stderr="")
+
+
+def _claude_unparseable() -> ClaudeRunResult:
+    return ClaudeRunResult(returncode=0, stdout=truncated_envelope(), stderr="")
+
+
+def _claude_discarding() -> ClaudeRunResult:
+    return ClaudeRunResult(
+        returncode=0,
+        stdout=review_envelope(structurally_invalid_doc_json("SHOULD_FIX")),
+        stderr="",
+    )
+
+
+def _claude_results(
+    h: Harness, *first: ClaudeRunResult, rest: ClaudeRunResult
+) -> list[ClaudeRunResult]:
+    return [*first, *([rest] * (len(h.roles) - len(first)))]
+
+
+def _claude_round(result: AutoDevResult) -> Callable[..., ClaudeReviewRound]:
+    def _stub(**_kwargs: object) -> ClaudeReviewRound:
+        return ClaudeReviewRound(result, None, backend_down=False)
+
+    return _stub
+
+
+def _scn_claude_ok(h: Harness) -> Result:
+    return h.invoke_claude(_claude_results(h, rest=_claude_ok()))[0]
+
+
+def _scn_claude_binary_missing(h: Harness) -> Result:
+    runner = FakeClaudeRunner()
+    h.monkeypatch.setattr("cw.claude_review.RealClaudeRunner", lambda: runner)
+    h.monkeypatch.setattr("cw.claude_review._which_claude", lambda: None)
+    result = h.cli.invoke(main, h.args("--backend", "claude"))
+    assert runner.calls == []
+    return result
+
+
+def _scn_claude_backend_error(h: Harness) -> Result:
+    return h.invoke_claude(_claude_results(h, rest=_claude_error()))[0]
+
+
+def _scn_claude_crash(h: Harness) -> Result:
+    h.monkeypatch.setattr(
+        "cw.claude_review.run_claude_review", _raise(CwError("cw broke"))
+    )
+    return h.invoke_claude([])[0]
+
+
+def _scn_claude_partial(h: Harness) -> Result:
+    return h.invoke_claude(_claude_results(h, _claude_ok(), rest=_claude_error()))[0]
+
+
+def _scn_claude_reviewers_failed(h: Harness) -> Result:
+    return h.invoke_claude(_claude_results(h, rest=_claude_unparseable()))[0]
+
+
+def _scn_claude_discarded(h: Harness) -> Result:
+    return h.invoke_claude(_claude_results(h, _claude_discarding(), rest=_claude_ok()))[
+        0
+    ]
+
+
+def _scn_claude_unknown_backend(h: Harness) -> Result:
+    return h.cli.invoke(main, h.args("--backend", "gemini"))
+
+
+_CLAUDE_EXIT_TABLE: dict[str, tuple[Callable[[Harness], Result], int, str | None]] = {
+    "verdict": (_scn_claude_ok, 0, None),
+    "binary_missing": (_scn_claude_binary_missing, 3, "binary_missing"),
+    "backend_error": (_scn_claude_backend_error, 3, "backend_error"),
+    "crash": (_scn_claude_crash, 3, "crash"),
+    "partial": (_scn_claude_partial, 4, "partial"),
+    "reviewers_failed": (_scn_claude_reviewers_failed, 4, "reviewers_failed"),
+    "discarded_findings": (_scn_claude_discarded, 4, "discarded_findings"),
+    "unknown_backend": (_scn_claude_unknown_backend, 2, None),
+}
+
+
+@pytest.mark.parametrize("scenario", list(_CLAUDE_EXIT_TABLE))
+def test_claude_exit_code_table(harness: Harness, scenario: str) -> None:
+    scenario_fn, expected, cause = _CLAUDE_EXIT_TABLE[scenario]
+
+    result = scenario_fn(harness)
+
+    assert result.exit_code == expected, result.output
+    if expected == _UNAVAILABLE:
+        assert cause is not None
+        _assert_unavailable(result, cause, backend="claude")
+    elif expected == _ROUND_FAILED:
+        assert cause is not None
+        _assert_round_failed(result, cause, backend="claude")
+    elif expected == 0:
+        assert _payload(result)["backend"] == "claude"
+    else:
+        assert result.stdout == ""
+        _assert_not_outage(result)
+
+
+def test_claude_happy_path_prints_the_verdict_envelope(harness: Harness) -> None:
+    result, runner = harness.invoke_claude(_claude_results(harness, rest=_claude_ok()))
+
+    assert result.exit_code == 0, result.output
+    payload = _payload(result)
+    assert payload["available"] is True
+    assert payload["backend"] == "claude"
+    assert payload["reviewed_sha"] == harness.head()
+    assert payload["result_blocker_reason"] is None
+    verdict = ReviewVerdict.model_validate(payload["verdict"])
+    assert verdict.reviewed_sha == harness.head()
+    assert len(runner.calls) == len(harness.roles)
+    assert all(call["cwd"] == harness.repo for call in runner.calls)
+    assert all(call["timeout"] is None for call in runner.calls)
+
+
+def test_claude_backend_error_detail_names_the_backend(harness: Harness) -> None:
+    result, _runner = harness.invoke_claude(
+        _claude_results(harness, rest=_claude_error())
+    )
+
+    payload = _assert_unavailable(result, "backend_error", backend="claude")
+    assert str(payload["detail"]).startswith("backend=claude; ")
+
+
+@pytest.mark.parametrize("mutate", [_dirty_untracked, _move_head])
+def test_claude_call_level_worktree_change_is_worktree_mutated(
+    harness: Harness, mutate: Callable[[Path], None]
+) -> None:
+    harness.spy_claude_review(after=mutate)
+
+    result, _runner = harness.invoke_claude(_claude_results(harness, rest=_claude_ok()))
+
+    payload = _assert_round_failed(result, "worktree_mutated", backend="claude")
+    assert "worktree" in str(payload["detail"])
+
+
+def test_claude_returned_mutation_blocker_is_worktree_mutated(
+    harness: Harness,
+) -> None:
+    """A per-role G4 park maps to the same cause even with no call-level change."""
+    blocked = make_codex_blocked(
+        ticket_id=_TICKET,
+        worktree=harness.repo,
+        reason=CODEX_REVIEW_WORKTREE_MUTATED,
+        retry_eligible=False,
+        details="backend=claude; role=Code Quality Reviewer; HEAD a -> b",
+    )
+    harness.monkeypatch.setattr(
+        "cw.claude_review.run_claude_review", _claude_round(blocked)
+    )
+
+    result, _runner = harness.invoke_claude([])
+
+    payload = _assert_round_failed(result, "worktree_mutated", backend="claude")
+    assert (
+        payload["detail"] == "backend=claude; role=Code Quality Reviewer; HEAD a -> b"
+    )
+
+
+def test_claude_budget_exhaustion_is_a_round_failure_not_an_outage(
+    harness: Harness,
+) -> None:
+    blocked = make_codex_blocked(
+        ticket_id=_TICKET,
+        worktree=harness.repo,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        retry_eligible=True,
+        details=f"backend=claude; Code Quality Reviewer ({CODEX_BUDGET_EXHAUSTED})",
+    )
+    harness.monkeypatch.setattr(
+        "cw.claude_review.run_claude_review", _claude_round(blocked)
+    )
+
+    result, _runner = harness.invoke_claude([])
+
+    _assert_round_failed(result, "reviewers_failed", backend="claude")
+
+
+def test_claude_arguments_and_the_ledger_fork_point_base(harness: Harness) -> None:
+    fork = git_in(harness.repo, "rev-parse", "HEAD~1")
+    write_ledger(
+        harness.repo,
+        ledger_with_rounds(
+            (),
+            shas=[harness.head()],
+            confirm="claude",
+            ticket_id=_TICKET,
+            fork_point=fork,
+        ),
+    )
+    calls = harness.spy_claude_review()
+
+    result, runner = harness.invoke_claude(
+        _claude_results(harness, rest=_claude_ok()),
+        "--model",
+        "claude-sonnet-5-5",
+        "--reasoning-effort",
+        "low",
+    )
+
+    assert result.exit_code == 0, result.output
+    [kwargs] = calls
+    assert kwargs["runner"] is runner
+    assert kwargs["task"] == harness.task
+    assert kwargs["worktree"] == harness.repo
+    assert kwargs["default_branch"] == "main"
+    assert kwargs["base_ref"] == fork
+    assert kwargs["model"] == "claude-sonnet-5-5"
+    assert kwargs["wall_clock_budget_seconds"] is None
+    assert kwargs["session_id"] == f"confirm-{_SESSION}"
+    assert "reasoning_effort" not in kwargs
+    argv = runner.calls[0]["argv"]
+    assert isinstance(argv, list)
+    assert argv[-2:] == ["--model", "claude-sonnet-5-5"]
+
+
+def test_claude_without_a_ledger_diffs_from_the_configured_branch(
+    harness: Harness,
+) -> None:
+    calls = harness.spy_claude_review()
+
+    result, _runner = harness.invoke_claude(_claude_results(harness, rest=_claude_ok()))
+
+    assert result.exit_code == 0, result.output
+    assert calls[0]["base_ref"] == "main"
+
+
+def test_claude_path_never_needs_codex(harness: Harness) -> None:
+    """No @needs_codex here: codex is hidden, and the claude path still runs."""
+    result, _runner = harness.invoke_claude(_claude_results(harness, rest=_claude_ok()))
+
+    assert result.exit_code == 0, result.output
+
+
+def test_claude_leaves_the_row_alone_and_posts_nothing(harness: Harness) -> None:
+    def _no_comment(*_args: object, **_kwargs: object) -> None:
+        msg = "confirm must not post a tracker comment"
+        raise AssertionError(msg)
+
+    harness.monkeypatch.setattr("cw.gh.post_issue_comment", _no_comment)
+    before = _row_snapshot()
+
+    result, _runner = harness.invoke_claude(_claude_results(harness, rest=_claude_ok()))
+
+    assert result.exit_code == 0, result.output
+    assert _row_snapshot() == before
+    assert read_events() == []
+
+
+@needs_codex
+def test_explicit_codex_backend_is_the_default_path(harness: Harness) -> None:
+    calls = harness.spy_run_review()
+
+    result, _runner = harness.invoke(
+        harness.all_roles(_ok_result()), "--backend", "codex"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _payload(result)["backend"] == "codex"
+    assert len(calls) == 1
+
+
+def test_help_lists_the_backend_option() -> None:
+    result = CliRunner().invoke(main, ["review", "confirm", "--help"])
+
+    assert result.exit_code == 0
+    assert "--backend" in result.output
+    flat = " ".join(result.output.split())
+    assert "[codex|claude]" in flat
+    assert "default: codex" in flat

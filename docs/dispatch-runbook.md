@@ -1567,6 +1567,69 @@ Three same-cause parks at one sha are the cap; the next failure escalates to an
 or fails on content on a healthy backend, surfaces as `agent_block`, not as
 this reason.
 
+#### Codex-lane clean mode (#2791)
+
+A codex REVIEW lane on a `review.convergence: clean` client keeps its own codex
+fix loop, then the detached `cw codex run` driver records that loop in the
+convergence ledger (`.cw/review-convergence.json`) and runs the confirmation
+round itself, so finalize's `verify-tip` finds a converged ledger. The opencode
+REVIEW lane still ignores clean mode.
+
+- **Which backend runs.** With `review.confirm_backend` unset the confirm round
+  is Claude: one `claude -p` call per reviewer role, `cwd` at the task worktree,
+  tools `Read,Grep,Glob` only, `--permission-mode dontAsk`, empty settings
+  sources (no operator or project hooks), no MCP servers, under the operator's
+  own Claude login. The prompt carries the diff from the ledger's fork point,
+  the approved plan (`.cw/plan.md`), the ticket title and body, the ticket's
+  comments (every comment the pipeline did not post itself, fetched live from
+  the tracker), the finding dispositions an operator already settled, and the
+  repo's review configuration (reviewer agent specs, `.claude/review-extras.md`,
+  the `CLAUDE.md` quality gates and ruff settings). The file tools can also
+  read any file under the task worktree, untracked and gitignored files
+  included. Claude Code (not cw) enforces the worktree
+  boundary: a direct read of a path outside the worktree was denied on the
+  `claude` version where the envelope was captured, but symlinks inside the
+  worktree that point outside it were not exercised, so their targets are not
+  verified as unreadable. The only hard boundary is the `review.confirm_backend`
+  opt-out (`codex` or `none`). This is
+  default-on egress for every codex-lane clean client. The confirm runs on the
+  client's `worker_model` (`--model <id>`) when that is set, and on Claude's
+  own default model otherwise.
+- **Opt-out.** `review.confirm_backend: none` or `codex` converges on the clean
+  codex round alone (the sentinel records `confirm_round_opt_out` or
+  `confirm_not_independent`). Nothing is sent to Claude.
+- **What a requeue does.**
+
+| Ledger state at the requeue | What the driver does | Why |
+|---|---|---|
+| `awaiting_confirm` at HEAD, `review.confirm_backend` unchanged since the ledger was stamped (after a Claude outage or a round that could not complete) | skips the codex loop and runs only the Claude confirm | the clean codex round at this sha is already recorded |
+| `awaiting_confirm` at HEAD, but `review.confirm_backend` now differs from the one stamped on the ledger (for example `none` or `codex` set after an outage) | re-runs the codex loop; the post-loop gate then converges on the clean loop round without calling Claude (opt-out) or confirms on the new backend | the stamped choice must not run a Claude call the client no longer consents to; the loop can park on a fresh MUST_FIX before the gate is reached |
+| anything else (a dirty Claude confirm, a stop released, HEAD moved) | re-runs the codex loop, then the confirm | the loop is the only fixer on this lane; Claude findings are not fed back into it |
+
+  A requeue after a Claude MUST_FIX therefore re-runs a nondeterministic codex
+  loop that can park on the same finding again.
+- **Claude down.** The park is `confirm_backend_unavailable` with
+  `blocker.details` starting `backend=claude;`. Follow the requeue procedure
+  above (restore `claude` on the serve host, then requeue); the cap and the
+  `agent_block` escalation are the same. A worktree changed by the reviewer
+  parks as `codex_review_worktree_mutated` instead: inspect `git status` and
+  `git log`, revert anything the reviewer process wrote, then `cw dev-queue
+  requeue <T> -c <C> --stage review`.
+- **`codex_convergence_ledger_error`.** A ledger, git or file step failed after
+  the codex review completed. The codex verdict is still posted. A failed save
+  is transient; a foreign or corrupt ledger, or a verdict that is not at HEAD,
+  repeats identically, so read `blocker.details` first, fix the cause (for a
+  foreign ledger, move `.cw/review-convergence.json` aside), then `cw dev-queue
+  requeue <T> -c <C> --stage review`. The park is charged.
+- **`--override-must-fix` is refused** on a clean client unless the worktree
+  holds a converged ledger for the ticket that is clean at the verdict's
+  reviewed commit (a missing, unreadable, foreign, non-converged or
+  other-tip ledger refuses before any write): `verify-tip` would still park
+  after the override. Exits: `cw dev-queue requeue <T> -c <C> --stage review`,
+  `cw review converge operator-settle` for a stopped ledger, or switching the
+  client to `review.convergence: blocking`. `cw review settle` records finding
+  dispositions on the row only; it does not converge the ledger.
+
 ### Reading a review's history (cw review history, #2790)
 
 `cw review history <T> -c <C>` replays one ticket's review round by round. Read

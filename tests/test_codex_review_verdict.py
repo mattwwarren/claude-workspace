@@ -206,6 +206,28 @@ class TestSynthesizeCodexReviewResult:
         # LocalExecutor one make_blocked defaults to.
         assert result.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
         assert "local_executor" not in result.next_actions[0]
+        assert result.blocker.details.startswith("## Codex Review Verdict")
+
+    def test_blocking_must_fix_carries_the_reviewer_label(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """#2791: the label reaches the rendered text embedded in the blocker."""
+        worktree = make_git_repo("wt-synth-label")
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        result, _verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth",
+            default_branch="main",
+            fix_loop_enabled=False,
+            reviewer_label="Claude",
+        )
+        assert result.blocker is not None
+        assert result.blocker.details.startswith("## Claude Review Verdict")
 
     @pytest.mark.parametrize(
         ("reason", "expect_retry"),
@@ -2681,6 +2703,34 @@ class TestRenderVerdictComment:
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
         body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "Non-blocking" in body
+
+    def test_default_title_is_codex(self) -> None:
+        """#2791 regression pin: every existing caller keeps the Codex title."""
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="NIT"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert body.splitlines()[0] == "## Codex Review Verdict"
+        labeled = render_verdict_comment(
+            verdict, fix_loop_enabled=False, reviewer_label="Codex"
+        )
+        assert labeled == body
+
+    def test_claude_label_changes_only_the_title(self) -> None:
+        """#2791: a Claude confirm round is never posted under a Codex header."""
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        codex = render_verdict_comment(verdict, fix_loop_enabled=False)
+        claude = render_verdict_comment(
+            verdict, fix_loop_enabled=False, reviewer_label="Claude"
+        )
+        assert claude.splitlines()[0] == "## Claude Review Verdict"
+        assert claude.splitlines()[1:] == codex.splitlines()[1:]
 
     def test_mixed_must_fix_and_should_fix_both_render(self) -> None:
         # Test Reviewer SHOULD_FIX 10 (#1236): the old test suite never

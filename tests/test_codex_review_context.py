@@ -30,7 +30,11 @@ from cw.codex_review import (
     _select_reviewer_roles,
     is_test_path,
 )
-from cw.codex_review._capability import _PROBE_SENTINEL
+from cw.codex_review._capability import (
+    _PROBE_SENTINEL,
+    _CodexFilesystemCapability,
+    _CodexFingerprint,
+)
 from cw.codex_review._context import (
     _CAPABLE_ONLY_MARKER,
     _DELTA_MODE_MARKER,
@@ -1728,6 +1732,64 @@ class TestPrepareReviewPass:
             ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
         ).strip()
         assert prepared.reviewed_sha == head
+
+    def test_default_still_runs_the_capability_probe(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """#2791 regression pin: no ``capability`` argument keeps the probe."""
+        repo = self._repo_with_change(make_git_repo, "wt-probe-default", None)
+        runner = FakeCodexRunner()
+        prepared = _prepare_review_pass(
+            _task(), repo, "main", runner=runner, session_id="s-probe"
+        )
+        assert len(runner.calls) == 1
+        assert prepared.capability.capable is False
+
+    def test_a_supplied_capability_skips_the_probe(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """#2791: the Claude confirm supplies its own capability, no runner."""
+        repo = self._repo_with_change(make_git_repo, "wt-probe-skip", None)
+        capability = _CodexFilesystemCapability(
+            True, None, _CodexFingerprint(None, "claude", "claude", "claude-tools")
+        )
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=None,
+            session_id="s-skip",
+            capability=capability,
+        )
+        assert prepared.capability is capability
+        assert all(_CAPABLE_ONLY_MARKER in p for p in prepared.prompts_by_role.values())
+
+    def test_a_supplied_capability_never_touches_a_runner(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = self._repo_with_change(make_git_repo, "wt-probe-unused", None)
+        runner = FakeCodexRunner()
+        capability = _CodexFilesystemCapability(
+            True, None, _CodexFingerprint(None, "claude", "claude", "claude-tools")
+        )
+        _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=runner,
+            session_id="s-unused",
+            capability=capability,
+        )
+        assert runner.calls == []
+
+    def test_neither_runner_nor_capability_is_a_value_error(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = self._repo_with_change(make_git_repo, "wt-probe-none", None)
+        with pytest.raises(ValueError, match="runner or a capability"):
+            _prepare_review_pass(
+                _task(), repo, "main", runner=None, session_id="s-none"
+            )
 
     def _repo_with_change(
         self, make_git_repo: Callable[[str], Path], name: str, tracker: str | None

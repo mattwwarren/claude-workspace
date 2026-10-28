@@ -511,10 +511,11 @@ def _prepare_review_pass(
     worktree: Path,
     default_branch: str,
     *,
-    runner: CodexRunner,
+    runner: CodexRunner | None,
     session_id: str,
     delta_from_sha: str | None = None,
     prior_open_findings: list[Finding] | None = None,
+    capability: _CodexFilesystemCapability | None = None,
 ) -> _ReviewPassInputs:
     """Assemble one review pass's inputs: capture diff, select roles, build prompts.
 
@@ -546,8 +547,18 @@ def _prepare_review_pass(
     scope-violation gate uses its own cycle-0-captured file set). Both
     parameters default to ``None``, so ``run_review``'s cycle-0 call site is
     unchanged.
+
+    ``capability`` (#2791) lets a non-codex reviewer (the Claude confirm round,
+    whose ``Read``/``Grep``/``Glob`` tools reach the worktree by construction)
+    supply its own verdict: the codex probe then never runs, and ``runner``
+    may be ``None``. With no ``capability`` the probe runs as before and a
+    ``runner`` is required (``ValueError`` otherwise).
     """
-    capability = _probe_filesystem_capability(runner=runner, session_id=session_id)
+    if capability is None:
+        if runner is None:
+            msg = "_prepare_review_pass needs a runner or a capability"
+            raise ValueError(msg)
+        capability = _probe_filesystem_capability(runner=runner, session_id=session_id)
     delta_diff: CapturedDiff | None = None
     delta_changed_files: frozenset[str] | None = None
     if delta_from_sha is not None:

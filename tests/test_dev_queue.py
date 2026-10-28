@@ -8308,11 +8308,20 @@ class TestApproveMustFixOverride:
         verdict_ticket_id: str = "GEN-500",
         write_verdict: bool = True,
         login: str | None = "octocat",
+        clean: bool = False,
     ) -> tuple[Path, list[CapturedEvent]]:
-        """Persist one parked row with a verdict in its worktree; capture events."""
+        """Persist one parked row with a verdict in its worktree; capture events.
+
+        *clean* configures the client with ``review.convergence: clean``.
+        """
         from tests.conftest import _make_finding, write_review_verdict_envelope
 
         _write_client_yaml(tmp_config_dir, tmp_path)
+        if clean:
+            clients_yaml = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+            clients_yaml.write_text(
+                clients_yaml.read_text() + "    review:\n      convergence: clean\n"
+            )
         worktree = tmp_path / "wt-must-fix"
         worktree.mkdir()
         task = _make_blocked_task(
@@ -8690,6 +8699,145 @@ class TestApproveMustFixOverride:
         assert any("GEN-500" in r.message for r in caplog.records)
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
         assert t.must_fix_override is None
+
+    # -- #2791 G3: a clean-mode client needs a converged ledger ------------
+
+    def _assert_refused(
+        self, events: list[CapturedEvent], before: dict[str, object], match: str
+    ) -> str:
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from cw.exceptions import ApproveGateError
+
+        with pytest.raises(ApproveGateError, match=match) as excinfo:
+            approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+        assert events == []
+        assert load_dev_queue().model_dump() == before
+        message = str(excinfo.value)
+        assert "requeue GEN-500 -c genhealth --stage review" in message
+        assert "cw review settle" not in message
+        return message
+
+    def test_clean_client_without_a_ledger_is_refused(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, events = self._seed(tmp_config_dir, tmp_path, monkeypatch, clean=True)
+        message = self._assert_refused(
+            events, load_dev_queue().model_dump(), "no convergence ledger"
+        )
+        assert "before any ledger was written" in message
+        assert "review.convergence: blocking" in message
+
+    def test_clean_client_with_an_unreadable_ledger_is_refused(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        verdict_path, events = self._seed(
+            tmp_config_dir, tmp_path, monkeypatch, clean=True
+        )
+        ledger_path = verdict_path.parent.parent / ".cw" / "review-convergence.json"
+        ledger_path.parent.mkdir(parents=True)
+        ledger_path.write_text("{not json", encoding="utf-8")
+        self._assert_refused(
+            events, load_dev_queue().model_dump(), "could not read the convergence"
+        )
+
+    def test_clean_client_with_another_tickets_ledger_is_refused(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests._review_convergence_helpers import confirmed_ledger, write_ledger
+
+        verdict_path, events = self._seed(
+            tmp_config_dir, tmp_path, monkeypatch, clean=True
+        )
+        write_ledger(
+            verdict_path.parent.parent,
+            confirmed_ledger().model_copy(update={"ticket_id": "GEN-1"}),
+        )
+        self._assert_refused(
+            events, load_dev_queue().model_dump(), "belongs to ticket 'GEN-1'"
+        )
+
+    def test_clean_client_with_a_non_converged_ledger_is_refused(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests._review_convergence_helpers import (
+            ledger_with_rounds,
+            round_finding,
+            write_ledger,
+        )
+
+        verdict_path, events = self._seed(
+            tmp_config_dir, tmp_path, monkeypatch, clean=True
+        )
+        write_ledger(
+            verdict_path.parent.parent,
+            ledger_with_rounds([round_finding()], ticket_id="GEN-500"),
+        )
+        message = self._assert_refused(
+            events, load_dev_queue().model_dump(), "'in_progress', not converged"
+        )
+        assert "cw review converge operator-settle" in message
+
+    def test_clean_client_with_a_converged_ledger_succeeds(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from tests._review_convergence_helpers import confirmed_ledger, write_ledger
+
+        verdict_path, events = self._seed(
+            tmp_config_dir, tmp_path, monkeypatch, clean=True
+        )
+        write_ledger(
+            verdict_path.parent.parent,
+            confirmed_ledger(sha=_REVIEWED_SHA).model_copy(
+                update={"ticket_id": "GEN-500"}
+            ),
+        )
+        result = approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+        assert result["reviewed_sha"] == _REVIEWED_SHA
+        assert len(events) == 1
+
+    def test_clean_client_with_a_ledger_converged_at_another_tip_is_refused(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests._review_convergence_helpers import confirmed_ledger, write_ledger
+
+        verdict_path, events = self._seed(
+            tmp_config_dir, tmp_path, monkeypatch, clean=True
+        )
+        stale = confirmed_ledger(sha="1111111111111111111111111111111111111111")
+        write_ledger(
+            verdict_path.parent.parent,
+            stale.model_copy(update={"ticket_id": "GEN-500"}),
+        )
+        message = self._assert_refused(
+            events, load_dev_queue().model_dump(), "converged at '1111"
+        )
+        assert _REVIEWED_SHA in message
+        assert "verify-tip would still park" in message
+
+    @pytest.mark.parametrize("with_ledger", [False, True])
+    def test_blocking_client_ignores_the_ledger(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        with_ledger: bool,
+    ) -> None:
+        from cw.dev_queue import approve_must_fix_override_ticket
+        from tests._review_convergence_helpers import (
+            ledger_with_rounds,
+            round_finding,
+            write_ledger,
+        )
+
+        verdict_path, events = self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        if with_ledger:
+            write_ledger(
+                verdict_path.parent.parent,
+                ledger_with_rounds([round_finding()], ticket_id="GEN-500"),
+            )
+        approve_must_fix_override_ticket("GEN-500", "genhealth", "why")
+        assert len(events) == 1
 
 
 # ---------------------------------------------------------------------------
