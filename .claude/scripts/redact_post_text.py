@@ -79,13 +79,15 @@ _ENCODING = "utf-8"
 _ERRORS = "surrogateescape"
 
 # One path segment. A trailing "." is never part of it, so a path that ends a
-# sentence keeps its full stop.
-_SEGMENT = r"[\w-]+(?:\.[\w-]+)*"
+# sentence keeps its full stop. A "+" is a legal username character (`john+doe`).
+_SEGMENT = r"[\w+-]+(?:\.[\w+-]+)*"
 # A user-home shape starts a path: it is not preceded by a word character, ".",
 # "/" or "-", so `src/home/x.tsx` and `https://x.io/Users/guide` are not homes.
 # A `file://` scheme is the one exception: `file:///home/<u>/x` is a home path,
-# and the scheme stays in the output (`file://<home>/x`).
-_PATH_START = r"(?:(?<![\w./-])|(?<=(?<!\w)file://))"
+# and the scheme stays in the output (`file://<home>/x`). So is a single-letter
+# short flag glued to the path (`-I/home/<u>/inc`, `git -C/home/<u>/repo`): the
+# flag letter is a word character, but the flag itself starts at a boundary.
+_PATH_START = r"(?:(?<![\w./-])|(?<=(?<!\w)file://)|(?<=(?<![\w./-])-[A-Za-z]))"
 # `~user/` is a tilde-user home; a bare `~3 files` or `~/x` is not.
 _TILDE_USER = rf"~(?=[A-Za-z_]){_SEGMENT}(?=/)"
 _USER_HOMES = rf"{_PATH_START}(?:/home/{_SEGMENT}|/Users/{_SEGMENT}|{_TILDE_USER})"

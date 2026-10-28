@@ -125,6 +125,11 @@ def test_transcript_dir_encoded_segment_is_redacted() -> None:
         "see ../home/alice/x",
         "a-/home/alice/x",
         "docs/~/x",
+        "a-I/home/alice/x",
+        "x--I/home/alice/x",
+        "src/-I/home/alice/x",
+        "-IJ/home/alice/x",
+        "-1/home/alice/x",
     ],
 )
 def test_mid_path_home_lookalikes_pass_through(text: str) -> None:
@@ -142,6 +147,11 @@ def test_mid_path_home_lookalikes_pass_through(text: str) -> None:
         ("(/Users/bob/x)", "(<home>/x)"),
         ("a:/home/alice/x,/Users/bob/y", "a:<home>/x,<home>/y"),
         ("[~/.cw/wt/ab12/dev-1/x]", "[<worktree>/x]"),
+        ("-I/home/alice/inc", "-I<home>/inc"),
+        ("gcc -L/home/alice/lib -lfoo", "gcc -L<home>/lib -lfoo"),
+        ("git -C/home/alice/.cw/wt/abc/dev-1 status", "git -C<worktree> status"),
+        ("-I/Users/bob/inc", "-I<home>/inc"),
+        ("-I~alice/inc", "-I<home>/inc"),
         (
             "'/home/alice/.claude/projects/-a/b.jsonl'",
             "'<home>/.claude/projects/<redacted>'",
@@ -162,6 +172,8 @@ _USERNAME_PATH_SHAPES = (
     ("pytest-of-jane.doe/pytest-0", "pytest-of-<redacted>/pytest-0"),
     ("~matthew/x", "<home>/x"),
     ("~jane.doe/src/cw", "<home>/src/cw"),
+    ("/home/john+doe/y", "<home>/y"),
+    ("/Users/john+doe/.cw/wt/abcd1234/dev-1/y", "<worktree>/y"),
     ("~matthew/.cw/wt/abcd1234/dev-1/y", "<worktree>/y"),
     ("~matthew/.claude/projects/-a-b/c.jsonl", TRANSCRIPT_REDACTED),
 )
