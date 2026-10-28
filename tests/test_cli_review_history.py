@@ -40,6 +40,7 @@ from tests._review_history_helpers import (
     fixture_converged,
     fixture_stopped,
     foreign_voided_event,
+    sentinel_review,
     record_verdict_round,
     stage_entered_event,
     voided_suppression,
@@ -236,6 +237,51 @@ def test_worktree_override(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     assert ReviewHistory.model_validate_json(result.output).summary.rounds_run == 5
+
+
+def test_worktree_override_without_a_ledger_does_not_fall_back(
+    tmp_path: Path,
+) -> None:
+    _seed_with_ledger(tmp_path, fixture_converged)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+
+    result = _invoke(ACME_TICKET, "-c", ACME, "--worktree", str(empty), "--json")
+
+    assert result.exit_code == 0, result.output
+    history = ReviewHistory.model_validate_json(result.output)
+    assert history.rounds == []
+    assert history.summary.rounds_run is None
+    assert (
+        f"no converge ledger found for this ticket (looked in: {empty})"
+        in history.notes
+    )
+
+
+def test_worktree_override_does_not_bind_another_tickets_session(
+    tmp_path: Path,
+) -> None:
+    fixture_converged().write(tmp_path / "elsewhere")
+    foreign_review = {"convergence_mode": "clean", "rounds_run": 9}
+    foreign = bound_session_for(
+        make_task(ticket_id="ACM-2", session_id="sess-acm-2"),
+        worktree_path=tmp_path / "elsewhere",
+        last_result=sentinel_review(foreign_review),
+    )
+    _seed_review_row(ACME_TICKET, ACME, sessions=[foreign])
+    stage_entered_event(ACME_TICKET, "sess-acm-2", REVIEW_START)
+
+    result = _invoke(
+        ACME_TICKET, "-c", ACME, "--worktree", str(tmp_path / "elsewhere"), "--json"
+    )
+
+    assert result.exit_code == 0, result.output
+    history = ReviewHistory.model_validate_json(result.output)
+    assert len(history.rounds) == 5
+    assert history.rounds[0].wall_seconds is None
+    assert "events" not in history.sources
+    assert not any("rounds_run=9" in note for note in history.notes)
+    assert any(_STAGE_COUNT in note for note in history.notes)
 
 
 def test_history_is_read_only(tmp_path: Path) -> None:

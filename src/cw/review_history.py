@@ -160,7 +160,10 @@ def collect_history_inputs(
     missing: tuple[int, ...] = ()
     if ledger is not None and ledger_path is not None:
         verdicts, missing = _read_verdicts(ledger, ledger_path, notes)
-    worktrees = frozenset([*automatic, *lookup])
+    # The override only moves the ledger lookup; sessions bind to the row's own
+    # worktrees, or an override at another ticket's checkout would pull that
+    # ticket's sessions (and their review results and events) into this row.
+    worktrees = frozenset(automatic)
     row_sessions = [
         s
         for s in sessions
