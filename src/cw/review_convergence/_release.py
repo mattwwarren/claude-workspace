@@ -130,10 +130,11 @@ def reconcile_ledger_for_init(
         history_rewritten=history_rewritten,
     )
     if reset is not None:
+        previous_ledger = existing.model_copy(update={"reset_history": []})
         reset_entry = LedgerReset(
             at=now,
             reason=reset,
-            previous_ledger=existing.model_dump(mode="json"),
+            previous_ledger=previous_ledger.model_dump(mode="json"),
         )
         reset_ledger = fresh.model_copy(update={"reset_history": [reset_entry]})
         return Reconciled(reset_ledger, reset, None)

@@ -17,9 +17,9 @@ ledger fails open: no override, the bare ladder verdict stands.
 from __future__ import annotations
 
 import itertools
-import json
 from typing import TYPE_CHECKING
 
+from cw._hook_context import _read_cw_context
 from cw.models import Stage
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
@@ -27,6 +27,7 @@ from cw.review_convergence import (
     detect_no_progress,
     load_ledger,
 )
+from cw.spawn import CW_CONTEXT_SCHEMA_VERSION
 
 if TYPE_CHECKING:
     from cw.models import TicketTask
@@ -71,10 +72,8 @@ def _clean_mode_context(task: TicketTask) -> bool:
     """Require the current worktree context to opt into clean mode."""
     if task.worktree_path is None:
         return False
-    context_path = task.worktree_path / ".claude" / "cw-context.json"
-    try:
-        context = json.loads(context_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeError):
+    context = _read_cw_context(str(task.worktree_path))
+    if context is None or context.get("schema_version") != CW_CONTEXT_SCHEMA_VERSION:
         return False
     review = context.get("review") if isinstance(context, dict) else None
     return isinstance(review, dict) and review.get("convergence") == "clean"
