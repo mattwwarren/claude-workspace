@@ -531,6 +531,26 @@ def test_same_content_but_foreign_comment_id_is_not_shown(tmp_path: Path) -> Non
     assert _VOIDED_NOTE in history.notes
 
 
+def test_same_content_and_comment_at_another_severity_is_not_shown(
+    tmp_path: Path,
+) -> None:
+    write_voided_ledger(derived_worktree(tmp_path))
+    foreign_voided_event(
+        ACME_TICKET,
+        file="src/cw/foo.py",
+        summary=VOIDED_SUMMARY,
+        severity="MUST_FIX",
+        operator_comment_id=COMMENT_ID,
+    )
+
+    history = _history(review_task(), tmp_path)
+
+    assert [(v.operator_comment_id, v.severity) for v in history.voided] == [
+        (COMMENT_ID, "SHOULD_FIX")
+    ]
+    assert _VOIDED_NOTE in history.notes
+
+
 def test_voided_event_for_no_row_record_is_counted(tmp_path: Path) -> None:
     write_voided_ledger(derived_worktree(tmp_path))
     foreign_voided_event(ACME_TICKET)
