@@ -159,6 +159,35 @@ def _must_fix_role(role: str) -> ClaudeRunResult:
     )
 
 
+def _only_role(severity: str, summary: str) -> Callable[[str], ClaudeRunResult]:
+    """A reviewer responder whose only finding has *severity* (below MUST_FIX)."""
+
+    def _respond(role: str) -> ClaudeRunResult:
+        findings = [_finding(severity, summary)]
+        return ClaudeRunResult(
+            0, review_envelope(_doc_json(role=role, findings=findings)), ""
+        )
+
+    return _respond
+
+
+def _assert_converged_on_sub_must_fix(
+    outcome: CleanConfirmOutcome, wt: Path, severity: str
+) -> None:
+    assert outcome.result.blocker is None
+    assert outcome.result.review.converged is True
+    ledger = _ledger(wt)
+    assert ledger.status == "converged"
+    confirm = ledger.rounds[-1]
+    assert confirm.kind == "confirm"
+    assert confirm.clean is True
+    if severity == "SHOULD_FIX":
+        assert [e.outcome for e in ledger.settled] == ["defer"]
+        assert ledger.settled[0].identity.severity == "SHOULD_FIX"
+    else:
+        assert ledger.settled == []
+
+
 def _error_role(_role: str) -> ClaudeRunResult:
     return ClaudeRunResult(0, error_envelope(), "")
 
@@ -327,6 +356,15 @@ def _blocker(wt: Path) -> Blocker:
 
 
 class TestConverge:
+    @pytest.mark.parametrize("severity", ["SHOULD_FIX", "NIT"])
+    def test_a_confirm_with_only_sub_must_fix_findings_converges(
+        self, wt: Path, severity: str
+    ) -> None:
+        runner = RoleAwareClaudeRunner(_only_role(severity, _SHOULD_FIX_SUMMARY))
+        outcome = _apply(wt, _client(wt), runner)
+        assert runner.roles
+        _assert_converged_on_sub_must_fix(outcome, wt, severity)
+
     def test_the_clients_worker_model_is_the_confirm_model(self, wt: Path) -> None:
         client = _client(wt).model_copy(update={"worker_model": "claude-sonnet-5-5"})
         runner = RoleAwareClaudeRunner(_clean_role)
@@ -552,6 +590,17 @@ class TestLedgerStates:
 
 
 class TestResume:
+    @pytest.mark.parametrize("severity", ["SHOULD_FIX", "NIT"])
+    def test_a_resumed_confirm_with_only_sub_must_fix_findings_converges(
+        self, wt: Path, severity: str
+    ) -> None:
+        write_ledger(wt, _awaiting_at(wt, _head(wt)))
+        runner = RoleAwareClaudeRunner(_only_role(severity, _SHOULD_FIX_SUMMARY))
+        outcome = _resume(wt, _client(wt), runner)
+        assert outcome is not None
+        assert runner.roles
+        _assert_converged_on_sub_must_fix(outcome, wt, severity)
+
     def test_awaiting_at_head_runs_only_the_confirm(self, wt: Path) -> None:
         write_ledger(wt, _awaiting_at(wt, _head(wt)))
         runner = RoleAwareClaudeRunner(_clean_role)
