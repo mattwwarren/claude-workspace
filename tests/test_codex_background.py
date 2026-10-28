@@ -2508,3 +2508,54 @@ def test_a_claude_failure_without_a_verdict_is_filed_as_claude(
     assert persisted.blocker.reason == CODEX_REVIEW_WORKTREE_MUTATED
     artifact = worktree / REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH
     assert "# Claude review unparseable" in artifact.read_text(encoding="utf-8")
+
+
+def test_an_outage_blocks_then_the_requeue_converges_without_the_codex_loop(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance 2: blocked while Claude is missing, requeueable once restored."""
+    worktree, _origin = make_git_repo_with_origin("wt-bg-outage-seq")
+    returned = _clean_result(
+        worktree, "T-seq", sha=git_in(worktree, "rev-parse", "HEAD")
+    )
+    client = _clean_client(worktree)
+    runner, claude_patch = _patch_claude(_claude_clean)
+
+    monkeypatch.setattr("cw.codex_clean_confirm._which_claude", lambda: None)
+    with claude_patch:
+        first, _ = _run_guarded(
+            worktree, sid="bg-seq-1", returned=returned, client=client
+        )
+    assert first.status == "blocked"
+    assert first.blocker is not None
+    assert first.blocker.reason == "confirm_backend_unavailable"
+    assert first.blocker.retry_eligible is True
+    assert load_executor_blocked_markers() == {}
+    ledger = load_ledger(worktree / LEDGER_RELATIVE_PATH)
+    assert ledger is not None
+    assert ledger.status == "awaiting_confirm"
+    assert runner.roles == []
+
+    monkeypatch.setattr("cw.codex_clean_confirm._which_claude", lambda: "/x/claude")
+    _seed_session("bg-seq-2")
+    task = TicketTask(ticket_id="T-seq", client="test", stage=Stage.REVIEW)
+    with (
+        claude_patch,
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            side_effect=AssertionError("the codex loop must not run again"),
+        ),
+        patch("cw.codex_background._post_review_comment"),
+    ):
+        _run(sid="bg-seq-2", task=task, worktree=worktree, client=client)
+    second = AutoDevResult.model_validate(load_state().sessions[0].last_result)
+    assert second.status != "blocked"
+    assert second.blocker is None
+    assert second.review.converged is True
+    assert runner.roles
+    done = load_ledger(worktree / LEDGER_RELATIVE_PATH)
+    assert done is not None
+    assert done.status == "converged"
+    assert load_executor_blocked_markers() == {}

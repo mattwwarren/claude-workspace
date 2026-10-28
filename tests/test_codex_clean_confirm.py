@@ -656,6 +656,7 @@ class TestResume:
 
 
 def _assert_unavailable(outcome: CleanConfirmOutcome, wt: Path, cause: str) -> None:
+    assert outcome.result.status == "blocked"
     blocker = outcome.result.blocker
     assert blocker is not None
     assert blocker.reason == "confirm_backend_unavailable"
@@ -691,6 +692,32 @@ class TestOutage:
 
         outcome = _apply(wt, _client(wt), RoleAwareClaudeRunner(_crash))
         _assert_unavailable(outcome, wt, "crash")
+
+    def test_blocked_then_requeueable_once_the_binary_is_restored(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Acceptance 2: an outage blocks, and a requeue after the fix converges."""
+        runner = RoleAwareClaudeRunner(_clean_role)
+        monkeypatch.setattr("cw.codex_clean_confirm._which_claude", lambda: None)
+        for expected in (1, 2):
+            outcome = _apply(wt, _client(wt), runner)
+            assert outcome.result.status == "blocked"
+            assert len(_ledger(wt).confirm_failures) == expected
+        assert runner.roles == []
+
+        monkeypatch.setattr("cw.codex_clean_confirm._which_claude", lambda: "/x/claude")
+        resumed = _resume(wt, _client(wt), runner)
+
+        assert resumed is not None
+        assert runner.roles
+        assert resumed.result.status != "blocked"
+        assert resumed.result.blocker is None
+        assert resumed.result.review.converged is True
+        ledger = _ledger(wt)
+        assert ledger.status == "converged"
+        assert ledger.last_clean_sha == _head(wt)
+        # The outage history stays on the ledger; it does not block convergence.
+        assert len(ledger.confirm_failures) == 2
 
     def test_the_fourth_same_cause_failure_escalates(
         self, wt: Path, monkeypatch: pytest.MonkeyPatch
