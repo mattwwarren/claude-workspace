@@ -9,11 +9,10 @@ the fine-grained :class:`ExecutorFailureCategory` -> reason mapping. Imported by
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from cw.auto_dev_result import StageReached
-    from cw.codex_runner import CodexRunResult
     from cw.executor_diagnostics import ExecutorFailureCategory
 
 STAGE3_REVIEW: StageReached = "stage3_review"
@@ -25,6 +24,11 @@ STAGE3_REVIEW: StageReached = "stage3_review"
 # import ``_roles`` (``_roles`` -> ``_context`` -> ``_capability`` would cycle).
 _COMMAND_NOT_FOUND_RETURNCODE = 127
 
+# The stderr text paired with that exit code. Shared by the claude runner that
+# produces it and by ``_is_spawn_error`` that consumes it, so the marker is not
+# kept in two places (#2791).
+_COMMAND_NOT_FOUND_MARKER = "command not found"
+
 # Matches a dotted major.minor.patch version number anywhere in a
 # `codex --version` output line (#1238). Real CLI banners are name-prefixed
 # (e.g. ``codex-cli 0.136.0``, confirmed live), not a bare version string —
@@ -35,8 +39,21 @@ _COMMAND_NOT_FOUND_RETURNCODE = 127
 _CODEX_VERSION_RE = re.compile(r"\d+(?:\.\d+){2}")
 
 
-def _is_spawn_error(result: CodexRunResult) -> bool:
-    """True when *result* is codex failing to spawn at all (binary missing).
+class _SpawnProbeResult(Protocol):
+    """The two fields of a runner result that identify a spawn failure.
+
+    Satisfied by both ``CodexRunResult`` and ``ClaudeRunResult`` (#2791).
+    """
+
+    @property
+    def returncode(self) -> int: ...
+
+    @property
+    def stderr(self) -> str: ...
+
+
+def _is_spawn_error(result: _SpawnProbeResult) -> bool:
+    """True when *result* is a runner failing to spawn at all (binary missing).
 
     Shared by ``_roles._classify_codex_failure`` (the fine-grained diagnostics
     taxonomy) and ``_capability._is_probe_error`` (#1709) — both need to
@@ -48,7 +65,7 @@ def _is_spawn_error(result: CodexRunResult) -> bool:
     """
     return (
         result.returncode == _COMMAND_NOT_FOUND_RETURNCODE
-        and "command not found" in result.stderr
+        and _COMMAND_NOT_FOUND_MARKER in result.stderr
     )
 
 

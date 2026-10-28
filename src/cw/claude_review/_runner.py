@@ -20,7 +20,10 @@ import shutil
 import subprocess
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from cw.codex_review._const import _COMMAND_NOT_FOUND_RETURNCODE
+from cw.codex_review._const import (
+    _COMMAND_NOT_FOUND_MARKER,
+    _COMMAND_NOT_FOUND_RETURNCODE,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -144,7 +147,7 @@ class RealClaudeRunner:
             return ClaudeRunResult(
                 returncode=_COMMAND_NOT_FOUND_RETURNCODE,
                 stdout="",
-                stderr=f"{argv[0]}: command not found",
+                stderr=f"{argv[0]}: {_COMMAND_NOT_FOUND_MARKER}",
             )
         try:
             stdout, stderr = proc.communicate(input=stdin, timeout=timeout_seconds)

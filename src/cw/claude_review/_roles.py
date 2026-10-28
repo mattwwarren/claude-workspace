@@ -29,10 +29,10 @@ from cw.claude_review._runner import build_claude_review_argv
 from cw.codex_review._audit_events import _empty_metrics
 from cw.codex_review._const import (
     _CATEGORY_TO_REASON,
-    _COMMAND_NOT_FOUND_RETURNCODE,
     _MIN_ROLE_TIMEOUT_SECONDS,
     CODEX_BUDGET_EXHAUSTED,
     CODEX_REVIEW_WORKTREE_MUTATED,
+    _is_spawn_error,
 )
 from cw.codex_review._context import _parse_reviewer_document
 from cw.codex_review._roles import (
@@ -59,7 +59,6 @@ _log = logging.getLogger(__name__)
 
 #: How many changed ``git status --porcelain`` lines a mutation report quotes.
 _MUTATION_STATUS_LINES = 5
-_COMMAND_NOT_FOUND_MARKER = "command not found"
 
 
 class WorktreeMutation(NamedTuple):
@@ -144,10 +143,7 @@ def _process_category(result: ClaudeRunResult) -> ExecutorFailureCategory | None
     """The process-level failure category of *result*, or ``None`` if it exited 0."""
     if result.timed_out:
         return "timeout"
-    if (
-        result.returncode == _COMMAND_NOT_FOUND_RETURNCODE
-        and _COMMAND_NOT_FOUND_MARKER in result.stderr
-    ):
+    if _is_spawn_error(result):
         return "spawn_error"
     if result.returncode != 0:
         return "nonzero_exit"
