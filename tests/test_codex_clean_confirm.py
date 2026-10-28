@@ -229,6 +229,31 @@ def _awaiting_at(wt: Path, sha: str) -> ConvergenceLedger:
     return ledger
 
 
+def _awaiting_at_head_with(
+    wt: Path,
+    *,
+    loop_backend: str = "codex",
+    ticket_id: str = "T-1",
+    fork_point: str | None = None,
+) -> ConvergenceLedger:
+    """An ``awaiting_confirm``-at-HEAD ledger with one identity field changed.
+
+    The confirm choice is an explicit independent ``claude``, which is what the
+    client resolves to on a codex lane, so a changed choice cannot be what
+    makes the resume decline: only the identity field under test can.
+    """
+    ledger = fresh_ledger(
+        confirm="claude",
+        loop_backend=loop_backend,
+        ticket_id=ticket_id,
+        fork_point=fork_point or _fork(wt),
+    )
+    ledger, report = record(ledger, sha=_head(wt), backend=loop_backend)
+    assert report.decision == "confirm_required"
+    assert ledger.awaiting_confirm_sha == _head(wt)
+    return ledger
+
+
 def _converged_at(wt: Path, sha: str) -> ConvergenceLedger:
     ledger, report = record(_awaiting_at(wt, sha), sha=sha, kind="confirm")
     assert report.decision == "clean"
@@ -537,11 +562,28 @@ class TestResume:
         assert "clean_confirm_resumed" in outcome.result.friction_highlights
         assert _ledger(wt).status == "converged"
 
-    @pytest.mark.parametrize("case", ["other_sha", "in_progress", "absent", "corrupt"])
+    @pytest.mark.parametrize(
+        "case",
+        [
+            "other_sha",
+            "in_progress",
+            "absent",
+            "corrupt",
+            "foreign_loop_backend",
+            "other_ticket",
+            "other_fork_point",
+        ],
+    )
     def test_every_other_state_runs_the_loop(self, wt: Path, case: str) -> None:
         path = wt / LEDGER_RELATIVE_PATH
         if case == "other_sha":
             write_ledger(wt, _awaiting_at(wt, _fork(wt)))
+        elif case == "foreign_loop_backend":
+            write_ledger(wt, _awaiting_at_head_with(wt, loop_backend="opencode"))
+        elif case == "other_ticket":
+            write_ledger(wt, _awaiting_at_head_with(wt, ticket_id="T-other"))
+        elif case == "other_fork_point":
+            write_ledger(wt, _awaiting_at_head_with(wt, fork_point="not-the-fork"))
         elif case == "in_progress":
             write_ledger(wt, _codex_ledger(wt, (_fork(wt), [round_finding()])))
         elif case == "corrupt":
