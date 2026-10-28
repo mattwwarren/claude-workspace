@@ -638,6 +638,51 @@ def test_blocking_row_without_a_matching_disposition_counts_it(
     assert _VOIDED_NOTE in history.notes
 
 
+@pytest.mark.parametrize(
+    ("file", "summary"),
+    [
+        pytest.param("src/cw/other.py", "Some finding", id="foreign-file"),
+        pytest.param("src/cw/foo.py", "Some other finding", id="foreign-summary"),
+    ],
+)
+def test_disposition_attribution_needs_both_file_and_summary(
+    tmp_path: Path, file: str, summary: str
+) -> None:
+    key = _disposition_key("src/cw/foo.py", "Some finding") or ""
+    task = review_task(
+        finding_dispositions={
+            key: FindingDisposition(
+                outcome="REJECTED", rationale="nope", summary="Some finding"
+            )
+        }
+    )
+    foreign_voided_event(
+        ACME_TICKET,
+        file=file,
+        summary=summary,
+        severity="MUST_FIX",
+        operator_comment_id=OTHER_COMMENT,
+    )
+
+    foreign_only = _history(task, tmp_path)
+
+    assert foreign_only.voided == []
+    assert _VOIDED_NOTE in foreign_only.notes
+
+    foreign_voided_event(
+        ACME_TICKET,
+        file="src/cw/foo.py",
+        summary="Some finding",
+        severity="MUST_FIX",
+        operator_comment_id=COMMENT_ID,
+    )
+
+    with_control = _history(task, tmp_path)
+
+    assert [v.operator_comment_id for v in with_control.voided] == [COMMENT_ID]
+    assert _VOIDED_NOTE in with_control.notes
+
+
 def test_another_tickets_voided_event_is_ignored(tmp_path: Path) -> None:
     foreign_voided_event("ACM-2")
 
