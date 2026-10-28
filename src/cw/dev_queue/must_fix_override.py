@@ -16,6 +16,13 @@ names the command legal from the row's state (#2692): the park refusals append
 the ``next_commands`` suffix, the verdict refusals name a review re-run (never
 the finalize jump or the override flag). Split out of ``approval.py`` beside
 ``plan_promotion``/``requeue`` to keep that module under the size ceiling.
+
+Under ``review.convergence: clean`` (#2791 G3) the override also needs a
+converged convergence ledger for this ticket in the worktree: finalize's
+``cw review converge verify-tip`` parks on anything less, so stamping the row
+would change nothing. A missing (the codex loop parked before any ledger was
+written), unreadable, foreign or non-converged ledger is refused before any
+write, naming the review requeue and the ledger-side exits.
 """
 
 from __future__ import annotations
@@ -36,6 +43,11 @@ from cw.events import record_event
 from cw.exceptions import ApproveGateError
 from cw.models import MustFixOverride, OrchestratorEventType, QueueItemStatus, Stage
 from cw.operator_identity import resolve_operator_login
+from cw.review_convergence import (
+    LEDGER_RELATIVE_PATH,
+    LEDGER_STATUS_CONVERGED,
+    load_ledger,
+)
 from cw.review_debt import fingerprint_v1
 from cw.review_findings import REVIEW_VERDICT_JSON_RELATIVE_PATH, ReviewVerdictEnvelope
 from cw.worktree import resolve_task_worktree
@@ -74,8 +86,10 @@ def approve_must_fix_override_ticket(
         ApproveGateError: if *reason* is blank, the row is not parked
             BLOCKED_ON_USER for ``codex_must_fix_findings``, its worktree or
             ``.claude/review-verdict.json`` cannot be resolved, the verdict
-            belongs to another ticket or is not blocking, or a MUST_FIX finding
-            has no fingerprint. Nothing is recorded on any of these paths.
+            belongs to another ticket or is not blocking, a MUST_FIX finding
+            has no fingerprint, or (clean-mode clients) the worktree holds no
+            converged convergence ledger for this ticket. Nothing is recorded
+            on any of these paths.
         CwError: if no matching task is found.
     """
     with _lock(bounded=bounded):
@@ -110,6 +124,7 @@ def _approve_must_fix_override_locked(
     task = _find_ticket(store, ticket_id, client_name)
     _require_codex_must_fix_park(task)
     verdict = _load_owned_verdict(task, client_name)
+    _require_converged_ledger_when_clean(task, client_name)
     finding_ids = _finding_ids(task, verdict)
 
     client_cfg = get_client(client_name)
@@ -189,8 +204,8 @@ def _review_rerun(task: TicketTask) -> str:
     return f" Re-run review to produce a current verdict: `{command}`."
 
 
-def _verdict_path(task: TicketTask, client_name: str) -> Path:
-    """Path of *task*'s worktree ``.claude/review-verdict.json``."""
+def _task_worktree(task: TicketTask, client_name: str) -> Path:
+    """*task*'s worktree, or a refusal naming the review re-run."""
     worktree = resolve_task_worktree(task, get_client(client_name))
     if worktree is None:
         msg = (
@@ -199,7 +214,12 @@ def _verdict_path(task: TicketTask, client_name: str) -> Path:
             f" bind the override to.{_review_rerun(task)}"
         )
         raise ApproveGateError(msg)
-    return worktree / REVIEW_VERDICT_JSON_RELATIVE_PATH
+    return worktree
+
+
+def _verdict_path(task: TicketTask, client_name: str) -> Path:
+    """Path of *task*'s worktree ``.claude/review-verdict.json``."""
+    return _task_worktree(task, client_name) / REVIEW_VERDICT_JSON_RELATIVE_PATH
 
 
 def _load_owned_verdict(task: TicketTask, client_name: str) -> ReviewVerdict:
@@ -259,3 +279,57 @@ def _finding_ids(task: TicketTask, verdict: ReviewVerdict) -> list[tuple[str, st
             raise ApproveGateError(msg)
         ids.add(fingerprint)
     return sorted(ids)
+
+
+def _ledger_exits(task: TicketTask) -> str:
+    """The exits a clean-mode ledger refusal names, honest about their strength."""
+    command = dev_queue_command("requeue", task, "--stage", Stage.REVIEW.value)
+    return (
+        f" Re-run review so the clean-mode gate converges the ledger: `{command}`"
+        " (the loop is not deterministic and can park on the same finding"
+        " again), or switch the client to `review.convergence: blocking`."
+    )
+
+
+def _require_converged_ledger_when_clean(task: TicketTask, client_name: str) -> None:
+    """Under clean mode, refuse unless this ticket's ledger has converged (G3).
+
+    ``verify-tip`` in finalize needs a converged ledger, so an override on a
+    missing, unreadable, foreign or non-converged one would stamp the row and
+    still park. Blocking-mode clients pass through untouched. Runs before any
+    write, like every other refusal here.
+    """
+    client_cfg = get_client(client_name)
+    if client_cfg.review.convergence != "clean":
+        return
+    path = _task_worktree(task, client_name) / LEDGER_RELATIVE_PATH
+    prefix = f"Cannot override MUST_FIX for ticket '{task.ticket_id}' under clean mode:"
+    try:
+        ledger = load_ledger(path)
+    except (OSError, ValueError) as exc:
+        msg = (
+            f"{prefix} could not read the convergence ledger {path}"
+            f" ({exc.__class__.__name__}).{_ledger_exits(task)}"
+        )
+        raise ApproveGateError(msg) from exc
+    if ledger is None:
+        msg = (
+            f"{prefix} no convergence ledger exists at {path}. The park came"
+            " from the codex fix loop before any ledger was written, so"
+            f" finalize's verify-tip would find no clean round.{_ledger_exits(task)}"
+        )
+        raise ApproveGateError(msg)
+    if ledger.ticket_id != task.ticket_id:
+        msg = (
+            f"{prefix} the convergence ledger {path} belongs to ticket"
+            f" {ledger.ticket_id!r}.{_ledger_exits(task)}"
+        )
+        raise ApproveGateError(msg)
+    if ledger.status != LEDGER_STATUS_CONVERGED:
+        msg = (
+            f"{prefix} the convergence ledger {path} is {ledger.status!r}, not"
+            " converged, so finalize's verify-tip would still park. For a"
+            " stopped ledger, `cw review converge operator-settle` settles the"
+            f" recurring findings first.{_ledger_exits(task)}"
+        )
+        raise ApproveGateError(msg)
