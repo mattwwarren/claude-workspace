@@ -150,6 +150,48 @@ def test_home_shapes_at_a_path_start_still_redact(text: str, expected: str) -> N
     assert _redact(text) == expected
 
 
+# (raw, whole-string result). The OS username is in pytest's tmp root and in the
+# `~user` form; neither is `$HOME`, `/home/<u>` or `/Users/<u>`.
+_USERNAME_PATH_SHAPES = (
+    (
+        "/tmp/pytest-of-matthew/pytest-3/test_x0/a.py",
+        "/tmp/pytest-of-<redacted>/pytest-3/test_x0/a.py",
+    ),
+    ("pytest-of-jane.doe/pytest-0", "pytest-of-<redacted>/pytest-0"),
+    ("~matthew/x", "<home>/x"),
+    ("~jane.doe/src/cw", "<home>/src/cw"),
+    ("~matthew/.cw/wt/abcd1234/dev-1/y", "<worktree>/y"),
+    ("~matthew/.claude/projects/-a-b/c.jsonl", TRANSCRIPT_REDACTED),
+)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    _USERNAME_PATH_SHAPES,
+    ids=[raw for raw, _ in _USERNAME_PATH_SHAPES],
+)
+def test_username_path_shapes_are_redacted_whole(raw: str, expected: str) -> None:
+    """A tail the pattern missed would survive; so would a stray username."""
+    assert _redact(raw, home="/srv/other") == expected
+    assert _redact(f"at ({raw}) end", home="/srv/other") == f"at ({expected}) end"
+    assert _redact(expected, home="/srv/other") == expected
+    assert "matthew" not in _redact(raw, home="/srv/other")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "took ~3 files and ~100ms",
+        "~/notes and ~ alone",
+        "docs/~matthew/x",
+        "no-pytest-of-matthew-here",
+        "mypytest-of-matthew/x",
+    ],
+)
+def test_username_path_shapes_leave_lookalikes_alone(text: str) -> None:
+    assert _redact(text, home="/srv/other") == text
+
+
 def test_dotted_username_is_one_home() -> None:
     assert _redact("/home/jane.doe/x") == "<home>/x"
 
@@ -251,6 +293,12 @@ _EXTRA_SHAPES = (
     ("keyword-api-key", "OPENAI_API_KEY=hunter2", "<redacted>", None),
     ("keyword-aws", "AWS_SECRET_ACCESS_KEY=hunter2/abc", "<redacted>", None),
     ("keyword-env-token", "GITHUB_TOKEN=hunter2", "<redacted>", None),
+    ("keyword-key-suffix", "STRIPE_KEY=hunter2", "<redacted>", None),
+    ("keyword-private-key", "PRIVATE_KEY=hunter2", "<redacted>", None),
+    ("keyword-access-key", "ACCESS_KEY=hunter2", "<redacted>", None),
+    ("keyword-dash-key", "deploy-key: hunter2", "<redacted>", None),
+    ("cookie-quoted", 'cookie = "sid=abc123 theme=hunter2"', "<redacted>", None),
+    ("json-cookie", '{"cookie": "sid=abc123"}', "{<redacted>}", None),
     ("json-api-key", '{"api_key": "hunter2hunter2"}', "{<redacted>}", None),
     ("json-password", '{"password": "hunter2"}', "{<redacted>}", None),
     ("json-token", '{"token": "hunter2"}', "{<redacted>}", None),
@@ -372,6 +420,31 @@ def test_pem_block_ends_at_its_end_line_or_the_next_blank_line(
     assert _redact(expected) == expected
 
 
+# A header value runs to the end of its line (it holds spaces and `;`), so these
+# cannot sit in `_EXTRA_SHAPES`, whose rows are re-checked mid-sentence.
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Cookie: session=abc123", "<redacted>"),
+        ("Cookie: sid=abc123; theme=hunter2; csrf=horse", "<redacted>"),
+        ("Set-Cookie: sid=abc123; Path=/; HttpOnly", "<redacted>"),
+        (
+            "> Cookie: session=abc123\nnext line stays\n",
+            "> <redacted>\nnext line stays\n",
+        ),
+        ("Cookie: sid=abc123\r\nHost: x", "<redacted>\r\nHost: x"),
+    ],
+)
+def test_cookie_header_is_redacted_to_the_end_of_its_line(
+    text: str, expected: str
+) -> None:
+    result = _redact(text)
+    assert result == expected
+    assert _redact(result) == result
+    for fragment in ("abc123", "hunter2", "horse"):
+        assert fragment not in result
+
+
 def test_long_unbroken_word_run_redacts_in_linear_time() -> None:
     """The identifier prefix of the keyword shapes must not go quadratic."""
     text = "a" * LONG_TARGET_CHARS
@@ -393,6 +466,8 @@ def test_url_userinfo_keeps_the_host() -> None:
         "eyJ.only.two",
         "AKIA-not-an-id",
         "the secret sauce",
+        "sort the monkey: banana and hotkey = f2",
+        "bake a cookie jar without a colon",
     ],
 )
 def test_benign_text_is_untouched_by_the_extra_shapes(text: str) -> None:

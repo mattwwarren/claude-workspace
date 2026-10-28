@@ -19,10 +19,11 @@ Shapes replaced, paths first, then secrets:
     2. `(/home/<u>|/Users/<u>|$HOME|~)/.cw/wt/<hash>[/<name>]` -> `<worktree>`
     3. `(/home/<u>|/Users/<u>|$HOME|~)/.claude/projects/<...>`
                                      -> `<home>/.claude/projects/<redacted>`
-    4. the `$HOME` value, `/home/<u>` and `/Users/<u>`  -> `<home>`
-    5. secret shapes (a superset of `cw._text._SECRET_PATTERNS`) -> `<redacted>`
+    4. the `$HOME` value, `/home/<u>`, `/Users/<u>` and `~<u>/` -> `<home>`
+    5. the user segment of pytest's tmp root `pytest-of-<u>`  -> `pytest-of-<redacted>`
+    6. secret shapes (a superset of `cw._text._SECRET_PATTERNS`) -> `<redacted>`
 
-The `/home/<u>`, `/Users/<u>` and `~` shapes only match at the start of a path
+The `/home/<u>`, `/Users/<u>`, `~<u>` and `~` shapes only match at the start of a path
 (start of text, or after a character other than a word character, `.`, `/` or
 `-`), so a repo-relative `web/src/home/Hero.tsx` or a URL path `/Users/guide` is
 left alone.
@@ -76,9 +77,15 @@ _SEGMENT = r"[\w-]+(?:\.[\w-]+)*"
 # A user-home shape starts a path: it is not preceded by a word character, ".",
 # "/" or "-", so `src/home/x.tsx` and `https://x.io/Users/guide` are not homes.
 _PATH_START = r"(?<![\w./-])"
-_USER_HOMES = rf"{_PATH_START}(?:/home/{_SEGMENT}|/Users/{_SEGMENT})"
+# `~user/` is a tilde-user home; a bare `~3 files` or `~/x` is not.
+_TILDE_USER = rf"~(?=[A-Za-z_]){_SEGMENT}(?=/)"
+_USER_HOMES = rf"{_PATH_START}(?:/home/{_SEGMENT}|/Users/{_SEGMENT}|{_TILDE_USER})"
 # A replaced value must not be the prefix of a longer name ("wt-7" in "wt-70").
 _NOT_MID_NAME = r"(?![\w-])"
+
+# pytest's per-user tmp root (`/tmp/pytest-of-<username>/pytest-3/...`): the
+# most common path shape in test-failure findings, and it embeds the OS username.
+_PYTEST_USER_DIR = re.compile(rf"((?<![\w-])pytest-of-){_SEGMENT}")
 
 # Mirror of cw._text._SECRET_PATTERNS, same order; see that module for the
 # rationale of each shape. A test pins these as equal to the upstream tuple.
@@ -133,8 +140,14 @@ _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
         rf"(?:(?:Basic|Bearer|Token)\s+)?{_ASSIGNED_VALUE}"
     ),
     re.compile(
-        rf"(?i)[\"']?{_IDENT_START}(?:password|passwd|secret|api[_-]?key)[\w-]*[\"']?"
-        rf"\s*[:=]\s*{_ASSIGNED_VALUE}"
+        rf"(?i)[\"']?{_IDENT_START}(?:password|passwd|secret|api[_-]?key|[_-]key)"
+        rf"[\w-]*[\"']?\s*[:=]\s*{_ASSIGNED_VALUE}"
+    ),
+    # `Cookie: a=1; b=2` / `Set-Cookie: sid=...; Path=/`: a header value runs to
+    # the end of the line and holds spaces and `;`, so one token would leak the rest.
+    re.compile(
+        rf"(?i)[\"']?{_IDENT_START}cookie[\w-]*[\"']?\s*[:=]\s*"
+        r"""(?:"[^"]*"|'[^']*'|[^\r\n]+)"""
     ),
 )
 
@@ -181,7 +194,8 @@ def redact_paths(text: str, *, home: str, worktrees: Sequence[str]) -> str:
     )
     if usable_home:
         text = re.sub(re.escape(usable_home) + _NOT_MID_NAME, HOME_PLACEHOLDER, text)
-    return re.sub(rf"(?:{_USER_HOMES}){_NOT_MID_NAME}", HOME_PLACEHOLDER, text)
+    text = re.sub(rf"(?:{_USER_HOMES}){_NOT_MID_NAME}", HOME_PLACEHOLDER, text)
+    return _PYTEST_USER_DIR.sub(rf"\1{REDACTION_PLACEHOLDER}", text)
 
 
 def redact_secrets(text: str) -> str:
