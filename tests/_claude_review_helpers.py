@@ -45,10 +45,53 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from typing import TYPE_CHECKING
 
+from cw.claude_review import ClaudeRunResult
+
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
+    from pathlib import Path
+
+_ROLE_LINE = re.compile(r"^# Reviewer Role: (.+)$", re.MULTILINE)
+
+
+class RoleAwareClaudeRunner:
+    """A ``ClaudeRunner`` answering each role with *respond(role)*.
+
+    Reads the role from the prompt's ``# Reviewer Role:`` line and records
+    every role and prompt. *side_effect*, when set, runs against the worktree
+    during each call (the G4 worktree-mutation cases).
+    """
+
+    def __init__(
+        self,
+        respond: Callable[[str], ClaudeRunResult],
+        side_effect: Callable[[Path], None] | None = None,
+    ) -> None:
+        self._respond = respond
+        self._side_effect = side_effect
+        self.roles: list[str] = []
+        self.prompts: list[str] = []
+
+    def run(
+        self,
+        worktree: Path,
+        _argv: list[str],
+        _timeout_seconds: int | None,
+        *,
+        stdin: str,
+    ) -> ClaudeRunResult:
+        match = _ROLE_LINE.search(stdin)
+        assert match is not None, "every reviewer prompt names its role"
+        role = match.group(1).strip()
+        self.roles.append(role)
+        self.prompts.append(stdin)
+        if self._side_effect is not None:
+            self._side_effect(worktree)
+        return self._respond(role)
+
 
 CAPTURED_REVIEW_ENVELOPE = (
     '{"duration_api_ms":8181,"stop_reason":"tool_use","session_id":"<re'

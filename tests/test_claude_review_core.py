@@ -7,7 +7,6 @@ envelope built from ``tests/_claude_review_helpers``.
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
 
 import pytest
@@ -22,6 +21,9 @@ from cw.codex_review import (
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEW_WORKTREE_MUTATED,
 )
+from tests._claude_review_helpers import (
+    RoleAwareClaudeRunner as _RoleAwareRunner,
+)
 from tests._claude_review_helpers import error_envelope, review_envelope
 from tests._codex_review_helpers import _doc_json, _finding_payload, _task
 from tests.conftest import git_in
@@ -31,39 +33,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.claude_review import ClaudeReviewRound
-
-_ROLE_LINE = re.compile(r"^# Reviewer Role: (.+)$", re.MULTILINE)
-
-
-class _RoleAwareRunner:
-    """Answers each role with *respond(role)*, recording the role and prompt."""
-
-    def __init__(
-        self,
-        respond: Callable[[str], ClaudeRunResult],
-        side_effect: Callable[[Path], None] | None = None,
-    ) -> None:
-        self._respond = respond
-        self._side_effect = side_effect
-        self.roles: list[str] = []
-        self.prompts: list[str] = []
-
-    def run(
-        self,
-        worktree: Path,
-        _argv: list[str],
-        _timeout_seconds: int | None,
-        *,
-        stdin: str,
-    ) -> ClaudeRunResult:
-        match = _ROLE_LINE.search(stdin)
-        assert match is not None, "every reviewer prompt names its role"
-        role = match.group(1).strip()
-        self.roles.append(role)
-        self.prompts.append(stdin)
-        if self._side_effect is not None:
-            self._side_effect(worktree)
-        return self._respond(role)
 
 
 def _clean(role: str) -> ClaudeRunResult:
