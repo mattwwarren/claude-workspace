@@ -14,12 +14,20 @@ from cw.models import CwState, QueueItemStatus, Stage
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from cw.review_history import build_review_history, collect_history_inputs
 from cw.review_history_render import render_review_history
-from tests._review_convergence_helpers import write_ledger
+from tests._review_convergence_helpers import (
+    consolidated_verdict,
+    fresh_ledger,
+    write_ledger,
+)
 from tests._review_history_helpers import (
     ACME_SESSION,
+    COMMENT_ID,
     DEFER_RATIONALE,
     OPERATOR_REASON,
+    ORIGINAL_RATIONALE,
     REJECT_RATIONALE,
+    VOIDED_AT,
+    VOIDED_SUMMARY,
     blocking_dispositions,
     clean_sentinel_session,
     client_config,
@@ -28,9 +36,11 @@ from tests._review_history_helpers import (
     fixture_blocking_sentinel,
     fixture_converged,
     fixture_stopped,
+    record_verdict_round,
+    voided_suppression,
     write_corrupt_ledger,
 )
-from tests._ticket_view_helpers import bound_session_for, make_task
+from tests._ticket_view_helpers import ACME_TICKET, bound_session_for, make_task
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -89,6 +99,86 @@ def test_converged_text(tmp_path: Path) -> None:
     assert "  wall_time: 12m04s" in lines
     assert "  wall_time: not recorded" in lines
     assert "round 5 (confirm):" in lines
+    _assert_invariants(text)
+
+
+def test_converged_header_and_round_block_keys_in_fixed_order(tmp_path: Path) -> None:
+    fixture_converged().write(derived_worktree(tmp_path))
+
+    _, text = _render(tmp_path, _task())
+
+    lines = text.splitlines()
+    assert lines[:13] == [
+        "review_history: ACM-1 (client acme)",
+        "state: row completed at review; ledger converged; finished",
+        "mode: clean",
+        "rounds: 5",
+        "converged: yes",
+        "final_clean_sha: sha-0004",
+        "stop: -",
+        "new_accepted_by_round: 5 3 2 0 0",
+        "fix_cycles: 3 of 8",
+        "confirm_backend: codex",
+        "deferred: 0",
+        "confirm_failures: 0",
+        "sources: ledger, verdict_files",
+    ]
+    assert lines[13:23] == [
+        "round 1 (loop):",
+        "  source: ledger",
+        "  backend: claude-native",
+        "  sha: sha-0001",
+        "  reviewers: Code Quality Reviewer, Test Reviewer",
+        "  new_findings: 5 (MUST_FIX 3, SHOULD_FIX 2)",
+        "  fix_dispatched: 5",
+        "  settled: 0 new, 0 resurfaced",
+        "  wall_time: not recorded",
+        "  recorded_at: 2026-10-27T12:00:00+00:00",
+    ]
+    _assert_invariants(text)
+
+
+def _voided_ledger_with_dispositions(tmp_path: Path) -> dict[str, FindingDisposition]:
+    """A voided ledger finding plus two live row dispositions and a legacy one."""
+    verdict = consolidated_verdict(
+        accepted=[("MUST_FIX", "Real bug"), ("SHOULD_FIX", VOIDED_SUMMARY)]
+    )
+    ledger, _ = record_verdict_round(
+        fresh_ledger(ticket_id=ACME_TICKET),
+        voided_suppression(ACME_TICKET, verdict),
+        "sha-0001",
+    )
+    write_ledger(derived_worktree(tmp_path), ledger)
+    dispositions = blocking_dispositions()
+    legacy_key = _disposition_key("src/cw/legacy.py", "no summary") or ""
+    dispositions[legacy_key] = FindingDisposition(outcome="REJECTED", rationale="old")
+    return dispositions
+
+
+def test_voided_and_disposition_lines_carry_every_field(tmp_path: Path) -> None:
+    dispositions = _voided_ledger_with_dispositions(tmp_path)
+
+    history, text = _render(tmp_path, _task(finding_dispositions=dispositions))
+
+    lines = text.splitlines()
+    event_at = history.voided[0].event_at
+    voided = lines[lines.index("voided:") + 1]
+    assert voided == (
+        f"  - SHOULD_FIX src/cw/foo.py: {VOIDED_SUMMARY} -- original rejection: "
+        f"{ORIGINAL_RATIONALE} (comment {COMMENT_ID}, voided_at {VOIDED_AT}, "
+        f"event_at {event_at})"
+    )
+    assert event_at.endswith("+00:00")
+    shown = lines[lines.index("dispositions:") + 1 : lines.index("voided:")]
+    assert shown == [
+        "  - REVERSED src/cw/bar.py: Settled, then withdrawn -- withdrawn: it was "
+        "a real bug (actor mattwwarren, recorded_at 2026-10-26T11:00:00Z, sha "
+        "abc1234)",
+        "  - REJECTED src/cw/foo.py: Rejected by the operator -- false positive: "
+        "covered by the caller (actor mattwwarren, recorded_at "
+        "2026-10-26T10:00:00Z, sha abc1234)",
+        "  - REJECTED src/cw/legacy.py: - -- old (actor -, recorded_at -, sha -)",
+    ]
     _assert_invariants(text)
 
 
