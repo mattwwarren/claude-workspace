@@ -14,7 +14,13 @@ runs. A ``.had_real_commit`` read on such a receiver fails the scan when it is:
 
 - the test of an ``if`` / ``while`` / ternary / ``assert``;
 - an operand of ``not``, ``and`` or ``or``;
-- compared with ``is`` / ``is not`` against ``None`` / ``True`` / ``False``.
+- the sole argument of the builtin ``bool(...)``;
+- a comprehension filter (an ``if`` clause of a ``for`` generator);
+- compared with ``==`` / ``!=`` / ``is`` / ``is not`` against ``None`` /
+  ``True`` / ``False``.
+
+Known limit: the scan is syntactic and does not track aliases, so
+``outcome = review.had_real_commit; if outcome:`` is not caught.
 """
 
 from __future__ import annotations
@@ -47,12 +53,13 @@ def _is_legacy_singleton(node: ast.expr) -> bool:
     )
 
 
-def _identity_offenders(node: ast.Compare) -> list[ast.expr]:
-    """Operands of an ``is``/``is not`` comparison against a legacy singleton."""
+def _singleton_comparison_offenders(node: ast.Compare) -> list[ast.expr]:
+    """Outcome operands of an ``==``/``!=``/``is``/``is not`` comparison
+    against a legacy singleton (``None``/``True``/``False``)."""
     operands = [node.left, *node.comparators]
     offenders: list[ast.expr] = []
     for index, op in enumerate(node.ops):
-        if not isinstance(op, (ast.Is, ast.IsNot)):
+        if not isinstance(op, (ast.Is, ast.IsNot, ast.Eq, ast.NotEq)):
             continue
         left, right = operands[index], operands[index + 1]
         if _is_review_outcome(left) and _is_legacy_singleton(right):
@@ -70,6 +77,16 @@ def _truthiness_operands(node: ast.AST) -> list[ast.expr]:
         return [node.operand]
     if isinstance(node, ast.BoolOp):
         return list(node.values)
+    if isinstance(node, ast.comprehension):
+        return list(node.ifs)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "bool"
+        and len(node.args) == 1
+        and not node.keywords
+    ):
+        return [node.args[0]]
     return []
 
 
@@ -83,7 +100,7 @@ def _offending_lines(source: str) -> list[int]:
             if _is_review_outcome(operand)
         ]
         if isinstance(node, ast.Compare):
-            candidates.extend(_identity_offenders(node))
+            candidates.extend(_singleton_comparison_offenders(node))
         lines.extend(candidate.lineno for candidate in candidates)
     return sorted(lines)
 
@@ -133,9 +150,14 @@ def test_self_test_flags_every_offending_shape() -> None:
             "b = verdict.review.had_real_commit is True",  # 11
             "c = review.had_real_commit is not False",  # 12
             "d = False is review.had_real_commit",  # 13
+            "e = review.had_real_commit == False",  # 14
+            "f = review.had_real_commit != None",  # 15
+            "g = bool(review.had_real_commit)",  # 16
+            "h = [x for x in y if review.had_real_commit]",  # 17
         ]
     )
-    assert _offending_lines(snippet) == [1, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+    # Lines 2 and 4 are ``pass`` bodies, not reads.
+    assert _offending_lines(snippet) == [1, 3, *range(5, 18)]
 
 
 def test_self_test_allows_named_comparisons_and_internal_bools() -> None:
@@ -152,6 +174,10 @@ def test_self_test_allows_named_comparisons_and_internal_bools() -> None:
             "    pass",
             "e = review.had_real_commit is other",  # not a legacy singleton
             "f = review.had_real_commit < 1",  # not an identity op
+            "g = bool(had_real_commit)",  # the fix loop's internal bool
+            "h = bool(tracker.had_real_commit)",  # not a Review receiver
+            "i = [x for x in y if tracker.had_real_commit]",  # not a Review receiver
+            "j = bool(review.had_real_commit, 1)",  # not the one-arg bool shape
         ]
     )
     assert _offending_lines(snippet) == []
