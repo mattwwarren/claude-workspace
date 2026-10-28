@@ -17,6 +17,7 @@ import pytest
 
 from cw import queue_peek
 from cw.models import Stage
+from cw.queue_peek import rows
 from cw.queue_peek_convergence import (
     AGE_REASON_PREFIX,
     convergence_peek_override,
@@ -416,9 +417,9 @@ class TestFormatRowHook:
         task = _review_task(tmp_path)
         info = _row_info(age=70, idle=2, child_idle=1)
         with patch.object(
-            queue_peek,
+            rows,
             "convergence_peek_override",
-            wraps=queue_peek.convergence_peek_override,
+            wraps=rows.convergence_peek_override,
         ) as spy:
             row = queue_peek.format_row(task, info, _NOW)
         assert spy.call_count == 1
@@ -431,9 +432,7 @@ class TestFormatRowHook:
 
     def test_hook_passes_idle_and_peek_threshold(self, tmp_path: Path) -> None:
         task = _review_task(tmp_path)
-        with patch.object(
-            queue_peek, "convergence_peek_override", return_value=None
-        ) as spy:
+        with patch.object(rows, "convergence_peek_override", return_value=None) as spy:
             queue_peek.format_row(task, _row_info(age=70, idle=2), _NOW)
         assert spy.call_args.kwargs == {
             "idle_min": pytest.approx(2.0),
@@ -446,7 +445,7 @@ class TestFormatRowHook:
         task = _review_task(tmp_path)  # no ledger: blocking mode
         info = _row_info(age=70, idle=2)
         hooked = queue_peek.format_row(task, info, _NOW)
-        with patch.object(queue_peek, "convergence_peek_override", return_value=None):
+        with patch.object(rows, "convergence_peek_override", return_value=None):
             unhooked = queue_peek.format_row(task, info, _NOW)
         assert hooked == unhooked
         assert hooked["recommend"] == "PEEK"

@@ -9,6 +9,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **`cw review history` replays a ticket's review rounds (#2790).** A read-only view of one ticket's review, round by round: reviewers, reviewed sha, new findings with their MUST_FIX/SHOULD_FIX split, fixes dispatched, findings settled with their rationale, and wall time, plus the stop, releases, row disposition records and voided findings. It reads only existing records (the converge ledger and its per-round verdict files, else the session's `AUTO_DEV_RESULT`), never fails on bad data (every degradation is a note), and shows an event only when it can be tied to the row, since ticket ids are unique per client, not globally. `--json` emits the new `review-history` schema (`cw schema show review-history`).
+### Changed
+
+- **`cw.queue_peek` is now a package: module split, no behavior change (#2793).** The 1012-line `src/cw/queue_peek.py` becomes `src/cw/queue_peek/` with one submodule per concern (`locate`, `parse`, `ladder`, `rows`, `render`). Code moves verbatim and every `cw.queue_peek.<name>` import path still resolves. Tests that patch `CW_STATE` / `CLAUDE_PROJECTS` now patch `cw.queue_peek.locate`, and patches on names `build_peek_rows` / `format_row` look up now target `cw.queue_peek.rows`.
 
 ## [1.79.0] - 2026-10-28
 

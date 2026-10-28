@@ -57,7 +57,7 @@ genuinely live, mid-task session is **not implemented** and is deferred to
 - `src/cw/cli/session_send.py` — appends first, triggers second, and exits 0
   whenever the append succeeded. Exit 1 is reserved for the cases where
   nothing was queued (unknown session, terminal session, bad flags).
-- `src/cw/queue_peek.py` — reports a `BLOCKED_ON_USER` row as
+- `src/cw/queue_peek/rows.py` — reports a `BLOCKED_ON_USER` row as
   `AWAITING_OPERATOR` rather than scoring it on the age/idle ladder. A parked
   row is awaiting a human, not wedged, and it is never a "suggested stop."
 - Any future consumer that drains a session's mailbox must call

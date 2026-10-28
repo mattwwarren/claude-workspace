@@ -147,7 +147,7 @@ def resolve_task_worktree(
 
     ``task.worktree_path`` wins when stamped (USER-origin rows, tests). It is
     ``None`` for every dispatch-driven row -- dispatch stamps ``worktree_path``
-    on the Session, never the TicketTask (see ``queue_peek.py``) -- so any
+    on the Session, never the TicketTask (see ``queue_peek/locate.py``) -- so any
     consumer that reads only that field sees ``None`` on the dominant
     production path. Fall back to the branch-derived worktree
     :func:`worktree_path_for` computes for the feature branch, using the same

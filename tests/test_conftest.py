@@ -392,7 +392,7 @@ class TestHomeRedirectByConstruction:
         [
             pytest.param(lambda: cw.config._REAL_STATE_DIR, id="config-state"),
             pytest.param(lambda: cw.config._REAL_CONFIG_DIR, id="config-config"),
-            pytest.param(lambda: queue_peek.CLAUDE_PROJECTS, id="queue-peek"),
+            pytest.param(lambda: queue_peek.locate.CLAUDE_PROJECTS, id="queue-peek"),
             pytest.param(lambda: native_daemon._JOBS_PATH, id="daemon-jobs"),
             pytest.param(lambda: versions._CLAUDE_SETTINGS_PATH, id="doctor-versions"),
             pytest.param(lambda: skills_drift._CLAUDE_HOME, id="doctor-skills"),

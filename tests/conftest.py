@@ -2422,9 +2422,10 @@ def _guard_no_real_claude_projects_writes() -> Iterator[None]:
     """Fail the suite if a test leaked a directory into the REAL projects dir.
 
     ``cw._util.claude_project_dir()`` resolves via ``Path.home()`` directly,
-    not through ``queue_peek.CLAUDE_PROJECTS`` / ``queue_peek.CW_STATE`` — so a
-    test fixture that redirects only those two module constants (as
-    ``patched_peek`` did before this guard existed) leaves that call path
+    not through ``queue_peek.locate.CLAUDE_PROJECTS`` /
+    ``queue_peek.locate.CW_STATE`` — so a test fixture that redirects only
+    those two module constants (as ``patched_peek`` did before this guard
+    existed) leaves that call path
     writing into the real ``~/.claude/projects/`` (GH #1736).
 
     The fix is the suite-wide ``HOME`` redirect (``tests/_session_home.py``
