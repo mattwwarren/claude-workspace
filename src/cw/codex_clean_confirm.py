@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
-from cw._git import git_output
+from cw._git import capture_head_sha, git_output
 from cw.auto_dev_result import AutoDevResult, Blocker
 from cw.auto_dev_result.schema._vocab import REVIEW_NOT_CONVERGING_BLOCKER_REASON
 from cw.claude_review import (
@@ -178,10 +178,6 @@ class _Gate:
 def _now() -> str:
     """ISO-8601 UTC, the format ``cw review converge`` stamps."""
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _head(worktree: Path) -> str:
-    return git_output(["rev-parse", "HEAD"], cwd=worktree).strip()
 
 
 def _fork_point(gate: _Gate) -> str:
@@ -677,7 +673,7 @@ def _gate_after_loop(
     gate: _Gate, base: CleanConfirmOutcome, verdict: ReviewVerdict
 ) -> CleanConfirmOutcome:
     """The ledger-state table (plan step 5), after a clean codex loop."""
-    head = _head(gate.worktree)
+    head = capture_head_sha(gate.worktree)
     if verdict.reviewed_sha != head:
         msg = (
             f"the codex verdict reviewed {verdict.reviewed_sha} but HEAD is {head}; "
@@ -763,7 +759,7 @@ def resume_pending_confirm(
         return None
     gate = _Gate(task, worktree, client, sid, runner, deadline)
     try:
-        head = _head(worktree)
+        head = capture_head_sha(worktree)
         ledger = load_ledger(gate.ledger_path)
         fork_point = _fork_point(gate)
     except _BOOKKEEPING_ERRORS:
