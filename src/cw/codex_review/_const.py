@@ -222,6 +222,14 @@ CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS = "codex_reviewer_failure_discarded_fi
 # _check_next_actions_invariants).
 _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS: list[str] = ["user_resolve_codex_review_failure"]
 
+# Backend-side failure reasons: the codex/claude backend itself errored or was
+# at capacity, so nothing says it is up. A round whose every failed role is one
+# of these is an outage (``cw review confirm`` exit 3, a ``confirm_backend_
+# unavailable`` park), not a content failure (exit 4). The Claude round
+# (``cw.claude_review.core``) and the codex path of ``cw review confirm`` both
+# classify against this one set so the two cannot disagree.
+BACKEND_DOWN_REASONS = frozenset({CODEX_ERROR, CODEX_MODEL_CAPACITY})
+
 # Failure reasons transient enough that a retry might succeed without any
 # code/config change on our side (the role either never got a turn at all,
 # codex itself timed out, or codex reported that the provider was momentarily

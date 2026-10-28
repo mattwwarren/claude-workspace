@@ -28,8 +28,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from cw.claude_review._roles import run_claude_roles
 from cw.codex_review._capability import _CodexFilesystemCapability, _CodexFingerprint
 from cw.codex_review._const import (
-    CODEX_ERROR,
-    CODEX_MODEL_CAPACITY,
+    BACKEND_DOWN_REASONS,
     CODEX_REVIEW_WORKTREE_MUTATED,
 )
 from cw.codex_review._context import _prepare_review_pass
@@ -54,8 +53,6 @@ CLAUDE_BACKEND_DETAILS_PREFIX = "backend=claude; "
 #: Prefix of the session id a confirm round files its diagnostics bundles under
 #: (``cw review confirm`` and the codex-lane gate both build ``<prefix><sid>``).
 CONFIRM_SESSION_ID_PREFIX = "confirm-"
-
-_BACKEND_DOWN_REASONS = frozenset({CODEX_ERROR, CODEX_MODEL_CAPACITY})
 
 # Recorded on the verdict the same way a probed codex verdict is. Built from
 # the real fields; the fingerprint names the backend so it never matches a
@@ -92,7 +89,7 @@ def _backend_down(
     return (
         not documents
         and bool(failures)
-        and all(failure.reason in _BACKEND_DOWN_REASONS for failure in failures)
+        and all(failure.reason in BACKEND_DOWN_REASONS for failure in failures)
     )
 
 

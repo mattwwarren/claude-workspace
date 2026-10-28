@@ -259,11 +259,11 @@ def _fail_without_verdict(
     the backend ran: exit 4. The Claude round hands in its own per-role
     classification; the codex round's is read from the failure summary.
     """
-    from cw.codex_review import CODEX_ERROR, CODEX_MODEL_CAPACITY
+    from cw.codex_review import BACKEND_DOWN_REASONS
 
     if backend_down is None:
         reasons = _failure_reasons(details)
-        backend_down = bool(reasons) and reasons <= {CODEX_ERROR, CODEX_MODEL_CAPACITY}
+        backend_down = bool(reasons) and reasons <= BACKEND_DOWN_REASONS
     if backend_down:
         _unavailable("backend_error", details, backend)
     _round_failed("reviewers_failed", details, backend)

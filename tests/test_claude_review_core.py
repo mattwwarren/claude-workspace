@@ -17,6 +17,9 @@ from cw.claude_review import (
     run_claude_review,
 )
 from cw.codex_review import (
+    BACKEND_DOWN_REASONS,
+    CODEX_ERROR,
+    CODEX_MODEL_CAPACITY,
     CODEX_MUST_FIX_FINDINGS,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEW_WORKTREE_MUTATED,
@@ -133,6 +136,26 @@ class TestRunClaudeReview:
         assert round_.verdict is None
         assert round_.result.blocker is not None
         assert round_.result.blocker.retry_eligible is True
+
+    def test_a_mixed_backend_error_and_timeout_round_is_not_backend_down(
+        self, wt: Path
+    ) -> None:
+        answered: list[str] = []
+
+        def _first_errors_rest_time_out(role: str) -> ClaudeRunResult:
+            answered.append(role)
+            return _backend_error(role) if len(answered) == 1 else _timeout(role)
+
+        runner = _RoleAwareRunner(_first_errors_rest_time_out)
+        round_ = _review(wt, runner)
+        assert len(runner.roles) > 1
+        assert round_.backend_down is False
+        assert round_.verdict is None
+
+    def test_the_backend_down_reason_set_is_the_two_backend_side_reasons(
+        self,
+    ) -> None:
+        assert {CODEX_ERROR, CODEX_MODEL_CAPACITY} == BACKEND_DOWN_REASONS
 
     def test_an_exhausted_budget_is_not_backend_down(
         self, wt: Path, monkeypatch: pytest.MonkeyPatch

@@ -55,6 +55,7 @@ from cw.codex_review._const import (
     _COMMAND_NOT_FOUND_RETURNCODE,
     _MIN_ROLE_TIMEOUT_SECONDS,
     _TRANSIENT_FAILURE_REASONS,
+    BACKEND_DOWN_REASONS,
     CODEX_BUDGET_EXHAUSTED,
     CODEX_CONVERGENCE_LEDGER_ERROR,
     CODEX_ERROR,
@@ -149,6 +150,7 @@ from cw.codex_review._verdict import (
 from cw.codex_review.core import run_review
 
 __all__ = [
+    "BACKEND_DOWN_REASONS",
     "CODEX_BUDGET_EXHAUSTED",
     "CODEX_CONVERGENCE_LEDGER_ERROR",
     "CODEX_ERROR",
