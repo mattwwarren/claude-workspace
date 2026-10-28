@@ -19,6 +19,7 @@ class TestSchemaList:
         assert "session" in result.output
         assert "review-verdict" in result.output
         assert "ticket-view" in result.output
+        assert "review-history" in result.output
 
     def test_list_json_is_valid_array(self) -> None:
         runner = CliRunner()
@@ -31,7 +32,8 @@ class TestSchemaList:
         assert "session" in parsed
         assert "review-verdict" in parsed
         assert "ticket-view" in parsed
-        assert len(parsed) == 5
+        assert "review-history" in parsed
+        assert len(parsed) == 6
 
 
 class TestSchemaShow:
@@ -130,6 +132,44 @@ class TestSchemaShowTicketView:
     def test_tldr_renders(self) -> None:
         runner = CliRunner()
         result = runner.invoke(main, ["schema", "show", "ticket-view", "--format=tldr"])
+        assert result.exit_code == 0
+        assert "schema_version" in result.output
+
+
+class TestSchemaShowReviewHistory:
+    """The ``cw review history --json`` contract (#2790)."""
+
+    def test_json_format_parses(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["schema", "show", "review-history", "--format=json"]
+        )
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert "schema_version" in parsed["properties"]
+        assert "rounds" in parsed["properties"]
+        assert "RoundView" in parsed["$defs"]
+
+    def test_sources_carries_the_closed_enum(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["schema", "show", "review-history", "--format=json"]
+        )
+        assert result.exit_code == 0
+        items = json.loads(result.output)["properties"]["sources"]["items"]
+        assert items["enum"] == [
+            "ledger",
+            "verdict_files",
+            "sentinel",
+            "row_dispositions",
+            "events",
+        ]
+
+    def test_tldr_renders(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["schema", "show", "review-history", "--format=tldr"]
+        )
         assert result.exit_code == 0
         assert "schema_version" in result.output
 

@@ -38,16 +38,18 @@ from cw.models import HOOK_CONTEXT_RELATIVE_PATH, QueueItemStatus, Stage, Ticket
 from tests.conftest import (
     _clean_git_env,
     _finding_kwargs,
+    _seed_sessions,
     commit_tracked_file,
     git_in,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     import pytest
 
+    from cw.models import Session
     from cw.review_finding_dispositions import FindingDisposition
 
 
@@ -101,6 +103,8 @@ def _seed_review_row(
     ledger: dict[str, FindingDisposition] | None = None,
     status: QueueItemStatus = QueueItemStatus.PENDING,
     worktree_path: Path | None = None,
+    session_id: str | None = None,
+    sessions: Sequence[Session] = (),
 ) -> TicketTask:
     """Enqueue a REVIEW-stage row for *ticket_id* carrying *ledger* (#2701).
 
@@ -108,7 +112,9 @@ def _seed_review_row(
     ``(client, ticket_id)``, so a test may seed before every invoke. Returns
     the task it asked to enqueue. *worktree_path* (#2787) is where the row's
     worktree lives, for ``converge operator-settle`` tests that reach a ledger
-    through the row.
+    through the row. *session_id* binds the row to a session and *sessions*
+    are appended to state (#2790); unlike the row, sessions are appended on
+    every call, so pass them once.
     """
     task = TicketTask(
         ticket_id=ticket_id,
@@ -117,8 +123,11 @@ def _seed_review_row(
         status=status,
         finding_dispositions=ledger or {},
         worktree_path=worktree_path,
+        session_id=session_id,
     )
     add_ticket(task)
+    if sessions:
+        _seed_sessions(*sessions)
     return task
 
 

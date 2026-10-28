@@ -104,6 +104,7 @@ _READ_ONLY_VERBS = frozenset(
         "event tail",
         "orchestrate watch",
         "review dispositions",
+        "review history",
         "lane ls",
         "config show",
         "config concurrency get",

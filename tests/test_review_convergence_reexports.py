@@ -58,6 +58,7 @@ EXPECTED_EXPORTS = {
     "UnmatchedTarget",
     "UnreadFindings",
     # Functions
+    "classify_findings",
     "confirm_blocker_fragment",
     "consecutive_confirm_failures",
     "demote_for_rereview",

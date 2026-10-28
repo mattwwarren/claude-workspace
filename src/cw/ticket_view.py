@@ -140,6 +140,18 @@ def find_ticket_clients(store: DevQueueStore, ticket_id: str) -> list[str]:
     return sorted({t.client for t in store.tasks if t.ticket_id == ticket_id})
 
 
+def other_row_count(store: DevQueueStore, ticket_id: str, client: str) -> int:
+    """Rows for (*ticket_id*, *client*) beyond the one a view selects.
+
+    A re-enqueued ticket leaves several rows for the same client; other
+    clients' rows for the same ticket id do not count.
+    """
+    rows = sum(
+        1 for t in store.tasks if t.ticket_id == ticket_id and t.client == client
+    )
+    return max(rows - 1, 0)
+
+
 def resolve_view_client(
     store: DevQueueStore, ticket_id: str, client_override: str | None
 ) -> str:
@@ -254,10 +266,7 @@ def build_ticket_view(
         stage_base_ref=task.stage_base_ref,
         dispatch=_dispatch_view(task, ceiling, client_cfg, now=now, sources=sources),
         approval=_approval_view(task),
-        other_rows=sum(
-            1 for t in store.tasks if t.ticket_id == ticket_id and t.client == client
-        )
-        - 1,
+        other_rows=other_row_count(store, ticket_id, client),
         created_at=task.created_at,
         completed_at=task.completed_at,
         next=next_commands(

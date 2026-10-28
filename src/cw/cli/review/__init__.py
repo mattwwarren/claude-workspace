@@ -30,6 +30,9 @@ grown to 951 lines, into focused submodules:
   inspection view (#2232). Its own submodule rather than a fifth command in
   ``commands``: everything there parses an operator-supplied payload and
   writes something, while this one only reads the dev-queue row.
+- ``history`` — the read-only ``cw review history`` view (#2790): one ticket's
+  review replayed round by round from the converge ledger, its sentinel and the
+  row's disposition records (``cw.review_history``).
 - ``voided`` — the ``cw review check-voided`` command (#1814) and its
   unmatched-new-entry check (#2319). Split out of ``commands`` once that check
   would have pushed it past the module-size ceiling.
@@ -50,6 +53,7 @@ from cw.cli.review import (  # noqa: F401  (command registration side effects)
     converge,
     converge_tip,
     dispositions,
+    history,
     operator_settle,
     voided,
 )
