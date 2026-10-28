@@ -345,6 +345,7 @@ def synthesize_codex_review_result(
     claim_tier_enabled: bool = False,
     disposition_drift_check_enabled: bool = True,
     pre_validation_rejected: list[RejectedFinding] | None = None,
+    reviewer_label: str = "Codex",
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Map consolidated review documents to a typed AutoDevResult.
 
@@ -478,6 +479,11 @@ def synthesize_codex_review_result(
     fix-loop-enabled pass whose cycle-0 review was already clean, a history
     ``ReviewVerdict.review`` alone cannot distinguish (R1). Like
     ``metrics_by_role``, it is unused on the zero-documents branch.
+
+    ``reviewer_label`` (#2791) is forwarded to :func:`render_verdict_comment`
+    on the same blocking branch, so the title embedded in ``blocker.details``
+    names the backend that actually reviewed (``"Claude"`` for the confirm
+    round). The ``"Codex"`` default keeps every existing caller unchanged.
     """
     if not documents:
         result = make_codex_blocked(
@@ -540,7 +546,11 @@ def synthesize_codex_review_result(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=block_reason,
-            details=render_verdict_comment(verdict, fix_loop_enabled=fix_loop_enabled),
+            details=render_verdict_comment(
+                verdict,
+                fix_loop_enabled=fix_loop_enabled,
+                reviewer_label=reviewer_label,
+            ),
         )
         return blocked.model_copy(update={"review": verdict.review}), verdict
     if failures:

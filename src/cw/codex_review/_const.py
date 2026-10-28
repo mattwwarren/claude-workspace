@@ -143,6 +143,19 @@ FIX_CYCLE_COMMIT_PREFIX = "fix(review): codex fix cycle"
 # clean result anyway would hand a later stage work that exists only locally.
 CODEX_UNPUSHED_AT_EXIT = "codex_unpushed_at_exit"
 
+# Clean-mode bookkeeping park (#2791): the codex review completed, but a ledger,
+# git or file step of the converge-to-clean gate failed afterwards (an
+# unreadable or foreign ledger, a merge-base failure, ``reviewed_sha != HEAD``,
+# a failed save). Retry-eligible like CODEX_UNPUSHED_AT_EXIT, and the completed
+# review and verdict are kept. Not in _CATEGORY_TO_REASON (no executor failure
+# category maps here) and not transient (a foreign ledger repeats identically).
+CODEX_CONVERGENCE_LEDGER_ERROR = "codex_convergence_ledger_error"
+
+# Claude confirm-round park (#2791 G4): a ``claude -p`` reviewer role changed
+# the worktree HEAD or ``git status`` (an operator hook, typically). Never
+# retry-eligible: the operator inspects the worktree, which is left as found.
+CODEX_REVIEW_WORKTREE_MUTATED = "codex_review_worktree_mutated"
+
 # Fix-loop divergence guard (#2394): the fix loop grew the diff for a
 # configured number of consecutive cycles (default 1 since #2633,
 # ``codex_fix_loop_stall_cycles``) while resolving none of the originally-found
