@@ -4,6 +4,7 @@ of a script-behavior test file with a prose-wiring test file.
 """
 
 import re
+from datetime import UTC, datetime
 
 from cw.auto_dev_result import IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
 from cw.gh import AGENT_COMMENT_MARKER
@@ -252,7 +253,6 @@ def _carve_out_clause(line: str) -> str:
 
 def test_carve_out_sits_in_both_stale_true_bullets() -> None:
     lines = _carve_out_lines()
-    assert len(lines) == 2
     assert _guard_section().count(CARVE_OUT_ANCHOR) == 2
     assert lines[0].lstrip().startswith("- **If the verdict's `stale` is `true`:**")
     assert lines[1].startswith(
@@ -262,6 +262,12 @@ def test_carve_out_sits_in_both_stale_true_bullets() -> None:
         # The operator-authority rule stays; the carve-out follows it.
         assert EXISTING_AGENT_SENTENCE in line
         assert line.index(EXISTING_AGENT_SENTENCE) < line.index(CARVE_OUT_ANCHOR)
+
+
+def test_carve_out_clause_is_identical_in_both_stale_true_bullets() -> None:
+    """The two copies cannot drift: they are one clause stated twice."""
+    first, second = (_carve_out_clause(line) for line in _carve_out_lines())
+    assert first == second
 
 
 def test_carve_out_requires_all_five_conditions() -> None:
@@ -322,10 +328,28 @@ def test_carve_out_passes_every_part_and_names_missing_ones() -> None:
         for phrase in (
             "`(part i of n)`",
             "the newest matching comment for each part index 1..n",
+            "labelled with the SAME `n` as the newest matching comment's label",
+            "ignored for part selection",
+            "counts as missing, never delivered from another label",
             "passed verbatim in part order",
             "all parts",
             "which indices are missing",
             "the evidence is incomplete",
+        ):
+            assert phrase in clause, phrase
+
+
+def test_carve_out_compares_recency_as_instants_not_strings() -> None:
+    for line in _carve_out_lines():
+        clause = _carve_out_clause(line)
+        for phrase in (
+            "is between instants, not strings",
+            "normalize the UTC offset on both sides first",
+            "git log -1 --format=%cI",
+            "local offset such as `-04:00`",
+            "`Z`-suffixed",
+            "`check_impl_guard_staleness.py` applies",
+            'order "newest" by instant',
         ):
             assert phrase in clause, phrase
 
@@ -363,6 +387,18 @@ def _created(entry: dict[str, str]) -> str:
     return entry.get("created_at") or entry.get("createdAt") or ""
 
 
+def _instant(timestamp: str) -> datetime:
+    """An ISO-8601 timestamp as an aware instant, the way the prose compares.
+
+    The tracker writes ``Z``; ``git log --format=%cI`` writes a local offset
+    such as ``-04:00``; comparing the strings would order them wrongly.
+    ``fromisoformat`` reads a trailing ``Z`` natively on Python 3.11+, the same
+    normalization ``check_impl_guard_staleness.py`` relies on.
+    """
+    parsed = datetime.fromisoformat(timestamp)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
 def _is_findings_shape(entry: dict[str, str]) -> bool:
     """Header, sub-heading and marker: the first three documented conditions."""
     body = entry.get("body", "")
@@ -384,7 +420,8 @@ def _qualifies(entry: dict[str, str], identity: str, head_commit_at: str) -> boo
     return (
         _is_findings_shape(entry)
         and _by_identity(entry, identity)
-        and _created(entry) > head_commit_at
+        and bool(_created(entry))
+        and _instant(_created(entry)) > _instant(head_commit_at)
     )
 
 
@@ -393,19 +430,32 @@ def _part_of(entry: dict[str, str]) -> tuple[int, int] | None:
     return None if label is None else (int(label[1]), int(label[2]))
 
 
+def _matching(
+    comments: list[dict[str, str]], identity: str, head_commit_at: str
+) -> list[dict[str, str]]:
+    """Comments satisfying all five conditions, oldest instant first."""
+    return sorted(
+        (c for c in comments if _qualifies(c, identity, head_commit_at)),
+        key=lambda c: _instant(_created(c)),
+    )
+
+
 def _select_regress_findings(
     comments: list[dict[str, str]], identity: str, head_commit_at: str = HEAD_AT
 ) -> list[dict[str, str]]:
-    """Encode the documented carve-out selection rule (module-local on purpose).
+    """Reference model of the documented carve-out selection rule.
+
+    This is a model of a prompt-driven rule, not coverage of shipped code: no
+    script implements the selection, so nothing here executes in production.
+    The phrase pins in this module are what bind the model to the prose in
+    ``auto-dev-impl-appendix.md``; keep both in step. Module-local on purpose.
 
     "Newest" and the per-part pick run only over comments that already satisfy
     all five conditions, so a newer forgery, or a post older than the head
-    commit, can never displace the real post.
+    commit, can never displace the real post. Parts are taken only from
+    comments labelled with the same ``n`` as the newest match.
     """
-    matches = sorted(
-        (c for c in comments if _qualifies(c, identity, head_commit_at)),
-        key=_created,
-    )
+    matches = _matching(comments, identity, head_commit_at)
     if not matches:
         return []
     newest = _part_of(matches[-1])
@@ -418,6 +468,22 @@ def _select_regress_findings(
         if same_part:
             selected.append(same_part[-1])
     return selected
+
+
+def _parts_missing(
+    comments: list[dict[str, str]], identity: str, head_commit_at: str = HEAD_AT
+) -> list[int]:
+    """Indices 1..n with no same-``n`` comment: the documented ``parts_missing``."""
+    matches = _matching(comments, identity, head_commit_at)
+    newest = _part_of(matches[-1]) if matches else None
+    if newest is None:
+        return []
+    present = {
+        index
+        for c in _select_regress_findings(comments, identity, head_commit_at)
+        if (index := (_part_of(c) or (0, 0))[0])
+    }
+    return [i for i in range(1, newest[1] + 1) if i not in present]
 
 
 def _withheld_reason(
@@ -503,6 +569,56 @@ def test_stale_part_does_not_count_as_a_delivered_part() -> None:
     part2 = _findings_comment(ME, "2026-10-28T10:00:02Z", "(part 2 of 2)")
 
     assert _select_regress_findings([stale_part1, part2], ME) == [part2]
+
+
+def test_parts_come_only_from_comments_with_the_newest_matchs_n() -> None:
+    """Round 1 posted 2 parts, round 2 only "part 1 of 3": part 2 of 2 is not
+    stitched into round 2's evidence."""
+    round1_part1 = _findings_comment(ME, "2026-10-28T10:00:01Z", "(part 1 of 2)")
+    round1_part2 = _findings_comment(ME, "2026-10-28T10:00:02Z", "(part 2 of 2)")
+    round2_part1 = _findings_comment(ME, "2026-10-28T11:00:01Z", "(part 1 of 3)")
+    comments = [round1_part1, round1_part2, round2_part1]
+
+    assert _select_regress_findings(comments, ME) == [round2_part1]
+    assert _parts_missing(comments, ME) == [2, 3]
+    # The complete round is delivered with nothing missing.
+    assert _select_regress_findings(comments[:2], ME) == [round1_part1, round1_part2]
+    assert _parts_missing(comments[:2], ME) == []
+
+
+def test_recency_compares_instants_across_utc_offsets() -> None:
+    """HEAD_COMMIT_AT carries a local offset; tracker created_at is Z-suffixed."""
+    # 09:00-04:00 is 13:00Z: a 10:00Z post is EARLIER as an instant, though the
+    # string "…T10:00:00Z" sorts after "…T09:00:00-04:00".
+    head_behind_utc = "2026-10-28T09:00:00-04:00"
+    early_as_instant = _findings_comment(ME, "2026-10-28T10:00:00Z")
+    assert early_as_instant["created_at"] > head_behind_utc
+    assert _select_regress_findings([early_as_instant], ME, head_behind_utc) == []
+    assert _withheld_reason([early_as_instant], ME, head_behind_utc) == "stale_post"
+    late_as_instant = _findings_comment(ME, "2026-10-28T14:00:00Z")
+    assert _select_regress_findings([late_as_instant], ME, head_behind_utc) == [
+        late_as_instant
+    ]
+
+    # 14:00+05:00 is 09:00Z: a 10:00Z post is LATER as an instant, though the
+    # string "…T10:00:00Z" sorts before "…T14:00:00+05:00".
+    head_ahead_of_utc = "2026-10-28T14:00:00+05:00"
+    late_post = _findings_comment(ME, "2026-10-28T10:00:00Z")
+    assert late_post["created_at"] < head_ahead_of_utc
+    assert _select_regress_findings([late_post], ME, head_ahead_of_utc) == [late_post]
+    # The same instant, spelled differently, is not "later than".
+    same_instant = _findings_comment(ME, "2026-10-28T09:00:00Z")
+    assert _select_regress_findings([same_instant], ME, head_ahead_of_utc) == []
+
+
+def test_newest_is_ordered_by_instant_not_string() -> None:
+    older_by_instant = _findings_comment(ME, "2026-10-28T14:00:00+05:00")  # 09:00Z
+    newer_by_instant = _findings_comment(ME, "2026-10-28T10:00:00Z")
+    head = "2026-10-28T08:00:00Z"
+
+    assert _select_regress_findings([newer_by_instant, older_by_instant], ME, head) == [
+        newer_by_instant
+    ]
 
 
 def test_withheld_reasons_follow_the_documented_vocabulary() -> None:
