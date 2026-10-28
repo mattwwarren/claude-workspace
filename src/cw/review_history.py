@@ -140,16 +140,23 @@ def collect_history_inputs(
     state: CwState | None,
     *,
     worktree_override: Path | None = None,
+    other_rows: int = 0,
     read_events_fn: Callable[..., list[OrchestratorEvent]] = read_events,
 ) -> HistoryInputs:
     """Read the ledger, verdict files, sentinel and events for *task*'s row.
 
     *client_cfg* is ``None`` for an unconfigured client (its derived worktree
     is then not tried); *state* is ``None`` when the session state could not
-    be read. *worktree_override* replaces the automatic ledger lookup. Never
-    raises on a data problem: each one becomes a note.
+    be read. *worktree_override* replaces the automatic ledger lookup.
+    *other_rows* counts the row's re-enqueued siblings, noted when above zero.
+    Never raises on a data problem: each one becomes a note.
     """
     notes: list[str] = []
+    if other_rows:
+        notes.append(
+            f"{other_rows} other dev-queue row(s) for this ticket and client; "
+            "showing the one `cw dev-queue show` selects"
+        )
     sessions: Sequence[Session] = [] if state is None else state.sessions
     if state is None:
         notes.append("session state unreadable; no session sentinel or event tie used")

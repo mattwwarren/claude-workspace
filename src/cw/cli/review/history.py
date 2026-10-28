@@ -14,7 +14,6 @@ under ``notes``.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -113,25 +112,16 @@ def review_history(
     store = load_dev_queue()
     resolved = resolve_view_client(store, ticket_id, client)
     task = _find_ticket(store, ticket_id, resolved, warn=False)
+    same_row = sum(
+        1 for t in store.tasks if t.ticket_id == ticket_id and t.client == resolved
+    )
     inputs = collect_history_inputs(
         task,
         _client_config(resolved),
         _state_or_none(),
         worktree_override=worktree,
+        other_rows=same_row - 1,
     )
-    other_rows = (
-        sum(1 for t in store.tasks if t.ticket_id == ticket_id and t.client == resolved)
-        - 1
-    )
-    if other_rows:
-        inputs = replace(
-            inputs,
-            notes=(
-                *inputs.notes,
-                f"{other_rows} other dev-queue row(s) for this ticket and client; "
-                "showing the one `cw dev-queue show` selects",
-            ),
-        )
     history = build_review_history(inputs)
     if output_json:
         click.echo(history.model_dump_json())

@@ -982,6 +982,19 @@ def test_unreadable_state_is_a_note(tmp_path: Path) -> None:
     assert _notes_with(build_review_history(inputs), "session state unreadable")
 
 
+def test_other_rows_are_noted_when_above_zero(tmp_path: Path) -> None:
+    cfg = client_config(tmp_path)
+    state = CwState(sessions=[])
+
+    many = collect_history_inputs(_task(), cfg, state, other_rows=2)
+    none = collect_history_inputs(_task(), cfg, state, other_rows=0)
+
+    note = "2 other dev-queue row(s) for this ticket and client"
+    assert [n for n in many.notes if n.startswith(note)]
+    assert "showing the one `cw dev-queue show` selects" in many.notes[0]
+    assert not [n for n in none.notes if "other dev-queue row(s)" in n]
+
+
 # --- docs guard -------------------------------------------------------------------
 
 
