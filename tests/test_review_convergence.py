@@ -8,6 +8,7 @@ through the real engine and every verdict through the real
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -40,11 +41,13 @@ from cw.review_convergence import (
     friction_lines,
     from_verdict,
     frozen_counts_from_verdict,
+    history_rewritten,
     load_ledger,
     max_cycles_exhausted,
     next_action,
     operator_settle,
     operator_settle_event_payload,
+    reconcile_for_init,
     reconcile_ledger_for_init,
     record_confirm_failure,
     record_round,
@@ -60,12 +63,15 @@ from cw.review_convergence import (
     status_summary,
     stop_summary,
     suppress_settled,
+    unread_from_verdict,
+    worktree_state,
 )
 from cw.review_findings import ReviewVerdict, consolidate_verdict
 from tests._codex_review_helpers import _task
 from tests._review_convergence_helpers import (
     DEFAULT_SHA,
     FORK_POINT,
+    LOOP_BACKEND,
     NOW,
     ROSTER,
     TICKET_ID,
@@ -130,10 +136,11 @@ def _reconcile(
     history_rewritten: bool = False,
     ticket_id: str = TICKET_ID,
     fork_point: str = FORK_POINT,
+    confirm: ConfirmBackend | None = "none",
 ) -> Reconciled:
     return reconcile_ledger_for_init(
         existing,
-        fresh=fresh_ledger(ticket_id=ticket_id, fork_point=fork_point),
+        fresh=fresh_ledger(ticket_id=ticket_id, fork_point=fork_point, confirm=confirm),
         ticket_id=ticket_id,
         fork_point=fork_point,
         history_rewritten=history_rewritten,
@@ -208,6 +215,24 @@ class TestFromVerdict:
             "d": ("operator_action", "do d"),
         }
         assert not unread.any
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda: consolidated_verdict(accepted=[("MUST_FIX", "a")]),
+            lambda: consolidated_verdict(rejected_must_fix=True),
+            lambda: consolidated_verdict(discarded={"SHOULD_FIX": 1}),
+            lambda: consolidated_verdict(failed_role="Security Reviewer"),
+        ],
+        ids=["clean", "rejected_must_fix", "discarded", "failed_role"],
+    )
+    def test_unread_from_verdict_matches_from_verdict(
+        self, build: Callable[[], ReviewVerdict]
+    ) -> None:
+        """#2791: one derivation, shared by ``from_verdict`` and the codex gate."""
+        verdict = build()
+        _findings, unread = from_verdict(verdict)
+        assert unread_from_verdict(verdict) == unread
 
     @pytest.mark.parametrize("disposition", ["dropped", "unresolved"])
     def test_undecided_finding_raises(self, disposition: str) -> None:
@@ -1137,6 +1162,7 @@ class TestBackendResolver:
             ("none", "codex", "none", False),
             ("claude", "claude-native", "claude", True),
             ("claude", "codex", "claude", False),
+            ("claude", "opencode", "claude", False),
         ],
     )
     def test_resolution(
@@ -1346,6 +1372,34 @@ class TestReconcileForInit:
         unknown = no_progress.model_copy(update={"stop_reason": "mystery"})
         assert _reconcile(unknown, head="np").released is None
         assert release_cause(unknown) is None
+
+    def test_an_open_ledger_follows_the_current_confirm_choice(self) -> None:
+        awaiting = _awaiting()
+        assert awaiting.confirm_backend == "codex"
+        result = _reconcile(awaiting, head=DEFAULT_SHA, confirm="none")
+        assert result.ledger.confirm_backend == "none"
+        assert result.ledger.status == "awaiting_confirm"
+        assert result.ledger.awaiting_confirm_sha == awaiting.awaiting_confirm_sha
+
+    def test_the_not_independent_flag_is_refreshed_with_the_backend(self) -> None:
+        existing = ledger_with_rounds(_distinct(0, 1), shas=["s1"])
+        assert existing.confirm_not_independent is False
+        refreshed = _reconcile(existing, head="s1", confirm="claude").ledger
+        assert refreshed.confirm_backend == "claude"
+        # The helper loop backend is claude-native, so claude is not independent.
+        assert refreshed.confirm_not_independent is True
+
+    def test_a_converged_ledger_clean_at_head_keeps_its_stamped_choice(self) -> None:
+        converged = confirmed_ledger(sha="S", confirm="codex")
+        result = _reconcile(converged, head="S", confirm="none")
+        assert result.ledger.confirm_backend == "codex"
+        assert result.ledger.status == "converged"
+
+    def test_a_demoted_converged_ledger_follows_the_current_choice(self) -> None:
+        converged = confirmed_ledger(sha="S", confirm="codex")
+        result = _reconcile(converged, head="S+1", confirm="none")
+        assert result.ledger.status == "in_progress"
+        assert result.ledger.confirm_backend == "none"
 
     def test_fixture_d_converged_ledger_on_a_moved_tip_is_reopened(self) -> None:
         converged = confirmed_ledger(sha="S")
@@ -1702,6 +1756,191 @@ class TestStrictTipWithRealGit:
         )
 
 
+class TestHistoryRewritten:
+    """``history_rewritten`` against a real repo (#2791, moved from the CLI)."""
+
+    def _ledger_at(self, sha: str) -> ConvergenceLedger:
+        ledger, _ = record(fresh_ledger(), sha=sha)
+        return ledger
+
+    def test_no_ledger_or_no_rounds_is_false_without_git(self, tmp_path: Path) -> None:
+        missing = tmp_path / "not-a-repo"
+        assert history_rewritten(None, missing, "HEAD") is False
+        assert history_rewritten(fresh_ledger(), missing, "HEAD") is False
+
+    def test_an_ancestor_is_not_rewritten(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("hist-ancestor")
+        base = git_in(repo, "rev-parse", "HEAD")
+        commit_tracked_file(repo, "a.py")
+        head = git_in(repo, "rev-parse", "HEAD")
+        assert history_rewritten(self._ledger_at(base), repo, head) is False
+
+    def test_a_dropped_commit_is_rewritten(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("hist-dropped")
+        commit_tracked_file(repo, "a.py")
+        dropped = git_in(repo, "rev-parse", "HEAD")
+        git_in(repo, "reset", "--hard", "HEAD~1")
+        head = git_in(repo, "rev-parse", "HEAD")
+        assert history_rewritten(self._ledger_at(dropped), repo, head) is True
+
+    def test_an_unknown_sha_raises_cw_error(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("hist-unknown")
+        head = git_in(repo, "rev-parse", "HEAD")
+        with pytest.raises(CwError, match=r"failed .* with exit 128"):
+            history_rewritten(self._ledger_at("f" * 40), repo, head)
+
+    def test_a_long_git_error_is_collapsed_to_one_bounded_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stderr = "fatal:\n" + "x " * 400
+
+        def _failing_git(argv: list[str], **_kwargs: object) -> object:
+            return subprocess.CompletedProcess(argv, 128, "", stderr)
+
+        monkeypatch.setattr("cw.review_convergence._release.run_git", _failing_git)
+        with pytest.raises(CwError) as raised:
+            history_rewritten(self._ledger_at("a" * 40), tmp_path, "HEAD")
+        message = str(raised.value)
+        assert "\n" not in message
+        assert message.endswith("...")
+        assert "fatal: x x" in message
+
+    def test_git_that_cannot_run_raises_cw_error(self, tmp_path: Path) -> None:
+        with pytest.raises(CwError, match="could not run"):
+            history_rewritten(self._ledger_at("a" * 40), tmp_path / "gone", "HEAD")
+
+
+class TestReconcileForInitEntryPoint:
+    """``reconcile_for_init``, the one reconcile both review lanes call (#2791)."""
+
+    @staticmethod
+    def _reconcile(
+        existing: ConvergenceLedger | None,
+        worktree: Path,
+        *,
+        head: str,
+        ticket_id: str = TICKET_ID,
+        fork_point: str = FORK_POINT,
+        max_cycles: int = 5,
+    ) -> Reconciled:
+        return reconcile_for_init(
+            existing,
+            worktree=worktree,
+            ticket_id=ticket_id,
+            fork_point=fork_point,
+            head_sha=head,
+            max_cycles=max_cycles,
+            loop_backend=LOOP_BACKEND,
+            confirm=resolve_confirm_backend("none", LOOP_BACKEND),
+            now=LATER,
+        )
+
+    def test_no_ledger_starts_fresh_from_the_arguments(self, tmp_path: Path) -> None:
+        result = self._reconcile(None, tmp_path, head="s1", max_cycles=5)
+        assert result.ledger == fresh_ledger(max_cycles=5, checkpoint_3a_sha="s1")
+        assert (result.reset_reason, result.released) == (None, None)
+
+    @pytest.mark.parametrize(
+        ("ticket_id", "fork_point", "reason"),
+        [
+            ("T-2", FORK_POINT, "ticket_mismatch"),
+            (TICKET_ID, "other", "fork_point_mismatch"),
+        ],
+    )
+    def test_a_foreign_ledger_is_reset_without_consulting_git(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        ticket_id: str,
+        fork_point: str,
+        reason: str,
+    ) -> None:
+        def _unexpected(*_args: object, **_kwargs: object) -> bool:
+            pytest.fail("history_rewritten must not run for a foreign ledger")
+
+        monkeypatch.setattr(
+            "cw.review_convergence._release.history_rewritten", _unexpected
+        )
+        existing = ledger_with_rounds(_distinct(0, 1), shas=["s1"])
+        result = self._reconcile(
+            existing,
+            tmp_path / "not-a-repo",
+            head="s1",
+            ticket_id=ticket_id,
+            fork_point=fork_point,
+        )
+        assert result.reset_reason == reason
+        assert result.ledger.rounds == []
+        assert result.ledger.ticket_id == ticket_id
+        assert result.ledger.fork_point == fork_point
+
+    def test_an_owned_ledger_with_rewritten_history_is_reset(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("init-rewritten")
+        commit_tracked_file(repo, "a.py")
+        dropped = git_in(repo, "rev-parse", "HEAD")
+        git_in(repo, "reset", "--hard", "HEAD~1")
+        head = git_in(repo, "rev-parse", "HEAD")
+        existing = ledger_with_rounds(_distinct(0, 1), shas=[dropped])
+        result = self._reconcile(existing, repo, head=head)
+        assert result.reset_reason == "history_rewritten"
+        assert result.ledger.rounds == []
+        assert result.released is None
+
+    def test_an_owned_ledger_is_resumed_with_the_refreshed_cap(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("init-resumed")
+        base = git_in(repo, "rev-parse", "HEAD")
+        existing = ledger_with_rounds(_distinct(0, 1), shas=[base])
+        result = self._reconcile(existing, repo, head=base, max_cycles=11)
+        assert result.ledger == existing.model_copy(update={"max_cycles": 11})
+        assert (result.reset_reason, result.released) == (None, None)
+
+
+class TestWorktreeState:
+    """``worktree_state`` (#2791 G4, moved from ``cw review confirm``)."""
+
+    def test_clean_repo_returns_head_and_empty_status(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("state-clean")
+        assert worktree_state(repo) == (git_in(repo, "rev-parse", "HEAD"), "")
+
+    def test_a_file_write_changes_the_status(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("state-write")
+        before = worktree_state(repo)
+        (repo / "new.txt").write_text("x\n", encoding="utf-8")
+        after = worktree_state(repo)
+        assert after[0] == before[0]
+        assert "?? new.txt" in after[1]
+
+    def test_a_commit_changes_the_head(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("state-commit")
+        before = worktree_state(repo)
+        commit_tracked_file(repo, "a.py")
+        after = worktree_state(repo)
+        assert after[0] != before[0]
+        assert after[1] == ""
+
+    def test_a_git_failure_raises_cw_error(self, tmp_path: Path) -> None:
+        not_a_repo = tmp_path / "plain"
+        not_a_repo.mkdir()
+        with pytest.raises(CwError, match="Cannot read the git state"):
+            worktree_state(not_a_repo)
+
+
 class TestNextActionAndStatus:
     def test_fresh_ledger_starts_a_loop_round(self) -> None:
         assert next_action(fresh_ledger(), head_sha="s0") == "loop_round"
@@ -1910,6 +2149,19 @@ class TestRenderers:
             "claude-native; no independent round ran"
         ) in lines
         assert not any(line.startswith("confirm_round_opt_out") for line in lines)
+
+    def test_friction_not_independent_names_the_codex_backends(self) -> None:
+        """#2791: the text is derived from the ledger, not hard-coded to claude."""
+        ledger, report = record(
+            fresh_ledger(confirm="codex", loop_backend="codex"),
+            sha="s1",
+            backend="codex",
+        )
+        assert report.decision == "clean"
+        assert (
+            "confirm_not_independent: confirm_backend=codex equals loop backend "
+            "codex; no independent round ran"
+        ) in friction_lines(ledger)
 
     def test_sentinel_fragment_for_open_and_converged_ledgers(self) -> None:
         open_ledger = ledger_with_rounds(_distinct(0, 1))

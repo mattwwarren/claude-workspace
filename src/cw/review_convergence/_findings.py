@@ -89,7 +89,19 @@ def from_verdict(verdict: ReviewVerdict) -> tuple[list[RoundFinding], UnreadFind
                 rationale=accepted.disposition_detail,
             )
         )
-    unread = UnreadFindings(
+    return findings, unread_from_verdict(verdict)
+
+
+def unread_from_verdict(verdict: ReviewVerdict) -> UnreadFindings:
+    """The :class:`UnreadFindings` tally of *verdict* (the one derivation).
+
+    Reads the three fields ``consolidate_verdict`` populates: the mechanically
+    rejected MUST_FIX findings, the reviewer failures that discarded MUST_FIX or
+    SHOULD_FIX claims, and the roles whose ``agents_run`` record is ``failed``.
+    :func:`from_verdict` returns it beside the findings; the codex-lane gate
+    (#2791) calls it directly for a loop round it records with no findings.
+    """
+    return UnreadFindings(
         rejected_must_fix=len(verdict.rejected_must_fix),
         discarded_run_failures=len(verdict.run_failures_with_should_fix_discards),
         failed_roles=tuple(
@@ -98,7 +110,6 @@ def from_verdict(verdict: ReviewVerdict) -> tuple[list[RoundFinding], UnreadFind
             if record.status == "failed"
         ),
     )
-    return findings, unread
 
 
 def round_input_findings(

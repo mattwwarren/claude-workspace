@@ -508,6 +508,17 @@ class TestInit:
         assert ledger.ticket_id == TICKET_ID
         assert ledger.fork_point == FORK_POINT
 
+    def test_codex_loop_stamps_codex_loop_and_claude_confirm(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        """#2791: a codex loop resolves the independent claude confirm."""
+        result = _init(runner, wt, ctx, "--loop-backend", "codex")
+        assert result.exit_code == 0, result.output
+        ledger = _stored(wt)
+        assert ledger.loop_backend == "codex"
+        assert ledger.confirm_backend == "claude"
+        assert ledger.confirm_not_independent is False
+
     def test_no_confirm_records_no_confirm_round(
         self, runner: CliRunner, wt: Path, ctx: Path
     ) -> None:
@@ -602,8 +613,11 @@ class TestInit:
     ) -> None:
         write_ledger(wt, ledger_with_rounds(_dirty(1, "x"), shas=[_head(wt)]))
 
+        # #2791: the merge-base call moved with ``history_rewritten`` into the
+        # engine package, so the seam is that module's ``run_git``.
         monkeypatch.setattr(
-            "cw.cli.review.converge.run_git", _raiser(FileNotFoundError("git"))
+            "cw.review_convergence._release.run_git",
+            _raiser(FileNotFoundError("git")),
         )
         result = _init(runner, wt, ctx)
         assert result.exit_code == 1

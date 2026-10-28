@@ -52,6 +52,7 @@ from cw.review_findings import consolidate_verdict
 from cw.worktree import compute_branch_diff_scope
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from cw.auto_dev_result import StageReached
@@ -345,6 +346,8 @@ def synthesize_codex_review_result(
     claim_tier_enabled: bool = False,
     disposition_drift_check_enabled: bool = True,
     pre_validation_rejected: list[RejectedFinding] | None = None,
+    reviewer_label: str = "Codex",
+    settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Map consolidated review documents to a typed AutoDevResult.
 
@@ -478,6 +481,17 @@ def synthesize_codex_review_result(
     fix-loop-enabled pass whose cycle-0 review was already clean, a history
     ``ReviewVerdict.review`` alone cannot distinguish (R1). Like
     ``metrics_by_role``, it is unused on the zero-documents branch.
+
+    ``reviewer_label`` (#2791) is forwarded to :func:`render_verdict_comment`
+    on the same blocking branch, so the title embedded in ``blocker.details``
+    names the backend that actually reviewed (``"Claude"`` for the confirm
+    round). The ``"Codex"`` default keeps every existing caller unchanged.
+
+    ``settled_suppression`` (#2791) is a third suppression seam, applied after
+    the two above: the codex-lane confirm gate passes the convergence ledger's
+    ``suppress_settled``, so a finding the ledger already settled is stamped
+    before the blocking check and the result agrees with what the ledger
+    records. ``None`` (every other caller) leaves the verdict unchanged.
     """
     if not documents:
         result = make_codex_blocked(
@@ -534,13 +548,19 @@ def synthesize_codex_review_result(
         worktree=worktree,
         disposition_drift_check_enabled=disposition_drift_check_enabled,
     )
+    if settled_suppression is not None:
+        verdict = settled_suppression(verdict)
     block_reason = _verdict_block_reason(verdict)
     if block_reason is not None:
         blocked = make_codex_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=block_reason,
-            details=render_verdict_comment(verdict, fix_loop_enabled=fix_loop_enabled),
+            details=render_verdict_comment(
+                verdict,
+                fix_loop_enabled=fix_loop_enabled,
+                reviewer_label=reviewer_label,
+            ),
         )
         return blocked.model_copy(update={"review": verdict.review}), verdict
     if failures:

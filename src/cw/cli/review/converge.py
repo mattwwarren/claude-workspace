@@ -37,6 +37,7 @@ from cw.exceptions import CwError
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
 from cw.models.client import DEFAULT_BLOCKING_MAX_CYCLES, DEFAULT_CLEAN_MAX_CYCLES
 from cw.review_convergence import (
+    DECISION_STOP_CONFIRM_ESCALATED,
     LEDGER_RELATIVE_PATH,
     LEDGER_STATUS_STOPPED,
     ResolvedBackend,
@@ -46,8 +47,8 @@ from cw.review_convergence import (
     consecutive_confirm_failures,
     frozen_counts_from_verdict,
     load_ledger,
-    new_ledger,
-    reconcile_ledger_for_init,
+    one_line,
+    reconcile_for_init,
     record_confirm_failure,
     record_round,
     render_history_comment,
@@ -60,7 +61,6 @@ from cw.review_convergence import (
     stop_summary,
     suppress_settled,
 )
-from cw.review_convergence._models import DECISION_STOP_CONFIRM_ESCALATED
 from cw.review_findings import ReviewVerdict
 
 if TYPE_CHECKING:
@@ -78,9 +78,6 @@ SOURCE_CONTEXT = "context"
 _REVIEW_CONTEXT_SCHEMA = 15
 _DEFAULT_LOOP_BACKEND = "claude-native"
 _PREP_PR_LEDGER_RELATIVE_PATH = Path(".cw/prep-pr-convergence.json")
-_REPORT_REASON_LIMIT = 300
-#: ``git merge-base --is-ancestor`` exit for the confirmed "not an ancestor".
-_NOT_ANCESTOR_EXIT = 1
 
 DISPATCH_REFUSAL = (
     "clean-mode review runs only on a ticket dispatched through cw dev-queue "
@@ -133,13 +130,6 @@ def emit_json(body: object) -> None:
     click.echo(json.dumps(body, indent=2))
 
 
-def _one_line(text: str) -> str:
-    collapsed = " ".join(text.split())
-    if len(collapsed) <= _REPORT_REASON_LIMIT:
-        return collapsed
-    return collapsed[:_REPORT_REASON_LIMIT] + "..."
-
-
 def load_ledger_or_none(path: Path) -> ConvergenceLedger | None:
     """The ledger at *path*, ``None`` when absent, a ``CwError`` when unreadable.
 
@@ -153,7 +143,7 @@ def load_ledger_or_none(path: Path) -> ConvergenceLedger | None:
     except (OSError, ValueError) as exc:
         msg = (
             f"cannot read the convergence ledger at {path}: "
-            f"{type(exc).__name__}: {_one_line(str(exc))}"
+            f"{type(exc).__name__}: {one_line(str(exc))}"
         )
         raise CwError(msg) from exc
 
@@ -176,7 +166,7 @@ def git_stdout(argv: Sequence[str], worktree: Path) -> str:
         msg = f"{command} could not run in {worktree}: {exc}"
         raise CwError(msg) from exc
     if result.returncode != 0:
-        msg = f"{command} failed in {worktree}: {_one_line(result.stderr)}"
+        msg = f"{command} failed in {worktree}: {one_line(result.stderr)}"
         raise CwError(msg)
     return result.stdout.strip()
 
@@ -338,40 +328,6 @@ def converge_config(context_path: Path, loop_backend: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _history_rewritten(
-    existing: ConvergenceLedger | None, worktree: Path, head_sha: str
-) -> bool:
-    """True when the last recorded round's sha is no longer an ancestor of HEAD.
-
-    ``git merge-base --is-ancestor`` exits 1 only for the confirmed "not an
-    ancestor" answer, which means the branch history moved under the ledger
-    (more review, never a skipped one). Any other nonzero exit (128 for an
-    unknown object, a broken repository) is a git failure that says nothing
-    about the history, so it raises rather than discarding a valid ledger.
-    """
-    if existing is None or not existing.rounds:
-        return False
-    last_sha = existing.rounds[-1].reviewed_sha
-    try:
-        result = run_git(
-            ["merge-base", "--is-ancestor", last_sha, head_sha],
-            cwd=worktree,
-            capture_output=True,
-        )
-    except OSError as exc:
-        msg = f"git merge-base could not run in {worktree}: {exc}"
-        raise CwError(msg) from exc
-    if result.returncode == 0:
-        return False
-    if result.returncode == _NOT_ANCESTOR_EXIT:
-        return True
-    msg = (
-        f"git merge-base --is-ancestor failed in {worktree} with exit "
-        f"{result.returncode}: {_one_line(result.stderr)}"
-    )
-    raise CwError(msg)
-
-
 def _init_report(reconciled: Reconciled) -> dict[str, object]:
     ledger = reconciled.ledger
     report: dict[str, object] = {
@@ -460,31 +416,15 @@ def converge_init(
         if no_confirm
         else resolve_confirm_backend(config.confirm_backend_configured, loop_backend)
     )
-    fresh = new_ledger(
+    reconciled = reconcile_for_init(
+        existing,
+        worktree=worktree,
         ticket_id=ticket_id,
         fork_point=fork_point,
-        checkpoint_3a_sha=reviewed_sha,
+        head_sha=reviewed_sha,
         max_cycles=config.max_cycles,
         loop_backend=loop_backend,
         confirm=confirm,
-    )
-    ownership_matches = (
-        existing is not None
-        and existing.ticket_id == ticket_id
-        and existing.fork_point == fork_point
-    )
-    reconciled = reconcile_ledger_for_init(
-        existing,
-        fresh=fresh,
-        ticket_id=ticket_id,
-        fork_point=fork_point,
-        history_rewritten=(
-            _history_rewritten(existing, worktree, reviewed_sha)
-            if ownership_matches
-            else False
-        ),
-        head_sha=reviewed_sha,
-        max_cycles=config.max_cycles,
         now=_utc_now_iso(),
     )
     if reconciled.ledger != existing:

@@ -46,6 +46,16 @@ DECISION_STOP_MAX_CYCLES: Final = "stop_max_cycles"
 DECISION_STOP_OPERATOR_ACTION: Final = "stop_operator_action"
 DECISION_STOP_CONFIRM_UNAVAILABLE: Final = "stop_confirm_unavailable"
 DECISION_STOP_CONFIRM_ESCALATED: Final = "stop_confirm_escalated"
+#: Every ``stop_*`` decision: the ledger left ``in_progress`` for ``stopped``.
+STOP_DECISIONS: Final = frozenset(
+    {
+        DECISION_STOP_NOT_CONVERGING,
+        DECISION_STOP_MAX_CYCLES,
+        DECISION_STOP_OPERATOR_ACTION,
+        DECISION_STOP_CONFIRM_UNAVAILABLE,
+        DECISION_STOP_CONFIRM_ESCALATED,
+    }
+)
 ReleaseCause = Literal[
     "new_commits", "max_cycles_raised", "operator_action_done", "identities_settled"
 ]

@@ -9,11 +9,10 @@ the fine-grained :class:`ExecutorFailureCategory` -> reason mapping. Imported by
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from cw.auto_dev_result import StageReached
-    from cw.codex_runner import CodexRunResult
     from cw.executor_diagnostics import ExecutorFailureCategory
 
 STAGE3_REVIEW: StageReached = "stage3_review"
@@ -25,6 +24,11 @@ STAGE3_REVIEW: StageReached = "stage3_review"
 # import ``_roles`` (``_roles`` -> ``_context`` -> ``_capability`` would cycle).
 _COMMAND_NOT_FOUND_RETURNCODE = 127
 
+# The stderr text paired with that exit code. Shared by the claude runner that
+# produces it and by ``_is_spawn_error`` that consumes it, so the marker is not
+# kept in two places (#2791).
+_COMMAND_NOT_FOUND_MARKER = "command not found"
+
 # Matches a dotted major.minor.patch version number anywhere in a
 # `codex --version` output line (#1238). Real CLI banners are name-prefixed
 # (e.g. ``codex-cli 0.136.0``, confirmed live), not a bare version string —
@@ -35,8 +39,21 @@ _COMMAND_NOT_FOUND_RETURNCODE = 127
 _CODEX_VERSION_RE = re.compile(r"\d+(?:\.\d+){2}")
 
 
-def _is_spawn_error(result: CodexRunResult) -> bool:
-    """True when *result* is codex failing to spawn at all (binary missing).
+class _SpawnProbeResult(Protocol):
+    """The two fields of a runner result that identify a spawn failure.
+
+    Satisfied by both ``CodexRunResult`` and ``ClaudeRunResult`` (#2791).
+    """
+
+    @property
+    def returncode(self) -> int: ...
+
+    @property
+    def stderr(self) -> str: ...
+
+
+def _is_spawn_error(result: _SpawnProbeResult) -> bool:
+    """True when *result* is a runner failing to spawn at all (binary missing).
 
     Shared by ``_roles._classify_codex_failure`` (the fine-grained diagnostics
     taxonomy) and ``_capability._is_probe_error`` (#1709) — both need to
@@ -48,7 +65,7 @@ def _is_spawn_error(result: CodexRunResult) -> bool:
     """
     return (
         result.returncode == _COMMAND_NOT_FOUND_RETURNCODE
-        and "command not found" in result.stderr
+        and _COMMAND_NOT_FOUND_MARKER in result.stderr
     )
 
 
@@ -143,6 +160,19 @@ FIX_CYCLE_COMMIT_PREFIX = "fix(review): codex fix cycle"
 # clean result anyway would hand a later stage work that exists only locally.
 CODEX_UNPUSHED_AT_EXIT = "codex_unpushed_at_exit"
 
+# Clean-mode bookkeeping park (#2791): the codex review completed, but a ledger,
+# git or file step of the converge-to-clean gate failed afterwards (an
+# unreadable or foreign ledger, a merge-base failure, ``reviewed_sha != HEAD``,
+# a failed save). Retry-eligible like CODEX_UNPUSHED_AT_EXIT, and the completed
+# review and verdict are kept. Not in _CATEGORY_TO_REASON (no executor failure
+# category maps here) and not transient (a foreign ledger repeats identically).
+CODEX_CONVERGENCE_LEDGER_ERROR = "codex_convergence_ledger_error"
+
+# Claude confirm-round park (#2791 G4): a ``claude -p`` reviewer role changed
+# the worktree HEAD or ``git status`` (an operator hook, typically). Never
+# retry-eligible: the operator inspects the worktree, which is left as found.
+CODEX_REVIEW_WORKTREE_MUTATED = "codex_review_worktree_mutated"
+
 # Fix-loop divergence guard (#2394): the fix loop grew the diff for a
 # configured number of consecutive cycles (default 1 since #2633,
 # ``codex_fix_loop_stall_cycles``) while resolving none of the originally-found
@@ -191,6 +221,14 @@ CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS = "codex_reviewer_failure_discarded_fi
 # blocked+terminal-reject next_actions invariant (see schema.py
 # _check_next_actions_invariants).
 _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS: list[str] = ["user_resolve_codex_review_failure"]
+
+# Backend-side failure reasons: the codex/claude backend itself errored or was
+# at capacity, so nothing says it is up. A round whose every failed role is one
+# of these is an outage (``cw review confirm`` exit 3, a ``confirm_backend_
+# unavailable`` park), not a content failure (exit 4). The Claude round
+# (``cw.claude_review.core``) and the codex path of ``cw review confirm`` both
+# classify against this one set so the two cannot disagree.
+BACKEND_DOWN_REASONS = frozenset({CODEX_ERROR, CODEX_MODEL_CAPACITY})
 
 # Failure reasons transient enough that a retry might succeed without any
 # code/config change on our side (the role either never got a turn at all,

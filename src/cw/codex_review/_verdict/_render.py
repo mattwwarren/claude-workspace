@@ -982,8 +982,15 @@ def _render_settle_payloads(verdict: ReviewVerdict) -> list[str]:
     return [*head, *body, *_settle_overflow_lines(overflow)]
 
 
-def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) -> str:
+def render_verdict_comment(
+    verdict: ReviewVerdict, *, fix_loop_enabled: bool, reviewer_label: str = "Codex"
+) -> str:
     """Render a consolidated verdict into a GitHub-issue-comment markdown body.
+
+    ``reviewer_label`` (#2791) names the backend in the title only
+    (``## <label> Review Verdict``): the Claude confirm round renders through
+    this same function, and must never be posted under a Codex header. The
+    default keeps every existing caller byte-identical.
 
     ``fix_loop_enabled`` is the caller's own already-known fix-loop state for
     this run — required (not optional) so no call site can silently fall back
@@ -997,7 +1004,7 @@ def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) ->
     which headline won, so the mixed case (something blocking AND something
     dropped) reports both.
     """
-    lines = ["## Codex Review Verdict", ""]
+    lines = [f"## {reviewer_label} Review Verdict", ""]
     if verdict.blocking:
         lines.append(
             f"**BLOCKING** — {len(verdict.must_fix)} MUST_FIX finding(s) must be "
