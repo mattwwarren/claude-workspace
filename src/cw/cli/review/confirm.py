@@ -63,7 +63,6 @@ CONFIRM_ROUND_FAILED_EXIT_CODE = 4
 _CODEX = "codex"
 _CLAUDE = "claude"
 _BACKENDS = (_CODEX, _CLAUDE)
-_SESSION_ID_PREFIX = "confirm-"
 #: ``_format_failures_detail`` appends this pointer after the ``role (reason)``
 #: pairs; the reasons are read from the text before it.
 _DIAGNOSTICS_MARKER = " [diagnostics:"
@@ -147,7 +146,9 @@ def _confirmation_base(*, worktree: Path, ticket_id: str, default_branch: str) -
 
 
 def _session_id(task: TicketTask) -> str:
-    return f"{_SESSION_ID_PREFIX}{task.session_id or task.ticket_id}"
+    from cw.claude_review import CONFIRM_SESSION_ID_PREFIX
+
+    return f"{CONFIRM_SESSION_ID_PREFIX}{task.session_id or task.ticket_id}"
 
 
 def _run_round(

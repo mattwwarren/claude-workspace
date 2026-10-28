@@ -36,6 +36,7 @@ from cw.claude_review._runner import (
 from cw.claude_review.core import (
     CLAUDE_BACKEND_DETAILS_PREFIX,
     CLAUDE_REVIEWER_LABEL,
+    CONFIRM_SESSION_ID_PREFIX,
     ClaudeReviewRound,
     run_claude_review,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "CLAUDE_BINARY",
     "CLAUDE_REVIEWER_LABEL",
     "CLAUDE_REVIEW_TOOLS",
+    "CONFIRM_SESSION_ID_PREFIX",
     "ClaudeReviewRound",
     "ClaudeRolesOutcome",
     "ClaudeRunResult",

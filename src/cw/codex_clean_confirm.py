@@ -54,6 +54,7 @@ from cw.auto_dev_result.schema._vocab import REVIEW_NOT_CONVERGING_BLOCKER_REASO
 from cw.claude_review import (
     CLAUDE_BACKEND_DETAILS_PREFIX,
     CLAUDE_REVIEWER_LABEL,
+    CONFIRM_SESSION_ID_PREFIX,
     _which_claude,
     run_claude_review,
 )
@@ -600,7 +601,7 @@ def _run_confirm(
             base_ref=ledger.fork_point,
             model=client.worker_model,
             wall_clock_budget_seconds=_remaining_budget(gate),
-            session_id=f"confirm-{gate.sid}",
+            session_id=f"{CONFIRM_SESSION_ID_PREFIX}{gate.sid}",
         )
     except (OSError, CwError) as exc:
         return _unavailable_outcome(

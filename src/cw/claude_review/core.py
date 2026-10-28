@@ -51,6 +51,9 @@ if TYPE_CHECKING:
 CLAUDE_REVIEWER_LABEL = "Claude"
 #: Prefix of every ``Blocker.details`` a Claude round builds.
 CLAUDE_BACKEND_DETAILS_PREFIX = "backend=claude; "
+#: Prefix of the session id a confirm round files its diagnostics bundles under
+#: (``cw review confirm`` and the codex-lane gate both build ``<prefix><sid>``).
+CONFIRM_SESSION_ID_PREFIX = "confirm-"
 
 _BACKEND_DOWN_REASONS = frozenset({CODEX_ERROR, CODEX_MODEL_CAPACITY})
 
