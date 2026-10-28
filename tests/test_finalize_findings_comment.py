@@ -443,8 +443,9 @@ _READBACK_PLACEHOLDERS = {
     "ticket": _READBACK_TICKET,
     "label": _READBACK_LABEL,
 }
+# Skip only off CI: a CI runner without jq must fail, not silently pass unrun.
 requires_jq = pytest.mark.skipif(
-    shutil.which("jq") is None,
+    shutil.which("jq") is None and not os.environ.get("CI"),
     reason="jq is not installed; the read-back selection filter needs the real binary",
 )
 _READBACK_OK = "READBACK_OK"
