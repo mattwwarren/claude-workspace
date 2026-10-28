@@ -743,6 +743,24 @@ class TestOutage:
     def test_every_role_a_backend_error(self, wt: Path) -> None:
         outcome = _apply(wt, _client(wt), RoleAwareClaudeRunner(_error_role))
         _assert_unavailable(outcome, wt, "backend_error")
+        blocker = outcome.result.blocker
+        assert blocker is not None
+        assert blocker.details.count(CLAUDE_BACKEND_DETAILS_PREFIX) == 1
+        stored = _ledger(wt).confirm_failures[-1].detail
+        assert not stored.startswith(CLAUDE_BACKEND_DETAILS_PREFIX)
+
+    def test_the_escalated_backend_error_carries_the_prefix_once(
+        self, wt: Path
+    ) -> None:
+        runner = RoleAwareClaudeRunner(_error_role)
+        outcomes = [_apply(wt, _client(wt), runner) for _ in range(4)]
+        reasons = [o.result.blocker.reason for o in outcomes if o.result.blocker]
+        assert reasons == ["confirm_backend_unavailable"] * 3 + ["agent_block"]
+        escalated = outcomes[-1].result.blocker
+        assert escalated is not None
+        assert escalated.details.count(CLAUDE_BACKEND_DETAILS_PREFIX) == 1
+        for failure in _ledger(wt).confirm_failures:
+            assert not failure.detail.startswith(CLAUDE_BACKEND_DETAILS_PREFIX)
 
     def test_a_crashing_call(self, wt: Path) -> None:
         def _crash(role: str) -> ClaudeRunResult:

@@ -658,7 +658,13 @@ def _run_confirm(
         )
     blocker = round_.result.blocker
     if round_.backend_down:
-        detail = blocker.details if blocker is not None else "no reviewer document"
+        # blocker.details already starts with the backend prefix;
+        # _unavailable_outcome adds it to the park details exactly once.
+        detail = (
+            blocker.details.removeprefix(CLAUDE_BACKEND_DETAILS_PREFIX)
+            if blocker is not None
+            else "no reviewer document"
+        )
         return _unavailable_outcome(
             gate, ledger, base, cause="backend_error", detail=detail
         )
