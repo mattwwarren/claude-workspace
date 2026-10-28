@@ -34,10 +34,12 @@ tolerated, as in `cw._text`.
 
 Stdlib-only by design: nothing in `.claude/scripts/` depends on the `cw`
 package, so the secret patterns are a copy. They are a SUPERSET of
-`cw._text._SECRET_PATTERNS`: the first entries mirror it in order (pinned by
+`cw._text._SECRET_PATTERNS`: `_MIRRORED_SECRET_PATTERNS` copies it (pinned by
 `tests/test_redact_post_text.py`), and `_EXTRA_SECRET_PATTERNS` adds the vendor
-token, URL-credential, private-key and JWT shapes that `cw._text` does not
-cover. `cw._text` redacts logs read by the operator; this text goes to a PUBLIC
+token, URL-credential, private-key, JWT and keyword-assignment shapes that
+`cw._text` does not cover. The extras run first, so a wider shape consumes a
+secret's whole run before a narrower mirrored one can leave its tail behind.
+`cw._text` redacts logs read by the operator; this text goes to a PUBLIC
 tracker, an irreversible sink where a finding that quotes the secret it flags
 must not carry it.
 
@@ -79,8 +81,7 @@ _USER_HOMES = rf"{_PATH_START}(?:/home/{_SEGMENT}|/Users/{_SEGMENT})"
 _NOT_MID_NAME = r"(?![\w-])"
 
 # Mirror of cw._text._SECRET_PATTERNS, same order; see that module for the
-# rationale of each shape. A test pins these as the first entries of
-# _SECRET_PATTERNS.
+# rationale of each shape. A test pins these as equal to the upstream tuple.
 _MIRRORED_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"sk-[A-Za-z0-9]{20,}"),
     re.compile(r"ghp_[A-Za-z0-9]{36}"),
@@ -89,33 +90,62 @@ _MIRRORED_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?i)\b(?:Authorization|token)\s*[:=]\s*\S+"),
 )
 
+# An assignment value: a whole quoted string (spaces included), else one token.
+_ASSIGNED_VALUE = r"""(?:"[^"]*"|'[^']*'|\S+)"""
+# An identifier around a keyword (`DB_PASSWORD`, `AWS_SECRET_ACCESS_KEY`). It
+# starts only where a word run starts, so scanning a long unbroken run stays
+# linear instead of retrying the prefix from every offset inside it.
+_IDENT_START = r"(?<![\w-])[\w-]*"
+
 # Shapes beyond cw._text, for a public and irreversible sink: a review finding
-# often quotes the very secret it flags. Over-redaction is tolerated.
+# often quotes the very secret it flags. Over-redaction is tolerated. These run
+# BEFORE the mirrored shapes: a mirrored shape is a fixed-width or narrower
+# cousin of a wider one here (`sk-` + 20 alphanumerics vs. `sk-` + any run of
+# `[A-Za-z0-9_-]`), and letting it match first leaves the wider shape's tail
+# behind it (`<redacted>-tail`).
 _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # A PEM private key, END line included; a clipped block with no END line
+    # runs to the next blank line (left in place) or the end of the text.
+    re.compile(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"
+        r"|-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?=\r?\n[ \t]*\r?\n|\Z)",
+        re.DOTALL,
+    ),
+    re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
     # Anthropic / OpenAI keys with "-" or "_" inside (sk-ant-api03-..., sk-proj-...).
     re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"sk_(?:live|test)_[A-Za-z0-9]{10,}"),
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"gh[osur]_[A-Za-z0-9]{20,}"),
-    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
+    re.compile(r"glpat-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"npm_[A-Za-z0-9]{30,}"),
+    re.compile(r"AIza[0-9A-Za-z_-]{35}"),
+    # AKIA = long-lived access key id, ASIA = temporary (STS) key id.
+    re.compile(r"A(?:KIA|SIA)[0-9A-Z]{16}"),
     re.compile(r"xox[abprs]-[A-Za-z0-9-]{10,}"),
     re.compile(r"lin_api_[A-Za-z0-9]{20,}"),
     # user:password@ inside a URL; the host and the rest of the URL stay.
     re.compile(r"(?<=://)[^\s/@:]+:[^\s/@]+(?=@)"),
+    # `Authorization: Basic <b64>` / `Bearer <t>` / `token = "<t>"`: the scheme
+    # word AND the credential after it, or the credential would survive.
     re.compile(
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
-        re.DOTALL,
+        rf"(?i)[\"']?{_IDENT_START}(?:Authorization|token)[\"']?\s*[:=]\s*"
+        rf"(?:(?:Basic|Bearer|Token)\s+)?{_ASSIGNED_VALUE}"
     ),
-    re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
-    re.compile(r"(?i)\b(?:password|passwd|secret|api[_-]?key)\s*[:=]\s*\S+"),
+    re.compile(
+        rf"(?i)[\"']?{_IDENT_START}(?:password|passwd|secret|api[_-]?key)[\w-]*[\"']?"
+        rf"\s*[:=]\s*{_ASSIGNED_VALUE}"
+    ),
 )
 
+# Wider shapes first, then the cw._text mirror (see above).
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
-    *_MIRRORED_SECRET_PATTERNS,
     *_EXTRA_SECRET_PATTERNS,
+    *_MIRRORED_SECRET_PATTERNS,
 )
 
 
-def _usable(value: str) -> str:
+def _normalize_path_value(value: str) -> str:
     """Return *value* without trailing slashes, or "" when nothing is left.
 
     An empty value must never reach a replacement: replacing "" inserts the
@@ -134,8 +164,8 @@ def _home_prefixes(home: str) -> str:
 
 def redact_paths(text: str, *, home: str, worktrees: Sequence[str]) -> str:
     """Replace worktree, transcript-dir and home paths in *text* with placeholders."""
-    usable_home = _usable(home)
-    usable_worktrees = {_usable(w) for w in worktrees} - {""}
+    usable_home = _normalize_path_value(home)
+    usable_worktrees = {_normalize_path_value(w) for w in worktrees} - {""}
     for worktree in sorted(usable_worktrees, key=len, reverse=True):
         text = re.sub(re.escape(worktree) + _NOT_MID_NAME, WORKTREE_PLACEHOLDER, text)
     prefixes = _home_prefixes(usable_home)

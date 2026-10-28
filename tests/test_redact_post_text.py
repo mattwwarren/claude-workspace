@@ -88,6 +88,14 @@ def test_custom_home_value_becomes_placeholder() -> None:
     assert _redact("/var/lib/dave/notes", home="/var/lib/dave") == "<home>/notes"
 
 
+def test_custom_home_value_does_not_eat_a_longer_name() -> None:
+    assert _redact("/var/lib/dave2/x", home="/var/lib/dave") == "/var/lib/dave2/x"
+
+
+def test_custom_home_value_keeps_trailing_punctuation() -> None:
+    assert _redact("/var/lib/dave.", home="/var/lib/dave") == "<home>."
+
+
 def test_tilde_worktree_shape_becomes_placeholder() -> None:
     assert _redact("~/.cw/wt/abcd1234/dev-2794/src") == "<worktree>/src"
 
@@ -182,36 +190,81 @@ def test_secret_redaction_matches_cw_text_redact(text: str) -> None:
 
 
 def test_secret_patterns_are_a_superset_of_cw_text() -> None:
-    """The cw._text shapes lead, in order; the extras come after them."""
+    """The mirror is exact; the full set is the mirror plus distinct extras.
+
+    Order between the two groups is behaviour, not pinned here: the tail-leak
+    tests below fail if a narrow mirrored shape runs before a wider extra one.
+    """
     upstream = [p.pattern for p in _text._SECRET_PATTERNS]
+    mirrored = [p.pattern for p in _mod._MIRRORED_SECRET_PATTERNS]
+    extras = [p.pattern for p in _mod._EXTRA_SECRET_PATTERNS]
     local = [p.pattern for p in _mod._SECRET_PATTERNS]
-    assert local[: len(upstream)] == upstream
-    assert len(local) > len(upstream)
-    assert [p.pattern for p in _mod._EXTRA_SECRET_PATTERNS] == local[len(upstream) :]
+    assert mirrored == upstream
+    assert extras
+    assert not set(extras) & set(upstream)
+    assert sorted(local) == sorted(upstream + extras)
 
 
-# One (name, shape) per entry of _EXTRA_SECRET_PATTERNS, in the same order, each
-# assembled from parts so no literal reads as a hard-coded credential.
+# (name, raw shape, whole-string result of redacting it, the span one extra pattern
+# must fullmatch). Each shape is assembled from parts so no literal reads as a
+# hard-coded credential. The exact result is what catches a pattern that covers
+# only a prefix of its shape.
 _EXTRA_SHAPES = (
-    ("sk-ant", "sk-" + "ant-api03-" + "Ab1_" * 8),
-    ("github_pat", "github_pat_" + "11AB" * 6),
-    ("gh-token", "gho_" + "q" * 24),
-    ("aws-id", "AKIA" + "IOSFODNN7EXAMPLE"),
-    ("slack", "xoxb-" + "1234567890-abcdef"),
-    ("linear", "lin_api_" + "k" * 24),
-    ("url-userinfo", "https://deploy:hunter2@git.example.com/org/repo"),
+    ("sk-ant", "sk-" + "ant-api03-" + "Ab1_" * 8, "<redacted>", None),
+    ("sk-live", "sk_" + "live_" + "a1B2c3D4e5F6", "<redacted>", None),
+    ("sk-test", "sk_" + "test_" + "a1B2c3D4e5F6", "<redacted>", None),
+    ("github_pat", "github_pat_" + "11AB" * 6, "<redacted>", None),
+    ("gh-oauth", "gho_" + "q" * 24, "<redacted>", None),
+    ("gh-pat", "ghp_" + "w" * 36, "<redacted>", None),
+    ("glpat", "glpat-" + "aB3dE5gH7j" * 2, "<redacted>", None),
+    ("npm", "npm_" + "aB3dE5gH7j" * 3, "<redacted>", None),
+    ("google", "AIza" + "Sy" + "a1B2c3D4e" * 3 + "Z" * 6, "<redacted>", None),
+    ("aws-id", "AKIA" + "IOSFODNN7EXAMPLE", "<redacted>", None),
+    ("aws-sts-id", "ASIA" + "IOSFODNN7EXAMPLE", "<redacted>", None),
+    ("slack", "xoxb-" + "1234567890-abcdef", "<redacted>", None),
+    ("linear", "lin_api_" + "k" * 24, "<redacted>", None),
+    (
+        "url-userinfo",
+        "https://deploy:hunter2@git.example.com/org/repo",
+        "https://<redacted>@git.example.com/org/repo",
+        "deploy:hunter2",
+    ),
     (
         "pem",
         "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nabc\n-----END RSA PRIVATE KEY-----",
+        "<redacted>",
+        None,
     ),
     (
         "jwt",
         "eyJ" + "hbGciOiJIUzI1" + ".eyJ" + "zdWIiOiIxMjM0" + ".sig" + "nature12345",
+        "<redacted>",
+        None,
     ),
-    ("keyword", "password: hunter2"),
+    ("authorization-basic", "Authorization: Basic dXNlcjpwYXNz", "<redacted>", None),
+    ("authorization-bearer", "Authorization: Bearer abc.def", "<redacted>", None),
+    ("authorization-token", "Authorization: Token abc123", "<redacted>", None),
+    ("keyword", "password: hunter2", "<redacted>", None),
+    ("keyword-env", "DB_PASSWORD=hunter2", "<redacted>", None),
+    ("keyword-pg", "PGPASSWORD=hunter2", "<redacted>", None),
+    ("keyword-secret-key", "SECRET_KEY=hunter2", "<redacted>", None),
+    ("keyword-api-key", "OPENAI_API_KEY=hunter2", "<redacted>", None),
+    ("keyword-aws", "AWS_SECRET_ACCESS_KEY=hunter2/abc", "<redacted>", None),
+    ("keyword-env-token", "GITHUB_TOKEN=hunter2", "<redacted>", None),
+    ("json-api-key", '{"api_key": "hunter2hunter2"}', "{<redacted>}", None),
+    ("json-password", '{"password": "hunter2"}', "{<redacted>}", None),
+    ("json-token", '{"token": "hunter2"}', "{<redacted>}", None),
+    (
+        "quoted-multi-word",
+        'password = "correct horse hunter2 staple"',
+        "<redacted>",
+        None,
+    ),
+    ("single-quoted-multi-word", "secret = 'hunter2 two'", "<redacted>", None),
 )
 _LEAKED_FRAGMENTS = (
     "hunter2",
+    "horse",
     "Ab1_",
     "11AB",
     "qqqq",
@@ -220,17 +273,36 @@ _LEAKED_FRAGMENTS = (
     "kkkk",
     "MIIEow",
     "hbGciOi",
+    "dXNlcjpwYXNz",
+    "abc123",
+    "nature12345",
 )
 
 
 @pytest.mark.parametrize(
-    ("name", "raw"), _EXTRA_SHAPES, ids=[n for n, _ in _EXTRA_SHAPES]
+    ("name", "raw", "expected", "_span"),
+    _EXTRA_SHAPES,
+    ids=[shape[0] for shape in _EXTRA_SHAPES],
 )
-def test_extra_secret_shapes_are_redacted(name: str, raw: str) -> None:
-    result = _redact(f"quoted: {raw} end")
-    assert "<redacted>" in result, name
+def test_extra_secret_shapes_are_redacted_whole(
+    name: str, raw: str, expected: str, _span: str | None
+) -> None:
+    """Exact output: a pattern covering only a prefix leaves a tail and fails."""
+    assert _redact(raw) == expected, name
+    assert _redact(f"quoted: {raw} end") == f"quoted: {expected} end", name
     for fragment in _LEAKED_FRAGMENTS:
-        assert fragment not in result, (name, fragment)
+        assert fragment not in _redact(raw), (name, fragment)
+
+
+def test_every_extra_pattern_covers_a_whole_shape() -> None:
+    """A pattern must cover a whole shape, not just a prefix of it."""
+    for pattern in _mod._EXTRA_SECRET_PATTERNS:
+        covered = [
+            match.group(0) == (span if span is not None else raw)
+            for _, raw, _, span in _EXTRA_SHAPES
+            if (match := pattern.search(raw))
+        ]
+        assert any(covered), pattern.pattern
 
 
 def test_sk_proj_dash_key_is_redacted() -> None:
@@ -238,12 +310,72 @@ def test_sk_proj_dash_key_is_redacted() -> None:
     assert _redact(f"key {raw}") == "key <redacted>"
 
 
-def test_extra_patterns_align_with_the_shapes() -> None:
-    """Kill-check: dropping any extra pattern shifts the pairing and fails here."""
-    patterns = _mod._EXTRA_SECRET_PATTERNS
-    assert len(patterns) == len(_EXTRA_SHAPES)
-    for pattern, (name, raw) in zip(patterns, _EXTRA_SHAPES, strict=True):
-        assert pattern.search(raw), name
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("sk-" + "A" * 24 + "-tailtailtail", "<redacted>"),
+        ("x sk-" + "A" * 24 + "-tailtailtail y", "x <redacted> y"),
+        ("ghp_" + "x" * 36 + "LEAKED", "<redacted>"),
+        ("see ghp_" + "x" * 36 + "LEAKED.", "see <redacted>."),
+    ],
+)
+def test_wide_shapes_win_over_the_narrow_mirrored_ones(
+    text: str, expected: str
+) -> None:
+    """No secret tail survives a narrower mirrored match."""
+    assert _redact(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "curl -H 'Authorization: Basic dXNlcjpwYXNz' url",
+            "curl -H <redacted> url",
+        ),
+        ("Authorization: Token abc123 trailing", "<redacted> trailing"),
+        ('token = "two words" after', "<redacted> after"),
+        ("export DB_PASSWORD=hunter2 && run", "export <redacted> && run"),
+        ("PGPASSWORD=hunter2 psql", "<redacted> psql"),
+        ('{"token": "abcd1234efgh5678", "ok": 1}', '{<redacted>, "ok": 1}'),
+        ("password = 'correct horse' next", "<redacted> next"),
+    ],
+)
+def test_credential_assignments_are_consumed_whole(text: str, expected: str) -> None:
+    assert _redact(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nabcd\n\nnext paragraph",
+            "<redacted>\n\nnext paragraph",
+        ),
+        (
+            "-----BEGIN RSA PRIVATE KEY-----\r\nMIIEow\r\nabcd\r\n\r\nnext",
+            "<redacted>\r\n\r\nnext",
+        ),
+        (
+            "before\n-----BEGIN PRIVATE KEY-----\nMII\n-----END PRIVATE KEY-----\n"
+            "after",
+            "before\n<redacted>\nafter",
+        ),
+        ("-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\nabcd", "<redacted>"),
+        ("key: -----BEGIN PRIVATE KEY-----\nMII", "key: <redacted>"),
+    ],
+)
+def test_pem_block_ends_at_its_end_line_or_the_next_blank_line(
+    text: str, expected: str
+) -> None:
+    assert _redact(text) == expected
+    assert _redact(expected) == expected
+
+
+def test_long_unbroken_word_run_redacts_in_linear_time() -> None:
+    """The identifier prefix of the keyword shapes must not go quadratic."""
+    text = "a" * LONG_TARGET_CHARS
+    assert _redact(text) == text
 
 
 def test_url_userinfo_keeps_the_host() -> None:
@@ -268,9 +400,11 @@ def test_benign_text_is_untouched_by_the_extra_shapes(text: str) -> None:
 
 
 def test_extra_shapes_are_idempotent() -> None:
-    text = " ".join(raw for _, raw in _EXTRA_SHAPES)
+    text = " ".join(raw for _, raw, _, _ in _EXTRA_SHAPES)
     once = _redact(text)
     assert _redact(once) == once
+    for _, raw, expected, _ in _EXTRA_SHAPES:
+        assert _redact(expected) == expected, raw
 
 
 # ---------------------------------------------------------------------------
