@@ -482,3 +482,10 @@ class TestFormatRowHook:
             encoding="utf-8",
         )
         assert _override(_review_task(tmp_path), _AGE_STOP) is None
+
+    def test_invalid_utf8_context_fails_open(self, tmp_path: Path) -> None:
+        write_ledger(tmp_path, _falling_ledger())
+        context_path = tmp_path / ".claude" / "cw-context.json"
+        context_path.parent.mkdir(parents=True, exist_ok=True)
+        context_path.write_bytes(b"\xff\xfe\x00")
+        assert _override(_review_task(tmp_path), _AGE_STOP) is None

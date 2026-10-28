@@ -72,7 +72,10 @@ def _clean_mode_context(task: TicketTask) -> bool:
     """Require the current worktree context to opt into clean mode."""
     if task.worktree_path is None:
         return False
-    context = _read_cw_context(str(task.worktree_path))
+    try:
+        context = _read_cw_context(str(task.worktree_path))
+    except UnicodeError:
+        return False
     if context is None or context.get("schema_version") != CW_CONTEXT_SCHEMA_VERSION:
         return False
     review = context.get("review") if isinstance(context, dict) else None
