@@ -907,13 +907,20 @@ class TestHealthyBackendFailures:
         assert ledger.status == "awaiting_confirm"
 
     def test_a_live_budget_reaches_the_roles(self, wt: Path) -> None:
-        outcome = _apply(
-            wt,
-            _client(wt),
-            RoleAwareClaudeRunner(_clean_role),
-            deadline=time.monotonic() + 3600,
-        )
+        runner = RoleAwareClaudeRunner(_clean_role)
+        outcome = _apply(wt, _client(wt), runner, deadline=time.monotonic() + 3600)
         assert outcome.result.review.converged is True
+        assert runner.timeouts
+        for timeout in runner.timeouts:
+            assert isinstance(timeout, int)
+            assert 0 < timeout <= 3600
+
+    def test_no_deadline_leaves_the_roles_unbounded(self, wt: Path) -> None:
+        runner = RoleAwareClaudeRunner(_clean_role)
+        outcome = _apply(wt, _client(wt), runner, deadline=None)
+        assert outcome.result.review.converged is True
+        assert runner.timeouts
+        assert all(timeout is None for timeout in runner.timeouts)
 
     def test_a_mutating_reviewer_parks_and_never_escalates(self, wt: Path) -> None:
         writes: list[str] = []
