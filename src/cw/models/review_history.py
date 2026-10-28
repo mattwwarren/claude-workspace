@@ -26,6 +26,9 @@ REVIEW_HISTORY_SCHEMA_VERSION = 1
 ConvergenceMode = Literal["clean", "blocking", "unknown"]
 RoundViewKind = Literal["loop", "confirm", "initial"]
 RoundSource = Literal["ledger", "sentinel_friction", "sentinel_cycle0"]
+HistorySource = Literal[
+    "ledger", "verdict_files", "sentinel", "row_dispositions", "events"
+]
 
 
 class SeveritySplit(BaseModel):
@@ -252,7 +255,7 @@ class ReviewHistory(BaseModel):
     )
     dispositions: list[DispositionView] = Field(default_factory=list)
     voided: list[VoidedView] = Field(default_factory=list)
-    sources: list[str] = Field(
+    sources: list[HistorySource] = Field(
         default_factory=list,
         description=(
             "Sources that contributed, in precedence order: `ledger`, "

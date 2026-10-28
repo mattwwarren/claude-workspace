@@ -42,6 +42,7 @@ from cw.models import OrchestratorEventType, QueueItemStatus, Stage
 from cw.models.enums import StageIdentifier
 from cw.models.review_history import (
     DispositionView,
+    HistorySource,
     HistorySummary,
     ReleaseView,
     ReviewHistory,
@@ -377,8 +378,8 @@ def _sources(
     review: Mapping[str, object] | None,
     *,
     events_used: bool,
-) -> list[str]:
-    sources: list[str] = []
+) -> list[HistorySource]:
+    sources: list[HistorySource] = []
     if inputs.ledger is not None:
         sources.append("ledger")
         if any(r.new_by_severity is not None for r in part.rounds):

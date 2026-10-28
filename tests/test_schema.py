@@ -150,6 +150,21 @@ class TestSchemaShowReviewHistory:
         assert "rounds" in parsed["properties"]
         assert "RoundView" in parsed["$defs"]
 
+    def test_sources_carries_the_closed_enum(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["schema", "show", "review-history", "--format=json"]
+        )
+        assert result.exit_code == 0
+        items = json.loads(result.output)["properties"]["sources"]["items"]
+        assert items["enum"] == [
+            "ledger",
+            "verdict_files",
+            "sentinel",
+            "row_dispositions",
+            "events",
+        ]
+
     def test_tldr_renders(self) -> None:
         runner = CliRunner()
         result = runner.invoke(
