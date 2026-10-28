@@ -1582,7 +1582,9 @@ REVIEW lane still ignores clean mode.
   own Claude login. The prompt carries the diff from the ledger's fork point,
   and the file tools can read any file under the task worktree, untracked and
   gitignored files included; reads outside the worktree are denied. This is
-  default-on egress for every codex-lane clean client.
+  default-on egress for every codex-lane clean client. The confirm runs on the
+  client's `worker_model` (`--model <id>`) when that is set, and on Claude's
+  own default model otherwise.
 - **Opt-out.** `review.confirm_backend: none` or `codex` converges on the clean
   codex round alone (the sentinel records `confirm_round_opt_out` or
   `confirm_not_independent`). Nothing is sent to Claude.

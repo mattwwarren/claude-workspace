@@ -417,6 +417,9 @@ def test_config_reference_documents_review_and_the_max_cycles_release() -> None:
     assert "and to the codex REVIEW lane (#2791" in row
     assert "`claude -p`" in row
     assert "`none`" in row
+    assert "runs on `client.worker_model` when that is set" in row
+    worker_row = content[content.index("| `worker_model` |") :].split("\n", 1)[0]
+    assert "codex-lane Claude confirm" in worker_row
 
 
 def test_config_reference_states_the_codex_lane_default_on_egress() -> None:
@@ -438,6 +441,7 @@ def test_codex_lane_clean_mode_is_documented() -> None:
     assert runbook.count("#### Codex-lane clean mode (#2791)") == 1
     section = _after(runbook, "#### Codex-lane clean mode (#2791)", span=4000)
     assert "`review.confirm_backend: none` or `codex`" in section
+    assert "`worker_model` (`--model <id>`) when that is set" in section
     assert "skips the codex loop and runs only the Claude confirm" in section
     assert "`codex_convergence_ledger_error`" in section
     assert "`--override-must-fix` is refused" in section

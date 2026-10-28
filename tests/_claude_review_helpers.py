@@ -61,7 +61,7 @@ class RoleAwareClaudeRunner:
     """A ``ClaudeRunner`` answering each role with *respond(role)*.
 
     Reads the role from the prompt's ``# Reviewer Role:`` line and records
-    every role and prompt. *side_effect*, when set, runs against the worktree
+    every role, prompt and argv. *side_effect*, when set, runs against the worktree
     during each call (the G4 worktree-mutation cases).
     """
 
@@ -74,11 +74,12 @@ class RoleAwareClaudeRunner:
         self._side_effect = side_effect
         self.roles: list[str] = []
         self.prompts: list[str] = []
+        self.argvs: list[list[str]] = []
 
     def run(
         self,
         worktree: Path,
-        _argv: list[str],
+        argv: list[str],
         _timeout_seconds: int | None,
         *,
         stdin: str,
@@ -88,6 +89,7 @@ class RoleAwareClaudeRunner:
         role = match.group(1).strip()
         self.roles.append(role)
         self.prompts.append(stdin)
+        self.argvs.append(list(argv))
         if self._side_effect is not None:
             self._side_effect(worktree)
         return self._respond(role)

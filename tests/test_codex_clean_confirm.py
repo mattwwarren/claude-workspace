@@ -300,6 +300,21 @@ def _blocker(wt: Path) -> Blocker:
 
 
 class TestConverge:
+    def test_the_clients_worker_model_is_the_confirm_model(self, wt: Path) -> None:
+        client = _client(wt).model_copy(update={"worker_model": "claude-sonnet-5-5"})
+        runner = RoleAwareClaudeRunner(_clean_role)
+        _apply(wt, client, runner)
+        assert runner.argvs
+        assert all(
+            argv[-2:] == ["--model", "claude-sonnet-5-5"] for argv in runner.argvs
+        )
+
+    def test_without_a_worker_model_no_model_flag_is_passed(self, wt: Path) -> None:
+        runner = RoleAwareClaudeRunner(_clean_role)
+        _apply(wt, _client(wt), runner)
+        assert runner.argvs
+        assert all("--model" not in argv for argv in runner.argvs)
+
     def test_unset_backend_runs_an_independent_claude_confirm(self, wt: Path) -> None:
         codex = _codex(wt)
         runner = RoleAwareClaudeRunner(_clean_role)
