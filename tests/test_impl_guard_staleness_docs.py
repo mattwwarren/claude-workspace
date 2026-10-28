@@ -3,8 +3,11 @@ override (#1794) — mirrors tests/test_scope_conformance_gate_docs.py's pairing
 of a script-behavior test file with a prose-wiring test file.
 """
 
+import json
 import re
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 from cw.auto_dev_result import IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
 from cw.gh import AGENT_COMMENT_MARKER
@@ -231,6 +234,14 @@ FINDINGS_HEADER = "## Blocking Review Findings"
 FINDINGS_SUBHEADING = "### Finalize ship-it gate findings"
 _PART_LABEL = re.compile(r"^\(part (\d+) of (\d+)\)$", re.MULTILINE)
 
+# The redacted observed `gh issue view 2633 --json comments` payload: the shape a
+# live-fetched `.cw/impl-comments.json` entry really has (`author` is an object
+# holding `login`, the timestamp is `createdAt`). Test entries are built from it
+# so a field name cannot drift from the tracker's.
+_OBSERVED_COMMENTS = json.loads(
+    (Path(__file__).parent / "fixtures" / "gh_issue_comments_2633.json").read_text()
+)["comments"]
+
 ME = "operator-login"
 FORGER = "someone-else"
 HEAD_AT = "2026-10-28T09:00:00Z"
@@ -281,7 +292,7 @@ def test_carve_out_requires_all_four_conditions() -> None:
             f"`{FINDINGS_SUBHEADING}`",
             "a sub-heading line quoted mid-body does not count",
             f"carries the marker `{AGENT_COMMENT_MARKER}`",
-            "its `author`",
+            "its author login",
             "all four",
             "tracker identity finalize posts as",
             "ME=$(gh api user --jq .login)",
@@ -297,8 +308,7 @@ def test_carve_out_names_the_compared_identity_field_on_each_side() -> None:
         clause = _carve_out_clause(line)
         for phrase in (
             "names one field on each side",
-            "the entry's `author` (a login) against `ME=$(gh api user --jq .login)`",
-            "writes `author` as `<login>`",
+            "the entry's author login against `ME=$(gh api user --jq .login)`",
             "no entry field is comparable to any field of the MCP `viewer` identity",
             "Linear delivery therefore fails closed with "
             "`withheld (identity_unresolved)`",
@@ -306,6 +316,77 @@ def test_carve_out_names_the_compared_identity_field_on_each_side() -> None:
         ):
             assert phrase in clause, phrase
         assert "all five" not in clause
+
+
+def test_carve_out_names_the_real_entry_field_names() -> None:
+    """The entries are the tracker's own payload: `author.login`, `createdAt`.
+
+    A bare "`author`" read as a string compares an object to `ME` and withholds
+    on GitHub every time, so the clause must name the real keys, accept the core
+    doc's mapped form as the alternative, and forbid the object comparison.
+    """
+    for line in _carve_out_lines():
+        clause = _carve_out_clause(line)
+        for phrase in (
+            "`author.login`",
+            "`createdAt`",
+            "`author` is an object",
+            "else from `author` when it is a string",
+            "else `created_at`",
+            "never compare the `author` object itself to `ME`",
+        ):
+            assert phrase in clause, phrase
+        assert (
+            "(the field each `.cw/impl-comments.json` entry already carries)"
+            not in (clause)
+        )
+        assert "the entry's `author` (a login)" not in clause
+        assert "writes `author` as `<login>`" not in clause
+
+
+def test_observed_payload_shape_matches_the_names_the_clause_uses() -> None:
+    """Ground truth for the field names: the observed tracker payload itself.
+
+    If the tracker's shape ever differs from what the clause names, this fails
+    on the fixture, not on a model of it.
+    """
+    clause = _carve_out_clause(_carve_out_lines()[0])
+    for entry in _OBSERVED_COMMENTS:
+        assert isinstance(entry["author"], dict)
+        assert isinstance(entry["author"]["login"], str)
+        assert isinstance(entry["createdAt"], str)
+        assert "created_at" not in entry
+        assert "`author.login`" in clause
+        assert "`createdAt`" in clause
+
+
+def test_selection_reads_the_observed_payload_shape() -> None:
+    """A findings post in the real entry shape is selected for its login."""
+    genuine = _findings_comment(ME, "2026-10-28T10:00:00Z")
+    assert isinstance(genuine["author"], dict)
+    assert "created_at" not in genuine
+    # Real-shaped neighbours: the observed comments, which are not findings.
+    neighbours = list(_OBSERVED_COMMENTS)
+
+    assert _select_regress_findings([*neighbours, genuine], ME) == [genuine]
+    assert _select_regress_findings([*neighbours, genuine], FORGER) == []
+    assert _withheld_reason([*neighbours, genuine], FORGER) == "author_mismatch"
+    # A string `author` compared to the identity is what the object comparison
+    # got wrong: the raw entry's `author` is never equal to `ME`.
+    assert genuine["author"] != ME
+
+
+def test_selection_accepts_the_mapped_form_too() -> None:
+    """The core doc's `{author: <login>, created_at}` mapping names the same post."""
+    genuine = _findings_comment(ME, "2026-10-28T10:00:00Z")
+    mapped = _mapped(genuine)
+    assert mapped["author"] == ME
+    assert "createdAt" not in mapped
+
+    assert _select_regress_findings([mapped], ME) == [mapped]
+    older_mapped = _mapped(_findings_comment(ME, "2026-10-28T09:00:00Z"))
+    assert _select_regress_findings([older_mapped, mapped], ME) == [mapped]
+    assert _select_regress_findings([mapped], FORGER) == []
 
 
 def test_carve_out_drops_forgeries_and_unrelated_agent_comments() -> None:
@@ -349,7 +430,10 @@ def test_carve_out_has_no_head_recency_gate() -> None:
         assert "predates the fix commit" not in clause
         assert "between instants" not in clause
         assert "deliberately not a condition" in clause
-        assert '"newest" is the latest `created_at`' in clause
+        assert (
+            '"newest" is the latest timestamp (`createdAt`, else `created_at`)'
+            in clause
+        )
         # The unchanged agent-authored sentence still precedes the carve-out.
         assert EXISTING_AGENT_SENTENCE in line
 
@@ -363,7 +447,7 @@ def test_carve_out_is_labelled_evidence_not_instruction() -> None:
         )
         assert "evidence" in clause
         assert "not a binding operator instruction" in clause
-        assert 'marking each passed comment "posted <created_at>"' in clause
+        assert 'marking each passed comment "posted <timestamp>"' in clause
         assert "with its own timestamp" in clause
         assert (
             "tell the Stage 2 agent to verify against the current code whether "
@@ -393,8 +477,34 @@ def test_carve_out_records_its_outcome_in_friction() -> None:
         assert "stale_post" not in tail
 
 
-def _created(entry: dict[str, str]) -> str:
-    return entry.get("created_at") or entry.get("createdAt") or ""
+def _gh_entry(author: str, created_at: str, body: str) -> dict[str, Any]:
+    """An entry in the observed live-fetch shape, values replaced, keys kept."""
+    entry = json.loads(json.dumps(_OBSERVED_COMMENTS[0]))
+    entry["author"] = {"login": author}
+    entry["createdAt"] = created_at
+    entry["body"] = body
+    return entry
+
+
+def _mapped(entry: dict[str, Any]) -> dict[str, Any]:
+    """The core doc's mapped form: `{author: <login>, created_at, body}`."""
+    return {
+        "author": _login(entry),
+        "created_at": _created(entry),
+        "body": entry["body"],
+    }
+
+
+def _login(entry: dict[str, Any]) -> str:
+    """The author login: `author.login` (raw gh shape) or a string `author`."""
+    author = entry.get("author")
+    if isinstance(author, dict):
+        return str(author.get("login") or "")
+    return author if isinstance(author, str) else ""
+
+
+def _created(entry: dict[str, Any]) -> str:
+    return entry.get("createdAt") or entry.get("created_at") or ""
 
 
 def _instant(timestamp: str) -> datetime:
@@ -406,7 +516,7 @@ def _instant(timestamp: str) -> datetime:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-def _is_findings_shape(entry: dict[str, str]) -> bool:
+def _is_findings_shape(entry: dict[str, Any]) -> bool:
     """Header, adjacent sub-heading and marker: the first three conditions.
 
     The sub-heading must be the first non-blank line after the header, the
@@ -425,11 +535,11 @@ def _is_findings_shape(entry: dict[str, str]) -> bool:
     )
 
 
-def _by_identity(entry: dict[str, str], identity: str) -> bool:
-    return bool(identity) and entry.get("author") == identity
+def _by_identity(entry: dict[str, Any], identity: str) -> bool:
+    return bool(identity) and _login(entry) == identity
 
 
-def _qualifies(entry: dict[str, str], identity: str) -> bool:
+def _qualifies(entry: dict[str, Any], identity: str) -> bool:
     """The four documented conditions, in the order the clause states them.
 
     ``created_at`` is not a condition (A5): an older-than-head post still
@@ -438,12 +548,12 @@ def _qualifies(entry: dict[str, str], identity: str) -> bool:
     return _is_findings_shape(entry) and _by_identity(entry, identity)
 
 
-def _part_of(entry: dict[str, str]) -> tuple[int, int] | None:
+def _part_of(entry: dict[str, Any]) -> tuple[int, int] | None:
     label = _PART_LABEL.search(entry["body"])
     return None if label is None else (int(label[1]), int(label[2]))
 
 
-def _matching(comments: list[dict[str, str]], identity: str) -> list[dict[str, str]]:
+def _matching(comments: list[dict[str, Any]], identity: str) -> list[dict[str, Any]]:
     """Comments satisfying all four conditions, oldest instant first."""
     return sorted(
         (c for c in comments if _qualifies(c, identity)),
@@ -452,8 +562,8 @@ def _matching(comments: list[dict[str, str]], identity: str) -> list[dict[str, s
 
 
 def _select_regress_findings(
-    comments: list[dict[str, str]], identity: str
-) -> list[dict[str, str]]:
+    comments: list[dict[str, Any]], identity: str
+) -> list[dict[str, Any]]:
     """Reference model of the documented carve-out selection rule.
 
     This is a model of a prompt-driven rule, not coverage of shipped code: no
@@ -473,7 +583,7 @@ def _select_regress_findings(
     if newest is None:
         return [matches[-1]]
     total = newest[1]
-    selected: list[dict[str, str]] = []
+    selected: list[dict[str, Any]] = []
     for index in range(1, total + 1):
         same_part = [c for c in matches if _part_of(c) == (index, total)]
         if same_part:
@@ -481,7 +591,7 @@ def _select_regress_findings(
     return selected
 
 
-def _parts_missing(comments: list[dict[str, str]], identity: str) -> list[int]:
+def _parts_missing(comments: list[dict[str, Any]], identity: str) -> list[int]:
     """Indices 1..n with no same-``n`` comment: the documented ``parts_missing``."""
     matches = _matching(comments, identity)
     newest = _part_of(matches[-1]) if matches else None
@@ -495,7 +605,7 @@ def _parts_missing(comments: list[dict[str, str]], identity: str) -> list[int]:
     return [i for i in range(1, newest[1] + 1) if i not in present]
 
 
-def _withheld_reason(comments: list[dict[str, str]], identity: str) -> str | None:
+def _withheld_reason(comments: list[dict[str, Any]], identity: str) -> str | None:
     """The documented friction reason when nothing is delivered, else ``None``."""
     if _select_regress_findings(comments, identity):
         return None
@@ -507,17 +617,15 @@ def _withheld_reason(comments: list[dict[str, str]], identity: str) -> str | Non
     return "author_mismatch"
 
 
-def _findings_comment(author: str, created_at: str, label: str = "") -> dict[str, str]:
+def _findings_comment(author: str, created_at: str, label: str = "") -> dict[str, Any]:
     label_line = f"{label}\n" if label else ""
-    return {
-        "author": author,
-        "created_at": created_at,
-        "body": (
-            f"{FINDINGS_HEADER}\n{FINDINGS_SUBHEADING}\n{label_line}"
-            "```\ngate: Step 8 ship-it\ndetails: MUST_FIX x\n```\n\n"
-            f"{AGENT_COMMENT_MARKER}"
-        ),
-    }
+    return _gh_entry(
+        author,
+        created_at,
+        f"{FINDINGS_HEADER}\n{FINDINGS_SUBHEADING}\n{label_line}"
+        "```\ngate: Step 8 ship-it\ndetails: MUST_FIX x\n```\n\n"
+        f"{AGENT_COMMENT_MARKER}",
+    )
 
 
 def test_forged_author_never_displaces_the_genuine_post() -> None:
@@ -529,21 +637,19 @@ def test_forged_author_never_displaces_the_genuine_post() -> None:
     assert _select_regress_findings([genuine, forged], "") == []
 
 
-def _quoting_comment(author: str, created_at: str) -> dict[str, str]:
+def _quoting_comment(author: str, created_at: str) -> dict[str, Any]:
     """Right header and marker, but the sub-heading only quoted mid-body.
 
     The shape of a #1815 ``review_blocked`` post that cites the finalize
     sub-heading in its prose.
     """
-    return {
-        "author": author,
-        "created_at": created_at,
-        "body": (
-            f"{FINDINGS_HEADER}\n### reviewer — MUST_FIX\n"
-            f"see the earlier post under:\n{FINDINGS_SUBHEADING}\n\n"
-            f"{AGENT_COMMENT_MARKER}"
-        ),
-    }
+    return _gh_entry(
+        author,
+        created_at,
+        f"{FINDINGS_HEADER}\n### reviewer — MUST_FIX\n"
+        f"see the earlier post under:\n{FINDINGS_SUBHEADING}\n\n"
+        f"{AGENT_COMMENT_MARKER}",
+    )
 
 
 def test_sub_heading_quoted_mid_body_never_displaces_the_genuine_post() -> None:
@@ -566,21 +672,17 @@ def test_blank_lines_between_header_and_sub_heading_still_qualify() -> None:
 
 
 def test_unrelated_agent_comments_are_never_selected() -> None:
-    scan = {
-        "author": ME,
-        "created_at": "2026-10-28T12:00:00Z",
-        "body": f"## Pending Verification Scan\n- x\n\n{AGENT_COMMENT_MARKER}",
-    }
-    bare = {
-        "author": ME,
-        "createdAt": "2026-10-28T13:00:00Z",
-        "body": AGENT_COMMENT_MARKER,
-    }
-    review = {
-        "author": ME,
-        "created_at": "2026-10-28T14:00:00Z",
-        "body": f"{FINDINGS_HEADER}\n### reviewer — MUST_FIX\n\n{AGENT_COMMENT_MARKER}",
-    }
+    scan = _gh_entry(
+        ME,
+        "2026-10-28T12:00:00Z",
+        f"## Pending Verification Scan\n- x\n\n{AGENT_COMMENT_MARKER}",
+    )
+    bare = _gh_entry(ME, "2026-10-28T13:00:00Z", AGENT_COMMENT_MARKER)
+    review = _gh_entry(
+        ME,
+        "2026-10-28T14:00:00Z",
+        f"{FINDINGS_HEADER}\n### reviewer — MUST_FIX\n\n{AGENT_COMMENT_MARKER}",
+    )
     assert _select_regress_findings([scan, bare, review], ME) == []
 
 
@@ -624,7 +726,7 @@ def test_parts_come_only_from_comments_with_the_newest_matchs_n() -> None:
 def test_withheld_reasons_follow_the_documented_vocabulary() -> None:
     genuine = _findings_comment(ME, "2026-10-28T10:00:00Z")
     forged = _findings_comment(FORGER, "2026-10-28T11:00:00Z")
-    unrelated = {"author": ME, "created_at": "2026-10-28T12:00:00Z", "body": "hi"}
+    unrelated = _gh_entry(ME, "2026-10-28T12:00:00Z", "hi")
 
     assert _withheld_reason([genuine], "") == "identity_unresolved"
     assert _withheld_reason([unrelated], ME) == "no_matching_comment"
@@ -640,7 +742,7 @@ def test_selection_helper_and_prose_name_the_same_conditions() -> None:
         FINDINGS_HEADER,
         FINDINGS_SUBHEADING,
         AGENT_COMMENT_MARKER,
-        "`author`",
-        "`created_at`",
+        "`author.login`",
+        "`createdAt`",
     ):
         assert token in clause
