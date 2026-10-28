@@ -515,6 +515,7 @@ def _ledger_summary(
     ledger: ConvergenceLedger, rounds: list[RoundView], settled: list[SettledView]
 ) -> HistorySummary:
     converged = ledger.status == LEDGER_STATUS_CONVERGED
+    deferred = [s for s in settled if s.outcome == "defer"]
     return HistorySummary(
         convergence_mode="clean",
         rounds_run=len(ledger.rounds),
@@ -527,7 +528,8 @@ def _ledger_summary(
         max_cycles=ledger.max_cycles,
         confirm_backend=ledger.confirm_backend,
         new_accepted_series=_series(rounds),
-        deferred=[s for s in settled if s.outcome == "defer"],
+        deferred=deferred,
+        deferred_count=len(deferred),
         releases=[
             ReleaseView(
                 at=r.at, round=r.round, reason=r.reason, cause=r.cause, sha=r.sha
@@ -586,6 +588,7 @@ def _sentinel_part(
         fix_cycles_used=_int(review.get("fix_cycles_used")),
         confirm_backend=backend if isinstance(backend, str) else None,
         new_accepted_series=_series(rounds),
+        deferred_count=deferred,
     )
     return _Part(rounds, [], summary)
 

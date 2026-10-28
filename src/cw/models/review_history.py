@@ -206,7 +206,17 @@ class HistorySummary(BaseModel):
     )
     deferred: list[SettledView] = Field(
         default_factory=list,
-        description='The `outcome == "defer"` subset of the top-level `settled`.',
+        description=(
+            'The `outcome == "defer"` subset of the top-level `settled`; empty '
+            "without a ledger, where only `deferred_count` is known."
+        ),
+    )
+    deferred_count: int | None = Field(
+        default=None,
+        description=(
+            "`len(deferred)` when a ledger was read, else the sentinel's "
+            "`review.deferred`; null when neither was read."
+        ),
     )
     releases: list[ReleaseView] = Field(default_factory=list)
     confirm_failures: int | None = Field(

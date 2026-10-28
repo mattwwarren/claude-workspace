@@ -98,6 +98,14 @@ def _fix_cycles(history: ReviewHistory) -> str:
     return str(used) if cap is None else f"{used} of {cap}"
 
 
+def _deferred(history: ReviewHistory) -> str:
+    """The deferred count; a sentinel-only count has no finding text behind it."""
+    count = history.summary.deferred_count
+    if count is None or "ledger" in history.sources:
+        return _count(count)
+    return f"{count} (text not recorded)"
+
+
 def _header(history: ReviewHistory) -> list[str]:
     summary = history.summary
     series = " ".join(str(n) for n in summary.new_accepted_series)
@@ -112,7 +120,7 @@ def _header(history: ReviewHistory) -> list[str]:
         _kv("new_accepted_by_round", series or _ABSENT),
         _kv("fix_cycles", _fix_cycles(history)),
         _kv("confirm_backend", _or_absent(summary.confirm_backend)),
-        _kv("deferred", str(len(summary.deferred))),
+        _kv("deferred", _deferred(history)),
         _kv("confirm_failures", _count(summary.confirm_failures)),
         _kv("sources", ", ".join(history.sources) or _ABSENT),
     ]

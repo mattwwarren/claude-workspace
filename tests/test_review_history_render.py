@@ -37,6 +37,7 @@ from tests._review_history_helpers import (
     fixture_converged,
     fixture_stopped,
     record_verdict_round,
+    sentinel_review,
     voided_suppression,
     write_corrupt_ledger,
 )
@@ -270,6 +271,21 @@ def test_blocking_degraded_text(tmp_path: Path) -> None:
     assert dispositions[1].startswith("  - REJECTED src/cw/foo.py:")
     assert any("rounds_unrecorded" in line for line in lines)
     _assert_invariants(text)
+
+
+def test_deferred_header_says_where_the_count_came_from(tmp_path: Path) -> None:
+    fixture_stopped().write(derived_worktree(tmp_path))
+    ledger_history, ledger_text = _render(tmp_path, _task())
+    _, blocking_text = _blocking(tmp_path / "blocking")
+    task = _task(session_id=ACME_SESSION)
+    bare = bound_session_for(task, last_result=sentinel_review({"fix_cycles_used": 1}))
+    _, bare_text = _render(tmp_path / "bare", task, (bare,))
+
+    count = ledger_history.summary.deferred_count
+    assert count
+    assert f"deferred: {count}" in ledger_text.splitlines()
+    assert "deferred: 1 (text not recorded)" in blocking_text.splitlines()
+    assert "deferred: not recorded" in bare_text.splitlines()
 
 
 def test_empty_history_prints_one_clear_line_then_notes(tmp_path: Path) -> None:

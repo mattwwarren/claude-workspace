@@ -1583,7 +1583,10 @@ block per round (reviewers, reviewed sha, new findings with their
 MUST_FIX/SHOULD_FIX split, fixes dispatched, findings settled that round with
 their rationale, wall time), then `settled_other` (operator settles, and any
 settled entry whose round has no block), `dispositions`, `voided`, `releases`
-and `notes`. Every key is printed, `-` when absent; nothing is truncated.
+and `notes`. Every key is printed, `-` when absent; nothing is truncated. The
+`deferred` header is the ledger's count, `N (text not recorded)` when only the
+sentinel reports it (a blocking-mode review keeps no finding text), or `not
+recorded`.
 
 Reading the trend: `new_accepted_by_round` falling toward 0 is a review that is
 converging. A series that stalls or comes back up, together with the ledger's
@@ -1629,6 +1632,8 @@ that is blocking or omits the mode, `unknown` with neither; `rounds_run`,
 `converged`, `final_clean_sha`, `ledger_status`, `stop_reason`,
 `stop_identities` as `<severity>::<file>::<summary>` keys, `fix_cycles_used`,
 `max_cycles`, `confirm_backend`, `new_accepted_series`, `deferred`,
+`deferred_count`: `len(deferred)` when a ledger was read, else the sentinel's
+`review.deferred`, null when neither was read,
 `releases` (`at`, `round` = rounds recorded at the release, `reason`, `cause`,
 `sha`), and `confirm_failures`: every confirm-backend outage the ledger ever
 recorded, null when no ledger was read), `settled`, `dispositions` (`key`,
