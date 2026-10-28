@@ -441,7 +441,12 @@ _EXTRA_SHAPES = (
     ("flag-password-space", "--password hunter2", "<redacted>", None),
     ("flag-token-space", "--token abc123", "<redacted>", None),
     ("flag-password-equals", "--password=hunter2", "<redacted>", None),
-    ("flag-api-key-space-quoted", '--api-key "correct horse hunter2"', "<redacted>", None),
+    (
+        "flag-api-key-space-quoted",
+        '--api-key "correct horse hunter2"',
+        "<redacted>",
+        None,
+    ),
 )
 _LEAKED_FRAGMENTS = (
     "hunter2",
