@@ -515,6 +515,29 @@ def test_voided_event_matched_through_a_row_disposition(tmp_path: Path) -> None:
     assert voided.operator_comment_id == COMMENT_ID
 
 
+def test_newline_wrapped_disposition_summary_still_attributes(tmp_path: Path) -> None:
+    wrapped = "Some   finding\n  wrapped over\tlines"
+    key = _disposition_key("src/cw/foo.py", wrapped) or ""
+    task = _task(
+        finding_dispositions={
+            key: FindingDisposition(
+                outcome="REJECTED", rationale="nope", summary=wrapped
+            )
+        }
+    )
+    foreign_voided_event(
+        ACME_TICKET,
+        file="src/cw/foo.py",
+        summary="Some finding wrapped over lines",
+        severity="MUST_FIX",
+        operator_comment_id=COMMENT_ID,
+    )
+
+    history = _history(task, tmp_path)
+
+    assert [v.operator_comment_id for v in history.voided] == [COMMENT_ID]
+
+
 def test_same_content_but_foreign_comment_id_is_not_shown(tmp_path: Path) -> None:
     _voided_ledger_worktree(tmp_path)
     foreign_voided_event(

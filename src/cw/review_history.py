@@ -738,8 +738,10 @@ def _with_wall_times(
 # --- review.finding_voided attribution and row dispositions --------------------------
 
 
-def _normalize(text: str) -> str:
-    return " ".join(text.split())
+def _normalized_summary(summary: str) -> str:
+    """*summary* under the producer's own rule, via the public finding identity."""
+    # Why: a disposition entry has no severity; only summary_normalized is read.
+    return finding_identity("SHOULD_FIX", "", summary).summary_normalized
 
 
 def _payload_str(payload: Mapping[str, object], key: str) -> str:
@@ -811,12 +813,12 @@ def _ledger_match(
 
 
 def _disposition_match(task: TicketTask, file: str, summary: str) -> _Match | None:
-    wanted = _normalize(summary)
+    wanted = _normalized_summary(summary)
     for key, entry in sorted(task.finding_dispositions.items()):
         if (
             entry.summary
             and split_disposition_key(key)[0] == file
-            and _normalize(entry.summary) == wanted
+            and _normalized_summary(entry.summary) == wanted
         ):
             return _Match(None, file, entry.summary, entry.rationale)
     return None
