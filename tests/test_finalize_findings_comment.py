@@ -320,6 +320,24 @@ def test_read_back_compares_bytes_and_fails_closed() -> None:
     assert "CRLF becomes LF" in paragraph
 
 
+def test_read_back_mismatch_records_urls_and_asks_for_human_deletion() -> None:
+    """F4: the read-back is post-hoc detection, so the entry carries the remedy."""
+    paragraph = _section_paragraph(READ_BACK)
+    assert "comment URL (or id) of EACH already-posted part" in paragraph
+    assert "the operator must review and delete those comments" in paragraph
+    assert "Deletion needs a human" in paragraph
+    assert "does not remove its edit history" in paragraph
+
+
+def test_read_back_states_only_what_it_proves() -> None:
+    """F3: no claim that a bypassed redactor cannot pass; points at G4 risk."""
+    paragraph = _section_paragraph(READ_BACK)
+    assert "cannot pass by matching itself" not in paragraph
+    assert "equals the part file the session wrote" in paragraph
+    assert "guards post-time divergence only" in paragraph
+    assert "**Residual risk (G4)**" in paragraph
+
+
 def test_park_marker_follows_read_back_and_requires_it() -> None:
     section = _section()
     assert section.rindex(PARK_MARKER) > section.index(READ_BACK)
