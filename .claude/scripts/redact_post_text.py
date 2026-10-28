@@ -207,12 +207,13 @@ _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     # A space-separated flag: `--password hunter2`, `--token abc`, `-api-key k`. The
     # `=` form is the keyword pattern above. A dash-led word only (prose such as
     # "password reset" is left alone), a value on the SAME line (`[ \t]+`, so a
-    # bare flag never takes the next line), and a value that does not itself begin
-    # with "-" (`--token --verbose` keeps `--verbose`). The identifier suffix cap
+    # bare flag never takes the next line), and a value that does not look like a long
+    # option (`--token --verbose` keeps `--verbose`; a single leading "-" is a
+    # credential, since ~1 in 64 urlsafe-base64 tokens starts with one). The identifier suffix cap
     # is shared with the patterns above, so a run of hits stays linear.
     re.compile(
         rf"(?i)(?<![\w-])-{{1,2}}[\w-]*(?:{_FLAG_KEYWORDS})"
-        rf"{_IDENT_SUFFIX}[ \t]+(?!-){_ASSIGNED_VALUE}"
+        rf"{_IDENT_SUFFIX}[ \t]+(?!--){_ASSIGNED_VALUE}"
     ),
     # `Cookie: a=1; b=2` / `Set-Cookie: sid=...; Path=/`: a header value runs to
     # the end of the line and holds spaces and `;`, so one token would leak the rest.

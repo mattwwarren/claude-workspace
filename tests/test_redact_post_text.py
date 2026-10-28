@@ -672,6 +672,11 @@ def test_secret_flag_value_is_redacted_in_every_separator_form(
         ("x --token abc123\r\nnext", "x <redacted>\r\nnext"),
         ("--DB-PASSWORD hunter2", "<redacted>"),
         ("--password hunter2", "<redacted>"),
+        # A value with ONE leading "-" is a credential (urlsafe base64 can begin
+        # with "-"); only a long-option look-alike (`--verbose`) is kept.
+        ("run --token -Xk3_abc now", "run <redacted> now"),
+        ("--password -hunter2", "<redacted>"),
+        ("--api-key -9fK2xQ", "<redacted>"),
         # A cookie header value runs to the end of its line (see the cookie
         # pattern), so the flag form takes one value and no more.
         ("curl --cookie sid=abc123 --verbose", "curl <redacted> --verbose"),
