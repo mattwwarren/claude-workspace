@@ -10,9 +10,9 @@ The class-11 stranded-routed-result detector and its operator close live in
 ``cw.doctor.routed_result_wedge`` (#2524); this package only wires its close
 into the reap tail.
 
-``task_running`` imports :func:`_gh_pr_states` and ``reap`` imports
-:func:`_reap_session_by_selector` from ``loop_health`` at top level (2-symbol
-direction); ``loop_health``'s reach back for
+``reap`` imports :func:`_reap_session_by_selector` from ``loop_health`` at
+top level (``task_running`` reaches GitHub through ``cw.gh`` instead);
+``loop_health``'s reach back for
 :func:`_collapse_blocked_on_user_tasks` is a function-local deferred import of
 this package to break the cycle.
 

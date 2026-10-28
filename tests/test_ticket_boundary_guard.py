@@ -5,8 +5,8 @@ cw keeps exactly one minimal, GitHub-only programmatic tracker client
 present. Everything else — provider-portable ticket reads/writes — is
 agent work, done through the agent's own native tools (gh CLI, Linear
 MCP). This is a regression test for #1240: a source-level scan asserting
-(a) no module outside a closed, named allowlist directly constructs a
-`gh` CLI subprocess call or a raw provider-HTTP call, (b) gh.py is
+(a) no module outside a closed, named allowlist (gh.py alone) directly
+constructs a `gh` CLI subprocess call or a raw provider-HTTP call, (b) gh.py is
 imported (not bypassed) by every other cw module that needs GitHub data,
 and (c) no Linear/tracker SDK import exists anywhere in src/cw. See
 docs/adr/0013-agent-delegated-ticket-work.md for the invariant this
@@ -26,19 +26,13 @@ from tests.conftest import _REPO_ROOT, _SRC_ROOT, _iter_src_files
 # Modules allowed to directly construct a `["gh", ...]` (or `("gh", ...)`)
 # subprocess argv literal. Paths are relative to _SRC_ROOT, posix form —
 # i.e. what `path.relative_to(_SRC_ROOT).as_posix()` produces.
-_DIRECT_GH_CALLER_ALLOWLIST = frozenset(
-    {
-        # The sanctioned surface: every other cw module reaches GitHub
-        # through gh.py's typed functions, not raw subprocess calls.
-        "cw/gh.py",
-        # Pre-existing daemon-side direct callers, grandfathered.
-        # Consolidation into gh.py is tracked as a follow-up in #1284,
-        # not this ticket's scope. (cw/reconcile/salvage.py was on this
-        # list until the process-kill-timeout removal deleted the module.)
-        "cw/doctor/loop_health.py",
-        "cw/worktree_gc.py",
-    }
-)
+#
+# gh.py is the only direct caller: every other cw module reaches GitHub
+# through gh.py's typed functions, not raw subprocess calls. No grandfathered
+# callers remain after #1284 consolidated cw/doctor/loop_health.py and
+# cw/worktree_gc.py into gh.py (cw/reconcile/salvage.py left earlier, with the
+# process-kill-timeout removal). A new entry needs a new ADR.
+_DIRECT_GH_CALLER_ALLOWLIST = frozenset({"cw/gh.py"})
 
 # Package-name substrings that would indicate a Linear/tracker SDK import,
 # or a generic HTTP client — cw has zero HTTP-client dependency today, and
@@ -129,8 +123,7 @@ def _run_scan(finder: Callable[[ast.AST, Path], list[str]]) -> list[str]:
 
 
 class TestNoDirectGhCallOutsideAllowlist:
-    """Deny-list scan: no raw `gh` subprocess construction outside gh.py
-    (and the named, grandfathered daemon-side callers)."""
+    """Deny-list scan: no raw `gh` subprocess construction outside gh.py."""
 
     def test_no_direct_gh_call_outside_allowlist(self) -> None:
         violations = _run_scan(_find_direct_gh_subprocess_call)

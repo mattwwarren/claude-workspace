@@ -37,6 +37,8 @@ from cw.worktree_gc import (
     remove_worktree_gc,
     run_worktree_gc,
 )
+from tests._reconcile_helpers import fake_branch_pr
+from tests.test_gh import _GH_PRS_MERGED, _GH_PRS_MIXED, _GH_PRS_OPEN
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -191,104 +193,122 @@ class TestListRepoWorktrees:
 
 
 class TestCheckPrState:
-    def test_returns_merged(self) -> None:
-        payload = json.dumps([{"state": "MERGED", "number": 735}])
-        with patch("cw.worktree_gc._sp.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout=payload, stderr="")
-            state, pr_number, gh_available = check_pr_state("dev/630")
+    """``check_pr_state`` projects ``fetch_branch_prs`` onto (state, number, ok)."""
 
-        assert state == "MERGED"
-        assert pr_number == 735
-        assert gh_available is True
+    @pytest.mark.parametrize(
+        ("state", "number"),
+        [("OPEN", 736), ("CLOSED", 734), ("MERGED", 735)],
+    )
+    def test_maps_first_pr_state_and_number(self, state: str, number: int) -> None:
+        prs = [fake_branch_pr(state=state, number=number)]
+        with patch("cw.worktree_gc.fetch_branch_prs", return_value=(prs, True)):
+            result = check_pr_state("dev/630")
 
-    def test_returns_open(self) -> None:
-        payload = json.dumps([{"state": "OPEN", "number": 736}])
-        with patch("cw.worktree_gc._sp.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout=payload, stderr="")
-            state, pr_number, gh_available = check_pr_state("dev/631")
-
-        assert state == "OPEN"
-        assert pr_number == 736
-        assert gh_available is True
-
-    def test_returns_closed(self) -> None:
-        payload = json.dumps([{"state": "CLOSED", "number": 734}])
-        with patch("cw.worktree_gc._sp.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout=payload, stderr="")
-            state, pr_number, gh_available = check_pr_state("dev/629")
-
-        assert state == "CLOSED"
-        assert pr_number == 734
-        assert gh_available is True
+        assert result == (state, number, True)
 
     def test_no_prs_returns_empty_string(self) -> None:
-        with patch("cw.worktree_gc._sp.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
-            state, pr_number, gh_available = check_pr_state("rfc/0006")
+        with patch("cw.worktree_gc.fetch_branch_prs", return_value=([], True)):
+            result = check_pr_state("rfc/0006")
 
-        assert state == ""
-        assert pr_number is None
-        assert gh_available is True
+        assert result == ("", None, True)
 
     def test_gh_not_found_returns_none_false(self) -> None:
+        with patch("cw.worktree_gc.fetch_branch_prs", return_value=(None, False)):
+            result = check_pr_state("dev/630")
+
+        assert result == (None, None, False)
+
+    def test_transient_error_returns_none_true_and_warns(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level("WARNING", logger="cw.worktree_gc")
+        with patch("cw.worktree_gc.fetch_branch_prs", return_value=(None, True)):
+            result = check_pr_state("dev/630")
+
+        assert result == (None, None, True)
+        assert "gh lookup failed for dev/630" in caplog.text
+
+    def test_multiple_prs_take_first(self) -> None:
+        prs = [
+            fake_branch_pr(state="MERGED", number=1),
+            fake_branch_pr(state="CLOSED", number=2),
+        ]
+        with patch("cw.worktree_gc.fetch_branch_prs", return_value=(prs, True)):
+            result = check_pr_state("dev/630")
+
+        assert result == ("MERGED", 1, True)
+
+    def test_forwards_timeout_and_cwd(self, tmp_path: Path) -> None:
+        with patch(
+            "cw.worktree_gc.fetch_branch_prs", return_value=([], True)
+        ) as mock_fetch:
+            check_pr_state("b", 7, cwd=tmp_path)
+
+        mock_fetch.assert_called_once_with("b", 7, cwd=tmp_path)
+
+    @pytest.mark.parametrize(
+        ("captured", "expected"),
+        [
+            (_GH_PRS_MERGED, ("MERGED", 2741, True)),
+            (_GH_PRS_OPEN, ("OPEN", 1666, True)),
+            (_GH_PRS_MIXED, ("MERGED", 1688, True)),
+        ],
+    )
+    def test_end_to_end_captured_payloads(
+        self, captured: str, expected: tuple[str, int, bool]
+    ) -> None:
+        with patch("cw.worktree_gc._sp.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=captured, stderr="")
+            result = check_pr_state("dev/630")
+
+        assert result == expected
+
+    def test_end_to_end_empty_list(self) -> None:
+        with patch("cw.worktree_gc._sp.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
+            result = check_pr_state("rfc/0006")
+
+        assert result == ("", None, True)
+
+    def test_end_to_end_gh_not_found(self) -> None:
         with patch("cw.worktree_gc._sp.run", side_effect=FileNotFoundError):
-            state, pr_number, gh_available = check_pr_state("dev/630")
+            result = check_pr_state("dev/630")
 
-        assert state is None
-        assert pr_number is None
-        assert gh_available is False
+        assert result == (None, None, False)
 
-    def test_timeout_returns_none_true(self) -> None:
+    def test_end_to_end_timeout(self) -> None:
         with patch(
             "cw.worktree_gc._sp.run",
             side_effect=subprocess.TimeoutExpired("gh", 10),
         ):
-            state, pr_number, gh_available = check_pr_state("dev/630")
+            result = check_pr_state("dev/630")
 
-        assert state is None
-        assert pr_number is None
-        assert gh_available is True
+        assert result == (None, None, True)
 
-    def test_non_zero_exit_returns_none_true(self) -> None:
+    def test_end_to_end_non_zero_exit(self) -> None:
         with patch("cw.worktree_gc._sp.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
-            state, pr_number, gh_available = check_pr_state("dev/630")
+            result = check_pr_state("dev/630")
 
-        assert state is None
-        assert pr_number is None
-        assert gh_available is True
+        assert result == (None, None, True)
 
-    def test_bad_json_returns_none_true(self) -> None:
+    def test_end_to_end_bad_json(self) -> None:
         with patch("cw.worktree_gc._sp.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout="not json", stderr=""
             )
-            state, pr_number, gh_available = check_pr_state("dev/630")
+            result = check_pr_state("dev/630")
 
-        assert state is None
-        assert pr_number is None
-        assert gh_available is True
+        assert result == (None, None, True)
 
-    def test_passes_state_all_flag(self) -> None:
+    def test_end_to_end_payload_without_url_is_transient(self) -> None:
+        """gh.py's strict parse rejects the old ``state,number`` shape (fails safe)."""
         payload = json.dumps([{"state": "MERGED", "number": 735}])
         with patch("cw.worktree_gc._sp.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=payload, stderr="")
-            check_pr_state("dev/630")
+            result = check_pr_state("dev/630")
 
-        cmd = mock_run.call_args[0][0]
-        assert "--state" in cmd
-        state_idx = cmd.index("--state")
-        assert cmd[state_idx + 1] == "all"
-
-    def test_passes_head_branch_arg(self) -> None:
-        payload = json.dumps([{"state": "MERGED", "number": 735}])
-        with patch("cw.worktree_gc._sp.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout=payload, stderr="")
-            check_pr_state("dev/630")
-
-        cmd = mock_run.call_args[0][0]
-        head_idx = cmd.index("--head")
-        assert cmd[head_idx + 1] == "dev/630"
+        assert result == (None, None, True)
 
 
 # ---------------------------------------------------------------------------
