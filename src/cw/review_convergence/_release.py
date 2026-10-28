@@ -7,14 +7,24 @@ ticket, fork point or rewritten branch), reopened as a new epoch (a stop with
 new commits), released without a commit (the three operator-resolvable stops),
 kept terminal (every other stop), or simply resumed.
 
+The two git-reading functions live here too, beside ``_store`` (the package's
+other I/O): :func:`history_rewritten` (the ``history_rewritten`` input
+:func:`reconcile_ledger_for_init` takes) and :func:`worktree_state` (the
+``(HEAD, git status)`` snapshot a confirm round compares before and after, #2791
+G4). Both were CLI-private; they moved here so core code (the codex-lane
+clean-mode gate, the Claude confirm runner) never imports :mod:`cw.cli`.
+
 Import these names from :mod:`cw.review_convergence`, not from this private
 submodule.
 """
 
 from __future__ import annotations
 
+import subprocess
 from typing import TYPE_CHECKING
 
+from cw._git import git_output, run_git
+from cw.exceptions import CwError
 from cw.review_convergence._models import (
     LEDGER_STATUS_CONVERGED,
     LEDGER_STATUS_IN_PROGRESS,
@@ -27,9 +37,74 @@ from cw.review_convergence._policy import release_cause
 from cw.review_convergence._tip import demote_for_rereview
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from cw.review_convergence._models import ConvergenceLedger, ReleaseCause
 
 _UNKNOWN_STOP = "unknown"
+#: ``git merge-base --is-ancestor`` exit for the confirmed "not an ancestor".
+_NOT_ANCESTOR_EXIT = 1
+_STDERR_LIMIT = 300
+
+
+def _one_line(text: str) -> str:
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= _STDERR_LIMIT:
+        return collapsed
+    return collapsed[:_STDERR_LIMIT] + "..."
+
+
+def history_rewritten(
+    existing: ConvergenceLedger | None, worktree: Path, head_sha: str
+) -> bool:
+    """True when the last recorded round's sha is no longer an ancestor of HEAD.
+
+    ``git merge-base --is-ancestor`` exits 1 only for the confirmed "not an
+    ancestor" answer, which means the branch history moved under the ledger
+    (more review, never a skipped one). Any other nonzero exit (128 for an
+    unknown object, a broken repository) is a git failure that says nothing
+    about the history, so it raises :class:`CwError` rather than discarding a
+    valid ledger. Callers evaluate it only when the ledger's ticket and fork
+    point already match (the ownership guard).
+    """
+    if existing is None or not existing.rounds:
+        return False
+    last_sha = existing.rounds[-1].reviewed_sha
+    try:
+        result = run_git(
+            ["merge-base", "--is-ancestor", last_sha, head_sha],
+            cwd=worktree,
+            capture_output=True,
+        )
+    except OSError as exc:
+        msg = f"git merge-base could not run in {worktree}: {exc}"
+        raise CwError(msg) from exc
+    if result.returncode == 0:
+        return False
+    if result.returncode == _NOT_ANCESTOR_EXIT:
+        return True
+    msg = (
+        f"git merge-base --is-ancestor failed in {worktree} with exit "
+        f"{result.returncode}: {_one_line(result.stderr)}"
+    )
+    raise CwError(msg)
+
+
+def worktree_state(worktree: Path) -> tuple[str, str]:
+    """``(HEAD sha, git status --porcelain)`` of *worktree*, or a ``CwError``.
+
+    Compared before and after a confirm round (``cw review confirm``'s
+    whole-call check, and the Claude role runner's per-role check, #2791 G4):
+    a difference means something the reviewer launched wrote to the worktree.
+    Gitignored paths are invisible to it by construction.
+    """
+    try:
+        head = git_output(["rev-parse", "HEAD"], cwd=worktree).strip()
+        status = git_output(["status", "--porcelain"], cwd=worktree)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        msg = f"Cannot read the git state of worktree '{worktree}': {exc}"
+        raise CwError(msg) from exc
+    return head, status
 
 
 def _reset_reason(

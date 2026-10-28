@@ -40,6 +40,7 @@ from cw.review_convergence import (
     friction_lines,
     from_verdict,
     frozen_counts_from_verdict,
+    history_rewritten,
     load_ledger,
     max_cycles_exhausted,
     next_action,
@@ -60,6 +61,8 @@ from cw.review_convergence import (
     status_summary,
     stop_summary,
     suppress_settled,
+    unread_from_verdict,
+    worktree_state,
 )
 from cw.review_findings import ReviewVerdict, consolidate_verdict
 from tests._codex_review_helpers import _task
@@ -208,6 +211,24 @@ class TestFromVerdict:
             "d": ("operator_action", "do d"),
         }
         assert not unread.any
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda: consolidated_verdict(accepted=[("MUST_FIX", "a")]),
+            lambda: consolidated_verdict(rejected_must_fix=True),
+            lambda: consolidated_verdict(discarded={"SHOULD_FIX": 1}),
+            lambda: consolidated_verdict(failed_role="Security Reviewer"),
+        ],
+        ids=["clean", "rejected_must_fix", "discarded", "failed_role"],
+    )
+    def test_unread_from_verdict_matches_from_verdict(
+        self, build: Callable[[], ReviewVerdict]
+    ) -> None:
+        """#2791: one derivation, shared by ``from_verdict`` and the codex gate."""
+        verdict = build()
+        _findings, unread = from_verdict(verdict)
+        assert unread_from_verdict(verdict) == unread
 
     @pytest.mark.parametrize("disposition", ["dropped", "unresolved"])
     def test_undecided_finding_raises(self, disposition: str) -> None:
@@ -1137,6 +1158,7 @@ class TestBackendResolver:
             ("none", "codex", "none", False),
             ("claude", "claude-native", "claude", True),
             ("claude", "codex", "claude", False),
+            ("claude", "opencode", "claude", False),
         ],
     )
     def test_resolution(
@@ -1702,6 +1724,86 @@ class TestStrictTipWithRealGit:
         )
 
 
+class TestHistoryRewritten:
+    """``history_rewritten`` against a real repo (#2791, moved from the CLI)."""
+
+    def _ledger_at(self, sha: str) -> ConvergenceLedger:
+        ledger, _ = record(fresh_ledger(), sha=sha)
+        return ledger
+
+    def test_no_ledger_or_no_rounds_is_false_without_git(self, tmp_path: Path) -> None:
+        missing = tmp_path / "not-a-repo"
+        assert history_rewritten(None, missing, "HEAD") is False
+        assert history_rewritten(fresh_ledger(), missing, "HEAD") is False
+
+    def test_an_ancestor_is_not_rewritten(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("hist-ancestor")
+        base = git_in(repo, "rev-parse", "HEAD")
+        commit_tracked_file(repo, "a.py")
+        head = git_in(repo, "rev-parse", "HEAD")
+        assert history_rewritten(self._ledger_at(base), repo, head) is False
+
+    def test_a_dropped_commit_is_rewritten(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("hist-dropped")
+        commit_tracked_file(repo, "a.py")
+        dropped = git_in(repo, "rev-parse", "HEAD")
+        git_in(repo, "reset", "--hard", "HEAD~1")
+        head = git_in(repo, "rev-parse", "HEAD")
+        assert history_rewritten(self._ledger_at(dropped), repo, head) is True
+
+    def test_an_unknown_sha_raises_cw_error(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("hist-unknown")
+        head = git_in(repo, "rev-parse", "HEAD")
+        with pytest.raises(CwError, match=r"failed .* with exit 128"):
+            history_rewritten(self._ledger_at("f" * 40), repo, head)
+
+    def test_git_that_cannot_run_raises_cw_error(self, tmp_path: Path) -> None:
+        with pytest.raises(CwError, match="could not run"):
+            history_rewritten(self._ledger_at("a" * 40), tmp_path / "gone", "HEAD")
+
+
+class TestWorktreeState:
+    """``worktree_state`` (#2791 G4, moved from ``cw review confirm``)."""
+
+    def test_clean_repo_returns_head_and_empty_status(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("state-clean")
+        assert worktree_state(repo) == (git_in(repo, "rev-parse", "HEAD"), "")
+
+    def test_a_file_write_changes_the_status(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("state-write")
+        before = worktree_state(repo)
+        (repo / "new.txt").write_text("x\n", encoding="utf-8")
+        after = worktree_state(repo)
+        assert after[0] == before[0]
+        assert "?? new.txt" in after[1]
+
+    def test_a_commit_changes_the_head(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("state-commit")
+        before = worktree_state(repo)
+        commit_tracked_file(repo, "a.py")
+        after = worktree_state(repo)
+        assert after[0] != before[0]
+        assert after[1] == ""
+
+    def test_a_git_failure_raises_cw_error(self, tmp_path: Path) -> None:
+        not_a_repo = tmp_path / "plain"
+        not_a_repo.mkdir()
+        with pytest.raises(CwError, match="Cannot read the git state"):
+            worktree_state(not_a_repo)
+
+
 class TestNextActionAndStatus:
     def test_fresh_ledger_starts_a_loop_round(self) -> None:
         assert next_action(fresh_ledger(), head_sha="s0") == "loop_round"
@@ -1910,6 +2012,19 @@ class TestRenderers:
             "claude-native; no independent round ran"
         ) in lines
         assert not any(line.startswith("confirm_round_opt_out") for line in lines)
+
+    def test_friction_not_independent_names_the_codex_backends(self) -> None:
+        """#2791: the text is derived from the ledger, not hard-coded to claude."""
+        ledger, report = record(
+            fresh_ledger(confirm="codex", loop_backend="codex"),
+            sha="s1",
+            backend="codex",
+        )
+        assert report.decision == "clean"
+        assert (
+            "confirm_not_independent: confirm_backend=codex equals loop backend "
+            "codex; no independent round ran"
+        ) in friction_lines(ledger)
 
     def test_sentinel_fragment_for_open_and_converged_ledgers(self) -> None:
         open_ledger = ledger_with_rounds(_distinct(0, 1))

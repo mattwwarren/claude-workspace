@@ -7,8 +7,10 @@ loop is deterministic, unit-tested, pure Python in this package, persisted as a
 ledger at ``<worktree>/.cw/review-convergence.json``, and exposed to the prose
 through the ``cw review converge`` subcommands (``cw.cli.review``).
 
-Every function here is pure: it takes a ledger and returns an updated copy, and
-reads no clock (callers pass ``now`` as an ISO-8601 UTC string). Failure
+Every engine function here is pure: it takes a ledger and returns an updated
+copy, and reads no clock (callers pass ``now`` as an ISO-8601 UTC string). The
+I/O is confined to ``_store`` (the ledger file) and the two git readers in
+``_release`` (:func:`history_rewritten`, :func:`worktree_state`). Failure
 direction is always "more review, never a skipped one": an unread finding, a
 role that never reviewed, an unconfirmed loop round and an unverified tip are
 all refused, never recorded as clean.
@@ -22,13 +24,14 @@ Submodules, each importing only the ones above it:
 - ``_backend`` -- :func:`resolve_confirm_backend`.
 - ``_policy`` -- ``max_cycles_exhausted``, ``release_cause``, the no-progress
   and oscillation detectors, ``consecutive_confirm_failures``.
-- ``_findings`` -- :func:`from_verdict`, the new-accepted classification and
-  :func:`suppress_settled`.
+- ``_findings`` -- :func:`from_verdict`, :func:`unread_from_verdict`, the
+  new-accepted classification and :func:`suppress_settled`.
 - ``_engine`` -- :func:`record_round`, :func:`record_confirm_failure`,
   :func:`operator_settle`, :func:`new_ledger`.
 - ``_tip`` -- :func:`finalize_ready`, :func:`evaluate_tip` (the strict
   final-sha rule), :func:`demote_for_rereview`.
-- ``_release`` -- :func:`reconcile_ledger_for_init`.
+- ``_release`` -- :func:`reconcile_ledger_for_init`, and the git readers
+  :func:`history_rewritten` and :func:`worktree_state` (#2791).
 - ``_store`` -- atomic ledger and per-round verdict persistence.
 - ``_render`` -- history comment, friction lines, stop summary, sentinel and
   blocker fragments, audit-event payload.
@@ -55,6 +58,7 @@ from cw.review_convergence._findings import (
     frozen_counts_from_verdict,
     round_input_findings,
     suppress_settled,
+    unread_from_verdict,
 )
 from cw.review_convergence._identity import FindingIdentity, finding_identity
 from cw.review_convergence._models import (
@@ -100,7 +104,11 @@ from cw.review_convergence._policy import (
     max_cycles_exhausted,
     release_cause,
 )
-from cw.review_convergence._release import reconcile_ledger_for_init
+from cw.review_convergence._release import (
+    history_rewritten,
+    reconcile_ledger_for_init,
+    worktree_state,
+)
 from cw.review_convergence._render import (
     confirm_blocker_fragment,
     friction_lines,
@@ -173,6 +181,7 @@ __all__ = [
     "friction_lines",
     "from_verdict",
     "frozen_counts_from_verdict",
+    "history_rewritten",
     "load_ledger",
     "max_cycles_exhausted",
     "new_ledger",
@@ -194,4 +203,6 @@ __all__ = [
     "status_summary",
     "stop_summary",
     "suppress_settled",
+    "unread_from_verdict",
+    "worktree_state",
 ]

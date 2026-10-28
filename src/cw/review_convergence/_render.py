@@ -168,8 +168,8 @@ def friction_lines(ledger: ConvergenceLedger) -> list[str]:
         )
     if ledger.confirm_not_independent:
         lines.append(
-            "confirm_not_independent: confirm_backend=claude equals loop "
-            "backend claude-native; no independent round ran"
+            f"confirm_not_independent: confirm_backend={ledger.confirm_backend} "
+            f"equals loop backend {ledger.loop_backend}; no independent round ran"
         )
     if ledger.confirm_backend == "none":
         lines.append("confirm_round_opt_out: review.confirm_backend=none")

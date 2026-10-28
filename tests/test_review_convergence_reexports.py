@@ -66,6 +66,7 @@ EXPECTED_EXPORTS = {
     "friction_lines",
     "frozen_counts_from_verdict",
     "from_verdict",
+    "history_rewritten",
     "load_ledger",
     "max_cycles_exhausted",
     "new_ledger",
@@ -87,6 +88,8 @@ EXPECTED_EXPORTS = {
     "status_summary",
     "stop_summary",
     "suppress_settled",
+    "unread_from_verdict",
+    "worktree_state",
 }
 
 
