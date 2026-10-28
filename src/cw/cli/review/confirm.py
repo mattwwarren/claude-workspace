@@ -41,6 +41,7 @@ from cw.dev_queue import load_dev_queue
 from cw.dev_queue.crud import _find_ticket
 from cw.exceptions import CwError
 from cw.models.orchestrator_config.stage import StageExecutorConfig
+from cw.review_convergence import LEDGER_RELATIVE_PATH, load_ledger
 from cw.worktree import resolve_task_worktree
 
 from ._group import review
@@ -113,6 +114,30 @@ def _worktree_state(worktree: Path) -> tuple[str, str]:
         msg = f"Cannot read the git state of worktree '{worktree}': {exc}"
         raise CwError(msg) from exc
     return head, status
+
+
+def _confirmation_base(*, worktree: Path, ticket_id: str, default_branch: str) -> str:
+    """Use the convergence ledger's fork point when one is available.
+
+    The independent round must review the same fork-point-anchored change set
+    as the loop. Direct command tests may run without a ledger, so retain the
+    explicit/client branch fallback for that non-convergence invocation shape.
+    """
+    path = worktree / LEDGER_RELATIVE_PATH
+    try:
+        ledger = load_ledger(path)
+    except (OSError, ValueError) as exc:
+        msg = f"cannot read the convergence ledger at {path}: {exc}"
+        raise CwError(msg) from exc
+    if ledger is None:
+        return default_branch
+    if ledger.ticket_id != ticket_id:
+        msg = (
+            f"convergence ledger at {path} belongs to ticket "
+            f"{ledger.ticket_id!r}, not {ticket_id!r}"
+        )
+        raise CwError(msg)
+    return ledger.fork_point
 
 
 def _run_round(
@@ -285,11 +310,17 @@ def review_confirm(
     if shutil.which(_BACKEND) is None:
         _unavailable("binary_missing", f"{_BACKEND} executable not found on PATH")
     before = _worktree_state(worktree)
+    configured_base = default_branch or client_config.default_branch
+    confirmation_base = _confirmation_base(
+        worktree=worktree,
+        ticket_id=ticket_id,
+        default_branch=configured_base,
+    )
 
     result, verdict = _run_round(
         task=task,
         worktree=worktree,
-        default_branch=default_branch or client_config.default_branch,
+        default_branch=confirmation_base,
         model=model,
         reasoning_effort=(
             reasoning_effort

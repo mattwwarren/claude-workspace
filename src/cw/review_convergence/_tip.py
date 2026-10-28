@@ -13,7 +13,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cw.review_convergence._models import TipVerdict
+from cw.review_convergence._models import (
+    LEDGER_STATUS_CONVERGED,
+    LEDGER_STATUS_IN_PROGRESS,
+    TipVerdict,
+)
 
 if TYPE_CHECKING:
     from cw.review_convergence._models import ConvergenceLedger
@@ -25,7 +29,9 @@ def finalize_ready(ledger: ConvergenceLedger) -> bool:
     ``record_round`` only reaches ``converged`` through the confirm rule, so an
     unconfirmed loop round can never satisfy this.
     """
-    return ledger.status == "converged" and ledger.last_clean_sha is not None
+    return (
+        ledger.status == LEDGER_STATUS_CONVERGED and ledger.last_clean_sha is not None
+    )
 
 
 def evaluate_tip(
@@ -61,8 +67,11 @@ def demote_for_rereview(ledger: ConvergenceLedger) -> ConvergenceLedger:
     because it is derived from ``status``. An already open ledger is returned
     unchanged.
     """
-    if ledger.status != "converged":
+    if ledger.status != LEDGER_STATUS_CONVERGED:
         return ledger
     return ledger.model_copy(
-        update={"status": "in_progress", "awaiting_confirm_sha": None}
+        update={
+            "status": LEDGER_STATUS_IN_PROGRESS,
+            "awaiting_confirm_sha": None,
+        }
     )

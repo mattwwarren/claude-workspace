@@ -23,6 +23,8 @@ from cw._hook_context import _read_cw_context
 from cw.models import Stage
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
+    LEDGER_STATUS_AWAITING_CONFIRM,
+    LEDGER_STATUS_IN_PROGRESS,
     ConvergenceLedger,
     detect_no_progress,
     load_ledger,
@@ -40,7 +42,9 @@ AGE_REASON_PREFIX = "age "
 
 #: Ledger statuses of a review that is still running. ``converged`` is waiting
 #: for finalize and ``stopped`` is parked, so neither is exempted.
-_IN_FLIGHT_STATUSES = frozenset({"in_progress", "awaiting_confirm"})
+_IN_FLIGHT_STATUSES = frozenset(
+    {LEDGER_STATUS_IN_PROGRESS, LEDGER_STATUS_AWAITING_CONFIRM}
+)
 
 #: A curve needs at least this many rounds to say anything about direction.
 _MIN_CURVE_POINTS = 2

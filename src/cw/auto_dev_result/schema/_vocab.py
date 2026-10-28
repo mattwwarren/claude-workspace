@@ -397,6 +397,9 @@ StageReached = Literal[
     "stage4b_pr_create",
     "stage5_post_create",
 ]
+# Runtime counterpart for producers and validators that need the canonical
+# Stage 3 wire identifier without repeating the literal (#2787).
+STAGE3_REVIEW: Literal["stage3_review"] = "stage3_review"
 # Short-form stage codes emitted by the auto-dev producer's resume-detection
 # substates (e.g. ``s5_ci_pending`` instead of ``stage5_post_create``).
 # ``AutoDevResult._normalize_stage_reached`` maps these to their nearest

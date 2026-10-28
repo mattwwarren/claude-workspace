@@ -17,9 +17,12 @@ from typing import TYPE_CHECKING
 
 from cw.auto_dev_result.schema._vocab import (
     CONFIRM_BACKEND_UNAVAILABLE_BLOCKER_REASON,
+    STAGE3_REVIEW,
 )
 from cw.gh import AGENT_COMMENT_MARKER
 from cw.review_convergence._models import (
+    LEDGER_STATUS_CONVERGED,
+    LEDGER_STATUS_STOPPED,
     STOP_MAX_CYCLES,
     STOP_NO_PROGRESS,
     STOP_OPERATOR_ACTION,
@@ -100,7 +103,7 @@ def stop_summary(ledger: ConvergenceLedger) -> dict[str, object] | None:
     now, and ``release_hint`` is the fixed per-reason instruction for what
     releases it.
     """
-    if ledger.status != "stopped":
+    if ledger.status != LEDGER_STATUS_STOPPED:
         return None
     reason = ledger.stop_reason or ""
     return {
@@ -182,7 +185,7 @@ def sentinel_review_fragment(ledger: ConvergenceLedger) -> dict[str, object]:
     ``agents_run`` and ``rejected_*`` counts when the ledger has them.
     ``final_round_clean_sha`` is set only for a converged ledger.
     """
-    converged = ledger.status == "converged"
+    converged = ledger.status == LEDGER_STATUS_CONVERGED
     fragment: dict[str, object] = {
         "convergence_mode": "clean",
         "rounds_run": len(ledger.rounds),
@@ -211,7 +214,7 @@ def confirm_blocker_fragment(
     requeue = f"cw dev-queue requeue {ledger.ticket_id} -c {client or '<C>'}"
     if not escalated:
         return {
-            "stage": "stage3_review",
+            "stage": STAGE3_REVIEW,
             "reason": CONFIRM_BACKEND_UNAVAILABLE_BLOCKER_REASON,
             "details": f"{failure.cause}: {failure.detail}",
             "recovery_hint": f"restore the confirm backend, then {requeue}",
@@ -220,7 +223,7 @@ def confirm_blocker_fragment(
         }
     count = consecutive_confirm_failures(ledger, cause=failure.cause)
     return {
-        "stage": "stage3_review",
+        "stage": STAGE3_REVIEW,
         "reason": "agent_block",
         "details": (
             f"confirm backend unavailable {count} times in a row with cause "

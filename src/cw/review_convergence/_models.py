@@ -24,6 +24,10 @@ GatingSeverity = Literal["MUST_FIX", "SHOULD_FIX"]
 RoundKind = Literal["loop", "confirm"]
 ConfirmBackend = Literal["codex", "claude", "none"]
 LedgerStatus = Literal["in_progress", "awaiting_confirm", "converged", "stopped"]
+LEDGER_STATUS_IN_PROGRESS: LedgerStatus = "in_progress"
+LEDGER_STATUS_AWAITING_CONFIRM: LedgerStatus = "awaiting_confirm"
+LEDGER_STATUS_CONVERGED: LedgerStatus = "converged"
+LEDGER_STATUS_STOPPED: LedgerStatus = "stopped"
 Decision = Literal[
     "clean",
     "continue",
@@ -250,7 +254,7 @@ class ConvergenceLedger(BaseModel):
     epoch_start_round: int = 0
     window_start_round: int = 0
     fix_cycles_used: int = 0
-    status: LedgerStatus = "in_progress"
+    status: LedgerStatus = LEDGER_STATUS_IN_PROGRESS
     stop_reason: str | None = None
     stop_identities: list[FindingIdentity] = Field(default_factory=list)
     releases: list[StopRelease] = Field(default_factory=list)

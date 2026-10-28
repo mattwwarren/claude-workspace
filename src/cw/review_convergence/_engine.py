@@ -24,6 +24,10 @@ from typing import TYPE_CHECKING
 from cw.review_convergence._findings import classify_findings
 from cw.review_convergence._identity import FindingIdentity, finding_identity
 from cw.review_convergence._models import (
+    LEDGER_STATUS_AWAITING_CONFIRM,
+    LEDGER_STATUS_CONVERGED,
+    LEDGER_STATUS_IN_PROGRESS,
+    LEDGER_STATUS_STOPPED,
     STOP_MAX_CYCLES,
     STOP_NO_PROGRESS,
     STOP_OPERATOR_ACTION,
@@ -99,7 +103,7 @@ def new_ledger(
 
 
 def _require_open_ledger(ledger: ConvergenceLedger) -> None:
-    if ledger.status in {"stopped", "converged"}:
+    if ledger.status in {LEDGER_STATUS_STOPPED, LEDGER_STATUS_CONVERGED}:
         msg = (
             f"cannot record a round on a {ledger.status} ledger; run "
             "'converge init' to reconcile it first"
@@ -110,7 +114,7 @@ def _require_open_ledger(ledger: ConvergenceLedger) -> None:
 def _require_confirm_preconditions(
     ledger: ConvergenceLedger, backend: str, reviewed_sha: str
 ) -> None:
-    if ledger.status != "awaiting_confirm":
+    if ledger.status != LEDGER_STATUS_AWAITING_CONFIRM:
         msg = (
             "a confirm round requires an awaiting_confirm ledger "
             f"(status is {ledger.status})"
@@ -218,20 +222,23 @@ def _transition(
     """The ledger fields a decision changes."""
     decision = outcome.decision
     if decision == "clean":
-        return {"status": "converged", "last_clean_sha": record.reviewed_sha}
+        return {
+            "status": LEDGER_STATUS_CONVERGED,
+            "last_clean_sha": record.reviewed_sha,
+        }
     if decision == "confirm_required":
         return {
-            "status": "awaiting_confirm",
+            "status": LEDGER_STATUS_AWAITING_CONFIRM,
             "awaiting_confirm_sha": record.reviewed_sha,
         }
     if decision == "continue":
         return {
-            "status": "in_progress",
+            "status": LEDGER_STATUS_IN_PROGRESS,
             "fix_cycles_used": ledger.fix_cycles_used + 1,
             "fixed": _fixed_after_continue(ledger, classified, record),
         }
     return {
-        "status": "stopped",
+        "status": LEDGER_STATUS_STOPPED,
         "stop_reason": outcome.reason,
         "stop_identities": outcome.stop_identities,
     }
@@ -329,7 +336,7 @@ def record_confirm_failure(
     ``stop_confirm_escalated`` and stays so until the run resets (R26).
     """
     candidate = ledger.awaiting_confirm_sha
-    if ledger.status != "awaiting_confirm" or candidate is None:
+    if ledger.status != LEDGER_STATUS_AWAITING_CONFIRM or candidate is None:
         msg = (
             "a confirm failure requires an awaiting_confirm ledger "
             f"(status is {ledger.status})"

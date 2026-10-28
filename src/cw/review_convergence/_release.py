@@ -15,7 +15,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cw.review_convergence._models import LedgerReset, Reconciled, StopRelease
+from cw.review_convergence._models import (
+    LEDGER_STATUS_CONVERGED,
+    LEDGER_STATUS_IN_PROGRESS,
+    LEDGER_STATUS_STOPPED,
+    LedgerReset,
+    Reconciled,
+    StopRelease,
+)
 from cw.review_convergence._policy import release_cause
 from cw.review_convergence._tip import demote_for_rereview
 
@@ -64,7 +71,7 @@ def _released(
         sha=head_sha,
     )
     update: dict[str, object] = {
-        "status": "in_progress",
+        "status": LEDGER_STATUS_IN_PROGRESS,
         "stop_reason": None,
         "stop_identities": [],
         "releases": [*ledger.releases, release],
@@ -139,8 +146,8 @@ def reconcile_ledger_for_init(
         reset_ledger = fresh.model_copy(update={"reset_history": [reset_entry]})
         return Reconciled(reset_ledger, reset, None)
     ledger = existing.model_copy(update={"max_cycles": max_cycles})
-    if ledger.status == "stopped":
+    if ledger.status == LEDGER_STATUS_STOPPED:
         return _reconcile_stopped(ledger, head_sha=head_sha, now=now)
-    if ledger.status == "converged" and head_sha != ledger.last_clean_sha:
+    if ledger.status == LEDGER_STATUS_CONVERGED and head_sha != ledger.last_clean_sha:
         return Reconciled(demote_for_rereview(ledger), None, None)
     return Reconciled(ledger, None, None)

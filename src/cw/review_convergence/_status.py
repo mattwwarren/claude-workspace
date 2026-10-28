@@ -12,6 +12,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
+from cw.review_convergence._models import (
+    LEDGER_STATUS_AWAITING_CONFIRM,
+    LEDGER_STATUS_CONVERGED,
+    LEDGER_STATUS_STOPPED,
+)
 from cw.review_convergence._render import sentinel_review_fragment, stop_summary
 
 if TYPE_CHECKING:
@@ -34,11 +39,14 @@ def next_action(ledger: ConvergenceLedger, *, head_sha: str) -> NextAction:
        (the fix cycle has not committed yet). Otherwise ``loop_round``: no
        round yet, or HEAD moved.
     """
-    if ledger.status == "converged" and head_sha == ledger.last_clean_sha:
+    if ledger.status == LEDGER_STATUS_CONVERGED and head_sha == ledger.last_clean_sha:
         return "done"
-    if ledger.status == "stopped":
+    if ledger.status == LEDGER_STATUS_STOPPED:
         return "stopped"
-    if ledger.status == "awaiting_confirm" and head_sha == ledger.awaiting_confirm_sha:
+    if (
+        ledger.status == LEDGER_STATUS_AWAITING_CONFIRM
+        and head_sha == ledger.awaiting_confirm_sha
+    ):
         return "confirm"
     if ledger.releases and ledger.releases[-1].round == len(ledger.rounds):
         return "loop_round"

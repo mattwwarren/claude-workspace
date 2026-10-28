@@ -489,7 +489,9 @@ def test_discarded_findings_round_is_not_recorded_clean_and_never_converges(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     head = harness.head()
-    ledger = ledger_with_rounds((), shas=[head], confirm="codex", ticket_id=_TICKET)
+    ledger = ledger_with_rounds(
+        (), shas=[head], confirm="codex", ticket_id=_TICKET, fork_point="main"
+    )
     assert ledger.status == "awaiting_confirm"
     ledger_path = write_ledger(harness.repo, ledger)
     before = ledger_path.read_bytes()
@@ -748,6 +750,35 @@ def test_arguments_to_run_review(harness: Harness) -> None:
     assert "disposition_drift_check_enabled" not in kwargs
     # cw imposes no deadline on any role (R20).
     assert all(call["timeout"] is None for call in runner.calls)
+
+
+@needs_codex
+def test_ledger_fork_point_overrides_divergent_default_branch(
+    harness: Harness,
+) -> None:
+    ledger_path = write_ledger(
+        harness.repo,
+        ledger_with_rounds(
+            (),
+            shas=[harness.head()],
+            confirm="codex",
+            ticket_id=_TICKET,
+            fork_point="main",
+        ),
+    )
+    assert ledger_path.exists()
+    seen: list[dict[str, object]] = []
+
+    def _stub(**kwargs: object) -> object:
+        seen.append(dict(kwargs))
+        raise OSError(_STOP)
+
+    harness.monkeypatch.setattr("cw.codex_review.run_review", _stub)
+
+    result, _runner = harness.invoke([], "--default-branch", "develop")
+
+    assert result.exit_code == _UNAVAILABLE
+    assert seen[0]["default_branch"] == "main"
 
 
 @needs_codex

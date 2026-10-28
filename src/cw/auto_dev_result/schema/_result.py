@@ -46,6 +46,7 @@ from cw.auto_dev_result.schema._vocab import (
     _V4_STATUSES,
     CONFIRM_BACKEND_UNAVAILABLE_BLOCKER_REASON,
     REVIEW_NOT_CONVERGING_BLOCKER_REASON,
+    STAGE3_REVIEW,
     PlanSource,
     SchemaVersion,
     StageReached,
@@ -508,7 +509,7 @@ class AutoDevResult(BaseModel):
         """#2787: clean-mode Stage 3 success needs ``converged``; the two
         convergence blockers forbid it."""
         if (
-            self.stage_reached == "stage3_review"
+            self.stage_reached == STAGE3_REVIEW
             and self.status in ("review_pending_approval", "stage_complete")
             and self.review.convergence_mode == "clean"
             and self.review.converged is not True

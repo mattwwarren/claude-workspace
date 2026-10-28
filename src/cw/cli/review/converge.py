@@ -38,6 +38,7 @@ from cw.models import HOOK_CONTEXT_RELATIVE_PATH
 from cw.models.client import DEFAULT_BLOCKING_MAX_CYCLES, DEFAULT_CLEAN_MAX_CYCLES
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
+    LEDGER_STATUS_STOPPED,
     ResolvedBackend,
     RoundFinding,
     RoundInput,
@@ -382,7 +383,7 @@ def _init_report(reconciled: Reconciled) -> dict[str, object]:
     }
     if reconciled.released is not None:
         report["released"] = reconciled.released.model_dump(mode="json")
-    if ledger.status == "stopped":
+    if ledger.status == LEDGER_STATUS_STOPPED:
         report["stop"] = stop_summary(ledger)
         report["reemitted"] = True
     return report
@@ -713,7 +714,9 @@ def converge_history_comment(out: Path, ledger_rel: Path) -> None:
     ledger = load_ledger_or_none(ledger_rel)
     written = ledger is not None and bool(ledger.rounds)
     if ledger is not None and written:
-        stop_reason = ledger.stop_reason if ledger.status == "stopped" else None
+        stop_reason = (
+            ledger.stop_reason if ledger.status == LEDGER_STATUS_STOPPED else None
+        )
         out.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(out, render_history_comment(ledger, stop_reason))
     emit_json({"written": written, "out": str(out)})
