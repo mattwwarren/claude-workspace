@@ -787,6 +787,19 @@ def test_sentinel_rounds_run_mismatch_keeps_the_ledger(tmp_path: Path) -> None:
 # --- blocking mode ---------------------------------------------------------------
 
 
+def test_blocking_sentinel_without_counts_has_no_rounds(tmp_path: Path) -> None:
+    task = _task(session_id=ACME_SESSION)
+    session = _session(
+        task, ACME_SESSION, last_result=sentinel_review({"fix_cycles_used": 1})
+    )
+
+    history = _history(task, tmp_path, sessions=[session])
+
+    assert history.rounds == []
+    assert history.summary.convergence_mode == "blocking"
+    assert _notes_with(history, "no must_fix_initial/should_fix")
+
+
 def test_blocking_mode_degraded_view(tmp_path: Path) -> None:
     task = _task(session_id=ACME_SESSION, finding_dispositions=blocking_dispositions())
     session = _session(task, ACME_SESSION, last_result=fixture_blocking_sentinel())

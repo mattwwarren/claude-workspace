@@ -170,6 +170,39 @@ def test_text_is_single_line_and_never_truncated(tmp_path: Path) -> None:
     _assert_invariants(text)
 
 
+def test_unrecorded_values_and_long_walls_render(tmp_path: Path) -> None:
+    fixture_stopped().write(derived_worktree(tmp_path))
+    history, _ = _render(tmp_path, _task())
+    bare = history.rounds[0].model_copy(
+        update={
+            "new_accepted": None,
+            "new_settled": None,
+            "resurfaced_settled": None,
+            "settled_total": None,
+            "fix_dispatched": None,
+            "wall_seconds": 3725.0,
+        }
+    )
+    history = history.model_copy(
+        update={
+            "rounds": [
+                bare,
+                history.rounds[1].model_copy(update={"wall_seconds": -5.0}),
+            ],
+            "summary": history.summary.model_copy(update={"stop_identities": []}),
+        }
+    )
+
+    lines = render_review_history(history).splitlines()
+
+    assert "stop: oscillation" in lines
+    assert "  new_findings: not recorded" in lines
+    assert "  settled: not recorded" in lines
+    assert "  fix_dispatched: not recorded" in lines
+    assert "  wall_time: 1h02m05s" in lines
+    assert "  wall_time: -0m05s" in lines
+
+
 @pytest.mark.parametrize("notes_present", [True, False])
 def test_notes_block_is_always_printed(tmp_path: Path, notes_present: bool) -> None:
     fixture_converged().write(derived_worktree(tmp_path))
