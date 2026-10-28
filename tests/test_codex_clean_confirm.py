@@ -27,8 +27,10 @@ from cw.codex_clean_confirm import (
 from cw.codex_review import (
     CODEX_CONVERGENCE_LEDGER_ERROR,
     CODEX_MUST_FIX_FINDINGS,
+    CODEX_REVIEW_PARTIAL,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_REVIEW_WORKTREE_MUTATED,
+    CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
     make_codex_blocked,
     synthesize_codex_review_result,
 )
@@ -709,32 +711,76 @@ class TestOutage:
 # ---------------------------------------------------------------------------
 
 
-def _partial_role() -> Callable[[str], ClaudeRunResult]:
+def _first_role_fails(
+    bad: Callable[[str], ClaudeRunResult],
+) -> Callable[[str], ClaudeRunResult]:
+    """The first role answers with *bad*; every later role answers clean."""
     seen: list[str] = []
 
     def _respond(role: str) -> ClaudeRunResult:
         seen.append(role)
-        return _error_role(role) if len(seen) == 1 else _clean_role(role)
+        return bad(role) if len(seen) == 1 else _clean_role(role)
 
     return _respond
 
 
 class TestHealthyBackendFailures:
+    # The synthesized codex_* contract (docs/headless-contract.md, retry_eligible:
+    # true only when a failed role was transient, else null = orchestrator
+    # triage). No document at all is codex_review_unparseable; the per-role
+    # cause stays in details. A reviewer whose findings were discarded unread
+    # is only called out as such when other roles still produced documents.
     @pytest.mark.parametrize(
-        "respond",
-        [_timeout_role, _discarding_role, _partial_role()],
-        ids=["timeout", "discarded", "partial"],
+        ("respond", "reason", "retry_eligible", "role_cause"),
+        [
+            (_timeout_role, CODEX_REVIEW_UNPARSEABLE, True, "codex_timeout"),
+            (
+                _discarding_role,
+                CODEX_REVIEW_UNPARSEABLE,
+                None,
+                "codex_review_unparseable",
+            ),
+            (
+                _first_role_fails(_discarding_role),
+                CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
+                None,
+                "codex_review_unparseable",
+            ),
+            (
+                _first_role_fails(_error_role),
+                CODEX_REVIEW_PARTIAL,
+                None,
+                "codex_error",
+            ),
+            (
+                _first_role_fails(_timeout_role),
+                CODEX_REVIEW_PARTIAL,
+                True,
+                "codex_timeout",
+            ),
+        ],
+        ids=[
+            "timeout",
+            "discarded_all",
+            "discarded_some",
+            "partial_error",
+            "partial_timeout",
+        ],
     )
     def test_the_round_is_returned_unchanged(
-        self, wt: Path, respond: Callable[[str], ClaudeRunResult]
+        self,
+        wt: Path,
+        respond: Callable[[str], ClaudeRunResult],
+        reason: str,
+        retry_eligible: bool | None,
+        role_cause: str,
     ) -> None:
         outcome = _apply(wt, _client(wt), RoleAwareClaudeRunner(respond))
         blocker = outcome.result.blocker
         assert blocker is not None
-        assert blocker.reason not in (
-            CODEX_MUST_FIX_FINDINGS,
-            "confirm_backend_unavailable",
-        )
+        assert blocker.reason == reason
+        assert blocker.retry_eligible is retry_eligible
+        assert role_cause in blocker.details
         assert blocker.details.startswith(CLAUDE_BACKEND_DETAILS_PREFIX)
         assert outcome.reviewer_label == "Claude"
         assert outcome.result.review.convergence_mode is None
