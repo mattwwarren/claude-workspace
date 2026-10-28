@@ -23,7 +23,8 @@ Shapes replaced, paths first, then secrets:
     5. the user segment of pytest's tmp root `pytest-of-<u>`  -> `pytest-of-<redacted>`
     6. secret shapes (a superset of `cw._text._SECRET_PATTERNS`) -> `<redacted>`
 
-The `/home/<u>`, `/Users/<u>`, `~<u>` and `~` shapes only match at the start of a path
+The `/home/<u>`, `/Users/<u>`, `~<u>` and `~` shapes, and the literal `$HOME` and
+`--worktree` values, only match at the start of a path
 (start of text, or after a character other than a word character, `.`, `/` or
 `-`), so a repo-relative `web/src/home/Hero.tsx` or a URL path `/Users/guide` is
 left alone.
@@ -171,7 +172,7 @@ def _home_prefixes(home: str) -> str:
     """The alternation of every home-directory spelling, *home* included."""
     alternatives = [_USER_HOMES, rf"{_PATH_START}~"]
     if home:
-        alternatives.append(re.escape(home))
+        alternatives.append(rf"{_PATH_START}{re.escape(home)}")
     return "|".join(alternatives)
 
 
@@ -180,7 +181,11 @@ def redact_paths(text: str, *, home: str, worktrees: Sequence[str]) -> str:
     usable_home = _normalize_path_value(home)
     usable_worktrees = {_normalize_path_value(w) for w in worktrees} - {""}
     for worktree in sorted(usable_worktrees, key=len, reverse=True):
-        text = re.sub(re.escape(worktree) + _NOT_MID_NAME, WORKTREE_PLACEHOLDER, text)
+        text = re.sub(
+            _PATH_START + re.escape(worktree) + _NOT_MID_NAME,
+            WORKTREE_PLACEHOLDER,
+            text,
+        )
     prefixes = _home_prefixes(usable_home)
     text = re.sub(
         rf"(?:{prefixes})/\.cw/wt/{_SEGMENT}(?:/{_SEGMENT})?",
@@ -193,7 +198,11 @@ def redact_paths(text: str, *, home: str, worktrees: Sequence[str]) -> str:
         text,
     )
     if usable_home:
-        text = re.sub(re.escape(usable_home) + _NOT_MID_NAME, HOME_PLACEHOLDER, text)
+        text = re.sub(
+            _PATH_START + re.escape(usable_home) + _NOT_MID_NAME,
+            HOME_PLACEHOLDER,
+            text,
+        )
     text = re.sub(rf"(?:{_USER_HOMES}){_NOT_MID_NAME}", HOME_PLACEHOLDER, text)
     return _PYTEST_USER_DIR.sub(rf"\1{REDACTION_PLACEHOLDER}", text)
 

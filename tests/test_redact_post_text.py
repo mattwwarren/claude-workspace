@@ -192,6 +192,42 @@ def test_username_path_shapes_leave_lookalikes_alone(text: str) -> None:
     assert _redact(text, home="/srv/other") == text
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("/srv/root/x.py", "/srv/root/x.py"),
+        ("a.b/root/x", "a.b/root/x"),
+        ("/root/x.py", "<home>/x.py"),
+        ("(/root/x)", "(<home>/x)"),
+        ("path=/root/x", "path=<home>/x"),
+        ("/root/.cw/wt/ab12/dev-1/y", "<worktree>/y"),
+        ("/srv/root/.cw/wt/ab12/dev-1/y", "/srv/root/.cw/wt/ab12/dev-1/y"),
+        ("/root/.claude/projects/-a/b.jsonl", TRANSCRIPT_REDACTED),
+        ("/srv/root/.claude/projects/-a/b", "/srv/root/.claude/projects/-a/b"),
+    ],
+)
+def test_literal_home_only_matches_at_a_path_start(text: str, expected: str) -> None:
+    """HOME=/root is the container default; it must not mangle `/srv/root/x`."""
+    assert _redact(text, home="/root") == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("src/cw/wt-7/x", "src/cw/wt-7/x"),
+        ("/srv/wt-7/x", "<worktree>/x"),
+        ("see (/srv/wt-7/x)", "see (<worktree>/x)"),
+        ("cwd=/srv/wt-7", "cwd=<worktree>"),
+    ],
+)
+def test_explicit_worktree_only_matches_at_a_path_start(
+    text: str, expected: str
+) -> None:
+    assert _redact(text, worktrees=("/srv/wt-7",)) == expected
+    assert _redact("src/cw/wt-7/x", worktrees=("/wt-7",)) == "src/cw/wt-7/x"
+    assert _redact("/wt-7/x", worktrees=("/wt-7",)) == "<worktree>/x"
+
+
 def test_dotted_username_is_one_home() -> None:
     assert _redact("/home/jane.doe/x") == "<home>/x"
 
