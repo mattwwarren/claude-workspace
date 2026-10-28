@@ -8,6 +8,7 @@ through the real engine and every verdict through the real
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1762,6 +1763,22 @@ class TestHistoryRewritten:
         head = git_in(repo, "rev-parse", "HEAD")
         with pytest.raises(CwError, match=r"failed .* with exit 128"):
             history_rewritten(self._ledger_at("f" * 40), repo, head)
+
+    def test_a_long_git_error_is_collapsed_to_one_bounded_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stderr = "fatal:\n" + "x " * 400
+
+        def _failing_git(argv: list[str], **_kwargs: object) -> object:
+            return subprocess.CompletedProcess(argv, 128, "", stderr)
+
+        monkeypatch.setattr("cw.review_convergence._release.run_git", _failing_git)
+        with pytest.raises(CwError) as raised:
+            history_rewritten(self._ledger_at("a" * 40), tmp_path, "HEAD")
+        message = str(raised.value)
+        assert "\n" not in message
+        assert message.endswith("...")
+        assert "fatal: x x" in message
 
     def test_git_that_cannot_run_raises_cw_error(self, tmp_path: Path) -> None:
         with pytest.raises(CwError, match="could not run"):
