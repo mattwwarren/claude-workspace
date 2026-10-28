@@ -5,8 +5,8 @@ an ``operator_action`` checklist is released without a commit only once every
 recurring finding is settled. ``operator-settle`` is how the operator, on the
 machine that dispatches, records "this recurring finding is a false positive" in
 the ledger's settled memory. It reuses ``cw review settle``'s audit contract
-(refuse inside a worker, a gh identity, a reason, an audit event before the
-write) but keys on the ledger's finding identity, which is defined for a finding
+(refuse inside a worker, a gh identity, a reason, an audit event per settle)
+but keys on the ledger's finding identity, which is defined for a finding
 with no diff anchor (``file: "N/A"``) where ``cw review settle``'s ledger
 builder is not.
 
@@ -19,8 +19,11 @@ Steps, in the order that matters:
 3. Match every entry against the identities the ledger has recorded. Any
    unmatched entry (a mis-copied anchor, #2319) prints the full JSON, exits 1
    and writes nothing, even when other entries matched.
-4. Emit one ``review.finding_settled`` event per settled identity, THEN save the
-   ledger: an emit failure aborts before the write.
+4. Save the ledger, THEN emit one ``review.finding_settled`` event per settled
+   identity. The ledger is the authoritative write; an emit failure exits 1
+   with the settle already saved, and re-running the same payload refreshes the
+   same one-entry-per-identity ledger entries (no duplicate settle) and records
+   the missing events.
 5. Look the row up again. If a worker started in between, one of two ledger
    writes may have been lost, so print a warning and exit 1; re-running is
    idempotent.
@@ -122,9 +125,10 @@ def _emit_operator_settle_events(
 ) -> None:
     """One ``review.finding_settled`` audit event per settled identity.
 
-    Raises rather than degrading, as ``cw review settle`` does: the caller must
-    not write the ledger for a finding whose audit did not record, so an emit
-    failure aborts the whole settle, before any write.
+    Runs after the ledger write. Raises rather than degrading, as ``cw review
+    settle`` does: the settle is already saved, so a failure names the re-run
+    that records the missing events. A re-run matches the same identities,
+    refreshes their one ledger entry (newest wins) and emits the events again.
     """
     from cw.events import record_event
 
@@ -139,10 +143,10 @@ def _emit_operator_settle_events(
             msg = (
                 "Could not record the review.finding_settled audit event for "
                 f"{entry.identity.file} ({entry.identity.summary_normalized!r}): "
-                f"{exc}. Nothing was written. A suppression with no audit "
-                "record is invisible, so the settle is refused rather than "
-                "recorded half-way. Fix the event store and re-run the same "
-                "payload."
+                f"{exc}. The ledger settle was saved, but a suppression with "
+                "no audit record is invisible. Fix the event store and re-run "
+                "the same payload: it refreshes the same ledger entries (no "
+                "duplicate) and records the missing events."
             )
             raise CwError(msg) from exc
 
@@ -203,8 +207,10 @@ def converge_operator_settle(
     (all or nothing). There is no flag that bypasses the match.
 
     The ledger is the row's worktree ledger unless --ledger names one; either
-    way its ticket must be --ticket-id. Emits one `review.finding_settled`
-    event per settled identity BEFORE writing the ledger. Refused inside a
+    way its ticket must be --ticket-id. Writes the ledger, then emits one
+    `review.finding_settled` event per settled identity; if the emit fails,
+    re-run the same payload (one ledger entry per identity, so nothing
+    duplicates) to record the events. Refused inside a
     headless worker, with a blank --reason, with no gh identity, and while the
     row is RUNNING.
     """
@@ -244,8 +250,8 @@ def converge_operator_settle(
         )
         raise click.exceptions.Exit(1)
 
-    _emit_operator_settle_events(report.settled, ticket_id)
     save_ledger(target_path, updated)
+    _emit_operator_settle_events(report.settled, ticket_id)
     result: dict[str, object] = {
         "ledger": str(target_path),
         "settled": [e.model_dump(mode="json") for e in report.settled],

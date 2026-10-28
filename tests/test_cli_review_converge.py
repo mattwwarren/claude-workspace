@@ -564,11 +564,27 @@ class TestInit:
         self, runner: CliRunner, wt: Path, ctx: Path
     ) -> None:
         """The last round's sha is not an ancestor of HEAD (a regress rewrote it)."""
-        write_ledger(wt, ledger_with_rounds(_dirty(1, "x"), shas=["0" * 40]))
+        commit_tracked_file(wt, "rewritten.py")
+        orphan = _head(wt)
+        git_in(wt, "reset", "--hard", "HEAD~1")
+        write_ledger(wt, ledger_with_rounds(_dirty(1, "x"), shas=[orphan]))
         result = _init(runner, wt, ctx)
         assert result.exit_code == 0, result.output
         assert _out(result)["reset_reason"] == "history_rewritten"
         assert _stored(wt).rounds == []
+
+    def test_a_git_failure_is_an_error_not_a_history_rewrite(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        """An unknown object is exit 128: git failed, the history said nothing."""
+        write_ledger(wt, ledger_with_rounds(_dirty(1, "x"), shas=["0" * 40]))
+        before = _ledger_path(wt).read_bytes()
+        result = _init(runner, wt, ctx)
+        assert result.exit_code == 1
+        assert "git merge-base --is-ancestor failed" in result.stderr
+        assert "exit 128" in result.stderr
+        assert isinstance(result.exception, SystemExit)
+        assert _ledger_path(wt).read_bytes() == before
 
     def test_a_round_on_an_ancestor_resumes(
         self, runner: CliRunner, wt: Path, ctx: Path
@@ -981,6 +997,42 @@ class TestRecordRound:
         stored = wt / ".cw" / "review-convergence" / "round-1-verdict.json"
         assert json.loads(stored.read_text(encoding="utf-8"))["reviewed_sha"] == head
         assert out.read_text(encoding="utf-8") == stored.read_text(encoding="utf-8")
+
+    def test_a_failed_ledger_commit_is_recovered_by_the_next_call(
+        self,
+        runner: CliRunner,
+        wt: Path,
+        ctx: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The ledger write is the commit point: dying before it loses nothing."""
+        head = _head(wt)
+        _init(runner, wt, ctx)
+        before = _ledger_path(wt).read_bytes()
+        out = tmp_path / "verdict.json"
+        payload = _verdict_round(
+            "loop", LOOP_BACKEND, head, _fixed_verdict(head, "Bug A")
+        )
+        with monkeypatch.context() as crash:
+            crash.setattr(
+                "cw.cli.review.converge.save_ledger",
+                _raiser(OSError("No space left on device")),
+            )
+            failed = _record_verdict(runner, wt, payload, "--out-verdict", str(out))
+        assert failed.exit_code == 1
+        assert isinstance(failed.exception, OSError)
+        assert _ledger_path(wt).read_bytes() == before
+        assert _stored(wt).rounds == []
+
+        retried = _record_verdict(runner, wt, payload, "--out-verdict", str(out))
+        assert retried.exit_code == 0, retried.stderr
+        assert _out(retried)["round"] == 1
+        assert len(_stored(wt).rounds) == 1
+        stored = wt / ".cw" / "review-convergence" / "round-1-verdict.json"
+        assert json.loads(stored.read_text(encoding="utf-8"))["reviewed_sha"] == head
+        assert out.read_text(encoding="utf-8") == stored.read_text(encoding="utf-8")
+        assert len(list(stored.parent.glob("round-*-verdict.json"))) == 1
 
     def test_a_findings_round_writes_no_verdict_file(
         self, runner: CliRunner, wt: Path, ctx: Path
@@ -2248,19 +2300,27 @@ class TestOperatorSettleRefusals:
         assert "--allow-unmatched" not in helped.stdout
         self._assert_untouched(wt, before)
 
-    def test_an_event_store_failure_aborts_before_the_ledger_write(
+    def test_an_event_store_failure_keeps_the_settle_and_a_rerun_records_the_event(
         self, runner: CliRunner, wt: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         before = _stage_oscillation(wt)
 
-        monkeypatch.setattr(
-            "cw.events.record_event", _raiser(OSError("No space left on device"))
-        )
-        result = _operator_settle(runner, _targets(_RECURRING))
-        assert result.exit_code == 1
-        assert "Nothing was written" in result.stderr
-        assert "No space left on device" in result.stderr
-        assert _ledger_path(wt).read_bytes() == before
+        with monkeypatch.context() as outage:
+            outage.setattr(
+                "cw.events.record_event", _raiser(OSError("No space left on device"))
+            )
+            failed = _operator_settle(runner, _targets(_RECURRING))
+        assert failed.exit_code == 1
+        assert "The ledger settle was saved" in failed.stderr
+        assert "No space left on device" in failed.stderr
+        assert _ledger_path(wt).read_bytes() != before
+        assert len(_stored(wt).settled) == 1
+        assert _settle_events() == []
+
+        rerun = _operator_settle(runner, _targets(_RECURRING))
+        assert rerun.exit_code == 0, rerun.stdout + rerun.stderr
+        assert len(_stored(wt).settled) == 1
+        assert len(_settle_events()) == 1
 
     def test_a_ledger_for_another_ticket_via_the_row(
         self, runner: CliRunner, wt: Path

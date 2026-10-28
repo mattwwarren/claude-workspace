@@ -77,6 +77,8 @@ _REVIEW_CONTEXT_SCHEMA = 15
 _DEFAULT_LOOP_BACKEND = "claude-native"
 _PREP_PR_LEDGER_RELATIVE_PATH = Path(".cw/prep-pr-convergence.json")
 _REPORT_REASON_LIMIT = 300
+#: ``git merge-base --is-ancestor`` exit for the confirmed "not an ancestor".
+_NOT_ANCESTOR_EXIT = 1
 
 DISPATCH_REFUSAL = (
     "clean-mode review runs only on a ticket dispatched through cw dev-queue "
@@ -339,9 +341,11 @@ def _history_rewritten(
 ) -> bool:
     """True when the last recorded round's sha is no longer an ancestor of HEAD.
 
-    ``git merge-base --is-ancestor`` exits 1 for "not an ancestor" and 128 for
-    an unknown commit; both mean the branch history moved under the ledger, so
-    it cannot be trusted (more review, never a skipped one).
+    ``git merge-base --is-ancestor`` exits 1 only for the confirmed "not an
+    ancestor" answer, which means the branch history moved under the ledger
+    (more review, never a skipped one). Any other nonzero exit (128 for an
+    unknown object, a broken repository) is a git failure that says nothing
+    about the history, so it raises rather than discarding a valid ledger.
     """
     if existing is None or not existing.rounds:
         return False
@@ -355,7 +359,15 @@ def _history_rewritten(
     except OSError as exc:
         msg = f"git merge-base could not run in {worktree}: {exc}"
         raise CwError(msg) from exc
-    return result.returncode != 0
+    if result.returncode == 0:
+        return False
+    if result.returncode == _NOT_ANCESTOR_EXIT:
+        return True
+    msg = (
+        f"git merge-base --is-ancestor failed in {worktree} with exit "
+        f"{result.returncode}: {_one_line(result.stderr)}"
+    )
+    raise CwError(msg)
 
 
 def _init_report(reconciled: Reconciled) -> dict[str, object]:
@@ -562,7 +574,10 @@ def converge_record_round(
     round-verdict file, no --out-verdict file.
 
     A verdict payload also persists the verdict as round-<n>-verdict.json
-    beside the ledger, which each fix cycle's verify-fixes reads back.
+    beside the ledger, which each fix cycle's verify-fixes reads back. The
+    ledger is written last, as the commit point: if the command dies between
+    the files and the ledger, re-running the same payload rewrites the files at
+    the same names and then commits the round.
     """
     payload = _parse_payload_or_exit(path, RoundInput)
     ledger = require_ledger(ledger_rel)
@@ -581,6 +596,11 @@ def converge_record_round(
         unread=unread,
         frozen=frozen,
     )
+    # The ledger write is the commit point and comes last. The verdict files are
+    # derived data named by the round number the ledger is about to assign, so a
+    # crash before the commit leaves only files the next call rewrites at the
+    # same names from the same ledger state (idempotent re-run); no reader
+    # resolves a round the ledger does not list.
     if payload.verdict is not None:
         save_round_verdict(ledger_rel, report.round, payload.verdict)
         if out_verdict is not None:
