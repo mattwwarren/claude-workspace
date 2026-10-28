@@ -11,7 +11,7 @@ from click.testing import CliRunner, Result
 from cw.cli import main
 from cw.config import clients_file, dev_queue_file, state_file
 from cw.events import inbox_path
-from cw.models import QueueItemStatus
+from cw.models import QueueItemStatus, Stage
 from cw.models.review_history import ReviewHistory
 from cw.review_convergence import LEDGER_RELATIVE_PATH
 from tests._cli_review_helpers import _enter_operator_machine, _seed_review_row
@@ -51,6 +51,7 @@ from tests._ticket_view_helpers import (
     bound_session_for,
     install_acme_client,
     make_task,
+    seed_queue,
 )
 
 if TYPE_CHECKING:
@@ -180,6 +181,39 @@ def test_unknown_ticket_exits_one(args: tuple[str, ...]) -> None:
 
     assert result.exit_code == 1
     assert "No dev-queue task found" in result.output
+
+
+def test_duplicate_rows_for_one_client_are_noted() -> None:
+    old = make_task(stage=Stage.REVIEW, status=QueueItemStatus.COMPLETED)
+    new = make_task(stage=Stage.REVIEW, status=QueueItemStatus.RUNNING)
+    seed_queue([old, new, make_task(client=OTHER, stage=Stage.REVIEW)])
+
+    text = _invoke(ACME_TICKET, "-c", ACME)
+    as_json = _invoke(ACME_TICKET, "-c", ACME, "--json")
+
+    note = (
+        "1 other dev-queue row(s) for this ticket and client; showing the one "
+        "`cw dev-queue show` selects"
+    )
+    assert text.exit_code == 0, text.output
+    assert f"  - {note}" in text.output.splitlines()
+    assert as_json.exit_code == 0, as_json.output
+    history = ReviewHistory.model_validate_json(as_json.output)
+    assert history.row_status == "running"
+    assert note in history.notes
+
+
+def test_single_row_has_no_duplicate_row_note() -> None:
+    seed_queue([make_task(stage=Stage.REVIEW), make_task(client=OTHER)])
+
+    text = _invoke(ACME_TICKET, "-c", ACME)
+    as_json = _invoke(ACME_TICKET, "-c", ACME, "--json")
+
+    assert text.exit_code == 0, text.output
+    assert "other dev-queue row" not in text.output
+    assert as_json.exit_code == 0, as_json.output
+    notes = ReviewHistory.model_validate_json(as_json.output).notes
+    assert not [n for n in notes if "other dev-queue row" in n]
 
 
 def test_ticket_under_two_clients_needs_c() -> None:

@@ -14,6 +14,7 @@ under ``notes``.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -104,6 +105,9 @@ def review_history(
     `review.finding_voided` event whose finding is already in the row's
     settled records. The rest are counted under `notes`, never shown.
 
+    A re-enqueued ticket has several rows for the same client: the one `cw
+    dev-queue show` selects is replayed and the rest are counted under `notes`.
+
     Without -c, fails if the ticket is queued under more than one client.
     """
     store = load_dev_queue()
@@ -115,6 +119,19 @@ def review_history(
         _state_or_none(),
         worktree_override=worktree,
     )
+    other_rows = (
+        sum(1 for t in store.tasks if t.ticket_id == ticket_id and t.client == resolved)
+        - 1
+    )
+    if other_rows:
+        inputs = replace(
+            inputs,
+            notes=(
+                *inputs.notes,
+                f"{other_rows} other dev-queue row(s) for this ticket and client; "
+                "showing the one `cw dev-queue show` selects",
+            ),
+        )
     history = build_review_history(inputs)
     if output_json:
         click.echo(history.model_dump_json())
