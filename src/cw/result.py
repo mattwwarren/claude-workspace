@@ -127,7 +127,7 @@ def result() -> None:
     emit --help``).
 
     Field rules (``cw schema show auto-dev-result`` is authoritative):
-    - schema_version: int -- one of the accepted versions (currently 1-8)
+    - schema_version: int -- one of the accepted versions (currently 1-9)
     - ticket_id: str
     - status: "shipped" | "stage_complete" | "no_op" | "blocked" |
       "merge_pending" | "merge_gate_blocked" | "plan_pending_approval" |

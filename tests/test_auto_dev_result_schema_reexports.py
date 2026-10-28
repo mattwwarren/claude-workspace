@@ -2,7 +2,7 @@
 
 The flat ``schema.py`` -> ``cw/auto_dev_result/schema/`` package split must
 preserve every ``from cw.auto_dev_result.schema import X`` call site unchanged —
-most importantly the 49-name re-export block in
+most importantly the 53-name re-export block in
 ``cw/auto_dev_result/__init__.py``, which is the surface every
 ``from cw.auto_dev_result import X`` site across ``src/`` and ``tests/`` reaches
 through. This mirrors ``tests/test_review_findings_reexports.py``'s
@@ -25,7 +25,7 @@ from cw.auto_dev_result.schema import AutoDevResult, Blocker
 
 # The complete re-export surface: every top-level name the flat ``schema.py``
 # bound before the split, plus later deliberate additions (``RealCommitOutcome``,
-# #1745). 49 of these are re-exported one level out by
+# #1745). 53 of these are re-exported one level out by
 # ``cw.auto_dev_result.__init__``; ``SchemaVersion`` is deliberately excluded
 # from that outer block (``parse.py`` imports it from here directly).
 EXPECTED_EXPORTS = {
