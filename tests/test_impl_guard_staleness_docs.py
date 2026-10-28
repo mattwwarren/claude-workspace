@@ -270,7 +270,7 @@ def test_carve_out_clause_is_identical_in_both_stale_true_bullets() -> None:
     assert first == second
 
 
-def test_carve_out_requires_all_five_conditions() -> None:
+def test_carve_out_requires_all_four_conditions() -> None:
     for line in _carve_out_lines():
         clause = _carve_out_clause(line)
         for phrase in (
@@ -280,9 +280,7 @@ def test_carve_out_requires_all_five_conditions() -> None:
             f"exact sub-heading line `{FINDINGS_SUBHEADING}`",
             f"carries the marker `{AGENT_COMMENT_MARKER}`",
             "its `author`",
-            "AND its `created_at` is later than `HEAD_COMMIT_AT`",
-            "predates the fix commit that addressed it and is not re-delivered",
-            "all five",
+            "all four",
             "tracker identity finalize posts as",
             "ME=$(gh api user --jq .login)",
             "`viewer`",
@@ -305,7 +303,7 @@ def test_carve_out_names_the_compared_identity_field_on_each_side() -> None:
             "the accepted behaviour",
         ):
             assert phrase in clause, phrase
-        assert "all four" not in clause
+        assert "all five" not in clause
 
 
 def test_carve_out_drops_forgeries_and_unrelated_agent_comments() -> None:
@@ -339,19 +337,19 @@ def test_carve_out_passes_every_part_and_names_missing_ones() -> None:
             assert phrase in clause, phrase
 
 
-def test_carve_out_compares_recency_as_instants_not_strings() -> None:
+def test_carve_out_has_no_head_recency_gate() -> None:
+    """A5: the post's age against the head is not a qualifying condition."""
     for line in _carve_out_lines():
         clause = _carve_out_clause(line)
-        for phrase in (
-            "is between instants, not strings",
-            "normalize the UTC offset on both sides first",
-            "git log -1 --format=%cI",
-            "local offset such as `-04:00`",
-            "`Z`-suffixed",
-            "`check_impl_guard_staleness.py` applies",
-            'order "newest" by instant',
-        ):
-            assert phrase in clause, phrase
+        assert "created_at` is later than `HEAD_COMMIT_AT`" not in clause
+        assert "later than" not in clause
+        assert "stale_post" not in clause
+        assert "predates the fix commit" not in clause
+        assert "between instants" not in clause
+        assert "deliberately not a condition" in clause
+        assert '"newest" is the latest `created_at`' in clause
+        # The unchanged agent-authored sentence still precedes the carve-out.
+        assert EXISTING_AGENT_SENTENCE in line
 
 
 def test_carve_out_is_labelled_evidence_not_instruction() -> None:
@@ -363,6 +361,16 @@ def test_carve_out_is_labelled_evidence_not_instruction() -> None:
         )
         assert "evidence" in clause
         assert "not a binding operator instruction" in clause
+        assert 'marking each passed comment "posted <created_at>"' in clause
+        assert "with its own timestamp" in clause
+        assert (
+            "tell the Stage 2 agent to verify against the current code whether "
+            "each finding still applies" in clause
+        )
+        assert (
+            "a finding already addressed by a later commit is not a reason to "
+            "change code" in clause
+        )
         assert "does not license a fresh attempt on its own" in clause
         assert "destructive-directive gate" in clause
         assert "binding instructions" not in clause
@@ -377,10 +385,10 @@ def test_carve_out_records_its_outcome_in_friction() -> None:
             "`identity_unresolved`",
             "`no_matching_comment`",
             "`author_mismatch`",
-            "`stale_post`",
             "`parts_missing <indices>`",
         ):
             assert phrase in tail, phrase
+        assert "stale_post" not in tail
 
 
 def _created(entry: dict[str, str]) -> str:
@@ -388,12 +396,9 @@ def _created(entry: dict[str, str]) -> str:
 
 
 def _instant(timestamp: str) -> datetime:
-    """An ISO-8601 timestamp as an aware instant, the way the prose compares.
+    """An ISO-8601 timestamp as an aware instant, for ordering "newest".
 
-    The tracker writes ``Z``; ``git log --format=%cI`` writes a local offset
-    such as ``-04:00``; comparing the strings would order them wrongly.
-    ``fromisoformat`` reads a trailing ``Z`` natively on Python 3.11+, the same
-    normalization ``check_impl_guard_staleness.py`` relies on.
+    ``fromisoformat`` reads a trailing ``Z`` natively on Python 3.11+.
     """
     parsed = datetime.fromisoformat(timestamp)
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
@@ -415,14 +420,13 @@ def _by_identity(entry: dict[str, str], identity: str) -> bool:
     return bool(identity) and entry.get("author") == identity
 
 
-def _qualifies(entry: dict[str, str], identity: str, head_commit_at: str) -> bool:
-    """The five documented conditions, in the order the clause states them."""
-    return (
-        _is_findings_shape(entry)
-        and _by_identity(entry, identity)
-        and bool(_created(entry))
-        and _instant(_created(entry)) > _instant(head_commit_at)
-    )
+def _qualifies(entry: dict[str, str], identity: str) -> bool:
+    """The four documented conditions, in the order the clause states them.
+
+    ``created_at`` is not a condition (A5): an older-than-head post still
+    qualifies, and the agent judges recency from the timestamp the label carries.
+    """
+    return _is_findings_shape(entry) and _by_identity(entry, identity)
 
 
 def _part_of(entry: dict[str, str]) -> tuple[int, int] | None:
@@ -430,18 +434,16 @@ def _part_of(entry: dict[str, str]) -> tuple[int, int] | None:
     return None if label is None else (int(label[1]), int(label[2]))
 
 
-def _matching(
-    comments: list[dict[str, str]], identity: str, head_commit_at: str
-) -> list[dict[str, str]]:
-    """Comments satisfying all five conditions, oldest instant first."""
+def _matching(comments: list[dict[str, str]], identity: str) -> list[dict[str, str]]:
+    """Comments satisfying all four conditions, oldest instant first."""
     return sorted(
-        (c for c in comments if _qualifies(c, identity, head_commit_at)),
+        (c for c in comments if _qualifies(c, identity)),
         key=lambda c: _instant(_created(c)),
     )
 
 
 def _select_regress_findings(
-    comments: list[dict[str, str]], identity: str, head_commit_at: str = HEAD_AT
+    comments: list[dict[str, str]], identity: str
 ) -> list[dict[str, str]]:
     """Reference model of the documented carve-out selection rule.
 
@@ -451,11 +453,11 @@ def _select_regress_findings(
     ``auto-dev-impl-appendix.md``; keep both in step. Module-local on purpose.
 
     "Newest" and the per-part pick run only over comments that already satisfy
-    all five conditions, so a newer forgery, or a post older than the head
-    commit, can never displace the real post. Parts are taken only from
-    comments labelled with the same ``n`` as the newest match.
+    all four conditions, so a newer forgery can never displace the real post.
+    Parts are taken only from comments labelled with the same ``n`` as the
+    newest match.
     """
-    matches = _matching(comments, identity, head_commit_at)
+    matches = _matching(comments, identity)
     if not matches:
         return []
     newest = _part_of(matches[-1])
@@ -470,36 +472,30 @@ def _select_regress_findings(
     return selected
 
 
-def _parts_missing(
-    comments: list[dict[str, str]], identity: str, head_commit_at: str = HEAD_AT
-) -> list[int]:
+def _parts_missing(comments: list[dict[str, str]], identity: str) -> list[int]:
     """Indices 1..n with no same-``n`` comment: the documented ``parts_missing``."""
-    matches = _matching(comments, identity, head_commit_at)
+    matches = _matching(comments, identity)
     newest = _part_of(matches[-1]) if matches else None
     if newest is None:
         return []
     present = {
         index
-        for c in _select_regress_findings(comments, identity, head_commit_at)
+        for c in _select_regress_findings(comments, identity)
         if (index := (_part_of(c) or (0, 0))[0])
     }
     return [i for i in range(1, newest[1] + 1) if i not in present]
 
 
-def _withheld_reason(
-    comments: list[dict[str, str]], identity: str, head_commit_at: str = HEAD_AT
-) -> str | None:
+def _withheld_reason(comments: list[dict[str, str]], identity: str) -> str | None:
     """The documented friction reason when nothing is delivered, else ``None``."""
-    if _select_regress_findings(comments, identity, head_commit_at):
+    if _select_regress_findings(comments, identity):
         return None
     if not identity:
         return "identity_unresolved"
     shaped = [c for c in comments if _is_findings_shape(c)]
     if not shaped:
         return "no_matching_comment"
-    if not any(_by_identity(c, identity) for c in shaped):
-        return "author_mismatch"
-    return "stale_post"
+    return "author_mismatch"
 
 
 def _findings_comment(author: str, created_at: str, label: str = "") -> dict[str, str]:
@@ -552,23 +548,17 @@ def test_multi_part_post_selects_every_part_in_order() -> None:
     assert _select_regress_findings([part2], ME) == [part2]
 
 
-def test_post_older_than_the_head_commit_is_dropped_as_stale() -> None:
+def test_post_older_than_the_head_commit_is_still_delivered_as_evidence() -> None:
+    """A5: no HEAD-timestamp gate; the label carries the timestamp instead."""
     old = _findings_comment(ME, "2026-10-28T08:00:00Z")
+    assert _instant(_created(old)) < _instant(HEAD_AT)
+
+    assert _select_regress_findings([old], ME) == [old]
+    assert _withheld_reason([old], ME) is None
+    # An older post is delivered alongside a newer one only as "newest" wins.
     new = _findings_comment(ME, "2026-10-28T10:00:00Z")
-
-    assert _select_regress_findings([old], ME) == []
-    assert _withheld_reason([old], ME) == "stale_post"
     assert _select_regress_findings([old, new], ME) == [new]
-    assert _withheld_reason([old, new], ME) is None
-    # Equal to HEAD_COMMIT_AT is not "later than".
-    assert _select_regress_findings([_findings_comment(ME, HEAD_AT)], ME) == []
-
-
-def test_stale_part_does_not_count_as_a_delivered_part() -> None:
-    stale_part1 = _findings_comment(ME, "2026-10-28T08:00:01Z", "(part 1 of 2)")
-    part2 = _findings_comment(ME, "2026-10-28T10:00:02Z", "(part 2 of 2)")
-
-    assert _select_regress_findings([stale_part1, part2], ME) == [part2]
+    assert _select_regress_findings([new, old], ME) == [new]
 
 
 def test_parts_come_only_from_comments_with_the_newest_matchs_n() -> None:
@@ -584,41 +574,6 @@ def test_parts_come_only_from_comments_with_the_newest_matchs_n() -> None:
     # The complete round is delivered with nothing missing.
     assert _select_regress_findings(comments[:2], ME) == [round1_part1, round1_part2]
     assert _parts_missing(comments[:2], ME) == []
-
-
-def test_recency_compares_instants_across_utc_offsets() -> None:
-    """HEAD_COMMIT_AT carries a local offset; tracker created_at is Z-suffixed."""
-    # 09:00-04:00 is 13:00Z: a 10:00Z post is EARLIER as an instant, though the
-    # string "…T10:00:00Z" sorts after "…T09:00:00-04:00".
-    head_behind_utc = "2026-10-28T09:00:00-04:00"
-    early_as_instant = _findings_comment(ME, "2026-10-28T10:00:00Z")
-    assert early_as_instant["created_at"] > head_behind_utc
-    assert _select_regress_findings([early_as_instant], ME, head_behind_utc) == []
-    assert _withheld_reason([early_as_instant], ME, head_behind_utc) == "stale_post"
-    late_as_instant = _findings_comment(ME, "2026-10-28T14:00:00Z")
-    assert _select_regress_findings([late_as_instant], ME, head_behind_utc) == [
-        late_as_instant
-    ]
-
-    # 14:00+05:00 is 09:00Z: a 10:00Z post is LATER as an instant, though the
-    # string "…T10:00:00Z" sorts before "…T14:00:00+05:00".
-    head_ahead_of_utc = "2026-10-28T14:00:00+05:00"
-    late_post = _findings_comment(ME, "2026-10-28T10:00:00Z")
-    assert late_post["created_at"] < head_ahead_of_utc
-    assert _select_regress_findings([late_post], ME, head_ahead_of_utc) == [late_post]
-    # The same instant, spelled differently, is not "later than".
-    same_instant = _findings_comment(ME, "2026-10-28T09:00:00Z")
-    assert _select_regress_findings([same_instant], ME, head_ahead_of_utc) == []
-
-
-def test_newest_is_ordered_by_instant_not_string() -> None:
-    older_by_instant = _findings_comment(ME, "2026-10-28T14:00:00+05:00")  # 09:00Z
-    newer_by_instant = _findings_comment(ME, "2026-10-28T10:00:00Z")
-    head = "2026-10-28T08:00:00Z"
-
-    assert _select_regress_findings([newer_by_instant, older_by_instant], ME, head) == [
-        newer_by_instant
-    ]
 
 
 def test_withheld_reasons_follow_the_documented_vocabulary() -> None:
@@ -642,6 +597,5 @@ def test_selection_helper_and_prose_name_the_same_conditions() -> None:
         AGENT_COMMENT_MARKER,
         "`author`",
         "`created_at`",
-        "`HEAD_COMMIT_AT`",
     ):
         assert token in clause
