@@ -18,6 +18,7 @@ import pytest
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import CwState, OrchestratorEventType, QueueItemStatus
+from cw.models.enums import StageIdentifier
 from cw.models.review_history import ReviewHistory
 from cw.review_adjudication import VoidedFinding
 from cw.review_adjudication._voided import _voided_rationale
@@ -467,6 +468,23 @@ def test_stage_event_after_round_one_is_not_a_start(tmp_path: Path) -> None:
     history = _history(_running(session_id=ACME_SESSION), tmp_path)
 
     assert history.rounds[0].wall_seconds is None
+
+
+def test_a_different_stage_event_is_not_a_review_start(tmp_path: Path) -> None:
+    """Only ``s3_review_started`` times round 1; other stages are not counted."""
+    fixture_converged().write(derived_worktree(tmp_path))
+    stage_entered_event(ACME_TICKET, ACME_SESSION, REVIEW_START)
+    stage_entered_event(
+        ACME_TICKET,
+        ACME_SESSION,
+        "2026-10-27T11:55:00+00:00",
+        stage=StageIdentifier.S2_IMPL_COMPLETE.value,
+    )
+
+    history = _history(_running(session_id=ACME_SESSION), tmp_path)
+
+    assert history.rounds[0].wall_seconds == 600.0
+    assert not _notes_with(history, "stage.entered")
 
 
 def test_another_tickets_stage_event_is_ignored(tmp_path: Path) -> None:

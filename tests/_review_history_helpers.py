@@ -148,16 +148,20 @@ def sentinel_review(
 
 
 def stage_entered_event(
-    ticket: str, session_id: str | None, at: str
+    ticket: str,
+    session_id: str | None,
+    at: str,
+    stage: str = StageIdentifier.S3_REVIEW_STARTED.value,
 ) -> OrchestratorEvent:
-    """Record ``stage.entered`` / ``s3_review_started`` at *at*, as the prose does.
+    """Record ``stage.entered`` for *stage* at *at*, as the prose does.
 
-    Same payload keys as ``auto-dev-review.md``; ``session_id=None`` omits the
-    key entirely (the prose's ``$CW_SESSION`` unset).
+    *stage* defaults to ``s3_review_started``. Same payload keys as
+    ``auto-dev-review.md``; ``session_id=None`` omits the key entirely (the
+    prose's ``$CW_SESSION`` unset).
     """
     payload: dict[str, object] = {
         "ticket_id": ticket,
-        "stage": StageIdentifier.S3_REVIEW_STARTED.value,
+        "stage": stage,
         "prev_stage": StageIdentifier.S2_IMPL_COMPLETE.value,
         "started_at": at,
     }
