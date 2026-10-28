@@ -124,6 +124,17 @@ def test_core_paragraph_names_trigger_order_and_rule() -> None:
         assert phrase in paragraph, phrase
 
 
+def test_prep_pr_still_produces_the_gates_the_trigger_names() -> None:
+    """The trigger matches `/prep-pr`'s `gate:` text; a rename there would turn
+    the whole feature into a silent no-op, so pin both producers."""
+    prep_pr = _cmd("prep-pr.md")
+    assert 'gate: "Step 7 max review cycles"' in prep_pr
+    assert 'gate: "Step 8 ship-it' in prep_pr
+    trigger = _core_paragraph()
+    assert "Step 7 max review cycles" in trigger
+    assert "Step 8 ship-it" in trigger
+
+
 def test_core_paragraph_does_not_name_the_park_stamp_command() -> None:
     assert "cw signal-park" not in _core_paragraph()
 
