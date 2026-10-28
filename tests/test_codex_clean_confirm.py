@@ -65,7 +65,7 @@ from tests._review_convergence_helpers import (
     structurally_invalid_doc_json,
     write_ledger,
 )
-from tests.conftest import _make_diff, _make_reviewer_doc, git_in
+from tests.conftest import _make_diff, _make_reviewer_doc, commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -503,6 +503,37 @@ class TestLedgerStates:
             "convergence_ledger_reset: ticket_mismatch"
             in outcome.result.friction_highlights
         )
+
+    def test_a_rebased_branch_resets_the_ledger(self, wt: Path) -> None:
+        commit_tracked_file(wt, "extra.py")
+        write_ledger(wt, _codex_ledger(wt, (_head(wt), [round_finding()])))
+        git_in(wt, "reset", "--hard", "HEAD~1")
+        outcome = _apply(wt, _client(wt), RoleAwareClaudeRunner(_clean_role))
+        ledger = _ledger(wt)
+        assert len(ledger.reset_history) == 1
+        assert ledger.status == "converged"
+        assert (
+            "convergence_ledger_reset: history_rewritten"
+            in outcome.result.friction_highlights
+        )
+
+    def test_a_git_failure_checking_history_parks_as_a_ledger_error(
+        self, wt: Path
+    ) -> None:
+        unknown_sha = "deadbeef" * 5
+        path = write_ledger(wt, _codex_ledger(wt, (unknown_sha, [round_finding()])))
+        before = path.read_text(encoding="utf-8")
+        codex = _codex(wt)
+        runner = RoleAwareClaudeRunner(_clean_role)
+        outcome = _apply(wt, _client(wt), runner, codex=codex)
+        blocker = outcome.result.blocker
+        assert blocker is not None
+        assert blocker.reason == CODEX_CONVERGENCE_LEDGER_ERROR
+        assert blocker.retry_eligible is True
+        assert "git merge-base --is-ancestor failed" in blocker.details
+        assert outcome.verdict is codex[1]
+        assert runner.roles == []
+        assert path.read_text(encoding="utf-8") == before
 
     def test_in_progress_is_resumed(self, wt: Path) -> None:
         write_ledger(wt, _codex_ledger(wt, (_fork(wt), [round_finding()])))
