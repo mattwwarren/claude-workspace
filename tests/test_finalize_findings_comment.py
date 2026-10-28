@@ -24,6 +24,7 @@ IMPL carve-out's verbatim-delivery clause.
 from pathlib import Path
 
 from cw.auto_dev_result.schema import FINALIZE_REGRESS_BLOCKER_REASONS
+from cw.gh import AGENT_COMMENT_MARKER
 from cw.spawn import _PRIOR_ATTEMPT_DETAILS_MAX_LEN
 from tests.conftest import _appendix, _cmd, load_guard_script_module
 from tests.test_agent_comment_provenance import PIPELINE_HEADERS
@@ -35,30 +36,29 @@ from tests.test_bodyfile_write_tool_conformance import (
 )
 from tests.test_impl_guard_staleness_docs import (
     CARVE_OUT_ANCHOR,
+    FINDINGS_HEADER,
+    FINDINGS_SUBHEADING,
     _carve_out_clause,
     _carve_out_lines,
 )
-from tests.test_sentinel_emission_discipline import _paragraph_containing
+from tests.test_sentinel_emission_discipline import (
+    FINALIZE_FINDINGS_SECTION,
+    FINALIZE_PARK_MARKER,
+    _finalize_findings_section,
+    _paragraph_containing,
+)
 
 ROOT = Path(__file__).parent.parent
 DOCS = ROOT / "docs"
 REDACTOR = ROOT / ".claude" / "scripts" / "redact_post_text.py"
 
-HEADER = "## Blocking Review Findings"
-SUBHEADING = "### Finalize ship-it gate findings"
-AGENT_MARKER = "<!-- cw-agent-authored -->"
 RULE_REFERENCE = "blocking-findings comment rule"
-SECTION_TITLE = (
-    "## Finalize review-findings comment (#2794): trigger, body shape, "
-    "redaction, park marker"
-)
 CORE_ANCHOR = "**Finalize review-findings comment (#2794):**"
 ORDER_CLAUSE = (
     "; within step (4), a review-findings block also posts the findings comment"
 )
 PART_LABEL = "(part i of n)"
 READ_BACK = "**Read-back (G4).**"
-PARK_MARKER = "**Park marker (#2135)**"
 FAILED_FRICTION = "blocking findings post failed: finalize_agent_block"
 SKIPPED_FRICTION = "blocking findings post skipped: redactor_unavailable"
 POSTED_FRICTION = "blocking findings posted: finalize_agent_block"
@@ -88,15 +88,8 @@ def _core_paragraph() -> str:
     return _paragraph_containing(_cmd("auto-dev-finalize.md"), CORE_ANCHOR)
 
 
-def _section() -> str:
-    appendix = _appendix("finalize")
-    start = appendix.index(SECTION_TITLE)
-    end = appendix.index("\n## ", start + len(SECTION_TITLE))
-    return appendix[start:end]
-
-
 def _section_paragraph(anchor: str) -> str:
-    return _paragraph_containing(_section(), anchor)
+    return _paragraph_containing(_finalize_findings_section(), anchor)
 
 
 # ---------------------------------------------------------------------------
@@ -120,13 +113,13 @@ def test_core_paragraph_names_trigger_order_and_rule() -> None:
         "and the Base-branch-state classifier (#2320) have not claimed the block",
         "finalize's main session",
         RULE_REFERENCE,
-        HEADER,
-        SUBHEADING,
+        FINDINGS_HEADER,
+        FINDINGS_SUBHEADING,
         "posts nothing, exactly as today",
         "`external_state_block`",
         "merge conflict",
         "Park marker clause",
-        SECTION_TITLE.removeprefix("## "),
+        FINALIZE_FINDINGS_SECTION.removeprefix("## "),
     ):
         assert phrase in paragraph, phrase
 
@@ -152,17 +145,19 @@ def test_order_of_evaluation_pin_holds_and_findings_clause_follows_it() -> None:
 
 def test_section_sits_before_the_unavailability_classifier() -> None:
     appendix = _appendix("finalize")
-    assert appendix.index(SECTION_TITLE) < appendix.index(
+    assert appendix.index(FINALIZE_FINDINGS_SECTION) < appendix.index(
         "## Unavailability classifier: signature table"
     )
 
 
 def test_section_names_header_subheading_and_marker() -> None:
-    section = _section()
-    assert f"`{HEADER}`" in section
-    assert f"`{SUBHEADING}`" in section
-    assert section.index(f"`{HEADER}`") < section.index(f"`{SUBHEADING}`")
-    assert AGENT_MARKER in section
+    section = _finalize_findings_section()
+    assert f"`{FINDINGS_HEADER}`" in section
+    assert f"`{FINDINGS_SUBHEADING}`" in section
+    assert section.index(f"`{FINDINGS_HEADER}`") < section.index(
+        f"`{FINDINGS_SUBHEADING}`"
+    )
+    assert AGENT_COMMENT_MARKER in section
     assert RULE_REFERENCE in section
 
 
@@ -205,7 +200,7 @@ def test_failed_post_is_never_stamped() -> None:
 
 
 def test_redaction_runs_before_measuring_and_splitting() -> None:
-    section = _section()
+    section = _finalize_findings_section()
     assert section.index("redact_post_text.py") < section.index(PART_LABEL)
     assert section.index("**Step 2 — redact.**") < section.index(
         "**Step 3 — measure and split.**"
@@ -238,7 +233,7 @@ def test_headless_block_bullet_reconciles_with_fail_closed_outcome() -> None:
     """G1: the HEADLESS-BLOCK bullet names the condition, not an EXIT."""
     bullet = next(
         line
-        for line in _section().splitlines()
+        for line in _finalize_findings_section().splitlines()
         if "HEADLESS BLOCK" in line and "redact_post_text.py" in line
     )
     assert "need >= 1" in bullet
@@ -248,7 +243,7 @@ def test_headless_block_bullet_reconciles_with_fail_closed_outcome() -> None:
 
 
 def test_redactor_fence_passes_both_worktree_anchors() -> None:
-    section = _section()
+    section = _finalize_findings_section()
     assert '--worktree "$GUARD_ROOT" --worktree "$CTX_WORKTREE"' in section
     assert '"$GUARD_ROOT/.claude/scripts/redact_post_text.py"' in section
     assert '"$HOME/.claude/scripts/redact_post_text.py"' in section
@@ -270,7 +265,7 @@ def test_version_table_row_names_the_finalize_appendix_site() -> None:
 
 
 def test_section_uses_the_write_tool_pointer_and_body_file() -> None:
-    section = _section()
+    section = _finalize_findings_section()
     assert POINTER in section
     assert "--body-file" in section
     for phrase in RESTATED_ARGUMENT_PHRASES:
@@ -299,7 +294,7 @@ def test_long_findings_split_into_parts_never_truncated() -> None:
 
 
 def test_section_never_references_the_truncating_helper() -> None:
-    section = _section()
+    section = _finalize_findings_section()
     assert "redact_and_cap" not in section
     assert "[truncated" not in section
 
@@ -339,9 +334,9 @@ def test_read_back_states_only_what_it_proves() -> None:
 
 
 def test_park_marker_follows_read_back_and_requires_it() -> None:
-    section = _section()
-    assert section.rindex(PARK_MARKER) > section.index(READ_BACK)
-    paragraph = _section_paragraph(PARK_MARKER)
+    section = _finalize_findings_section()
+    assert section.rindex(FINALIZE_PARK_MARKER) > section.index(READ_BACK)
+    paragraph = _section_paragraph(FINALIZE_PARK_MARKER)
     assert "read back successfully" in paragraph
     assert "cw signal-park" in paragraph
     assert REVIEW_PARK_IGNORE in paragraph
@@ -401,7 +396,7 @@ def test_headless_contract_rows_mention_blocking_findings_comment() -> None:
 
 
 def test_header_reused_not_added_to_the_provenance_enumeration() -> None:
-    assert HEADER in PIPELINE_HEADERS
+    assert FINDINGS_HEADER in PIPELINE_HEADERS
     assert len(PIPELINE_HEADERS) == 4
     rule = _cmd("auto-dev.md")
     rule_section = rule[
@@ -409,7 +404,7 @@ def test_header_reused_not_added_to_the_provenance_enumeration() -> None:
             "## Tool-Use Denial Exit"
         )
     ]
-    assert SUBHEADING not in rule_section
+    assert FINDINGS_SUBHEADING not in rule_section
 
 
 def test_finalize_regress_reasons_unchanged() -> None:

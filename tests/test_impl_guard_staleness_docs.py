@@ -6,6 +6,7 @@ of a script-behavior test file with a prose-wiring test file.
 import re
 
 from cw.auto_dev_result import IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
+from cw.gh import AGENT_COMMENT_MARKER
 from tests.conftest import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
@@ -227,7 +228,6 @@ EXISTING_AGENT_SENTENCE = (
 )
 FINDINGS_HEADER = "## Blocking Review Findings"
 FINDINGS_SUBHEADING = "### Finalize ship-it gate findings"
-AGENT_MARKER = "<!-- cw-agent-authored -->"
 _PART_LABEL = re.compile(r"^\(part (\d+) of (\d+)\)$", re.MULTILINE)
 
 ME = "operator-login"
@@ -272,7 +272,7 @@ def test_carve_out_requires_all_five_conditions() -> None:
             "single newest finalize-findings post",
             f"begins with the exact header line `{FINDINGS_HEADER}`",
             f"exact sub-heading line `{FINDINGS_SUBHEADING}`",
-            f"carries the marker `{AGENT_MARKER}`",
+            f"carries the marker `{AGENT_COMMENT_MARKER}`",
             "its `author`",
             "AND its `created_at` is later than `HEAD_COMMIT_AT`",
             "predates the fix commit that addressed it and is not re-delivered",
@@ -371,7 +371,7 @@ def _is_findings_shape(entry: dict[str, str]) -> bool:
         bool(lines)
         and lines[0] == FINDINGS_HEADER
         and FINDINGS_SUBHEADING in lines
-        and AGENT_MARKER in body
+        and AGENT_COMMENT_MARKER in body
     )
 
 
@@ -443,7 +443,8 @@ def _findings_comment(author: str, created_at: str, label: str = "") -> dict[str
         "created_at": created_at,
         "body": (
             f"{FINDINGS_HEADER}\n{FINDINGS_SUBHEADING}\n{label_line}"
-            f"```\ngate: Step 8 ship-it\ndetails: MUST_FIX x\n```\n\n{AGENT_MARKER}"
+            "```\ngate: Step 8 ship-it\ndetails: MUST_FIX x\n```\n\n"
+            f"{AGENT_COMMENT_MARKER}"
         ),
     }
 
@@ -461,13 +462,17 @@ def test_unrelated_agent_comments_are_never_selected() -> None:
     scan = {
         "author": ME,
         "created_at": "2026-10-28T12:00:00Z",
-        "body": f"## Pending Verification Scan\n- x\n\n{AGENT_MARKER}",
+        "body": f"## Pending Verification Scan\n- x\n\n{AGENT_COMMENT_MARKER}",
     }
-    bare = {"author": ME, "createdAt": "2026-10-28T13:00:00Z", "body": AGENT_MARKER}
+    bare = {
+        "author": ME,
+        "createdAt": "2026-10-28T13:00:00Z",
+        "body": AGENT_COMMENT_MARKER,
+    }
     review = {
         "author": ME,
         "created_at": "2026-10-28T14:00:00Z",
-        "body": f"{FINDINGS_HEADER}\n### reviewer — MUST_FIX\n\n{AGENT_MARKER}",
+        "body": f"{FINDINGS_HEADER}\n### reviewer — MUST_FIX\n\n{AGENT_COMMENT_MARKER}",
     }
     assert _select_regress_findings([scan, bare, review], ME) == []
 
@@ -518,7 +523,7 @@ def test_selection_helper_and_prose_name_the_same_conditions() -> None:
     for token in (
         FINDINGS_HEADER,
         FINDINGS_SUBHEADING,
-        AGENT_MARKER,
+        AGENT_COMMENT_MARKER,
         "`author`",
         "`created_at`",
         "`HEAD_COMMIT_AT`",

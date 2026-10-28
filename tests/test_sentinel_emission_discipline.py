@@ -533,7 +533,10 @@ def test_review_operator_action_override_notes_the_prior_stamp() -> None:
 # third stage wiring of the #2135 park-comment stamp.
 # ---------------------------------------------------------------------------
 
-FINALIZE_FINDINGS_SECTION = "## Finalize review-findings comment (#2794)"
+FINALIZE_FINDINGS_SECTION = (
+    "## Finalize review-findings comment (#2794): trigger, body shape, "
+    "redaction, park marker"
+)
 FINALIZE_PARK_MARKER = "**Park marker (#2135)**"
 
 
