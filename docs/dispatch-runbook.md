@@ -1597,7 +1597,8 @@ REVIEW lane still ignores clean mode.
 
 | Ledger state at the requeue | What the driver does | Why |
 |---|---|---|
-| `awaiting_confirm` at HEAD (after a Claude outage or a round that could not complete) | skips the codex loop and runs only the Claude confirm | the clean codex round at this sha is already recorded |
+| `awaiting_confirm` at HEAD, `review.confirm_backend` unchanged since the ledger was stamped (after a Claude outage or a round that could not complete) | skips the codex loop and runs only the Claude confirm | the clean codex round at this sha is already recorded |
+| `awaiting_confirm` at HEAD, but `review.confirm_backend` now differs from the one stamped on the ledger (for example `none` or `codex` set after an outage) | re-runs the codex loop; the post-loop gate then converges on the clean loop round without calling Claude (opt-out) or confirms on the new backend | the stamped choice must not run a Claude call the client no longer consents to; the loop can park on a fresh MUST_FIX before the gate is reached |
 | anything else (a dirty Claude confirm, a stop released, HEAD moved) | re-runs the codex loop, then the confirm | the loop is the only fixer on this lane; Claude findings are not fed back into it |
 
   A requeue after a Claude MUST_FIX therefore re-runs a nondeterministic codex
