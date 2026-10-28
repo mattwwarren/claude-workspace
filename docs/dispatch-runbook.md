@@ -1581,7 +1581,12 @@ REVIEW lane still ignores clean mode.
   sources (no operator or project hooks), no MCP servers, under the operator's
   own Claude login. The prompt carries the diff from the ledger's fork point,
   and the file tools can read any file under the task worktree, untracked and
-  gitignored files included; reads outside the worktree are denied. This is
+  gitignored files included. Claude Code (not cw) enforces the worktree
+  boundary: a direct read of a path outside the worktree was denied on the
+  `claude` version where the envelope was captured, but symlinks inside the
+  worktree that point outside it were not exercised, so their targets are not
+  verified as unreadable. The only hard boundary is the `review.confirm_backend`
+  opt-out (`codex` or `none`). This is
   default-on egress for every codex-lane clean client. The confirm runs on the
   client's `worker_model` (`--model <id>`) when that is set, and on Claude's
   own default model otherwise.
