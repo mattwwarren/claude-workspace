@@ -20,7 +20,12 @@ Shapes replaced, paths first, then secrets:
     3. `(/home/<u>|/Users/<u>|$HOME|~)/.claude/projects/<...>`
                                      -> `<home>/.claude/projects/<redacted>`
     4. the `$HOME` value, `/home/<u>` and `/Users/<u>`  -> `<home>`
-    5. secret shapes (a mirror of `cw._text._SECRET_PATTERNS`) -> `<redacted>`
+    5. secret shapes (a superset of `cw._text._SECRET_PATTERNS`) -> `<redacted>`
+
+The `/home/<u>`, `/Users/<u>` and `~` shapes only match at the start of a path
+(start of text, or after a character other than a word character, `.`, `/` or
+`-`), so a repo-relative `web/src/home/Hero.tsx` or a URL path `/Users/guide` is
+left alone.
 
 Redaction replaces spans and never truncates: the output differs from the
 input only inside replaced spans, a missing trailing newline stays missing,
@@ -28,8 +33,13 @@ and the CLI round-trips CRLF and undecodable bytes unchanged. Over-redaction is
 tolerated, as in `cw._text`.
 
 Stdlib-only by design: nothing in `.claude/scripts/` depends on the `cw`
-package, so the secret patterns are a mirrored copy, pinned equal to
-`cw._text._SECRET_PATTERNS` by `tests/test_redact_post_text.py`.
+package, so the secret patterns are a copy. They are a SUPERSET of
+`cw._text._SECRET_PATTERNS`: the first entries mirror it in order (pinned by
+`tests/test_redact_post_text.py`), and `_EXTRA_SECRET_PATTERNS` adds the vendor
+token, URL-credential, private-key and JWT shapes that `cw._text` does not
+cover. `cw._text` redacts logs read by the operator; this text goes to a PUBLIC
+tracker, an irreversible sink where a finding that quotes the secret it flags
+must not carry it.
 
 Exit codes:
     0  -- redacted text written to stdout
@@ -61,18 +71,47 @@ _ERRORS = "surrogateescape"
 # One path segment. A trailing "." is never part of it, so a path that ends a
 # sentence keeps its full stop.
 _SEGMENT = r"[\w-]+(?:\.[\w-]+)*"
-_USER_HOMES = rf"/home/{_SEGMENT}|/Users/{_SEGMENT}"
+# A user-home shape starts a path: it is not preceded by a word character, ".",
+# "/" or "-", so `src/home/x.tsx` and `https://x.io/Users/guide` are not homes.
+_PATH_START = r"(?<![\w./-])"
+_USER_HOMES = rf"{_PATH_START}(?:/home/{_SEGMENT}|/Users/{_SEGMENT})"
 # A replaced value must not be the prefix of a longer name ("wt-7" in "wt-70").
 _NOT_MID_NAME = r"(?![\w-])"
 
-# Mirror of cw._text._SECRET_PATTERNS; see that module for the rationale of
-# each shape. Kept byte-identical by a parity test.
-_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
+# Mirror of cw._text._SECRET_PATTERNS, same order; see that module for the
+# rationale of each shape. A test pins these as the first entries of
+# _SECRET_PATTERNS.
+_MIRRORED_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"sk-[A-Za-z0-9]{20,}"),
     re.compile(r"ghp_[A-Za-z0-9]{36}"),
     re.compile(r"Bearer\s+[A-Za-z0-9._-]+"),
     re.compile(r"(?<=[=:])[A-Za-z0-9_-]{32,}"),
     re.compile(r"(?i)\b(?:Authorization|token)\s*[:=]\s*\S+"),
+)
+
+# Shapes beyond cw._text, for a public and irreversible sink: a review finding
+# often quotes the very secret it flags. Over-redaction is tolerated.
+_EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # Anthropic / OpenAI keys with "-" or "_" inside (sk-ant-api03-..., sk-proj-...).
+    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"gh[osur]_[A-Za-z0-9]{20,}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"xox[abprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"lin_api_[A-Za-z0-9]{20,}"),
+    # user:password@ inside a URL; the host and the rest of the URL stay.
+    re.compile(r"(?<=://)[^\s/@:]+:[^\s/@]+(?=@)"),
+    re.compile(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+        re.DOTALL,
+    ),
+    re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+    re.compile(r"(?i)\b(?:password|passwd|secret|api[_-]?key)\s*[:=]\s*\S+"),
+)
+
+_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
+    *_MIRRORED_SECRET_PATTERNS,
+    *_EXTRA_SECRET_PATTERNS,
 )
 
 
@@ -87,7 +126,7 @@ def _usable(value: str) -> str:
 
 def _home_prefixes(home: str) -> str:
     """The alternation of every home-directory spelling, *home* included."""
-    alternatives = [_USER_HOMES, "~"]
+    alternatives = [_USER_HOMES, rf"{_PATH_START}~"]
     if home:
         alternatives.append(re.escape(home))
     return "|".join(alternatives)
@@ -116,7 +155,7 @@ def redact_paths(text: str, *, home: str, worktrees: Sequence[str]) -> str:
 
 
 def redact_secrets(text: str) -> str:
-    """Replace known secret shapes in *text*, exactly as `cw._text.redact` does."""
+    """Replace the `cw._text.redact` secret shapes, plus the extras, in *text*."""
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub(REDACTION_PLACEHOLDER, text)
     return text
