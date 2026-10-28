@@ -730,11 +730,16 @@ def _refuse_unpushed_clean_exit(
 
 
 class _ReviewOutcome(NamedTuple):
-    """Step 3's answer: what to persist, its verdict, the gate, and its label."""
+    """Step 3's answer: what to persist, its verdict, its label and footer.
+
+    ``fix_loop_footer`` is whether the posted verdict may carry the codex fix
+    loop's "available" wording: the lane's fix loop is enabled AND the verdict
+    is the codex-built one. ``reviewer_label`` is presentation only.
+    """
 
     result: AutoDevResult
     verdict: ReviewVerdict | None
-    fix_loop_enabled: bool
+    fix_loop_footer: bool
     reviewer_label: str
 
 
@@ -790,7 +795,12 @@ def _review_and_confirm(
             result, verdict = _refuse_unpushed_clean_exit(
                 task=task, worktree=worktree, result=result, verdict=verdict
             )
-        return _ReviewOutcome(result, verdict, fix_loop_enabled, resumed.reviewer_label)
+        return _ReviewOutcome(
+            result,
+            verdict,
+            fix_loop_enabled and resumed.fix_loop_footer,
+            resumed.reviewer_label,
+        )
     result, verdict = run_review_with_fix_loop(
         runner=runner,
         task=task,
@@ -832,7 +842,10 @@ def _review_and_confirm(
         verdict=verdict,
     )
     return _ReviewOutcome(
-        gated.result, gated.verdict, fix_loop_enabled, gated.reviewer_label
+        gated.result,
+        gated.verdict,
+        fix_loop_enabled and gated.fix_loop_footer,
+        gated.reviewer_label,
     )
 
 
@@ -897,7 +910,7 @@ def _run_codex_review_and_complete(
 
         # Step 3: per-role review pass + bounded fix loop (#1392), then the
         # clean-mode confirm gate (#2791).
-        result, verdict, fix_loop_enabled, reviewer_label = _review_and_confirm(
+        result, verdict, fix_loop_footer, reviewer_label = _review_and_confirm(
             runner=runner,
             task=task,
             worktree=worktree,
@@ -921,9 +934,7 @@ def _run_codex_review_and_complete(
             # loop's footer never applies to it.
             review_text = render_verdict_comment(
                 verdict,
-                fix_loop_enabled=(
-                    fix_loop_enabled and reviewer_label == CODEX_REVIEWER_LABEL
-                ),
+                fix_loop_enabled=fix_loop_footer,
                 reviewer_label=reviewer_label,
             )
             # #2095: the durable copy is written first, unconditionally, so a

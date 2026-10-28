@@ -138,12 +138,15 @@ class CleanConfirmOutcome(NamedTuple):
     """The gate's answer: the result to persist, its verdict, and its label.
 
     ``reviewer_label`` titles the Step 4b comment and the unparseable
-    artifact, so a Claude-built result is never posted under a Codex header.
+    artifact, so a Claude-built result is never posted under a Codex header. It
+    is presentation only: ``fix_loop_footer`` is the typed switch for the
+    "codex fix loop available" wording, true only for a codex-built verdict.
     """
 
     result: AutoDevResult
     verdict: ReviewVerdict | None
     reviewer_label: str
+    fix_loop_footer: bool
 
 
 @dataclass
@@ -319,9 +322,18 @@ def _parked(
     if base is not None:
         update["review"] = base.result.review
     result = _finish(gate, blocked.model_copy(update=update), park=True)
+    return _carried(result, base)
+
+
+def _carried(
+    result: AutoDevResult, base: CleanConfirmOutcome | None
+) -> CleanConfirmOutcome:
+    """*result* labeled like *base*, or as a Claude-built one when there is none."""
     if base is None:
-        return CleanConfirmOutcome(result, None, CLAUDE_REVIEWER_LABEL)
-    return CleanConfirmOutcome(result, base.verdict, base.reviewer_label)
+        return CleanConfirmOutcome(result, None, CLAUDE_REVIEWER_LABEL, False)
+    return CleanConfirmOutcome(
+        result, base.verdict, base.reviewer_label, base.fix_loop_footer
+    )
 
 
 def _ledger_error_outcome(
@@ -341,7 +353,30 @@ def _ledger_error_outcome(
         details=f"{type(exc).__name__}: {one_line(str(exc))}",
         retry_eligible=True,
     )
-    return _parked(gate, base, blocker)
+    try:
+        return _parked(gate, base, blocker)
+    except ValueError:
+        # The failure being reported may itself have come from _finish
+        # (friction, sentinel fragment, result validation); building the park
+        # through it again would escape to the thread-level PENDING revert.
+        # Fall back to the bare blocker over the base review, with no _finish.
+        _log.exception(
+            "convergence park could not be finalized ticket=%s client=%s session=%s",
+            gate.task.ticket_id,
+            gate.client.name,
+            gate.sid,
+        )
+        blocked = make_codex_blocked(
+            ticket_id=gate.task.ticket_id,
+            worktree=gate.worktree,
+            reason=blocker.reason,
+            details=blocker.details,
+            retry_eligible=blocker.retry_eligible,
+        )
+        review = (
+            base.result.review if base is not None else blocked.review
+        ).model_copy(update={"convergence_mode": "clean", "converged": False})
+        return _carried(blocked.model_copy(update={"review": review}), base)
 
 
 def _converged_outcome(gate: _Gate, base: CleanConfirmOutcome) -> CleanConfirmOutcome:
@@ -355,8 +390,7 @@ def _converged_outcome(gate: _Gate, base: CleanConfirmOutcome) -> CleanConfirmOu
         ledger.confirm_backend if ledger is not None else None,
         ledger.last_clean_sha if ledger is not None else None,
     )
-    result = _finish(gate, base.result, park=False)
-    return CleanConfirmOutcome(result, base.verdict, base.reviewer_label)
+    return _carried(_finish(gate, base.result, park=False), base)
 
 
 def _stopped_outcome(
@@ -461,7 +495,9 @@ def _record_confirm_round(
     save_round_verdict(gate.ledger_path, report.round, claude_verdict)
     save_ledger(gate.ledger_path, ledger)
     gate.ledger = ledger
-    claude = CleanConfirmOutcome(round_.result, claude_verdict, CLAUDE_REVIEWER_LABEL)
+    claude = CleanConfirmOutcome(
+        round_.result, claude_verdict, CLAUDE_REVIEWER_LABEL, False
+    )
     if report.decision == DECISION_CLEAN:
         return _converged_outcome(gate, base or claude)
     result = round_.result
@@ -478,7 +514,7 @@ def _record_confirm_round(
         )
         result = result.model_copy(update={"blocker": hinted})
     return CleanConfirmOutcome(
-        _finish(gate, result, park=True), claude_verdict, CLAUDE_REVIEWER_LABEL
+        _finish(gate, result, park=True), claude_verdict, CLAUDE_REVIEWER_LABEL, False
     )
 
 
@@ -518,7 +554,9 @@ def _healthy_failure_outcome(
         gate.sid,
         blocker.reason if blocker is not None else None,
     )
-    return CleanConfirmOutcome(round_.result, round_.verdict, CLAUDE_REVIEWER_LABEL)
+    return CleanConfirmOutcome(
+        round_.result, round_.verdict, CLAUDE_REVIEWER_LABEL, False
+    )
 
 
 def _run_confirm(
@@ -627,7 +665,7 @@ def apply_clean_confirm(
     is read or written on those paths. *deadline* is the review thread's
     ``time.monotonic()`` deadline (``None``: no wall-clock budget).
     """
-    base = CleanConfirmOutcome(result, verdict, CODEX_REVIEWER_LABEL)
+    base = CleanConfirmOutcome(result, verdict, CODEX_REVIEWER_LABEL, True)
     if not _is_clean_client(client) or result.blocker is not None or verdict is None:
         return base
     gate = _Gate(task, worktree, client, sid, runner, deadline)

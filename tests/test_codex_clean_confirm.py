@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw import codex_clean_confirm
 from cw.auto_dev_result import KNOWN_BLOCKER_REASONS, AutoDevResult
 from cw.claude_review import CLAUDE_BACKEND_DETAILS_PREFIX, ClaudeRunResult
 from cw.codex_clean_confirm import (
@@ -804,6 +805,65 @@ class TestBookkeeping:
         )
         _assert_ledger_error(outcome, codex)
         assert not (wt / LEDGER_RELATIVE_PATH).exists()
+
+
+class TestParkFinalizationFailure:
+    """A failure inside ``_finish`` must not escape the bookkeeping handler."""
+
+    @staticmethod
+    def _fail_first_finish(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+        real = codex_clean_confirm._finish
+        calls: list[int] = []
+
+        def _finish(*args: object, **kwargs: object) -> AutoDevResult:
+            calls.append(1)
+            if len(calls) == 1:
+                msg = "friction could not be merged"
+                raise ValueError(msg)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr("cw.codex_clean_confirm._finish", _finish)
+        return calls
+
+    def test_the_loop_path_falls_back_to_the_bare_park(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._fail_first_finish(monkeypatch)
+        codex = _codex(wt, sha=_fork(wt))
+        outcome = _apply(
+            wt, _client(wt), RoleAwareClaudeRunner(_clean_role), codex=codex
+        )
+        assert calls == [1]
+        blocker = outcome.result.blocker
+        assert blocker is not None
+        assert blocker.reason == CODEX_CONVERGENCE_LEDGER_ERROR
+        assert blocker.retry_eligible is True
+        assert outcome.verdict is codex[1]
+        assert outcome.reviewer_label == CODEX_REVIEWER_LABEL
+        assert outcome.fix_loop_footer is True
+        assert outcome.result.review.convergence_mode == "clean"
+        assert outcome.result.review.converged is False
+
+    def test_the_resume_path_falls_back_to_the_bare_park(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_ledger(wt, _awaiting_at(wt, _head(wt)))
+
+        def _fail_save(*_args: object, **_kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.codex_clean_confirm.save_ledger", _fail_save)
+        self._fail_first_finish(monkeypatch)
+        outcome = _resume(wt, _client(wt), RoleAwareClaudeRunner(_clean_role))
+        assert outcome is not None
+        assert outcome.result.blocker is not None
+        assert outcome.result.blocker.reason == CODEX_CONVERGENCE_LEDGER_ERROR
+        assert outcome.verdict is None
+        assert outcome.reviewer_label == "Claude"
+        assert outcome.fix_loop_footer is False
+        assert outcome.result.review.convergence_mode == "clean"
+        assert outcome.result.review.converged is False
 
 
 def test_both_new_reasons_are_registered() -> None:

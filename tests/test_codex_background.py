@@ -2272,7 +2272,7 @@ def test_clean_client_runs_the_gate_once_after_the_guard(
         ) as guard_mock,
         patch(
             "cw.codex_background.apply_clean_confirm",
-            return_value=CleanConfirmOutcome(returned[0], returned[1], "Codex"),
+            return_value=CleanConfirmOutcome(returned[0], returned[1], "Codex", True),
         ) as gate_mock,
     ):
         manager.attach_mock(guard_mock, "guard")
@@ -2470,6 +2470,11 @@ def test_a_claude_must_fix_is_posted_under_a_claude_title(
     text = post_mock.call_args.args[1]
     assert text.startswith("## Claude Review Verdict")
     assert "Codex Review Verdict" not in text
+    # The lane's fix loop is on (the default), but the Claude round never ran
+    # it: the typed fix_loop_footer, not the label, selects the single-pass
+    # wording over the fix-loop-available one.
+    assert "_Single-pass review — fix loop disabled for this lane._" in text
+    assert "The fix loop was available" not in text
     envelope = ReviewVerdictEnvelope.model_validate_json(
         (worktree / REVIEW_VERDICT_JSON_RELATIVE_PATH).read_text(encoding="utf-8")
     )
