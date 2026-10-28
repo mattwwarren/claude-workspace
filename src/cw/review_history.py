@@ -58,6 +58,7 @@ from cw.review_convergence import (
     LEDGER_STATUS_CONVERGED,
     LEDGER_STATUS_IN_PROGRESS,
     ConvergenceError,
+    classify_findings,
     finding_identity,
     from_verdict,
     load_ledger,
@@ -92,7 +93,6 @@ _REVIEW_STARTED = StageIdentifier.S3_REVIEW_STARTED.value
 _IN_FLIGHT_STATUSES = frozenset(
     {LEDGER_STATUS_IN_PROGRESS, LEDGER_STATUS_AWAITING_CONFIRM}
 )
-_FIX_OUTCOMES = frozenset({"fix", "operator_action"})
 #: One ``review_round_<n>`` line of ``cw.review_convergence.friction_lines``.
 _FRICTION_RE = re.compile(
     r"^review_round_(?P<round>\d+): kind=(?P<kind>loop|confirm) "
@@ -473,10 +473,10 @@ def _severity_split(
 ) -> SeveritySplit | None:
     """MUST_FIX/SHOULD_FIX split of round *record*'s new findings, if it checks out.
 
-    Reproduces the engine's new-accepted rule over the round's verdict file
-    (outcome ``fix`` or ``operator_action``, identity not settled before this
-    round) and returns the split only when its total equals the ledger's own
-    ``new_fix + new_operator_action``.
+    Runs the engine's own new-accepted rule (``classify_findings``) over the
+    round's verdict file against the ledger as it stood before this round
+    (settled entries of earlier rounds only), and returns the split only when
+    its total equals the ledger's own ``new_fix + new_operator_action``.
     """
     if verdict is None:
         return None
@@ -488,13 +488,11 @@ def _severity_split(
             "severity split not shown"
         )
         return None
-    earlier = {e.identity for e in ledger.settled if e.round < record.round}
-    new = [
-        f
-        for f in findings
-        if f.outcome in _FIX_OUTCOMES
-        and finding_identity(f.severity, f.file, f.summary) not in earlier
-    ]
+    before = ledger.model_copy(
+        update={"settled": [e for e in ledger.settled if e.round < record.round]}
+    )
+    classified = classify_findings(before, findings, record.round)
+    new = [*classified.new_fix, *classified.new_operator]
     expected = record.new_fix + record.new_operator_action
     if len(new) != expected:
         notes.append(
