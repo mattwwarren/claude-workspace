@@ -349,8 +349,8 @@ ignore = [
 "src/cw/dispatch/routing/stage_walk.py" = ["PLC0415"]
 # loop_health defers the cw.doctor.wedge._collapse_blocked_on_user_tasks import
 # inside _reap_session_by_selector to break the wedge ↔ loop_health circular
-# dependency (#1314): wedge imports _gh_pr_states/_reap_session_by_selector from
-# loop_health at module top, so loop_health's reach back into wedge must be
+# dependency (#1314): wedge imports _reap_session_by_selector from loop_health
+# at module top, so loop_health's reach back into wedge must be
 # function-level. Inline import is the sanctioned mechanism, not a workaround.
 "src/cw/doctor/loop_health.py" = ["PLC0415"]
 # review_recipes.address_review defers the cw.spawn import inside
