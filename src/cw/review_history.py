@@ -580,9 +580,7 @@ def _sentinel_part(
     backend = review.get("confirm_backend")
     converged = review.get("converged")
     summary = HistorySummary(
-        convergence_mode=(
-            "clean" if review.get("convergence_mode") == "clean" else "blocking"
-        ),
+        convergence_mode="clean" if _is_clean_mode(review) else "blocking",
         rounds_run=_int(review.get("rounds_run")),
         converged=converged if isinstance(converged, bool) else None,
         final_clean_sha=final_sha if isinstance(final_sha, str) else None,
@@ -592,6 +590,10 @@ def _sentinel_part(
         deferred_count=deferred,
     )
     return _Part(rounds, [], summary)
+
+
+def _is_clean_mode(review: Mapping[str, object]) -> bool:
+    return review.get("convergence_mode") == "clean"
 
 
 def _sentinel_rounds(
@@ -608,7 +610,7 @@ def _sentinel_rounds(
             "no session AUTO_DEV_RESULT with a review block found for this row"
         )
         return []
-    if review.get("convergence_mode") == "clean":
+    if _is_clean_mode(review):
         notes.append(
             "the sentinel's review block is clean-mode but carries no "
             "review_round_<n> friction lines; per-round data not recorded"
