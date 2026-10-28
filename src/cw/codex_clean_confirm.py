@@ -61,6 +61,7 @@ from cw.claude_review import (
 from cw.codex_review import (
     CODEX_CONVERGENCE_LEDGER_ERROR,
     CODEX_MUST_FIX_FINDINGS,
+    STAGE3_REVIEW,
     make_codex_blocked,
 )
 from cw.dispatch_state import ExecutorBlockedMarker, save_executor_blocked_marker
@@ -372,7 +373,7 @@ def _ledger_error_outcome(
         lost = "\n".join(f"- {line}" for line in gate.pending_findings)
         details += f"\n\nClaude confirm findings not persisted to the ledger:\n{lost}"
     blocker = Blocker(
-        stage="stage3_review",
+        stage=STAGE3_REVIEW,
         reason=CODEX_CONVERGENCE_LEDGER_ERROR,
         details=details,
         retry_eligible=True,
@@ -424,7 +425,7 @@ def _stopped_outcome(
     summary = stop_summary(ledger) or {}
     reason = summary.get("reason") or ledger.stop_reason
     blocker = Blocker(
-        stage="stage3_review",
+        stage=STAGE3_REVIEW,
         reason=REVIEW_NOT_CONVERGING_BLOCKER_REASON,
         details=(
             f"convergence ledger stopped ({reason}); release: "
