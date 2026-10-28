@@ -14,18 +14,21 @@ from cw.models import CwState, QueueItemStatus, Stage
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from cw.review_history import build_review_history, collect_history_inputs
 from cw.review_history_render import render_review_history
+from tests._review_convergence_helpers import write_ledger
 from tests._review_history_helpers import (
     ACME_SESSION,
     DEFER_RATIONALE,
     OPERATOR_REASON,
     REJECT_RATIONALE,
     blocking_dispositions,
+    clean_sentinel_session,
     client_config,
     derived_worktree,
     fixture_awaiting_confirm,
     fixture_blocking_sentinel,
     fixture_converged,
     fixture_stopped,
+    write_corrupt_ledger,
 )
 from tests._ticket_view_helpers import bound_session_for, make_task
 
@@ -110,6 +113,46 @@ def test_stopped_text_prints_each_rationale_once(tmp_path: Path) -> None:
     assert "mattwwarren" in other
     releases = lines[lines.index("releases:") + 1]
     assert "identities_settled" in releases
+    _assert_invariants(text)
+
+
+def test_settled_entries_with_no_round_block_render_under_settled_other(
+    tmp_path: Path,
+) -> None:
+    ledger = fixture_stopped().ledger
+    write_ledger(
+        derived_worktree(tmp_path),
+        ledger.model_copy(update={"rounds": ledger.rounds[1:]}),
+    )
+
+    _, text = _render(tmp_path, _task())
+
+    lines = text.splitlines()
+    other = lines[lines.index("settled_other:") + 1 : lines.index("dispositions: -")]
+    for summary, rationale in (
+        ("False alarm", REJECT_RATIONALE),
+        ("Later thing", DEFER_RATIONALE),
+    ):
+        assert text.count(rationale) == 1, rationale
+        (line,) = (x for x in other if summary in x)
+        assert rationale in line
+        assert "adjudication" in line
+
+
+def test_sentinel_friction_round_renders_the_unsplit_settled_total(
+    tmp_path: Path,
+) -> None:
+    write_corrupt_ledger(derived_worktree(tmp_path))
+    task = _task()
+
+    session = clean_sentinel_session(task, derived_worktree(tmp_path))
+    _, text = _render(tmp_path, task, (session,))
+
+    lines = text.splitlines()
+    assert "  source: sentinel_friction" in lines
+    assert "  sha: abc1234" in lines
+    assert "  settled: 1 (new/resurfaced split not recorded)" in lines
+    assert "  wall_time: not recorded" in lines
     _assert_invariants(text)
 
 
@@ -213,5 +256,8 @@ def test_notes_block_is_always_printed(tmp_path: Path, notes_present: bool) -> N
     text = render_review_history(history)
 
     lines = text.splitlines()
-    assert lines[-1] == ("notes: -" if not notes_present else lines[-1])
     assert ("notes:" in lines) is notes_present
+    if notes_present:
+        assert lines[-1].startswith("  - ")
+    else:
+        assert lines[-1] == "notes: -"
