@@ -1,7 +1,8 @@
 """Status/stage/scope vocabulary for the ``<<<AUTO_DEV_RESULT`` sentinel.
 
 The closed-enum ``Literal`` aliases (:data:`SchemaVersion`, :data:`Status`,
-:data:`StageReached`, :data:`ScopeTier`, :data:`PlanSource`), the derived
+:data:`StageReached`, :data:`ScopeTier`, :data:`PlanSource`,
+:data:`RealCommitOutcome`), the derived
 frozensets that classify them, the blocker-reason registry, and the two
 classifier functions that read it. Depends on nothing else in this package —
 the root of the ``_vocab -> _validators -> _models -> _result`` layering.
@@ -29,7 +30,20 @@ IMPACT_REASON_KEY = "impact_reason"
 # Accepted sentinel schema versions. Single source of truth: parse.py derives
 # SUPPORTED_SCHEMA_VERSIONS (its pre-Pydantic gate) from this Literal via
 # get_args, so a version bump edits exactly one place (#1535 drift class).
-SchemaVersion = Literal[1, 2, 3, 4, 5, 6, 7, 8]
+SchemaVersion = Literal[1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+# v9 (#1745): the fix loop's real-commit outcome on `Review.had_real_commit`.
+# A named tri-state rather than `bool | None`, so no consumer can read the
+# unknown case as "no commit" through truthiness.
+RealCommitOutcome = Literal[
+    # At least one fix cycle produced a real commit (OR'd across cycles).
+    "committed",
+    # The fix loop ran but every cycle's fix invocation was a no-op.
+    "no_op",
+    # Not reported: no fix loop finalized this review, or a legacy payload
+    # predates the field.
+    "unknown",
+]
 
 Status = Literal[
     "shipped",

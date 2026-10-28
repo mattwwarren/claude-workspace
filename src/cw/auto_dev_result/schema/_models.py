@@ -31,6 +31,7 @@ from cw.auto_dev_result.schema._validators import (
 )
 from cw.auto_dev_result.schema._vocab import (
     _LOGGER_NAME,
+    RealCommitOutcome,
     ScopeTier,
     is_known_blocker_reason,
 )
@@ -82,14 +83,17 @@ class Review(BaseModel):
     # (`len(verdict.agents_run)`, including failed entries). Advisory optional
     # field; defaults to 0 on payloads from producers that predate v5.
     agents_run: int = 0
-    # #1723: true iff at least one fix cycle in the run produced a real
-    # commit (OR'd across cycles) — distinguishes a genuinely-fixed cycle-0
-    # blocker from a fix loop that converged (no MUST_FIX survivors) purely
-    # because every cycle's codex fix invocation was a no-op. Advisory
-    # optional field; defaults to None so payloads from producers that predate
-    # this field remain explicitly unknown. Finalized fix-loop results always
-    # populate a concrete bool.
-    had_real_commit: bool | None = None
+    # #1723: whether at least one fix cycle in the run produced a real commit
+    # (OR'd across cycles) — distinguishes a genuinely-fixed cycle-0 blocker
+    # from a fix loop that converged (no MUST_FIX survivors) purely because
+    # every cycle's codex fix invocation was a no-op. Advisory optional field.
+    #
+    # #1745 (schema v9): a named tri-state, not `bool | None`, so the unknown
+    # case cannot be read as "no commit" through truthiness. Defaults to
+    # `"unknown"` for producers that never report it; finalized fix-loop
+    # results always populate `"committed"` or `"no_op"`. Legacy `true` /
+    # `false` / `null` payloads are mapped on read by the validator below.
+    had_real_commit: RealCommitOutcome = "unknown"
     # #2000: the same quantity as `ReviewVerdict.rejected_count` /
     # `rejected_count_by_severity` (`review_findings/_models.py`) — findings
     # that validation deleted before adjudication ever saw them, at every
@@ -166,6 +170,20 @@ class Review(BaseModel):
     converged: bool | None = None
     final_round_clean_sha: str | None = None
     confirm_backend: Literal["codex", "claude", "none"] | None = None
+
+    # Why: read-side only (#1745). Pre-v9 sentinels and persisted
+    # `.claude/review-verdict.json` envelopes (read by `must_fix_override`,
+    # which bypasses `parse.py`) carry the old `bool | None` shape. The
+    # `isinstance(v, bool)` check runs first so `1` is never taken for `True`;
+    # anything else passes through for the Literal to accept or reject.
+    @field_validator("had_real_commit", mode="before")
+    @classmethod
+    def _map_legacy_real_commit(cls, v: object) -> object:
+        if isinstance(v, bool):
+            return "committed" if v else "no_op"
+        if v is None:
+            return "unknown"
+        return v
 
     @model_serializer(mode="wrap")
     def _serialize_without_blocking_fields(

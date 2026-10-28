@@ -40,6 +40,7 @@ from cw.auto_dev_result import (
     AutoDevResult,
     BlockedResult,
     Health,
+    RealCommitOutcome,
     Review,
     Status,
     _is_placeholder_sentinel_text,
@@ -3903,9 +3904,9 @@ class TestPlanDraftFingerprintField:
     """The plan stage emits the draft's fingerprint so `cw dev-queue approve`
     can bind the approval it records to that exact draft (#2102)."""
 
-    def test_current_schema_version_is_8(self) -> None:
-        assert AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION == 8
-        assert 8 in SUPPORTED_SCHEMA_VERSIONS
+    def test_current_schema_version_is_9(self) -> None:
+        assert AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION == 9
+        assert 9 in SUPPORTED_SCHEMA_VERSIONS
 
     def test_v8_payload_carries_plan_draft_fingerprint(self) -> None:
         payload = _plan_pending_payload()
@@ -4762,19 +4763,75 @@ class TestReviewHadRealCommit:
     """Issue #1723 — Review.had_real_commit field (fix-loop no-op-flake detection)."""
 
     def test_review_had_real_commit_defaults_unknown(self) -> None:
-        """Omitting `had_real_commit` preserves the legacy outcome as unknown."""
+        """Omitting `had_real_commit` defaults to the named `unknown` (#1745)."""
         review = Review(must_fix_initial=0, should_fix=0, fix_cycles_used=0)
-        assert review.had_real_commit is None
+        assert review.had_real_commit == "unknown"
 
-    def test_review_had_real_commit_round_trips_false(self) -> None:
-        """An explicit `had_real_commit=False` round-trips through dump/validate."""
-        review = Review(
-            must_fix_initial=0, should_fix=0, fix_cycles_used=0, had_real_commit=False
+    @pytest.mark.parametrize("outcome", get_args(RealCommitOutcome))
+    def test_review_had_real_commit_round_trips(self, outcome: str) -> None:
+        """Every named outcome round-trips through dump/validate and JSON."""
+        review = Review.model_validate(
+            {
+                "must_fix_initial": 0,
+                "should_fix": 0,
+                "fix_cycles_used": 0,
+                "had_real_commit": outcome,
+            }
         )
         dumped = review.model_dump()
-        assert dumped["had_real_commit"] is False
-        reloaded = Review.model_validate(dumped)
-        assert reloaded.had_real_commit is False
+        assert dumped["had_real_commit"] == outcome
+        assert Review.model_validate(dumped).had_real_commit == outcome
+        reloaded = Review.model_validate_json(review.model_dump_json())
+        assert reloaded.had_real_commit == outcome
+
+    def test_old_payload_without_key_round_trips_as_unknown(self) -> None:
+        """Acceptance 1: a pre-#1745 payload omitting the key reads `unknown`
+        through both the sentinel parser and the model, and re-serializes as a
+        string rather than `null`."""
+        payload = _shipped_payload()
+        assert "had_real_commit" not in payload["review"]
+        parsed = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(parsed, AutoDevResult)
+        assert parsed.review.had_real_commit == "unknown"
+        validated = AutoDevResult.model_validate(payload)
+        assert validated.review.had_real_commit == "unknown"
+        wire = json.loads(validated.model_dump_json())
+        assert wire["review"]["had_real_commit"] == "unknown"
+        restored = AutoDevResult.model_validate_json(validated.model_dump_json())
+        assert restored.review.had_real_commit == "unknown"
+
+    @pytest.mark.parametrize(
+        ("legacy", "expected"),
+        [(True, "committed"), (False, "no_op"), (None, "unknown")],
+        ids=["true", "false", "null"],
+    )
+    def test_legacy_bool_or_null_maps_to_named_outcome(
+        self, legacy: bool | None, expected: str
+    ) -> None:
+        """Legacy `true`/`false`/`null` payloads are accepted on read only."""
+        review = Review.model_validate(
+            {
+                "must_fix_initial": 0,
+                "should_fix": 0,
+                "fix_cycles_used": 1,
+                "had_real_commit": legacy,
+            }
+        )
+        assert review.had_real_commit == expected
+        assert json.loads(review.model_dump_json())["had_real_commit"] == expected
+
+    @pytest.mark.parametrize("junk", ["maybe", 1, "true"], ids=["maybe", "int", "str"])
+    def test_junk_outcome_is_rejected(self, junk: object) -> None:
+        """Only bools (never `1`) and the three names are accepted."""
+        with pytest.raises(ValidationError, match="had_real_commit"):
+            Review.model_validate(
+                {
+                    "must_fix_initial": 0,
+                    "should_fix": 0,
+                    "fix_cycles_used": 0,
+                    "had_real_commit": junk,
+                }
+            )
 
 
 class TestOperatorUnavailableBlockerReasons:
@@ -5159,6 +5216,47 @@ class TestSchemaVersionV5:
         result = parse_stdout(_wrap_sentinel(payload))
         assert isinstance(result, AutoDevResult)
         assert result.schema_version == 5
+
+
+class TestSchemaVersionV9:
+    """#1745 — v9 retypes `review.had_real_commit` to a named tri-state.
+
+    The one-version look-ahead (v10) and two-ahead rejection (v11) are covered
+    by `TestSchemaVersionSkew`, which keys off `max(SUPPORTED_SCHEMA_VERSIONS)`.
+    """
+
+    def test_v9_payload_with_committed_review_parses(self) -> None:
+        payload = _shipped_payload()
+        payload["schema_version"] = 9
+        payload["review"]["had_real_commit"] = "committed"
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.schema_version == 9
+        assert result.review.had_real_commit == "committed"
+
+    def test_v8_payload_with_legacy_bool_maps_to_named_outcome(self) -> None:
+        payload = _shipped_payload()
+        payload["schema_version"] = 8
+        payload["review"]["had_real_commit"] = False
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.review.had_real_commit == "no_op"
+
+    def test_contract_doc_records_v9_retype_and_restart_caveat(self) -> None:
+        """Version-history row 9, Note A18 and the §8 rollout exception all
+        name the retype, and A18 carries the serve-loop restart caveat."""
+        from tests.conftest import _REPO_ROOT
+
+        doc = (_REPO_ROOT / "docs" / "headless-contract.md").read_text(encoding="utf-8")
+        row_start = doc.index("\n| 9 |")
+        row = doc[row_start + 1 : doc.index("\n", row_start + 1)]
+        assert "had_real_commit" in row
+        note_start = doc.index("**Note (A18, #1745):**")
+        note = doc[note_start : doc.index("\n\n", note_start)]
+        assert "restart `cw dev-queue serve`" in note
+        rollout = doc[doc.index("**Cross-version status compatibility:**") :]
+        rollout = rollout[: rollout.index("\n")]
+        assert "had_real_commit" in rollout
 
 
 # ---------------------------------------------------------------------------

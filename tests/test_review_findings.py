@@ -4948,6 +4948,24 @@ class TestRenderReviewVerdictEnvelope:
         text = render_review_verdict_envelope(verdict, ticket_id="T-1")
         assert json.loads(text).keys() == {"ticket_id", "verdict"}
 
+    def test_legacy_bool_had_real_commit_envelope_loads_as_named_outcome(
+        self,
+    ) -> None:
+        """#1745: a pre-upgrade `.claude/review-verdict.json` carrying the old
+        bool still loads (the `must_fix_override` read path), and a freshly
+        rendered envelope carries the named string."""
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="NIT"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        text = render_review_verdict_envelope(verdict, ticket_id="T-1")
+        fresh = json.loads(text)
+        assert fresh["verdict"]["review"]["had_real_commit"] == "unknown"
+        fresh["verdict"]["review"]["had_real_commit"] = False
+        envelope = ReviewVerdictEnvelope.model_validate_json(json.dumps(fresh))
+        assert envelope.verdict.review.had_real_commit == "no_op"
+
 
 class TestExecutorNeutralContract:
     def test_claude_and_codex_shapes_validate_identically(self) -> None:

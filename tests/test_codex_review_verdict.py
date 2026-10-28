@@ -2820,7 +2820,7 @@ class TestRenderVerdictComment:
                     update={
                         "must_fix_initial": 2,
                         "fix_cycles_used": 2,
-                        "had_real_commit": False,
+                        "had_real_commit": "no_op",
                     }
                 )
             }
@@ -2846,7 +2846,7 @@ class TestRenderVerdictComment:
                     update={
                         "must_fix_initial": 2,
                         "fix_cycles_used": 2,
-                        "had_real_commit": True,
+                        "had_real_commit": "committed",
                     }
                 )
             }
@@ -2871,7 +2871,31 @@ class TestRenderVerdictComment:
             }
         )
         body = render_verdict_comment(legacy_verdict, fix_loop_enabled=True)
-        assert legacy_verdict.review.had_real_commit is None
+        assert legacy_verdict.review.had_real_commit == "unknown"
+        assert "UNVERIFIED" not in body
+
+    def test_no_op_outcome_ignored_without_fix_cycles(self) -> None:
+        """#1745 — with `fix_cycles_used == 0` no fix loop ran, so even a
+        `no_op` outcome never renders the UNVERIFIED headline."""
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        clean_verdict = consolidate_verdict(
+            documents=[doc],
+            diff=diff,
+            reviewed_sha="sha",
+        )
+        no_loop_verdict = clean_verdict.model_copy(
+            update={
+                "review": clean_verdict.review.model_copy(
+                    update={
+                        "must_fix_initial": 2,
+                        "fix_cycles_used": 0,
+                        "had_real_commit": "no_op",
+                    }
+                )
+            }
+        )
+        body = render_verdict_comment(no_loop_verdict, fix_loop_enabled=True)
         assert "UNVERIFIED" not in body
 
     def test_blocking_capped_exit_shows_resolved_vs_open_counts(self) -> None:

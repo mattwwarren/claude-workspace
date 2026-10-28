@@ -60,14 +60,18 @@ def _finalize_review(
     ``final_verdict.review`` because ``synthesize_codex_review_result`` does not
     thread the cycle index through its internal ``consolidate_verdict`` call.
     ``had_real_commit`` is the loop's OR-across-cycles real-commit tracker
-    (#1723) — true iff at least one fix cycle actually committed a change.
+    (#1723) — true iff at least one fix cycle actually committed a change. It
+    stays a plain bool while the loop runs and is mapped here, at the one
+    boundary into ``Review``, to the named ``RealCommitOutcome`` (#1745):
+    ``"committed"`` or ``"no_op"``. ``model_copy`` skips validators, so the
+    named string is written directly.
     """
     return final_verdict.review.model_copy(
         update={
             "must_fix_initial": cycle0_review.must_fix_initial,
             "deferred": len(open_findings),
             "fix_cycles_used": cycle_count,
-            "had_real_commit": had_real_commit,
+            "had_real_commit": "committed" if had_real_commit else "no_op",
         }
     )
 
