@@ -728,6 +728,19 @@ _PEM_ADVERSARIAL = {
     "pgp-markers-blank-line-separated": (_PGP_BEGIN + "\n\n")
     * (_PEM_MARKER_CHARS // 40),
     "pgp-markers-same-line": (_PGP_BEGIN + " ") * (_PEM_MARKER_CHARS // 39),
+    # The clipped-block preamble (armor headers, then a blank line) is a loop; a
+    # marker followed by header lines, or by a header run with no blank line,
+    # must stay linear.
+    "pgp-markers-newline-blank-line": (_PGP_BEGIN + "\n\n") * (_PEM_MARKER_CHARS // 40),
+    "pgp-markers-with-header-lines": (_PGP_BEGIN + "\nVersion: GnuPG v1\n\n")
+    * (_PEM_MARKER_CHARS // 60),
+    "pgp-marker-then-header-run-no-blank": _PGP_BEGIN
+    + "\n"
+    + "Comment: x\n" * (LONG_TARGET_CHARS // 11),
+    "pem-markers-with-dek-headers": (
+        _PEM_BEGIN + "\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123\n\n"
+    )
+    * (_PEM_MARKER_CHARS // 80),
     "unterminated-with-long-body": _PEM_BEGIN + "\n" + "A" * LONG_TARGET_CHARS * 4,
     "markers-then-long-body": (_PEM_BEGIN + "\n\n") * 200
     + _PEM_BEGIN
@@ -751,6 +764,48 @@ def test_pem_marker_runs_redact_in_bounded_time(name: str) -> None:
     assert _PGP_BEGIN not in result
     assert "AAAA" not in result
     assert "BBBB" not in result
+
+
+_CLIPPED_PGP_BODY = "lQOYBFzzzzyyyy\nxxxxwwww\n=ab12"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Armored PGP: a blank line follows the marker (or its armor headers).
+        f"{_PGP_BEGIN}\n\n{_CLIPPED_PGP_BODY}\n",
+        f"{_PGP_BEGIN}\nVersion: GnuPG v1\n\n{_CLIPPED_PGP_BODY}\n",
+        f"{_PGP_BEGIN}\nVersion: GnuPG v1\nComment: my key\n\n{_CLIPPED_PGP_BODY}",
+        f"{_PGP_BEGIN}\r\nVersion: GnuPG v1\r\n\r\n{_CLIPPED_PGP_BODY}",
+        # A blank line made of spaces still ends the armor headers.
+        f"{_PGP_BEGIN}\nVersion: GnuPG v1\n \t\n{_CLIPPED_PGP_BODY}",
+        # Legacy encrypted PEM: Proc-Type / DEK-Info headers, blank line, body.
+        "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n"
+        f"DEK-Info: AES-128-CBC,0123\n\n{_CLIPPED_PGP_BODY}\n",
+    ],
+)
+def test_clipped_key_block_with_a_header_preamble_leaks_no_body(text: str) -> None:
+    """A clipped armored/encrypted key has a blank line before its body.
+
+    The clipped-block scan used to stop at that blank line and redact only the
+    marker, so the base64 body survived.
+    """
+    result = _redact(text)
+    for fragment in ("lQOYBF", "zzzzyyyy", "xxxxwwww", "ab12"):
+        assert fragment not in result, result
+    assert _redact(result) == result
+
+
+def test_clipped_key_block_preamble_stops_at_the_body_blank_line() -> None:
+    """Only the one blank line after the headers is part of the key; the next
+    blank line after the body still ends the clipped block."""
+    text = f"{_PGP_BEGIN}\nVersion: GnuPG v1\n\nlQOYBFabcd\n\nnext paragraph"
+    assert _redact(text) == "<redacted>\n\nnext paragraph"
+
+
+def test_clipped_key_block_without_preamble_still_stops_at_its_blank_line() -> None:
+    text = f"{_PGP_BEGIN}\nlQOYBFabcd\n\nnext paragraph"
+    assert _redact(text) == "<redacted>\n\nnext paragraph"
 
 
 @pytest.mark.parametrize(

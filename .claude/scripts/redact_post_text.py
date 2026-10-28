@@ -149,6 +149,14 @@ _CREDENTIAL_KEYWORDS = (
 )
 _FLAG_KEYWORDS = rf"{_CREDENTIAL_KEYWORDS}|token|authorization|cookie"
 
+# What a clipped key block (no END line) may carry before its body: armor or
+# encapsulation headers (`Version: GnuPG v1`, `Proc-Type: 4,ENCRYPTED`,
+# `DEK-Info: ...`) and then the blank line RFC 4880 / RFC 1421 put before the
+# body. Without it the clipped-block scan stopped at that blank line and left the
+# whole body behind. Optional: a body that starts right after the marker keeps the
+# plain blank-line stop. Each header is one bounded line, so the loop stays linear.
+_CLIPPED_KEY_PREAMBLE = r"(?:\r?\n(?:[A-Za-z][A-Za-z0-9-]*:[^\r\n]*\r?\n)*[ \t]*\r?\n)?"
+
 # Shapes beyond cw._text, for a public and irreversible sink: a review finding
 # often quotes the very secret it flags. Over-redaction is tolerated. These run
 # BEFORE the mirrored shapes: a mirrored shape is a fixed-width or narrower
@@ -157,7 +165,8 @@ _FLAG_KEYWORDS = rf"{_CREDENTIAL_KEYWORDS}|token|authorization|cookie"
 # behind it (`<redacted>-tail`).
 _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     # A PEM private key, END line included; a clipped block with no END line
-    # runs to the next blank line (left in place) or the end of the text. The
+    # runs to the next blank line (left in place) or the end of the text, past
+    # the armor-header preamble and its blank line when it has one. The
     # END search stops at the next `-----BEGIN ` marker: unbounded, it scanned to
     # the end of the text from every unterminated marker, O(N^2) in the number of
     # markers (22 s at 493 KB). Bounded, each marker scans only up to the next
@@ -167,7 +176,7 @@ _EXTRA_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----"
         r"(?:(?:(?!-----BEGIN ).)*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----"
-        r"|.*?(?=\r?\n[ \t]*\r?\n|\Z))",
+        r"|" + _CLIPPED_KEY_PREAMBLE + r".*?(?=\r?\n[ \t]*\r?\n|\Z))",
         re.DOTALL,
     ),
     re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
