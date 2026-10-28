@@ -23,8 +23,10 @@ from cw.review_adjudication import VoidedFinding
 from cw.review_adjudication._voided import _voided_rationale
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
+    SettleTarget,
     demote_for_rereview,
     friction_lines,
+    operator_settle,
 )
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from cw.review_history import (
@@ -35,6 +37,7 @@ from cw.review_history import (
 )
 from tests._review_convergence_helpers import (
     LOOP_BACKEND,
+    NOW,
     ROSTER,
     consolidated_verdict,
     fresh_ledger,
@@ -45,6 +48,7 @@ from tests._review_history_helpers import (
     ACME_SESSION,
     COMMENT_ID,
     DEFER_RATIONALE,
+    OPERATOR_REASON,
     ORIGINAL_RATIONALE,
     OTHER,
     OTHER_COMMENT,
@@ -281,6 +285,35 @@ def test_resurfaced_settled_finding_is_not_new(tmp_path: Path) -> None:
     assert split is not None
     assert split.model_dump() == {"must_fix": 1, "should_fix": 0}
     assert history.rounds[1].resurfaced_settled == 1
+
+
+def test_later_operator_settle_does_not_hide_the_rounds_own_finding(
+    tmp_path: Path,
+) -> None:
+    """An operator settle is stamped ``round == len(rounds)``: the round's own fix
+    finding, settled afterwards, must still count as new in that round's split."""
+    verdict = consolidated_verdict(accepted=[("MUST_FIX", "a")])
+    ledger, _ = record_verdict_round(
+        fresh_ledger(ticket_id=ACME_TICKET), verdict, "sha-0001"
+    )
+    ledger, report = operator_settle(
+        ledger,
+        [SettleTarget(severity="MUST_FIX", file="src/cw/foo.py", summary="a")],
+        actor="mattwwarren",
+        reason=OPERATOR_REASON,
+        now=NOW,
+    )
+    assert [e.round for e in report.settled] == [len(ledger.rounds)]
+    worktree = derived_worktree(tmp_path)
+    write_ledger(worktree, ledger)
+    write_round_verdict(worktree, 1, verdict)
+
+    history = _history(review_task(), tmp_path)
+
+    split = history.rounds[0].new_by_severity
+    assert split is not None
+    assert split.model_dump() == {"must_fix": 1, "should_fix": 0}
+    assert not _notes_with(history, "verdict file has")
 
 
 # --- wall time ----------------------------------------------------------------
