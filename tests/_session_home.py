@@ -2,9 +2,10 @@
 
 Imported by ``tests/conftest.py`` ahead of every ``cw`` import. ``src/cw`` binds
 many ``Path.home()``-derived constants at import time (``cw.config``'s
-``_REAL_STATE_DIR``/``_REAL_CONFIG_DIR``, ``queue_peek.CLAUDE_PROJECTS``,
-``native_daemon._JOBS_PATH``, the ``doctor`` seams, ...), and ``cw.config``
-also reads ``XDG_*`` at import time. A fixture or ``pytest_configure`` hook
+``_REAL_STATE_DIR``/``_REAL_CONFIG_DIR``,
+``queue_peek.locate.CLAUDE_PROJECTS``, ``native_daemon._JOBS_PATH``, the
+``doctor`` seams, ...), and ``cw.config`` also reads ``XDG_*`` at import
+time. A fixture or ``pytest_configure`` hook
 runs too late to reach them, so this module mutates ``os.environ`` as a side
 effect of being imported: ``HOME`` points at a throwaway directory holding a
 minimal ``.gitconfig``, and the ``XDG_*`` base-directory overrides are dropped.

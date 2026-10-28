@@ -271,9 +271,13 @@ class TestReadOnlySurfacesNeverWrite:
         )
 
     def test_queue_peek_never_writes_last_result(self) -> None:
-        path = _CW_ROOT / "queue_peek.py"
-        text = path.read_text(encoding="utf-8")
-        assert not _ASSIGNMENT_RE.search(text), (
-            f"{path} now writes last_result — this surface is blessed "
-            "read-only; route writes through the door instead"
-        )
+        # A package since #2793: scan every submodule, and fail on an empty
+        # scan rather than pass vacuously.
+        paths = sorted((_CW_ROOT / "queue_peek").rglob("*.py"))
+        assert paths
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            assert not _ASSIGNMENT_RE.search(text), (
+                f"{path} now writes last_result — this surface is blessed "
+                "read-only; route writes through the door instead"
+            )
