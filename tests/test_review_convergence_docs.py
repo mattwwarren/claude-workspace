@@ -177,6 +177,26 @@ def test_core_clean_mode_consolidate_passes_the_diff_base() -> None:
     assert "`git diff $FORK_POINT...$CHECKPOINT_3A_SHA` in blocking mode" in content
 
 
+def test_core_step_3a_clean_fence_diffs_from_the_pinned_base() -> None:
+    """#2800: the Step 3a clean-mode diff fence re-derives and uses ``DIFF_BASE``."""
+    content = _cmd(REVIEW)
+    window = _after(content, "Clean mode (#2800) diffs from the pinned base", span=500)
+    [fence] = _fences(window, "bash")
+    fetch = fence.index("git fetch origin <branch-name>")
+    derive = fence.index('DIFF_BASE="$(jq -r .diff_base .cw/diff-base.json)"')
+    diff = fence.index("git diff $DIFF_BASE...origin/<branch-name>")
+    assert fetch < derive < diff
+    assert "$FORK_POINT" not in fence
+
+
+def test_core_fix_loop_repins_the_diff_base_before_the_clean_re_review() -> None:
+    """#2800: a fix cycle may merge ``origin/<default>``, so the re-review re-pins."""
+    content = _cmd(REVIEW)
+    window = _after(content, "the sparse-feedback skip never fires", span=900)
+    assert "Re-run `cw review converge diff-base` first" in window
+    assert "same exit-status handling as the `loop_round` bullet" in window
+
+
 def test_core_orders_check_voided_before_suppress_before_record_round() -> None:
     content = _cmd(REVIEW)
     voided = content.index("cw review check-voided")
