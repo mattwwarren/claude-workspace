@@ -1958,7 +1958,7 @@
     },
     "ReviewConfig": {
      "additionalProperties": false,
-     "description": "Per-client Stage 3 review settings (#2787 converge-to-clean mode).\n\n``convergence=\"blocking\"`` (the default) keeps the historical loop that\nstops once no MUST_FIX survives. ``\"clean\"`` keeps cycling until a full\nround is clean at the reviewed sha and an independent confirm round agrees.\n\n``max_cycles`` caps clean-mode rounds only; ``None`` resolves to\n``DEFAULT_CLEAN_MAX_CYCLES`` there, and the configured value is inert in\nblocking mode. ``confirm_backend`` is the raw configured choice (``None``\nwhen unset); the resolved backend is picked at convergence time.\n\n``default_merge_tolerance`` applies in clean mode only and is inert in\nblocking mode. It is on by default: finalize's tip check then accepts a\nmerge of ``origin/<default>`` made after the last clean round when the merge\nchanges none of the files in the branch's own diff (#2815). ``False``\nrestores the strict final-sha rule for every merge.",
+     "description": "Per-client Stage 3 review settings (#2787 converge-to-clean mode).\n\n``convergence=\"blocking\"`` (the default) keeps the historical loop that\nstops once no MUST_FIX survives. ``\"clean\"`` keeps cycling until a full\nround is clean at the reviewed sha and an independent confirm round agrees.\n\n``max_cycles`` caps clean-mode rounds only; ``None`` resolves to\n``DEFAULT_CLEAN_MAX_CYCLES`` there, and the configured value is inert in\nblocking mode. ``confirm_backend`` is the raw configured choice (``None``\nwhen unset); the resolved backend is picked at convergence time.\n\n``default_merge_tolerance`` applies in clean mode only and is inert in\nblocking mode. It is on by default: finalize's tip check then accepts a\nmerge of ``origin/<default>`` made after the last clean round when the merge\nchanges none of the files in the branch's own diff (#2815). ``False``\nrestores the strict final-sha rule for every merge.\n\n``confirm_reentry`` applies in clean mode only and is inert in blocking\nmode. It also needs the lane's codex fix loop enabled. It is on by\ndefault: a dirty Claude confirm round on a codex lane re-enters the codex\nfix loop with the confirm's MUST_FIX findings as seeds (#2807). ``False``\nrestores the park on a dirty confirm.",
      "properties": {
       "convergence": {
        "default": "blocking",
@@ -2002,6 +2002,11 @@
       "default_merge_tolerance": {
        "default": true,
        "title": "Default Merge Tolerance",
+       "type": "boolean"
+      },
+      "confirm_reentry": {
+       "default": true,
+       "title": "Confirm Reentry",
        "type": "boolean"
       }
      },
