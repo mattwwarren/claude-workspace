@@ -62,6 +62,7 @@ from tests._review_convergence_helpers import (
     live_merge_base,
     operator_finding,
     publish_develop,
+    rewind_origin_main,
     round_finding,
     round_payload,
     stamp_dispositions,
@@ -946,7 +947,7 @@ class TestDiffBase:
         merged = branch_that_merged_main(wt, tmp_path / "main-clone")
         _init(runner, wt, ctx, fork_point=merged.fork_point)
         # The tracking ref predates the push, as an unfetched clone holds it.
-        git_in(wt, "update-ref", "refs/remotes/origin/main", merged.fork_point)
+        rewind_origin_main(wt, merged.fork_point)
 
         result = _converge(runner, wt, "diff-base")
 

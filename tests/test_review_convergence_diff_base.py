@@ -30,8 +30,10 @@ from tests._review_convergence_helpers import (
     branch_that_merged_main,
     fresh_ledger,
     live_merge_base,
+    rewind_origin_main,
+    side_branch_commit,
 )
-from tests.conftest import commit_tracked_file, git_in
+from tests.conftest import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -50,20 +52,6 @@ def repo(make_git_repo_with_origin: Callable[..., tuple[Path, Path]]) -> Path:
 @pytest.fixture
 def merged(repo: Path, tmp_path: Path) -> MergedMainBranch:
     return branch_that_merged_main(repo, tmp_path / "main-clone")
-
-
-def _rewind_origin_main(repo: Path, sha: str) -> None:
-    """Point the local ``origin/main`` at *sha*, as an unfetched push leaves it."""
-    git_in(repo, "update-ref", "refs/remotes/origin/main", sha)
-
-
-def _side_commit(repo: Path) -> str:
-    """A commit on a branch off ``main`` that HEAD never reaches."""
-    git_in(repo, "checkout", "-b", "side", "main")
-    commit_tracked_file(repo, "side.py")
-    sha = git_in(repo, "rev-parse", "HEAD")
-    git_in(repo, "checkout", "feature")
-    return sha
 
 
 def _git_answering(
@@ -140,7 +128,7 @@ class TestRefresh:
     def test_fetches_before_resolving(
         self, repo: Path, merged: MergedMainBranch
     ) -> None:
-        _rewind_origin_main(repo, merged.fork_point)
+        rewind_origin_main(repo, merged.fork_point)
         assert resolve_diff_base(repo, "main") == merged.fork_point
 
         assert refresh_diff_base(repo, "main") == merged.merge_base
@@ -182,7 +170,7 @@ class TestVerify:
     def test_rejects_a_commit_that_is_not_an_ancestor(
         self, repo: Path, merged: MergedMainBranch
     ) -> None:
-        side = _side_commit(repo)
+        side = side_branch_commit(repo)
         assert git_in(repo, "rev-parse", "HEAD") == merged.head
         with pytest.raises(CwError, match="is not an ancestor of HEAD"):
             verify_diff_base(repo, side, "main")

@@ -64,17 +64,15 @@ from tests._review_convergence_helpers import (
     codex_audit_fixture,
     ledger_with_rounds,
     live_merge_base,
+    merge_origin_commit,
     publish_develop,
+    rewind_origin_main,
+    side_branch_commit,
     structurally_invalid_doc_json,
     warm_codex_capability,
     write_ledger,
 )
-from tests.conftest import (
-    _make_ticket_task,
-    commit_tracked_file,
-    git_in,
-    push_commit_to_origin,
-)
+from tests.conftest import _make_ticket_task, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -835,10 +833,9 @@ def test_ledger_diff_base_is_diff_base_not_scope_branch(
     """
     publish_develop(harness.repo)
     fork_point = live_merge_base(harness.repo, "main")
-    origin = Path(git_in(harness.repo, "remote", "get-url", "origin"))
-    push_commit_to_origin(origin, "develop", tmp_path / "develop-clone", "dev-only.py")
-    git_in(harness.repo, "fetch", "origin")
-    git_in(harness.repo, "merge", "--no-edit", "origin/develop")
+    merge_origin_commit(
+        harness.repo, tmp_path / "develop-clone", "develop", "dev-only.py"
+    )
     develop_base = live_merge_base(harness.repo, "develop")
     assert develop_base != live_merge_base(harness.repo, "main")
     assert develop_base != fork_point
@@ -1428,11 +1425,7 @@ def _not_a_commit(harness: Harness, _merged: MergedMainBranch) -> str:
 
 
 def _not_an_ancestor(harness: Harness, _merged: MergedMainBranch) -> str:
-    git_in(harness.repo, "checkout", "-b", "side", "main")
-    commit_tracked_file(harness.repo, "side.py")
-    side = harness.head()
-    git_in(harness.repo, "checkout", "feature")
-    return side
+    return side_branch_commit(harness.repo)
 
 
 def _stale_fork_point(_harness: Harness, merged: MergedMainBranch) -> str:
@@ -1484,7 +1477,7 @@ def test_a_pre_change_ledger_is_back_filled_and_recorded(
     assert before is not None
     assert before.diff_base is None
     # The local tracking ref predates the push, so only a fetch finds the base.
-    git_in(harness.repo, "update-ref", "refs/remotes/origin/main", merged.fork_point)
+    rewind_origin_main(harness.repo, merged.fork_point)
 
     if backend == "codex":
         bases = _capture_codex_base(harness)

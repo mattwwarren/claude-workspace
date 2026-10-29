@@ -323,24 +323,33 @@ def live_merge_base(repo: Path, branch: str = "main") -> str:
     return git_in(repo, "merge-base", f"origin/{branch}", "HEAD")
 
 
+def merge_origin_commit(repo: Path, scratch: Path, branch: str, filename: str) -> None:
+    """Advance ``origin/<branch>`` out of band and merge it into HEAD.
+
+    The advance is the shared ``push_commit_to_origin`` from the side clone at
+    *scratch*; the origin is read from *repo*'s remote, so a caller that
+    discarded the bare path does not need it. *repo* fetches and merges the
+    new tip, leaving the merge commit on its current branch.
+    """
+    origin = Path(git_in(repo, "remote", "get-url", "origin"))
+    push_commit_to_origin(origin, branch, scratch, filename)
+    git_in(repo, "fetch", "origin")
+    git_in(repo, "merge", "--no-edit", f"origin/{branch}")
+
+
 def branch_that_merged_main(
     repo: Path, scratch: Path, *, branch: str = "feature"
 ) -> MergedMainBranch:
     """Advance ``origin/main``, merge it into *branch*, commit once more, push.
 
     *repo* comes from ``make_git_repo_with_origin`` (a feature branch pushed to
-    a bare origin whose ``main`` is still the fork point). The advance is the
-    shared out-of-band push, ``push_commit_to_origin``, from the side clone at
-    *scratch*; the origin is read from *repo*'s remote, so a caller that
-    discarded the bare path does not need it. The branch is pushed after the
-    merge, as the impl agent does, so ``origin/<branch>`` is its tip.
+    a bare origin whose ``main`` is still the fork point). The advance and the
+    merge are ``merge_origin_commit``. The branch is pushed after the merge, as
+    the impl agent does, so ``origin/<branch>`` is its tip.
     """
-    fork_point = git_in(repo, "merge-base", "origin/main", "HEAD")
-    origin = Path(git_in(repo, "remote", "get-url", "origin"))
-    push_commit_to_origin(origin, "main", scratch, MAIN_ONLY_FILE)
+    fork_point = live_merge_base(repo)
     git_in(repo, "checkout", branch)
-    git_in(repo, "fetch", "origin")
-    git_in(repo, "merge", "--no-edit", "origin/main")
+    merge_origin_commit(repo, scratch, "main", MAIN_ONLY_FILE)
     commit_tracked_file(repo, _AFTER_MERGE_FILE)
     git_in(repo, "push", "origin", branch)
     return MergedMainBranch(
@@ -349,6 +358,22 @@ def branch_that_merged_main(
         merge_base=live_merge_base(repo),
         main_only_file=MAIN_ONLY_FILE,
     )
+
+
+def side_branch_commit(
+    repo: Path, *, base: str = "main", back_to: str = "feature"
+) -> str:
+    """A commit on a branch off *base* that HEAD (on *back_to*) never reaches."""
+    git_in(repo, "checkout", "-b", "side", base)
+    commit_tracked_file(repo, "side.py")
+    sha = git_in(repo, "rev-parse", "HEAD")
+    git_in(repo, "checkout", back_to)
+    return sha
+
+
+def rewind_origin_main(repo: Path, sha: str) -> None:
+    """Point the local ``origin/main`` at *sha*, as an unfetched push leaves it."""
+    git_in(repo, "update-ref", "refs/remotes/origin/main", sha)
 
 
 def publish_develop(repo: Path) -> None:
