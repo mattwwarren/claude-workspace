@@ -131,8 +131,14 @@ _MIRRORED_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
 # An assignment value: a whole quoted string (spaces included), else one token.
 # A backslash escapes the next character inside the quotes, so `"ab\"cd"` is one
 # value. The two branches of each loop are disjoint (`[^"\\]` never matches a
-# backslash), so a quoted value is scanned once, without backtracking.
-_ASSIGNED_VALUE = r"""(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)"""
+# backslash), so a quoted value is scanned once, without backtracking. An opening
+# quote that never closes (a clipped or line-wrapped quote, a passphrase with
+# spaces) takes the rest of its line: falling to one token would post the words
+# after the first space. Each closed-quote scan ends at the next quote of its kind,
+# so a text of unterminated markers is still scanned O(1) times overall.
+_ASSIGNED_VALUE = (
+    r"""(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|"[^\r\n]*|'[^\r\n]*|\S+)"""
+)
 # An identifier around a keyword (`DB_PASSWORD`, `AWS_SECRET_ACCESS_KEY`). The
 # prefix starts only where a word run starts, so a run is tried from one offset,
 # not from every offset inside it; the suffix is capped. Without the cap, a run

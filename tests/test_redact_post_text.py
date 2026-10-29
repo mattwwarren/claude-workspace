@@ -547,10 +547,56 @@ def test_wide_shapes_win_over_the_narrow_mirrored_ones(
         ("password = 'it\\'s SECRETTAIL' next", "<redacted> next"),
         ('--password "esc\\" aped SECRETTAIL" next', "<redacted> next"),
         ('x --token "a\\\\" next', "x <redacted> next"),
+        # A closed quoted value with spaces: nothing after the closing quote is eaten.
+        ('password = "correct horse" and more text', "<redacted> and more text"),
+        ("--api-key 'correct horse' --verbose", "<redacted> --verbose"),
     ],
 )
 def test_credential_assignments_are_consumed_whole(text: str, expected: str) -> None:
     assert _redact(text) == expected
+
+
+_UNTERMINATED_FRAGMENTS = ("correct", "horse", "hunter2", "staple", "def")
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('password = "correct horse hunter2 staple', "<redacted>"),
+        ("secret: 'abc def", "<redacted>"),
+        ("--api-key 'correct horse hunter2", "<redacted>"),
+        ('{"password": "correct horse hunter2', "{<redacted>"),
+        ("export API_KEY='correct horse hunter2 staple", "export <redacted>"),
+        ("--password 'abc def", "<redacted>"),
+    ],
+)
+def test_unterminated_quoted_value_is_redacted_to_the_end_of_the_line(
+    text: str, expected: str
+) -> None:
+    """An opening quote with no closing quote takes the whole rest of the line."""
+    result = _redact(text)
+    assert result == expected
+    assert _redact(result) == result
+    for fragment in _UNTERMINATED_FRAGMENTS:
+        assert fragment not in result
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n"])
+@pytest.mark.parametrize(
+    ("head", "redacted"),
+    [
+        ('password = "correct horse hunter2', "<redacted>"),
+        ("secret: 'abc def", "<redacted>"),
+        ("--api-key 'correct horse", "<redacted>"),
+        ('{"password": "correct horse', "{<redacted>"),
+    ],
+)
+def test_unterminated_quoted_value_stops_at_the_end_of_its_line(
+    head: str, redacted: str, eol: str
+) -> None:
+    """The next line is kept intact: redaction stops at the line break."""
+    result = _redact(f"x {head}{eol}next line stays{eol}")
+    assert result == f"x {redacted}{eol}next line stays{eol}"
 
 
 @pytest.mark.parametrize(
@@ -670,6 +716,33 @@ def test_repeated_escaped_quote_assignments_redact_in_bounded_time() -> None:
     elapsed = time.perf_counter() - start
     assert elapsed < LONG_RUN_MAX_SECONDS, elapsed
     assert "password" not in result
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        'password="x y ',
+        "--token 'x y ",
+        "secret='x y ",
+        "password=\"x y --token 'x y ",
+        'password="x y\n',
+    ],
+)
+def test_repeated_unterminated_quote_markers_redact_in_bounded_time(unit: str) -> None:
+    """Many unterminated quoted values in one text must stay linear.
+
+    Each closed-quote scan stops at the next quote of its kind and the fallback is
+    one line scan; absolute ceiling, as in the keyword-run test.
+    """
+    text = unit * (LONG_TARGET_CHARS // len(unit))
+    start = time.perf_counter()
+    result = _redact(text)
+    elapsed = time.perf_counter() - start
+    assert elapsed < LONG_RUN_MAX_SECONDS, elapsed
+    # Markers pair up (one closes at the next), so the text between pairs is not
+    # a value; what must be gone is every keyword.
+    for keyword in ("password", "--token", "secret"):
+        assert keyword not in result
 
 
 _FLAG_NAMES = (
