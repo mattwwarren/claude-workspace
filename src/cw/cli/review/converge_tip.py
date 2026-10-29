@@ -223,6 +223,31 @@ def _only_default_merges(
     )
 
 
+def _merges_add_only_branch_paths(
+    worktree: Path, clean: str, head: str, allowed: set[str]
+) -> bool:
+    """True when each merge differs from its default-branch parents only in *allowed*.
+
+    For every merge in ``clean..head`` and each of its parents after the
+    first, the paths that differ between that parent and the merge commit must
+    lie within *allowed* (the branch's own diff plus the exempt paths). A
+    merge that carries a hand edit to a file the branch never touched, even
+    one the default branch changed, differs from the default-branch side
+    there and is refused. An octopus merge is checked against every extra
+    parent, so it is only accepted if each one passes.
+    """
+    merges = _run(worktree, ["rev-list", "--parents", "--merges", f"{clean}..{head}"])
+    if merges is None:
+        return False
+    for line in merges.splitlines():
+        merge, _first, *others = line.split()
+        for parent in others:
+            differs = _paths(worktree, parent, merge)
+            if differs is None or not differs <= allowed:
+                return False
+    return True
+
+
 def _untouched(
     worktree: Path, clean: str, head: str, default_sha: str, exempt: frozenset[str]
 ) -> bool:
@@ -230,8 +255,11 @@ def _untouched(
 
     ``B`` is the branch's own diff (merge base to *clean*), ``C`` what landed
     after the clean round, ``M`` what the default branch changed since the
-    merge base. ``(B & C) - exempt`` must be empty and ``C`` must lie within
-    ``M``. Exempt paths leave the touching set only, so an exempt path that
+    merge base. ``(B & C) - exempt`` must be empty, ``C`` must lie within
+    ``M``, and each merge must differ from its default-branch parents only in
+    ``B`` and the exempt paths (see :func:`_merges_add_only_branch_paths`), so
+    a hand edit to a path main changed but the branch never touched is
+    refused. Exempt paths leave the touching set only, so an exempt path that
     main changed is accepted unverified, a hand-resolved conflict included.
     """
     base = _run(worktree, ["merge-base", clean, default_sha])
@@ -243,7 +271,9 @@ def _untouched(
     moved = _paths(worktree, merge_base, default_sha)
     if branch is None or landed is None or moved is None:
         return False
-    return not (branch & landed) - exempt and landed <= moved
+    if (branch & landed) - exempt or not landed <= moved:
+        return False
+    return _merges_add_only_branch_paths(worktree, clean, head, branch | exempt)
 
 
 def _default_merge_only(worktree: Path, clean_sha: str, head_sha: str) -> bool:

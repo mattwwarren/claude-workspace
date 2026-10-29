@@ -2489,6 +2489,45 @@ class TestDefaultMergeTolerance:
         _assert_parks(runner, wt, sub, before)
 
     @_SUBS
+    def test_a_hand_edit_in_a_main_changed_file_parks(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """The file is in C and in M but not in B: ``C <= M`` alone accepts it."""
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_main(origin, tmp_path, "main-moved.py")
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-commit", "--no-ff", "origin/main")
+        with (wt / "main-moved.py").open("a", encoding="utf-8") as handle:
+            handle.write("smuggled = True\n")
+        git_in(wt, "add", "main-moved.py")
+        _conclude_merge(wt)
+        _assert_parks(runner, wt, sub, before)
+
+    @_SUBS
+    def test_the_same_merge_without_the_hand_edit_is_tolerated(
+        self,
+        runner: CliRunner,
+        wt_origin: tuple[Path, Path],
+        tmp_path: Path,
+        sub: str,
+    ) -> None:
+        """Positive control for the hand-edit test: only the appended line differs."""
+        wt, origin = wt_origin
+        _tip_context(wt)
+        before = _pushed_and_converged(wt)
+        _push_main(origin, tmp_path, "main-moved.py")
+        git_in(wt, "fetch", "origin")
+        git_in(wt, "merge", "--no-commit", "--no-ff", "origin/main")
+        _conclude_merge(wt)
+        _assert_tolerated(runner, wt, sub, before)
+
+    @_SUBS
     def test_a_rewritten_history_parks(
         self,
         runner: CliRunner,
